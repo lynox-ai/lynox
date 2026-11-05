@@ -27,6 +27,31 @@ export function ruleValue(raw: string): { value: string; hidden: boolean; multil
   return { value: raw.trim(), hidden: hiddenCharIndexes(raw).length > 0, multiline: /[\t\n\r]/.test(raw.trim()) };
 }
 
+/** A subject fragment shorter than this would file almost every mail. */
+export const SUBJECT_MIN = 3;
+
+/**
+ * True when the value is one bare sender address, as a `from` rule compares it with the sender:
+ * brackets, a scheme, a list or a part without `@` would never equal a sender and only hold a place.
+ */
+export function isOneSenderAddress(value: string): boolean {
+  return /^[^\s@<>()[\]{},;:"`]+@[^\s@<>()[\]{},;:"`]+$/.test(value);
+}
+
+/**
+ * Why the value of a fixed rule (sender, subject, list id) cannot be stored, or null. Checked on
+ * the raw input, as `ruleValue` does: a character a reader does not see, a line break or tab, for
+ * a sender anything but one address, for a subject fewer than `SUBJECT_MIN` characters.
+ */
+export function fixedValueProblem(raw: string, kind: 'from' | 'subject_contains' | 'list_id'): string | null {
+  const v = ruleValue(raw);
+  if (v.hidden) return 'matcherValue holds characters a reader does not see';
+  if (v.multiline) return 'matcherValue must be one line';
+  if (kind === 'from' && !isOneSenderAddress(v.value.toLowerCase())) return 'matcherValue must be one sender address';
+  if (kind === 'subject_contains' && charCount(v.value) < SUBJECT_MIN) return `subject phrase must be at least ${String(SUBJECT_MIN)} characters`;
+  return null;
+}
+
 /** A rule description: one line a reader sees whole, 3 to 300 characters. */
 export const DESCRIPTION_MIN = 3;
 export const DESCRIPTION_MAX = 300;

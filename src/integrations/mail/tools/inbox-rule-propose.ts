@@ -12,12 +12,12 @@
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import type { MailHooks } from '../context.js';
 import type { MailRegistry } from './registry.js';
-import { charCount, DESCRIPTION_MAX, DESCRIPTION_MIN, descriptionProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine, ruleValue } from '../../inbox/rule-text.js';
+import { charCount, DESCRIPTION_MAX, DESCRIPTION_MIN, descriptionProblem, isOneSenderAddress, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine, ruleValue, SUBJECT_MIN } from '../../inbox/rule-text.js';
 
 export const INBOX_RULE_NAME_MAX = 80;
 export const INBOX_RULE_VALUE_MAX = 200;
 /** A subject fragment shorter than this would file almost every mail. */
-export const INBOX_RULE_SUBJECT_MIN = 3;
+export const INBOX_RULE_SUBJECT_MIN = SUBJECT_MIN;
 
 type ProposeKind = 'from' | 'subject_contains' | 'matches_description';
 const KINDS: readonly ProposeKind[] = ['from', 'subject_contains', 'matches_description'];
@@ -96,7 +96,7 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
         if (input.matcher_kind === 'from') {
           value = value.toLowerCase();
           // A bare address: brackets, a scheme or a list would never equal a sender and only hold a place.
-          if (!/^[^\s@<>()[\]{},;:"`]+@[^\s@<>()[\]{},;:"`]+$/.test(value)) {
+          if (!isOneSenderAddress(value)) {
             return Promise.resolve('inbox_rule_propose: for "from", matcher_value must be one sender address.');
           }
         } else if (value.length < INBOX_RULE_SUBJECT_MIN) {

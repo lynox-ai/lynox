@@ -113,31 +113,38 @@ describe('createInboxRule', () => {
 
 	it('reports a refusal of a rule label such as R1 apart from any other refusal', async () => {
 		installFetch(async () => jsonResponse({ error: 'name must not name a rule label such as R1' }, 400));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: true });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: true, notOneAddress: false });
 		installFetch(async () => jsonResponse({ error: 'description must not name a rule label such as R1' }, 400));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: true });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: true, notOneAddress: false });
+	});
+
+	it('reports a sender that is not one whole address apart from any other refusal', async () => {
+		installFetch(async () => jsonResponse({ error: 'matcherValue must be one sender address' }, 400));
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: true });
+		installFetch(async () => jsonResponse({ error: 'matcherValue must be one line' }, 400));
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
 	});
 
 	it('fails without the rule-label flag when the server rejects with another 400', async () => {
 		installFetch(async () => jsonResponse({ error: 'bad' }, 400));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
 	});
 
 	it('fails without the rule-label flag when a refusal has no JSON body', async () => {
 		installFetch(async () => new Response('nope', { status: 400 }));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
 	});
 
 	it('fails when the server omits the id field', async () => {
 		installFetch(async () => jsonResponse({}, 201));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
 	});
 
 	it('fails when fetch throws', async () => {
 		installFetch(async () => {
 			throw new Error('network');
 		});
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
 	});
 });
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { t, setLocale, getLocale } from '../i18n.svelte.js';
+import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 // The reading pane's note on a rule that named the mail but was not applied: which rule and why,
 // with the rule's name or without one, linked to the rule while it exists, and, where the reason
@@ -26,11 +27,13 @@ const localeBefore = getLocale();
 
 beforeEach(() => {
 	setLocale('de');
+	resetSettingsViewer();
 	target = document.createElement('div');
 	document.body.appendChild(target);
 });
 
 afterEach(async () => {
+	resetSettingsViewer();
 	if (component) unmount(component);
 	component = undefined;
 	target.remove();
@@ -57,9 +60,10 @@ function item(ruleWithheld: unknown, over: Record<string, unknown> = {}): Record
 	};
 }
 
-async function render(payload: Record<string, unknown>): Promise<void> {
+async function render(payload: Record<string, unknown>, viewer: 'owner' | 'mandate' = 'owner'): Promise<void> {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const path = String(url).split('?')[0]!;
+		if (path.endsWith('/config')) return Response.json({ viewer });
 		if (path.endsWith('/full')) return Response.json({ item: payload, body: { md: 'Hallo', source: 'cache' } });
 		if (path.endsWith('/thread')) return Response.json({ messages: [], partial: false });
 		return Response.json({ error: 'not found' }, { status: 404 });
@@ -104,6 +108,13 @@ const OFFERS_FIXED: Record<Reason, boolean> = {
 	rule_withheld_sensitive: false,
 	forwarded_by_person: true,
 };
+/** A forwarded mail's sender is the person who forwarded it: only the subject is offered. */
+const OFFERS_SENDER: Record<Reason, boolean> = {
+	rule_withheld_classifier: true,
+	rule_withheld_unchecked: true,
+	rule_withheld_sensitive: false,
+	forwarded_by_person: false,
+};
 
 describe('InboxReadingPane — a rule held back', () => {
 	it.each(REASONS)('%s: says it with the rule name, linked to the rule', async (reason) => {
@@ -138,13 +149,30 @@ describe('InboxReadingPane — a rule held back', () => {
 			expect(subject).toBeNull();
 			return;
 		}
-		expect(sender?.textContent?.trim()).toBe(t('inbox.rule_withheld_from_sender'));
 		expect(subject?.textContent?.trim()).toBe(t('inbox.rule_withheld_from_subject'));
-		const s = new URL(sender!.getAttribute('href')!, 'http://localhost');
-		expect(s.pathname).toBe('/app/inbox/rules');
-		expect(Object.fromEntries(s.searchParams)).toEqual({ accountId: 'info', kind: 'from', value: 'mahnung@inkasso.example' });
+		if (OFFERS_SENDER[reason]) {
+			expect(sender?.textContent?.trim()).toBe(t('inbox.rule_withheld_from_sender'));
+			const s = new URL(sender!.getAttribute('href')!, 'http://localhost');
+			expect(s.pathname).toBe('/app/inbox/rules');
+			expect(Object.fromEntries(s.searchParams)).toEqual({ accountId: 'info', kind: 'from', value: 'mahnung@inkasso.example' });
+		} else {
+			expect(sender).toBeNull();
+		}
 		const j = new URL(subject!.getAttribute('href')!, 'http://localhost');
 		expect(Object.fromEntries(j.searchParams)).toEqual({ accountId: 'info', kind: 'subject_contains', value: 'Zahlungserinnerung 42' });
+	});
+
+	it('forwarded_by_person: offers the subject rule and no sender rule', async () => {
+		await render(item({ id: 'rul_1', name: 'Mahnungen', reason: 'forwarded_by_person' }));
+		expect(byTestId('inbox-rule-withheld-from-subject')?.textContent?.trim()).toBe(t('inbox.rule_withheld_from_subject'));
+		expect(byTestId('inbox-rule-withheld-from-sender')).toBeNull();
+	});
+
+	it.each(REASONS)('%s: offers a mandate no fixed rule, and still says why the rule was held back', async (reason) => {
+		await render(item({ id: 'rul_1', name: 'Mahnungen', reason }), 'mandate');
+		expect(byTestId('inbox-rule-withheld-text')?.textContent).toBe(SENTENCES[reason].named);
+		expect(byTestId('inbox-rule-withheld-from-sender')).toBeNull();
+		expect(byTestId('inbox-rule-withheld-from-subject')).toBeNull();
 	});
 
 	it('offers no subject rule for a mail without subject, and no sender rule without sender', async () => {

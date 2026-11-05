@@ -8,34 +8,11 @@
 // Wire shapes mirror `core/src/types/inbox.ts` — keep in sync when the
 // engine adds a new matcher kind or action.
 
-export type InboxRuleMatcherKind = 'from' | 'subject_contains' | 'list_id' | 'matches_description';
-export type InboxRuleAction = 'archive' | 'mark_read' | 'label' | 'show';
-/** `agent`: proposed by the assistant; it applies only once the owner confirms it. */
-export type InboxRuleSource = 'proactive_threshold' | 'on_demand' | 'agent';
-export type InboxRuleBucket = 'requires_user' | 'auto_handled';
+import type { InboxRuleAction, InboxRuleBucket, InboxRuleMatcherKind, InboxRuleSource } from './inbox-rules-read.js';
 
-export interface InboxRule {
-	id: string;
-	tenantId: string;
-	accountId: string;
-	matcherKind: InboxRuleMatcherKind;
-	matcherValue: string;
-	bucket: InboxRuleBucket;
-	action: InboxRuleAction;
-	source: InboxRuleSource;
-	createdAt: string;
-	/** What the rule is called. Absent on rules from before names existed. */
-	name?: string | undefined;
-	/** When the owner confirmed it (ISO); absent while a proposed rule waits. Only confirmed rules apply. */
-	confirmedAt?: string | null | undefined;
-	/** The run that proposed it (`source: 'agent'`). */
-	runId?: string | undefined;
-}
-
-/** True while a rule waits for the owner's confirmation. */
-export function isRulePending(rule: InboxRule): boolean {
-	return rule.confirmedAt === undefined || rule.confirmedAt === null;
-}
+// The types and the read live in `inbox-rules-read.ts`; they are exported from here as before.
+export { isRulePending, listInboxRules } from './inbox-rules-read.js';
+export type { InboxRule, InboxRuleAction, InboxRuleBucket, InboxRuleMatcherKind, InboxRuleSource } from './inbox-rules-read.js';
 
 export interface CreateRuleBody {
 	accountId: string;
@@ -51,29 +28,15 @@ export interface CreateRuleBody {
 
 /**
  * The outcome of a create. `namesRuleLabel`: the server refused the name or description because
- * it holds a label such as "R1", which the rule check uses to tell rules apart.
+ * it holds a label such as "R1", which the rule check uses to tell rules apart. `notOneAddress`:
+ * the server refused a sender rule whose value is not one whole sender address.
  */
-export type CreateRuleResult = { ok: true; id: string } | { ok: false; namesRuleLabel: boolean };
+export type CreateRuleResult = { ok: true; id: string } | { ok: false; namesRuleLabel: boolean; notOneAddress: boolean };
 
 /** The server's refusal of a name or description that holds a rule label (`api.ts`). */
 const RULE_LABEL_REFUSAL = /rule label such as R1/;
-
-export async function listInboxRules(
-	apiBase: string,
-	accountId: string,
-	tenantId?: string,
-): Promise<InboxRule[] | null> {
-	const params = new URLSearchParams({ accountId });
-	if (tenantId !== undefined) params.set('tenantId', tenantId);
-	try {
-		const res = await fetch(`${apiBase}/inbox/rules?${params.toString()}`);
-		if (!res.ok) return null;
-		const data = (await res.json()) as { rules?: InboxRule[] };
-		return Array.isArray(data.rules) ? data.rules : [];
-	} catch {
-		return null;
-	}
-}
+/** The server's refusal of a sender that is not one whole address (`rule-text.ts` fixedValueProblem). */
+const FROM_ADDRESS_REFUSAL = /^matcherValue must be one sender address$/;
 
 export async function createInboxRule(
 	apiBase: string,
@@ -93,12 +56,12 @@ export async function createInboxRule(
 			} catch {
 				// No JSON body: an unnamed refusal.
 			}
-			return { ok: false, namesRuleLabel: RULE_LABEL_REFUSAL.test(error) };
+			return { ok: false, namesRuleLabel: RULE_LABEL_REFUSAL.test(error), notOneAddress: FROM_ADDRESS_REFUSAL.test(error) };
 		}
 		const data = (await res.json()) as { id?: string };
-		return typeof data.id === 'string' ? { ok: true, id: data.id } : { ok: false, namesRuleLabel: false };
+		return typeof data.id === 'string' ? { ok: true, id: data.id } : { ok: false, namesRuleLabel: false, notOneAddress: false };
 	} catch {
-		return { ok: false, namesRuleLabel: false };
+		return { ok: false, namesRuleLabel: false, notOneAddress: false };
 	}
 }
 

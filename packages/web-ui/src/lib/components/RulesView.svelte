@@ -15,8 +15,10 @@
 	// A rule the assistant proposed waits in its own section above the rules that apply; only the
 	// owner confirms it, with what confirming does written next to the button. A link may open the
 	// form prefilled (`?accountId=&kind=&value=`, the reading pane's "fixed rule from the sender").
+	// A prefilled form opens with no "then" chosen: what happens to the mail is the owner's choice,
+	// made in the form, never carried by a link. No other parameter of the link is read.
 
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import { get } from 'svelte/store';
 	import { page } from '$app/stores';
 	import { t, tf } from '../i18n.svelte.js';
@@ -37,7 +39,7 @@
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
-	import { isInboxAvailable, loadInboxCounts } from '../stores/inbox.svelte.js';
+	import { getRulesPendingByAccount, isInboxAvailable, loadInboxCounts } from '../stores/inbox.svelte.js';
 
 	type FormPreset = 'archive' | 'escalate' | 'silent';
 
@@ -126,15 +128,18 @@
 	let formMatchKind = $state<InboxRuleMatcherKind>('from');
 	let formMatchValue = $state('');
 	let formName = $state('');
-	let formPreset = $state<FormPreset>('archive');
+	// null: nothing chosen yet (a form a link opened); Save waits for a choice.
+	let formPreset = $state<FormPreset | null>('archive');
 	let formSubmitting = $state(false);
 	// The server refused the name or description: it holds a label such as "R1".
 	let formRuleLabelError = $state(false);
+	// The server refused a sender that is not one whole address.
+	let formFromAddressError = $state(false);
 	let pendingDeleteId = $state<string | null>(null);
 	const formIsDescription = $derived(formMatchKind === 'matches_description');
 	// A description rule that files mail as handled applies only when the classifier agrees.
 	const formHandledHint = $derived(
-		formIsDescription && PRESET_MAP[formPreset].bucket === 'auto_handled'
+		formIsDescription && formPreset !== null && PRESET_MAP[formPreset].bucket === 'auto_handled'
 			? tf('inbox.rules_description_handled_hint', { then: t(PRESET_MAP[formPreset].labelKey) })
 			: null,
 	);
@@ -151,6 +156,19 @@
 		};
 	})();
 
+	// A link may point at one rule (`#rule-<id>`, the reading pane's held-back note): it is scrolled
+	// to once the list holding it has loaded.
+	const linkedRuleElementId = (() => {
+		const hash = get(page).url.hash;
+		if (!hash.startsWith('#rule-')) return null;
+		try {
+			return decodeURIComponent(hash.slice(1));
+		} catch {
+			return null;
+		}
+	})();
+	let scrolledToLinkedRule = false;
+
 	onMount(async () => {
 		// Counts probe + mail-account list are independent — parallelise to
 		// shave one RTT off the cold mount.
@@ -164,17 +182,20 @@
 			return;
 		}
 		accounts = list;
-		// The account a link named; else the default account, so the user lands on something
-		// useful when they only have one mail account configured.
+		// The account a link named; else the first account with proposals waiting, so the count
+		// next to the rules entry leads to them; else the default account, so the user lands on
+		// something useful when they only have one mail account configured.
 		const linked = prefill.accountId.length > 0 ? prefill.accountId : null;
+		const pending = getRulesPendingByAccount();
+		const withProposals = list.find((a) => (pending[a.id] ?? 0) > 0);
 		const defaultAcc = list.find((a) => a.isDefault) ?? list[0];
-		const chosen = linked ?? defaultAcc?.id;
+		const chosen = linked ?? withProposals?.id ?? defaultAcc?.id;
 		if (chosen !== undefined) {
 			inputAccountId = chosen;
 			appliedAccountId = chosen;
 		}
 		if (prefill.kind !== null && prefill.value.length > 0) {
-			openForm();
+			openForm(null);
 			formMatchKind = prefill.kind;
 			formMatchValue = prefill.value;
 		}
@@ -238,6 +259,14 @@
 			return;
 		}
 		rules = list;
+		if (linkedRuleElementId !== null && !scrolledToLinkedRule) {
+			await tick();
+			const el = document.getElementById(linkedRuleElementId);
+			if (el !== null) {
+				scrolledToLinkedRule = true;
+				el.scrollIntoView({ block: 'center' });
+			}
+		}
 	}
 
 	function accountLabel(id: string): string {
@@ -246,12 +275,20 @@
 		return a.displayName ? `${a.displayName} <${a.address}>` : a.address;
 	}
 
-	function openForm(): void {
+	/** The account's label in the picker, with the number of its waiting proposals, if any. */
+	function accountOptionLabel(id: string): string {
+		const n = getRulesPendingByAccount()[id] ?? 0;
+		return n > 0 ? `${accountLabel(id)} (${String(n)})` : accountLabel(id);
+	}
+
+	/** Open the form; `preset` null leaves "then" unchosen (a form a link opened). */
+	function openForm(preset: FormPreset | null = 'archive'): void {
 		formMatchKind = 'from';
 		formMatchValue = '';
 		formName = '';
-		formPreset = 'archive';
+		formPreset = preset;
 		formRuleLabelError = false;
+		formFromAddressError = false;
 		formOpen = true;
 	}
 
@@ -259,14 +296,16 @@
 		formOpen = false;
 		formSubmitting = false;
 		formRuleLabelError = false;
+		formFromAddressError = false;
 	}
 
 	async function submitForm(): Promise<void> {
 		const accountId = appliedAccountId.trim();
 		const value = formMatchValue.trim();
-		if (accountId.length === 0 || value.length === 0) return;
+		if (accountId.length === 0 || value.length === 0 || formPreset === null) return;
 		formSubmitting = true;
 		formRuleLabelError = false;
+		formFromAddressError = false;
 		const preset = PRESET_MAP[formPreset];
 		const name = formName.trim();
 		const result = await createInboxRule(getApiBase(), {
@@ -282,6 +321,7 @@
 		if (!result.ok) {
 			// A label such as "R1" is said in the form, where it can be rephrased.
 			if (result.namesRuleLabel) formRuleLabelError = true;
+			else if (result.notOneAddress) formFromAddressError = true;
 			else addToast(t('inbox.rules_error_create'), 'error');
 			return;
 		}
@@ -380,7 +420,7 @@
 				/>
 				<datalist id="rules-account-list">
 					{#each accounts as account (account.id)}
-						<option value={account.id}>{accountLabel(account.id)}</option>
+						<option value={account.id}>{accountOptionLabel(account.id)}</option>
 					{/each}
 				</datalist>
 			{/if}
@@ -396,7 +436,7 @@
 				<section class="mb-6" aria-labelledby="rules-proposals-title" data-testid="rules-proposals">
 					<h2 id="rules-proposals-title" class="text-[11px] text-text-subtle uppercase tracking-widest mb-1">{t('inbox.rules_proposals_title')}</h2>
 					<p class="text-[12px] text-text-muted mb-2">{t('inbox.rules_proposals_intro')}</p>
-					{#if !isOwnerSession()}
+					{#if isMandateSession()}
 						<p class="text-[12px] text-text-muted mb-2" data-testid="rules-proposals-mandate">{t('inbox.rules_proposals_mandate')}</p>
 					{/if}
 					<ul class="space-y-2" role="list">
@@ -419,9 +459,10 @@
 								{#if isOwnerSession()}
 									<!-- What confirming does stands next to the button, before the click. -->
 									<div class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-accent/20 pt-3">
-										<p class="text-[12px] text-text min-w-0 flex-1" data-testid="rules-confirm-text">{confirmText(rule)}</p>
+										<p id="rule-confirm-text-{rule.id}" class="text-[12px] text-text min-w-0 flex-1" data-testid="rules-confirm-text">{confirmText(rule)}</p>
 										<button
 											type="button"
+											aria-describedby="rule-confirm-text-{rule.id}"
 											onclick={() => void confirmProposal(rule.id)}
 											disabled={confirmingId !== null}
 											class="shrink-0 rounded-[var(--radius-sm)] bg-accent text-white hover:bg-accent-hover disabled:opacity-50 px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
@@ -441,7 +482,7 @@
 				{#if !formOpen && isOwnerSession()}
 					<button
 						type="button"
-						onclick={openForm}
+						onclick={() => openForm()}
 						class="rounded-[var(--radius-sm)] bg-accent/15 text-accent-text hover:bg-accent/25 px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 					>{t('inbox.rules_add')}</button>
 				{/if}
@@ -484,7 +525,7 @@
 							bind:value={formMatchValue}
 							required
 							maxlength={formIsDescription ? DESCRIPTION_MAX : undefined}
-							placeholder={formIsDescription ? t('inbox.rules_description_placeholder') : t('inbox.rules_match_value_placeholder')}
+							placeholder={formIsDescription ? t('inbox.rules_description_placeholder') : formMatchKind === 'from' ? t('inbox.rules_match_from_placeholder') : t('inbox.rules_match_value_placeholder')}
 							class="w-full bg-bg-subtle border border-border rounded-[var(--radius-sm)] px-3 py-2 text-sm text-text placeholder:text-text-subtle"
 						/>
 						{#if formIsDescription}
@@ -512,11 +553,17 @@
 								</label>
 							{/each}
 						</div>
+						{#if formPreset === null}
+							<p class="mt-2 text-[11px] text-text-muted" data-testid="rules-then-choose-hint">{t('inbox.rules_then_choose_hint')}</p>
+						{/if}
 						{#if formHandledHint !== null}
 							<p class="mt-2 text-[11px] text-text-muted" data-testid="rules-handled-hint">{formHandledHint}</p>
 						{/if}
 					</fieldset>
 
+					{#if formFromAddressError}
+						<p class="rounded-[var(--radius-sm)] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger" role="alert" data-testid="rules-from-address-error">{t('inbox.rules_error_from_address')}</p>
+					{/if}
 					{#if formRuleLabelError}
 						<p class="rounded-[var(--radius-sm)] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger" role="alert" data-testid="rules-label-error">{t('inbox.rules_error_rule_label')}</p>
 					{/if}
@@ -529,7 +576,7 @@
 						>{t('inbox.rules_cancel')}</button>
 						<button
 							type="submit"
-							disabled={formSubmitting || formMatchValue.trim().length === 0}
+							disabled={formSubmitting || formPreset === null || formMatchValue.trim().length === 0}
 							class="rounded-[var(--radius-sm)] bg-accent text-white hover:bg-accent-hover disabled:opacity-50 px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
 						>{t('inbox.rules_save')}</button>
 					</div>

@@ -448,10 +448,24 @@ describe('MailContext — listAccounts carries the last polling error', () => {
 });
 
 describe('MailContext — tools()', () => {
-  it('returns the mail tools backed by the context registry (incl. mail_connect)', async () => {
+  // The flags at their defaults ('' reads as unset): inbox rules on, the inbox reader off.
+  beforeEach(() => {
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+    vi.stubEnv('LYNOX_FEATURE_INBOX_READ', '');
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('returns the mail tools backed by the context registry (incl. mail_connect), with the rule proposal by default', async () => {
     await ctx.addAccount(INPUT_GMAIL);
     const tools = ctx.tools();
     const names = tools.map(t => t.definition.name).sort();
+    expect(names).toEqual(['inbox_rule_propose', 'mail_connect', 'mail_read', 'mail_reply', 'mail_search', 'mail_send', 'mail_triage']);
+  });
+
+  it('leaves the rule proposal out with inbox rules turned off', async () => {
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
+    await ctx.addAccount(INPUT_GMAIL);
+    const names = ctx.tools().map(t => t.definition.name).sort();
     expect(names).toEqual(['mail_connect', 'mail_read', 'mail_reply', 'mail_search', 'mail_send', 'mail_triage']);
   });
 });

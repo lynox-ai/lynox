@@ -79,6 +79,7 @@ async function render(a: Answers = {}): Promise<void> {
 		}
 		if (u.pathname.endsWith('/inbox/rules')) return Response.json({ rules: a.rules ?? [] });
 		if (u.pathname.endsWith('/inbox/cold-start')) return Response.json({ active: [], recent: [] });
+		if (u.pathname.includes('/inbox/undo/')) return Response.json({ undone: 1 });
 		return Response.json({}, { status: 404 });
 	}));
 	const { default: View } = await import('./InboxView.svelte');
@@ -128,6 +129,36 @@ describe('InboxView — filtered to one rule', () => {
 		expect(itemQueries.at(-1)!.get('ruleId')).toBeNull();
 		expect(target.textContent).toContain('Unser Herbst-Newsletter');
 		expect(gotoSpy.calls.at(-1)?.[0]).toBe('/app/inbox');
+	});
+
+	it('clears the filter on the way to the snoozed list, which cannot be filtered by rule', async () => {
+		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
+		await render({ rules: [rule] });
+		expect(byTestId('inbox-rule-filter')).not.toBeNull();
+		const snoozed = [...target.querySelectorAll('button')].find((b) => b.textContent?.includes(t('inbox.zone_snoozed')));
+		snoozed!.click();
+		await settle();
+		expect(byTestId('inbox-rule-filter')).toBeNull();
+		const store = await import('../stores/inbox.svelte.js');
+		expect(store.getInboxRuleFilter()).toBeNull();
+		const last = itemQueries.at(-1)!;
+		expect(last.get('snoozedOnly')).toBe('true');
+		expect(last.get('ruleId')).toBeNull();
+		expect(gotoSpy.calls.at(-1)?.[0]).toBe('/app/inbox');
+	});
+
+	it('keeps the filter on a later load of the list, such as after an undo', async () => {
+		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
+		await render({ rules: [rule] });
+		const before = itemQueries.length;
+		const store = await import('../stores/inbox.svelte.js');
+		expect(await store.undoBulk('blk_1', 'auto_handled')).toBe(true);
+		await settle();
+		expect(itemQueries.length).toBeGreaterThan(before);
+		const last = itemQueries.at(-1)!;
+		expect(last.get('bucket')).toBe('auto_handled');
+		expect(last.get('ruleId')).toBe('rul_c1');
+		expect(byTestId('inbox-rule-filter')?.textContent).toContain('Regel: Newsletter');
 	});
 
 	it('ignores an id the server would refuse', async () => {

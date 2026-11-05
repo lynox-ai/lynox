@@ -11,7 +11,7 @@ const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 	['inbox.rules_proposals_mandate', 'Bestätigen kann nur der Inhaber dieser Instanz. Brauchst du die Regel, wende dich an den Inhaber.', 'Only the owner of this instance can confirm it. If you need the rule, ask the owner.'],
 	['inbox.rules_proposal_badge', 'Vorschlag des Assistenten', 'Suggested by the assistant'],
 	['inbox.rules_confirm', 'Bestätigen', 'Confirm'],
-	['inbox.rules_confirm_text', 'Regel bestätigen? {name} — wenn {match} „{value}“, dann „{bucket}“. Sie wirkt, sobald du bestätigst.', 'Confirm this rule? {name} — when {match} “{value}”, then “{bucket}”. It applies as soon as you confirm.'],
+	['inbox.rules_confirm_text', 'Regel „{name}“ bestätigen? Wenn {match} „{value}“, dann „{bucket}“. Sie wirkt, sobald du bestätigst.', 'Confirm rule “{name}”? When {match} “{value}”, then “{bucket}”. It applies as soon as you confirm.'],
 	['inbox.rules_error_confirm', 'Regel konnte nicht bestätigt werden. Lade die Seite neu und versuch es noch einmal.', 'Could not confirm the rule. Reload the page and try again.'],
 	['inbox.rules_pending_count', '{count} Vorschläge warten auf Bestätigung', '{count} suggestions waiting for confirmation'],
 	['inbox.rules_pending_count_one', '1 Vorschlag wartet auf Bestätigung', '1 suggestion waiting for confirmation'],
@@ -39,6 +39,10 @@ const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 	['inbox.rule_withheld_unchecked_unnamed', 'Regel zurückgehalten: Die Prüfung konnte nicht laufen, etwa wegen fehlendem KI-Budget oder Guthaben, darum zeigt lynox dir die Mail. Soll die Regel ohne Prüfung greifen, mach daraus eine feste Regel.', 'Rule held back: the check could not run, for example because of no AI budget or credit, so lynox shows you the mail. If the rule should apply without a check, turn it into a fixed rule.'],
 	['inbox.rule_withheld_sensitive_unnamed', 'Regel zurückgehalten: Diese Mail wirkt sensibel. Eine Regel legt solche Mails nie als erledigt ab, darum zeigt lynox sie dir.', 'Rule held back: this mail looks sensitive. A rule never files such mail as handled, so lynox shows it to you.'],
 	['inbox.rule_withheld_forwarded_unnamed', 'Regel zurückgehalten: Diese Mail hat eine Person weitergeleitet. Solche Mails legt eine Beschreibungsregel nicht als erledigt ab, darum zeigt lynox sie dir. Soll die Regel auch hier greifen, mach daraus eine feste Regel.', 'Rule held back: a person forwarded this mail. A description rule does not file such mail as handled, so lynox shows it to you. If the rule should apply here too, turn it into a fixed rule.'],
+	['inbox.rules_match_from', 'Absender ist', 'Sender is'],
+	['inbox.rules_match_from_placeholder', 'z. B. rechnung@lieferant.ch', 'e.g. invoices@supplier.com'],
+	['inbox.rules_then_choose_hint', 'Wähl unter „Dann“, was mit diesen Mails geschehen soll. Erst dann lässt sich die Regel speichern.', 'Choose under “Then” what should happen to these mails. Only then can the rule be saved.'],
+	['inbox.rules_error_from_address', 'Trag eine ganze Absenderadresse ein, etwa rechnung@lieferant.ch. Die Regel prüft genau diese eine Adresse; Teile wie „noreply@“ oder eine Domain allein gehen nicht. Für mehrere Adressen leg je eine Regel an.', 'Enter one whole sender address, such as invoices@supplier.com. The rule checks exactly this one address; parts such as “noreply@” or a domain alone do not work. For several addresses, add one rule each.'],
 ];
 
 const localeBefore = getLocale();

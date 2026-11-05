@@ -70,8 +70,12 @@ const confirmed = {
 };
 
 interface Answers {
-	viewer: Viewer;
-	rules?: unknown[];
+	/** Whose session the server names; a function answers `/config` itself (held, refused). */
+	viewer: Viewer | (() => Promise<Response> | Response);
+	/** The rules listed; a function is asked on every list. */
+	rules?: unknown[] | (() => unknown[]);
+	/** The waiting proposals per account, as `/inbox/counts` gives them. */
+	pendingByAccount?: Record<string, number>;
 	/** The answer to a POST of a new rule. */
 	create?: () => Response;
 	/** The answer to a confirm. */
@@ -87,10 +91,10 @@ async function render(a: Answers): Promise<void> {
 			if (path.endsWith('/inbox/rules')) return a.create ? a.create() : Response.json({ id: 'rul_new' }, { status: 201 });
 			return Response.json({ error: 'unexpected' }, { status: 500 });
 		}
-		if (path.endsWith('/config')) return Response.json({ viewer: a.viewer });
-		if (path.endsWith('/inbox/counts')) return Response.json({ counts: {}, snoozed: 0, rulesPending: 1 });
+		if (path.endsWith('/config')) return typeof a.viewer === 'function' ? a.viewer() : Response.json({ viewer: a.viewer });
+		if (path.endsWith('/inbox/counts')) return Response.json({ counts: {}, snoozed: 0, rulesPending: 1, rulesPendingByAccount: a.pendingByAccount ?? {} });
 		if (path.endsWith('/mail/accounts')) return Response.json({ accounts: [{ id: 'info', displayName: 'Info', address: 'info@example.com', isDefault: true }, { id: 'sales', address: 'sales@example.com' }] });
-		if (path.endsWith('/inbox/rules')) return Response.json({ rules: a.rules ?? [proposal, confirmed] });
+		if (path.endsWith('/inbox/rules')) return Response.json({ rules: typeof a.rules === 'function' ? a.rules() : a.rules ?? [proposal, confirmed] });
 		return Response.json({ error: 'not found' }, { status: 404 });
 	}));
 	const { default: Page } = await import('./RulesView.svelte');
@@ -159,7 +163,7 @@ describe('RulesView — proposals', () => {
 	it('shows the owner what confirming does before the click: name, check, value and bucket', async () => {
 		await render({ viewer: 'owner' });
 		const text = byTestId('rules-confirm-text')!.textContent;
-		expect(text).toBe('Regel bestätigen? Lieferantenrechnungen — wenn Absender enthält „rechnung@lieferant.example“, dann „Braucht dich“. Sie wirkt, sobald du bestätigst.');
+		expect(text).toBe('Regel „Lieferantenrechnungen“ bestätigen? Wenn Absender ist „rechnung@lieferant.example“, dann „Braucht dich“. Sie wirkt, sobald du bestätigst.');
 		expect(text).toBe(tf('inbox.rules_confirm_text', { name: 'Lieferantenrechnungen', match: t('inbox.rules_match_from'), value: 'rechnung@lieferant.example', bucket: t('inbox.zone_needs_you') }));
 		expect(button(t('inbox.rules_confirm'))).toBeDefined();
 		expect(byTestId('rules-proposals-mandate')).toBeNull();
@@ -167,17 +171,76 @@ describe('RulesView — proposals', () => {
 
 	it('names an unnamed proposal by its value, as the server does', async () => {
 		await render({ viewer: 'owner', rules: [{ ...proposal, name: undefined }] });
-		expect(byTestId('rules-confirm-text')!.textContent).toMatch(/^Regel bestätigen\? rechnung@lieferant\.example — wenn/);
+		expect(byTestId('rules-confirm-text')!.textContent).toMatch(/^Regel „rechnung@lieferant\.example“ bestätigen\? Wenn/);
 	});
 
 	it('confirms through the owner route and reloads the rules and the count', async () => {
 		let rulesAfter: unknown[] = [proposal, confirmed];
-		await render({ viewer: 'owner', rules: rulesAfter, confirm: () => { rulesAfter = [{ ...proposal, confirmedAt: '2026-11-05T00:00:00Z' }, confirmed]; return Response.json({ id: 'rul_p1' }); } });
+		await render({ viewer: 'owner', rules: () => rulesAfter, confirm: () => { rulesAfter = [{ ...proposal, confirmedAt: '2026-11-05T00:00:00Z' }, confirmed]; return Response.json({ id: 'rul_p1' }); } });
+		const listsBefore = (vi.mocked(fetch).mock.calls as Array<[string, RequestInit?]>).filter(([u, i]) => String(u).split('?')[0] === '/api/inbox/rules' && i?.method === undefined).length;
 		button(t('inbox.rules_confirm'))!.click();
 		await settle();
 		expect(writes).toEqual([{ method: 'POST', path: '/api/inbox/rules/rul_p1/confirm', body: {} }]);
-		const fetched = (vi.mocked(fetch).mock.calls as Array<[string, RequestInit?]>).map(([u]) => String(u).split('?')[0]);
+		const calls = vi.mocked(fetch).mock.calls as Array<[string, RequestInit?]>;
+		const fetched = calls.map(([u]) => String(u).split('?')[0]);
 		expect(fetched.filter((p) => p === '/api/inbox/counts').length).toBeGreaterThanOrEqual(2);
+		// The rules are listed again: the confirmed proposal leaves the proposals and joins the rules that apply.
+		expect(calls.filter(([u, i]) => String(u).split('?')[0] === '/api/inbox/rules' && i?.method === undefined).length).toBe(listsBefore + 1);
+		expect(byTestId('rules-proposals')).toBeNull();
+		expect([...target.querySelectorAll('li')].map((li) => li.id)).toEqual(['rule-rul_p1', 'rule-rul_c1']);
+	});
+
+	it('ties each confirm button to its own confirm sentence for a screen reader', async () => {
+		const second = { ...proposal, id: 'rul_p2', name: 'Zweiter', matcherValue: 'zwei@lieferant.example' };
+		await render({ viewer: 'owner', rules: [proposal, second] });
+		const buttons = [...target.querySelectorAll('button')].filter((b) => b.textContent?.trim() === t('inbox.rules_confirm'));
+		expect(buttons).toHaveLength(2);
+		const described = buttons.map((b) => document.getElementById(b.getAttribute('aria-describedby') ?? '')?.textContent);
+		expect(described[0]).toContain('Lieferantenrechnungen');
+		expect(described[1]).toContain('Zweiter');
+		expect(described[0]).not.toContain('Zweiter');
+	});
+
+	it('shows neither the confirm nor the mandate sentence while the server has not said whose session it is', async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => { release = r; });
+		await render({ viewer: async () => { await gate; return Response.json({ viewer: 'owner' }); } });
+		expect(byTestId('rules-proposal')).not.toBeNull();
+		expect(button(t('inbox.rules_confirm'))).toBeUndefined();
+		expect(byTestId('rules-confirm-text')).toBeNull();
+		expect(byTestId('rules-proposals-mandate')).toBeNull();
+		release();
+		await settle();
+		expect(button(t('inbox.rules_confirm'))).toBeDefined();
+		expect(byTestId('rules-proposals-mandate')).toBeNull();
+	});
+
+	it('scrolls to the rule a link points at once the list has loaded', async () => {
+		const scrolled: Element[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this); };
+		try {
+			pageUrl.href = 'http://localhost/app/inbox/rules?accountId=info#rule-rul_c1';
+			await render({ viewer: 'owner' });
+			const el = document.getElementById('rule-rul_c1');
+			expect(el).not.toBeNull();
+			expect(scrolled).toEqual([el]);
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+	});
+
+	it('scrolls nowhere without a rule in the link', async () => {
+		const scrolled: Element[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this); };
+		try {
+			pageUrl.href = 'http://localhost/app/inbox/rules?accountId=info#top';
+			await render({ viewer: 'owner' });
+			expect(scrolled).toEqual([]);
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
 	});
 
 	it('says so when the confirm fails and keeps the proposal', async () => {
@@ -320,5 +383,123 @@ describe('RulesView — prefill from a link', () => {
 		pageUrl.href = 'http://localhost/app/inbox/rules?accountId=sales&kind=from&value=a%40b.example';
 		await render({ viewer: 'mandate', rules: [] });
 		expect(target.querySelector('form')).toBeNull();
+	});
+});
+
+describe('RulesView — the account with waiting proposals', () => {
+	function accountInput(): HTMLInputElement {
+		return target.querySelector<HTMLInputElement>('input[list="rules-account-list"]')!;
+	}
+	function listedFor(): string[] {
+		return (vi.mocked(fetch).mock.calls as Array<[string, RequestInit?]>).map(([u]) => String(u)).filter((u) => u.startsWith('/api/inbox/rules?'));
+	}
+
+	it('opens the first account with proposals waiting when the link names none', async () => {
+		await render({ viewer: 'owner', pendingByAccount: { sales: 2 }, rules: [{ ...proposal, accountId: 'sales' }] });
+		expect(accountInput().value).toBe('sales');
+		expect(listedFor()).toEqual(['/api/inbox/rules?accountId=sales']);
+		expect(byTestId('rules-proposal')).not.toBeNull();
+	});
+
+	it('keeps the default account without any proposal waiting', async () => {
+		await render({ viewer: 'owner', pendingByAccount: {}, rules: [confirmed] });
+		expect(accountInput().value).toBe('info');
+		expect(listedFor()).toEqual(['/api/inbox/rules?accountId=info']);
+	});
+
+	it('keeps the account a link names, whoever has proposals waiting', async () => {
+		pageUrl.href = 'http://localhost/app/inbox/rules?accountId=info';
+		await render({ viewer: 'owner', pendingByAccount: { sales: 2 } });
+		expect(accountInput().value).toBe('info');
+	});
+
+	it('shows the number of waiting proposals next to each account in the picker', async () => {
+		await render({ viewer: 'owner', pendingByAccount: { sales: 2 } });
+		const options = [...target.querySelectorAll('#rules-account-list option')].map((o) => o.textContent);
+		expect(options).toEqual(['Info <info@example.com>', 'sales@example.com (2)']);
+	});
+});
+
+describe('RulesView — a form a link opened', () => {
+	const PREFILL = 'http://localhost/app/inbox/rules?accountId=info&kind=from&value=chef%40firma.example';
+	function save(): HTMLButtonElement {
+		return button(t('inbox.rules_save'))!;
+	}
+	function thenRadios(): HTMLInputElement[] {
+		return [...target.querySelectorAll<HTMLInputElement>('input[name="rule-then-preset"]')];
+	}
+
+	it('opens with no "then" chosen, says to choose one, and saves only after a choice, with the choice', async () => {
+		pageUrl.href = PREFILL;
+		await render({ viewer: 'owner', rules: [] });
+		expect(textInputs()[1]!.value).toBe('chef@firma.example');
+		expect(thenRadios()).toHaveLength(3);
+		expect(thenRadios().filter((r) => r.checked)).toEqual([]);
+		expect(save().disabled).toBe(true);
+		expect(byTestId('rules-then-choose-hint')?.textContent).toBe(t('inbox.rules_then_choose_hint'));
+		// A submit without a choice sends nothing.
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		expect(writes).toEqual([]);
+		await choose('rule-then-preset', 'escalate');
+		expect(save().disabled).toBe(false);
+		expect(byTestId('rules-then-choose-hint')).toBeNull();
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		expect(writes).toHaveLength(1);
+		expect(writes[0]).toMatchObject({ method: 'POST', path: '/api/inbox/rules', body: { matcherKind: 'from', matcherValue: 'chef@firma.example', bucket: 'requires_user', action: 'show' } });
+	});
+
+	it.each(['preset', 'then', 'action', 'bucket'])('chooses nothing from a "%s" in the link', async (param) => {
+		pageUrl.href = `${PREFILL}&${param}=archive&preset=silent`;
+		await render({ viewer: 'owner', rules: [] });
+		expect(target.querySelector('form')).not.toBeNull();
+		expect(thenRadios().filter((r) => r.checked)).toEqual([]);
+		expect(save().disabled).toBe(true);
+	});
+
+	it('reads no parameter of the link but account, kind and value', async () => {
+		const { default: src } = (await import('./RulesView.svelte?raw')) as { default: string };
+		const read = [...src.matchAll(/params\.get\('([^']+)'\)/g)].map((m) => m[1]).sort();
+		expect(read).toEqual(['accountId', 'kind', 'value']);
+		expect(src).not.toMatch(/searchParams\.(getAll|entries|forEach|keys|values|has)\b/);
+	});
+
+	it('keeps "add rule" as it was: archive chosen and Save ready once a value is typed', async () => {
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		expect(radio('rule-then-preset', 'archive').checked).toBe(true);
+		expect(byTestId('rules-then-choose-hint')).toBeNull();
+		await type(textInputs()[1]!, 'news@shop.example');
+		expect(save().disabled).toBe(false);
+	});
+});
+
+describe('RulesView — the sender of a fixed rule', () => {
+	it('shows a whole address as the example for a sender, and the shared one for a subject', async () => {
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		expect(textInputs()[1]!.placeholder).toBe(t('inbox.rules_match_from_placeholder'));
+		await choose('rule-match-kind', 'subject_contains');
+		expect(textInputs()[1]!.placeholder).toBe(t('inbox.rules_match_value_placeholder'));
+		await choose('rule-match-kind', 'list_id');
+		expect(textInputs()[1]!.placeholder).toBe(t('inbox.rules_match_value_placeholder'));
+	});
+
+	it.each(['noreply@', '@lieferant.ch', 'lieferant.ch'])('says in the form when the server refuses "%s" as not one whole address', async (value) => {
+		const toasts = await import('../stores/toast.svelte.js');
+		const spy = vi.spyOn(toasts, 'addToast');
+		await render({ viewer: 'owner', rules: [], create: () => Response.json({ error: 'matcherValue must be one sender address' }, { status: 400 }) });
+		await openForm();
+		await type(textInputs()[1]!, value);
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		expect(writes[0]).toMatchObject({ body: { matcherKind: 'from', matcherValue: value } });
+		expect(byTestId('rules-from-address-error')?.textContent).toBe(t('inbox.rules_error_from_address'));
+		expect(byTestId('rules-from-address-error')?.textContent).toBe('Trag eine ganze Absenderadresse ein, etwa rechnung@lieferant.ch. Die Regel prüft genau diese eine Adresse; Teile wie „noreply@“ oder eine Domain allein gehen nicht. Für mehrere Adressen leg je eine Regel an.');
+		expect(byTestId('rules-label-error')).toBeNull();
+		expect(target.querySelector('form')).not.toBeNull();
+		expect(spy).not.toHaveBeenCalledWith(t('inbox.rules_error_create'), 'error');
+		spy.mockRestore();
 	});
 });

@@ -141,6 +141,8 @@ let counts = $state<InboxCounts>(ZERO_COUNTS);
 let snoozedCount = $state(0);
 /** Rules the assistant proposed that wait for confirmation, over all accounts. */
 let rulesPending = $state(0);
+/** The same per account id; an account with none is left out. */
+let rulesPendingByAccount = $state<Record<string, number>>({});
 /** The rule whose items the bucket lists show, or null for all items. */
 let ruleFilter = $state<string | null>(null);
 let itemsByBucket = $state<Record<InboxBucket, InboxItem[]>>({
@@ -488,10 +490,11 @@ export async function loadInboxCounts(): Promise<boolean> {
 			return false;
 		}
 		if (!res.ok) return false;
-		const data = (await res.json()) as { counts: InboxCounts; snoozed?: number; rulesPending?: number };
+		const data = (await res.json()) as { counts: InboxCounts; snoozed?: number; rulesPending?: number; rulesPendingByAccount?: unknown };
 		counts = { ...ZERO_COUNTS, ...data.counts };
 		snoozedCount = data.snoozed ?? 0;
 		rulesPending = typeof data.rulesPending === 'number' && data.rulesPending > 0 ? data.rulesPending : 0;
+		rulesPendingByAccount = pendingByAccount(data.rulesPendingByAccount);
 		available = true;
 		return true;
 	} catch {
@@ -542,6 +545,21 @@ export function getSnoozedCount(): number {
 /** How many rules the assistant proposed wait for confirmation, over all accounts. */
 export function getRulesPendingCount(): number {
 	return rulesPending;
+}
+
+/** How many proposals wait per account id; an account with none is not in it. */
+export function getRulesPendingByAccount(): Readonly<Record<string, number>> {
+	return rulesPendingByAccount;
+}
+
+/** The per-account counts of a counts body: positive whole numbers only, anything else dropped. */
+function pendingByAccount(raw: unknown): Record<string, number> {
+	const out: Record<string, number> = {};
+	if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return out;
+	for (const [id, n] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof n === 'number' && Number.isInteger(n) && n > 0) out[id] = n;
+	}
+	return out;
 }
 
 /** The label of the count next to the rules entry: neutral, as a mandate sees it too. */

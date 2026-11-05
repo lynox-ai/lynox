@@ -1570,6 +1570,18 @@ export class InboxStateDb {
     return n;
   }
 
+  /** The same waiting rules, per account of the tenant; an account with none is left out. */
+  countPendingRulesByAccount(tenantId: string = DEFAULT_TENANT_ID): Record<string, number> {
+    const rows = this.db
+      .prepare<[string], { account_id: string; n: number }>(
+        'SELECT account_id, COUNT(*) AS n FROM inbox_rules WHERE tenant_id = ? AND confirmed_at IS NULL GROUP BY account_id ORDER BY account_id',
+      )
+      .all(tenantId);
+    const out: Record<string, number> = {};
+    for (const r of rows) out[r.account_id] = r.n;
+    return out;
+  }
+
   /** How many rules of one kind an account has, waiting ones included. */
   countRulesOfKind(accountId: string, kind: InboxRuleMatcherKind, tenantId: string = DEFAULT_TENANT_ID): number {
     const { n } = this.db

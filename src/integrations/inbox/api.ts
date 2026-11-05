@@ -22,7 +22,7 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
-import { charCount, cutChars, descriptionProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
+import { charCount, cutChars, descriptionProblem, fixedValueProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
 import { isFeatureEnabled } from '../../core/features.js';
 
 export interface InboxApiDeps {
@@ -418,7 +418,9 @@ export function handleGetCounts(deps: InboxApiDeps, query: { tenantId?: string |
   const counts = deps.state.countItemsByBucket(query.tenantId);
   const snoozed = deps.state.countSnoozedItems(query.tenantId);
   const rulesPending = deps.state.countPendingRules(query.tenantId);
-  return { status: 200, body: { counts, snoozed, rulesPending } };
+  // The same per account, so the rule view can open the account the waiting rules belong to.
+  const rulesPendingByAccount = deps.state.countPendingRulesByAccount(query.tenantId);
+  return { status: 200, body: { counts, snoozed, rulesPending, rulesPendingByAccount } };
 }
 
 // ── Cold start ───────────────────────────────────────────────────────────
@@ -965,6 +967,12 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     if (deps.state.countRulesOfKind(body.accountId, 'matches_description', body.tenantId) >= MAX_DESCRIPTION_RULES) {
       return bad(`at most ${String(MAX_DESCRIPTION_RULES)} description rules per account`);
     }
+  } else {
+    // A fixed value is checked as the agent's proposals are: the owner may open the form from a
+    // link, so what it carries has to read as stored and match a real sender or subject. Checked
+    // when a rule is created only; a stored rule loads as it is.
+    const problem = fixedValueProblem(body.matcherValue, body.matcherKind);
+    if (problem !== null) return bad(problem);
   }
   // One line, as the agent's proposals are cut: the name lands in audit rows the model can read.
   const name = typeof body.name === 'string' ? ruleLine(body.name) : '';

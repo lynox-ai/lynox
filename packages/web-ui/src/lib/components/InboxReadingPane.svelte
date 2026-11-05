@@ -17,6 +17,7 @@
 		type SnoozePreset,
 	} from '../stores/inbox.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { inboxHeadline } from '../utils/inbox-headline.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
@@ -138,10 +139,27 @@
 		return { before: template.slice(0, at), name: w.name, after: template.slice(at + '{name}'.length) };
 	}
 
-	/** A sensitive mail would be held back from a fixed rule too: no way to one is offered. */
+	/**
+	 * A sensitive mail would be held back from a fixed rule too: no way to one is offered. Creating
+	 * a rule is the owner's, so a mandate's session is offered none either.
+	 */
 	function offersFixedRule(w: InboxRuleWithheld): boolean {
-		return w.reason !== 'rule_withheld_sensitive';
+		return w.reason !== 'rule_withheld_sensitive' && !isMandateSession();
 	}
+
+	/**
+	 * A mail a person forwarded carries the forwarder as its sender: a sender rule would file all of
+	 * that person's mail, so only the subject is offered.
+	 */
+	function offersSenderRule(w: InboxRuleWithheld): boolean {
+		return w.reason !== 'forwarded_by_person';
+	}
+
+	// Whose session reads the note: only the owner is offered a fixed rule. Asked once a held-back
+	// rule is shown, not for every mail.
+	$effect(() => {
+		if (full?.item.ruleWithheld) void loadSettingsViewer();
+	});
 
 	/** The rule view with the form prefilled for a fixed rule on this mail. */
 	function fixedRuleHref(item: InboxItem, kind: 'from' | 'subject_contains', value: string): string {
@@ -362,7 +380,7 @@
 					<div class="mb-4 rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 px-3 py-2 text-[12px] text-text" role="note" data-testid="inbox-rule-withheld">
 						<p data-testid="inbox-rule-withheld-text">{parts.before}{#if parts.name !== null}{#if ruleHref !== null}<a href={ruleHref} class="underline hover:text-accent-text" data-testid="inbox-rule-withheld-link">{parts.name}</a>{:else}{parts.name}{/if}{/if}{parts.after}</p>
 						{#if offersFixedRule(withheld)}
-							{@const sender = full.item.fromAddress.trim()}
+							{@const sender = offersSenderRule(withheld) ? full.item.fromAddress.trim() : ''}
 							{@const subject = full.item.subject.trim()}
 							{#if sender.length > 0 || subject.length > 0}
 								<div class="mt-2 flex flex-wrap gap-1.5">

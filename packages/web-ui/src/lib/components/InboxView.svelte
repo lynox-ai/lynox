@@ -4,7 +4,7 @@
 	import { page } from '$app/stores';
 	import { get } from 'svelte/store';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
-	import { listInboxRules } from '../api/inbox-rules.js';
+	import { listInboxRules } from '../api/inbox-rules-read.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
