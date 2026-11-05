@@ -146,8 +146,8 @@ describe('the query identifiers of a read row, held to the handlers', () => {
     expect(other).toEqual([
       // A plugin's file URL, not a request's.
       'const mod = await import(pathToFileURL(abs).href) as { handler?: unknown };',
-      // The request log line, with a webhook route token taken out.
-      "const url = redactWebhookPath(req.url ?? '/');",
+      // The request log line: path and parameter names, no route token, no query value.
+      "const url = requestLogUrl(req.url ?? '/');",
       // The webhook route admits a raw path only when it equals the parsed one; the comparison
       // reads the path up to `?`, never the query.
       "if (token !== null && isCanonicalRequestPath(req.url ?? '/', url.pathname)) {",

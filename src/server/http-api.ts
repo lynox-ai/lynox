@@ -135,7 +135,8 @@ import { WorkflowStore, type WorkflowAuthorship } from '../core/workflow-store.j
 import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
-import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
+import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './webhook-receiver.js';
+import { requestLogUrl } from './request-log-url.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
@@ -3569,8 +3570,9 @@ export class LynoxHTTPApi {
         // error goes out as class and status (`error-egress.ts`).
         process.stderr.write(`HTTP API error: ${processErrorText(err)}\n`);
       }
-      // A webhook route token selects a trigger and is never logged.
-      const url = redactWebhookPath(req.url ?? '/');
+      // A webhook route token selects a trigger and is never logged, and no query value is
+      // (`request-log-url.ts`): the line keeps the path and the parameter names.
+      const url = requestLogUrl(req.url ?? '/');
       const status = res.statusCode;
       const ms = Date.now() - start;
       process.stderr.write(`${method} ${url} ${status} ${ms}ms\n`);
