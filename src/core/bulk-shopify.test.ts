@@ -464,6 +464,36 @@ describe('reading a store\'s product list narrowed by a filter', () => {
       expect(s.products.get(20)!['seo']).toEqual({ title: null, description: 'D2' });
     });
 
+    // Found in the dress rehearsal of the filtered run on the development store (05.11.): the
+    // resume after the probe cleared every unwritten target's error, the reason a left-out
+    // product's sentence is read from included.
+    it('keeps the reason of every left-out product through the resume, and clears a failed write to retry it', async () => {
+      fill(4);
+      s.groups = new Map([[10, { product_type: 'Gemuse' }], [20, { product_type: 'Gemüse' }], [30, { product_type: 'Gemuse' }], [40, { product_type: 'Gemuse' }]]);
+      // 30 is listed, then gone when it is read.
+      s.productAnswer = (id) => id === gid(30) ? { data: { product: null } } : undefined;
+      vi.stubEnv(FLAG, '1');
+      const id = startedList(filtered({ product_type: 'Gemuse' }));
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(ledger.externalTargetKeys(id)).toEqual([gid(10), gid(20), gid(30), gid(40)]);
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      const reasons = (): (string | null)[] => ledger.getPreview(id).map((t) => t.error);
+      expect(reasons()).toEqual([null, 'not_in_filter', 'not_found', null]);
+      expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+      await apply(id);
+      // The counter-witness: a target the run may write whose write failed is retried, so its error goes.
+      const forty = ledger.getPreview(id).find((t) => t.key === gid(40))!;
+      ledger.recordFailed(id, forty.seq, 'write_failed');
+      expect(reasons()).toEqual([null, 'not_in_filter', 'not_found', 'write_failed']);
+      expect(ledger.confirmProbe(id)).toEqual({ ok: true });
+      expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 2 })).toMatchObject({ ok: true });
+      expect(reasons()).toEqual([null, 'not_in_filter', 'not_found', null]);
+      expect(ledger.getStatus(id)!.invalidReasons).toEqual({ not_in_filter: 1, not_found: 1 });
+      await apply(id);
+      expect(ledger.getPreview(id).map((t) => [t.error, t.written])).toEqual([[null, true], ['not_in_filter', false], ['not_found', false], [null, true]]);
+    });
+
     it('leaves out a product whose answer lacks the filtered field, and keeps the summary of a list that kept some', async () => {
       neighbours('product_type');
       // 30 lists under the filter, but its read answers no product type: fail closed.

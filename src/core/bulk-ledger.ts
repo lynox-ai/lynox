@@ -2365,7 +2365,9 @@ export class BulkLedger {
       // Not a target that failed on what it would send (`secret`): that fails the same way every
       // time, so retrying it first would halt a small run again at the same place and the rest
       // would never be written. It stays failed; the resume carries on with the others.
-      db.prepare(`UPDATE bulk_targets SET error = NULL, claimed_at = NULL WHERE run_id = ? AND applied_at IS NULL AND error IS NOT NULL AND error != 'secret'`)
+      // Nor a target left out when it was planned (`invalid`): it is never written, so there is
+      // nothing to retry, and its error is the reason the run page shows for it.
+      db.prepare(`UPDATE bulk_targets SET error = NULL, claimed_at = NULL WHERE run_id = ? AND applied_at IS NULL AND error IS NOT NULL AND error != 'secret' AND change != 'invalid'`)
         .run(runId);
       triggerId = this.armTrigger(run, now);
       return true;
