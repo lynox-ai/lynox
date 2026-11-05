@@ -14,7 +14,7 @@ import {
 
 export type { RefreshBodyFailure };
 import { getApiBase } from '../config.svelte.js';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import { addToast } from './toast.svelte.js';
 
 export type InboxBucket = 'requires_user' | 'draft_ready' | 'auto_handled';
@@ -56,6 +56,26 @@ export interface InboxItem {
 	inReplyTo?: string | undefined;
 	notifyOnUnsnooze?: boolean | undefined;
 	notifiedAt?: string | undefined; // ISO
+	/** The rule that filed this item; absent when none did, or once that rule is deleted. */
+	matchedRuleId?: string | undefined;
+	/** The rule that named this item but was not applied, or null when none was withheld. */
+	ruleWithheld?: InboxRuleWithheld | null | undefined;
+}
+
+/** Why a rule that named a mail was not applied, so the mail is shown instead. */
+export type InboxRuleWithheldReason =
+	| 'rule_withheld_sensitive'
+	| 'rule_withheld_classifier'
+	| 'rule_withheld_unchecked'
+	| 'forwarded_by_person';
+
+/** A rule withheld on an item, as it was when it was withheld. */
+export interface InboxRuleWithheld {
+	/** Null once the rule is deleted. */
+	id: string | null;
+	/** The rule's name when it was withheld; null when it had none. */
+	name: string | null;
+	reason: InboxRuleWithheldReason;
 }
 
 export interface InboxCounts {
@@ -119,6 +139,10 @@ const EMPTY_COLD_START: ColdStartSnapshot = { active: [], recent: [] };
 
 let counts = $state<InboxCounts>(ZERO_COUNTS);
 let snoozedCount = $state(0);
+/** Rules the assistant proposed that wait for confirmation, over all accounts. */
+let rulesPending = $state(0);
+/** The rule whose items the bucket lists show, or null for all items. */
+let ruleFilter = $state<string | null>(null);
 let itemsByBucket = $state<Record<InboxBucket, InboxItem[]>>({
 	requires_user: [],
 	draft_ready: [],
@@ -464,9 +488,10 @@ export async function loadInboxCounts(): Promise<boolean> {
 			return false;
 		}
 		if (!res.ok) return false;
-		const data = (await res.json()) as { counts: InboxCounts; snoozed?: number };
+		const data = (await res.json()) as { counts: InboxCounts; snoozed?: number; rulesPending?: number };
 		counts = { ...ZERO_COUNTS, ...data.counts };
 		snoozedCount = data.snoozed ?? 0;
+		rulesPending = typeof data.rulesPending === 'number' && data.rulesPending > 0 ? data.rulesPending : 0;
 		available = true;
 		return true;
 	} catch {
@@ -514,6 +539,31 @@ export function getSnoozedCount(): number {
 	return snoozedCount;
 }
 
+/** How many rules the assistant proposed wait for confirmation, over all accounts. */
+export function getRulesPendingCount(): number {
+	return rulesPending;
+}
+
+/** The label of the count next to the rules entry: neutral, as a mandate sees it too. */
+export function rulesPendingLabel(count: number): string {
+	return count === 1 ? t('inbox.rules_pending_count_one') : tf('inbox.rules_pending_count', { count: String(count) });
+}
+
+/** A rule id as the server accepts it in `?ruleId=` (`rul_…`). */
+const RULE_ID = /^rul_[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Show only the items of one rule in the bucket lists, or all again with null. An id the server
+ * would refuse is dropped. Every later load of a bucket keeps the filter until it is cleared.
+ */
+export function setInboxRuleFilter(ruleId: string | null): void {
+	ruleFilter = ruleId !== null && RULE_ID.test(ruleId) ? ruleId : null;
+}
+
+export function getInboxRuleFilter(): string | null {
+	return ruleFilter;
+}
+
 export async function loadInboxItems(
 	bucket: InboxBucket,
 	limit = 50,
@@ -528,6 +578,7 @@ export async function loadInboxItems(
 			offset: String(offset),
 		});
 		if (q !== undefined && q.length > 0) params.set('q', q);
+		if (ruleFilter !== null) params.set('ruleId', ruleFilter);
 		const res = await fetch(`${getApiBase()}/inbox/items?${params.toString()}`);
 		if (res.status === 503) {
 			available = false;

@@ -11,12 +11,20 @@
 	// accounts endpoint; future non-mail channels (when reintroduced) will
 	// expose their own pseudo-account ids that advanced users could paste
 	// by hand since /api/mail/accounts only knows mail.
+	//
+	// A rule the assistant proposed waits in its own section above the rules that apply; only the
+	// owner confirms it, with what confirming does written next to the button. A link may open the
+	// form prefilled (`?accountId=&kind=&value=`, the reading pane's "fixed rule from the sender").
 
 	import { onDestroy, onMount } from 'svelte';
-	import { t } from '../i18n.svelte.js';
+	import { get } from 'svelte/store';
+	import { page } from '$app/stores';
+	import { t, tf } from '../i18n.svelte.js';
 	import {
+		confirmInboxRule,
 		createInboxRule,
 		deleteInboxRule,
+		isRulePending,
 		listInboxRules,
 		type InboxRule,
 		type InboxRuleAction,
@@ -57,13 +65,50 @@
 			case 'from': return t('inbox.rules_match_from');
 			case 'subject_contains': return t('inbox.rules_match_subject');
 			case 'list_id': return t('inbox.rules_match_list_id');
+			case 'matches_description': return t('inbox.rules_match_description');
 		}
 	}
+
+	/** The bucket a rule files into, by its name in the inbox. */
+	function bucketLabel(bucket: InboxRuleBucket): string {
+		return bucket === 'requires_user' ? t('inbox.zone_needs_you') : t('inbox.zone_handled');
+	}
+
+	/** A rule's name; unnamed, it is called by its value, as the server names it. */
+	function ruleName(rule: InboxRule): string {
+		return rule.name !== undefined && rule.name.length > 0 ? rule.name : rule.matcherValue;
+	}
+
+	/** What confirming does, said before the click: name, check, value and bucket. */
+	function confirmText(rule: InboxRule): string {
+		return tf('inbox.rules_confirm_text', {
+			name: ruleName(rule),
+			match: matchLabel(rule.matcherKind),
+			value: rule.matcherValue,
+			bucket: bucketLabel(rule.bucket),
+		});
+	}
+
+	/** The inbox, filtered to the items a rule filed. */
+	function ruleItemsHref(rule: InboxRule): string {
+		const params = new URLSearchParams({ ruleId: rule.id, accountId: rule.accountId, zone: rule.bucket });
+		return `/app/inbox?${params.toString()}`;
+	}
+
+	const MATCH_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains', 'list_id', 'matches_description'];
+	/** The kinds a link may prefill: the fixed ones, as the reading pane offers them. */
+	const PREFILL_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains', 'list_id'];
+	const NAME_MAX = 80;
+	const DESCRIPTION_MAX = 300;
 
 	let accounts = $state<MailAccountView[]>([]);
 	let accountsLoading = $state(true);
 	let rules = $state<InboxRule[]>([]);
 	let rulesLoading = $state(false);
+	// A waiting proposal has its own section above the rules that apply.
+	const proposals = $derived(rules.filter((r) => isRulePending(r)));
+	const confirmedRules = $derived(rules.filter((r) => !isRulePending(r)));
+	let confirmingId = $state<string | null>(null);
 
 	// Two-state split for the account picker: `inputAccountId` mirrors the
 	// `<input>` (every keystroke), `appliedAccountId` drives the rules load
@@ -80,9 +125,31 @@
 	let formOpen = $state(false);
 	let formMatchKind = $state<InboxRuleMatcherKind>('from');
 	let formMatchValue = $state('');
+	let formName = $state('');
 	let formPreset = $state<FormPreset>('archive');
 	let formSubmitting = $state(false);
+	// The server refused the name or description: it holds a label such as "R1".
+	let formRuleLabelError = $state(false);
 	let pendingDeleteId = $state<string | null>(null);
+	const formIsDescription = $derived(formMatchKind === 'matches_description');
+	// A description rule that files mail as handled applies only when the classifier agrees.
+	const formHandledHint = $derived(
+		formIsDescription && PRESET_MAP[formPreset].bucket === 'auto_handled'
+			? tf('inbox.rules_description_handled_hint', { then: t(PRESET_MAP[formPreset].labelKey) })
+			: null,
+	);
+
+	// A link may open the form prefilled ("fixed rule from the sender"): account, kind and value.
+	const prefill = (() => {
+		const params = get(page).url.searchParams;
+		const kind = params.get('kind');
+		const value = params.get('value')?.trim() ?? '';
+		return {
+			accountId: params.get('accountId')?.trim() ?? '',
+			kind: PREFILL_KINDS.find((k) => k === kind) ?? null,
+			value,
+		};
+	})();
 
 	onMount(async () => {
 		// Counts probe + mail-account list are independent — parallelise to
@@ -97,12 +164,19 @@
 			return;
 		}
 		accounts = list;
-		// Pre-select the default account so the user lands on something
+		// The account a link named; else the default account, so the user lands on something
 		// useful when they only have one mail account configured.
+		const linked = prefill.accountId.length > 0 ? prefill.accountId : null;
 		const defaultAcc = list.find((a) => a.isDefault) ?? list[0];
-		if (defaultAcc) {
-			inputAccountId = defaultAcc.id;
-			appliedAccountId = defaultAcc.id;
+		const chosen = linked ?? defaultAcc?.id;
+		if (chosen !== undefined) {
+			inputAccountId = chosen;
+			appliedAccountId = chosen;
+		}
+		if (prefill.kind !== null && prefill.value.length > 0) {
+			openForm();
+			formMatchKind = prefill.kind;
+			formMatchValue = prefill.value;
 		}
 	});
 
@@ -175,13 +249,16 @@
 	function openForm(): void {
 		formMatchKind = 'from';
 		formMatchValue = '';
+		formName = '';
 		formPreset = 'archive';
+		formRuleLabelError = false;
 		formOpen = true;
 	}
 
 	function closeForm(): void {
 		formOpen = false;
 		formSubmitting = false;
+		formRuleLabelError = false;
 	}
 
 	async function submitForm(): Promise<void> {
@@ -189,22 +266,39 @@
 		const value = formMatchValue.trim();
 		if (accountId.length === 0 || value.length === 0) return;
 		formSubmitting = true;
+		formRuleLabelError = false;
 		const preset = PRESET_MAP[formPreset];
-		const ok = await createInboxRule(getApiBase(), {
+		const name = formName.trim();
+		const result = await createInboxRule(getApiBase(), {
 			accountId,
 			matcherKind: formMatchKind,
 			matcherValue: value,
 			bucket: preset.bucket,
 			action: preset.action,
 			source: 'on_demand',
+			...(name.length > 0 ? { name } : {}),
 		});
 		formSubmitting = false;
-		if (ok === null) {
-			addToast(t('inbox.rules_error_create'), 'error');
+		if (!result.ok) {
+			// A label such as "R1" is said in the form, where it can be rephrased.
+			if (result.namesRuleLabel) formRuleLabelError = true;
+			else addToast(t('inbox.rules_error_create'), 'error');
 			return;
 		}
 		closeForm();
 		await reloadRules();
+	}
+
+	async function confirmProposal(id: string): Promise<void> {
+		if (confirmingId !== null) return;
+		confirmingId = id;
+		const ok = await confirmInboxRule(getApiBase(), id);
+		confirmingId = null;
+		if (!ok) {
+			addToast(t('inbox.rules_error_confirm'), 'error');
+			return;
+		}
+		await Promise.all([reloadRules(), loadInboxCounts()]);
 	}
 
 	async function confirmDelete(id: string): Promise<void> {
@@ -217,10 +311,37 @@
 		}
 		pendingDeleteId = null;
 		// Optimistic: filter locally, then reconcile from server.
+		const wasPending = rules.some((r) => r.id === id && isRulePending(r));
 		rules = rules.filter((r) => r.id !== id);
-		await reloadRules();
+		await Promise.all([reloadRules(), ...(wasPending ? [loadInboxCounts()] : [])]);
 	}
 </script>
+
+{#snippet deleteControl(rule: InboxRule)}
+	{#if !isOwnerSession()}
+		<!-- No delete until the server said this is the owner's session: the rule is the owner's. -->
+	{:else if pendingDeleteId === rule.id}
+		<div class="flex items-center gap-1 shrink-0">
+			<button
+				type="button"
+				onclick={() => void confirmDelete(rule.id)}
+				class="rounded-[var(--radius-sm)] bg-danger/20 text-danger hover:bg-danger/30 px-3 py-1.5 text-[11px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+			>{t('inbox.rules_delete')}</button>
+			<button
+				type="button"
+				onclick={() => (pendingDeleteId = null)}
+				class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+			>{t('inbox.rules_cancel')}</button>
+		</div>
+	{:else}
+		<button
+			type="button"
+			onclick={() => (pendingDeleteId = rule.id)}
+			aria-label={t('inbox.rules_delete')}
+			class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-danger hover:border-danger/40 min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
+		>×</button>
+	{/if}
+{/snippet}
 
 <div
 	class="p-4 sm:p-6 max-w-3xl mx-auto pb-[max(1rem,env(safe-area-inset-bottom))]"
@@ -270,9 +391,52 @@
 		{:else if rulesLoading}
 			<p class="text-text-subtle text-sm">{t('inbox.rules_loading')}</p>
 		{:else}
+			{#if proposals.length > 0}
+				<!-- Proposals wait above the rules that apply: none of them applies until confirmed. -->
+				<section class="mb-6" aria-labelledby="rules-proposals-title" data-testid="rules-proposals">
+					<h2 id="rules-proposals-title" class="text-[11px] text-text-subtle uppercase tracking-widest mb-1">{t('inbox.rules_proposals_title')}</h2>
+					<p class="text-[12px] text-text-muted mb-2">{t('inbox.rules_proposals_intro')}</p>
+					{#if !isOwnerSession()}
+						<p class="text-[12px] text-text-muted mb-2" data-testid="rules-proposals-mandate">{t('inbox.rules_proposals_mandate')}</p>
+					{/if}
+					<ul class="space-y-2" role="list">
+						{#each proposals as rule (rule.id)}
+							<li id="rule-{rule.id}" class="rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 px-4 py-3" data-testid="rules-proposal">
+								<div class="flex items-start justify-between gap-3">
+									<div class="min-w-0 flex-1">
+										{#if rule.source === 'agent'}
+											<span class="inline-block rounded-full bg-accent/15 text-accent-text px-2 py-0.5 text-[10px] mb-1" data-testid="rules-proposal-badge">{t('inbox.rules_proposal_badge')}</span>
+										{/if}
+										<p class="text-sm text-text font-medium break-words">{ruleName(rule)}</p>
+										<p class="text-sm text-text mt-1">
+											<span class="text-text-muted">{matchLabel(rule.matcherKind)}:</span>
+											<span class="font-mono break-all">{rule.matcherValue}</span>
+										</p>
+										<p class="text-[11px] text-text-subtle mt-1">→ {bucketLabel(rule.bucket)}</p>
+									</div>
+									{@render deleteControl(rule)}
+								</div>
+								{#if isOwnerSession()}
+									<!-- What confirming does stands next to the button, before the click. -->
+									<div class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-accent/20 pt-3">
+										<p class="text-[12px] text-text min-w-0 flex-1" data-testid="rules-confirm-text">{confirmText(rule)}</p>
+										<button
+											type="button"
+											onclick={() => void confirmProposal(rule.id)}
+											disabled={confirmingId !== null}
+											class="shrink-0 rounded-[var(--radius-sm)] bg-accent text-white hover:bg-accent-hover disabled:opacity-50 px-3 py-1.5 text-[12px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
+										>{t('inbox.rules_confirm')}</button>
+									</div>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+				</section>
+			{/if}
+
 			<div class="mb-3 flex items-center justify-between">
 				<span class="text-[11px] text-text-subtle uppercase tracking-widest">
-					{rules.length} {rules.length === 1 ? '·' : ''}
+					{confirmedRules.length} {confirmedRules.length === 1 ? '·' : ''}
 				</span>
 				{#if !formOpen && isOwnerSession()}
 					<button
@@ -288,10 +452,21 @@
 					onsubmit={(e) => { e.preventDefault(); void submitForm(); }}
 					class="mb-4 rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 p-4 space-y-3"
 				>
+					<label class="block">
+						<span class="text-[11px] text-text-subtle uppercase tracking-widest">{t('inbox.rules_name_label')}</span>
+						<input
+							type="text"
+							bind:value={formName}
+							maxlength={NAME_MAX}
+							placeholder={t('inbox.rules_name_placeholder')}
+							class="mt-1 w-full bg-bg-subtle border border-border rounded-[var(--radius-sm)] px-3 py-2 text-sm text-text placeholder:text-text-subtle"
+						/>
+					</label>
+
 					<fieldset>
 						<legend class="text-[11px] text-text-subtle uppercase tracking-widest mb-2">{t('inbox.rules_match_label')}</legend>
 						<div class="flex flex-wrap gap-3 mb-2">
-							{#each ['from', 'subject_contains', 'list_id'] as const as kind (kind)}
+							{#each MATCH_KINDS as kind (kind)}
 								<label class="flex items-center gap-2 text-sm text-text">
 									<input
 										type="radio"
@@ -308,9 +483,17 @@
 							type="text"
 							bind:value={formMatchValue}
 							required
-							placeholder={t('inbox.rules_match_value_placeholder')}
+							maxlength={formIsDescription ? DESCRIPTION_MAX : undefined}
+							placeholder={formIsDescription ? t('inbox.rules_description_placeholder') : t('inbox.rules_match_value_placeholder')}
 							class="w-full bg-bg-subtle border border-border rounded-[var(--radius-sm)] px-3 py-2 text-sm text-text placeholder:text-text-subtle"
 						/>
+						{#if formIsDescription}
+							<div class="mt-2 space-y-1 text-[11px] text-text-muted" data-testid="rules-description-hints">
+								<p>{t('inbox.rules_description_hint')}</p>
+								<p>{t('inbox.rules_description_overlap')}</p>
+								<p>{t('inbox.rules_description_out_of_office')}</p>
+							</div>
+						{/if}
 					</fieldset>
 
 					<fieldset>
@@ -329,7 +512,14 @@
 								</label>
 							{/each}
 						</div>
+						{#if formHandledHint !== null}
+							<p class="mt-2 text-[11px] text-text-muted" data-testid="rules-handled-hint">{formHandledHint}</p>
+						{/if}
 					</fieldset>
+
+					{#if formRuleLabelError}
+						<p class="rounded-[var(--radius-sm)] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger" role="alert" data-testid="rules-label-error">{t('inbox.rules_error_rule_label')}</p>
+					{/if}
 
 					<div class="flex items-center justify-end gap-2 pt-1 flex-wrap">
 						<button
@@ -346,14 +536,17 @@
 				</form>
 			{/if}
 
-			{#if rules.length === 0}
+			{#if confirmedRules.length === 0}
 				<p class="text-text-subtle text-sm">{t('inbox.rules_empty')}</p>
 			{:else}
 				<ul class="space-y-2" role="list">
-					{#each rules as rule (rule.id)}
-						<li class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
+					{#each confirmedRules as rule (rule.id)}
+						<li id="rule-{rule.id}" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
 							<div class="flex items-start justify-between gap-3">
 								<div class="min-w-0 flex-1">
+									{#if rule.name !== undefined && rule.name.length > 0}
+										<p class="text-sm text-text font-medium break-words mb-0.5">{rule.name}</p>
+									{/if}
 									<p class="text-sm text-text">
 										<span class="text-text-muted">{matchLabel(rule.matcherKind)}:</span>
 										<span class="font-mono break-all">{rule.matcherValue}</span>
@@ -361,30 +554,13 @@
 									<p class="text-[11px] text-text-subtle mt-1">
 										→ {t(ruleDisplayLabelKey(rule))}
 									</p>
+									<a
+										href={ruleItemsHref(rule)}
+										class="inline-block mt-1 text-[11px] text-accent-text hover:underline py-1"
+										data-testid="rules-items-link"
+									>{t('inbox.rules_items_link')}</a>
 								</div>
-								{#if !isOwnerSession()}
-									<!-- No delete until the server said this is the owner's session: the rule is the owner's. -->
-								{:else if pendingDeleteId === rule.id}
-									<div class="flex items-center gap-1 shrink-0">
-										<button
-											type="button"
-											onclick={() => void confirmDelete(rule.id)}
-											class="rounded-[var(--radius-sm)] bg-danger/20 text-danger hover:bg-danger/30 px-3 py-1.5 text-[11px] min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-										>{t('inbox.rules_delete')}</button>
-										<button
-											type="button"
-											onclick={() => (pendingDeleteId = null)}
-											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:px-4"
-										>{t('inbox.rules_cancel')}</button>
-									</div>
-								{:else}
-									<button
-										type="button"
-										onclick={() => (pendingDeleteId = rule.id)}
-										aria-label={t('inbox.rules_delete')}
-										class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-danger hover:border-danger/40 min-h-[36px] pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
-									>×</button>
-								{/if}
+								{@render deleteControl(rule)}
 							</div>
 						</li>
 					{/each}

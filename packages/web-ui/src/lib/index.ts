@@ -200,11 +200,14 @@ export type {
 export {
 	listInboxRules,
 	createInboxRule,
+	confirmInboxRule,
 	deleteInboxRule,
+	isRulePending,
 } from './api/inbox-rules.js';
 export type {
 	InboxRule,
 	CreateRuleBody,
+	CreateRuleResult,
 	InboxRuleMatcherKind,
 	InboxRuleAction,
 	InboxRuleSource,

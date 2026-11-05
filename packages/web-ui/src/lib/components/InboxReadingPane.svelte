@@ -12,6 +12,8 @@
 		setItemAction,
 		setItemSnooze,
 		type InboxItem,
+		type InboxRuleWithheld,
+		type InboxRuleWithheldReason,
 		type SnoozePreset,
 	} from '../stores/inbox.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -116,6 +118,42 @@
 		closeItem();
 	}
 
+
+	// A rule named this mail but was not applied: the pane says which and why, and where it
+	// follows from the reason, offers the fixed rule that would apply (from the sender or subject).
+	const WITHHELD_KEYS: Record<InboxRuleWithheldReason, string> = {
+		rule_withheld_classifier: 'inbox.rule_withheld_classifier',
+		rule_withheld_unchecked: 'inbox.rule_withheld_unchecked',
+		rule_withheld_sensitive: 'inbox.rule_withheld_sensitive',
+		forwarded_by_person: 'inbox.rule_withheld_forwarded',
+	};
+
+	/** The hint's sentence, split around the rule's name so the name can link to the rule. */
+	function withheldParts(w: InboxRuleWithheld): { before: string; name: string | null; after: string } {
+		const key = WITHHELD_KEYS[w.reason];
+		if (w.name === null || w.name.length === 0) return { before: t(`${key}_unnamed`), name: null, after: '' };
+		const template = t(key);
+		const at = template.indexOf('{name}');
+		if (at === -1) return { before: template, name: null, after: '' };
+		return { before: template.slice(0, at), name: w.name, after: template.slice(at + '{name}'.length) };
+	}
+
+	/** A sensitive mail would be held back from a fixed rule too: no way to one is offered. */
+	function offersFixedRule(w: InboxRuleWithheld): boolean {
+		return w.reason !== 'rule_withheld_sensitive';
+	}
+
+	/** The rule view with the form prefilled for a fixed rule on this mail. */
+	function fixedRuleHref(item: InboxItem, kind: 'from' | 'subject_contains', value: string): string {
+		const params = new URLSearchParams({ accountId: item.accountId, kind, value });
+		return `/app/inbox/rules?${params.toString()}`;
+	}
+
+	/** The rule view of the account, at the rule; none once the rule is deleted. */
+	function withheldRuleHref(item: InboxItem, w: InboxRuleWithheld): string | null {
+		if (w.id === null) return null;
+		return `/app/inbox/rules?${new URLSearchParams({ accountId: item.accountId }).toString()}#rule-${encodeURIComponent(w.id)}`;
+	}
 
 	const snoozePresets: ReadonlyArray<{ label: string; preset: SnoozePreset }> = $derived([
 		{ label: t('inbox.snooze_today'), preset: 'later_today' as const },
@@ -317,6 +355,36 @@
 					<div class="h-3 w-10/12 animate-pulse rounded bg-bg-subtle"></div>
 				</div>
 			{:else if full}
+				{@const withheld = full.item.ruleWithheld ?? null}
+				{#if withheld !== null}
+					{@const parts = withheldParts(withheld)}
+					{@const ruleHref = withheldRuleHref(full.item, withheld)}
+					<div class="mb-4 rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 px-3 py-2 text-[12px] text-text" role="note" data-testid="inbox-rule-withheld">
+						<p data-testid="inbox-rule-withheld-text">{parts.before}{#if parts.name !== null}{#if ruleHref !== null}<a href={ruleHref} class="underline hover:text-accent-text" data-testid="inbox-rule-withheld-link">{parts.name}</a>{:else}{parts.name}{/if}{/if}{parts.after}</p>
+						{#if offersFixedRule(withheld)}
+							{@const sender = full.item.fromAddress.trim()}
+							{@const subject = full.item.subject.trim()}
+							{#if sender.length > 0 || subject.length > 0}
+								<div class="mt-2 flex flex-wrap gap-1.5">
+									{#if sender.length > 0}
+										<a
+											href={fixedRuleHref(full.item, 'from', sender)}
+											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] inline-flex items-center"
+											data-testid="inbox-rule-withheld-from-sender"
+										>{t('inbox.rule_withheld_from_sender')}</a>
+									{/if}
+									{#if subject.length > 0}
+										<a
+											href={fixedRuleHref(full.item, 'subject_contains', subject)}
+											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] inline-flex items-center"
+											data-testid="inbox-rule-withheld-from-subject"
+										>{t('inbox.rule_withheld_from_subject')}</a>
+									{/if}
+								</div>
+							{/if}
+						{/if}
+					</div>
+				{/if}
 				{#if full.body.source === 'missing'}
 					<p class="rounded-[var(--radius-md)] border border-warning bg-warning-subtle px-3 py-2 text-[12px] text-warning">
 						{t('inbox.reading_body_missing')}

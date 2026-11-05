@@ -1,13 +1,19 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { t, getLocale } from '../i18n.svelte.js';
+	import { page } from '$app/stores';
+	import { get } from 'svelte/store';
+	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { listInboxRules } from '../api/inbox-rules.js';
+	import { getApiBase } from '../config.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
 		closeItem,
 		dismissReclassifyBanner,
 		getInboxCounts,
 		getInboxItems,
+		getInboxRuleFilter,
+		getRulesPendingCount,
 		getLastAction,
 		getReclassifyBanner,
 		getSelectedItemId,
@@ -22,7 +28,9 @@
 		loadSnoozedItems,
 		onColdStartCompletion,
 		openItem,
+		rulesPendingLabel,
 		runColdStartBackfillForAllAccounts,
+		setInboxRuleFilter,
 		setItemAction,
 		setItemSnooze,
 		startColdStartPolling,
@@ -66,12 +74,41 @@
 	let countsLoaded = $state(false);
 	const touchPrimary = isTouchPrimary();
 
+	// "Mail from this rule": `?ruleId=` filters the bucket lists to the items that rule filed;
+	// `zone` opens the bucket it files into, `accountId` finds its name. Read once, on arrival:
+	// the store keeps the filter for every later load until it is cleared.
+	const BUCKET_ZONES: ReadonlyArray<InboxZone> = ['requires_user', 'draft_ready', 'auto_handled'];
+	const arrival = get(page).url.searchParams;
+	setInboxRuleFilter(arrival.get('ruleId'));
+	const arrivalZone = BUCKET_ZONES.find((z) => z === arrival.get('zone'));
+	if (getInboxRuleFilter() !== null && arrivalZone !== undefined) zone = arrivalZone;
+	let ruleFilterId = $state<string | null>(getInboxRuleFilter());
+	let ruleFilterName = $state<string | null>(null);
+
+	async function resolveRuleFilterName(ruleId: string, accountId: string): Promise<void> {
+		const list = await listInboxRules(getApiBase(), accountId);
+		const rule = list?.find((r) => r.id === ruleId);
+		if (rule === undefined || ruleFilterId !== ruleId) return;
+		ruleFilterName = rule.name !== undefined && rule.name.length > 0 ? rule.name : rule.matcherValue;
+	}
+
+	function clearRuleFilter(): void {
+		setInboxRuleFilter(null);
+		ruleFilterId = null;
+		ruleFilterName = null;
+		void goto('/app/inbox', { replaceState: true, keepFocus: true, noScroll: true });
+	}
+
 	let cleanupVisibility: (() => void) | undefined;
 	let cleanupColdStart: (() => void) | undefined;
 	let cleanupColdStartListener: (() => void) | undefined;
 	let cleanupKeyHandler: (() => void) | undefined;
 
 	onMount(async () => {
+		const arrivalAccount = arrival.get('accountId');
+		if (ruleFilterId !== null && arrivalAccount !== null && arrivalAccount.length > 0) {
+			void resolveRuleFilterName(ruleFilterId, arrivalAccount);
+		}
 		await loadInboxCounts();
 		countsLoaded = true;
 		cleanupColdStart = startColdStartPolling();
@@ -88,14 +125,23 @@
 	});
 
 	onDestroy(() => {
+		// The filter belongs to this visit of the inbox, not to the next one.
+		setInboxRuleFilter(null);
 		cleanupVisibility?.();
 		cleanupColdStart?.();
 		cleanupColdStartListener?.();
 		cleanupKeyHandler?.();
 	});
 
+	// The snoozed list cannot be filtered by rule (the server refuses the pair): leaving for it
+	// clears the filter rather than showing every snoozed mail under the rule's chip.
+	$effect(() => {
+		if (zone === 'snoozed' && ruleFilterId !== null) clearRuleFilter();
+	});
+
 	$effect(() => {
 		if (!countsLoaded) return;
+		void ruleFilterId;
 		if (zone && isInboxAvailable()) {
 			if (zone === 'snoozed') {
 				void loadSnoozedItems(50, 0);
@@ -496,57 +542,84 @@
 						</div>
 					{/if}
 
-					<!-- Mobile-only zone pills (md+ uses InboxZoneRail). -->
-					<div
-						class="md:hidden flex gap-1 mb-3 overflow-x-auto scrollbar-none -mx-4 px-4 py-1"
-						role="tablist"
-						aria-label={t('inbox.title')}
-					>
-						<button
-							role="tab"
-							aria-selected={zone === 'requires_user'}
-							onclick={() => (zone = 'requires_user')}
-							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'requires_user' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+					<!-- Mobile-only zone pills (md+ uses InboxZoneRail), then the rules entry the rail
+						carries on md+. -->
+					<div class="md:hidden flex items-center gap-1 mb-3 overflow-x-auto scrollbar-none -mx-4 px-4 py-1">
+						<div
+							class="flex gap-1"
+							role="tablist"
+							aria-label={t('inbox.title')}
 						>
-							<span>{t('inbox.zone_needs_you')}</span>
-							{#if counts.requires_user > 0}
-								<span class="rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono">{counts.requires_user}</span>
-							{/if}
-						</button>
-						<button
-							role="tab"
-							aria-selected={zone === 'draft_ready'}
-							onclick={() => (zone = 'draft_ready')}
-							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'draft_ready' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							<button
+								role="tab"
+								aria-selected={zone === 'requires_user'}
+								onclick={() => (zone = 'requires_user')}
+								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'requires_user' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							>
+								<span>{t('inbox.zone_needs_you')}</span>
+								{#if counts.requires_user > 0}
+									<span class="rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono">{counts.requires_user}</span>
+								{/if}
+							</button>
+							<button
+								role="tab"
+								aria-selected={zone === 'draft_ready'}
+								onclick={() => (zone = 'draft_ready')}
+								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'draft_ready' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							>
+								<span>{t('inbox.zone_drafted')}</span>
+								{#if counts.draft_ready > 0}
+									<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.draft_ready}</span>
+								{/if}
+							</button>
+							<button
+								role="tab"
+								aria-selected={zone === 'auto_handled'}
+								onclick={() => (zone = 'auto_handled')}
+								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'auto_handled' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							>
+								<span>{t('inbox.zone_handled')}</span>
+								{#if counts.auto_handled > 0}
+									<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.auto_handled}</span>
+								{/if}
+							</button>
+							<button
+								role="tab"
+								aria-selected={zone === 'snoozed'}
+								onclick={() => (zone = 'snoozed')}
+								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'snoozed' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
+							>
+								<span>{t('inbox.zone_snoozed')}</span>
+								{#if getSnoozedCount() > 0}
+									<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{getSnoozedCount()}</span>
+								{/if}
+							</button>
+						</div>
+						<a
+							href="/app/inbox/rules"
+							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm text-text-muted hover:text-text flex items-center gap-2"
+							data-testid="inbox-pill-rules"
 						>
-							<span>{t('inbox.zone_drafted')}</span>
-							{#if counts.draft_ready > 0}
-								<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.draft_ready}</span>
+							<span>{t('inbox.rules_link')}</span>
+							{#if getRulesPendingCount() > 0}
+								<span class="rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono" aria-hidden="true">{getRulesPendingCount()}</span>
+								<span class="sr-only">{rulesPendingLabel(getRulesPendingCount())}</span>
 							{/if}
-						</button>
-						<button
-							role="tab"
-							aria-selected={zone === 'auto_handled'}
-							onclick={() => (zone = 'auto_handled')}
-							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'auto_handled' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-						>
-							<span>{t('inbox.zone_handled')}</span>
-							{#if counts.auto_handled > 0}
-								<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{counts.auto_handled}</span>
-							{/if}
-						</button>
-						<button
-							role="tab"
-							aria-selected={zone === 'snoozed'}
-							onclick={() => (zone = 'snoozed')}
-							class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'snoozed' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
-						>
-							<span>{t('inbox.zone_snoozed')}</span>
-							{#if getSnoozedCount() > 0}
-								<span class="rounded-full bg-bg-muted text-text-muted px-1.5 text-[10px] font-mono">{getSnoozedCount()}</span>
-							{/if}
-						</button>
+						</a>
 					</div>
+
+					{#if ruleFilterId !== null}
+						<div class="mb-3 flex items-center gap-2" data-testid="inbox-rule-filter">
+							<span class="inline-flex min-w-0 items-center rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-[12px] text-accent-text">
+								<span class="truncate">{tf('inbox.rule_filter_chip', { name: ruleFilterName ?? ruleFilterId })}</span>
+							</span>
+							<button
+								type="button"
+								onclick={clearRuleFilter}
+								class="shrink-0 rounded-[var(--radius-sm)] px-2 py-1 text-[11px] text-text-subtle hover:text-text min-h-[32px] pointer-coarse:min-h-[44px]"
+							>{t('inbox.rule_filter_clear')}</button>
+						</div>
+					{/if}
 
 					{#if zone === 'snoozed' ? isLoadingSnoozed() : isLoading(zone)}
 						<p class="text-text-subtle text-sm">{t('inbox.loading')}</p>
@@ -556,14 +629,15 @@
 						{@const items = zone === 'snoozed' ? getSnoozedItems() : getInboxItems(zone).filter((i) => !i.userAction)}
 						{#if items.length === 0}
 							<p class="text-text-subtle text-sm">
-								{#if zone === 'requires_user'}{t('inbox.empty_needs_you')}
+								{#if ruleFilterId !== null}{t('inbox.rule_filter_empty')}
+								{:else if zone === 'requires_user'}{t('inbox.empty_needs_you')}
 								{:else if zone === 'draft_ready'}{t('inbox.empty_drafted')}
 								{:else if zone === 'snoozed'}{t('inbox.empty_snoozed')}
 								{:else}{t('inbox.empty_handled')}
 								{/if}
 							</p>
 							{@const allEmpty = counts.requires_user === 0 && counts.draft_ready === 0 && counts.auto_handled === 0}
-							{#if allEmpty}
+							{#if allEmpty && ruleFilterId === null}
 								<div class="mt-3">
 									<button
 										type="button"
