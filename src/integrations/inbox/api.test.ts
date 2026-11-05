@@ -952,7 +952,7 @@ describe('rules endpoints — description rules (PRD inbox-user-rules E3/E11)', 
   const base = { accountId: ACCOUNT.id, matcherKind: 'matches_description' as const, bucket: 'requires_user' as const, action: 'show' as const, source: 'on_demand' as const };
 
   it('with the flag off, the kind does not exist for the API', () => {
-    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
     const res = handleCreateRule(deps, { ...base, matcherValue: 'Terminanfragen von Kunden' });
     expect(res).toMatchObject({ status: 400, body: { error: 'invalid matcherKind' } });
     expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);

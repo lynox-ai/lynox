@@ -376,7 +376,7 @@ describe('bootstrapInbox — wiring', () => {
     });
 
     it('with the flag off, checks no description rule: the classifier alone decides', async () => {
-      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(mistralReply(JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'x' }), 10));
       const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: makeClient({ content: [] }), llmRegion: 'eu', mistralApiKey: 'eu-key' });
       try {

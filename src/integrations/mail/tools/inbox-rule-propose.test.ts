@@ -67,9 +67,11 @@ async function propose(input: Record<string, unknown>, agent: IAgent = chat): Pr
 const valid = { account: 'acct-1', matcher_kind: 'from', matcher_value: 'Kunde@Example.com', name: 'Kunde' };
 
 describe('inbox_rule_propose — behind its flag', () => {
-  it('is among the mail tools only with LYNOX_FEATURE_INBOX_USER_RULES on', () => {
+  it('is among the mail tools unless LYNOX_FEATURE_INBOX_USER_RULES is off, and on by default', () => {
     const names = (): string[] => createMailTools(new InMemoryMailRegistry(), { hooks } as never).map((t) => t.definition.name);
     vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+    expect(names()).toContain('inbox_rule_propose');
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
     expect(names()).not.toContain('inbox_rule_propose');
     vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '1');
     expect(names()).toContain('inbox_rule_propose');

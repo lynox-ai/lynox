@@ -43,8 +43,7 @@ export function createMailTools(registry: MailRegistry, ctx?: MailContext): Tool
     createMailConnectTool() as ToolEntry,
     // Reads the inbox store; behind its flag until the cut is through (PRD inbox-user-rules Teil 1).
     ...(isFeatureEnabled('inbox-read') ? [createInboxReadTool(ctx?.hooks) as ToolEntry] : []),
-    // Proposes a rule the owner confirms; behind its flag until the rule view can show a proposal
-    // (PRD inbox-user-rules Teil 3), so none waits where nobody sees it.
+    // Proposes a rule the owner confirms, which the rule view shows; behind its flag, on by default.
     ...(isFeatureEnabled('inbox-user-rules') ? [createInboxRuleProposeTool(registry, ctx?.hooks) as ToolEntry] : []),
   ];
 }
