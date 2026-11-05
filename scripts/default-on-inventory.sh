@@ -25,6 +25,9 @@
 # `isFeatureEnabled` falls back to that table when the flag's env var is unset, so a
 # `false → true` there ships the feature on every instance that sets nothing, the same
 # rollout as a `?? true`. Until this read existed, such a flip passed this guard green.
+# It reads the table literal, not what `isFeatureEnabled` returns: a special case in the
+# resolver is not read. A write to the table anywhere but its declaration (an assignment,
+# `Object.assign`) stops the run, because the literal would no longer be the default.
 # Flags registered at runtime (`registerFeature`) are not in the table and not read here.
 # Then diffs that set against `scripts/default-on-inventory.txt`. A new default-ON
 # flag that is not in the file fails. Adding the line is the deliberate act — it
@@ -81,16 +84,29 @@ done
 # comment nor a `'name': true|false,` entry (a constant, an expression, a value on the
 # next line, an unquoted key, a spread) stops the run instead of reading as "nothing
 # default-ON".
-FEATURE_BLOCK="$(sed -n '/^const CORE_FEATURE_DEFAULTS[^=]*= {/,/^};/p' "$FEATURES")"
-[ -n "$FEATURE_BLOCK" ] || { echo "default-on-inventory: found no CORE_FEATURE_DEFAULTS block in $FEATURES — the file's shape changed, refusing to report a clean run" >&2; exit 1; }
-# The lines between the opening and the closing line that are not blank or a comment.
-feature_lines="$(printf '%s\n' "$FEATURE_BLOCK" | sed '1d;$d' | grep -cvE '^[[:space:]]*($|//|/\*|\*)' || true)"
-feature_literal="$(printf '%s\n' "$FEATURE_BLOCK" | sed '1d;$d' | grep -cE "^[[:space:]]*'[a-z0-9-]+':[[:space:]]*(true|false),?[[:space:]]*(//.*)?$" || true)"
+# The table is named in exactly two places: its declaration and the one read in
+# `isFeatureEnabled`. Any other mention could change a default the literal does not show.
+feature_mentions="$(grep -c 'CORE_FEATURE_DEFAULTS' "$FEATURES" || true)"
+if [ "$feature_mentions" -ne 2 ] || ! grep -qE '^const CORE_FEATURE_DEFAULTS[^=]*= \{[[:space:]]*$' "$FEATURES" \
+   || ! grep -qF 'CORE_FEATURE_DEFAULTS[flag as FeatureFlag]' "$FEATURES"; then
+  echo "default-on-inventory: CORE_FEATURE_DEFAULTS is named ${feature_mentions} times in $FEATURES, expected its declaration (ending in '{') and the one read in isFeatureEnabled — a write elsewhere would change a default the table does not show; refusing to report a clean run" >&2
+  exit 1
+fi
+# The check above made the opening line end at `{`, so no entry can sit on it, outside the
+# lines read below.
+FEATURE_BLOCK="$(LC_ALL=C sed -n '/^const CORE_FEATURE_DEFAULTS[^=]*= {/,/^};/p' "$FEATURES")"
+# The lines between the opening and the closing line that are not blank or a comment. A
+# comment line is `//…`, a whole `/* … */`, the start of a block comment with no quote on
+# it, or a `*` continuation; `/* x */ 'name': true,` is an entry and must read as one.
+feature_lines="$(printf '%s\n' "$FEATURE_BLOCK" | sed '1d;$d' \
+  | LC_ALL=C grep -cvE "^[[:space:]]*(\$|//|/\*.*\*/[[:space:]]*\$|/\*[^'*]*\$|\*)" || true)"
+feature_literal="$(printf '%s\n' "$FEATURE_BLOCK" | sed '1d;$d' \
+  | LC_ALL=C grep -cE "^[[:space:]]*'[a-z0-9-]+':[[:space:]]*(true|false),?[[:space:]]*(//.*)?$" || true)"
 if [ "$feature_literal" -eq 0 ] || [ "$feature_lines" -ne "$feature_literal" ]; then
   echo "default-on-inventory: read ${feature_literal} of ${feature_lines} lines of CORE_FEATURE_DEFAULTS in $FEATURES as a literal true or false entry — refusing to report a clean run" >&2
   exit 1
 fi
-for name in $(printf '%s\n' "$FEATURE_BLOCK" | sed -nE "s/^[[:space:]]*'([a-z0-9-]+)':[[:space:]]*true,?[[:space:]]*(\/\/.*)?$/\1/p"); do
+for name in $(printf '%s\n' "$FEATURE_BLOCK" | LC_ALL=C sed -nE "s/^[[:space:]]*'([a-z0-9-]+)':[[:space:]]*true,?[[:space:]]*(\/\/.*)?$/\1/p"); do
   found="${found}feature:${name}"$'\n'
 done
 
