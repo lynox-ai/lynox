@@ -7,6 +7,7 @@
 // A name is not running text, so none of them is kept in any place.
 
 import { hiddenCharIndexes } from '../../core/hidden-chars.js';
+import { normalizeHeaderText } from './classifier/sanitize.js';
 
 /** One line of rule text: hidden characters and line breaks become spaces, runs of space collapse. */
 export function ruleLine(raw: string): string {
@@ -16,19 +17,42 @@ export function ruleLine(raw: string): string {
 }
 
 /**
+ * A header value or a rule value as the match compares it: normalized as a stored header,
+ * lowercased, and with the Greek final sigma read as the medial one (lowercasing picks one of
+ * the two by the letters around it, which a piece of a subject does not carry).
+ */
+export function ruleMatchText(value: string): string {
+  return normalizeHeaderText(value).toLowerCase().replace(/\u03C2/g, '\u03C3');
+}
+
+/** Half of a surrogate pair without its other half: no character at all, so no reader sees it. */
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
  * A matched value is stored as given, only trimmed: the loader compares the value and the mail
- * both as the inbox stores a header (`rules-loader.ts`, `ruleMatchText`), so a value as the owner
+ * both as the inbox stores a header (`ruleMatchText` below), so a value as the owner
  * reads it and a value as the mail carries it (a warning sign as emoji is U+26A0 U+FE0F, a subject
  * may hold two spaces, or a non-breaking one) both match. The caller refuses one that holds a
  * character a reader does not see, outside the places real text puts one (`hidden-chars.ts`,
- * checked on the raw input), or a line break or tab, which no subject or address carries.
+ * checked on the raw input), half of a surrogate pair, or a line break or tab, which no subject
+ * or address carries.
  */
 export function ruleValue(raw: string): { value: string; hidden: boolean; multiline: boolean } {
-  return { value: raw.trim(), hidden: hiddenCharIndexes(raw).length > 0, multiline: /[\t\n\r]/.test(raw.trim()) };
+  const hidden = hiddenCharIndexes(raw).length > 0 || LONE_SURROGATE_RE.test(raw);
+  return { value: raw.trim(), hidden, multiline: /[\t\n\r]/.test(raw.trim()) };
 }
 
 /** A subject fragment shorter than this would file almost every mail. */
 export const SUBJECT_MIN = 3;
+
+/**
+ * True when a subject phrase is too short, as typed or as the match compares it: characters the
+ * match drops (a direction mark, a narrow no-break space, a variation selector) would otherwise
+ * let `r\u200Ee` pass as three characters and match as `re`.
+ */
+export function subjectTooShort(value: string): boolean {
+  return charCount(value) < SUBJECT_MIN || charCount(ruleMatchText(value)) < SUBJECT_MIN;
+}
 /** The longest value of a fixed rule (sender, subject, list id), in characters (code points). */
 export const FIXED_VALUE_MAX = 200;
 
@@ -44,7 +68,7 @@ export function isOneSenderAddress(value: string): boolean {
  * Why the value of a fixed rule (sender, subject, list id) cannot be stored, or null. Checked on
  * the raw input, as `ruleValue` does: a character a reader does not see, a line break or tab, more
  * than `FIXED_VALUE_MAX` characters, for a sender anything but one address, for a subject fewer
- * than `SUBJECT_MIN` characters.
+ * than `SUBJECT_MIN` characters as typed or as matched (`subjectTooShort`).
  */
 export function fixedValueProblem(raw: string, kind: 'from' | 'subject_contains' | 'list_id'): string | null {
   const v = ruleValue(raw);
@@ -52,7 +76,7 @@ export function fixedValueProblem(raw: string, kind: 'from' | 'subject_contains'
   if (v.multiline) return 'matcherValue must be one line';
   if (charCount(v.value) > FIXED_VALUE_MAX) return `matcherValue exceeds ${String(FIXED_VALUE_MAX)} characters`;
   if (kind === 'from' && !isOneSenderAddress(v.value.toLowerCase())) return 'matcherValue must be one sender address';
-  if (kind === 'subject_contains' && charCount(v.value) < SUBJECT_MIN) return `subject phrase must be at least ${String(SUBJECT_MIN)} characters`;
+  if (kind === 'subject_contains' && subjectTooShort(v.value)) return `subject phrase must be at least ${String(SUBJECT_MIN)} characters`;
   return null;
 }
 

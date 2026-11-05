@@ -12,7 +12,7 @@
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import type { MailHooks } from '../context.js';
 import type { MailRegistry } from './registry.js';
-import { charCount, DESCRIPTION_MAX, DESCRIPTION_MIN, descriptionProblem, FIXED_VALUE_MAX, isOneSenderAddress, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine, ruleValue, SUBJECT_MIN } from '../../inbox/rule-text.js';
+import { charCount, DESCRIPTION_MAX, DESCRIPTION_MIN, descriptionProblem, FIXED_VALUE_MAX, isOneSenderAddress, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine, ruleValue, SUBJECT_MIN, subjectTooShort } from '../../inbox/rule-text.js';
 
 export const INBOX_RULE_NAME_MAX = 80;
 export const INBOX_RULE_VALUE_MAX = FIXED_VALUE_MAX;
@@ -99,7 +99,7 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
           if (!isOneSenderAddress(value)) {
             return Promise.resolve('inbox_rule_propose: for "from", matcher_value must be one sender address.');
           }
-        } else if (charCount(value) < INBOX_RULE_SUBJECT_MIN) {
+        } else if (subjectTooShort(value)) {
           return Promise.resolve(`inbox_rule_propose: a subject phrase needs at least ${String(INBOX_RULE_SUBJECT_MIN)} characters.`);
         }
       }

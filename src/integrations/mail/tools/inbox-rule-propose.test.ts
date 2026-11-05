@@ -147,6 +147,12 @@ describe('inbox_rule_propose — what it accepts', () => {
     ['a subject phrase under 3 characters', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'ab' }, /at least 3 characters/],
     // Counted in characters, as the owner's create counts them: two emoji are two, not four.
     ['a subject phrase of two emoji', { ...valid, matcher_kind: 'subject_contains', matcher_value: '\u{1F600}\u{1F600}' }, /at least 3 characters/],
+    // Counted as the match compares it: the mark, the narrow space, the joiner, the selector drop out.
+    ['a subject phrase that matches as "re" (a left-to-right mark)', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'r\u200Ee' }, /at least 3 characters/],
+    ['a subject phrase that matches as "re" (a narrow no-break space)', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'r\u202Fe' }, /at least 3 characters/],
+    ['a subject phrase that matches as "en" (a zero-width non-joiner)', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'e\u200Cn' }, /at least 3 characters/],
+    ['a subject phrase that matches as one symbol', { ...valid, matcher_kind: 'subject_contains', matcher_value: '\u2122\uFE0F\u200F ' }, /at least 3 characters/],
+    ['a value holding half of a surrogate pair', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'ab\uDB40' }, /characters a reader does not see/],
   ];
   for (const [label, input, msg] of refused) {
     it(`refuses ${label}, and stores nothing`, async () => {
@@ -168,6 +174,11 @@ describe('inbox_rule_propose — what it accepts', () => {
   it('accepts exactly 80 characters of name and 3 of subject phrase', async () => {
     expect(await propose({ ...valid, name: 'n'.repeat(80) })).toMatch(/^Proposed/);
     expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'abc' })).toMatch(/^Proposed/);
+  });
+
+  it('accepts a short phrase whose match keeps three characters: "Re: ", "\u26A0\uFE0F Mahnung"', async () => {
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'Re: ' })).toMatch(/^Proposed/);
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: '\u26A0\uFE0F Mahnung' })).toMatch(/^Proposed/);
   });
 
   it('accepts a subject phrase of 3 emoji and one of exactly 200 characters', async () => {

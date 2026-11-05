@@ -3,9 +3,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb, envelopeToItemInputFields } from './state.js';
-import { InboxRulesLoader, ruleMatchText } from './rules-loader.js';
+import { InboxRulesLoader, ruleMatchText, storedValueNeverMatches } from './rules-loader.js';
 import { normalizeHeaderText, sanitizeHeader } from './classifier/sanitize.js';
-import { fixedValueProblem } from './rule-text.js';
+import { charCount, fixedValueProblem, SUBJECT_MIN } from './rule-text.js';
 import type { MailAccountConfig } from '../mail/provider.js';
 import type { InboxRule } from '../../types/index.js';
 
@@ -70,11 +70,13 @@ function mulberry32(seed: number): () => number {
 }
 
 // Letters with case quirks, every kind of whitespace and line break, hidden characters the
-// stored header drops, ones it keeps (U+034F), and emoji with their variation selector.
+// stored header drops, ones it keeps (U+034F), and emoji with their variation selector. The
+// direction marks, the non-joiner, the soft hyphen, the Arabic letter mark and the narrow
+// no-break space are ones the create check lets stand next to a letter while the match drops them.
 const POOL = [
   'a', 'b', 'R', 'x', ' ', ' ', ' ', '\t', '\u00A0', '\r', '\n', '\u200B', '\u200D', '\u2028', '\u202E', '\u2060',
   '\uFEFF', '\uFE0F', '\u26A0', '\u{1F600}', '\u{E0041}', '\u{E0100}', '\u034F', '\u03A3', '\u03C2', '\u03C3',
-  '\u0391', '\u0130', 'i', '\u0307',
+  '\u0391', '\u0130', 'i', '\u0307', '\u202F', '\u00AD', '\u061C', '\u200E', '\u200F', '\u200C',
 ];
 
 function randomText(rand: () => number, length: number): string {
@@ -103,19 +105,21 @@ function* cases(seed: number, n: number): Generator<{ subject: string; value: st
   }
 }
 
-/** Every case the old comparison matched that `match` does not: the counterexamples. */
-function lostMatches(seed: number, n: number, match: (value: string, subject: string) => boolean): { lost: string[]; oldMatches: number; skippedEmpty: number } {
+/** Every case the old comparison matched that `match` does not: the counterexamples. Generated
+ *  from code points, so every value and subject is well formed. */
+function lostMatches(seed: number, n: number, match: (value: string, subject: string) => boolean): { lost: string[]; oldMatches: number; skipped: string[] } {
   const lost: string[] = [];
   let oldMatches = 0;
-  let skippedEmpty = 0;
+  const skipped: string[] = [];
   for (const { subject, value } of cases(seed, n)) {
     if (!oldMatch(value, subject)) continue;
-    // A value with nothing left once normalized never matches, by design (create refuses one).
-    if (ruleMatchText(value) === '') { skippedEmpty++; continue; }
+    // A value the loader never matches, by design: nothing left once normalized, or a subject
+    // phrase normalizing shrank below the minimum. The test checks create refuses each one.
+    if (storedValueNeverMatches('subject_contains', value)) { skipped.push(value); continue; }
     oldMatches++;
     if (!match(value, subject)) lost.push(JSON.stringify({ subject, value }));
   }
-  return { lost, oldMatches, skippedEmpty };
+  return { lost, oldMatches, skipped };
 }
 
 const SEED = 0x801e;
@@ -199,6 +203,8 @@ describe('every case that matched before still matches', () => {
     expect(control.lost.length).toBeGreaterThanOrEqual(1);
     expect(real.lost).toEqual([]);
     expect(real.oldMatches).toBeGreaterThan(N / 10);
+    // The loader drops only what create refuses: no value it skips could have been stored today.
+    for (const v of real.skipped) expect(fixedValueProblem(v, 'subject_contains'), JSON.stringify(v)).not.toBeNull();
   });
 });
 
@@ -214,10 +220,15 @@ describe('a rule value with nothing left once normalized never matches', () => {
     expect(loader.match({ accountId: 'acct-1', from: 'a@b.example', subject: '' })).toBeNull();
   });
 
-  it('create refuses such a value (seeded fuzz over the same pool)', () => {
+  it('create refuses such a value, and every subject phrase it takes matches as 3 or more characters (seeded fuzz over the same pool)', () => {
     for (const v of ['\u200B\u200B\u200B', ' \u2060 ', '\uFE0F\uFE0F\uFE0F', '\u200D\u200D\u200D', '\u{E0041}\u{E0042}\u{E0043}', '   ']) {
       expect(fixedValueProblem(v, 'subject_contains'), JSON.stringify(v)).not.toBeNull();
       expect(fixedValueProblem(v, 'from'), JSON.stringify(v)).not.toBeNull();
+    }
+    // Controls: three characters as typed, fewer as matched.
+    for (const v of ['r\u200Ee', 'r\u202Fe', 'e\u200Cn', '\u2122\uFE0F\u200F ']) {
+      expect(charCount(ruleMatchText(v)), JSON.stringify(v)).toBeLessThan(SUBJECT_MIN);
+      expect(fixedValueProblem(v, 'subject_contains'), JSON.stringify(v)).not.toBeNull();
     }
     const rand = mulberry32(SEED + 1);
     let accepted = 0;
@@ -225,9 +236,39 @@ describe('a rule value with nothing left once normalized never matches', () => {
       const v = randomText(rand, 1 + Math.floor(rand() * 8));
       if (fixedValueProblem(v, 'subject_contains') !== null) continue;
       accepted++;
-      expect(ruleMatchText(v), JSON.stringify(v)).not.toBe('');
+      expect(charCount(ruleMatchText(v)), JSON.stringify(v)).toBeGreaterThanOrEqual(SUBJECT_MIN);
     }
     expect(accepted).toBeGreaterThan(100);
+  });
+});
+
+describe('a stored subject phrase under the minimum', () => {
+  it('a plain one stored before the minimum existed keeps matching as before', () => {
+    expect(oldMatch('Re', 'Re: Angebot')).toBe(true);
+    expect(storedValueNeverMatches('subject_contains', 'Re')).toBe(false);
+    expect(subjectMatches('Re', 'Re: Angebot')).toBe(true);
+    expect(subjectMatches(' re ', 'RE: Angebot')).toBe(true);
+    expect(subjectMatches('Re', 'Angebot')).toBe(false);
+  });
+
+  it('one that normalizing shrank never matches: before, it matched only mail carrying the same mark', () => {
+    // Before normalizing, "a\u200Eb" matched only a subject with the mark between a and b; read
+    // as "ab" it would file every subject holding "ab". It now matches neither.
+    expect(oldMatch('a\u200Eb', 'Fab Four')).toBe(false);
+    expect(oldMatch('a\u200Eb', 'Fa\u200Eb Four')).toBe(true);
+    expect(storedValueNeverMatches('subject_contains', 'a\u200Eb')).toBe(true);
+    expect(subjectMatches('a\u200Eb', 'Fab Four')).toBe(false);
+    expect(subjectMatches('a\u200Eb', 'Fa\u200Eb Four')).toBe(false);
+  });
+
+  it('a sender is compared whole and keeps matching when short', () => {
+    expect(storedValueNeverMatches('from', 'a\u200Eb')).toBe(false);
+    expect(oneRule('from', 'a\u200Eb').match({ accountId: 'acc', from: 'ab', subject: 'x' })).not.toBeNull();
+  });
+
+  it('one with nothing left still never matches', () => {
+    expect(storedValueNeverMatches('subject_contains', '\u200B')).toBe(true);
+    expect(storedValueNeverMatches('from', '\u200B')).toBe(true);
   });
 });
 
