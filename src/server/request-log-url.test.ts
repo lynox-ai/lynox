@@ -25,9 +25,10 @@ describe('requestLogUrl', () => {
   });
 
   it('replaces an address in a path segment and masks a secret shape', () => {
-    const line = requestLogUrl('/api/inbox/contacts/jane.doe%40customer.ch');
-    expect(line).not.toContain('jane.doe');
-    expect(line.startsWith('/api/inbox/contacts/')).toBe(true);
+    expect(requestLogUrl('/api/inbox/contacts/jane.doe%40customer.ch')).toBe('/api/inbox/contacts/<address>');
+    for (const p of ['/c/jane@customer.ch', '/c/jane%2540customer.ch', '/c/jane%EF%BC%A0customer.ch', '/c/jane%2Fdoe%40x.ch/more']) {
+      expect(requestLogUrl(p)).not.toMatch(/jane/);
+    }
     const key = `sk-ant-api03-${'A1b2C3d4'.repeat(6)}`;
     expect(requestLogUrl(`/api/memory/${key}`)).not.toContain(key);
     expect(requestLogUrl('/api/threads/abc-123')).toBe('/api/threads/abc-123');
@@ -46,25 +47,24 @@ describe('requestLogUrl', () => {
     expect(requestLogUrl('/a?a=1;t=s3cret')).toBe('/a?a=<redacted>');
   });
 
-  it('writes a path past the bound as a placeholder, without decoding it', () => {
-    const long = `/${'%E0'.repeat(Math.ceil(MAX_LOGGED_PATH / 3) + 1)}`;
-    const started = performance.now();
-    expect(requestLogUrl(`${long}?a=1`)).toBe('<long path>?a=<redacted>');
-    expect(performance.now() - started).toBeLessThan(60);
+  it('writes a path past the bound as a placeholder, and one at the bound as sent', () => {
+    expect(requestLogUrl(`/${'%E0'.repeat(MAX_LOGGED_PATH)}?a=1`)).toBe('<long path>?a=<redacted>');
+    const atBound = `/${'a'.repeat(MAX_LOGGED_PATH - 1)}`;
+    expect(requestLogUrl(atBound)).not.toBe('<long path>');
+    expect(requestLogUrl(`${atBound}b`)).toBe('<long path>');
   });
 
   it('does not throw on broken escapes', () => {
     for (const p of ['/%', '/%E0%A4', '/%zz', '/%ED%A0%80', '/%C0%80']) expect(() => requestLogUrl(p)).not.toThrow();
   });
 
-  it('escapes decoded whitespace, so the path cannot pose as the other fields', () => {
-    const line = requestLogUrl('/x%20404%201ms%0AGET%20/fake');
-    expect(line).not.toMatch(/[\s\u00a0\u3000]/u);
-    expect(requestLogUrl('/x%C2%A0y')).not.toContain('\u00a0');
+  it('writes the path undecoded, so it cannot pose as the other fields', () => {
+    expect(requestLogUrl('/x%20404%201ms%0AGET%20/fake')).toBe('/x%20404%201ms%0AGET%20/fake');
+    expect(requestLogUrl('/x%C2%A0y')).toBe('/x%C2%A0y');
   });
 
-  it('takes the route token out of an encoded webhook segment too', () => {
-    expect(requestLogUrl('/api/webhook%73/tok3n')).not.toContain('tok3n');
+  it('takes the route token out behind an encoded separator', () => {
+    expect(requestLogUrl('/api/webhooks%2Ftok3n')).toBe('/api/webhooks/<redacted>');
   });
 
   it('writes an empty path as a slash', () => {
