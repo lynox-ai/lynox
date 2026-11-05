@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailWatcher } from './watch.js';
 import { MailStateDb } from './state.js';
 import { MailError } from './provider.js';
+import { InboundMailDeferred } from './inbound-deferred.js';
 import type {
   MailEnvelope,
   MailProvider,
@@ -384,5 +385,80 @@ describe('MailWatcher — last polling error per account', () => {
     await watcher.attach(b);
     await a.emit(fail('auth_failed'));
     expect(watcher.lastError('acct-b')).toBeNull();
+  });
+});
+
+describe('MailWatcher — a deferred batch is held for the next poll', () => {
+  // The fake provider here emits each mail once, as Gmail and Graph do: neither lists a mail a
+  // second time once it handed it on.
+  it('hands a deferred mail over on the next poll even when the provider does not list it again', async () => {
+    handler.mockImplementationOnce(() => { throw new InboundMailDeferred('test'); });
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider, { applyPrefilter: false });
+
+    await provider.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<d-1@x>' }), envelope(2, { messageId: '<d-2@x>' })] });
+    expect(state.countForAccount('acct-a'), 'deferred batch marked seen').toBe(0);
+
+    await provider.emit({ type: 'ok' });
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(received.at(-1)?.uids).toEqual([1, 2]);
+    expect(state.countForAccount('acct-a')).toBe(2);
+
+    // Handed over once: a later poll does not repeat it.
+    await provider.emit({ type: 'ok' });
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it('a held mail the provider lists again goes over once, ahead of the new mail', async () => {
+    handler.mockImplementationOnce(() => { throw new InboundMailDeferred('test'); });
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider, { applyPrefilter: false });
+    await provider.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<d-1@x>' })] });
+
+    await provider.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<d-1@x>' }), envelope(3, { messageId: '<d-3@x>' })] });
+    expect(received.at(-1)?.uids).toEqual([1, 3]);
+  });
+
+  it('a poll error does not hand the held mail over; the next good poll does', async () => {
+    handler.mockImplementationOnce(() => { throw new InboundMailDeferred('test'); });
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider, { applyPrefilter: false });
+    await provider.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<d-1@x>' })] });
+
+    await provider.emit({ type: 'error', error: new MailError('timeout', 'poll failed') });
+    expect(handler).toHaveBeenCalledTimes(1);
+    await provider.emit({ type: 'ok' });
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(received.at(-1)?.uids).toEqual([1]);
+  });
+
+  it('a handler crash is not held: only a deferral is (control)', async () => {
+    handler.mockImplementationOnce(() => { throw new Error('handler crash'); });
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider, { applyPrefilter: false });
+    await provider.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<d-1@x>' })] });
+
+    await provider.emit({ type: 'ok' });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('a removed account drops what it held; a re-attach of the same account keeps it', async () => {
+    handler.mockImplementationOnce(() => { throw new InboundMailDeferred('test'); });
+    const first = new FakeProvider('acct-a');
+    await watcher.attach(first, { applyPrefilter: false });
+    await first.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<d-1@x>' })] });
+
+    const second = new FakeProvider('acct-a');
+    await watcher.attach(second, { applyPrefilter: false });
+    await second.emit({ type: 'ok' });
+    expect(received.at(-1)?.uids, 're-attach lost the held mail').toEqual([1]);
+
+    handler.mockImplementationOnce(() => { throw new InboundMailDeferred('test'); });
+    await second.emit({ type: 'new', envelopes: [envelope(2, { messageId: '<d-2@x>' })] });
+    await watcher.detach('acct-a');
+    const third = new FakeProvider('acct-a');
+    await watcher.attach(third, { applyPrefilter: false });
+    await third.emit({ type: 'ok' });
+    expect(received.at(-1)?.uids, 'removed account handed over its held mail').toEqual([1]);
   });
 });

@@ -672,6 +672,17 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     expect(euRuntime.hook).not.toHaveBeenCalled();
   });
 
+  it('a shutdown that ends no restore leaves the intake open (control)', async () => {
+    // Only the restore closes the intake; a signal shutdown keeps handing mail on until it stops.
+    const { engine, releaseDrain } = await engineMidRebootstrap('releases');
+    try {
+      await engine.shutdown({ inboxBacklog: 'bounded' });
+    } finally {
+      releaseDrain();
+    }
+    expect((engine as unknown as { _inboxIntakeClosed: boolean })._inboxIntakeClosed).toBe(false);
+  });
+
   it('a rebootstrap whose bootstrap fails leaves no hook behind, as a cold boot whose inbox failed', async () => {
     // The deferring stand-in must not outlive a failed bootstrap: it would hold every mail back
     // until the next restart.

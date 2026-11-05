@@ -1069,6 +1069,45 @@ describe('OAuthGmailProvider — watch', () => {
   });
 });
 
+// Gmail emits a mail once (its dedup map), so a mail the inbox defers would never come back from
+// the provider. The watcher holds it and hands it over on the next poll.
+describe('OAuthGmailProvider under MailWatcher — a deferred mail', () => {
+  it('is handed over again on a later tick although Gmail does not emit it twice', async () => {
+    const { MailWatcher } = await import('../watch.js');
+    const { MailStateDb } = await import('../state.js');
+    const { InboundMailDeferred } = await import('../inbound-deferred.js');
+    fetchMock.mockImplementation((url: string) => {
+      const s = String(url);
+      if (s.includes('/messages?') && !s.match(/\/messages\/[^?]+/)) {
+        return Promise.resolve(respondJson({ messages: [{ id: 'msg-deferred', threadId: 't-1' }] }));
+      }
+      if (s.match(/\/messages\/msg-deferred\?/)) {
+        return Promise.resolve(respondJson(metadataMessage('msg-deferred', { subject: 'deferred' })));
+      }
+      return Promise.resolve(respondJson({}));
+    });
+    const state = new MailStateDb({ path: ':memory:' });
+    const handed: string[] = [];
+    let first = true;
+    const watcher = new MailWatcher(state, async (_accountId, envelopes) => {
+      if (first) { first = false; throw new InboundMailDeferred('test'); }
+      handed.push(...envelopes.map((e) => e.subject));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    try {
+      await watcher.attach(provider, { intervalMs: 50, applyPrefilter: false });
+      await new Promise((r) => setTimeout(r, 200));
+    } finally {
+      await watcher.stopAll();
+      await provider.close();
+    }
+    expect(first, 'fixture: the first hand-over was deferred').toBe(false);
+    expect(handed).toEqual(['deferred']);
+    expect(state.countForAccount(makeAccount().id)).toBe(1);
+    state.close();
+  });
+});
+
 // A stop of the run ends Gmail's reads in flight, never a send that started. Each case runs inside a
 // call slot, stops the call afterwards, and looks at the signal each request carried.
 describe('OAuthGmailProvider — a stopped run', () => {

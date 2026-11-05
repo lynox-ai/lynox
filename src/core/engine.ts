@@ -995,7 +995,7 @@ export class Engine {
       // Same posture as the cold-boot path — surface but don't crash. Without a runtime there is
       // no hook, as on a cold boot whose inbox failed: the deferring one would hold the mail back
       // until the next restart.
-      if (this._mailContext && !this._inboxRuntime) delete this._mailContext.hooks.onInboundMail;
+      if (this._mailContext) delete this._mailContext.hooks.onInboundMail;
       console.error(
         '[lynox] Inbox classifier rebootstrap on provider-switch failed — '
         + 'classifier disabled until next restart:',
