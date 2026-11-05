@@ -10,6 +10,7 @@ import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HALT_REASONS, bulkFailureLimit } 
 import type { PlannedTarget } from './bulk-ledger.js';
 import { BulkSecretError, bulkWriterFor, runBulkEffect, workspaceWriter, type BulkRunTrail, type TargetWriter } from './bulk-apply.js';
 import { TriggerStore } from './trigger-store.js';
+import { BULK_NOTICES } from './bulk-notices.js';
 import { deriveSourceEffect } from './task-manager.js';
 import { WorkerLoop } from './worker-loop.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
@@ -1673,6 +1674,17 @@ describe('data-store runs', () => {
     const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: (run) => bulkWriterFor(run, store) });
     expect(out.status).toBe('refused');
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+  });
+
+  it('tells a German owner of a run with no writer in German, lead and counts alike (ux U-105)', async () => {
+    seedStore();
+    writeFileSync(join(ws, 'p.json'), JSON.stringify([{ target: 'S1', price: 5 }]));
+    const runId = runIdOf(await bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, agent()));
+    approve(runId);
+    const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => null, notices: BULK_NOTICES.de });
+    expect(out.status).toBe('refused');
+    expect(out.summary).toMatch(/^Massenlauf angehalten: Zielsystem nicht erreichbar oder Fehler in lynox\. .* von 1 Zielen\.$/);
   });
 });
 

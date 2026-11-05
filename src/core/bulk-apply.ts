@@ -272,7 +272,7 @@ async function applyRunEffect(
   const writer = deps.writerFor(run);
   if (!writer) {
     ledger.halt(runId, BULK_HALT_REASONS.unavailable);
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.unavailable}.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.unavailable), say) };
   }
   // Before anything of this call is read or written: a run whose row cannot be written does
   // not run.

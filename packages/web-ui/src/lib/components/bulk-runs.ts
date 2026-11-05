@@ -158,13 +158,22 @@ export function bulkRestartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey'
 	return 'read';
 }
 
+/** The restarts the page offers no button for. */
+const BULK_NO_RESTART_BUTTON: ReadonlySet<BulkRestartKind> = new Set(['none', 'no_judge', 'judge_own_key']);
+/** A planned run's steps that tell the owner to go on, or that they can: shown only with a button to do so. */
+const BULK_BEFORE_PROMISES_GOING_ON: ReadonlySet<string> = new Set([
+	'bulk.halt.unavailable_before', 'bulk.halt.unavailable_judge_before', 'bulk.halt.unauthorized_before',
+	'bulk.halt.blocked_before_managed', 'bulk.halt.blocked_before_selfhost', 'bulk.halt.creditRefused_before',
+	'bulk.halt.spendLimit_before_managed', 'bulk.halt.spendLimit_before_selfhost', 'bulk.halt.consecutiveFailures_before',
+]);
+
 /** The page's own sentences for a planned run's halt: why it halted, and what the owner can do
  *  first. `managed`: whether this instance is a managed one; unknown reads as managed, the
  *  instances lynox runs. Null on a halt this page has no sentence for, and on a run past its
  *  plan: a write run halts on some of the same keys for other reasons (three failed writes,
  *  not reads), so it keeps the engine's reason. */
 export function bulkHaltText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge' | 'listFirstPage' | 'judgeServedBy' | 'judgeOwnKey'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
 ): { cause: string; before: string | null } | null {
@@ -180,12 +189,16 @@ export function bulkHaltText(
 		spent: bulkUsd(run.costUsd),
 	};
 	const tier = managed === false ? 'selfhost' : 'managed';
-	const beforeKey = key === 'unauthorized' ? 'bulk.halt.credential_before'
-		: key === 'blocked' || key === 'spendLimit' ? `bulk.halt.${key}_before_${tier}`
-		: `bulk.halt.${key}_before`;
-	const before = i18n.tf(beforeKey, vars);
 	// A judged run's `unavailable` may also be its model; a run without a judge has none to blame.
-	const causeKey = key === 'unavailable' && run.judge !== null ? 'bulk.halt.unavailable_judge' : `bulk.halt.${key}`;
+	const judgedUnavailable = key === 'unavailable' && run.judge !== null;
+	const beforeKey = key === 'blocked' || key === 'spendLimit' ? `bulk.halt.${key}_before_${tier}`
+		: judgedUnavailable ? 'bulk.halt.unavailable_judge_before'
+		: `bulk.halt.${key}_before`;
+	// A step that promises going on stands only where the page offers to go on (ux U-105 L1): a
+	// run that cannot be moved on as it is gets the warning's way instead.
+	const offersRestart = !BULK_NO_RESTART_BUTTON.has(bulkRestartKind(run) ?? 'none');
+	const before = BULK_BEFORE_PROMISES_GOING_ON.has(beforeKey) && !offersRestart ? beforeKey : i18n.tf(beforeKey, vars);
+	const causeKey = judgedUnavailable ? 'bulk.halt.unavailable_judge' : `bulk.halt.${key}`;
 	return { cause: i18n.tf(causeKey, vars), before: before === beforeKey ? null : before };
 }
 
@@ -254,7 +267,8 @@ export function bulkResumeText(
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
-		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
+		: key === 'credential' ? 'bulk.halt.credential_before'
+		: key === 'unauthorized' || key === 'unavailable' ? `bulk.halt.${key}_before`
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
 		: key === 'markupAddedByShop' ? 'bulk.halt.markupAddedByShop_before'
 		: null;
@@ -680,7 +694,11 @@ export function bulkSupportMailto(
 	// The sentence stands with the way on: a restart for a planned run, writing on for one that wrote.
 	// `nothing` leaves the halt's own sentence out, so the link has nothing to stand with.
 	const resumeKind = run.phase === 'planned' ? null : bulkResumeKind(run);
-	const shown = run.phase === 'planned' ? bulkRestartKind(run) !== null : resumeKind !== null && resumeKind !== 'nothing';
+	// A planned run the page offers no restart for shows no step that promises one (ux U-105 L1),
+	// so no sentence for the link either.
+	const restartKind = run.phase === 'planned' ? bulkRestartKind(run) : null;
+	const shown = run.phase === 'planned' ? restartKind !== null && !BULK_NO_RESTART_BUTTON.has(restartKind)
+		: resumeKind !== null && resumeKind !== 'nothing';
 	if (!shown) return null;
 	const subject = i18n.tf('bulk.halt.support_subject', { run: run.id, host: bulkSystemName(run.targetSystem, i18n) });
 	return `mailto:${BULK_SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}`;
