@@ -944,6 +944,33 @@ export const MICROSOFT_OAUTH_CLAIM_PARAM = 'microsoft_oauth';
  */
 export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
 
+/**
+ * The query parameter carrying the user's work address on the Microsoft connect start
+ * (`GET /oauth/microsoft/start`, browser → control plane), next to `instance_id` and the
+ * start token. The control plane resolves the tenant from the address's domain and sets
+ * `login_hint` from it; the engine only passes the address on (PRD-M365 §3.5).
+ *
+ * Next to the start token, not inside it. Signing it would protect nothing: the address
+ * comes from no authenticated source, and the token already binds the start to its
+ * instance. Three conditions carry that placement, and the control plane's start route
+ * owes all three:
+ *
+ *  1. **A hint only.** The connected identity and the `tid` come from the token exchange
+ *     alone (id_token, Graph `/me`). Nothing read from this parameter is stored, and it
+ *     decides nothing beyond `login_hint` and the tenant discovery. A plan that would store
+ *     it reopens the question of signing it.
+ *  2. **Personal data in a URL.** The address lands in browser history and in whatever
+ *     records the request URL. The control plane does not log it, never echoes it in an
+ *     error text or a redirect, and keeps it out of what its error tracking reports about
+ *     the request.
+ *  3. **A swapped address connects nothing.** In a genuine start link it leads to another
+ *     tenant's sign-in, and the `tid` comparison after the exchange ends the flow with
+ *     `wrong_tenant`. A test at that comparison kills the mutant that drops it.
+ *
+ * Imported, never typed, for the reason {@link MICROSOFT_OAUTH_CLAIM_PARAM} gives.
+ */
+export const MICROSOFT_OAUTH_START_ADDRESS_PARAM = 'work_address';
+
 // === Admin consent status — GET /internal/oauth/microsoft/adminconsent/status (engine → CP) ===
 
 /**
