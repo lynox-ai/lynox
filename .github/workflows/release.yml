@@ -215,10 +215,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # actions/attest: the OIDC token that Sigstore signs the provenance with, and the
-      # attestations API it records it in.
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -292,37 +288,84 @@ jobs:
           echo "$INSPECT" | grep -q '"architecture": "arm64"' || { echo "arm64 missing from manifest"; exit 1; }
           echo "Multi-arch manifest verified: amd64 + arm64 both present."
 
-      # The digest a host records when it pulls `:${VERSION}` (its RepoDigests entry) is the
-      # manifest list's, so that is the digest the attestation below names.
+  # Build provenance for the release image, signed through Sigstore with this workflow's OIDC
+  # identity and pushed to GHCR next to the image. The signing certificate names this file and
+  # the release tag's ref, so a verifier can tell an image this workflow attested from one that
+  # another workflow pushed under a release tag. What it binds is a run of release.yml started by
+  # a published release at that tag, not reviewed code: whoever can publish a release, or point
+  # its tag at another commit, gets the same certificate. Verify with
+  #   gh attestation verify oci://ghcr.io/lynox-ai/lynox@sha256:<digest> --repo lynox-ai/lynox \
+  #     --signer-workflow lynox-ai/lynox/.github/workflows/release.yml \
+  #     --source-ref refs/tags/v<version> --deny-self-hosted-runners
+  # A job of its own, so the OIDC token is in reach only of the steps here, none of which runs
+  # repository code. npm does not wait for it: if this job fails, the package is out and the
+  # image is tagged but unattested; re-running the failed jobs attests it then.
+  docker-attest:
+    needs: docker-manifest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      # actions/attest: the OIDC token that Sigstore signs the provenance with, and the
+      # attestations API it records it in.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The digest a host records when it pulls `:<version>` (its RepoDigests entry) is the
+      # manifest list's, so that is the digest attested. The tag can move after it was created,
+      # so the list it points at must hold exactly the manifests of the two images this run
+      # built (each build pushes an index of its image and buildx's attestation manifest);
+      # those are addressed by digest and cannot move.
       - name: Read the manifest list digest
         id: index
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
           SHA: ${{ github.sha }}
+          DIGESTS: /tmp/digests
         run: |
           set -euo pipefail
-          digest_of() { docker buildx imagetools inspect "ghcr.io/lynox-ai/lynox:$1" --format '{{json .Manifest}}' | jq -r .digest; }
-          DIGEST=$(digest_of "${VERSION}")
+          VERSION="${RELEASE_TAG#v}"
+          inspect() { docker buildx imagetools inspect "ghcr.io/lynox-ai/lynox$1" --format '{{json .Manifest}}'; }
+          children() { jq -r 'if .manifests then .manifests[].digest else .digest end'; }
+          BUILT=()
+          for f in "${DIGESTS}"/*; do BUILT+=("sha256:$(basename "$f")"); done
+          if [ "${#BUILT[@]}" -ne 2 ]; then
+            echo "::error::expected the 2 digests this run built (amd64+arm64), got ${#BUILT[@]}"
+            exit 1
+          fi
+          EXPECTED=$(for d in "${BUILT[@]}"; do inspect "@${d}" | children; done | sort)
+          LIST=$(inspect ":${VERSION}")
+          DIGEST=$(jq -r .digest <<< "$LIST")
           if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::could not read the manifest list digest of ${VERSION} (got '${DIGEST}')"
             exit 1
           fi
+          ACTUAL=$(children <<< "$LIST" | sort)
+          if [ -z "$EXPECTED" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::${VERSION} does not point at the images this run built; nothing is attested"
+            exit 1
+          fi
           for TAG in latest "${SHA}"; do
-            OTHER=$(digest_of "$TAG")
+            OTHER=$(inspect ":${TAG}" | jq -r .digest) || OTHER="unreadable"
             if [ "$OTHER" != "$DIGEST" ]; then
-              echo "::warning:::${TAG} points at ${OTHER}, not at the attested ${DIGEST} of :${VERSION}"
+              echo "::warning::tag ${TAG} points at ${OTHER}, not at the attested ${DIGEST} of ${VERSION}"
             fi
           done
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "ghcr.io/lynox-ai/lynox:${VERSION} = ${DIGEST}"
 
-      # Build provenance for the release image, signed through Sigstore with this workflow's OIDC
-      # identity and pushed to GHCR next to the image. It is what tells a release image apart
-      # from one any other workflow pushed under a release tag: the signing certificate names
-      # this file and the release tag's ref. Verify with
-      #   gh attestation verify oci://ghcr.io/lynox-ai/lynox:<version> --repo lynox-ai/lynox \
-      #     --signer-workflow lynox-ai/lynox/.github/workflows/release.yml \
-      #     --source-ref refs/tags/v<version> --deny-self-hosted-runners
       # No storage record: it needs a further permission and is not what a verifier reads.
       - name: Attest the release image
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
