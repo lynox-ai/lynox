@@ -598,6 +598,20 @@ const MIGRATIONS: string[] = [
    ALTER TABLE inbox_items ADD COLUMN matched_rule_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_inbox_items_matched_rule ON inbox_items(tenant_id, matched_rule_id);
    COMMIT;`,
+
+  // v21: the rule that named an item but was not applied (PRD inbox-user-rules F1, E3): its id,
+  // its name as it was then, and why. Written with the item, as the bucket is, and never by a later
+  // write: an item is classified once. Deleting the rule clears the id and keeps name and reason.
+  // Rows from before carry NULL, which reads as "no rule withheld"; nothing is backfilled, as no
+  // released version withheld a rule. One transaction, as v17.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (21);
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_id TEXT;
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_name TEXT;
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_reason TEXT
+     CHECK (rule_withheld_reason IS NULL OR rule_withheld_reason IN
+       ('rule_withheld_sensitive', 'rule_withheld_classifier', 'rule_withheld_unchecked', 'forwarded_by_person'));
+   COMMIT;`,
 ];
 
 export interface MailStateDbOptions {

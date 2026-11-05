@@ -145,10 +145,10 @@ function ruleVerdict(rule: InboxRule, payload: InboxQueuePayload): ClassifyResul
   const base = { classifierVersion: `rule:${rule.id}`, bodyTruncated: false, confidence: 1 };
   const named = { id: rule.id, name: rule.name, action: rule.action };
   if (rule.bucket === 'auto_handled' && payload.sensitive !== undefined) {
-    return { ...base, bucket: 'requires_user', reasonDe: `Sensibler Inhalt — Regel „${label}“ nicht angewandt, bitte ansehen.`, failReason: 'rule_withheld_sensitive', rule: { ...named, withheld: true } };
+    return { ...base, bucket: 'requires_user', reasonDe: `Sensibler Inhalt — Regel „${label}“ nicht angewandt, bitte ansehen.`, failReason: 'rule_withheld_sensitive', rule: { ...named, withheld: 'rule_withheld_sensitive' } };
   }
   if (rule.bucket === 'auto_handled' && isForwardedByPerson(payload.classifierInput)) {
-    return { ...base, bucket: 'requires_user', reasonDe: FORWARDED_REASON_DE, failReason: 'forwarded_by_person', rule: { ...named, withheld: true } };
+    return { ...base, bucket: 'requires_user', reasonDe: FORWARDED_REASON_DE, failReason: 'forwarded_by_person', rule: { ...named, withheld: 'forwarded_by_person' } };
   }
   return { ...base, bucket: rule.bucket, reasonDe: `Regel: ${label}`, failReason: null, rule: { ...named, withheld: false } };
 }
@@ -162,7 +162,7 @@ function ruleOverruled(rule: InboxRule, verdict: ClassifyResult): ClassifyResult
     classifierFailReason: verdict.failReason,
     reasonDe: `Regel „${label}“ nicht angewandt: ${verdict.reasonDe}`,
     failReason: 'rule_withheld_classifier',
-    rule: { id: rule.id, name: rule.name, action: rule.action, withheld: true },
+    rule: { id: rule.id, name: rule.name, action: rule.action, withheld: 'rule_withheld_classifier' },
   };
 }
 
@@ -176,7 +176,7 @@ function ruleUnchecked(rule: InboxRule, classifierVersion: string): ClassifyResu
     failReason: 'rule_withheld_unchecked',
     classifierVersion,
     bodyTruncated: false,
-    rule: { id: rule.id, name: rule.name, action: rule.action, withheld: true },
+    rule: { id: rule.id, name: rule.name, action: rule.action, withheld: 'rule_withheld_unchecked' },
   };
 }
 
@@ -272,7 +272,11 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           reasonDe: result.reasonDe,
           classifiedAt: new Date(),
           classifierVersion: result.classifierVersion,
-          ...(rule !== undefined && !rule.withheld ? { matchedRuleId: rule.id } : {}),
+          // A rule either filed the item or was withheld on it; the item says which (v20, v21).
+          ...(rule !== undefined && rule.withheld === false ? { matchedRuleId: rule.id } : {}),
+          ...(rule !== undefined && rule.withheld !== false
+            ? { ruleWithheld: { id: rule.id, name: rule.name, reason: rule.withheld } }
+            : {}),
           ...envelopeFields,
         },
         rule === undefined
@@ -291,10 +295,10 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
             }
           : {
               tenantId: payload.tenantId,
-              action: rule.withheld ? 'classified' : 'rule_applied',
+              action: rule.withheld !== false ? 'classified' : 'rule_applied',
               actor: 'rule_engine',
               payloadJson: JSON.stringify({
-                ...(rule.withheld ? { rule_withheld: rule.id, fail_reason: result.failReason } : { rule_id: rule.id }),
+                ...(rule.withheld !== false ? { rule_withheld: rule.id, fail_reason: result.failReason } : { rule_id: rule.id }),
                 ...(result.classifierFailReason !== undefined ? { classifier_fail_reason: result.classifierFailReason } : {}),
                 ...(rule.name !== undefined ? { rule_name: rule.name } : {}),
                 matcher_kind: 'matches_description',

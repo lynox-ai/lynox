@@ -26,8 +26,11 @@ import type {
   InboxRuleAction,
   InboxRuleMatcherKind,
   InboxRuleSource,
+  InboxRuleWithheld,
+  InboxRuleWithheldReason,
   InboxUserAction,
 } from '../../types/index.js';
+import { INBOX_RULE_WITHHELD_REASONS } from '../../types/index.js';
 import { sanitizeHeader, stripHtmlAndInvisibles } from './classifier/sanitize.js';
 import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 
@@ -63,6 +66,8 @@ export interface InboxItemInput {
   inReplyTo?: string | undefined;
   /** The rule that filed the item (v20). */
   matchedRuleId?: string | undefined;
+  /** The rule that named the item but was not applied (v21). Never set with `matchedRuleId`. */
+  ruleWithheld?: { id: string; name: string | undefined; reason: InboxRuleWithheldReason } | undefined;
 }
 
 /**
@@ -262,6 +267,10 @@ interface ItemRow {
   notified_at: number | null;
   // v20 — null on items no rule filed
   matched_rule_id: string | null;
+  // v21 — null on items no rule was withheld on (and the id null once that rule is deleted)
+  rule_withheld_id: string | null;
+  rule_withheld_name: string | null;
+  rule_withheld_reason: string | null;
 }
 
 interface AuditRow {
@@ -313,6 +322,17 @@ interface ThreadMessageRow {
 
 // ── Row → domain mappers ───────────────────────────────────────────────────
 
+function isRuleWithheldReason(value: string): value is InboxRuleWithheldReason {
+  return (INBOX_RULE_WITHHELD_REASONS as ReadonlyArray<string>).includes(value);
+}
+
+/** The withheld rule of a row; the reason column is the marker (the id is cleared on delete). */
+function rowToRuleWithheld(row: ItemRow): InboxRuleWithheld | null {
+  const reason = row.rule_withheld_reason;
+  if (reason === null || reason === undefined || !isRuleWithheldReason(reason)) return null;
+  return { id: row.rule_withheld_id ?? null, name: row.rule_withheld_name ?? null, reason };
+}
+
 function rowToItem(row: ItemRow): InboxItem {
   return {
     id: row.id,
@@ -341,6 +361,7 @@ function rowToItem(row: ItemRow): InboxItem {
     notifyOnUnsnooze: row.notify_on_unsnooze === 1,
     notifiedAt: row.notified_at !== null ? new Date(row.notified_at) : undefined,
     ...(row.matched_rule_id !== null && row.matched_rule_id !== undefined ? { matchedRuleId: row.matched_rule_id } : {}),
+    ruleWithheld: rowToRuleWithheld(row),
   };
 }
 
@@ -431,6 +452,10 @@ export class InboxStateDb {
    * than corrupting.
    */
   insertItem(input: InboxItemInput): string {
+    // An item is either filed by a rule or names one that was withheld, never both.
+    if (input.matchedRuleId !== undefined && input.ruleWithheld !== undefined) {
+      throw new Error('insertItem: matchedRuleId and ruleWithheld are exclusive');
+    }
     const id = nextId('inb');
     const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
     const unsnoozeOnReply = input.unsnoozeOnReply ?? true;
@@ -441,8 +466,9 @@ export class InboxStateDb {
            bucket, confidence, reason_de, classified_at, classifier_version,
            unsnooze_on_reply,
            from_address, from_name, subject, mail_date, snippet,
-           message_id, in_reply_to, matched_rule_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           message_id, in_reply_to, matched_rule_id,
+           rule_withheld_id, rule_withheld_name, rule_withheld_reason
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (tenant_id, account_id, thread_key) DO NOTHING`,
       )
       .run(
@@ -465,6 +491,9 @@ export class InboxStateDb {
         input.messageId ?? null,
         input.inReplyTo ?? null,
         input.matchedRuleId ?? null,
+        input.ruleWithheld?.id ?? null,
+        input.ruleWithheld?.name ?? null,
+        input.ruleWithheld?.reason ?? null,
       ) as { changes: number };
     if (result.changes > 0) return id;
     // Race lost — another job inserted first. Return that row's id.
@@ -1531,6 +1560,16 @@ export class InboxStateDb {
     }).immediate();
   }
 
+  /** Rules the agent proposed that wait for the owner's confirmation, over all accounts of a tenant. */
+  countPendingRules(tenantId: string = DEFAULT_TENANT_ID): number {
+    const { n } = this.db
+      .prepare<[string], { n: number }>(
+        'SELECT COUNT(*) AS n FROM inbox_rules WHERE tenant_id = ? AND confirmed_at IS NULL',
+      )
+      .get(tenantId) as { n: number };
+    return n;
+  }
+
   /** How many rules of one kind an account has, waiting ones included. */
   countRulesOfKind(accountId: string, kind: InboxRuleMatcherKind, tenantId: string = DEFAULT_TENANT_ID): number {
     const { n } = this.db
@@ -1582,7 +1621,8 @@ export class InboxStateDb {
     return rows.map(rowToRule);
   }
 
-  /** Deletes a rule and clears it from the items it filed; its name stays in their audit. */
+  /** Deletes a rule and clears it from the items it filed; its name stays in their audit. On the
+   *  items it was withheld on, its id is cleared and its name and the reason stay. */
   deleteRule(id: string, tenantId: string = DEFAULT_TENANT_ID): boolean {
     return this.db.transaction((): boolean => {
       const result = this.db
@@ -1591,6 +1631,9 @@ export class InboxStateDb {
       if (result.changes === 0) return false;
       this.db
         .prepare('UPDATE inbox_items SET matched_rule_id = NULL WHERE tenant_id = ? AND matched_rule_id = ?')
+        .run(tenantId, id);
+      this.db
+        .prepare('UPDATE inbox_items SET rule_withheld_id = NULL WHERE tenant_id = ? AND rule_withheld_id = ?')
         .run(tenantId, id);
       return true;
     })();

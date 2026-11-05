@@ -109,6 +109,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
     expect(ruleLlm).toHaveBeenCalledTimes(1);
     const item = inbox.listItems()[0]!;
     expect(item).toMatchObject({ bucket: 'requires_user', matchedRuleId: ruleId, classifierVersion: `rule:${ruleId}`, reasonDe: 'Regel: Mahnungen' });
+    expect(item.ruleWithheld).toBeNull();
     expect(audit(item.id)).toEqual({ action: 'rule_applied', actor: 'rule_engine', payload: expect.objectContaining({ rule_id: ruleId, rule_name: 'Mahnungen', matcher_kind: 'matches_description', stage: 'description', bucket: 'requires_user' }) });
   });
 
@@ -124,6 +125,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
       expect(llm).toHaveBeenCalledTimes(1);
       const item = inbox.listItems()[0]!;
       expect(item).toMatchObject({ bucket: 'auto_handled', matchedRuleId: ruleId, classifierVersion: `rule:${ruleId}`, reasonDe: 'Regel: Mahnungen' });
+      expect(item.ruleWithheld).toBeNull();
       expect(audit(item.id)).toEqual({ action: 'rule_applied', actor: 'rule_engine', payload: expect.objectContaining({ rule_id: ruleId, bucket: 'auto_handled', action: 'mark_read' }) });
     });
 
@@ -137,6 +139,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
         expect(item.bucket).toBe(bucket);
         expect(item.matchedRuleId).toBeUndefined();
         expect(item.reasonDe).toBe('Regel „Newsletter“ nicht angewandt: vom Klassifizierer');
+        expect(item.ruleWithheld).toEqual({ id: ruleId, name: 'Newsletter', reason: 'rule_withheld_classifier' });
         const a = audit(item.id);
         expect(a).toMatchObject({ action: 'classified', actor: 'rule_engine' });
         expect(a.payload).toMatchObject({ rule_withheld: ruleId, fail_reason: 'rule_withheld_classifier', classifier_fail_reason: null, bucket });
@@ -154,11 +157,12 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
       const item = inbox.listItems()[0]!;
       expect(item).toMatchObject({ bucket: 'requires_user', reasonDe: 'Regel „Newsletter“ nicht angewandt: Gegenprüfung nicht möglich, bitte ansehen.' });
       expect(item.matchedRuleId).toBeUndefined();
+      expect(item.ruleWithheld).toEqual({ id: ruleId, name: 'Newsletter', reason: 'rule_withheld_unchecked' });
       expect(audit(item.id).payload).toMatchObject({ rule_withheld: ruleId, fail_reason: 'rule_withheld_unchecked' });
     });
 
     it('shows the mail when the classifier answers nothing usable (fail-closed)', async () => {
-      descriptionRule('Newsletter und Werbung', 'auto_handled', 'Newsletter', 'archive');
+      const ruleId = descriptionRule('Newsletter und Werbung', 'auto_handled', 'Newsletter', 'archive');
       const queue = buildInboxRunner({ state: inbox, llm: vi.fn(async () => ''), ruleCheck: { rules, llm: vi.fn(async () => '{"rule_id": "R1"}') } });
       queue.enqueue(payload());
       await queue.drain();
@@ -166,6 +170,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
       expect(item.bucket).toBe('requires_user');
       expect(item.matchedRuleId).toBeUndefined();
       expect(audit(item.id).payload).toMatchObject({ fail_reason: 'rule_withheld_classifier', classifier_fail_reason: 'json_parse_error' });
+      expect(item.ruleWithheld).toEqual({ id: ruleId, name: 'Newsletter', reason: 'rule_withheld_classifier' });
     });
 
     it('shows the mail without a classifier call when the rule call spent the last of the budget', async () => {
@@ -181,6 +186,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
       const item = inbox.listItems()[0]!;
       expect(item.bucket).toBe('requires_user');
       expect(audit(item.id).payload).toMatchObject({ rule_withheld: ruleId, fail_reason: 'rule_withheld_unchecked' });
+      expect(item.ruleWithheld).toEqual({ id: ruleId, name: 'Newsletter', reason: 'rule_withheld_unchecked' });
     });
 
     it('shows the mail without a classifier call when the managed credit gate refuses the check', async () => {
@@ -196,6 +202,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
       const item = inbox.listItems()[0]!;
       expect(item.bucket).toBe('requires_user');
       expect(audit(item.id).payload).toMatchObject({ rule_withheld: ruleId, fail_reason: 'rule_withheld_unchecked' });
+      expect(item.ruleWithheld).toEqual({ id: ruleId, name: 'Newsletter', reason: 'rule_withheld_unchecked' });
     });
 
     it('lets an aborted job fail as a job: the classifier check is not read as no', async () => {
@@ -209,6 +216,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
       const item = inbox.listItems()[0]!;
       expect(item.bucket).toBe('requires_user');
       expect(item.matchedRuleId).toBeUndefined();
+      expect(item.ruleWithheld).toBeNull();
       expect(item.classifierVersion).toMatch(/^dead-letter:/);
     });
   });
@@ -223,6 +231,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
     expect(llm).toHaveBeenCalledTimes(1);
     const item = inbox.listItems()[0]!;
     expect(item.matchedRuleId).toBeUndefined();
+    expect(item.ruleWithheld).toBeNull();
     expect(audit(item.id).action).toBe('classified');
   });
 
@@ -312,6 +321,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
     const a = audit(item.id);
     expect(a.actor).toBe('rule_engine');
     expect(a.payload).toMatchObject({ rule_withheld: ruleId, fail_reason: 'rule_withheld_sensitive', sensitive_categories: ['iban'] });
+    expect(item.ruleWithheld).toEqual({ id: ruleId, name: 'Mahnungen', reason: 'rule_withheld_sensitive' });
     expect(a.payload['rule_id']).toBeUndefined();
   });
 
@@ -327,6 +337,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
     expect(item.bucket).toBe('requires_user');
     expect(item.matchedRuleId).toBeUndefined();
     expect(audit(item.id).payload).toMatchObject({ rule_withheld: ruleId, fail_reason: 'forwarded_by_person' });
+    expect(item.ruleWithheld).toEqual({ id: ruleId, name: 'Rechnungen', reason: 'forwarded_by_person' });
   });
 
   it('still files a sensitive mail under a rule that shows it to the owner', async () => {

@@ -143,6 +143,38 @@ describe('handleGetItemFull', () => {
   });
 });
 
+describe('ruleWithheld on the item payloads (as sent: JSON)', () => {
+  const wire = (body: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+
+  it('/full and the list carry the withheld rule, and null on an item without one', () => {
+    const withheldId = state.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: 'w', bucket: 'requires_user', confidence: 0, reasonDe: 'r',
+      classifiedAt: new Date('2026-05-11'), classifierVersion: 'v',
+      ruleWithheld: { id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' },
+    });
+    const plainId = insertItem('p');
+    const full = wire(handleGetItemFull(deps, withheldId).body);
+    expect((full['item'] as Record<string, unknown>)['ruleWithheld']).toEqual({ id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' });
+    const plain = wire(handleGetItemFull(deps, plainId).body);
+    expect((plain['item'] as Record<string, unknown>)['ruleWithheld']).toBeNull();
+    const list = wire(handleListItems(deps, {}).body)['items'] as Array<Record<string, unknown>>;
+    expect(list.find((i) => i['id'] === withheldId)?.['ruleWithheld']).toEqual({ id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' });
+    expect(list.find((i) => i['id'] === plainId)?.['ruleWithheld']).toBeNull();
+  });
+
+  it('after the rule is deleted through the route, /full keeps the name and reason without the id', () => {
+    const ruleId = state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@b', bucket: 'auto_handled', action: 'archive', source: 'on_demand', name: 'Alt' });
+    const id = state.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: 'w', bucket: 'requires_user', confidence: 0, reasonDe: 'r',
+      classifiedAt: new Date('2026-05-11'), classifierVersion: 'v',
+      ruleWithheld: { id: ruleId, name: 'Alt', reason: 'rule_withheld_sensitive' },
+    });
+    expect(handleDeleteRule(deps, ruleId).status).toBe(204);
+    const full = wire(handleGetItemFull(deps, id).body);
+    expect((full['item'] as Record<string, unknown>)['ruleWithheld']).toEqual({ id: null, name: 'Alt', reason: 'rule_withheld_sensitive' });
+  });
+});
+
 describe('handleGetItemContext', () => {
   it('404s on missing item', () => {
     expect(handleGetItemContext(deps, 'missing').status).toBe(404);
@@ -357,6 +389,20 @@ describe('handleGetItemThread', () => {
 });
 
 describe('handleGetCounts', () => {
+  it('counts the rules waiting for confirmation over all accounts, not confirmed ones, in the asked tenant', () => {
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'two@acme.example', isDefault: false });
+    expect((handleGetCounts(deps).body as { rulesPending: number }).rulesPending).toBe(0);
+    const a = state.proposeRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@x', name: 'A' }, 10);
+    state.proposeRule({ accountId: 'acct-2', matcherKind: 'from', matcherValue: 'b@x', name: 'B' }, 10);
+    state.proposeRule({ accountId: 'acct-2', matcherKind: 'from', matcherValue: 'c@x', name: 'C', tenantId: 'other' }, 10);
+    state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'own@x', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    expect((handleGetCounts(deps).body as { rulesPending: number }).rulesPending).toBe(2);
+    expect((handleGetCounts(deps, { tenantId: 'other' }).body as { rulesPending: number }).rulesPending).toBe(1);
+    if (!a.ok) throw new Error('propose failed');
+    expect(handleConfirmRule(deps, a.id).status).toBe(200);
+    expect((handleGetCounts(deps).body as { rulesPending: number }).rulesPending).toBe(1);
+  });
+
   it('zero-fills missing buckets', () => {
     insertItem('a', 'requires_user');
     insertItem('b', 'auto_handled');

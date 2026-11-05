@@ -412,9 +412,13 @@ export function handleGetCounts(deps: InboxApiDeps, query: { tenantId?: string |
   // `counts` keeps its three-zone shape for back-compat with the existing
   // smoke spec and clients reading the contract. `snoozed` rides alongside
   // as a top-level field so the new Snoozed tab can render its badge.
+  // `rulesPending`: rules the agent proposed that wait for the owner, over all of the tenant's
+  // accounts, for the count next to the rule view. Counted whether or not proposing is on: a
+  // proposal made while it was on still waits after it is turned off.
   const counts = deps.state.countItemsByBucket(query.tenantId);
   const snoozed = deps.state.countSnoozedItems(query.tenantId);
-  return { status: 200, body: { counts, snoozed } };
+  const rulesPending = deps.state.countPendingRules(query.tenantId);
+  return { status: 200, body: { counts, snoozed, rulesPending } };
 }
 
 // ── Cold start ───────────────────────────────────────────────────────────

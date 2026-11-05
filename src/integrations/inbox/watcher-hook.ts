@@ -347,6 +347,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           reasonDe: reasonForCategories(sensitive.categories),
           classifiedAt: new Date(),
           classifierVersion: 'sensitive-prefilter',
+          // The item names the rule it was not filed by, with the rule's name as it is now.
+          ...(withheldRule
+            ? { ruleWithheld: { id: withheldRule.id, name: withheldRule.name, reason: 'rule_withheld_sensitive' as const } }
+            : {}),
           ...envelopeFields,
         },
         {
@@ -357,7 +361,13 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
             sensitive_categories: sensitive.categories,
             sensitive_mode: withheldRule ? sensitiveMode : 'skip',
             skipped_llm: true,
-            ...(withheldRule ? { rule_withheld: withheldRule.id } : {}),
+            ...(withheldRule
+              ? {
+                  rule_withheld: withheldRule.id,
+                  fail_reason: 'rule_withheld_sensitive',
+                  ...(withheldRule.name !== undefined ? { rule_name: withheldRule.name } : {}),
+                }
+              : {}),
           }),
         },
       );
