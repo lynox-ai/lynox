@@ -19,6 +19,24 @@ import type { BulkInvalidReason, BulkRunStatus, ListPageItem } from './bulk-ledg
 import type { BulkNotices } from './bulk-notices.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, mediaImageGidNumber, productGidNumber, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
+import { presetStoreHost } from './oauth-presets.js';
+import type { ApiProfile } from './api-store.js';
+
+/** The Shopify scopes either of which `fileUpdate`, the bulk image form's write, needs (PRD
+ *  shopify-preset §16.6). The Shopify preset asks for neither (`oauth-presets.ts`). */
+export const SHOPIFY_MEDIA_WRITE_SCOPES: readonly string[] = Object.freeze(['write_files', 'write_themes']);
+
+/**
+ * Whether the store connection for `host` may run the bulk image form (`fileUpdate`): the engine's own Shopify
+ * connection to that store (`presetStoreHost`, the same profile the write attaches) whose grant,
+ * as Shopify answered it, holds `write_files` or `write_themes`. Without a recorded grant nothing
+ * is known beyond the ask, and the preset never asks for either, so that counts as no.
+ */
+export function shopifyMediaWritable(profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined, host: string): boolean {
+  // Only the Shopify preset derives its API host from the store (`apiOnDerivedHost`), so a match is that preset.
+  if (profile === undefined || presetStoreHost(profile) !== host) return false;
+  return (profile.oauth_grant?.granted_scope ?? []).some((s) => SHOPIFY_MEDIA_WRITE_SCOPES.includes(s));
+}
 
 /** Whether this instance reads Shopify stores in bulk runs. Asked when a run is planned and on
  *  every tick of one, so turning it off stops a run that is already under way. */
