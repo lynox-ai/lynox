@@ -15,7 +15,7 @@ import { noticeLanguage } from './notice-language.js';
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
-  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, type WorkerNotices,
+  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -3374,7 +3374,7 @@ export class WorkerLoop {
     // has nobody to ask here.
     const asksItsOwner = planned.mode === 'interactive' && asksOnlyViaAskUser(planned.steps);
     if (planned.mode !== 'autonomous' && !asksItsOwner) {
-      endEvent(this.#runSlotOf(task.id), { state: 'dropped', reason: `Workflow "${planned.id}" is marked '${planned.mode}' and may ask for more than an answer, which a run started by an event has nobody to give.` });
+      endEvent(this.#runSlotOf(task.id), { state: 'dropped', reason: eventModeRefusedReason(planned.id, planned.mode) });
       throw new Error(
         `Pipeline "${planned.id}" is marked '${planned.mode}' and may ask for more than an answer (ask_secret / ask_human), ` +
         `which a scheduled run has nobody to give: remove those steps, or run it from a chat session.`,

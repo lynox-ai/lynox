@@ -16,6 +16,7 @@
 import type { NoticeLanguage } from './notice-language.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { isProvisionedInstance } from './wire-capture.js';
+import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON } from '../server/webhook-receiver.js';
 
 /** An event whose run did not complete, in English; the worker also compares a sentence to it. */
 export const EVENT_RUN_FAILED_EN = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual. If it should have changed something, check whether that change is missing and make it by hand or ask lynox in a chat.';
@@ -58,11 +59,37 @@ function firstRunUnconfirmedId(stored: string): string | undefined {
   if (!stored.startsWith(FIRST_RUN_HEAD) || !stored.endsWith(FIRST_RUN_TAIL)) return undefined;
   return stored.slice(FIRST_RUN_HEAD.length, stored.length - FIRST_RUN_TAIL.length);
 }
+/**
+ * An event run by a workflow whose mode lets it ask for more than an answer: the event's stored
+ * reason, with the workflow's id and mode in it. Writer and reader share the parts, as above; the
+ * mode is one of the planner's words and never holds `MODE_MID`, so the reader splits at its last
+ * occurrence and an id that holds it is still read whole.
+ */
+const MODE_HEAD = 'Workflow "';
+const MODE_MID = '" is marked \'';
+const MODE_TAIL = '\' and may ask for more than an answer, which a run started by an event has nobody to give.';
+export function eventModeRefusedReason(workflowId: string, mode: string): string {
+  return `${MODE_HEAD}${workflowId}${MODE_MID}${mode}${MODE_TAIL}`;
+}
+/** The workflow id of a stored {@link eventModeRefusedReason}, or undefined for any other text. */
+function eventModeRefusedId(stored: string): string | undefined {
+  if (!stored.startsWith(MODE_HEAD) || !stored.endsWith(MODE_TAIL)) return undefined;
+  const inner = stored.slice(MODE_HEAD.length, stored.length - MODE_TAIL.length);
+  const mid = inner.lastIndexOf(MODE_MID);
+  return mid > 0 ? inner.slice(0, mid) : undefined;
+}
 /** A workflow id is not bounded where it comes from (a task's pipeline id can come from the API or a
- *  sync), so a German sentence names at most this many of its characters (ux Rest-P W18). */
+ *  sync), so a German sentence names at most this many of its UTF-16 units (ux Rest-P W18), cut
+ *  between characters so no half of a surrogate pair is left. */
 export const SAID_WORKFLOW_ID_MAX = 36;
 function saidWorkflowId(id: string): string {
-  return id.length > SAID_WORKFLOW_ID_MAX ? `${id.slice(0, SAID_WORKFLOW_ID_MAX)}…` : id;
+  if (id.length <= SAID_WORKFLOW_ID_MAX) return id;
+  let kept = '';
+  for (const char of id) {
+    if (kept.length + char.length > SAID_WORKFLOW_ID_MAX) break;
+    kept += char;
+  }
+  return `${kept}…`;
 }
 
 export interface WorkerNotices {
@@ -229,12 +256,19 @@ function deEventReason(stored: string): string {
     [ACCESS_ENDED_RESULT]: 'Mittendrin angehalten: Der Zugang einer Person, die diesen Plan eingerichtet oder geändert hat, ist beendet.',
     [MANDATE_UNSTAMPED_RESULT]: DE_MANDATE_UNSTAMPED,
     [PLAN_ENDED_RESULT]: DE_PLAN_ENDED,
+    // Stored by the webhook receiver when it does not keep a delivery (ux Rest-P, refuter 05.11.).
+    [QUEUE_FULL_REASON]: `Der Auslöser hatte schon ${String(MAX_WAITING_EVENTS)} Ereignisse in der Warteschlange; was darüber hinaus kam, hat lynox nicht aufbewahrt. Prüf, ob dabei Änderungen fehlen.`,
+    [SHOP_MISMATCH_REASON]: 'Die Lieferung nennt einen anderen Shop als die Verbindung des Auslösers. Prüf unter Automation → Trigger, mit welchem Shop er verbunden ist.',
   });
   const own = deEventReasons[stored];
   if (own !== undefined) return own;
   const workflowId = firstRunUnconfirmedId(stored);
   if (workflowId !== undefined) {
     return `Workflow „${saidWorkflowId(workflowId)}“ ist vor dem ersten Lauf noch nicht bestätigt; der Auslöser ist darum aus. Plane den Workflow in der Bibliothek ein und schalte den Auslöser wieder ein.`;
+  }
+  const modeId = eventModeRefusedId(stored);
+  if (modeId !== undefined) {
+    return `Workflow „${saidWorkflowId(modeId)}“ kann mehr als eine Antwort brauchen, und bei einem Lauf durch ein Ereignis gibt sie niemand. Bitte lynox im Chat, ihn ohne Rückfragen umzubauen.`;
   }
   return stored;
 }

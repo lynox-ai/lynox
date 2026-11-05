@@ -4,13 +4,14 @@ import { join } from 'node:path';
 import { noticeLanguage } from './notice-language.js';
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
-  MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, SAID_WORKFLOW_ID_MAX, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, firstRunUnconfirmedReason,
+  MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, SAID_WORKFLOW_ID_MAX, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, eventModeRefusedReason, firstRunUnconfirmedReason,
   type WorkerNotices,
 } from './worker-notices.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { EVENT_STOPPED, OWN_FAILURE_REASONS, REMINDER_BODY_MAX } from './worker-loop.js';
+import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON } from '../server/webhook-receiver.js';
 
 afterEach(() => { vi.unstubAllEnvs(); });
 
@@ -265,6 +266,54 @@ describe('the notice tables', () => {
     expect(longBody.length).toBe(237);
     // One character over is cut too.
     expect(n.eventReason(firstRunUnconfirmedReason(`${fits}x`))).toContain(`„${fits}…“`);
+    // The cut falls between characters: an emoji across the 36th unit is left out whole, not halved.
+    const emoji = `${'e'.repeat(SAID_WORKFLOW_ID_MAX - 1)}\u{1F600}tail`;
+    const emojiBody = n.eventReason(firstRunUnconfirmedReason(emoji));
+    expect(emojiBody).toContain(`„${'e'.repeat(SAID_WORKFLOW_ID_MAX - 1)}…“`);
+    expect(/[\uD800-\uDFFF]/.test(emojiBody)).toBe(false);
+    // One that ends at the 36th unit is kept whole.
+    const emojiFits = `${'e'.repeat(SAID_WORKFLOW_ID_MAX - 2)}\u{1F600}tail`;
+    expect(n.eventReason(firstRunUnconfirmedReason(emojiFits))).toContain(`„${'e'.repeat(SAID_WORKFLOW_ID_MAX - 2)}\u{1F600}…“`);
+  });
+
+  it('says the webhook receiver\'s drops and a workflow that may ask for more in German, as ux wrote them (refuter 05.11.)', () => {
+    const n = WORKER_NOTICES.de;
+    expect(n.eventReason(QUEUE_FULL_REASON)).toBe(`Der Auslöser hatte schon ${String(MAX_WAITING_EVENTS)} Ereignisse in der Warteschlange; was darüber hinaus kam, hat lynox nicht aufbewahrt. Prüf, ob dabei Änderungen fehlen.`);
+    expect(n.eventReason(SHOP_MISMATCH_REASON)).toBe('Die Lieferung nennt einen anderen Shop als die Verbindung des Auslösers. Prüf unter Automation → Trigger, mit welchem Shop er verbunden ist.');
+    // The stored shape, as an old row holds it, written out.
+    expect(n.eventReason('Workflow "wf-1" is marked \'interactive\' and may ask for more than an answer, which a run started by an event has nobody to give.'))
+      .toBe('Workflow „wf-1“ kann mehr als eine Antwort brauchen, und bei einem Lauf durch ein Ereignis gibt sie niemand. Bitte lynox im Chat, ihn ohne Rückfragen umzubauen.');
+    expect(eventModeRefusedReason('wf-1', 'interactive')).toBe('Workflow "wf-1" is marked \'interactive\' and may ask for more than an answer, which a run started by an event has nobody to give.');
+    // An id that holds the middle part is read whole; the cut applies as for the first-run sentence.
+    expect(n.eventReason(eventModeRefusedReason('a" is marked \'b', 'interactive'))).toContain('„a" is marked \'b“');
+    expect(n.eventReason(eventModeRefusedReason('m'.repeat(60), 'interactive'))).toContain(`„${'m'.repeat(SAID_WORKFLOW_ID_MAX)}…“`);
+    // Only the stored shape: anchored at both ends, with an id.
+    const mode = eventModeRefusedReason('wf-1', 'interactive');
+    for (const near of [`x${mode}`, `${mode} `, eventModeRefusedReason('', 'interactive')]) expect(n.eventReason(near)).toBe(near);
+    // English says them as stored.
+    expect(WORKER_NOTICES.en.eventReason(QUEUE_FULL_REASON)).toBe(QUEUE_FULL_REASON);
+  });
+
+  it('has a German sentence for every reason an event is dropped with, wherever one is written', () => {
+    // Every expression a dropped event's reason is written from, in the sources that write one. A
+    // new constant, call or literal there fails here until the table says it (refuter 05.11.: two
+    // receiver reasons and the mode drop reached a German owner in English).
+    const said: Record<string, string> = {
+      EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, MANDATE_UNSTAMPED_RESULT, PLAN_ENDED_RESULT, SHOP_MISMATCH_REASON, QUEUE_FULL_REASON,
+      'firstRunUnconfirmedReason(planned.id)': firstRunUnconfirmedReason('wf-1'),
+      'eventModeRefusedReason(planned.id, planned.mode)': eventModeRefusedReason('wf-1', 'interactive'),
+    };
+    const written = new Set<string>();
+    for (const file of ['src/core/worker-loop.ts', 'src/server/webhook-receiver.ts']) {
+      const source = readFileSync(join(__dirname, '..', '..', file), 'utf8');
+      for (const m of source.matchAll(/state: 'dropped', reason: ([^}]+?) \}|\.drop\([^,]+, ([^)]+)\)|\.dropWaiting\([^,]+, ([^)]+)\)/g)) written.add((m[1] ?? m[2] ?? m[3])!.trim());
+      // The receiver picks its reason in one expression: each constant in it is a reason.
+      for (const m of source.matchAll(/reason: (shopMismatch \? [^\n]+),$/gm)) {
+        for (const c of m[1]!.match(/\b[A-Z][A-Z0-9_]{3,}\b/g) ?? []) written.add(c);
+      }
+    }
+    expect([...written].sort()).toEqual(Object.keys(said).sort());
+    for (const [key, stored] of Object.entries(said)) expect([key, WORKER_NOTICES.de.eventReason(stored) !== stored]).toEqual([key, true]);
   });
 
   it('names a German workflow status it knows, and leaves out one it does not', () => {
@@ -336,7 +385,8 @@ describe('the notice tables', () => {
     // A dropped event's reason is said in its frame, one event or many. A first-run refusal switches
     // its trigger off, so the events after the first are dropped as not live: up to 999 of it fit.
     for (const r of [NO_REASON_RECORDED, EVENT_TRIGGER_NOT_LIVE, EVENT_SHOP_MOVED, MANDATE_UNSTAMPED_RESULT, PLAN_ENDED_RESULT,
-      firstRunUnconfirmedReason('w'.repeat(SAID_WORKFLOW_ID_MAX)), firstRunUnconfirmedReason('w'.repeat(60))]) {
+      firstRunUnconfirmedReason('w'.repeat(SAID_WORKFLOW_ID_MAX)), firstRunUnconfirmedReason('w'.repeat(60)),
+      QUEUE_FULL_REASON, SHOP_MISMATCH_REASON, eventModeRefusedReason('w'.repeat(SAID_WORKFLOW_ID_MAX), 'interactive'), eventModeRefusedReason('w'.repeat(60), 'interactive')]) {
       for (const count of r.startsWith('Workflow "') ? [1, 999] : [1, 99_999]) {
         const body = n.eventsNotRun(count, n.eventReason(r));
         expect([r, count, body.length <= REMINDER_BODY_MAX]).toEqual([r, count, true]);
