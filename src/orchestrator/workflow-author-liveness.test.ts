@@ -213,7 +213,7 @@ describe("a saved workflow a mandate shaped runs only while that mandate's grant
     expect(mockProcess).toHaveBeenCalledTimes(2);
   });
 
-  // 1184 (2): the start row says how the owner's run was started. A session of the owner's worker
+  // The start row says how the owner's run was started. A session of the owner's worker
   // run by its schedule is not a start by hand; the run and the retry write it the same way.
   it.each([[undefined, 'started=hand by=owner'], ['schedule', 'started=schedule by=owner']] as const)(
     'the start rows of a run and its retry under worker start %s say %s', async (start, words) => {
@@ -564,10 +564,10 @@ describe("a sibling's later failure keeps the access stop (1184)", () => {
   });
 });
 
-// 1184, point 5: a capped phase's pool hands out every step it holds. Once a sub-run ended the run
+// A capped phase's pool hands out every step it holds. Once a sub-run ended the run
 // for its makers' access, a sibling the pool hands out later does not start, even when a second
 // read of the access would let it. Any other cause leaves the phase's steps to finish.
-describe("a capped phase starts no sibling after the run ended for its makers' access (1184)", () => {
+describe("a capped phase starts no sibling after the run ended for its makers' access", () => {
   const cappedManifest = (onFailure: 'stop' | 'continue') => ({
     manifest_version: '1.1' as const, name: 'probe', triggered_by: 'test', context: {}, execution: 'parallel' as const,
     agents: [

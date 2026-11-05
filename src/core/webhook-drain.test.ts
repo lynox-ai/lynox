@@ -150,7 +150,7 @@ describe('the webhook drain', () => {
     expect(eventOf(t, id).runId).toBe('run-1');
   });
 
-  // 1184 (2): the run is held as an event's start, so a workflow its steps start never says it was
+  // The run is held as an event's start, so a workflow its steps start never says it was
   // started by hand or by a schedule.
   it("holds the run as an event's start for everything it does", async () => {
     let seen: string | undefined = 'unread';

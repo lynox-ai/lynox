@@ -1904,7 +1904,7 @@ export class WorkerLoop {
    * so a gate or a stop added here holds for both.
    *
    * How the run was started is decided here, once, for everything the run does
-   * (`worker-run-start.ts`): a workflow the run's session starts records it (1184). A hand run of
+   * (`worker-run-start.ts`): a workflow the run's session starts records it. A hand run of
    * a mandate's proposal (`handRun`) always comes through `runTriggerNow`, inside the hand scope.
    */
   #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {

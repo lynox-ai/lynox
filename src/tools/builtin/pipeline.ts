@@ -1063,8 +1063,8 @@ export function workflowRunTrail(
     ['retry', run.retry ? 'yes' : undefined],
     // The owner pressed Run in the library (1055): the run is the mandate's, the start the owner's,
     // in the words a plan's run started by hand uses, which the trail view shows (`started_hand`).
-    // The same words for the owner's chat or session running a mandate's workflow (1100). A run of
-    // the owner's own worker says how that run was started (1184): its schedule is not a hand.
+    // The same words for the owner's chat or session running a mandate's workflow. A run of the
+    // owner's own worker says how that run was started: its schedule is not a hand.
     ['started', run.startedBy === undefined ? undefined : OWNER_START_WORD[run.startedBy]],
     ['by', run.startedBy !== undefined ? 'owner' : undefined],
   ];

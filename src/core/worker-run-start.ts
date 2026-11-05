@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  * How the worker run this code runs in was started, decided once where the worker frames the run
  * (`#runInSlot` in worker-loop.ts) and held for everything it does: its session's turns and the
  * workflows its tools start. Read by `run_workflow` for the record of how a mandate's workflow
- * that the owner's run starts was started (1184): a run of the owner's schedule is not one the
+ * that the owner's run starts was started: a run of the owner's schedule is not one the
  * owner started by hand, and the instance log must not say it was.
  *
  * - `schedule`: the trigger came due on its own.

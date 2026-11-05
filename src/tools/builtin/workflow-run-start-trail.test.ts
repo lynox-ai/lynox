@@ -4,7 +4,7 @@ import type { RequestPrincipal } from '../../core/request-principal.js';
 import { runAsWorkerRun, type WorkerRunStart } from '../../core/worker-run-start.js';
 import { ownerStartOfCall, workflowRunTrail } from './pipeline.js';
 
-// 1184 (2): the owner's run of a mandate's workflow records how it was started. A run of the
+// The owner's run of a mandate's workflow records how it was started. A run of the
 // owner's own worker started by its schedule is not a start by hand.
 const BEA: RequestPrincipal = { kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' };
 
@@ -20,7 +20,7 @@ function startRow(start: WorkerRunStart | undefined): string {
   return targets[0]!;
 }
 
-describe("the start row of the owner's run of a mandate's workflow says how it was started (1184)", () => {
+describe("the start row of the owner's run of a mandate's workflow says how it was started", () => {
   it("the owner's chat, outside a worker run: by hand (control, as before)", () => {
     expect(startRow(undefined)).toBe('one_shot=no started=hand by=owner');
   });

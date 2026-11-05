@@ -4095,8 +4095,8 @@ describe('WorkerLoop', () => {
   });
 });
 
-// 1184 (2): how the worker run was started is held for its session, where `run_workflow` reads it.
-describe('the worker holds how its run was started for the run (1184)', () => {
+// How the worker run was started is held for its session, where `run_workflow` reads it.
+describe('the worker holds how its run was started for the run', () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(`${FIXED_DAY}T12:00:00Z`)); });
   afterEach(() => { vi.useRealTimers(); });
 
