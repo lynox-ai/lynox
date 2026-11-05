@@ -506,7 +506,9 @@ function ciGateNames(): { names: Set<string>; paths: string[] } {
 /** Scripts CI runs that are not gates at all. Named, never pattern-matched. */
 // `ci-docs-only.sh` classifies a change as docs-only for ci.yml's `detect` job; it decides which
 // jobs run, it does not judge the change, and it cannot fail a pull request on its own.
-const NON_GATE = new Set(['scripts/smoke-local.sh', 'scripts/ci-docs-only.sh']);
+// `canary-version.sh` computes the semver a canary image is named with (canary-build.yml); it builds
+// a tag, it does not judge the change. Its own tests are in tests/canary-version.test.ts.
+const NON_GATE = new Set(['scripts/smoke-local.sh', 'scripts/ci-docs-only.sh', 'scripts/canary-version.sh']);
 
 describe('gate coverage', () => {
   it('every gate step in lefthook.yml has an entry — whatever it is written in', () => {
