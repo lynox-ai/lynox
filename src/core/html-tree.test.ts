@@ -113,6 +113,8 @@ describe('normalizeHtml: the line breaks a store lays a list or a table out with
   it('does not equate a line break before text in a li, nor between inline elements', () => {
     expect(htmlEqual('<ul><li>x</li></ul>', '<ul><li>\nx</li></ul>')).toBe(false);
     expect(htmlEqual('<p><b>a</b><i>b</i></p>', '<p><b>a</b>\n<i>b</i></p>')).toBe(false);
+    // Only the first child of a li is the store's layout; further on, the LF is a shown space.
+    expect(htmlEqual('<ul><li><i>a</i><b>x</b></li></ul>', '<ul><li><i>a</i>\n<b>x</b></li></ul>')).toBe(false);
     // A style on the li itself shows its whitespace too.
     expect(htmlEqual('<ul><li style="white-space:pre"><b>x</b></li></ul>', '<ul><li style="white-space:pre">\n<b>x</b></li></ul>')).toBe(false);
   });

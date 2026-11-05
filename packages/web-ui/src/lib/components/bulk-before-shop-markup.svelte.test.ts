@@ -1,12 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { setLocale, getLocale, t, tf } from '../i18n.svelte.js';
 import { bulkInvalidText, bulkMandateI18n, type BulkI18n } from './bulk-runs.js';
 
 // ux U-154 (row 1121): a new run leaves out a product whose description is the version an earlier
 // run wrote and the store added markup to. The sentence names that run by its date where the
-// ledger still holds it; a mandate's session reads it with "the shop" and "the owner".
+// ledger still holds it; a mandate's session reads it with "the shop" and "the owner". That the
+// run page hands over the date and the session's wording is asserted in bulk-runs.test.ts, which
+// can read the page source (this file runs in the browser too).
 
 const owner: BulkI18n = { t, tf };
 const mandate = bulkMandateI18n(owner);
@@ -44,10 +44,4 @@ describe('before_has_shop_markup: the sentence under the product (U-154)', () =>
 		expect(bulkInvalidText('before_has_shop_markup', true, true, owner)).toBe(said(owner, null));
 	});
 
-	it('is given the date and the session\'s wording by the run page', () => {
-		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
-		// The mandate's wording (`view`), not the owner's (`i18n`), and the date from the target.
-		expect(page).toContain('bulkInvalidText(target.error, shopify, managed, view, {');
-		expect(page).toContain('markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null');
-	});
 });

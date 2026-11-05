@@ -229,6 +229,13 @@ describe('the approved unchecked-change texts', () => {
 		expect(page).toContain(`<p id="bulk-approve-confirm-first" `);
 	});
 
+	it('gives the marked-before sentence the date and the session\'s wording (ux U-154)', () => {
+		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
+		// The mandate's wording (`view`), not the owner's (`i18n`), and the date from the target.
+		expect(page).toContain('bulkInvalidText(target.error, shopify, managed, view, {');
+		expect(page).toContain('markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null');
+	});
+
 	it('holds the confirmation', () => {
 		expect(line('bulk.approve.unmeasured_confirm')).toBe(entry('bulk.approve.unmeasured_confirm',
 			'Ich weiss, dass lynox diese Art Änderung nicht geprüft hat, und gebe sie trotzdem frei.',
