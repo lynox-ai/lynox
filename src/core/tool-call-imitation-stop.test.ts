@@ -8,11 +8,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
-interface Script { events: Array<Record<string, unknown>>; yielded: number; returned: boolean; hang?: boolean }
+interface Script { events: Array<Record<string, unknown>>; yielded: number; returned: boolean; abortedAtReturn?: boolean; hang?: boolean }
 
-const { calls, scripts } = vi.hoisted(() => ({
+const { calls, scripts, onCall } = vi.hoisted(() => ({
   calls: [] as Array<{ params: { messages: BetaMessageParam[] }; signal: AbortSignal | undefined }>,
   scripts: [] as Script[],
+  onCall: { fn: null as (() => void) | null },
 }));
 
 vi.mock('@anthropic-ai/sdk', () => {
@@ -25,6 +26,7 @@ vi.mock('@anthropic-ai/sdk', () => {
           finalMessage: async () => ({ content: [{ type: 'text', text: '' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }),
           [Symbol.asyncIterator]() {
             calls.push({ params, signal: opts?.signal });
+            onCall.fn?.();
             const script = scripts.shift();
             if (!script) throw new Error('no scripted reply left');
             return {
@@ -37,7 +39,11 @@ vi.mock('@anthropic-ai/sdk', () => {
                   if (opts?.signal?.aborted) fail(); else opts?.signal?.addEventListener('abort', fail, { once: true });
                 });
               },
-              return: async () => { script.returned = true; return { done: true, value: undefined }; },
+              return: async () => {
+                script.returned = true;
+                script.abortedAtReturn = opts?.signal?.aborted === true;
+                return { done: true, value: undefined };
+              },
             };
           },
         }),
@@ -48,7 +54,8 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: MockAnthropic, APIError };
 });
 
-import { RunAbortedError, ToolCallImitationError } from './agent.js';
+import { getEventListeners } from 'node:events';
+import { Agent, RunAbortedError, ToolCallImitationError } from './agent.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { SessionStore } from './session-store.js';
@@ -68,7 +75,7 @@ function script(events: Array<Record<string, unknown>>): Script {
 
 function toolUseReply(id: string, input: Record<string, unknown>): Script {
   return script([
-    { type: 'message_start', message: { usage } },
+    { type: 'message_start', message: { usage: { ...usage } } },
     { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id, name: 'send_request', input: {} } },
     { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } },
     { type: 'content_block_stop', index: 0 },
@@ -84,7 +91,7 @@ function textReply(text: string, step: number, stopReason = 'end_turn'): Script 
     deltas.push({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: text.slice(o, o + step) } });
   }
   return script([
-    { type: 'message_start', message: { usage } },
+    { type: 'message_start', message: { usage: { ...usage } } },
     { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
     ...deltas,
     { type: 'content_block_stop', index: 0 },
@@ -130,6 +137,7 @@ async function boot(): Promise<Engine> {
 }
 
 beforeEach(() => {
+  onCall.fn = null;
   handler.mockReset();
   calls.length = 0;
   scripts.length = 0;
@@ -185,8 +193,14 @@ describe('a reply that writes the same tool call out as text', { timeout: 60_000
     expect(looping.yielded).toBe(deltaCompletingCopy(3, step) + 1);
     expect(looping.yielded).toBeLessThan(looping.events.length);
     expect(looping.returned).toBe(true);
-    // The request itself was ended through the call's own signal.
-    expect(calls[1]!.signal?.aborted).toBe(true);
+    // The request itself was ended through the call's own signal, before the stream was left.
+    expect(looping.abortedAtReturn).toBe(true);
+
+    // What the stopped call used is recorded with the run: both calls' input tokens, and the
+    // first call's output plus an estimate for the text streamed before the stop.
+    const run = engine.getRunHistory()!.getRunsBySession(session.sessionId)[0]!;
+    expect(run.tokens_in).toBe(200);
+    expect(run.tokens_out).toBeGreaterThan(20);
 
     const live = session.getAgent()!.getMessages();
     // The question and the completed pair; nothing of the stopped reply.
@@ -213,11 +227,11 @@ describe('a reply that writes the same tool call out as text', { timeout: 60_000
     expect(outgoingTexts(applyRunStops(live)).at(-1)).toBe(runStopText({ code: 'tool_call_imitation' }));
     expect(runStopText({ code: 'tool_call_imitation' })).toContain('wrote a tool call out as text');
     expect(runStopText({ code: 'tool_call_imitation' })).toContain('Nothing of it was run');
-    // The run's own signal was never aborted: the next call got a live one.
-    expect(calls.at(-1)!.signal?.aborted).toBe(false);
+    // A finished call's controller is released after it, so nothing of it can run on.
+    expect(calls.at(-1)!.signal?.aborted).toBe(true);
   });
 
-  it('a reply that shows the request twice is read to the end', async () => {
+  it('reads a reply that quotes the request as an example to the end', async () => {
     const engine = await boot();
     const session = engine.createSession();
     const reply = textReply(COPY.repeat(2), 9);
@@ -244,5 +258,45 @@ describe('a reply that writes the same tool call out as text', { timeout: 60_000
     expect(err).toBeInstanceOf(RunAbortedError);
     expect(err).not.toBeInstanceOf(ToolCallImitationError);
     expect(readRunStop(session.getAgent()!.getMessages().at(-1)!)?.code).toBe('run_interrupted');
+  });
+});
+
+describe('the per-call controller on a long run', () => {
+  it('keeps at most one abort listener on the run\'s signal across twelve calls', async () => {
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [sendTool] });
+    handler.mockResolvedValue('ok');
+    for (let i = 0; i < 11; i++) toolUseReply(`tu_${String(i)}`, { url: `https://x.test/${String(i)}` });
+    textReply('Done.', 50);
+    const counts: number[] = [];
+    onCall.fn = () => {
+      const run = (agent as unknown as { abortController: AbortController | null }).abortController;
+      counts.push(run ? getEventListeners(run.signal, 'abort').length : -1);
+    };
+    await agent.send('go through all of them');
+    expect(counts).toHaveLength(12);
+    // The listener of the call in flight, and none left behind by the calls before it.
+    expect(Math.max(...counts)).toBeLessThanOrEqual(1);
+    expect(Math.min(...counts)).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a call that starts after the run was stopped starts with a stopped signal', { timeout: 15_000 }, async () => {
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [sendTool] });
+    // The run is stopped while its tool runs; the tool still returns.
+    handler.mockImplementation(() => {
+      (agent as unknown as { abortController: AbortController }).abortController.abort();
+      return Promise.resolve('ok');
+    });
+    toolUseReply('tu_1', { url: 'https://x.test/1' });
+    // Its reply would never end on its own: only the call's signal ends it.
+    const s2 = textReply('never read', 50);
+    s2.events.splice(-3);
+    s2.hang = true;
+    const abortedAtStart: boolean[] = [];
+    onCall.fn = () => { abortedAtStart.push(calls.at(-1)!.signal?.aborted === true); };
+    const err = await agent.send('go').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+    expect(calls).toHaveLength(2);
+    // The second call is handed a signal that is already stopped, so it does not run on.
+    expect(abortedAtStart).toEqual([false, true]);
   });
 });

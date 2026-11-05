@@ -31,7 +31,7 @@ import { headlessRefusalNote } from './write-notes.js';
 import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS, MISTRAL_EU_HOST, MISTRAL_GLOBAL_HOST } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
-import { StreamProcessor } from './stream.js';
+import { StreamProcessor, type PartialUsage } from './stream.js';
 import { ToolCallImitationDetector, imitationToolsFrom } from './tool-call-imitation.js';
 import { CostGuard } from './cost-guard.js';
 import { classifyProviderFailure, type RunFailure } from './provider-failure.js';
@@ -409,10 +409,13 @@ export class ThinkingOnlyLoopError extends ContinuationLoopError {
 export class ToolCallImitationError extends RunAbortedError {
   /** The tool the repeated text names or whose input it carries, when known; for logs. */
   readonly toolName: string | undefined;
-  constructor(toolName?: string | undefined) {
+  /** What the stopped call used up to the stop. The provider bills it, so it is recorded. */
+  readonly usage: BetaUsage | undefined;
+  constructor(toolName?: string | undefined, usage?: BetaUsage | undefined) {
     super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
     this.name = 'ToolCallImitationError';
     this.toolName = toolName;
+    this.usage = usage;
   }
 }
 
@@ -3751,7 +3754,10 @@ export class Agent implements IAgent {
         const processor = new StreamProcessor(handler, this.name, imitationTools.length > 0
           ? {
             detector: new ToolCallImitationDetector(imitationTools),
-            stop: (hit) => { callController.abort(); return new ToolCallImitationError(hit.toolName); },
+            stop: (hit, partial) => {
+              callController.abort();
+              return new ToolCallImitationError(hit.toolName, this._stoppedCallUsage(partial));
+            },
           }
           : undefined);
 
@@ -3767,7 +3773,11 @@ export class Agent implements IAgent {
       } catch (err: unknown) {
         if (signal?.aborted) throw err;
         // The reply was stopped on purpose; the same request would write the same text again.
-        if (err instanceof ToolCallImitationError) throw err;
+        // What it used is booked like a finished call's usage before the run ends.
+        if (err instanceof ToolCallImitationError) {
+          await this._recordStoppedCallUsage(err.usage);
+          throw err;
+        }
         if (attempt < Agent.MAX_RETRIES && isRetryable(err)) {
           const delay = Agent.RETRY_BASE_MS * Math.pow(2, attempt);
           if (this.onStream) {
@@ -3790,11 +3800,45 @@ export class Agent implements IAgent {
       } finally {
         // The run's signal lives across calls; one listener per call would pile up.
         signal?.removeEventListener('abort', onRunAbort);
+        // A stream that lost the race above is still being read and generated; this ends it.
+        // After a finished call it does nothing.
+        callController.abort();
       }
     }
 
     // Unreachable, but satisfies TypeScript
     throw new Error('Exhausted retries');
+  }
+
+  /** The usage of a call cut off mid-stream: what the provider reported so far, with the
+   *  output at least the estimate from the streamed characters. */
+  private _stoppedCallUsage(partial: PartialUsage): BetaUsage {
+    const u = partial.usage;
+    // A provider may report a small running count at the start; the streamed text is the
+    // better floor until its final count arrives.
+    const estimatedOut = Math.ceil(partial.streamedChars / this._charsPerToken);
+    return {
+      cache_creation: u?.cache_creation ?? null,
+      cache_creation_input_tokens: u?.cache_creation_input_tokens ?? null,
+      cache_read_input_tokens: u?.cache_read_input_tokens ?? null,
+      inference_geo: u?.inference_geo ?? null,
+      input_tokens: u?.input_tokens ?? 0,
+      iterations: u?.iterations ?? null,
+      output_tokens: Math.max(u?.output_tokens ?? 0, estimatedOut),
+      server_tool_use: u?.server_tool_use ?? null,
+      service_tier: u?.service_tier ?? null,
+      speed: u?.speed ?? null,
+    };
+  }
+
+  /** Books a stopped call's usage where a finished call's goes: the `turn_end` event the
+   *  session sums into the run's tokens and cost, and the cost guard. */
+  private async _recordStoppedCallUsage(usage: BetaUsage | undefined): Promise<void> {
+    if (usage === undefined) return;
+    if (this.onStream) {
+      await this.onStream({ type: 'turn_end', stop_reason: 'tool_call_imitation', usage, agent: this.name });
+    }
+    this.costGuard?.recordTurn(usage);
   }
 
   private _buildSystemPrompt(): Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> {

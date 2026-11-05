@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { StreamProcessor } from './stream.js';
 import { ToolCallImitationDetector } from './tool-call-imitation.js';
+import type { PartialUsage } from './stream.js';
 import type { StreamEvent } from '../types/index.js';
 
 async function* mockStream(events: Array<Record<string, unknown>>) {
@@ -309,26 +310,38 @@ describe('StreamProcessor with the guard on a tool call written out as text', ()
     return out;
   }
 
-  function guarded(): { proc: StreamProcessor; collected: StreamEvent[]; stops: unknown[] } {
+  function guarded(): { proc: StreamProcessor; collected: StreamEvent[]; stops: unknown[]; partials: PartialUsage[] } {
     const collected: StreamEvent[] = [];
     const stops: unknown[] = [];
+    const partials: PartialUsage[] = [];
     const proc = new StreamProcessor((e: StreamEvent) => { collected.push(e); }, 'test-agent', {
       detector: new ToolCallImitationDetector(TOOLS),
-      stop: (hit) => { stops.push(hit); return new Error('stopped by the guard'); },
+      stop: (hit, partial) => { stops.push(hit); partials.push(partial); return new Error('stopped by the guard'); },
     });
-    return { proc, collected, stops };
+    return { proc, collected, stops, partials };
   }
 
   it('throws the guard\'s error once the same call is written out three times, and does not render that delta', async () => {
-    const { proc, collected, stops } = guarded();
-    await expect(proc.process(mockStream(textEvents(0, COPY.repeat(5))) as AsyncIterable<never>)).rejects.toThrow('stopped by the guard');
+    const { proc, collected, stops, partials } = guarded();
+    const start = { type: 'message_start', message: { usage: { input_tokens: 1234, output_tokens: 1, cache_read_input_tokens: 50 } } };
+    const thinking = [
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'plan it' } },
+      { type: 'content_block_stop', index: 0 },
+    ];
+    await expect(proc.process(mockStream([start, ...thinking, ...textEvents(1, COPY.repeat(5))]) as AsyncIterable<never>)).rejects.toThrow('stopped by the guard');
     expect(stops).toHaveLength(1);
     expect(stops[0]).toMatchObject({ toolName: 'http_request', count: 3 });
+    // What the call used so far goes with the stop: the reported usage, and every thinking
+    // and text character streamed up to it.
+    expect(partials[0]!.usage).toMatchObject({ input_tokens: 1234, cache_read_input_tokens: 50 });
     const shown = collected.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text).join('');
     // Everything before the delta that completed the third copy, and nothing after it.
     expect(COPY.repeat(3).startsWith(shown)).toBe(true);
     expect(shown.length).toBeGreaterThan(COPY.length * 2);
     expect(shown.length).toBeLessThan(COPY.length * 3);
+    // The delta that completed the third copy (6 characters) was generated but not shown.
+    expect(partials[0]!.streamedChars).toBe('plan it'.length + shown.length + 6);
   });
 
   it('does not stop a reply that started a real tool call before its text', async () => {
