@@ -206,7 +206,7 @@ curl http://localhost:3000/api/backups
 curl -X POST http://localhost:3000/api/backups/{id}/restore
 ```
 
-Each listed backup carries `file_count` and `total_bytes` (the number and the summed size of its files) next to its full `files` list.
+Each listed backup carries `file_count` and `total_bytes` (the number and the summed size of its files). The list of the files themselves is left out; `GET /api/backups?files=1` includes it.
 
 :::caution
 Restoring a backup replaces your current data. Make sure to create a fresh backup before restoring an older one.

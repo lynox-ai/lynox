@@ -10,6 +10,7 @@ import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HALT_REASONS, bulkFailureLimit } 
 import type { PlannedTarget } from './bulk-ledger.js';
 import { BulkSecretError, bulkWriterFor, runBulkEffect, workspaceWriter, type BulkRunTrail, type TargetWriter } from './bulk-apply.js';
 import { TriggerStore } from './trigger-store.js';
+import { BULK_NOTICES } from './bulk-notices.js';
 import { deriveSourceEffect } from './task-manager.js';
 import { WorkerLoop } from './worker-loop.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
@@ -1674,6 +1675,17 @@ describe('data-store runs', () => {
     expect(out.status).toBe('refused');
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
   });
+
+  it('tells a German owner of a run with no writer in German, lead and counts alike (ux U-105)', async () => {
+    seedStore();
+    writeFileSync(join(ws, 'p.json'), JSON.stringify([{ target: 'S1', price: 5 }]));
+    const runId = runIdOf(await bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, agent()));
+    approve(runId);
+    const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => null, notices: BULK_NOTICES.de });
+    expect(out.status).toBe('refused');
+    expect(out.summary).toMatch(/^Massenlauf angehalten: Zielsystem nicht erreichbar oder Fehler in lynox\. .* von 1 Zielen\.$/);
+  });
 });
 
 // PRD §7(i): before-images reach no model context. Enumerated by CHANNEL — every place a
@@ -1990,7 +2002,80 @@ describe('what a resume after a failure halt may still do', () => {
     // k000 and k002 written, k001 sent and failed: the cap of 3 is spent, and of the 38 open
     // only k001 may still be sent to.
     expect([s.haltReason, s.applied, s.resumeOpen, s.resumeTries]).toEqual([BULK_HALT_REASONS.maxTargets, 2, 38, 1]);
+    // A local writer's failed send is known, so the next pass sends to k001 again.
+    expect([s.sentUnknown, s.resumeSends]).toEqual([0, 1]);
     // The maximum the halt names, which writing on has to go above.
     expect(s.maxTargets).toBe(3);
+  });
+});
+
+// ux Rest-P: every outcome a write is pushed with speaks a German owner's language, lead and
+// counts together; the reason stored on the run stays English.
+describe('a write told to a German owner', () => {
+  const de = (writer: TargetWriter, now?: () => number) => ({ ...effectDeps(writer, now), notices: BULK_NOTICES.de });
+
+  it('refuses a run that does not exist, and an effect that does not fit the run, in German', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    expect((await runBulkEffect('no-such-run', 'bulk_apply', de(memory(initial).writer))).summary).toBe('Diesen Massenlauf gibt es nicht.');
+    expect((await runBulkEffect(runId, 'bulk_undo', de(memory(initial).writer))).summary).toBe('Der Auslöser passt nicht zu diesem Massenlauf.');
+  });
+
+  it('refuses a run not approved, and one halted, in German with German counts', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    expect((await runBulkEffect(runId, 'bulk_apply', de(memory(initial).writer))).summary)
+      .toBe('Massenlauf nicht freigegeben; nichts geschrieben. 0 geschrieben, von 3 Zielen.');
+    approve(runId);
+    ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
+    expect((await runBulkEffect(runId, 'bulk_apply', de(memory(initial).writer))).summary)
+      .toBe('Massenlauf angehalten; geschrieben wird erst nach dem Fortsetzen. 0 geschrieben, von 3 Zielen.');
+  });
+
+  it('halts a run changed after approval in German, and stores the reason in English', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    engineDb.getDb().prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND seq = 0')
+      .run(engineDb.enc(JSON.stringify('evil')), runId);
+    const out = await runBulkEffect(runId, 'bulk_apply', de(memory(initial).writer));
+    expect(out.summary).toBe('Massenlauf angehalten: Der Lauf hat sich seit der Freigabe geändert. 0 geschrieben, von 3 Zielen.');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.checksum);
+  });
+
+  it('halts a run whose store\'s writes were switched off in German', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    vi.spyOn(ledger, 'isWriteSwitchedOff').mockReturnValue(true);
+    const out = await runBulkEffect(runId, 'bulk_apply', de(memory(initial).writer));
+    expect(out.summary).toBe('Massenlauf angehalten: Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen. 0 geschrieben, von 3 Zielen.');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.shopifyWriteOff);
+  });
+
+  it('halts a run whose row before cannot be written in German', async () => {
+    const { runId, initial } = recordMemoryRun(2);
+    approve(runId);
+    const unwritable: BulkRunTrail = { begin: () => { throw new Error('SQLITE_FULL'); }, end: () => { /* none */ } };
+    const out = await runBulkEffect(runId, 'bulk_apply', { ...de(memory(initial).writer), trailFor: () => unwritable });
+    expect(out.summary).toBe('Massenlauf angehalten: Der Lauf liess sich nicht im Protokoll der Instanz festhalten; nichts gelesen, nichts geschrieben. 0 geschrieben, von 2 Zielen.');
+  });
+
+  it('tells each end of an atomic run in German: failed, out of time, stopped', async () => {
+    const failed = recordMemoryRun(4, { atomic: true });
+    approve(failed.runId);
+    expect((await runBulkEffect(failed.runId, 'bulk_apply', de(memory(failed.initial, new Set(['k002'])).writer))).summary)
+      .toMatch(/^Massenlauf \(ganz oder gar nicht\) abgebrochen und zurückgenommen\. 2 geschrieben, \S+ fehlgeschlagen, 2 zurückgenommen, von 4 Zielen\.$/);
+
+    const timed = recordMemoryRun(4, { atomic: true });
+    approve(timed.runId);
+    const at = Date.now();
+    const clock = (): number => ((ledger.getStatus(timed.runId)?.applied ?? 0) >= 2 ? at + 10 * 60 * 60_000 : at);
+    expect((await runBulkEffect(timed.runId, 'bulk_apply', de(memory(timed.initial).writer, clock))).summary)
+      .toMatch(/^Massenlauf \(ganz oder gar nicht\): Zeit abgelaufen, alles zurückgenommen\. /);
+
+    const stopped = recordMemoryRun(4, { atomic: true });
+    approve(stopped.runId);
+    const controller = new AbortController();
+    const inner = memory(stopped.initial).writer;
+    const stopAfterOne: TargetWriter = { read: (k) => inner.read(k), write: async (k, a) => { const r = await inner.write(k, a); controller.abort(); return r; } };
+    const out = await runBulkEffect(stopped.runId, 'bulk_apply', { ...de(stopAfterOne), signal: controller.signal, ownerStopped: () => true });
+    expect(out.summary).toMatch(/^Massenlauf \(ganz oder gar nicht\) gestoppt und zurückgenommen\. /);
   });
 });

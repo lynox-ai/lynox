@@ -1607,6 +1607,11 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (67);
    ALTER TABLE bulk_targets ADD COLUMN context TEXT;
    ALTER TABLE bulk_targets ADD COLUMN context_secret_field INTEGER;`,
+  // v68 (1010, PRD shopify-preset §20.2 item 5): with `new_link_domain`, the domain the refused link
+  // points to, encrypted like `before`, so the owner is told which one. NULL for every existing
+  // target: its page keeps the sentence without the domain.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
+   ALTER TABLE bulk_targets ADD COLUMN link_domain TEXT;`,
 ];
 
 export interface EngineDbOptions {

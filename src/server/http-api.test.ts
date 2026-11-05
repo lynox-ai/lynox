@@ -5835,15 +5835,15 @@ describe('LynoxHTTPApi', () => {
     // The approved wording, copied byte for byte. A difference here is a text that was not
     // approved; change it only with a new approval.
     const APPROVED = [
-      'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an bexio schickt, und er geschieht erst nach deinem Ja. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-      'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
+      'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
+      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
       'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
     ];
     // The page around it, approved 2026-10-21 under the same rule.
     const APPROVED_FRAME = {
       title: 'Schreibrechte für bexio bestätigen',
       scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Das Recht ist damit breiter als das, was lynox damit tut.',
+      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
       button: 'Zustimmen und weiter zu bexio',
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
     };
@@ -12157,6 +12157,26 @@ describe('LynoxHTTPApi', () => {
       expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
     });
 
+    it('says when the probe was found as planned after a send without a clear answer, not written', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      // Sent without a clear answer, then read back holding the planned value.
+      bulkLedger.markSent(id, 0);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'already');
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      const probe = ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown }).probe;
+      expect(probe).toEqual({ key: keys[0], fields: ['price'], found: true });
+    });
+
     it('names the one target a probe wrote and the fields it changed, until the probe is confirmed', async () => {
       const host = 'shop.example.com';
       const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
@@ -12178,7 +12198,7 @@ describe('LynoxHTTPApi', () => {
       expect(await probeOf()).toBeNull();
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
       // The written target, and only the fields the write changed — not the ones sent unchanged.
-      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'] });
+      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'], found: false });
       // Writing on wider before the confirmation is refused with the engine's reason: what the kind
       // of entry lacks, and that the one written target is the probe to confirm.
       const block = { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'confirm' };
@@ -13711,6 +13731,29 @@ describe('LynoxHTTPApi', () => {
       expect(body.configured.api_key).toBe(true);
       expect(body.configured.search).toBe(false);
       expect(body.count).toBe(1);
+    });
+
+    it('GET /api/secrets/status gives a mandate the booleans but not the size of the owner\'s vault', async () => {
+      repayRateWindow();
+      mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY', 'STRIPE_KEY', 'SHOPIFY_TOKEN']);
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-vault' : null));
+      type Resolver = Parameters<typeof api.setPrincipalResolverForTesting>[0];
+      const saved = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown> & { configured: Record<string, boolean> };
+        expect(body.configured.api_key).toBe(true);
+        expect(body.configured.search).toBe(false);
+        expect('count' in body).toBe(false);
+        expect(JSON.stringify(body)).not.toMatch(/"count"/);
+      } finally {
+        api.setPrincipalResolverForTesting(saved);
+      }
+      // The owner, on the same vault, still gets it.
+      const owner = await (await jsonFetch('/api/secrets/status')).json() as { count?: number };
+      expect(owner.count).toBe(3);
     });
 
     // Regression: HN-launch installer bug (2026-05-23). When the npx wizard

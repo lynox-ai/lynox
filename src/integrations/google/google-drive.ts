@@ -516,7 +516,14 @@ async function handleMove(auth: GoogleAuth, input: DriveInput): Promise<string> 
   });
   if (!metaResponse.ok) return `Error: Failed to get file info (${metaResponse.status}).`;
   const meta = await metaResponse.json() as { parents?: string[] };
-  const removeParents = meta.parents?.join(',') ?? '';
+  // No current folder in the answer, for example a file shared with this account whose folder
+  // it cannot see: a move would only ADD the target, and what Drive does with that on a file
+  // that has a folder elsewhere is not documented. So nothing is sent.
+  const current = (Array.isArray(meta.parents) ? meta.parents : []).filter((p) => typeof p === 'string' && p !== '');
+  if (current.length === 0) {
+    return 'Error: Drive did not say which folder this file is in now (it may be shared with you from a folder you cannot see), so it was not moved. Nothing was changed. This tool cannot move a file whose current folder Drive does not report, so tell the user to move it in Drive itself.';
+  }
+  const removeParents = current.join(',');
 
   // Stopped after the read (the run's stop or the tool's time limit): the move has not
   // started, so it is not sent.

@@ -924,6 +924,38 @@ function noLlmKeyText(status: number, detail: string): string | null {
 }
 const LLM_FIELDS: readonly unknown[] = ['gcp_project_id', 'api_base_url', 'model_id'];
 
+/** The server's refusal of a message or an answer that read as carrying a key in a mandate's
+ *  chat (422, code `mandate_key_input`). */
+/** Remove a refused message from this browser's saved copy of `threadId`: its bubble (the last one
+ *  with its text, so an earlier message with the same text stays), the empty reply saved after it,
+ *  and any queued entry with its text. */
+function dropFromSavedThread(threadId: string, content: string, task: string): void {
+	if (typeof localStorage === 'undefined') return;
+	const root = readPersistedRoot();
+	const saved = root.threads[threadId];
+	if (saved) {
+		let i = -1;
+		for (let j = saved.length - 1; j >= 0; j--) if (saved[j]!.role === 'user' && saved[j]!.content === content) { i = j; break; }
+		if (i >= 0) {
+			const next = saved[i + 1];
+			const emptyReply = next !== undefined && next.role === 'assistant' && !next.content && !next.blocks?.length && !next.toolCalls?.length;
+			saved.splice(i, emptyReply ? 2 : 1);
+		}
+	}
+	const queued = root.queues?.[threadId];
+	if (queued) {
+		const left = queued.filter((q) => q.task !== task);
+		if (left.length > 0) root.queues![threadId] = left;
+		else delete root.queues![threadId];
+	}
+	writePersistedRoot(root);
+}
+
+function isKeyInputRefusal(status: number, detail: string | null): boolean {
+	if (status !== 422 || !detail) return false;
+	try { return (JSON.parse(detail) as { code?: unknown } | null)?.code === 'mandate_key_input'; } catch { return false; }
+}
+
 /** Map HTTP status + error detail to a user-friendly i18n message. */
 function mapApiError(status: number, detail: string): string {
 	const lower = detail.toLowerCase();
@@ -1571,6 +1603,24 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			return;
 		}
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
+		if (isKeyInputRefusal(res.status, chatErrorDetail)) {
+			// The message read as carrying a key in a chat that takes none (a mandate's): the server
+			// kept nothing of it, and this page drops it too, so it is neither stored here nor sent
+			// again by a retry. The message field was emptied when it was sent.
+			if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+			if (messages[userMsgIdx] === turn.userMsg) messages.splice(userMsgIdx, 1);
+			// This browser's saved copy of the refused message's thread can hold it: a queued message
+			// is saved with its text, and its thread is saved again as it leaves the queue. The copy of
+			// that thread is cleaned by itself, since the helper may have moved to another one meanwhile.
+			dropFromSavedThread(sid, turn.userMsg?.content ?? display, task);
+			// The text goes back into the message field, in memory only, so a false alarm costs no
+			// retyping; that field is never stored.
+			const returned = composerDraft !== null && composerDraft(display);
+			keyRefusalReset?.();
+			chatError = t(returned ? 'chat.mandate_key_input_returned' : 'chat.mandate_key_input');
+			chatErrorDetail = null;
+			return;
+		}
 		chatError = noLlmKeyText(res.status, chatErrorDetail ?? '') ?? mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
 		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
@@ -2566,6 +2616,18 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
  */
 async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | null): Promise<void> {
 	if (outcome === 'lost') { addToast(t('chat.error_connection'), 'error', 6000); return; }
+	if (outcome === 'key_refused') {
+		// Not stored: the question is still open, so its card comes back. A typed answer goes back
+		// into the message field (the field a free answer is typed in), in memory only; the answer
+		// the view showed above the card is taken down.
+		if (sessionId !== sid) return;
+		keyRefusalReset?.();
+		await checkPendingPrompt();
+		const returned = answer !== null && composerDraft !== null && composerDraft(answer);
+		chatError = t(returned ? 'chat.mandate_key_input_returned' : 'chat.mandate_key_input');
+		chatErrorDetail = null;
+		return;
+	}
 	if (outcome === 'settled' || sessionId !== sid) return;
 	if (chatError !== null && chatError !== closedReplySentence) return;
 	// Who reads it decides the way out where only the owner can act. Unknown reads as the owner,
@@ -2588,6 +2650,12 @@ export function registerComposerDraft(fn: ComposerDraft): () => void {
 	composerDraft = fn;
 	return () => { if (composerDraft === fn) composerDraft = null; };
 }
+/** The chat view takes down what it shows of an answer the server refused as carrying a key. */
+let keyRefusalReset: (() => void) | null = null;
+export function registerKeyRefusalReset(fn: () => void): () => void {
+	keyRefusalReset = fn;
+	return () => { if (keyRefusalReset === fn) keyRefusalReset = null; };
+}
 /** The sentence `reportReply` last put up, so a queued message takes down that one and no other error. */
 let closedReplySentence: string | null = null;
 
@@ -2605,9 +2673,10 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 }
 
 /** How a reply ended: `lost` when the server could not be reached or failed twice, `closed` when
- *  it answered 410 (a closed question, with the reason the server gave, or null), and `settled`
- *  for every other final word. */
-type ReplyOutcome = 'settled' | 'lost' | { readonly closed: ClosedCode | null };
+ *  it answered 410 (a closed question, with the reason the server gave, or null), `key_refused`
+ *  when it refused the answer as carrying a key (422 `mandate_key_input`), and `settled` for
+ *  every other final word. */
+type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -2623,6 +2692,12 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				let code: unknown;
 				try { code = ((await res.json()) as { code?: unknown } | null)?.code; } catch { /* no body: no reason given */ }
 				return { closed: closedCodeOf(code) };
+			}
+			// An answer read as carrying a key in a mandate's chat: not stored, the question stays open.
+			if (res.status === 422) {
+				let detail: string | null = null;
+				try { detail = await res.text(); } catch { /* no body */ }
+				if (isKeyInputRefusal(422, detail)) return 'key_refused';
 			}
 			// 5xx → retry once
 			if (res.status >= 500) {

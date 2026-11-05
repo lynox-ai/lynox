@@ -121,6 +121,23 @@ describe('escalateToUser (the Agent→User escalation primitive, Slice B3)', () 
     expect(roles).toEqual(['user', 'assistant', 'user', 'assistant']); // alternates; no doubled user
   });
 
+  // ux Rest-P E15: the push speaks the owner's language, the seed stays the model's context.
+  it('pushes the push body where one is given, on every path, and seeds the thread with the body', () => {
+    const long = `Seite hat sich geändert.\n\n${'x'.repeat(300)}`;
+    escalateToUser(store, router, { key: 'task-p', title: 't', body: 'Page changed.', pushBody: long });
+    expect((notify.mock.calls[0]![0] as NotificationMessage).body).toBe(`${long.slice(0, 197)}…`);
+    expect(JSON.stringify(store.getMessages('escalation-task-p'))).toContain('Page changed.');
+    expect(JSON.stringify(store.getMessages('escalation-task-p'))).not.toContain('Seite hat sich');
+    escalateToUser(null, router, { key: 'task-q', title: 't', body: 'Page changed.', pushBody: 'Seite hat sich geändert.' });
+    expect((notify.mock.calls[1]![0] as NotificationMessage).body).toBe('Seite hat sich geändert.');
+    store.createThread('escalation-task-r', { created_by: 'mandate:setup@example.org' });
+    escalateToUser(store, router, { key: 'task-r', title: 't', body: 'Page changed.', pushBody: 'Seite hat sich geändert.' });
+    expect((notify.mock.calls[2]![0] as NotificationMessage).body).toBe('Seite hat sich geändert.');
+    // Without one, the push carries the body as before.
+    escalateToUser(store, router, { key: 'task-s', title: 't', body: 'Page changed.' });
+    expect((notify.mock.calls[3]![0] as NotificationMessage).body).toBe('Page changed.');
+  });
+
   it('degrades to a bare push (returns null) when there is no ThreadStore', () => {
     const r = escalateToUser(null, router, { key: 'task-1', title: 't', body: 'b', data: { taskId: 'x' } });
     expect(r).toBeNull();

@@ -51,6 +51,12 @@
   says that this cannot be confirmed, so a removed record does not make a
   backup look complete. The done step of a migration that left the workspace
   out says so too.
+- `GET /api/backups` no longer sends each backup's `files` list (one entry
+  per file: path, size, type and checksum) unless asked:
+  `GET /api/backups?files=1` returns it as before. Each backup now carries
+  `file_count` and `total_bytes`, the number and summed size of its files,
+  with or without the parameter. A client that reads `files` from the list
+  has to add `?files=1`. The web UI reads the totals.
 - `GET /api/access-trail` marks a helper's read with `auto: true` when it is
   on a route the web UI polls by itself (the engine's fixed list of four
   status routes, such as `GET /api/runs/active`). The owner's view groups
