@@ -185,6 +185,14 @@ describe('a schedule refused after it was sent, in the reader\'s language (ux U-
 		expect(await sendSchedule({ error: 'engine sentence', code: 'missing_workflow' }, 404)).toContain('Nicht geplant: lynox findet diesen Workflow nicht mehr unter den gespeicherten. Lade die Seite neu.');
 	});
 
+	it('a helper\'s field that reads as carrying a key: the sentence of its own, not the engine\'s English, the dialog stays open (ux U-150)', async () => {
+		const text = await sendSchedule({ error: 'Your input was not sent because …', code: 'mandate_key_input' }, 422);
+		expect(text).toContain(t('chat.mandate_key_input_other'));
+		expect(text).not.toContain('Your input was not sent');
+		const confirm = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === t('workflow_library.schedule_confirm'));
+		expect(confirm, 'the dialog is still open, with what was typed').toBeDefined();
+	});
+
 	it('CONTROL: a refusal without a known code still shows the engine\'s sentence', async () => {
 		expect(await sendSchedule({ error: 'engine sentence' })).toContain('engine sentence');
 	});

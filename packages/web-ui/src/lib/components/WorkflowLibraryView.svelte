@@ -217,6 +217,8 @@
 		foreign_workflow: 'workflow_library.schedule_refused.foreign',
 		unreadable_workflow: 'workflow_library.schedule_refused.unreadable',
 		missing_workflow: 'workflow_library.schedule_refused.missing',
+		// A helper's field that reads as carrying a key (ux U-150): the server's own sentence is English.
+		mandate_key_input: 'chat.mandate_key_input_other',
 	};
 
 	function asksOwner(wf: SavedWorkflow): boolean {

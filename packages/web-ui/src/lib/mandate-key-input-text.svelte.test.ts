@@ -26,6 +26,13 @@ describe('the refusal of a helper\'s input that looks like a key', () => {
     expect(t('chat.mandate_key_input_returned')).toBe(EN_R);
   });
 
+  it('reads verbatim where a title or a task field was refused (not a chat message)', () => {
+    setLocale('de');
+    expect(t('chat.mandate_key_input_other')).toBe('Nicht angenommen: Der Text enthält etwas, das wie ein Schlüssel, ein Token oder ein Passwort aussieht, und den nimmt lynox hier nicht entgegen. Schlüssel speichert nur der Inhaber dieser Instanz. War es kein Schlüssel, versuch es ohne den Teil, der wie einer aussieht, noch einmal.');
+    setLocale('en');
+    expect(t('chat.mandate_key_input_other')).toBe('Not accepted: the text contains something that looks like a key, token or password, which lynox does not take here. Only the owner of this instance stores keys. If it was not a key, try again without the part that looks like one.');
+  });
+
   it('the engine\'s fallback sentence is the English one without the text put back', () => {
     const src = readFileSync(join(__dirname, '../../../../src/core/secret-store.ts'), 'utf8');
     expect(src).toContain(`export const MANDATE_KEY_INPUT_REFUSAL = '${EN_L}';`);
