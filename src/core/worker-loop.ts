@@ -1910,12 +1910,14 @@ export class WorkerLoop {
   #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
     const start: WorkerRunStart = isStartedByHand(task.id) ? 'hand'
       : event !== undefined ? 'event'
-        : this.#picksUpAnswer(task.id) ? 'answered' : 'schedule';
+        : task.effect === 'run_agent' && this.#picksUpAnswer(task.id) ? 'answered' : 'schedule';
     return runAsWorkerRun(start, () => this.#runFramed(task, capUSD, handRun, starter, event));
   }
 
   /** Whether this run picks up an answered question: then how the run that asked was started is
-   *  not known here (`worker-run-start.ts`). A store that cannot be read must not throw out of
+   *  not known here (`worker-run-start.ts`). Read only for `run_agent`, the one effect whose run
+   *  asks a question under its trigger and picks the answer up (`executeStandard`), so the other
+   *  effects' dispatch reads nothing more than before. A store that cannot be read must not throw out of
    *  here, before the frame exists; the frame's own read of the question then ends the run as it
    *  did before. */
   #picksUpAnswer(triggerId: string): boolean {

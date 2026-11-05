@@ -4133,7 +4133,7 @@ describe('the worker holds how its run was started for the run (1184)', () => {
     expect(seen).toEqual(['answered']);
   });
 
-  it('a question store that cannot be read throws nothing out of the frame: the run ends as before, without reaching its session', async () => {
+  it('a question store that cannot be read throws nothing out of the frame and never reaches its session', async () => {
     const seen: Array<WorkerRunStart | undefined> = [];
     const session = sessionSeeing(seen);
     const read = vi.fn(() => { throw new Error('engine.db busy'); });
@@ -4151,6 +4151,31 @@ describe('the worker holds how its run was started for the run (1184)', () => {
     expect(read, 'positive control: the store was asked').toHaveBeenCalled();
     expect(rejections).toEqual([]);
     expect(seen).toEqual([]);
+  });
+
+  it('"Run now" on a trigger with an answered question waiting runs as a hand, not as answered', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    const read = vi.fn(() => ({ id: 'prompt-1', session_id: 'thread-parked', question: 'Send the report?', answer: 'Yes.', hand_run: 0 }));
+    const promptStore = { getAnsweredForTrigger: read, getPendingForTrigger: vi.fn(() => undefined), releaseTrigger: vi.fn() } as unknown as PromptStore;
+    const task = makeTask({ id: 'hand-1', effect: 'run_agent', schedule_cron: undefined, next_run_at: undefined });
+    const loop = new WorkerLoop(makeEngine({ taskManager: makeTaskManager([task]), session, promptStore }), makeNotificationRouter(false), 60_000);
+    expect(await loop.runTriggerNow('hand-1')).toEqual({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(read, 'positive control: the run picked the answer up').toHaveBeenCalled();
+    expect(seen).toEqual(['hand']);
+  });
+
+  it('a due trigger of another effect does not ask the question store at its start', async () => {
+    const read = vi.fn(() => ({ id: 'prompt-1', session_id: 'thread-parked', question: 'Send the report?', answer: 'Yes.', hand_run: 0 }));
+    const promptStore = { getAnsweredForTrigger: read, releaseTrigger: vi.fn() } as unknown as PromptStore;
+    const control = { getAnsweredForTrigger: vi.fn(() => undefined), releaseTrigger: vi.fn() } as unknown as PromptStore;
+    await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask({ effect: 'notify' })]), session: makeSession('Done.'), promptStore }), makeNotificationRouter(false), 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+    await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask()]), session: makeSession('Done.'), promptStore: control }), makeNotificationRouter(false), 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(control.getAnsweredForTrigger, 'positive control: a run_agent dispatch asks it').toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
   });
 
   it('outside a worker run there is none', () => {
