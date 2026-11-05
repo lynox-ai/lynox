@@ -521,7 +521,7 @@ async function handleMove(auth: GoogleAuth, input: DriveInput): Promise<string> 
   // that has a folder elsewhere is not documented. So nothing is sent.
   const current = (Array.isArray(meta.parents) ? meta.parents : []).filter((p) => typeof p === 'string' && p !== '');
   if (current.length === 0) {
-    return 'Error: Drive did not say which folder this file is in now (it may be shared with you from a folder you cannot see), so it was not moved. Nothing was changed. Ask the user which folder it is in, or move it in Drive itself.';
+    return 'Error: Drive did not say which folder this file is in now (it may be shared with you from a folder you cannot see), so it was not moved. Nothing was changed. This tool cannot move a file whose current folder Drive does not report, so tell the user to move it in Drive itself.';
   }
   const removeParents = current.join(',');
 

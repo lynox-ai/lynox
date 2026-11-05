@@ -325,6 +325,7 @@ describe('google_drive tool', () => {
 
       expect(result).toMatch(/did not say which folder this file is in now/);
       expect(result).toMatch(/Nothing was changed/);
+      expect(result).toMatch(/tell the user to move it in Drive itself/);
       const patches = mockFetch.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === 'PATCH');
       expect(patches).toHaveLength(0);
     });
