@@ -9,17 +9,17 @@ import { t, setLocale, getLocale } from './i18n.svelte.js';
  */
 
 const ENGINE = {
-	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; was du an ihnen änderst, geht verloren, sobald die Engine engine.db wieder öffnet.',
-	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed. API connections such as bexio or Shopify come from an older copy; what you change in them is lost once the engine opens engine.db again.',
+	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; was du an ihnen änderst, kann verloren gehen, sobald die Engine engine.db wieder öffnet.',
+	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed. API connections such as bexio or Shopify come from an older copy; what you change in them can be lost once the engine opens engine.db again.',
 };
 // With durable memory on and not loaded for want of engine.db: memory is an old state, access cannot sign in.
 const ENGINE_MEMORY = {
-	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern, lynox kennt nur einen alten Stand seines Gedächtnisses, und Personen, denen du Zugang gegeben hast, können sich nicht anmelden. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; was du an ihnen änderst, geht verloren, sobald die Engine engine.db wieder öffnet.',
-	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed, lynox only knows an old state of its memory, and people you gave access cannot sign in. API connections such as bexio or Shopify come from an older copy; what you change in them is lost once the engine opens engine.db again.',
+	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern, lynox kennt nur einen alten Stand seines Gedächtnisses, und Personen, denen du Zugang gegeben hast, können sich nicht anmelden. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; was du an ihnen änderst, kann verloren gehen, sobald die Engine engine.db wieder öffnet.',
+	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed, lynox only knows an old state of its memory, and people you gave access cannot sign in. API connections such as bexio or Shopify come from an older copy; what you change in them can be lost once the engine opens engine.db again.',
 };
 const HISTORY = {
-	de: 'Die Engine ist ohne history.db gestartet: Verlauf, Threads, Aufgaben, Trigger und Workflows sind nicht verfügbar. Neue Chats werden nicht gespeichert; sie gehen beim Neuladen der Seite oder nach einer halben Stunde ohne Eingabe verloren. Tages- und Monatsgrenzen für Kosten gelten in dieser Zeit nicht.',
-	en: 'The engine started without history.db: history, threads, tasks, triggers and workflows are not available. New chats are not saved; they are lost when the page is reloaded or after half an hour without input. Daily and monthly cost limits do not apply meanwhile.',
+	de: 'Die Engine ist ohne history.db gestartet: Verlauf, Threads, Aufgaben, Trigger und Workflows sind nicht verfügbar. Neue Chats werden nicht gespeichert; sie gehen beim Neuladen der Seite oder nach etwa einer halben Stunde ohne Eingabe verloren. Tages- und Monatsgrenzen für Kosten gelten in dieser Zeit nicht.',
+	en: 'The engine started without history.db: history, threads, tasks, triggers and workflows are not available. New chats are not saved; they are lost when the page is reloaded or after about half an hour without input. Daily and monthly cost limits do not apply meanwhile.',
 };
 const SELFHOST = {
 	de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Den Grund nennt das Log, das die Engine beim Start schreibt; behebe ihn und starte die Engine neu.',

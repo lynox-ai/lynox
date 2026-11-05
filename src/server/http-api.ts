@@ -3704,7 +3704,8 @@ export class LynoxHTTPApi {
     const alerted = (process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '') !== '';
     // Durable memory was switched on and did not load because engine.db is missing: the engine runs
     // on the old memory files, and a mandate cannot sign in. With durable memory off both are the
-    // normal state, so the UI says neither.
+    // normal state, so the UI says neither. The engine.db check matters only if the knowledge store
+    // failed for another reason with engine.db open; then memory is not an old copy of engine.db.
     const memoryOld = engine.getEngineDb() === null && engine.getLegacyMemoryReason() === 'store_missing';
     return {
       boot_stores_missing: missing,

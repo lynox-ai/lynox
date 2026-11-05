@@ -3,8 +3,9 @@
  *
  * The engine puts `boot_stores_missing` on the providers poll for the owner only, and
  * `boot_stores_alerted` when a control plane runs the instance (its health monitor alerts on the
- * degraded engine). One line: a sentence per missing store, then one closing sentence for the mode,
- * so the way out is not said twice when both are missing.
+ * degraded engine), and `boot_store_memory_old` when durable memory was on and did not load for want
+ * of engine.db. One line in paragraphs: one per missing store, then one closing paragraph for the
+ * mode, so the way out is not said twice when both are missing.
  */
 
 export type BootStore = 'engine.db' | 'history.db';
