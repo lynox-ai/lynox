@@ -26,12 +26,16 @@ let text: { left: string; returned: string };
 let calls: string[];
 
 function serve(route: (url: string) => Response | undefined): void {
-	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
 		calls.push(url);
 		const r = route(url);
 		if (r) return r;
-		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
+		// A thread resumed by id gets a session of that id, as the server answers; a new one is t1.
+		if (url.endsWith('/sessions')) {
+			const asked = (JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as { threadId?: string }).threadId;
+			return json({ sessionId: asked ?? 't1' });
+		}
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		return json({ messages: [], activeRun: null });
 	}));
@@ -118,15 +122,15 @@ describe('a helper\'s message refused as carrying a key', () => {
 		let answerSecond: (r: Response) => void = () => {};
 		let runs = 0;
 		serve((url) => undefined);
-		const plain = globalThis.fetch as unknown as (input: string | URL) => Promise<Response>;
-		vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+		const plain = globalThis.fetch as unknown as (input: string | URL, init?: RequestInit) => Promise<Response>;
+		vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 			const url = String(input);
 			if (url.endsWith('/run')) {
 				calls.push(url);
 				runs++;
 				return new Promise<Response>((r) => { if (runs === 1) finishFirst = r; else answerSecond = r; });
 			}
-			return plain(input);
+			return plain(input, init);
 		}));
 		store.registerComposerDraft(() => true);
 
@@ -141,6 +145,7 @@ describe('a helper\'s message refused as carrying a key', () => {
 		expect(JSON.stringify([...saved.values()]), 'control: the thread\'s saved copy holds it as it leaves').toContain(KEY);
 		await store.resumeThread('t2');
 		await settle();
+		expect(JSON.stringify([...saved.values()]), 'control: after the switch the left thread\'s copy still holds it').toContain(KEY);
 		answerSecond(refused());
 		await new Promise((r) => setTimeout(r, 50));
 		await settle();
