@@ -17,8 +17,8 @@ const HISTORY = {
 	en: 'The engine started without history.db: history, threads, tasks, triggers and workflows are not available. New chats are not saved; they are lost when the page is reloaded or after half an hour without input. Daily and monthly cost limits do not apply meanwhile.',
 };
 const SELFHOST = {
-	de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Den Grund nennt das Container-Log; behebe ihn und starte die Engine neu.',
-	en: 'This lasts until the engine restarts and can open all its files again. The container log names the cause; fix it and restart the engine.',
+	de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Den Grund nennt das Log, das die Engine beim Start schreibt; behebe ihn und starte die Engine neu.',
+	en: 'This lasts until the engine restarts and can open all its files again. The log the engine writes at startup names the cause; fix it and restart the engine.',
 };
 const MANAGED = {
 	de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Das lynox-Team bekommt dazu automatisch eine Meldung.',
