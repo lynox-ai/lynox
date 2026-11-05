@@ -24,24 +24,10 @@
 
 import type { InboxRule } from '../../types/index.js';
 import type { InboxStateDb } from './state.js';
-import { charCount, MAX_DESCRIPTION_RULES, ruleMatchText, SUBJECT_MIN } from './rule-text.js';
+import { MAX_DESCRIPTION_RULES, ruleMatchText } from './rule-text.js';
 
 // The match form lives next to the create check that counts on it; re-exported for the callers here.
 export { ruleMatchText };
-
-/**
- * True when a stored value never matches. A value with nothing left once normalized would be
- * contained in every subject, so an archive rule would file every mail. A subject phrase that
- * normalizing shrank below `SUBJECT_MIN` (`r\u200Ee` read as `re`) would file almost every mail,
- * where it matched only mail carrying the same mark before: create refuses both (`subjectTooShort`).
- * A plain short phrase stored before the minimum existed (`Re`) keeps matching as it always did.
- */
-export function storedValueNeverMatches(kind: InboxRule['matcherKind'], value: string): boolean {
-  const match = ruleMatchText(value);
-  if (match === '') return true;
-  if (kind !== 'subject_contains' || charCount(match) >= SUBJECT_MIN) return false;
-  return match !== value.trim().toLowerCase().replace(/\u03C2/g, '\u03C3');
-}
 
 export interface RuleMatchInput {
   accountId: string;
@@ -58,8 +44,6 @@ export interface RuleMatchInput {
 interface CachedRule {
   rule: InboxRule;
   matcherLower: string;
-  /** `storedValueNeverMatches`, decided once when the rules are loaded. */
-  never: boolean;
 }
 
 /**
@@ -76,9 +60,9 @@ export class InboxRulesLoader {
     const subjectLower = ruleMatchText(input.subject);
     const listIdLower = input.listId === undefined ? undefined : ruleMatchText(input.listId);
     for (const cached of this._rulesFor(input.accountId, input.tenantId)) {
-      // A value with nothing left once normalized, or a subject phrase normalizing shrank below
-      // the minimum, would file (almost) every mail. Create refuses one; a stored one never matches.
-      if (cached.never) continue;
+      // A value with nothing left once normalized would be contained in every subject: an
+      // archive rule would then file every mail. Create refuses one; a stored one never matches.
+      if (cached.matcherLower === '') continue;
       switch (cached.rule.matcherKind) {
         case 'from':
           if (fromLower === cached.matcherLower) return cached.rule;
@@ -122,11 +106,7 @@ export class InboxRulesLoader {
     if (cached !== undefined) return cached;
     const fresh = this.state
       .listConfirmedRulesForAccount(accountId, tenantId)
-      .map((rule) => ({
-        rule,
-        matcherLower: ruleMatchText(rule.matcherValue),
-        never: storedValueNeverMatches(rule.matcherKind, rule.matcherValue),
-      }));
+      .map((rule) => ({ rule, matcherLower: ruleMatchText(rule.matcherValue) }));
     cached = fresh;
     this.cache.set(key, cached);
     return cached;

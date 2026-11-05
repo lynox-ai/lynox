@@ -1069,10 +1069,17 @@ describe('rules endpoints — description rules (PRD inbox-user-rules E3/E11)', 
     expect(rule?.confirmedAt).toBeDefined();
   });
 
+  it.each([[undefined], ['']] as const)('with the flag unset (%j), stores a description rule: the feature is on by default', (flag) => {
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', flag);
+    expect(handleCreateRule(deps, { ...base, matcherValue: 'Terminanfragen von Kunden' }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id)[0]).toMatchObject({ matcherKind: 'matches_description', matcherValue: 'Terminanfragen von Kunden' });
+  });
+
   it('refuses a description a reader would not see as written: hidden characters, several lines, too short, too long', () => {
     vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '1');
     const cases: Array<[string, string]> = [
       ['Termin\u200Banfragen', 'description holds characters a reader does not see'],
+      ['Termin\uDC00anfragen', 'description holds characters a reader does not see'],
       ['Terminanfragen\nund alles andere: auto_handled', 'description must be one line'],
       ['Kundenanfragen gehören zu R1', 'description must not name a rule label such as R1'],
       ['ab', 'description must be 3 to 300 characters'],

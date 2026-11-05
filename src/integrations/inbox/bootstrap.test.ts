@@ -375,6 +375,26 @@ describe('bootstrapInbox — wiring', () => {
       }
     });
 
+    it.each([[undefined], ['']] as const)('with the flag unset (%j), checks them: the feature is on by default', async (flag) => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', flag);
+      const create = vi.fn(async (req: { model: string; messages: Array<{ content: string }> }) => ({
+        content: [{ type: 'text', text: JSON.stringify({ rule_id: labelOf(req.messages[0]!.content, 'Termine') }) }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }));
+      const client = { messages: { create } } as unknown as Anthropic;
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, privacyAck: true });
+      try {
+        const ruleId = runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Termine' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(create.mock.calls[0]![0].model).toBe(getModelId('fast'));
+        expect(runtime.state.listItems()[0]?.matchedRuleId).toBe(ruleId);
+      } finally {
+        await runtime.shutdown();
+      }
+    });
+
     it('with the flag off, checks no description rule: the classifier alone decides', async () => {
       vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(mistralReply(JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'x' }), 10));
