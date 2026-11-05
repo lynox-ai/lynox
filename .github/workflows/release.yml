@@ -215,6 +215,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # actions/attest: the OIDC token that Sigstore signs the provenance with, and the
+      # attestations API it records it in.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -287,6 +291,46 @@ jobs:
           echo "$INSPECT" | grep -q '"architecture": "amd64"' || { echo "amd64 missing from manifest"; exit 1; }
           echo "$INSPECT" | grep -q '"architecture": "arm64"' || { echo "arm64 missing from manifest"; exit 1; }
           echo "Multi-arch manifest verified: amd64 + arm64 both present."
+
+      # The digest a host records when it pulls `:${VERSION}` (its RepoDigests entry) is the
+      # manifest list's, so that is the digest the attestation below names.
+      - name: Read the manifest list digest
+        id: index
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          digest_of() { docker buildx imagetools inspect "ghcr.io/lynox-ai/lynox:$1" --format '{{json .Manifest}}' | jq -r .digest; }
+          DIGEST=$(digest_of "${VERSION}")
+          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::could not read the manifest list digest of ${VERSION} (got '${DIGEST}')"
+            exit 1
+          fi
+          for TAG in latest "${SHA}"; do
+            OTHER=$(digest_of "$TAG")
+            if [ "$OTHER" != "$DIGEST" ]; then
+              echo "::warning:::${TAG} points at ${OTHER}, not at the attested ${DIGEST} of :${VERSION}"
+            fi
+          done
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "ghcr.io/lynox-ai/lynox:${VERSION} = ${DIGEST}"
+
+      # Build provenance for the release image, signed through Sigstore with this workflow's OIDC
+      # identity and pushed to GHCR next to the image. It is what tells a release image apart
+      # from one any other workflow pushed under a release tag: the signing certificate names
+      # this file and the release tag's ref. Verify with
+      #   gh attestation verify oci://ghcr.io/lynox-ai/lynox:<version> --repo lynox-ai/lynox \
+      #     --signer-workflow lynox-ai/lynox/.github/workflows/release.yml \
+      #     --source-ref refs/tags/v<version> --deny-self-hosted-runners
+      # No storage record: it needs a further permission and is not what a verifier reads.
+      - name: Attest the release image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/lynox-ai/lynox
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
   npm:
     needs: pre-release-check
