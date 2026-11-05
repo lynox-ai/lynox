@@ -616,12 +616,16 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
       ['[video src="203.0.113.7"]', '203.0.113.7'],
       ['[video src="3405803783/a.mp4"]', '203.0.113.7'],
       ['[video src="evil.exa%0D%0ample/a.mp4"]', 'evil.example'],
+      // esc_url trims the start, so leading spaces do not turn the host into a path.
+      ['[video src="  evil.example/a.mp4"]', 'evil.example'],
     ] as const) expect(check(after), after).toEqual({ ok: false, reason: 'new_link_domain', detail });
+    // Printed as written, a backslash is a `/` to the page: the host is the name before it.
+    expect(check(`[video src="https://evil.example\\@${HOST}/a.mp4"]`)).toMatchObject({ ok: false, reason: 'url_control_char' });
     // A file name is a domain to `esc_url` as well.
     expect(check('[video src="a.mp4"]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'a.mp4' });
     // Twin: a value that names no host stays a word or a path on the store: a relative path, a
     // word, a number, a fraction, a one-label name, a space in the host, an abbreviation.
-    for (const after of ['[video src="/media/a.mp4"]', '[button size=large]Go[/button]', '[x version=3.5]', '[x file=index.php?a=b.example]', '[x ratio=16/9]', '[x w=1.5]', '[x label="ja/nein"]', '[x src="media/a.mp4"]', '[button link="evil .example"]', '[x title="Gr.M"]', '[x title="Hinweis:"]']) {
+    for (const after of ['[video src="/media/a.mp4"]', '[button size=large]Go[/button]', '[x version=3.5]', '[x file=index.php?a=b.example]', '[x ratio=16/9]', '[x w=1.5]', '[x label="ja/nein"]', '[x src="media/a.mp4"]', '[button link="evil .example"]', '[x title="Gr.M"]', '[x title="Hinweis:"]', '[video src="/cdn.example/a.mp4"]']) {
       expect(check(after), after).toEqual({ ok: true });
     }
   });
@@ -632,6 +636,12 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     expect(check('[embed]evil.example/x[/embed]')).toEqual(foreign);
     expect(check('[embed] <em>www.evil.example</em> [/embed]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'www.evil.example' });
     expect(check('[link]javascript:alert(1)[/link]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // A nested pair whose text holds a shortcode: no closing tag follows its link directly.
+    expect(check('[foo][embed]evil.example/[x][/embed][/foo]')).toEqual(foreign);
+    // Deeper than the whole texts are read, the text before a closing tag still is.
+    const wraps = Array.from({ length: 9 }, (_, i) => `w${String(i)}`);
+    const deep = `${wraps.map((w) => `[${w}]`).join('')}[embed]evil.example/x[/embed]${[...wraps].reverse().map((w) => `[/${w}]`).join('')}`;
+    expect(check(deep)).toEqual(foreign);
   });
 
   it('reads a URL WordPress embeds: alone on its line or alone in a paragraph', () => {

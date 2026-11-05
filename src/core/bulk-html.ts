@@ -875,8 +875,8 @@ function linkCandidatesOf(value: string): LinkCandidate[] {
   const add = (v: string, spaced: boolean): void => { if (v !== '') out.push({ value: v, spaced }); };
   for (const tag of shortcodeTagsOf(value)) {
     // WordPress reads a no-break and a zero-width space as a space, the name included: in
-    // `[video​src="…"]` the name is `video` and `src` an attribute.
-    const spaced = tag.replace(/[ ​]/g, ' ');
+    // `[video\u200bsrc="…"]` the name is `video` and `src` an attribute.
+    const spaced = tag.replace(/[\u00a0\u200b]/g, ' ');
     if (spaced.startsWith('[/')) continue;
     const rest = spaced.slice(1 + nameRunAt(spaced, 0, spaced.length - 1), -1).replace(/\/\s*$/, '');
     for (const m of rest.matchAll(SHORTCODE_ATTRIBUTE)) {
@@ -894,7 +894,7 @@ function linkCandidatesOf(value: string): LinkCandidate[] {
 }
 
 /** The characters `esc_url` keeps (`a-z0-9-~+_.?#=!&;,/:%@$|*'()[]` and every byte from 0x80). */
-const ESC_URL_DROPS = /[^a-z0-9\-~+_.?#=!&;,/:%@$|*'()[\]\u0080-￿]/gi;
+const ESC_URL_DROPS = /[^a-z0-9\-~+_.?#=!&;,/:%@$|*'()[\]\u0080-\uffff]/gi;
 
 /**
  * WordPress's `esc_url` up to its scheme check, step by step (wp-includes/formatting.php): leading
