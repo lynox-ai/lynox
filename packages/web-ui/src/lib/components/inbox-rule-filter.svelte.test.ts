@@ -214,3 +214,52 @@ describe('InboxView — waiting proposals next to the rules entry', () => {
 		expect(target.querySelectorAll('.sr-only').length).toBe(0);
 	});
 });
+
+describe('InboxView — the mobile zone pills keep the active one in view', () => {
+	let scrolled: Array<{ el: Element; opts: unknown }>;
+	let original: typeof Element.prototype.scrollIntoView;
+	beforeEach(() => {
+		scrolled = [];
+		original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element, opts?: unknown) { scrolled.push({ el: this, opts }); };
+	});
+	afterEach(() => {
+		Element.prototype.scrollIntoView = original;
+	});
+
+	/** The pill a scroll was last asked for, by its label, and only in the mobile row. */
+	function lastScrolledPill(): string | undefined {
+		const last = scrolled.at(-1);
+		expect(last?.el.closest('[role="tablist"]')?.parentElement?.contains(byTestId('inbox-pill-rules'))).toBe(true);
+		return last?.el.querySelector('span')?.textContent?.trim();
+	}
+
+	it('scrolls "Erledigt heute" into view on arrival from a rule, and the new pill after a switch', async () => {
+		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
+		await render();
+		expect(lastScrolledPill()).toBe('Erledigt heute');
+		expect(scrolled.at(-1)?.opts).toEqual({ inline: 'nearest', block: 'nearest' });
+		const snoozed = [...target.querySelectorAll('[role="tablist"] button')].find((b) => b.textContent?.includes(t('inbox.zone_snoozed')));
+		snoozed!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await settle();
+		expect(lastScrolledPill()).toBe(t('inbox.zone_snoozed'));
+	});
+
+	it('scrolls the active pill into view again when the pills change width (a badge, the web font)', async () => {
+		const observed: Array<{ el: Element; fire: () => void }> = [];
+		vi.stubGlobal('ResizeObserver', class {
+			readonly cb: () => void;
+			constructor(cb: () => void) { this.cb = cb; }
+			observe(el: Element): void { observed.push({ el, fire: () => this.cb() }); }
+			disconnect(): void {}
+		});
+		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
+		await render();
+		const watcher = observed.find((o) => o.el.getAttribute('role') === 'tablist');
+		expect(watcher).toBeDefined();
+		scrolled = [];
+		watcher!.fire();
+		expect(scrolled).toHaveLength(1);
+		expect(lastScrolledPill()).toBe('Erledigt heute');
+	});
+});

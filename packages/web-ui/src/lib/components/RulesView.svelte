@@ -119,9 +119,13 @@
 		too_long: { key: 'inbox.rules_error_too_long', testId: 'rules-too-long-error' },
 		list_id: { key: 'inbox.rules_error_list_id', testId: 'rules-list-id-error' },
 	};
+	/** The input's cap on a description. The input counts UTF-16 units, the server characters (code
+	 *  points), so the input never lets through more than the server takes; a description is typed,
+	 *  never filled in, so the input cannot hold more than this and refuse to submit. */
 	const DESCRIPTION_MAX = 300;
-	/** The server's cap on a sender, subject or list id value. The input counts UTF-16 units,
-	 *  the server characters, so the input never lets through more than the server takes. */
+	/** The server's cap on a sender, subject or list id value, in characters (code points). The
+	 *  input carries no `maxlength`: it counts UTF-16 units, so a prefilled subject with emoji would
+	 *  stop submitting after one edit. The form counts characters instead, as the server does. */
 	const FIXED_VALUE_MAX = 200;
 
 	let accounts = $state<MailAccountView[]>([]);
@@ -320,6 +324,10 @@
 		const accountId = appliedAccountId.trim();
 		const value = formMatchValue.trim();
 		if (accountId.length === 0 || value.length === 0 || formPreset === null) return;
+		if (!formIsDescription && Array.from(value).length > FIXED_VALUE_MAX) {
+			formRefusal = 'too_long';
+			return;
+		}
 		formSubmitting = true;
 		formRefusal = null;
 		const preset = PRESET_MAP[formPreset];
@@ -539,7 +547,7 @@
 							type="text"
 							bind:value={formMatchValue}
 							required
-							maxlength={formIsDescription ? DESCRIPTION_MAX : FIXED_VALUE_MAX}
+							maxlength={formIsDescription ? DESCRIPTION_MAX : undefined}
 							placeholder={formIsDescription ? t('inbox.rules_description_placeholder') : formMatchKind === 'from' ? t('inbox.rules_match_from_placeholder') : t('inbox.rules_match_value_placeholder')}
 							class="w-full bg-bg-subtle border border-border rounded-[var(--radius-sm)] px-3 py-2 text-sm text-text placeholder:text-text-subtle"
 						/>

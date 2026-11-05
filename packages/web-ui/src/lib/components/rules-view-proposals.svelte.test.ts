@@ -564,13 +564,46 @@ describe('RulesView — what the form says when the server refuses the value', (
 		expect(byTestId('rules-subject-short-error')).toBeNull();
 	});
 
-	it('caps a sender or subject value at 200 and a description at 300 in the input', async () => {
+	it('caps a description at 300 in the input, and a sender or subject not there: the input counts UTF-16 units', async () => {
 		await render({ viewer: 'owner', rules: [] });
 		await openForm();
-		for (const [kind, max] of [['from', '200'], ['subject_contains', '200'], ['matches_description', '300']] as const) {
+		for (const [kind, max] of [['from', null], ['subject_contains', null], ['matches_description', '300']] as const) {
 			await choose('rule-match-kind', kind);
 			expect(textInputs()[1]!.getAttribute('maxlength'), kind).toBe(max);
 		}
+	});
+
+	it('counts a subject in characters, as the server does: 150 emoji (300 UTF-16 units) are sent', async () => {
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		await choose('rule-match-kind', 'subject_contains');
+		const value = '\u{1F600}'.repeat(150);
+		expect(value.length).toBe(300);
+		await type(textInputs()[1]!, value);
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		expect(writes[0]).toMatchObject({ body: { matcherKind: 'subject_contains', matcherValue: value } });
+		expect(byTestId('rules-too-long-error')).toBeNull();
+	});
+
+	it('says a subject of 201 characters is too long in the form and sends nothing; 200 are sent', async () => {
+		const toasts = await import('../stores/toast.svelte.js');
+		const spy = vi.spyOn(toasts, 'addToast');
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		await choose('rule-match-kind', 'subject_contains');
+		await type(textInputs()[1]!, '\u{1F600}'.repeat(200) + 'x');
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		expect(writes).toHaveLength(0);
+		expect(byTestId('rules-too-long-error')?.textContent).toBe('Der Wert ist zu lang: höchstens 200 Zeichen. Kürz ihn und speichere noch einmal.');
+		expect(byTestId('rules-too-long-error')?.getAttribute('role')).toBe('alert');
+		expect(spy).not.toHaveBeenCalled();
+		spy.mockRestore();
+		await type(textInputs()[1]!, '\u{1F600}'.repeat(200));
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		expect(writes).toHaveLength(1);
 	});
 });
 

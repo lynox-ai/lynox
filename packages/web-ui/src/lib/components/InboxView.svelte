@@ -85,6 +85,26 @@
 	let ruleFilterId = $state<string | null>(getInboxRuleFilter());
 	let ruleFilterName = $state<string | null>(null);
 
+	// The mobile zone pills scroll sideways at narrow widths: the active one is scrolled into view
+	// on arrival (a link may open "Handled today", past the edge), whenever the zone changes, and
+	// whenever the pills change width (a count badge appears, the web font arrives) and could push
+	// the active one back out.
+	let mobileZoneTabs = $state<HTMLElement | null>(null);
+	$effect(() => {
+		const active = zone;
+		const row = mobileZoneTabs;
+		if (row === null) return;
+		const reveal = (): void => {
+			const tab = row.querySelector<HTMLElement>(`[data-zone="${active}"]`);
+			if (tab !== null && typeof tab.scrollIntoView === 'function') tab.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+		};
+		reveal();
+		if (typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(reveal);
+		observer.observe(row);
+		return () => observer.disconnect();
+	});
+
 	async function resolveRuleFilterName(ruleId: string, accountId: string): Promise<void> {
 		const list = await listInboxRules(getApiBase(), accountId);
 		const rule = list?.find((r) => r.id === ruleId);
@@ -549,9 +569,11 @@
 							class="flex shrink-0 gap-1"
 							role="tablist"
 							aria-label={t('inbox.title')}
+							bind:this={mobileZoneTabs}
 						>
 							<button
 								role="tab"
+								data-zone="requires_user"
 								aria-selected={zone === 'requires_user'}
 								onclick={() => (zone = 'requires_user')}
 								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'requires_user' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
@@ -563,6 +585,7 @@
 							</button>
 							<button
 								role="tab"
+								data-zone="draft_ready"
 								aria-selected={zone === 'draft_ready'}
 								onclick={() => (zone = 'draft_ready')}
 								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'draft_ready' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
@@ -574,6 +597,7 @@
 							</button>
 							<button
 								role="tab"
+								data-zone="auto_handled"
 								aria-selected={zone === 'auto_handled'}
 								onclick={() => (zone = 'auto_handled')}
 								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'auto_handled' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
@@ -585,6 +609,7 @@
 							</button>
 							<button
 								role="tab"
+								data-zone="snoozed"
 								aria-selected={zone === 'snoozed'}
 								onclick={() => (zone = 'snoozed')}
 								class="shrink-0 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm transition-colors flex items-center gap-2 {zone === 'snoozed' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}"
