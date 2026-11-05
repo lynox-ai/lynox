@@ -179,7 +179,9 @@ export class MailWatcher {
         //    follow-up resolution) left the mail marked seen yet unprocessed.
         //    (A throw inside the classifier hook itself is swallowed upstream
         //    in MailContext's wrapper, so it does not reach here — the hook
-        //    dead-letters instead of throwing on backpressure.) The hook is
+        //    dead-letters instead of throwing on backpressure. The one throw
+        //    let through is `InboundMailDeferred`, which a hook uses exactly
+        //    to keep the mail unseen for the next tick.) The hook is
         //    thread-idempotent (findItemByThread short-circuit) so a next-tick
         //    retry cannot double-insert.
         if (noise.length > 0) this.state.markSeenBatch(accountId, noise);
