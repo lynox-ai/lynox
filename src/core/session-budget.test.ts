@@ -385,7 +385,7 @@ describe('persistent budget — a cap that cannot be checked refuses (no cost pr
     vi.unstubAllEnvs();
   });
 
-  // The two texts word for word (ux U-163): one for a self-hoster, who reads the startup log
+  // The two texts word for word: one for a self-hoster, who reads the startup log
   // and repairs the file, one for a managed tenant, who can do neither.
   const selfHost = (caps: string): string =>
     `Spending cap (${caps}) cannot be checked: the history database (history.db) did not open when lynox started, `
