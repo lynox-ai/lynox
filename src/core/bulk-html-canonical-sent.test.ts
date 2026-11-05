@@ -330,6 +330,13 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
       expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
     });
 
+    it('keeps no domain that holds a credential only once lower case, as the check read it', async () => {
+      // The judge's fake scanner knows the shape in lower case only; the value spells it in upper case.
+      expect(['SK-LIVE-abc.evil.example'].some((t) => t.includes('sk-live-'))).toBe(false);
+      const shown = shownOf(await judge(linked('https://SK-LIVE-abc.evil.example/x')));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
     it('keeps no domain whose spelling holds a vault value that lower case would hide', async () => {
       const vault = (t: string): string => t.replaceAll('MyToken42', '***');
       expect(vault('mytoken42.evil.example')).toBe('mytoken42.evil.example');

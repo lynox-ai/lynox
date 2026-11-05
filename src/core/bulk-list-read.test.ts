@@ -543,6 +543,14 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
     expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', undefined], ['new_link_domain', undefined]]);
   });
 
+  it('keeps no domain a plan spells in upper case that is a credential\'s shape once lower case (1010)', async () => {
+    // The plan-time scan reads the text, where the shape is upper case and is not one; the link
+    // check reads the host in lower case, which the scanner names. Built at run time.
+    const host = `${'SK-ANT-API03-'}ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCD.EVIL.EXAMPLE`;
+    const id = await previewed({ description: `<p>New <a href="https://${host}/">deal</a></p>` });
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', undefined], ['new_link_domain', undefined]]);
+  });
+
   it('keeps no domain with another markup refusal (twin)', async () => {
     const id = await previewed({ description: '<p>New</p><img src="https://evil.example/a.png">' });
     expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_img', undefined], ['new_img', undefined]]);
