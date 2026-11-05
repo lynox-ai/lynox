@@ -423,8 +423,8 @@ describe('going on from a run that halted', () => {
 		expect(left.every((k) => k in BULK_HALT_REASONS)).toBe(true);
 	});
 
-	const at = (haltKey: string, o: Partial<Pick<BulkRunDetailData, 'phase' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge'>> = {}) =>
-		({ phase: 'planned' as BulkRunDetailData['phase'], haltKey, targetSystem: 'http:shop.example.invalid', costUsd: 0, costCapUsd: null, judge: null, ...o });
+	const at = (haltKey: string, o: Partial<Pick<BulkRunDetailData, 'phase' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge' | 'listFirstPage' | 'judgeServedBy' | 'judgeOwnKey'>> = {}) =>
+		({ phase: 'planned' as BulkRunDetailData['phase'], haltKey, targetSystem: 'http:shop.example.invalid', costUsd: 0, costCapUsd: null, judge: null, listFirstPage: null, judgeServedBy: null, judgeOwnKey: false, ...o });
 
 	it('has a sentence in both languages for every halt it restarts or refuses', () => {
 		for (const key of [...AS_IS.filter((k) => k !== 'judgeModel'), 'costCap', ...NONE]) {
@@ -444,10 +444,13 @@ describe('going on from a run that halted', () => {
 		// The way on: continue, and if it halts again right away the host is not reachable yet (ux U-105).
 		const tryLater = 'Du kannst fortsetzen. Hält der Lauf gleich wieder an, ist shop.example.invalid noch nicht erreichbar; versuch es später noch einmal.';
 		expect(bulkHaltText(at('unavailable'), true, DE)).toEqual({ cause: 'Der Lauf kam nicht weiter. shop.example.invalid hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', before: tryLater });
-		// A judged run may also have stopped on its model; the way on is the same.
-		expect(bulkHaltText(at('unavailable', { judge: judged.judge }), true, DE)).toEqual({
-			cause: 'Der Lauf kam nicht weiter. shop.example.invalid oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', before: tryLater,
+		// A judged run may also have stopped on its model, and its way on names both (ux U-105 M1).
+		expect(bulkHaltText(at('unavailable', judged), true, DE)).toEqual({
+			cause: 'Der Lauf kam nicht weiter. shop.example.invalid oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.',
+			before: 'Du kannst fortsetzen. Hält der Lauf gleich wieder an, antworten shop.example.invalid oder das KI-Modell noch nicht; versuch es später noch einmal.',
 		});
+		expect(bulkHaltText(at('unavailable', judged), true, EN)?.before)
+			.toBe('You can continue. If the run halts again right away, shop.example.invalid or the AI model is not answering yet; try again later.');
 		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
 			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, verbraucht 0.0034 USD.');
@@ -482,6 +485,26 @@ describe('going on from a run that halted', () => {
 		expect(bulkHaltText(at('spendLimit'), true, DE)?.before).not.toMatch(/Limits/);
 		expect(bulkHaltText(at('spendLimit'), false, DE)?.before).toMatch(/oder wenn du es unter Einstellungen → Limits anhebst\.$/);
 		expect(bulkHaltText(at('spendLimit'), false, EN)?.before).toMatch(/or once you raise it under Settings → Limits\.$/);
+	});
+
+	it('promises going on only where the page offers to go on (ux U-105 L1)', () => {
+		const noModel = { judge: judged.judge, judgeServedBy: null };
+		const ownKey = { ...judged, judgeOwnKey: true };
+		const cases: readonly [string, boolean | null, Partial<Pick<BulkRunDetailData, 'judge' | 'judgeServedBy' | 'judgeOwnKey'>>][] = [
+			['unavailable', true, {}], ['unavailable', true, judged], ['unauthorized', true, {}], ['blocked', true, {}],
+			['blocked', false, {}], ['creditRefused', true, {}], ['spendLimit', true, {}], ['spendLimit', false, {}],
+			['consecutiveFailures', true, {}],
+		];
+		for (const [key, managed, o] of cases) {
+			// With a button: the step stands.
+			expect([key, managed, bulkRestartKind(at(key, o)), bulkHaltText(at(key, o), managed, DE)?.before]).toEqual([key, managed, expect.stringMatching(/^(read|judge)$/), expect.any(String)]);
+			// Without one: a judged run with no model, or one on its own key, gets no promise.
+			for (const without of [{ ...o, ...noModel }, { ...o, ...ownKey }]) {
+				expect([key, managed, without.judgeOwnKey === true, bulkHaltText(at(key, without), managed, DE)?.before]).toEqual([key, managed, without.judgeOwnKey === true, null]);
+			}
+		}
+		// A step that does not promise going on still stands without a button.
+		expect(bulkHaltText(at('credential', noModel), true, DE)?.before).toContain('Einstellungen → APIs');
 	});
 
 	it('gives a refused access the step to reconnect it, and a missing model the start\'s own sentence', () => {

@@ -8,8 +8,8 @@
  * and a reason this table has no German for is quoted as stored.
  *
  * The German wording is ux U-099 and U-105; the paths a bulk run takes in ordinary use are
- * translated, the rare ones (atomic runs, refusals) are still English and listed in
- * `worker-notices.test.ts`.
+ * translated. What is still English (atomic runs, refusals, the worker's own catch paths when a
+ * preview or a judging pass throws) is listed in `worker-notices.test.ts`.
  */
 import type { NoticeLanguage } from './notice-language.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
@@ -135,6 +135,9 @@ function deHaltReason(reason: string): string | undefined {
   return deHaltReasons[reason];
 }
 
+/** A judging run halts as `unavailable` when its model call fails too, so its sentence names the model (ux U-105 M1). */
+const DE_JUDGE_UNAVAILABLE = 'KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.';
+
 const DE: BulkNotices = Object.freeze({
   applyDone: 'Massenlauf fertig.',
   previewDone: 'Vorschau fertig. Der Massenlauf wartet auf deine Prüfung.',
@@ -161,7 +164,8 @@ const DE: BulkNotices = Object.freeze({
   costs: (calls: number, eachUsd: number) =>
     `${String(calls)} API-Abrufe in diesem Durchgang, geschätzt $${(calls * eachUsd).toFixed(4)} (je $${String(eachUsd)} laut Profil).`,
   halted: (phase: BulkPhase, reason: string) =>
-    `${phase === 'apply' ? 'Massenlauf' : phase === 'preview' ? 'Vorschau' : 'Beurteilung'} angehalten: ${deHaltReason(reason) ?? `${reason}.`}`,
+    `${phase === 'apply' ? 'Massenlauf' : phase === 'preview' ? 'Vorschau' : 'Beurteilung'} angehalten: ${
+      (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? DE_JUDGE_UNAVAILABLE : deHaltReason(reason)) ?? `${reason}.`}`,
   previewStopped: 'Vorschau beendet: Der Lauf wurde verworfen, angehalten oder ist weitergegangen.',
   listStopped: 'Lesen der Liste beendet: Der Lauf wurde verworfen, angehalten oder ist weitergegangen.',
   judgeStopped: 'Beurteilung beendet: Der Lauf wurde angehalten, ersetzt oder ist weitergegangen.',

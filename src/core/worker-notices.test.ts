@@ -88,6 +88,11 @@ describe('the notice tables', () => {
     for (const k of ORDINARY_HALTS) {
       expect([k, BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS[k]).includes(BULK_HALT_REASONS[k])]).toEqual([k, false]);
     }
+    // A judging pass halts as unavailable on its model too, so only its sentence names the model (ux U-105 M1).
+    expect(BULK_NOTICES.de.halted('judge', BULK_HALT_REASONS.unavailable)).toBe('Beurteilung angehalten: KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.');
+    for (const phase of ['apply', 'preview'] as const) {
+      expect([phase, BULK_NOTICES.de.halted(phase, BULK_HALT_REASONS.unavailable).includes('Zielsystem nicht erreichbar oder Fehler in lynox.')]).toEqual([phase, true]);
+    }
     // A reason the table has no German for is quoted as stored, not dropped.
     expect(BULK_NOTICES.de.halted('preview', BULK_HALT_REASONS.checksum)).toBe(`Vorschau angehalten: ${BULK_HALT_REASONS.checksum}.`);
   });
