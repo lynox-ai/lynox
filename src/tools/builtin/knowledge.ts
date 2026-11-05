@@ -76,6 +76,10 @@ export const rememberTool: ToolEntry<RememberInput> = {
       'structured/quantitative data (use data_store_insert). Also NOT for instructions about the job you are doing now ' +
       '(what this text, run or batch must contain or leave out, its length, its keywords), even when phrased as binding: ' +
       'they describe the task, not the business. Record such a rule only when the operator says it applies from now on. ' +
+      'Also NOT for what you wrote in a draft the operator asked for (a newsletter, a product or SEO text, a post, an about-us page): ' +
+      'what it says about the business, its products, its range or its history is yours, not a fact, and neither is the draft ' +
+      'itself. Record only what the operator stated or confirmed about it; a choice they left to you ("decide yourself") ' +
+      'is yours, not confirmed. ' +
       'Record a durable fact before you finish the turn.',
     eager_input_streaming: true,
     input_schema: {

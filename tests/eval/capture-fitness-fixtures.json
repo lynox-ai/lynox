@@ -122,6 +122,16 @@
         "Entwirf einen kurzen Über-uns-Text für die Website von Brunnhof{N}, etwa 80 Wörter.",
         "Schreib einen kurzen Instagram-Post für Lindenwerk{N}, mit zwei passenden Hashtags."
       ]
+    },
+    {
+      "id": "N8-product-text-draft",
+      "expect": "silent",
+      "why": "SEO and product texts ordered for a shop, with no company details: the kind of order a shop customer gives every week. Anything the draft says about the company (history, origin, values, certificates) is invented; stored as a fact, a later chat reads it as true. Product names and the shop name come from the operator's order and are no miss. The runner counts every write, queued or active, from the capture pass and from the model's own remember tool alike; read the texts.",
+      "cases": [
+        "Schreib eine SEO-optimierte Produktbeschreibung, etwa 120 Wörter, für den Tischwasserfilter Klarfluss im Onlineshop von Quellhaus{N}.",
+        "Formuliere Meta-Title und Meta-Description für die Kategorieseite Wasserfilter im Onlineshop von Bergquell{N}.",
+        "Schreib einen kurzen Produkttext für die Ersatzkartusche Pura 3 von Talwasser{N}, mit drei Stichpunkten zu den Vorteilen."
+      ]
     }
   ]
 }
