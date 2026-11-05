@@ -1098,27 +1098,24 @@ describe('what the preview says about a target lynox leaves out', () => {
 		expect(i18nSource).toContain('lynox schreibt diesen Text deshalb nicht. Den neuen Text siehst du unten. Kopier ihn und füge ihn {where} in der HTML- oder Text-Ansicht des Editors ein, nicht in der formatierten Ansicht, sonst wandelt der Editor die Zeichen selbst um. Oder bitte lynox im Chat, den Lauf ohne diese Beschreibung neu zu planen.');
 		expect(i18nSource).toContain("lynox does not write this text. You see the new text below. Copy it and paste it {where} in the editor\\'s HTML or text view, not the formatted view, or the editor converts the characters itself. Or ask lynox in the chat to plan the run again without this description.");
 	});
-	it('words a link the check refuses on every run, a judged run with its allowed domains (U-148)', () => {
+	it('words a link the check refuses on every run, in one sentence for a run with or without a judge (U-148)', () => {
 		const table: Record<string, string> = {
-			'bulk.invalid.new_link_domain': 'drop it, or by hand {where}', 'bulk.invalid.new_link_domain_judged': 'allow it, or by hand {where}',
+			'bulk.invalid.new_link_domain': 'drop it, or by hand {where}',
 			'bulk.invalid.url_scheme': 'not a link, by hand {where}', 'bulk.invalid.url_control_char': 'odd characters',
 			'bulk.invalid.where_shopify': 'in Shopify', 'bulk.invalid.where_other': 'where you manage them', 'bulk.invalid.other': 'skip ({code})',
 		};
 		const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => (table[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => v[n] ?? '') };
-		const ctx = (judged: boolean) => ({ field: undefined, host: null, dataStore: false, judged });
-		expect(bulkInvalidText('new_link_domain', false, true, own, ctx(false))).toBe('drop it, or by hand where you manage them');
-		expect(bulkInvalidText('new_link_domain', true, true, own, ctx(true))).toBe('allow it, or by hand in Shopify');
-		// Without a context the run counts as one without a judge: no allowed domains are offered.
+		const ctx = { field: undefined, host: null, dataStore: false };
+		expect(bulkInvalidText('new_link_domain', false, true, own, ctx)).toBe('drop it, or by hand where you manage them');
 		expect(bulkInvalidText('new_link_domain', true, true, own)).toBe('drop it, or by hand in Shopify');
-		for (const judged of [true, false]) {
-			expect(bulkInvalidText('url_scheme', false, true, own, ctx(judged))).toBe('not a link, by hand where you manage them');
-			expect(bulkInvalidText('url_control_char', true, true, own, ctx(judged))).toBe('odd characters');
-		}
+		expect(bulkInvalidText('url_scheme', false, true, own, ctx)).toBe('not a link, by hand where you manage them');
+		expect(bulkInvalidText('url_control_char', true, true, own, ctx)).toBe('odd characters');
+		// No sentence points to a field for allowed link domains, which no page mounts yet.
+		expect(i18nSource).not.toContain('new_link_domain_judged');
 	});
 	it('holds the link sentences ux released word for word, in both languages (U-148)', () => {
 		const released: [string, string, string][] = [
 			["new_link_domain", "Der neue Text verweist auf eine Domain, auf die dieses Produkt bisher nicht verweist: als Link, als Adresse im Text oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf ohne diesen Verweis neu zu planen. Gehört er so hinein, schreib den Text von Hand {where}.", "The new text points to a domain this product did not point to before: in a link, as an address in the text or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. lynox does not write the text. Ask lynox in the chat to plan the run again without it. If it belongs there as it is, write the text by hand {where}."],
-			["new_link_domain_judged", "Der neue Text verweist auf eine Domain, auf die dieses Produkt bisher nicht verweist: als Link, als Adresse im Text oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf ohne diesen Verweis neu zu planen. Soll er bleiben, trag die Domain beim nächsten Start des Beurteilens unter „Erlaubte Link-Domains“ ein oder schreib den Text von Hand {where}.", "The new text points to a domain this product did not point to before: in a link, as an address in the text or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. lynox does not write the text. Ask lynox in the chat to plan the run again without it. If it should stay, add the domain under “Allowed link domains” the next time you start judging, or write the text by hand {where}."],
 			["url_scheme", "Der neue Text enthält eine Adresse, die kein gewöhnlicher Web- oder Mail-Link ist, etwa „javascript:“, oder in einem Shortcode einen Wert mit Doppelpunkt wie „a:b“. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf ohne diese Adresse neu zu planen. Gehört der Wert so in den Shortcode, schreib den Text von Hand {where}.", "The new text contains an address that is not a plain web or mail link, such as “javascript:”, or a value with a colon in a shortcode, such as “a:b”. lynox does not write it. Ask lynox in the chat to plan the run again without this address. If the value belongs in the shortcode as it is, write the text by hand {where}."],
 			["url_control_char", "Der neue Text enthält in einer Adresse oder einem Shortcode-Wert unsichtbare Steuerzeichen oder das Ersatzzeichen �, oder eine Mail-Adresse mit Leerzeichen. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf neu zu planen, und sag dazu, dass Adressen und Shortcode-Werte keine solchen Zeichen und Mail-Adressen keine Leerzeichen enthalten sollen.", "The new text contains invisible control characters or the replacement character � in an address or a shortcode value, or a mail address with a space. lynox does not write it. Ask lynox in the chat to plan the run again and say that addresses and shortcode values must not contain such characters, and mail addresses no spaces."],
 		];

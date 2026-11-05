@@ -835,77 +835,133 @@ function hostAsWritten(value: string): string | undefined {
  *  in double, single or no quotes, or a positional one. */
 const SHORTCODE_ATTRIBUTE = /([\w-]+)\s*=\s*"([^"]*)"(?:\s|$)|([\w-]+)\s*=\s*'([^']*)'(?:\s|$)|([\w-]+)\s*=\s*([^\s'"]+)(?:\s|$)|"([^"]*)"(?:\s|$)|'([^']*)'(?:\s|$)|(\S+)(?:\s|$)/g;
 
-/** A token of a shortcode's enclosed text that reads as a link: a scheme with no space after its
- *  colon (`https://…`, `javascript:…`), or a protocol-relative `//…`. "Hinweis: neu" is prose. */
-const ENCLOSED_LINK = /(?:^|[\s>"'(])((?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)[^\s<>"'[\]]+)/g;
-
-/** A token anywhere in a value that the shop or a page reads as an absolute link: `http(s)://…`,
- *  a protocol-relative `//…`, or `www.…`. WordPress embeds such a URL standing on its own line,
- *  and in an `[embed]` at any depth, whatever wraps it. */
-const ABSOLUTE_LINK = /(?:^|[\s>"'(=[\]])((?:https?:)?\/\/[^\s<>"'[\]]+|www\.[^\s<>"'[\]]+)/gi;
+/** A pair's enclosed text is read down to this depth of nested pairs; deeper, only the text right
+ *  before a closing tag is read. Each level reads the text once more, so the cost stays linear. */
+const ENCLOSED_DEPTH = 8;
 
 /** The text right before a closing tag, after the tag before it: what a pair such as
  *  `[embed]…[/embed]` hands its handler, at whatever depth it sits. */
 const BEFORE_CLOSER = /\]([^[\]]*)\[\//g;
 
+/** WordPress's `autoembed`: a URL on its own line, or alone in a paragraph, which it embeds — by
+ *  oEmbed discovery for any site, so an unknown host can still put a frame on the page. A URL
+ *  among words is not embedded and, as text, not checked (as in HTML). */
+const OWN_LINE_URL = /^\s*(https?:\/\/[^\s<>"]+)\s*$/gim;
+const OWN_PARAGRAPH_URL = /<p(?: [^>]*)?>\s*(https?:\/\/[^\s<>"]+)\s*<\/p>/gi;
+
+/** A shortcode's text in a link's place: its tags dropped and trimmed. */
+function enclosedText(text: string): string {
+  return text.replace(/<[^<>]*>/g, '').trim();
+}
+
+/** The text a pair encloses, at each depth down to `ENCLOSED_DEPTH`. */
+function enclosedTextsOf(value: string, depth: number, out: string[]): void {
+  if (depth === 0) return;
+  for (const enclosed of shortcodeEnclosedOf(value)) {
+    out.push(enclosedText(enclosed));
+    if (enclosed.includes('[')) enclosedTextsOf(enclosed, depth - 1, out);
+  }
+}
+
+/** A value of a shortcode or of the page that the shop may print as a link, and whether it holds a
+ *  space: a text with one is a link only as `esc_url` makes it (`a b` → `a%20b`), never as written. */
+type LinkCandidate = { value: string; spaced: boolean };
+
 /** The values a shortcode or a page may turn into a link: every attribute value of an opening
- *  shortcode tag, a single token a pair encloses, every link-shaped token a pair encloses, and every
- *  absolute link anywhere in the value. */
-function linkCandidatesOf(value: string): string[] {
-  const out: string[] = [];
+ *  shortcode tag, the text each pair encloses and the text before each closing tag, and each URL
+ *  `autoembed` embeds. */
+function linkCandidatesOf(value: string): LinkCandidate[] {
+  const out: LinkCandidate[] = [];
+  const add = (v: string, spaced: boolean): void => { if (v !== '') out.push({ value: v, spaced }); };
   for (const tag of shortcodeTagsOf(value)) {
     // WordPress reads a no-break and a zero-width space as a space, the name included: in
-    // `[video\u200bsrc="…"]` the name is `video` and `src` an attribute.
-    const spaced = tag.replace(/[\u00a0\u200b]/g, ' ');
+    // `[video​src="…"]` the name is `video` and `src` an attribute.
+    const spaced = tag.replace(/[ ​]/g, ' ');
     if (spaced.startsWith('[/')) continue;
     const rest = spaced.slice(1 + nameRunAt(spaced, 0, spaced.length - 1), -1).replace(/\/\s*$/, '');
     for (const m of rest.matchAll(SHORTCODE_ATTRIBUTE)) {
       const v = m[2] ?? m[4] ?? m[6] ?? m[7] ?? m[8] ?? m[9];
-      if (v !== undefined && v.trim() !== '') out.push(v);
+      if (v !== undefined && v.trim() !== '') add(v, false);
     }
   }
-  for (const m of value.matchAll(BEFORE_CLOSER)) {
-    const token = m[1]!.replace(/<[^<>]*>/g, '').trim();
-    if (token !== '' && !/\s/.test(token)) out.push(token);
-  }
-  for (const enclosed of shortcodeEnclosedOf(value)) {
-    for (const m of enclosed.matchAll(ENCLOSED_LINK)) out.push(m[1]!);
-  }
-  for (const m of value.matchAll(ABSOLUTE_LINK)) out.push(m[1]!);
+  const texts: string[] = [];
+  enclosedTextsOf(value, ENCLOSED_DEPTH, texts);
+  for (const m of value.matchAll(BEFORE_CLOSER)) texts.push(enclosedText(m[1]!));
+  for (const t of texts) add(t, /\s/.test(t));
+  for (const m of value.matchAll(OWN_LINE_URL)) add(m[1]!, false);
+  for (const m of value.matchAll(OWN_PARAGRAPH_URL)) add(m[1]!, false);
   return out;
 }
 
-/** A host as the end of a domain: labels separated by dots, the last one starting with a letter. */
-const DOMAIN_SHAPED = /^[^/?#:]+\.[A-Za-z][A-Za-z0-9-]*(?::\d+)?(?:[/?#]|$)/;
+/** The characters `esc_url` keeps (`a-z0-9-~+_.?#=!&;,/:%@$|*'()[]` and every byte from 0x80). */
+const ESC_URL_DROPS = /[^a-z0-9\-~+_.?#=!&;,/:%@$|*'()[\]\u0080-￿]/gi;
 
 /**
- * A value as the shop prints it into a link (`esc_url`) and a browser then reads it: whitespace
- * dropped, as `esc_url` does (which takes the tab, newline and CR the URL parser drops with it);
- * a backslash read as `/`, as the URL parser does; and a value without a scheme that starts with a
- * domain gets `http://` in front, as `esc_url` gives it — `evil.example/a.mp4` is
- * `http://evil.example/a.mp4`, not a path on the store. A value that does not start with a domain
- * (`large`, `/sale`, `#top`; `DOMAIN_SHAPED` cannot start with `/`, `?` or `#`) stays relative.
+ * WordPress's `esc_url` up to its scheme check, step by step (wp-includes/formatting.php): leading
+ * whitespace trimmed and a space made `%20`; every character outside its set dropped — a backslash
+ * too, so `shop.example\@evil.example` reaches the page as `shop.example@evil.example`; an encoded
+ * CR or LF removed until none is left (but in a `mailto:`); `;//` read as `://`; and `http://` in
+ * front of a value with no `:` that starts with none of `/`, `#`, `?` and is no `name.php`.
  */
-function printedLink(value: string): string {
-  const v = value.replace(/\\/g, '/').replace(/\s+/g, '');
-  if (v.includes(':') || /^[a-z0-9-]+?\.php/i.test(v)) return v;
-  return DOMAIN_SHAPED.test(v) ? `http://${v}` : v;
+function escUrl(value: string): { url: string; prefixed: boolean } {
+  let url = value.replace(/^[ \t\n\r\0\x0B]+/, '').replace(/ /g, '%20').replace(ESC_URL_DROPS, '');
+  if (url === '') return { url, prefixed: false };
+  if (!/^mailto:/i.test(url)) {
+    for (let before = ''; before !== url;) { before = url; url = url.replace(/%0d|%0a|%0D|%0A/g, ''); }
+  }
+  url = url.replace(/;\/\//g, '://');
+  if (url === '' || url.includes(':') || '/#?'.includes(url[0]!) || /^[a-z0-9-]+?\.php/i.test(url)) return { url, prefixed: false };
+  return { url: `http://${url}`, prefixed: true };
 }
 
-/** A value as written and as a browser reads it once the shop prints it into an attribute: with
- *  its character references decoded (`&#x6a;avascript:` is `javascript:`), each as printed. */
-function linkForms(value: string): string[] {
-  const decoded = value.includes('&') ? textBelow(parseHtmlFragment(value.replace(/</g, '&lt;'))) : value;
-  return [...new Set([printedLink(value), printedLink(decoded)])];
+/**
+ * Whether a value `esc_url` gave `http://` reads as a link to a host, rather than a word an
+ * attribute holds (`large`, `1.5`, `ja/nein`): its host as the URL parser reads it — `%2E` and
+ * `。` as dots, a trailing dot dropped — is a name of at least two labels whose last has two
+ * characters or more, or an IPv4 address outside 0.0.0.0/8 written as four numbers or followed by
+ * a path. A host of one label (`localhost`, `media/a.mp4`) is not counted: it names no foreign
+ * domain, and counting it would refuse `ja/nein`.
+ */
+function readsAsHost(prefixed: string): boolean {
+  let host: string;
+  try {
+    host = new URL(prefixed).hostname.replace(/\.$/, '');
+  } catch {
+    return false;
+  }
+  const written = prefixed.slice('http://'.length);
+  const hostPart = written.split(/[/?#]/)[0]!.replace(/\.$/, '');
+  const ipv4 = /^(\d+)\.\d+\.\d+\.\d+$/.exec(host);
+  if (ipv4 !== null) return ipv4[1] !== '0' && (hostPart.split('.').length === 4 || hostPart.length < written.length);
+  const labels = host.split('.');
+  return labels.length >= 2 && labels[labels.length - 1]!.length >= 2;
 }
 
-/** The candidates of a value and of its text as a browser decodes it: `&#104;ttps://` is a link. */
-function candidatesWithDecoded(value: string): string[] {
-  const out = linkCandidatesOf(value);
-  if (!value.includes('&')) return out;
-  const decoded = textBelow(parseHtmlFragment(value.replace(/</g, '&lt;')));
-  for (const m of decoded.matchAll(ABSOLUTE_LINK)) out.push(m[1]!);
+/** A value read as a link the way it reaches a browser: as written, for a shortcode that prints it
+ *  as it is; and as `esc_url` prints it, for one that escapes it. A value of a scheme alone
+ *  (`Hinweis:`) is no link. A text with a space is read only as `esc_url` gives it a host or keeps
+ *  a web scheme: `[b]Hinweis: neu[/b]` is a label, `[embed]evil.example/a b[/embed]` a link. */
+function printedForms(candidate: LinkCandidate): string[] {
+  const { value, spaced } = candidate;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\s*$/.test(value)) return [];
+  const escaped = escUrl(value);
+  const out: string[] = [];
+  if (escaped.prefixed ? readsAsHost(escaped.url) : escaped.url !== '' && (!spaced || /^(?:https?:)?\/\//i.test(escaped.url))) {
+    out.push(escaped.url);
+  }
+  if (!spaced) out.push(value);
   return out;
+}
+
+/** A value as a browser reads it once the shop prints it into an attribute, with its character
+ *  references decoded (`&#x6a;avascript:` is `javascript:`), and as written: each as printed. */
+function linkForms(candidate: LinkCandidate): string[] {
+  const forms = printedForms(candidate);
+  if (candidate.value.includes('&')) {
+    const decoded = textBelow(parseHtmlFragment(candidate.value.replace(/</g, '&lt;')));
+    forms.push(...printedForms({ value: decoded, spaced: candidate.spaced }));
+  }
+  return [...new Set(forms)];
 }
 
 /**
@@ -915,18 +971,19 @@ function candidatesWithDecoded(value: string): string[] {
  */
 function checkShortcodeLinks(input: MarkupCheckInput): MarkupCheckResult {
   const before = input.before ?? '';
-  const held = counts(candidatesWithDecoded(before));
+  const beforeCandidates = linkCandidatesOf(before);
+  const held = counts(beforeCandidates.map((c) => c.value));
   const linked = linkedDomains(markupOf(parseHtmlFragment(before)).triples, input.storeHost);
-  for (const v of held.keys()) {
-    for (const form of linkForms(v)) {
+  for (const c of beforeCandidates) {
+    for (const form of linkForms(c)) {
       const target = linkTarget(form, input.storeHost);
       if (target.ok) linked.add(`${target.kind}:${target.domain}`);
     }
   }
-  for (const v of candidatesWithDecoded(input.after)) {
-    const n = held.get(v) ?? 0;
-    if (n > 0) { held.set(v, n - 1); continue; }
-    for (const form of linkForms(v)) {
+  for (const c of linkCandidatesOf(input.after)) {
+    const n = held.get(c.value) ?? 0;
+    if (n > 0) { held.set(c.value, n - 1); continue; }
+    for (const form of linkForms(c)) {
       const link = checkLink(form, input, linked);
       if (!link.ok) return link;
     }

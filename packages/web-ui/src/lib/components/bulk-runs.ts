@@ -893,9 +893,8 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
  *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
 export function bulkInvalidText(
 	reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n,
-	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's.
-	 *  With `new_link_domain`: whether the run has a judge, whose start takes allowed link domains. */
-	context?: { field: string | undefined; host: string | null; dataStore: boolean; judged?: boolean },
+	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's. */
+	context?: { field: string | undefined; host: string | null; dataStore: boolean },
 ): string {
 	// The field the judge only reads that held a credential, named so the owner knows which one to
 	// clean (U-140): on Shopify by its readable name, in the data store by the owner's column name,
@@ -910,9 +909,9 @@ export function bulkInvalidText(
 	}
 	const anyForm = BULK_INVALID_ANY_FORM[reason];
 	if (anyForm !== undefined) {
-		// Only a judged start takes allowed link domains: a run without a judge is not told to add one.
-		const key = anyForm === 'new_link_domain' && context?.judged === true ? 'new_link_domain_judged' : anyForm;
-		return i18n.tf(`bulk.invalid.${key}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
+		// One sentence for a judged run too: the field for allowed link domains is mounted on no page
+		// yet, so no run is told to add one there (U-148).
+		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
 	}
 	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
 	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });

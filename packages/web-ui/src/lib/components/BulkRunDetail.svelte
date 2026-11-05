@@ -516,7 +516,7 @@
 											{/if}
 											{@render markupList(target, false)}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', judged: run.judgeRuleHash !== null })}</p>
+												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store' })}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
 													{#each target.refusedValues as { field, value } (field)}
 														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle">{bulkVisibleText(field)}:</div>{/if}
