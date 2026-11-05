@@ -893,7 +893,7 @@ const ANY_STORE_HOST = 'store.invalid';
 
 /** Whether an item is one a write may add (`checkMarkup`): an allowlisted HTML element outside a
  *  `template`, with no raw text and no attribute but an `a`'s `href`, one the link check reads. */
-function withinAllowlist(item: MarkupItem): boolean {
+export function withinAllowlist(item: MarkupItem): boolean {
   return item.kind === 'element' && item.namespace === 'html' && ALLOWED_ELEMENTS.has(item.element) && item.text === null
     && !item.inTemplate
     && item.attributes.every(([name, value]) => item.element === 'a' && name === 'href' && linkTarget(value, ANY_STORE_HOST).ok);

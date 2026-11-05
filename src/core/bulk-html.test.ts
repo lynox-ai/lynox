@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   checkMarkup, droppedTagsOf, htmlFieldsOfListForm, markupChangesOf, markupOf, plainTextMarkupOf,
-  type MarkupCheckInput, type MarkupRefusal,
+  withinAllowlist, type MarkupCheckInput, type MarkupItem, type MarkupRefusal,
 } from './bulk-html.js';
 import { parseFragment, defaultTreeAdapter, html as p5 } from 'parse5';
 import { canonicalHtml } from './html-tree.js';
@@ -509,9 +509,18 @@ describe('markupChangesOf', () => {
     expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example?bcc=x@evil.example">b</a></p>')).toBe(true);
     expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example">b</a></p>')).toBe(false);
     // A comment fails on its kind, its namespace and its name at once, and raw text lies only in
-    // elements off the list: those two conditions hold no case of their own.
+    // elements off the list: parsed markup reaches neither condition alone (the next test does).
     // Only what is added counts: a removed image does not.
     expect(outside('<p>a</p><img src="/i.jpg">', '<p>a</p>')).toBe(false);
+  });
+
+  it('holds each allowlist condition alone, for an item no parse yields', () => {
+    // The kind and the raw text guard against an item that breaks the parser's invariants: a
+    // comment carrying an element's namespace and name, an allowlisted element carrying raw text.
+    const p: MarkupItem = { kind: 'element', namespace: 'html', element: 'p', attributes: [], text: null, inTemplate: false };
+    expect(withinAllowlist(p)).toBe(true);
+    expect(withinAllowlist({ ...p, kind: 'comment' })).toBe(false);
+    expect(withinAllowlist({ ...p, text: 'x' })).toBe(false);
   });
 
   it('names an allowlisted element with an attribute, and one inside a template', () => {
