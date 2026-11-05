@@ -42,7 +42,9 @@ const realFeatures = readFileSync(join(repoRoot, 'src/core/features.ts'), 'utf8'
 /** The real inventory's `feature:` lines, with the fixture's one config flag. */
 const realFeatureInventory = `x_flag\n${readFileSync(join(repoRoot, 'scripts/default-on-inventory.txt'), 'utf8')
   .split('\n').filter((l) => l.startsWith('feature:')).join('\n')}\n`;
-const READ = 'export const on = (flag: string): boolean => CORE_FEATURE_DEFAULTS[flag as FeatureFlag] ?? false;\n';
+/** The read the script requires word for word (it is `isFeatureEnabled`'s last line in the real file). */
+const READ_LINE = '  return CORE_FEATURE_DEFAULTS[flag as FeatureFlag] ?? _dynamicDefaults.get(flag) ?? false;';
+const READ = `export function isFeatureEnabled(flag: string): boolean {\n${READ_LINE}\n}\n`;
 const block = (entries: string, after = ''): string =>
   `const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {\n${entries}};\n${after}${READ}`;
 const recorded = (...extra: string[]): string => `# on record\nx_flag\n${extra.join('\n')}\n`;
@@ -89,9 +91,12 @@ describe('default-on-inventory reads the feature flags\' defaults', () => {
     ['an empty table', block(''), UNREADABLE],
     // With a plain entry beside it, so the line itself decides (not an otherwise empty table).
     ['a block comment in front of an entry', block("  'off-flag': false,\n  /* on */ 'on-flag': true,\n"), UNREADABLE],
+    ['block comments on both sides of an entry', block("  'off-flag': false,\n  /* a */ 'on-flag': true, /* c */\n"), UNREADABLE],
+    ['an entry behind a two-line block comment', block("  'off-flag': false,\n  /* a\n  */ 'on-flag': true,\n"), UNREADABLE],
     ['no table at all', 'export const nothing = 1;\n', NAMED],
     ['a write to the table after its declaration', block("  'on-flag': false,\n", "CORE_FEATURE_DEFAULTS['on-flag'] = true;\n"), NAMED],
     ['a write to the table in place of the read', `const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {\n  'on-flag': false,\n};\nCORE_FEATURE_DEFAULTS['on-flag'] = true;\n`, NAMED],
+    ['a write on the read line itself', block("  'on-flag': false,\n").replace(READ_LINE, `${READ_LINE} CORE_FEATURE_DEFAULTS['on-flag'] = true;`), NAMED],
     ['an entry on the opening line', `const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = { 'on-flag': true,\n  'off-flag': false,\n};\n${READ}`, NAMED],
   ];
   for (const [what, features, diagnosis] of unreadable) {

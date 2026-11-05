@@ -26,8 +26,10 @@
 # `false → true` there ships the feature on every instance that sets nothing, the same
 # rollout as a `?? true`. Until this read existed, such a flip passed this guard green.
 # It reads the table literal, not what `isFeatureEnabled` returns: a special case in the
-# resolver is not read. A write to the table anywhere but its declaration (an assignment,
-# `Object.assign`) stops the run, because the literal would no longer be the default.
+# resolver is not read. The table's name may occur exactly twice in the file, in its
+# declaration and in the one read, which must be the line below word for word; any other
+# occurrence (an assignment, `Object.assign`, an alias, even on the read's own line) stops
+# the run, because the literal would no longer be the whole default.
 # Flags registered at runtime (`registerFeature`) are not in the table and not read here.
 # Then diffs that set against `scripts/default-on-inventory.txt`. A new default-ON
 # flag that is not in the file fails. Adding the line is the deliberate act — it
@@ -80,26 +82,25 @@ for f in $FIELDS; do
 done
 
 # The feature flags' defaults: the `CORE_FEATURE_DEFAULTS` object literal, one entry per
-# line. Read fail-closed: no block, no entry, or any line in it that is neither a
-# comment nor a `'name': true|false,` entry (a constant, an expression, a value on the
-# next line, an unquoted key, a spread) stops the run instead of reading as "nothing
-# default-ON".
-# The table is named in exactly two places: its declaration and the one read in
-# `isFeatureEnabled`. Any other mention could change a default the literal does not show.
-feature_mentions="$(grep -c 'CORE_FEATURE_DEFAULTS' "$FEATURES" || true)"
+# line. Read fail-closed: no entry, or any line in it that is neither a `//` comment nor
+# a `'name': true|false,` entry (a constant, an expression, a value on the next line, an
+# unquoted key, a spread, a `/* */` comment) stops the run instead of reading as "nothing
+# default-ON". Block comments are refused rather than parsed: parsing them is where a
+# `true` hides.
+FEATURE_READ='  return CORE_FEATURE_DEFAULTS[flag as FeatureFlag] ?? _dynamicDefaults.get(flag) ?? false;'
+# `|| true` inside the group: with no match, grep's exit 1 would end the run silently
+# under `pipefail`, without saying why.
+feature_mentions="$( { grep -o 'CORE_FEATURE_DEFAULTS' "$FEATURES" || true; } | wc -l | tr -d ' ')"
 if [ "$feature_mentions" -ne 2 ] || ! grep -qE '^const CORE_FEATURE_DEFAULTS[^=]*= \{[[:space:]]*$' "$FEATURES" \
-   || ! grep -qF 'CORE_FEATURE_DEFAULTS[flag as FeatureFlag]' "$FEATURES"; then
-  echo "default-on-inventory: CORE_FEATURE_DEFAULTS is named ${feature_mentions} times in $FEATURES, expected its declaration (ending in '{') and the one read in isFeatureEnabled — a write elsewhere would change a default the table does not show; refusing to report a clean run" >&2
+   || ! grep -qxF "$FEATURE_READ" "$FEATURES"; then
+  echo "default-on-inventory: CORE_FEATURE_DEFAULTS is named ${feature_mentions} times in $FEATURES, expected its declaration (ending in '{') and the one read in isFeatureEnabled, word for word: '${FEATURE_READ}' — a write elsewhere would change a default the table does not show; refusing to report a clean run" >&2
   exit 1
 fi
 # The check above made the opening line end at `{`, so no entry can sit on it, outside the
 # lines read below.
 FEATURE_BLOCK="$(LC_ALL=C sed -n '/^const CORE_FEATURE_DEFAULTS[^=]*= {/,/^};/p' "$FEATURES")"
-# The lines between the opening and the closing line that are not blank or a comment. A
-# comment line is `//…`, a whole `/* … */`, the start of a block comment with no quote on
-# it, or a `*` continuation; `/* x */ 'name': true,` is an entry and must read as one.
-feature_lines="$(printf '%s\n' "$FEATURE_BLOCK" | sed '1d;$d' \
-  | LC_ALL=C grep -cvE "^[[:space:]]*(\$|//|/\*.*\*/[[:space:]]*\$|/\*[^'*]*\$|\*)" || true)"
+# The lines between the opening and the closing line that are not blank or a `//` comment.
+feature_lines="$(printf '%s\n' "$FEATURE_BLOCK" | sed '1d;$d' | LC_ALL=C grep -cvE '^[[:space:]]*($|//)' || true)"
 feature_literal="$(printf '%s\n' "$FEATURE_BLOCK" | sed '1d;$d' \
   | LC_ALL=C grep -cE "^[[:space:]]*'[a-z0-9-]+':[[:space:]]*(true|false),?[[:space:]]*(//.*)?$" || true)"
 if [ "$feature_literal" -eq 0 ] || [ "$feature_lines" -ne "$feature_literal" ]; then

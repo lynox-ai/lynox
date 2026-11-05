@@ -64,7 +64,8 @@ function run(defaultOn: string[], recorded: string[]): { code: number; out: stri
   writeFileSync(
     join(root, 'src/core/features.ts'),
     "const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {\n  'off-flag': false,\n};\n" +
-    'export const on = (flag: string): boolean => CORE_FEATURE_DEFAULTS[flag as FeatureFlag] ?? false;\n',
+    'export function isFeatureEnabled(flag: string): boolean {\n' +
+    '  return CORE_FEATURE_DEFAULTS[flag as FeatureFlag] ?? _dynamicDefaults.get(flag) ?? false;\n}\n',
   );
   writeFileSync(join(root, 'scripts/default-on-inventory.txt'), `# on record\n${recorded.join('\n')}\n`);
   const r = spawnSync('bash', [join(root, 'scripts/default-on-inventory.sh')], {
