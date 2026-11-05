@@ -520,7 +520,7 @@ describe('RulesView — what the form says when the server refuses the value', (
 		await settle();
 		return spy;
 	}
-	const ALERTS = ['rules-from-address-error', 'rules-label-error', 'rules-hidden-chars-error', 'rules-subject-short-error', 'rules-list-id-error'];
+	const ALERTS = ['rules-from-address-error', 'rules-label-error', 'rules-hidden-chars-error', 'rules-subject-short-error', 'rules-too-long-error', 'rules-list-id-error'];
 
 	it.each([
 		['subject phrase must be at least 3 characters', 'subject_contains', 'Hi', 'rules-subject-short-error', 'inbox.rules_error_subject_short'],
@@ -528,6 +528,7 @@ describe('RulesView — what the form says when the server refuses the value', (
 		['matcherValue must be one line', 'from', 'a@b.example', 'rules-hidden-chars-error', 'inbox.rules_error_hidden_chars'],
 		['description holds characters a reader does not see', 'matches_description', 'Mahnungen', 'rules-hidden-chars-error', 'inbox.rules_error_hidden_chars'],
 		['list_id rules do not apply yet', 'from', 'a@b.example', 'rules-list-id-error', 'inbox.rules_error_list_id'],
+		['matcherValue exceeds 200 characters', 'subject_contains', 'Rechnung', 'rules-too-long-error', 'inbox.rules_error_too_long'],
 	])('says "%s" in the form, as an alert, and toasts nothing', async (error, kind, value, testId, key) => {
 		const spy = await submitRefused(error, kind, value);
 		const alert = byTestId(testId);
@@ -537,6 +538,39 @@ describe('RulesView — what the form says when the server refuses the value', (
 		expect(target.querySelector('form')).not.toBeNull();
 		expect(spy).not.toHaveBeenCalled();
 		spy.mockRestore();
+	});
+	it('clears the refusal when the value is sent again, and when the form is opened again', async () => {
+		let reply: () => Response = () => Response.json({ error: 'subject phrase must be at least 3 characters' }, { status: 400 });
+		await render({ viewer: 'owner', rules: [], create: () => reply() });
+		await openForm();
+		await choose('rule-match-kind', 'subject_contains');
+		await type(textInputs()[1]!, 'Hi');
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		expect(byTestId('rules-subject-short-error')).not.toBeNull();
+		// Sent again, refused for a reason the form does not name: the old reason must not stay.
+		reply = () => Response.json({ error: 'bad' }, { status: 400 });
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		expect(byTestId('rules-subject-short-error')).toBeNull();
+		// Refused again, then cancelled and opened anew: the new form starts without a refusal.
+		reply = () => Response.json({ error: 'subject phrase must be at least 3 characters' }, { status: 400 });
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		expect(byTestId('rules-subject-short-error')).not.toBeNull();
+		[...target.querySelectorAll<HTMLButtonElement>('form button')].find((b) => b.textContent?.trim() === t('inbox.rules_cancel'))!.click();
+		await settle();
+		await openForm();
+		expect(byTestId('rules-subject-short-error')).toBeNull();
+	});
+
+	it('caps a sender or subject value at 200 and a description at 300 in the input', async () => {
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		for (const [kind, max] of [['from', '200'], ['subject_contains', '200'], ['matches_description', '300']] as const) {
+			await choose('rule-match-kind', kind);
+			expect(textInputs()[1]!.getAttribute('maxlength'), kind).toBe(max);
+		}
 	});
 });
 

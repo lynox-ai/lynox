@@ -116,9 +116,13 @@
 		not_one_address: { key: 'inbox.rules_error_from_address', testId: 'rules-from-address-error' },
 		hidden_chars: { key: 'inbox.rules_error_hidden_chars', testId: 'rules-hidden-chars-error' },
 		subject_short: { key: 'inbox.rules_error_subject_short', testId: 'rules-subject-short-error' },
+		too_long: { key: 'inbox.rules_error_too_long', testId: 'rules-too-long-error' },
 		list_id: { key: 'inbox.rules_error_list_id', testId: 'rules-list-id-error' },
 	};
 	const DESCRIPTION_MAX = 300;
+	/** The server's cap on a sender, subject or list id value. The input counts UTF-16 units,
+	 *  the server characters, so the input never lets through more than the server takes. */
+	const FIXED_VALUE_MAX = 200;
 
 	let accounts = $state<MailAccountView[]>([]);
 	let accountsLoading = $state(true);
@@ -309,7 +313,7 @@
 	function closeForm(): void {
 		formOpen = false;
 		formSubmitting = false;
-		formRefusal = null;
+		// The refusal is cleared where the form opens (`openForm`), the only way it opens.
 	}
 
 	async function submitForm(): Promise<void> {
@@ -535,7 +539,7 @@
 							type="text"
 							bind:value={formMatchValue}
 							required
-							maxlength={formIsDescription ? DESCRIPTION_MAX : undefined}
+							maxlength={formIsDescription ? DESCRIPTION_MAX : FIXED_VALUE_MAX}
 							placeholder={formIsDescription ? t('inbox.rules_description_placeholder') : formMatchKind === 'from' ? t('inbox.rules_match_from_placeholder') : t('inbox.rules_match_value_placeholder')}
 							class="w-full bg-bg-subtle border border-border rounded-[var(--radius-sm)] px-3 py-2 text-sm text-text placeholder:text-text-subtle"
 						/>

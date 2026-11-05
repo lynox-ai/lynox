@@ -126,6 +126,7 @@ describe('createInboxRule', () => {
 		['matcherValue must be one line', 'hidden_chars'],
 		['description must be one line', 'hidden_chars'],
 		['subject phrase must be at least 3 characters', 'subject_short'],
+		['matcherValue exceeds 200 characters', 'too_long'],
 		['list_id rules do not apply yet', 'list_id'],
 	] as const)('reports "%s" as %s', async (error, refusal) => {
 		installFetch(async () => jsonResponse({ error }, 400));
@@ -133,18 +134,18 @@ describe('createInboxRule', () => {
 	});
 
 	it('names no refusal the form cannot act on', async () => {
-		for (const error of ['matcherValue exceeds 200 characters', 'description must be 3 to 300 characters', 'x matcherValue must be one line', 'invalid matcherKind']) {
+		for (const error of ['description must be 3 to 300 characters', 'x matcherValue must be one line', 'invalid matcherKind']) {
 			installFetch(async () => jsonResponse({ error }, 400));
 			expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: null });
 		}
 	});
 
-	it('fails without the rule-label flag when the server rejects with another 400', async () => {
+	it('names no refusal when the server rejects with another 400', async () => {
 		installFetch(async () => jsonResponse({ error: 'bad' }, 400));
 		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: null });
 	});
 
-	it('fails without the rule-label flag when a refusal has no JSON body', async () => {
+	it('names no refusal when a refusal has no JSON body', async () => {
 		installFetch(async () => new Response('nope', { status: 400 }));
 		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: null });
 	});

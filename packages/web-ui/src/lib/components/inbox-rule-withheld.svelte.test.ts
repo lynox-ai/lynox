@@ -213,19 +213,25 @@ describe('InboxReadingPane — a rule held back', () => {
 	});
 
 	it.each([
-		['a zero-width space', 'Newsletter\u200B KW 45', 'Newsletter'],
-		['a combining grapheme joiner padding', 'Sale \u034F\u034F\u034F jetzt kaufen', 'jetzt kaufen'],
-		['a tab of an unfolded header', 'Re: Rechnung\tNr. 42', 'Re: Rechnung'],
-		['a byte order mark in front', '\uFEFFZahlungserinnerung 42', 'Zahlungserinnerung 42'],
-	])('offers from a subject with %s only a piece the subject contains as it is', async (_label, subject, value) => {
+		['an emoji', '\u26A0 Mahnung Nr. 42', '\u26A0 Mahnung Nr. 42'],
+		['a family emoji', 'Familie \u{1F468}\u200D\u{1F469}\u200D\u{1F467}', 'Familie \u{1F468}\u200D\u{1F469}\u200D\u{1F467}'],
+		['more than 200 characters', 'x'.repeat(250), 'x'.repeat(200)],
+	])('offers the stored subject with %s whole, cut to 200 characters', async (_label, subject, value) => {
 		await render(item({ id: 'rul_1', name: 'Mahnungen', reason: 'rule_withheld_classifier' }, { subject }));
 		const link = byTestId('inbox-rule-withheld-from-subject') as HTMLAnchorElement | null;
-		const prefilled = new URL(link!.getAttribute('href')!, 'http://localhost').searchParams.get('value');
-		expect(prefilled).toBe(value);
-		expect(subject.includes(prefilled!)).toBe(true);
+		expect(new URL(link!.getAttribute('href')!, 'http://localhost').searchParams.get('value')).toBe(value);
 	});
 
-	it.each(['Hi', ' Re ', 'ab\u200Bcd', '\u{1F600}\u{1F600}'])('offers no subject rule for "%s", which has no piece of 3 characters', async (subject) => {
+	// The stored subject keeps a few characters the server refuses (a combining grapheme joiner,
+	// the braille blank): no piece of it is offered, and no subject rule at all, also when the
+	// character stands behind the 200 characters a value can hold.
+	it.each(['Sale \u034F\u034F\u034F jetzt kaufen', 'Rechnung\u2800Nr. 42', `${'x'.repeat(210)} \u034F jetzt`])('offers no subject rule for a subject that holds a character the server refuses (%j)', async (subject) => {
+		await render(item({ id: 'rul_1', name: 'Mahnungen', reason: 'rule_withheld_classifier' }, { subject }));
+		expect(byTestId('inbox-rule-withheld-from-subject')).toBeNull();
+		expect(byTestId('inbox-rule-withheld-from-sender')).not.toBeNull();
+	});
+
+	it.each(['Hi', ' Re ', '\u{1F600}\u{1F600}'])('offers no subject rule for "%s", shorter than 3 characters', async (subject) => {
 		await render(item({ id: 'rul_1', name: 'Mahnungen', reason: 'rule_withheld_classifier' }, { subject }));
 		expect(byTestId('inbox-rule-withheld-from-subject')).toBeNull();
 		expect(byTestId('inbox-rule-withheld-from-sender')).not.toBeNull();

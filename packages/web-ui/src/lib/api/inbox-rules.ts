@@ -33,9 +33,10 @@ export interface CreateRuleBody {
  * - `not_one_address`: a sender rule whose value is not one whole sender address;
  * - `hidden_chars`: the value holds a character a reader does not see, a line break or a tab;
  * - `subject_short`: a subject phrase under the minimum, which would match almost any mail;
+ * - `too_long`: a sender, subject or list id value over the server's cap;
  * - `list_id`: a list id rule, which cannot be created while the mail's List-ID is not read.
  */
-export type CreateRuleRefusal = 'rule_label' | 'not_one_address' | 'hidden_chars' | 'subject_short' | 'list_id';
+export type CreateRuleRefusal = 'rule_label' | 'not_one_address' | 'hidden_chars' | 'subject_short' | 'too_long' | 'list_id';
 
 /** The outcome of a create; `refusal` is null for a failure the form cannot name. */
 export type CreateRuleResult = { ok: true; id: string } | { ok: false; refusal: CreateRuleRefusal | null };
@@ -47,6 +48,7 @@ const REFUSALS: ReadonlyArray<readonly [RegExp, CreateRuleRefusal]> = [
 	[/^(matcherValue|description) holds characters a reader does not see$/, 'hidden_chars'],
 	[/^(matcherValue|description) must be one line$/, 'hidden_chars'],
 	[/^subject phrase must be at least \d+ characters$/, 'subject_short'],
+	[/^matcherValue exceeds \d+ characters$/, 'too_long'],
 	[/^list_id rules do not apply yet$/, 'list_id'],
 ];
 

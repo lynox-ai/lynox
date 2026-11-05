@@ -4,9 +4,10 @@
 // break or a tab, more than FIXED_VALUE_MAX characters, a sender that is not one address, or a
 // subject phrase under SUBJECT_MIN characters (`src/integrations/inbox/rule-text.ts`). A link
 // that prefills such a value would end in that refusal, so the reading pane offers only a value
-// the server takes. The rule compares the stored value with the mail's raw subject, so the
-// subject phrase is a piece of the subject as it is: the longest run between hidden characters
-// and line breaks, not the subject with them removed, which the subject would no longer contain.
+// the server takes. The pane reads the subject and sender as the inbox stored them, and the rule
+// match compares both the mail and the rule value in that stored form, so the stored subject
+// (cut to the cap) matches the mail it came from. A subject that still holds a character the
+// server refuses is not offered at all: a piece of it would be a broader rule than the owner chose.
 // `tests/inbox-rule-prefill-drift.test.ts` holds these checks against the server's.
 
 import { hiddenCharIndexes } from './hidden-chars.js';
@@ -35,26 +36,16 @@ export function senderRulePrefill(fromAddress: string): string | null {
 }
 
 /**
- * The subject phrase a fixed rule may be made from: the longest run of the subject between
- * characters a reader does not see and line breaks, trimmed and cut to the cap; null when no run
- * holds SUBJECT_MIN characters.
+ * The subject phrase a fixed rule may be made from: the whole subject, trimmed and cut to the
+ * cap; null when it holds a character a reader does not see or a line break, or is shorter than
+ * SUBJECT_MIN characters.
  */
 export function subjectRulePrefill(subject: string): string | null {
-	const chars = Array.from(subject);
-	const hidden = new Set(hiddenCharIndexes(subject));
-	let best: string[] = [];
-	let run: string[] = [];
-	const close = (): void => {
-		const piece = Array.from(run.join('').trim());
-		if (piece.length > best.length) best = piece;
-		run = [];
-	};
-	chars.forEach((c, i) => {
-		if (hidden.has(i) || LINE_BREAKS.has(c)) close();
-		else run.push(c);
-	});
-	close();
-	const value = best.slice(0, FIXED_VALUE_MAX).join('').trim();
+	const whole = subject.trim();
+	// The whole subject, not only the part within the cap.
+	if (hiddenCharIndexes(whole).length > 0 || [...whole].some((c) => LINE_BREAKS.has(c))) return null;
+	// A cut can end between the parts of an emoji, which then reads as hidden: checked again.
+	const value = Array.from(whole).slice(0, FIXED_VALUE_MAX).join('').trim();
 	if (Array.from(value).length < SUBJECT_MIN || !readsAsStored(value)) return null;
 	return value;
 }
