@@ -63,6 +63,7 @@
 		getContainedOrigin,
 		getContainedPrefill,
 		registerComposerDraft,
+		registerKeyRefusalReset,
 		planInNewChat,
 		newChat,
 		type FileAttachment,
@@ -111,7 +112,7 @@
 	import ComposerModelPicker from './ComposerModelPicker.svelte';
 	import ThreadModelControl from './ThreadModelControl.svelte';
 	import OnboardingBasics from './OnboardingBasics.svelte';
-	import { canChooseModel, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { canChooseModel, isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
@@ -1806,6 +1807,10 @@
 	$effect(() => { focusInput(); });
 	// An answer that reached a closed question comes back here, into an empty field only (UX-064):
 	// a text the user is writing is theirs, and the sentence above says the answer was not used.
+	// An answer refused as carrying a key was not taken: what this view shows of it goes.
+	// The refusal is pinned into view: a question card that comes back shrinks the message area, and
+	// the sentence would otherwise sit below its fold, out of sight behind the card.
+	$effect(() => registerKeyRefusalReset(() => { answeredPrompts = []; approvalInflight = null; pinToBottomFor(1500); }));
 	$effect(() => registerComposerDraft((text) => {
 		if (inputText.trim() !== '') return false;
 		inputText = text;
@@ -1872,7 +1877,9 @@
 		// Chat input guard: warn if text looks like an API key or secret. Before the answer
 		// branch, so text typed into this box as the answer to an open question is checked too.
 		if (looksLikeSecret(task)) {
-			addToast(t('chat.secret_warning'), 'error', 6000);
+			// In a mandate's chat no key is taken at all, not even by "store a secret": the helper
+			// reads the same sentence the server's refusal shows (the text stays in the field).
+			addToast(isMandateSession() ? t('chat.mandate_key_input_returned') : t('chat.secret_warning'), 'error', 6000);
 			return;
 		}
 

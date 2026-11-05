@@ -82,7 +82,7 @@ import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onb
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
-import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
+import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
@@ -1327,6 +1327,39 @@ export const BULK_PROBE_REQUIRED =
 /** A workflow's authorship, or undefined when the read throws: no badge, and a run the runner refuses as unreadable. */
 function authorshipOrNone(read: () => WorkflowAuthorship | undefined): WorkflowAuthorship | undefined {
   try { return read(); } catch { return undefined; }
+}
+
+/** The code beside `MANDATE_KEY_INPUT_REFUSAL`, read by the web UI. */
+export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
+
+/**
+ * Whether text a mandate's helper typed somewhere other than the chat reads as carrying a key — a
+ * conversation's title, a task's fields, a compaction's focus — and was refused for it (422, the
+ * fixed sentence). Every string in `value` is read, nested ones and object keys included; a value
+ * nested deeper than four levels is refused unread. The owner is not checked.
+ */
+function refusedMandateKeyIn(principal: RequestPrincipal, res: ServerResponse, value: unknown): boolean {
+  if (isOwnerPrincipal(principal)) return false;
+  const texts: string[] = [];
+  let tooDeep = false;
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === 'string') { texts.push(v); return; }
+    if (v === null || typeof v !== 'object') return;
+    if (depth >= 4) { tooDeep = true; return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, depth + 1); return; }
+    for (const [k, x] of Object.entries(v)) { texts.push(k); walk(x, depth + 1); }
+  };
+  walk(value, 0);
+  if (!tooDeep && !texts.some((t) => mandateCredentialInput(t) !== null)) return false;
+  errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+  return true;
+}
+
+/** A mandate's typed answer refused for reading as a key (`MandateKeyInputError`): 422, fixed sentence. */
+function keyInputRefused(res: ServerResponse, err: unknown): boolean {
+  if (!(err instanceof MandateKeyInputError)) return false;
+  errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+  return true;
 }
 
 function errorResponse(
@@ -4483,6 +4516,19 @@ export class LynoxHTTPApi {
       // A mandate runs only in a conversation it started (§3.13 E1, N2). Read on the thread
       // row, not on the session object: the session's principal is whoever ran last.
       if (this._refuseUnlessOwns(req, res, 'run this conversation', () => [this._threadRow(sessionId)])) return;
+      // A mandate's helper takes no key in this chat: a message that reads as carrying one is
+      // refused here, before the thread, the run history, the title, a log or the model see any of
+      // it, and before a busy or full queue (409, 429) or a takeover could answer instead — those
+      // keep the message in the helper's browser as failed and resendable. Not masked as for the
+      // owner below: what a mask leaves (a key's last characters) would still reach the owner's
+      // thread. The refusal is a fixed sentence and names no part of the text.
+      {
+        const typed = (body as Record<string, unknown> | null)?.['task'];
+        if (typeof typed === 'string' && !isOwnerPrincipal(this._principalOf(req)) && mandateCredentialInput(typed) !== null) {
+          errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+          return;
+        }
+      }
       // Which erasure this request started under; see `erasureGeneration`.
       const erasureGenAtEntry = this.erasureGeneration;
       const erasedSinceEntry = (): boolean => this.erasureGeneration !== erasureGenAtEntry;
@@ -5711,7 +5757,9 @@ export class LynoxHTTPApi {
         // Pending, yet not answered: its time ran out before the sweep marked it. Nothing between
         // the read above and this write yields, so another answer cannot settle it in between
         // today; should that change, this still names only this question.
-        if (!ps.answerUser(promptId, answer, by)) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
+        let answered: boolean;
+        try { answered = ps.answerUser(promptId, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
+        if (!answered) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
         jsonResponse(res, 200, { ok: true });
         return;
       }
@@ -5720,7 +5768,9 @@ export class LynoxHTTPApi {
       const pending = ps.getPending(params['id']!);
       if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
         if (!this._answerRecorded(_req, res, by, pending.id)) return;
-        if (ps.answerUser(pending.id, answer, by)) { jsonResponse(res, 200, { ok: true }); return; }
+        let answered: boolean;
+        try { answered = ps.answerUser(pending.id, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
+        if (answered) { jsonResponse(res, 200, { ok: true }); return; }
       }
 
       errorResponse(res, 404, 'No pending prompt');
@@ -5761,7 +5811,9 @@ export class LynoxHTTPApi {
 
       const by = this._principalOf(_req);
       if (!this._answerRecorded(_req, res, by, promptId)) return;
-      if (ps.answerUserTabs(promptId, answers, by)) { jsonResponse(res, 200, { ok: true }); return; }
+      let answered: boolean;
+      try { answered = ps.answerUserTabs(promptId, answers, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
+      if (answered) { jsonResponse(res, 200, { ok: true }); return; }
       errorResponse(res, 404, 'No pending prompt');
     }, OWN));
 
@@ -5786,7 +5838,7 @@ export class LynoxHTTPApi {
       if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
       if (existing.status !== 'pending') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
 
-      ps.setPartialAnswers(promptId, partial as (string | null)[]);
+      try { ps.setPartialAnswers(promptId, partial as (string | null)[], this._principalOf(_req)); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 
@@ -5997,6 +6049,7 @@ export class LynoxHTTPApi {
       }
       const b = body as Record<string, unknown> | null;
       const focus = typeof b?.['focus'] === 'string' ? b['focus'] : undefined;
+      if (refusedMandateKeyIn(this._principalOf(_req), res, focus)) return;
       const result = await session.compact(focus);
       // The occupancy pair travels on the manual path too: this route is a
       // blocking request with no SSE, so without it the UI would have to show
@@ -6088,6 +6141,7 @@ export class LynoxHTTPApi {
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       if (this._refuseUnlessOwns(_req, res, 'change this conversation', () => [thread])) return;
       const b = body as Record<string, unknown> | null;
+      if (refusedMandateKeyIn(this._principalOf(_req), res, b?.['title'])) return;
       const skipExtraction = typeof b?.['skip_extraction'] === 'boolean' ? b['skip_extraction'] : undefined;
       // A chat that read data through a store connection stays out of memory for its life
       // (`core/containment.ts`): private mode cannot be switched off there. Read from the
@@ -8823,6 +8877,8 @@ export class LynoxHTTPApi {
       const pipelineId = typeof b['pipelineId'] === 'string' && b['pipelineId'].length > 0 ? b['pipelineId'] : undefined;
       const hidden = hiddenInTaskText(b);
       if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
+      // The fields a person types; not the ids, which a random-looking id would fail.
+      if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
 
       // Slice B2: schedule a saved workflow on cron — the promote-to-cron consent
       // action. Validates the workflow is autonomous, binds + constrains the
@@ -8959,6 +9015,8 @@ export class LynoxHTTPApi {
       // Before the mark below: a refused edit is no mandate's edit.
       const hidden = hiddenInTaskText(b);
       if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
+      // The fields a person types; not the ids, which a random-looking id would fail.
+      if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
       // Checked here rather than left to `update`, which throws: a thrown error answers
       // 500, and a refused request must not mark the trigger as a mandate's edit either.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {
