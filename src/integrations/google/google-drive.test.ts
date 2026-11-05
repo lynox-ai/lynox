@@ -314,6 +314,8 @@ describe('google_drive tool', () => {
       ['no parents field', {}],
       ['an empty list', { parents: [] }],
       ['only empty ids', { parents: [''] }],
+      ['non-string ids', { parents: [null, 123] }],
+      ['parents that is not a list', { parents: 'src' }],
     ])('sends no PATCH and says why when the read returns %s', async (_label, meta) => {
       const auth = createMockAuth();
       const tool = createDriveTool(() => auth);
