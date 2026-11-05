@@ -67,6 +67,8 @@ interface Answers {
 	rulesPending?: number;
 	/** Read on every counts request, so a test can change them between loads. */
 	counts?: { requires_user: number; draft_ready: number; auto_handled: number };
+	/** The counts answer waits for this, so a test can hold the first load back. */
+	countsHeld?: Promise<void>;
 	items?: unknown[];
 	rules?: unknown[];
 }
@@ -74,6 +76,7 @@ interface Answers {
 async function render(a: Answers = {}): Promise<void> {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = new URL(String(url), 'http://localhost');
+		if (u.pathname.endsWith('/inbox/counts')) await a.countsHeld;
 		if (u.pathname.endsWith('/inbox/counts')) return Response.json({ counts: { ...(a.counts ?? { requires_user: 0, draft_ready: 0, auto_handled: 1 }) }, snoozed: 0, rulesPending: a.rulesPending ?? 0 });
 		if (u.pathname.endsWith('/inbox/items')) {
 			itemQueries.push(u.searchParams);
@@ -289,6 +292,20 @@ describe('InboxView — the mobile zone pills keep the active one in view', () =
 		expect(pill('auto_handled').textContent).toContain('1');
 		expect(pill('auto_handled').offsetLeft + pill('auto_handled').offsetWidth).toBeGreaterThan(ROW_WIDTH);
 		expect(row().scrollLeft).toBeGreaterThan(0);
+		expect(fullyInView('auto_handled')).toBe(true);
+	});
+
+	it('does not reveal before the counts have loaded: the badges still change the widths', async () => {
+		let release: () => void = () => {};
+		const countsHeld = new Promise<void>((resolve) => { release = resolve; });
+		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
+		// The badge this load brings is wider than any shown before it (the count store outlives a view).
+		await render({ countsHeld, counts: { requires_user: 0, draft_ready: 0, auto_handled: 125 } });
+		expect(pill('auto_handled').textContent).not.toContain('125');
+		expect(row().scrollLeft).toBe(0);
+		release();
+		await settle();
+		expect(pill('auto_handled').textContent).toContain('125');
 		expect(fullyInView('auto_handled')).toBe(true);
 	});
 
