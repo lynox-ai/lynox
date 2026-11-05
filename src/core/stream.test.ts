@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { StreamProcessor } from './stream.js';
+import { ToolCallImitationDetector } from './tool-call-imitation.js';
 import type { StreamEvent } from '../types/index.js';
 
 async function* mockStream(events: Array<Record<string, unknown>>) {
@@ -294,5 +295,61 @@ describe('StreamProcessor', () => {
 
       expect(result.content[0]).toMatchObject({ type: 'tool_use', input: {} });
     });
+  });
+});
+
+describe('StreamProcessor with the guard on a tool call written out as text', () => {
+  const COPY = '{"url": "https://x.test/orders", "method": "POST"}\n';
+  const TOOLS = [{ name: 'http_request', properties: ['url', 'method'] }];
+
+  function textEvents(startIndex: number, text: string): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [{ type: 'content_block_start', index: startIndex, content_block: { type: 'text', text: '' } }];
+    for (let o = 0; o < text.length; o += 6) out.push({ type: 'content_block_delta', index: startIndex, delta: { type: 'text_delta', text: text.slice(o, o + 6) } });
+    out.push({ type: 'content_block_stop', index: startIndex });
+    return out;
+  }
+
+  function guarded(): { proc: StreamProcessor; collected: StreamEvent[]; stops: unknown[] } {
+    const collected: StreamEvent[] = [];
+    const stops: unknown[] = [];
+    const proc = new StreamProcessor((e: StreamEvent) => { collected.push(e); }, 'test-agent', {
+      detector: new ToolCallImitationDetector(TOOLS),
+      stop: (hit) => { stops.push(hit); return new Error('stopped by the guard'); },
+    });
+    return { proc, collected, stops };
+  }
+
+  it('throws the guard\'s error once the same call is written out three times, and does not render that delta', async () => {
+    const { proc, collected, stops } = guarded();
+    await expect(proc.process(mockStream(textEvents(0, COPY.repeat(5))) as AsyncIterable<never>)).rejects.toThrow('stopped by the guard');
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toMatchObject({ toolName: 'http_request', count: 3 });
+    const shown = collected.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text).join('');
+    // Everything before the delta that completed the third copy, and nothing after it.
+    expect(COPY.repeat(3).startsWith(shown)).toBe(true);
+    expect(shown.length).toBeGreaterThan(COPY.length * 2);
+    expect(shown.length).toBeLessThan(COPY.length * 3);
+  });
+
+  it('does not stop a reply that started a real tool call before its text', async () => {
+    const { proc, stops } = guarded();
+    const result = await proc.process(mockStream([
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't1', name: 'http_request', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"url":"https://x.test"}' } },
+      { type: 'content_block_stop', index: 0 },
+      ...textEvents(1, COPY.repeat(5)),
+    ]) as AsyncIterable<never>);
+    expect(stops).toHaveLength(0);
+    expect(result.content[1]).toMatchObject({ type: 'text', text: COPY.repeat(5) });
+  });
+
+  it('does not stop a reply that started a server tool call before its text', async () => {
+    const { proc, stops } = guarded();
+    await proc.process(mockStream([
+      { type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', id: 's1', name: 'web_search', input: {} } },
+      { type: 'content_block_stop', index: 0 },
+      ...textEvents(1, COPY.repeat(5)),
+    ]) as AsyncIterable<never>);
+    expect(stops).toHaveLength(0);
   });
 });
