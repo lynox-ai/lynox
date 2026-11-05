@@ -550,7 +550,7 @@ export function shownLinkDomain(refusal: VerdictTextRefusal, holdsSecret: (text:
   return holdsSecret(domain) || holdsSecret(written) ? undefined : domain;
 }
 
-/** The host a refused link spells, where it is its domain up to case and a final dot: that
+/** The host a refused link spells, where it is its domain up to ASCII case and a final dot: that
  *  spelling, else undefined. Only the link's own value counts — the same host written elsewhere in
  *  the field says nothing about how this link spells it. */
 function writtenDomain(hostWritten: string | undefined, domain: string): string | undefined {

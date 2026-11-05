@@ -514,7 +514,7 @@ describe('markupChangesOf', () => {
     expect(outside('<p>a</p><img src="/i.jpg">', '<p>a</p>')).toBe(false);
   });
 
-  it('holds each allowlist condition alone, for an item no parse yields', () => {
+  it('holds its kind and raw-text conditions alone, for an item no parse yields', () => {
     // The kind and the raw text guard against an item that breaks the parser's invariants: a
     // comment carrying an element's namespace and name, an allowlisted element carrying raw text.
     const p: MarkupItem = { kind: 'element', namespace: 'html', element: 'p', attributes: [], text: null, inTemplate: false };
