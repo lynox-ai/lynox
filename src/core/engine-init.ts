@@ -35,7 +35,7 @@ import { ifReturned, ifStored, InstanceWriteUnrecorded, withInstanceWriteAs, typ
 import { ALL_NAMESPACES } from '../types/index.js';
 import { INSTANCE_WRITE_SITES } from './mandate-tool-lock.js';
 import type { KnowledgeStoreResult } from '../types/index.js';
-import { configurePersistentBudget } from './session-budget.js';
+import { configurePersistentBudget, isPersistentBudgetUnverifiable, describeSetCaps } from './session-budget.js';
 import { describeConnectionTokens } from './profile-secret-view.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
@@ -85,6 +85,11 @@ export function configureBudgetAndRateLimits(
     dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
     monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
   });
+  // Said at boot, not only at the first refused run: whoever reads the startup log sees
+  // that nothing will run, next to the line that says why the history did not open.
+  if (isPersistentBudgetUnverifiable()) {
+    process.stderr.write(`[lynox] Spending caps (${describeSetCaps()}) cannot be checked without the history database: no chat or scheduled run starts until lynox restarts with it open.\n`);
+  }
   if (runHistory) configureHistoryBackedLimits(runHistory, userConfig, toolContext);
   configureEgressPolicy(userConfig, toolContext);
 }

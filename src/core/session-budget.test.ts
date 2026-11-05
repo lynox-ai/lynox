@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   checkSessionBudget, recordSessionCost, getSessionCost,
   configurePersistentBudget, checkPersistentBudget, resetPersistentBudget,
@@ -381,22 +381,50 @@ describe('persistent budget — a cap that cannot be checked refuses (no cost pr
     resetPersistentBudget();
   });
 
-  it('refuses every run when the engine was configured without a cost provider, naming the caps and the way out', () => {
-    configurePersistentBudget({ costProvider: null, dailyCapUSD: 15, monthlyCapUSD: 150 });
-    const r = checkPersistentBudget();
-    expect(r.allowed).toBe(false);
-    expect(r.dailyLimitUSD).toBe(15);
-    expect(r.monthlyLimitUSD).toBe(150);
-    expect(r.reason).toContain('Spending cap (daily $15, monthly $150) cannot be checked');
-    expect(r.reason).toContain('RunHistory init failed');
-    expect(r.reason).toContain('restart lynox');
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
-  it('refuses with the default caps too: a cap left at its default is still a cap', () => {
-    configurePersistentBudget({ costProvider: null });
+  // The two texts word for word (ux U-163): one for a self-hoster, who reads the startup log
+  // and repairs the file, one for a managed tenant, who can do neither.
+  const selfHost = (caps: string): string =>
+    `Spending cap (${caps}) cannot be checked: the history database (history.db) did not open when lynox started, `
+    + "so today's and this month's spend are unknown. No run starts until lynox opens it again at a restart. "
+    + 'The log lynox writes at startup names the cause ("RunHistory init failed"); fix it, for example '
+    + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
+  const managed = (caps: string): string =>
+    `Spending cap (${caps}) cannot be checked: the history database did not open when lynox started, `
+    + "so today's and this month's spend are unknown. No run starts until lynox opens it again at a restart. "
+    + 'The lynox team gets an automatic alert about it.';
+
+  const capVariants: Array<[string, { dailyCapUSD?: number; monthlyCapUSD?: number }, string]> = [
+    ['both caps set', { dailyCapUSD: 15, monthlyCapUSD: 150 }, 'daily $15, monthly $150'],
+    ['both caps at their defaults', {}, 'daily $100, monthly $500'],
+    ['only the daily cap set', { dailyCapUSD: 15, monthlyCapUSD: Infinity }, 'daily $15'],
+    ['only the monthly cap set', { dailyCapUSD: Infinity, monthlyCapUSD: 150 }, 'monthly $150'],
+  ];
+  for (const [what, caps, named] of capVariants) {
+    it(`self-host, ${what}: refuses with the self-host text, word for word`, () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', undefined);
+      configurePersistentBudget({ costProvider: null, ...caps });
+      const r = checkPersistentBudget();
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toBe(selfHost(named));
+    });
+    it(`managed, ${what}: refuses with the managed text, word for word`, () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-test');
+      configurePersistentBudget({ costProvider: null, ...caps });
+      const r = checkPersistentBudget();
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toBe(managed(named));
+    });
+  }
+
+  it('reports the caps it refuses on', () => {
+    configurePersistentBudget({ costProvider: null, dailyCapUSD: 15, monthlyCapUSD: 150 });
     const r = checkPersistentBudget();
-    expect(r.allowed).toBe(false);
-    expect(r.reason).toContain('Spending cap (daily $100, monthly $500) cannot be checked');
+    expect(r.dailyLimitUSD).toBe(15);
+    expect(r.monthlyLimitUSD).toBe(150);
   });
 
   it('refuses a reservation, also for a zero estimate, and holds nothing', () => {
@@ -420,12 +448,7 @@ describe('persistent budget — a cap that cannot be checked refuses (no cost pr
     expect(checkPersistentBudget().allowed).toBe(false);
   });
 
-  it('only one cap set: the refusal names that one', () => {
-    configurePersistentBudget({ costProvider: null, dailyCapUSD: Infinity, monthlyCapUSD: 150 });
-    expect(checkPersistentBudget().reason).toContain('Spending cap (monthly $150) cannot be checked');
-  });
-
-  it('allows when both caps are disabled: nothing to check', () => {
+  it('allows when no cap is set: nothing to check, nothing refused', () => {
     configurePersistentBudget({ costProvider: null, dailyCapUSD: Infinity, monthlyCapUSD: Infinity });
     expect(checkPersistentBudget().allowed).toBe(true);
     expect(reservePersistentBudget(5).allowed).toBe(true);

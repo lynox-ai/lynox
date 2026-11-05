@@ -34,7 +34,7 @@ const { checkPersistentBudget, resetPersistentBudget } = await import('./session
 describe('Engine boot — the spending caps without run history', () => {
   const dirs: string[] = [];
   const engines: InstanceType<typeof Engine>[] = [];
-  const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_MAX_DAILY_COST_USD', 'LYNOX_MAX_MONTHLY_COST_USD'] as const;
+  const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_MAX_DAILY_COST_USD', 'LYNOX_MAX_MONTHLY_COST_USD', 'LYNOX_MANAGED_INSTANCE_ID'] as const;
   const saved = new Map<string, string | undefined>();
 
   function setEnv(key: string, value: string | undefined): void {
@@ -54,11 +54,13 @@ describe('Engine boot — the spending caps without run history', () => {
     reloadConfig();
   });
 
+  let bootLog = '';
   async function boot(historyOpens: boolean): Promise<InstanceType<typeof Engine>> {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-budgetboot-'));
     dirs.push(dir);
     for (const k of ENV_KEYS) setEnv(k, undefined);
     setEnv('LYNOX_DATA_DIR', dir);
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', undefined);
     // The managed tier's caps, as the control plane sets them.
     setEnv('LYNOX_MAX_DAILY_COST_USD', '15');
     setEnv('LYNOX_MAX_MONTHLY_COST_USD', '150');
@@ -70,15 +72,17 @@ describe('Engine boot — the spending caps without run history', () => {
     try {
       await engine.init();
     } finally {
+      bootLog = stderr.mock.calls.map((c) => String(c[0])).join('');
       stderr.mockRestore();
     }
     return engine;
   }
 
-  it('allows a run when run history opened (the control)', async () => {
+  it('the budget check allows when run history opened, and the boot says nothing about the caps (the control)', async () => {
     const engine = await boot(true);
     expect((engine as unknown as { runHistory: unknown }).runHistory).not.toBeNull();
     expect(checkPersistentBudget().allowed).toBe(true);
+    expect(bootLog).not.toContain('cannot be checked');
   });
 
   it('refuses every run when run history did not open, naming the caps', async () => {
@@ -88,5 +92,11 @@ describe('Engine boot — the spending caps without run history', () => {
     const check = checkPersistentBudget();
     expect(check.allowed).toBe(false);
     expect(check.reason).toContain('Spending cap (daily $15, monthly $150) cannot be checked');
+  });
+
+  it('says so in the startup log, next to the line that says why the history did not open', async () => {
+    await boot(false);
+    expect(bootLog).toContain('RunHistory init failed');
+    expect(bootLog).toContain('[lynox] Spending caps (daily $15, monthly $150) cannot be checked without the history database: no chat or scheduled run starts until lynox restarts with it open.');
   });
 });

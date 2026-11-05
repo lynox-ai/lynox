@@ -155,14 +155,38 @@ function spendUnverifiable(): boolean {
     && (_dailyCapUSD < Infinity || _monthlyCapUSD < Infinity);
 }
 
-function unverifiableReason(): string {
-  const caps = [
+/**
+ * Whether the daily/monthly caps are set but cannot be checked (see {@link spendUnverifiable}).
+ * The boot reads it once to say so in the startup log.
+ */
+export function isPersistentBudgetUnverifiable(): boolean {
+  return spendUnverifiable();
+}
+
+/** The caps that are set, as the refusal and the startup log name them: `daily $15, monthly $150`. */
+export function describeSetCaps(): string {
+  return [
     _dailyCapUSD < Infinity ? `daily $${_dailyCapUSD}` : null,
     _monthlyCapUSD < Infinity ? `monthly $${_monthlyCapUSD}` : null,
   ].filter((c): c is string => c !== null).join(', ');
-  return `Spending cap (${caps}) cannot be checked: the run history did not open when lynox started, `
-    + "so today's and this month's spend are unknown. No run starts until it does. "
-    + 'The startup log says why ("RunHistory init failed"); fix that (disk space, file permissions on the lynox data directory) and restart lynox.';
+}
+
+/**
+ * The refusal while spend is unknown. Two readers: a self-hoster can read the startup log and
+ * repair the file; a managed tenant can do neither, and the operator is alerted instead (the
+ * health probe reports the instance degraded). Managed is recognised by the same env as
+ * everywhere else in the engine. Read per refusal, not cached at boot.
+ */
+function unverifiableReason(): string {
+  const head = `Spending cap (${describeSetCaps()}) cannot be checked: `;
+  const tail = "so today's and this month's spend are unknown. No run starts until lynox opens it again at a restart. ";
+  if (process.env['LYNOX_MANAGED_INSTANCE_ID']) {
+    return `${head}the history database did not open when lynox started, ${tail}`
+      + 'The lynox team gets an automatic alert about it.';
+  }
+  return `${head}the history database (history.db) did not open when lynox started, ${tail}`
+    + 'The log lynox writes at startup names the cause ("RunHistory init failed"); fix it, for example '
+    + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
 }
 
 /** Check if persistent daily/monthly budget allows another run. */
