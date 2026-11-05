@@ -6,7 +6,7 @@ import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, modelIdIsD
 import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
-import { Agent, ContinuationLoopError, RunAbortedError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
+import { Agent, ContinuationLoopError, RunAbortedError, ToolCallImitationError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
 import { loopGuardStopReason } from '../../core/loop-guard-stop.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
@@ -1988,7 +1988,8 @@ async function executeThinker(
     const childAborted = err instanceof RunAbortedError;
     // The time limit ended it — not the parent's stop and not a loop guard (both
     // guards' errors are RunAbortedErrors too). A failure, not an interruption.
-    const timedOut = childAborted && !(err instanceof ToolLoopBreakError) && !(err instanceof ContinuationLoopError) && deadline?.signal.aborted === true;
+    const timedOut = childAborted && !(err instanceof ToolLoopBreakError) && !(err instanceof ContinuationLoopError)
+      && !(err instanceof ToolCallImitationError) && deadline?.signal.aborted === true;
     // A loop guard ended it: recorded aborted like a stop, but with the guard as the reason and
     // its message as the error, so the history tells a guard from a stop.
     const guard = loopGuardStopReason(err);

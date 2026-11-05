@@ -118,6 +118,13 @@ vi.mock('../../core/agent.js', () => ({
       this.name = 'ThinkingOnlyLoopError';
     }
   },
+  // As in agent.ts: a run-abort subclass, thrown by the guard on the reply's text.
+  ToolCallImitationError: class ToolCallImitationError extends MockRunAbortedError {
+    constructor() {
+      super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+      this.name = 'ToolCallImitationError';
+    }
+  },
 }));
 
 vi.mock('../../core/observability.js', () => ({
@@ -698,6 +705,13 @@ describe('spawn_agent tool', () => {
         opts?.disposableDeadline?.addEventListener('abort', () => reject(new ThinkingOnlyLoopError()), { once: true });
       })), 30);
       expect(guarded).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'thinking_loop' }));
+
+      // The same for the guard on a tool call written out as text.
+      const { ToolCallImitationError } = await import('../../core/agent.js');
+      const imitated = await rowsFor(() => mockSend.mockImplementationOnce((_t: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_r, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new ToolCallImitationError()), { once: true });
+      })), 30);
+      expect(imitated).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'tool_call_imitation' }));
     }, 3000);
 
     it('a loop break that lands after the limit fired is still a loop break, not a timeout', async () => {
@@ -5461,8 +5475,9 @@ describe('spawn_agent tool', () => {
     });
 
     it('a child a loop guard stopped is recorded aborted with the guard as the reason and its message as the error', async () => {
-      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } = await import('../../core/agent.js');
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } = await import('../../core/agent.js');
       const cases: Array<[Error, string]> = [
+        [new ToolCallImitationError(), 'tool_call_imitation'],
         [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
         [new ContinuationLoopError('prefix'), 'continuation_loop'],
         [new ThinkingOnlyLoopError(), 'thinking_loop'],
