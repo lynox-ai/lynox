@@ -10,6 +10,7 @@ import { ConnectionStore } from './connection-store.js';
 import { InboundEventStore } from './inbound-events.js';
 import { TriggerStore } from './trigger-store.js';
 import { EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_STOPPED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
+import { WORKER_NOTICES } from './worker-notices.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import { setPlanPauseForTests } from './plan-pause.js';
@@ -185,6 +186,18 @@ describe('the webhook drain', () => {
     expect(pushes(EVENT_RUN_FAILED)).toBe(1);
     expect(pushes('wire money')).toBe(0);
     expect(engine.escalateToUser).not.toHaveBeenCalled();
+  });
+
+  it('tells a German-speaking owner of a failed event in German, with the way on', async () => {
+    (engine as unknown as { config: { language: string } }).config = { language: 'de' };
+    runner.run.mockResolvedValue({ ok: true, status: 'failed', runId: 'run-f', error: 'boom' });
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'failed');
+    await loop.tick();
+    expect(pushes(WORKER_NOTICES.de.eventRunFailed)).toBe(1);
+    expect(pushes(EVENT_RUN_FAILED)).toBe(0);
   });
 
   it('CONTROL: with the switch off it reads nothing and runs nothing', async () => {

@@ -10,6 +10,9 @@
  */
 import type { NoticeLanguage } from './notice-language.js';
 
+/** An event whose run did not complete, in English; the worker also compares a sentence to it. */
+export const EVENT_RUN_FAILED_EN = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual. If it should have changed something, check whether that change is missing and make it by hand or ask lynox in a chat.';
+
 export interface WorkerNotices {
   /** The summary of more than a few triggers waiting for confirmation. */
   consentManyTitle(count: number): string;
@@ -66,6 +69,8 @@ export interface WorkerNotices {
   workflowCompleted(runId: string | undefined): string;
   /** A schedule whose workflow is gone, with or without its id (U-099 D). */
   workflowGone(workflowId: string | undefined): string;
+  /** An event whose run did not complete, with the way on (ux U-105 W1). */
+  readonly eventRunFailed: string;
 }
 
 /** The workflow statuses a notice names; any other, `unknown` included, is left out rather than quoted raw. */
@@ -109,6 +114,7 @@ const EN: WorkerNotices = Object.freeze({
   workflowCompleted: (runId: string | undefined) => `Workflow completed (run ${runId ?? 'unknown'})`,
   workflowGone: (workflowId: string | undefined) =>
     `${workflowId !== undefined ? `Workflow ${workflowId} no longer exists` : 'This plan\'s workflow no longer exists'}, so the run was skipped. Delete the plan under Automation › Triggers if you no longer need it.`,
+  eventRunFailed: EVENT_RUN_FAILED_EN,
 });
 
 const DE: WorkerNotices = Object.freeze({
@@ -147,6 +153,7 @@ const DE: WorkerNotices = Object.freeze({
   workflowCompleted: (runId: string | undefined) => `Workflow abgeschlossen (Lauf ${runId ?? 'unbekannt'})`,
   workflowGone: (workflowId: string | undefined) =>
     `${workflowId !== undefined ? `Workflow ${workflowId} existiert` : 'Der Workflow dieses Plans existiert'} nicht mehr, deshalb wurde der Lauf übersprungen. Lösch den Plan unter Automation → Trigger, wenn du ihn nicht mehr brauchst.`,
+  eventRunFailed: 'Der Lauf zu einem Ereignis wurde nicht fertig. lynox führt dieses Ereignis nicht noch einmal aus; spätere Ereignisse laufen wie gewohnt. Sollte es etwas ändern, prüf, ob das fehlt, und erledige es von Hand oder bitte lynox im Chat darum.',
 });
 
 export const WORKER_NOTICES: Readonly<Record<NoticeLanguage, WorkerNotices>> = Object.freeze({ en: EN, de: DE });

@@ -7,9 +7,9 @@
  * the model reads it (`bulk-ledger.ts`), so only the sentence that names it is translated, here,
  * and a reason this table has no German for is quoted as stored.
  *
- * The German wording is ux U-099; the paths a bulk run takes in ordinary use are translated,
- * the rare ones (atomic runs, refusals, a host that cannot be reached) are still English and
- * listed in `worker-notices.test.ts`.
+ * The German wording is ux U-099 and U-105; the paths a bulk run takes in ordinary use are
+ * translated. What is still English (atomic runs, refusals, the worker's own catch paths when a
+ * preview or a judging pass throws) is listed in `worker-notices.test.ts`.
  */
 import type { NoticeLanguage } from './notice-language.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
@@ -118,9 +118,25 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.maxTargets]: 'Freigegebene Höchstzahl erreicht.',
     [BULK_HALT_REASONS.awaitingStart]: 'Wartet, bis du das Lesen startest.',
     [BULK_HALT_REASONS.expired]: 'Freigabe abgelaufen.',
+    // ux U-105: the words of the run page (`bulk.halt.*`), so push and page say the same; neutral
+    // as to person, since a mandate gets the same summary and only the owner resumes a run.
+    [BULK_HALT_REASONS.unavailable]: 'Zielsystem nicht erreichbar oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.',
+    [BULK_HALT_REASONS.credential]: 'lynox findet keinen gespeicherten Zugang zum Zielsystem. Verbinde ihn unter Einstellungen → APIs neu oder bitte lynox im Chat darum.',
+    [BULK_HALT_REASONS.unauthorized]: 'Das Zielsystem hat den gespeicherten Zugang abgelehnt. Ist er unter Einstellungen → APIs neu verbunden, lässt sich der Lauf fortsetzen.',
+    [BULK_HALT_REASONS.blocked]: 'Die Instanz darf dieses Zielsystem nicht erreichen.',
+    [BULK_HALT_REASONS.contract]: 'Ein Ziel liegt ausserhalb dessen, was der Lauf schreiben darf.',
+    [BULK_HALT_REASONS.costCap]: 'Der Lauf hat seine KI-Kostengrenze erreicht.',
+    [BULK_HALT_REASONS.spendLimit]: 'Das tägliche oder monatliche KI-Budget ist erreicht.',
+    [BULK_HALT_REASONS.creditRefused]: 'KI-Aufruf abgelehnt: kein Guthaben, oder die Verbindung zu lynox war unterbrochen.',
+    [BULK_HALT_REASONS.probeRequired]: 'Weitere Ziele schreibt lynox erst nach bestätigter Probe.',
+    [BULK_HALT_REASONS.mandateEnded]: 'Der Zugang, über den der Lauf geplant wurde, endete vor der Freigabe. Geschrieben wurde nichts.',
+    [BULK_HALT_REASONS.markupAddedByShop]: 'Ein geschriebenes Produkt enthält Markup, das lynox nicht gesendet hat; es kam im Shop dazu. Produkt und Wege stehen unter Massenläufe.',
   });
   return deHaltReasons[reason];
 }
+
+/** A judging run halts as `unavailable` when its model call fails too, so its sentence names the model (ux U-105 M1). */
+const DE_JUDGE_UNAVAILABLE = 'KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.';
 
 const DE: BulkNotices = Object.freeze({
   applyDone: 'Massenlauf fertig.',
@@ -148,7 +164,8 @@ const DE: BulkNotices = Object.freeze({
   costs: (calls: number, eachUsd: number) =>
     `${String(calls)} API-Abrufe in diesem Durchgang, geschätzt $${(calls * eachUsd).toFixed(4)} (je $${String(eachUsd)} laut Profil).`,
   halted: (phase: BulkPhase, reason: string) =>
-    `${phase === 'apply' ? 'Massenlauf' : phase === 'preview' ? 'Vorschau' : 'Beurteilung'} angehalten: ${deHaltReason(reason) ?? `${reason}.`}`,
+    `${phase === 'apply' ? 'Massenlauf' : phase === 'preview' ? 'Vorschau' : 'Beurteilung'} angehalten: ${
+      (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? DE_JUDGE_UNAVAILABLE : deHaltReason(reason)) ?? `${reason}.`}`,
   previewStopped: 'Vorschau beendet: Der Lauf wurde verworfen, angehalten oder ist weitergegangen.',
   listStopped: 'Lesen der Liste beendet: Der Lauf wurde verworfen, angehalten oder ist weitergegangen.',
   judgeStopped: 'Beurteilung beendet: Der Lauf wurde angehalten, ersetzt oder ist weitergegangen.',

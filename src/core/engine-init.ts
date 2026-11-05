@@ -1044,7 +1044,9 @@ export function setupMemoryStoreSubscription(
             process.stderr.write(`[lynox:trail] derived knowledge write refused: its row could not be written (${namespaceLabel(data.namespace)})\n`);
             return;
           }
-          process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${getErrorMessage(err)}\n`);
+          // The store runs entity extraction over the memory; a malformed stored alias list fails its JSON.parse with a
+          // SyntaxError that quotes entity names taken from run memory.
+          process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${processErrorText(err)}\n`);
         }
       })();
 

@@ -12,7 +12,7 @@ import { errorText, errorTextReduced, FixedTextError, processErrorText } from '.
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { noticeLanguage } from './notice-language.js';
-import { WORKER_NOTICES, type WorkerNotices } from './worker-notices.js';
+import { EVENT_RUN_FAILED_EN, WORKER_NOTICES, type WorkerNotices } from './worker-notices.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
@@ -181,7 +181,7 @@ const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 /** What the owner is told of an event that was not run, or whose run did not complete: lynox's own sentences. */
 export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
 export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
-export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
+export const EVENT_RUN_FAILED = EVENT_RUN_FAILED_EN;
 /**
  * A run whose answered question came from a deleted contained conversation, and whose new one
  * could not be contained (ux U-089). The way on depends on who runs the instance.
@@ -1427,7 +1427,9 @@ export class WorkerLoop {
               else this.#recordRun(taskManager, parked.id, WAIT_EXPIRED_RESULT, 'failed', run);
             } catch (err: unknown) {
               process.stderr.write(
-                `[lynox:worker] could not record the expired wait for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+                // Recording the run computes the next occurrence, whose error quotes the stored cron expression or a
+                // snippet of the watch config (URL, selector): text a model wrote.
+                `[lynox:worker] could not record the expired wait for ${parked.id}: ${processErrorText(err)}\n`,
               );
             }
             process.stderr.write(
@@ -1624,7 +1626,8 @@ export class WorkerLoop {
             this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
           } catch (err: unknown) {
             process.stderr.write(
-              `[lynox:worker] recording or releasing the interrupted run of ${task.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+              // Same as the expired wait above: the next occurrence's error quotes the cron or the watch config.
+              `[lynox:worker] recording or releasing the interrupted run of ${task.id} failed: ${processErrorText(err)}\n`,
             );
           }
           continue;
@@ -1712,7 +1715,8 @@ export class WorkerLoop {
             // The owner who stopped the run asked for it, and is not told of it again; nor of a run
             // its paused plan ended, which the pause's notice tells. The reason stays on the event.
             if (said === EVENT_STOPPED || TOLD_BY_PAUSE.has(ended.reason ?? '')) continue;
-            this.#sayEvent(triggerId, title, said);
+            // The one sentence here the owner's language has a version of (ux U-105 W1).
+            this.#sayEvent(triggerId, title, said === EVENT_RUN_FAILED ? this.#notices().eventRunFailed : said);
           }
         } finally {
           for (const [why, count] of dropped) {

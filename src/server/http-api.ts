@@ -13794,7 +13794,8 @@ export class LynoxHTTPApi {
           wsAccess = workspaceAccessIfPresent();
           wsWalk = wsAccess === null ? null : await this._workspaceWalk(wsAccess, dataDir);
         } catch (err) {
-          process.stderr.write(`⚠ /api/data: workspace root unavailable: ${err instanceof Error ? err.message : String(err)}\n`);
+          // The walk's errno messages name the workspace entry, and those names are chosen by the agent or the user.
+          process.stderr.write(`⚠ /api/data: workspace root unavailable: ${processErrorText(err)}\n`);
           jsonResponse(res, 500, { deleted: false, failed: ['workspace'], error: 'Erasure incomplete — the workspace could not be reached, so nothing was erased' });
           return;
         }
@@ -14442,7 +14443,8 @@ export class LynoxHTTPApi {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === 'ENOENT') { errorResponse(res, 404, 'Directory not found'); return; }
         if (code === 'ENOTDIR') { errorResponse(res, 400, 'Not a directory'); return; }
-        console.error(`[lynox] GET /api/files failed: ${code ?? (err instanceof Error ? err.message : String(err))}`);
+        // The code alone where there is one; a WorkspaceRootError has none and names the workspace path.
+        console.error(`[lynox] GET /api/files failed: ${code ?? processErrorText(err)}`);
         errorResponse(res, 500, 'Could not read the directory');
       }
     }, free('creates the workspace directory when it is missing, and only reads otherwise'));
