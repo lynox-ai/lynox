@@ -369,6 +369,18 @@ describe('canary-build.yml', () => {
     const push = builds.find((b) => b.with?.['push'] === true);
     expect(String(push?.with?.['tags'])).toContain('${{ steps.meta.outputs.canary_ref }}');
   });
+
+  it('pushes exactly the branch, sha and semver canary tags, from one step only', () => {
+    // A plain `X.Y.Z` tag here would pass every image floor on every instance.
+    const pushes = steps.filter((s) => s.uses?.startsWith('docker/build-push-action@') && s.with?.['push'] === true);
+    expect(pushes).toHaveLength(1);
+    const tags = String(pushes[0]!.with?.['tags']).split('\n').map((t) => t.trim()).filter((t) => t !== '');
+    expect(tags).toEqual([
+      'ghcr.io/lynox-ai/lynox:${{ steps.meta.outputs.branch_tag }}',
+      'ghcr.io/lynox-ai/lynox:${{ steps.meta.outputs.sha_tag }}',
+      '${{ steps.meta.outputs.canary_ref }}',
+    ]);
+  });
 });
 
 describe('Dockerfile', () => {
