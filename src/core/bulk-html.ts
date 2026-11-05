@@ -611,14 +611,17 @@ const WHITESPACE_SHOWN = new Set(['pre', 'textarea', 'listing', 'plaintext', 'xm
 
 /**
  * Whether a value holds an element that shows its whitespace: one of {@link WHITESPACE_SHOWN}, or
- * any element whose `style` names `white-space` (row 1137 (b)). Theme CSS that sets `white-space`
+ * any element whose `style` names `white-space` (row 1137 (b)) or `display` (an inline `li` shows its
+ * line break as a space), or holds a backslash (a CSS escape the name test does not read), or a
+ * `style` element in the value itself, whose rules no name test reads. Theme CSS that sets these
  * through a class is not seen here.
  */
 export function showsWhitespace(value: string): boolean {
   for (const [c] of descendants(parseHtmlFragment(value), false)) {
     if (!isElement(c)) continue;
+    if (c.tagName === 'style') return true;
     if (c.namespaceURI === p5.NS.HTML && WHITESPACE_SHOWN.has(c.tagName)) return true;
-    if (c.attrs.some((a) => a.name === 'style' && /white-space/i.test(a.value))) return true;
+    if (c.attrs.some((a) => a.name === 'style' && (/white-space|display/i.test(a.value) || a.value.includes('\\')))) return true;
   }
   return false;
 }

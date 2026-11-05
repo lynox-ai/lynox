@@ -382,6 +382,48 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     // Only the product the broken mark is on.
     expect(byKey(next, `${LIST}/2`).change).toBe('update');
   });
+
+  it('reads the mark only in a field the store kept otherwise than sent: a sibling sent as it came back marks nothing', async () => {
+    // Both fields sent; the store added the script to the description only.
+    const id = approvedRun({ description: '<p>Neu</p>', short_description: '<p>kurz</p>' }, [{ description: '<p>Alt</p>', short_description: '<p>alt</p>' }]);
+    const store = new Map([[`${LIST}/1`, { description: '<p>Alt</p>', short_description: '<p>alt</p>' } as Record<string, unknown>]]);
+    await run(id, stubWriter(store, (v) => ({ ...v, description: `${String(v['description'])}${SCRIPT}` })));
+    expect(ledger.getPreview(id)[0]).toMatchObject({ shopAddedMarkup: true });
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(id);
+    // The owner rewrote the description since; the short description is still lynox's, as sent.
+    const owned = approvedRun({ short_description: '<p>kürzer</p>' }, [{ description: '<p>Meins</p>', short_description: '<p>kurz</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(owned, `${LIST}/1`).change).toBe('update');
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(owned);
+    // The control on the same mark: the description still the marked value is refused.
+    const refused = approvedRun({ short_description: '<p>kürzer</p>' }, [{ description: `<p>Neu</p>${SCRIPT}`, short_description: '<p>kurz</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(refused, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+  });
+
+  it('counts a marked row whose sent value does not parse as the marked value', async () => {
+    const { id } = await markedRun();
+    engineDb.getDb().prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND shop_added_markup = 1').run(engineDb.enc('{broken'), id);
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>anything</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(next, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+  });
+
+  it('mints no undo that restores a value another family left marked, read while that write was still unmarked', async () => {
+    // r2 read the product before the refusal could see the mark: its before-image is the marked value.
+    const { id } = await markedRun();
+    const marked = `<p>Neu</p>${SCRIPT}`;
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET shop_added_markup = 0 WHERE run_id = ?').run(id);
+    const r2 = approvedRun({ description: '<p>Neuer</p>' }, [{ description: marked }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(r2, `${LIST}/1`).change).toBe('update');
+    const store = new Map([[`${LIST}/1`, { description: marked } as Record<string, unknown>], [`${LIST}/2`, { description: '<p>Alt 2</p>' } as Record<string, unknown>]]);
+    await run(r2, stubWriter(store));
+    // The mark lands after r2's read.
+    db.prepare(`UPDATE bulk_targets SET shop_added_markup = 1 WHERE run_id = ? AND target_key = (SELECT target_key FROM bulk_targets WHERE run_id = ? AND seq = ?)`)
+      .run(id, id, byKey(id, `${LIST}/1`).seq);
+    const undo = planned(r2);
+    expect(byKey(undo, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+    // The other product's undo is minted.
+    expect(byKey(undo, `${LIST}/2`).change).not.toBe('invalid');
+  });
 });
 
 describe('htmlFieldsOf: fail-closed on the product form (sec-core F6)', () => {
@@ -450,6 +492,16 @@ describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.
     ] as const) {
       expect(sameValue({ description: a }, { description: b }, html)).toBe(false);
       expect(sameValue({ description: a }, { description: a }, html)).toBe(true);
+    }
+    // What else in the value can show a line break: an inline display, a CSS escape the name test
+    // does not read, a style element's own rules (refuter, 05.11.).
+    for (const [a, b] of [
+      ['<ul><li style="display:inline">\n<b>x</b></li></ul>', '<ul><li style="display:inline"><b>x</b></li></ul>'],
+      ['<ul><li style="white\\-space:pre">\n<b>x</b></li></ul>', '<ul><li style="white\\-space:pre"><b>x</b></li></ul>'],
+      ['<style>li{white-space:pre}</style><ul><li>\n<b>x</b></li></ul>', '<style>li{white-space:pre}</style><ul><li><b>x</b></li></ul>'],
+    ] as const) {
+      expect(htmlEqual(a, b)).toBe(true);
+      expect(sameValue({ description: a }, { description: b }, html)).toBe(false);
     }
     // A style that names no white-space keeps the normalised comparison.
     expect(sameValue({ description: '<P style="color:red">a  b</P>' }, { description: '<p style="color:red">a b</p>' }, html)).toBe(true);

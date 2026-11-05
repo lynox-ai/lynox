@@ -1654,7 +1654,7 @@ export class BulkLedger {
       const seoEntityFields = seoNoted && r.change === 'update' ? shopifySeoEntityFields(prior, after) : [];
       const shopMarkedAt = r.error !== 'before_has_shop_markup' ? undefined
         : run !== undefined && prior !== null && typeof prior === 'object'
-          ? this.shopMarkedWriteOf(this.engineDb.dec(r.target_key), prior as Record<string, unknown>, this.shopMarkFields(run), runId)?.appliedAt ?? null
+          ? this.shopMarkedWriteOf(this.engineDb.dec(r.target_key), prior, runId)?.appliedAt ?? null
           : null;
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
@@ -2500,7 +2500,10 @@ export class BulkLedger {
       const read = external && merged !== null && sides.includes(null) ? { id: merged.id, grantId: null } : merged;
       // Condition (b): a value the store kept with markup the run never sent was never the
       // owner's state, so it is not written back — wherever down the family it comes from.
-      const tainted = htmlFields.length > 0 && !after.absent && this.restoresShopAddedMarkup(sourceRunId, r.seq, after.value, htmlFields);
+      // And a value an earlier write of another family left marked (row 1121), read as the source's
+      // before-image while that write was still unmarked or before the refusal existed.
+      const tainted = !after.absent && ((htmlFields.length > 0 && this.restoresShopAddedMarkup(sourceRunId, r.seq, after.value, htmlFields))
+        || this.shopMarkedWriteOf(t.key, after.value, sourceRunId) !== null);
       return { key: t.key, sourceSeq: r.seq, expected, after, change, read, tainted };
     });
     const id = randomUUID();
@@ -2706,34 +2709,36 @@ export class BulkLedger {
     });
   }
 
-  /** The HTML fields a run's before-image is compared in against marked read-backs (row 1121):
-   *  its HTML fields, and on the Shopify product form `descriptionHtml` whatever list form is found
-   *  (fail-closed, as {@link shopifyApplyOf}). */
-  private shopMarkFields(run: RunRow): readonly string[] {
-    const html = this.htmlFieldsOf(run.id);
-    return this.shopifyFormOfRun(run) === 'shopify_product' ? [...new Set([...html, 'descriptionHtml'])] : html;
-  }
-
   /**
    * The latest write, in any run but `exceptRun` and in any family, whose read-back of the target
-   * `key` was marked (`shop_added_markup`) and equals `before` in one of `fields` under `htmlEqual`
-   * — the strict direction: a reformatted copy still counts (row 1121). Its `applied_at`, or null
-   * when there is none. A marked read-back that does not parse counts as equal: its value is not
+   * `key` was marked (`shop_added_markup`) and equals `value` under `htmlEqual` — the strict
+   * direction: a reformatted copy still counts (row 1121) — in a field that could hold the markup:
+   * one of the marked run's HTML fields that the write sent as text and the store kept otherwise
+   * than `sameHtmlField` explains. A field the write did not send, or that came back as sent, is
+   * the store's or lynox's own and marks nothing. The fields come from the marked write, not from
+   * the run asking, so a run of another form reads the same marks. Its `applied_at`, or null when
+   * there is none. A marked row that does not decrypt or parse counts as equal: its value is not
    * known. Marked rows are few, and the key is stored encrypted, so they are read and compared here.
    */
-  private shopMarkedWriteOf(key: string, before: Readonly<Record<string, unknown>>, fields: readonly string[], exceptRun: string): { appliedAt: string | null } | null {
-    if (fields.length === 0) return null;
+  private shopMarkedWriteOf(key: string, value: unknown, exceptRun: string): { appliedAt: string | null } | null {
+    if (value === null || typeof value !== 'object') return null;
+    const now = value as Record<string, unknown>;
     const rows = this.engineDb.getDb().prepare(
-      `SELECT target_key, after_actual, applied_at FROM bulk_targets
+      `SELECT run_id, target_key, after_planned, after_actual, applied_at FROM bulk_targets
         WHERE shop_added_markup = 1 AND after_actual IS NOT NULL AND run_id != ? ORDER BY applied_at DESC`,
-    ).all(exceptRun) as { target_key: string; after_actual: string; applied_at: string | null }[];
+    ).all(exceptRun) as { run_id: string; target_key: string; after_planned: string | null; after_actual: string; applied_at: string | null }[];
     for (const r of rows) {
-      if (this.engineDb.dec(r.target_key) !== key) continue;
-      let kept: unknown;
-      try { kept = (JSON.parse(this.engineDb.dec(r.after_actual)) as ActualImage).value; } catch { return { appliedAt: r.applied_at }; }
+      let rowKey: string;
+      try { rowKey = this.engineDb.dec(r.target_key); } catch { return { appliedAt: r.applied_at }; }
+      if (rowKey !== key) continue;
+      const kept = (() => { try { return (JSON.parse(this.engineDb.dec(r.after_actual)) as ActualImage).value; } catch { return undefined; } })();
+      const sent = r.after_planned === null ? undefined : this.parsedObject(r.after_planned);
+      if (kept === undefined || sent === undefined) return { appliedAt: r.applied_at };
       if (kept === null || typeof kept !== 'object') continue;
       const held = kept as Record<string, unknown>;
-      if (fields.some((f) => typeof before[f] === 'string' && typeof held[f] === 'string' && htmlEqual(before[f] as string, held[f] as string))) {
+      const marked = this.htmlFieldsOf(r.run_id).filter((f) => typeof sent[f] === 'string' && typeof held[f] === 'string'
+        && !sameHtmlField(sent[f] as string, held[f] as string));
+      if (marked.some((f) => typeof now[f] === 'string' && htmlEqual(now[f] as string, held[f] as string))) {
         return { appliedAt: r.applied_at };
       }
     }
@@ -2800,7 +2805,7 @@ export class BulkLedger {
     // owner's state. Refused with the image kept, so the preview can name that write.
     const run = this.runRow(runId);
     if (run !== undefined && run.kind !== 'undo'
-      && this.shopMarkedWriteOf(this.engineDb.dec(row.target_key), read.before, this.shopMarkFields(run), runId) !== null) {
+      && this.shopMarkedWriteOf(this.engineDb.dec(row.target_key), read.before, runId) !== null) {
       return db.prepare(`UPDATE bulk_targets SET before = ?, change = 'invalid', undo = NULL, error = ? WHERE ${guard}`)
         .run(this.engineDb.enc(JSON.stringify(before)), 'before_has_shop_markup' satisfies BulkInvalidReason, runId, seq, runId).changes === 1;
     }
