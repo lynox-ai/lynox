@@ -34,6 +34,7 @@ import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
 import { planOfTrigger, stampFromRow } from './plan-stamp.js';
 import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, claimAdvanceWarnings, claimPauseNotices, markWarningsDelivered, pausePlanNow, pausedAtNow, planPauseOn } from './plan-pause.js';
 import { filingContextFor } from './approval-filing.js';
+import { runAsWorkerRun, type WorkerRunStart } from './worker-run-start.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
@@ -1901,8 +1902,16 @@ export class WorkerLoop {
    * heartbeat, the gates, the dispatch, the recorded end, and the lease given up last. A run of
    * a due trigger and a webhook run share it whole ({@link SlotEvent} says where they differ),
    * so a gate or a stop added here holds for both.
+   *
+   * How the run was started is decided here, once, for everything the run does
+   * (`worker-run-start.ts`): a workflow the run's session starts records it (1184).
    */
-  async #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
+  #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
+    const start: WorkerRunStart = handRun || isStartedByHand(task.id) ? 'hand' : event !== undefined ? 'event' : 'schedule';
+    return runAsWorkerRun(start, () => this.#runFramed(task, capUSD, handRun, starter, event));
+  }
+
+  async #runFramed(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to

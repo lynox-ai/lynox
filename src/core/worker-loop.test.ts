@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
 import { WORKER_NOTICES } from './worker-notices.js';
+import { currentWorkerRunStart, type WorkerRunStart } from './worker-run-start.js';
 import { PLAN_ENDED_RESULT } from './plan-pause.js';
 import { onBoxBlock, pv } from './prompt-value.js';
 import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js';
@@ -4091,6 +4092,40 @@ describe('WorkerLoop', () => {
     vi.mocked(tm.getTrigger).mockReturnValue(ordinary);
     await exec.executeTask(ordinary, null);
     expect(updateWatchConfig).toHaveBeenCalledTimes(1);
+  });
+});
+
+// 1184 (2): how the worker run was started is held for its session, where `run_workflow` reads it.
+describe('the worker holds how its run was started for the run (1184)', () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(`${FIXED_DAY}T12:00:00Z`)); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  function sessionSeeing(seen: Array<WorkerRunStart | undefined>): Session {
+    const session = makeSession('Done.');
+    vi.mocked(session.run).mockImplementation(async () => { seen.push(currentWorkerRunStart()); return 'Done.'; });
+    return session;
+  }
+
+  it('a trigger that came due runs as its schedule', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask()]), session }), makeNotificationRouter(false), 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toEqual(['schedule']);
+  });
+
+  it('"Run now" runs as a hand', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    const task = makeTask({ id: 'hand-1', effect: 'run_agent', schedule_cron: undefined, next_run_at: undefined });
+    const loop = new WorkerLoop(makeEngine({ taskManager: makeTaskManager([task]), session }), makeNotificationRouter(false), 60_000);
+    expect(await loop.runTriggerNow('hand-1')).toEqual({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toEqual(['hand']);
+  });
+
+  it('outside a worker run there is none', () => {
+    expect(currentWorkerRunStart()).toBeUndefined();
   });
 });
 

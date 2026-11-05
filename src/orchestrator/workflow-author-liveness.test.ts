@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { IAgent, LynoxUserConfig, PlannedPipeline, ToolEntry } from '../types/index.js';
 import type { WorkflowAuthorship } from '../core/workflow-store.js';
 import { OWNER_PRINCIPAL } from '../core/request-principal.js';
+import { runAsWorkerRun } from '../core/worker-run-start.js';
 
 /**
  * A saved workflow a mandate made or last changed runs only while that mandate's grant is live,
@@ -211,6 +212,25 @@ describe("a saved workflow a mandate shaped runs only while that mandate's grant
     expect(out).not.toMatch(/^Error/);
     expect(mockProcess).toHaveBeenCalledTimes(2);
   });
+
+  // 1184 (2): the start row says how the owner's run was started. A session of the owner's worker
+  // run by its schedule is not a start by hand; the run and the retry write it the same way.
+  it.each([[undefined, 'started=hand by=owner'], ['schedule', 'started=schedule by=owner']] as const)(
+    'the start rows of a run and its retry under worker start %s say %s', async (start, words) => {
+      authorship = BEAS;
+      const parent = chat();
+      const record = (parent.toolContext as unknown as { auditLog: { record: ReturnType<typeof vi.fn> } }).auditLog.record;
+      const go = async (): Promise<void> => {
+        mockProcess.mockImplementationOnce(() => Promise.reject(new Error('provider down')));
+        await runWorkflowTool.handler({ workflow_id: WF }, parent);
+        scriptStep();
+        expect(await runWorkflowTool.handler({ workflow_id: WF, retry: true }, parent)).not.toMatch(/^Error/);
+      };
+      if (start === undefined) await go(); else await runAsWorkerRun(start, go);
+      const starts = record.mock.calls.map((c: unknown[]) => c[0] as { action: string; phase: string; target: string })
+        .filter((r) => r.action === 'workflow:run' && r.phase === 'attempt');
+      expect(starts.map((r) => r.target)).toEqual([`one_shot=no ${words}`, `one_shot=no retry=yes ${words}`]);
+    });
 
   it('steps a chat writes itself run as before: no saved workflow shaped them', async () => {
     authorship = undefined;
@@ -541,6 +561,46 @@ describe("a sibling's later failure keeps the access stop (1184)", () => {
     expect([state.status, state.error]).toEqual(['failed', WORKFLOW_ENDED_MID_RUN_ERROR]);
     // Under continue the sibling's own failure is still recorded as its output (review r3).
     if (onFailure === 'continue') expect(state.outputs.get('sibling')?.error).toBe('the API answered 500');
+  });
+});
+
+// 1184, point 5: a capped phase's pool hands out every step it holds. Once a sub-run ended the run
+// for its makers' access, a sibling the pool hands out later does not start, even when a second
+// read of the access would let it. Any other cause leaves the phase's steps to finish.
+describe("a capped phase starts no sibling after the run ended for its makers' access (1184)", () => {
+  const cappedManifest = (onFailure: 'stop' | 'continue') => ({
+    manifest_version: '1.1' as const, name: 'probe', triggered_by: 'test', context: {}, execution: 'parallel' as const,
+    agents: [
+      { id: 'outer', agent: 'outer', runtime: 'pipeline' as const,
+        pipeline: [{ id: 'inner-write', task: 'Write the report.' }, { id: 'inner-send', task: 'Send the report.', input_from: ['inner-write'] }] },
+      { id: 'sibling', agent: 'sibling', runtime: 'inline' as const, task: 'Post the summary.' },
+    ],
+    gate_points: [], on_failure: onFailure,
+  });
+  const called = (): string[] => mockProcess.mock.calls.map((c: unknown[]) => c[1] as string);
+
+  it('the check before the sub-run\'s second step throws once: the sibling the pool hands out next never reaches the provider', async () => {
+    let throwOnce = false;
+    const source: RunSource = { kind: 'saved', workflowId: WF, authors: [{ kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' }],
+      ends: { isLive: () => { if (throwOnce) { throwOnce = false; throw new Error('engine.db busy'); } return true; } } };
+    mockProcess.mockImplementation((_s: unknown, name: string) => {
+      if (name === 'inner-write') throwOnce = true;
+      return Promise.resolve(endTurnResponse('done'));
+    });
+    const state = await runManifest(cappedManifest('continue'), config, { source, parentTools: [], limits: { maxParallelSteps: 1 } });
+    expect(called()).toEqual(['inner-write']);
+    expect([state.status, state.error]).toEqual(['failed', WORKFLOW_END_CHECK_FAILED_ERROR]);
+  });
+
+  it("control: a step that fails on its own under stop leaves the pool's next sibling to run", async () => {
+    const source: RunSource = { kind: 'saved', workflowId: WF, authors: [{ kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' }], ends: { isLive: () => true } };
+    mockProcess.mockImplementation((_s: unknown, name: string) => name === 'inner-write'
+      ? Promise.reject(new Error('the API answered 500'))
+      : Promise.resolve(endTurnResponse('done')));
+    const state = await runManifest(cappedManifest('stop'), config, { source, parentTools: [], limits: { maxParallelSteps: 1 } });
+    expect(called()).toEqual(['inner-write', 'sibling']);
+    expect(state.status).toBe('failed');
+    expect(state.error).not.toBe(WORKFLOW_END_CHECK_FAILED_ERROR);
   });
 });
 

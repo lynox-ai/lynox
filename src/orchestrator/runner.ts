@@ -1103,6 +1103,11 @@ async function executeStep(
   // pool hands out after the stop (the scope can only abort agents that already exist).
   if (stoppedByOwner(options, state)) return 'halt';
   if (questionUnanswered(options, state)) return 'halt';
+  // A run already ended for its makers' access — by a sibling's sub-run, or by a check that threw
+  // once — starts no further step, even when reading the access again would now let it (1184): the
+  // pool of a capped phase hands out every step it holds. Only that cause: a sibling's gate
+  // rejection or failure leaves the steps of its phase to finish, as the parallel contract says.
+  if (state.status !== 'running' && isAuthorStop(state.error)) return 'halt';
   if (stopForEndedAuthor(options, state)) return 'halt';
 
   const stepStart = new Date().toISOString();

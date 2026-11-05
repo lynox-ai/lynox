@@ -11,6 +11,7 @@ import { InboundEventStore } from './inbound-events.js';
 import { TriggerStore } from './trigger-store.js';
 import { EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_STOPPED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
 import { WORKER_NOTICES } from './worker-notices.js';
+import { currentWorkerRunStart } from './worker-run-start.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import { setPlanPauseForTests } from './plan-pause.js';
@@ -147,6 +148,18 @@ describe('the webhook drain', () => {
     expect([after.status, after.next_run_at, after.enabled]).toEqual([before.status, before.next_run_at, before.enabled]);
     expect(after.last_run_status).toBe('success');
     expect(eventOf(t, id).runId).toBe('run-1');
+  });
+
+  // 1184 (2): the run is held as an event's start, so a workflow its steps start never says it was
+  // started by hand or by a schedule.
+  it("holds the run as an event's start for everything it does", async () => {
+    let seen: string | undefined = 'unread';
+    runner.run.mockImplementationOnce(() => { seen = currentWorkerRunStart(); return Promise.resolve({ ok: true, status: 'completed', runId: 'run-1' }); });
+    const t = sharedTrigger();
+    const id = deliver(t, { email: 'kim@example.com', total: 12.5 });
+    await loop.tick();
+    await settled(t, id, 'done');
+    expect(seen).toBe('event');
   });
 
   // A push per order is noise; the run history holds the success.
