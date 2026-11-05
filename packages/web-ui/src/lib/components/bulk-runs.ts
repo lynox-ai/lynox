@@ -694,7 +694,11 @@ export function bulkSupportMailto(
 	// The sentence stands with the way on: a restart for a planned run, writing on for one that wrote.
 	// `nothing` leaves the halt's own sentence out, so the link has nothing to stand with.
 	const resumeKind = run.phase === 'planned' ? null : bulkResumeKind(run);
-	const shown = run.phase === 'planned' ? bulkRestartKind(run) !== null : resumeKind !== null && resumeKind !== 'nothing';
+	// A planned run the page offers no restart for shows no step that promises one (ux U-105 L1),
+	// so no sentence for the link either.
+	const restartKind = run.phase === 'planned' ? bulkRestartKind(run) : null;
+	const shown = run.phase === 'planned' ? restartKind !== null && !BULK_NO_RESTART_BUTTON.has(restartKind)
+		: resumeKind !== null && resumeKind !== 'nothing';
 	if (!shown) return null;
 	const subject = i18n.tf('bulk.halt.support_subject', { run: run.id, host: bulkSystemName(run.targetSystem, i18n) });
 	return `mailto:${BULK_SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}`;

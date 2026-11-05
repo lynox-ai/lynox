@@ -829,6 +829,13 @@ describe('going on from a run that halted', () => {
 		}
 		// Where the page shows no way on, it shows neither the sentence nor the link.
 		expect(bulkSupportMailto(any('blocked', { probeConfirmed: false, maxTargets: 2 }), true, DE)).toBeNull();
+		// A judged run that cannot be judged on gets no restart, so neither sentence nor link; with its model it gets both.
+		const judgedPlanned = any('blocked', { phase: 'planned', judge: judged.judge, judgeServedBy: judged.judgeServedBy });
+		expect(bulkSupportMailto(judgedPlanned, true, DE)).toBe(link);
+		expect(bulkHaltText(judgedPlanned, true, DE)?.before).toContain('support@lynox.ai');
+		for (const without of [{ ...judgedPlanned, judgeServedBy: null }, { ...judgedPlanned, judgeOwnKey: true }]) {
+			expect([without.judgeOwnKey, bulkSupportMailto(without, true, DE), bulkHaltText(without, true, DE)?.before]).toEqual([without.judgeOwnKey, null, null]);
+		}
 		expect(bulkSupportMailto(any('blocked', { phase: 'aborted' }), true, DE)).toBeNull();
 	});
 });

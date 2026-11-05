@@ -93,6 +93,10 @@ describe('the notice tables', () => {
     for (const phase of ['apply', 'preview'] as const) {
       expect([phase, BULK_NOTICES.de.halted(phase, BULK_HALT_REASONS.unavailable).includes('Zielsystem nicht erreichbar oder Fehler in lynox.')]).toEqual([phase, true]);
     }
+    // No other reason a judging pass halts on gets the model's sentence.
+    for (const k of ORDINARY_HALTS.filter((r) => r !== 'unavailable')) {
+      expect([k, BULK_NOTICES.de.halted('judge', BULK_HALT_REASONS[k]).includes('KI-Modell oder Zielsystem')]).toEqual([k, false]);
+    }
     // A reason the table has no German for is quoted as stored, not dropped.
     expect(BULK_NOTICES.de.halted('preview', BULK_HALT_REASONS.checksum)).toBe(`Vorschau angehalten: ${BULK_HALT_REASONS.checksum}.`);
   });
