@@ -179,7 +179,7 @@ export function describeSetCaps(): string {
  */
 function unverifiableReason(): string {
   const head = `Spending cap (${describeSetCaps()}) cannot be checked: `;
-  const tail = "so today's and this month's spend are unknown. No run starts until lynox opens it again at a restart. ";
+  const tail = "so today's and this month's spend are unknown. The agent does not run, not even for a chat, until lynox opens the history database again at a restart. ";
   if (process.env['LYNOX_MANAGED_INSTANCE_ID']) {
     return `${head}the history database did not open when lynox started, ${tail}`
       + 'The lynox team gets an automatic alert about it.';

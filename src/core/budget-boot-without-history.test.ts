@@ -97,6 +97,6 @@ describe('Engine boot — the spending caps without run history', () => {
   it('says so in the startup log, next to the line that says why the history did not open', async () => {
     await boot(false);
     expect(bootLog).toContain('RunHistory init failed');
-    expect(bootLog).toContain('[lynox] Spending caps (daily $15, monthly $150) cannot be checked without the history database: no chat or scheduled run starts until lynox restarts with it open.');
+    expect(bootLog).toContain('[lynox] Spending caps (daily $15, monthly $150) cannot be checked without the history database: the agent does not run, not even for a chat, until lynox restarts with it open.');
   });
 });

@@ -389,12 +389,12 @@ describe('persistent budget — a cap that cannot be checked refuses (no cost pr
   // and repairs the file, one for a managed tenant, who can do neither.
   const selfHost = (caps: string): string =>
     `Spending cap (${caps}) cannot be checked: the history database (history.db) did not open when lynox started, `
-    + "so today's and this month's spend are unknown. No run starts until lynox opens it again at a restart. "
+    + "so today's and this month's spend are unknown. The agent does not run, not even for a chat, until lynox opens the history database again at a restart. "
     + 'The log lynox writes at startup names the cause ("RunHistory init failed"); fix it, for example '
     + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
   const managed = (caps: string): string =>
     `Spending cap (${caps}) cannot be checked: the history database did not open when lynox started, `
-    + "so today's and this month's spend are unknown. No run starts until lynox opens it again at a restart. "
+    + "so today's and this month's spend are unknown. The agent does not run, not even for a chat, until lynox opens the history database again at a restart. "
     + 'The lynox team gets an automatic alert about it.';
 
   const capVariants: Array<[string, { dailyCapUSD?: number; monthlyCapUSD?: number }, string]> = [

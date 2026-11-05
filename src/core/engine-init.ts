@@ -88,7 +88,7 @@ export function configureBudgetAndRateLimits(
   // Said at boot, not only at the first refused run: whoever reads the startup log sees
   // that nothing will run, next to the line that says why the history did not open.
   if (isPersistentBudgetUnverifiable()) {
-    process.stderr.write(`[lynox] Spending caps (${describeSetCaps()}) cannot be checked without the history database: no chat or scheduled run starts until lynox restarts with it open.\n`);
+    process.stderr.write(`[lynox] Spending caps (${describeSetCaps()}) cannot be checked without the history database: the agent does not run, not even for a chat, until lynox restarts with it open.\n`);
   }
   if (runHistory) configureHistoryBackedLimits(runHistory, userConfig, toolContext);
   configureEgressPolicy(userConfig, toolContext);
