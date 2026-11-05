@@ -14443,7 +14443,8 @@ export class LynoxHTTPApi {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === 'ENOENT') { errorResponse(res, 404, 'Directory not found'); return; }
         if (code === 'ENOTDIR') { errorResponse(res, 400, 'Not a directory'); return; }
-        console.error(`[lynox] GET /api/files failed: ${code ?? (err instanceof Error ? err.message : String(err))}`);
+        // The code alone where there is one; a WorkspaceRootError has none and names the workspace path.
+        console.error(`[lynox] GET /api/files failed: ${code ?? processErrorText(err)}`);
         errorResponse(res, 500, 'Could not read the directory');
       }
     }, free('creates the workspace directory when it is missing, and only reads otherwise'));

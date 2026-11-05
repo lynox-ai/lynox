@@ -115,7 +115,8 @@ const JUDGED = [
  * must match exactly `count` raw sinks of the file, so a judgement fails when its log line moves
  * away, changes or multiplies. It does NOT see a change in what the try block calls: a provider
  * call added there, or a callee that starts to reach the network, leaves the judgement green and
- * the `why` false. Whoever changes such a try block judges its sink again. A sink whose error can
+ * the `why` false. Whoever changes such a try block judges its sink again, and so does whoever adds a
+ * caller to a helper that holds a judged sink (its try blocks are its callers'). A sink whose error can
  * quote such text (a JSON.parse of stored data, a cron or a name a model wrote) is not judged but
  * routed through processErrorText.
  */
@@ -127,7 +128,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: "recording a workflow question's delivery failed", count: 1, why: 'the notify never rejects and the delivery reporter catches its own' },
   ],
   'core/worker-loop.ts': [
-    { marker: 'session abort threw while stopping', count: 1, why: 'only an AbortController abort can throw here' },
+    { marker: 'session abort threw while stopping', count: 1, why: 'the engine agent abort is an AbortController abort; a member abort that throws is caught' },
     { marker: 'answer re-arm failed', count: 1, why: 'SQLite reads and updates by trigger id' },
     { marker: 'prompt settle failed for', count: 1, why: 'a prompt expiry UPDATE by trigger id' },
     { marker: 'wait sweep failed', count: 1, why: 'SQLite reads by id; the record and settle calls inside catch their own' },
@@ -143,7 +144,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'wire capture sink refused', count: 1, why: 'reason is built from the env-configured sink path and its file mode' },
   ],
   'core/run-history.ts': [
-    { marker: 'verb-graph mirror write failed', count: 1, why: 'the task mirror upsert: SQLite; resolving the assignee returns null, it does not throw' },
+    { marker: 'verb-graph mirror write failed', count: 1, why: 'the task mirror upsert and the assignee subject it may create: SQLite, no values in the message' },
   ],
   'core/retrieval-engine.ts': [
     { marker: 'recall ${method} fell back to legacy', count: 1, why: 'the recall reads: SQLite' },
@@ -159,9 +160,11 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'could not drop the retired line', count: 1, why: 'BlockOverLimitError names the block id and lengths; otherwise SQLite' },
   ],
   'core/knowledge-layer.ts': [
+    { marker: 'gc mirror failed', count: 1, why: 'the stub GC after every 50th run: SQLite deletes, no values in the message' },
+    { marker: 'consolidation mirror failed', count: 1, why: 'supersede and confirmation counts by id in one SQLite transaction' },
     { marker: '[lynox:subject-graph] mirror failed for', count: 1, why: 'subject-graph mirror writes: SQLite, or lynox errors naming ids and kinds only' },
     { marker: 'fell back to legacy: ', count: 1, why: 'engine.db reads: SQLite; decryption never throws and the alias parses are guarded' },
-    { marker: '[lynox:mirror-parity] CRITICAL', count: 1, why: 'purge and deactivate by id; the extractors swallow model errors' },
+    { marker: '[lynox:mirror-parity] CRITICAL', count: 1, why: 'supersede, erase, purge, deactivate and the store read-back, all SQLite by id; the extractors swallow model errors' },
     { marker: 'text-edit mirror failed', count: 1, why: 'a stub text UPDATE: SQLite names columns, never values' },
     { marker: 'confidence mirror (', count: 1, why: 'a confidence UPDATE by id' },
     { marker: 'tier-raise mirror failed', count: 1, why: 'stub supersede and upsert: SQLite' },
@@ -176,7 +179,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
   ],
   'core/engine.ts': [
     { marker: '[escalation] recording the delivery failed', count: 1, why: 'a SQLite UPDATE binding a fixed delivery summary' },
-    { marker: '[escalation] a hook failed on the delivery', count: 1, why: 'the only hook posts a fixed body and swallows its own fetch' },
+    { marker: '[escalation] a hook failed on the delivery', count: 1, why: 'the engine own hook posts a fixed body and swallows its fetch; an embedder hook is its own code' },
     { marker: 'Grant backfill failed', count: 1, why: 'backfillGrants and checkFingerprints read the ledger and the vault, no provider' },
     { marker: 'Grant host recompute failed', count: 1, why: 'recomputeGrantHosts, the same ledger write as above' },
     { marker: '[lynox:vault-bindings] Migration failed', count: 1, why: 'binds vault names to the hosts of stored profiles' },
@@ -186,8 +189,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'mandate end not recorded', count: 1, why: 'an INSERT with bound values; the plan-pause listener reports through processErrorText' },
     { marker: 'withdrawing the questions of deleted thread', count: 1, why: 'an UPDATE by thread id' },
     { marker: 'stopping the run of deleted schedule', count: 1, why: 'map lookups and an abort; nothing that throws carries run text' },
-    { marker: 'data dir scan failed', count: 1, why: "fs errno naming entries of lynox's own data directory" },
-    { marker: 'GET /api/files failed', count: 1, why: 'prints the errno or class code that fs and workspace errors carry, not their path-bearing message' },
+    { marker: 'data dir scan failed', count: 1, why: 'fs errno naming entries of the configured data directory, an operator path, not workspace content' },
     { marker: 'Grant for the credential write to', count: 1, why: 'secretWritten mints a grant locally after the vault write' },
   ],
   'tools/builtin/http.ts': [
@@ -245,7 +247,7 @@ const FROZEN: Record<string, number> = {
   'integrations/microsoft/microsoft-auth.ts': 1,
   'integrations/push/web-push-channel.ts': 1,
   'scripts/subject-sweep.ts': 1,
-  'server/http-api.ts': 7,
+  'server/http-api.ts': 6,
   'shell-sidecar/exec-daemon.ts': 1,
   'tools/builtin/http.ts': 1,
 };
