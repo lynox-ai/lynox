@@ -3414,7 +3414,8 @@ export class Engine {
     // provider-switch) so we don't dispose a runtime that is about to be
     // replaced and then forgotten.
     if (forRestore) {
-      // A mail arriving from here on stays unseen for the process after the restore.
+      // A mail arriving from here on is not handed to a runtime the exit then kills. It stays
+      // unseen, but only IMAP lists it again after the restart; Gmail and Graph do not.
       this._inboxIntakeClosed = true;
       try {
         await settleWithin(this._drainInboxForRestore(), RESTORE_INBOX_BOUND_MS, 'inbox shutdown');

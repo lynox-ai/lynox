@@ -442,23 +442,50 @@ describe('MailWatcher — a deferred batch is held for the next poll', () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
-  it('a removed account drops what it held; a re-attach of the same account keeps it', async () => {
+  it('a removed account drops what it held', async () => {
     handler.mockImplementationOnce(() => { throw new InboundMailDeferred('test'); });
     const first = new FakeProvider('acct-a');
     await watcher.attach(first, { applyPrefilter: false });
     await first.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<d-1@x>' })] });
+    await watcher.detach('acct-a');
 
     const second = new FakeProvider('acct-a');
     await watcher.attach(second, { applyPrefilter: false });
     await second.emit({ type: 'ok' });
-    expect(received.at(-1)?.uids, 're-attach lost the held mail').toEqual([1]);
+    expect(handler, 'removed account handed over its held mail').toHaveBeenCalledTimes(1);
+  });
 
+  it('a second deferral adds to what is held instead of replacing it', async () => {
+    // Gmail polls can overlap; the second one's deferral must not drop the first one's mails.
+    // Deferred after a turn of the event loop, so both polls are in their handler at once.
+    const deferLater = async (): Promise<never> => { await new Promise((r) => setTimeout(r, 0)); throw new InboundMailDeferred('test'); };
+    handler.mockImplementationOnce(deferLater);
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider, { applyPrefilter: false });
+    const first = provider.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<d-1@x>' })] });
+    handler.mockImplementationOnce(deferLater);
+    const second = provider.emit({ type: 'new', envelopes: [envelope(2, { messageId: '<d-2@x>' })] });
+    await Promise.all([first, second]);
+
+    await provider.emit({ type: 'ok' });
+    expect([...(received.at(-1)?.uids ?? [])].sort()).toEqual([1, 2]);
+  });
+
+  it('beyond the cap the newest are not held, and that is logged', async () => {
     handler.mockImplementationOnce(() => { throw new InboundMailDeferred('test'); });
-    await second.emit({ type: 'new', envelopes: [envelope(2, { messageId: '<d-2@x>' })] });
-    await watcher.detach('acct-a');
-    const third = new FakeProvider('acct-a');
-    await watcher.attach(third, { applyPrefilter: false });
-    await third.emit({ type: 'ok' });
-    expect(received.at(-1)?.uids, 'removed account handed over its held mail').toEqual([1]);
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const provider = new FakeProvider('acct-a');
+      await watcher.attach(provider, { applyPrefilter: false });
+      const many = Array.from({ length: 502 }, (_, i) => envelope(i + 1, { messageId: `<cap-${String(i + 1)}@x>` }));
+      await provider.emit({ type: 'new', envelopes: many });
+      expect(errSpy.mock.calls.some((c) => /2 deferred mail\(s\).*not held/.test(String(c[0])))).toBe(true);
+
+      await provider.emit({ type: 'ok' });
+      expect(received.at(-1)?.uids.length).toBe(500);
+      expect(received.at(-1)?.uids.at(-1)).toBe(500);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });

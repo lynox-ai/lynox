@@ -1096,7 +1096,10 @@ describe('OAuthGmailProvider under MailWatcher — a deferred mail', () => {
     const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
     try {
       await watcher.attach(provider, { intervalMs: 50, applyPrefilter: false });
-      await new Promise((r) => setTimeout(r, 200));
+      // Until the second hand-over, not a fixed wait: two ticks on a loaded box take longer.
+      for (let waited = 0; handed.length === 0 && waited < 5_000; waited += 25) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
     } finally {
       await watcher.stopAll();
       await provider.close();

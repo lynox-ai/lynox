@@ -76,7 +76,8 @@ export class MailWatcher {
    * Mails a handler deferred (`InboundMailDeferred`), per account, handed over again with the
    * account's next successful poll. The watcher holds them itself because a provider does not
    * list a mail twice: Gmail remembers what it emitted and moves its window on, Graph commits its
-   * cursor. Only IMAP would list it again. Lives in memory: a restart loses what is held.
+   * cursor. Only IMAP would list it again. Lives in memory: a restart loses what is held, and
+   * after a restart Gmail and Graph do not list it again either.
    */
   private readonly deferred = new Map<string, MailEnvelope[]>();
   private followupTimer: ReturnType<typeof setInterval> | null = null;
@@ -134,10 +135,7 @@ export class MailWatcher {
   async attach(provider: MailProvider, options: MailWatcherAttachOptions = {}): Promise<() => Promise<void>> {
     const accountId = provider.accountId;
     if (this.attachments.has(accountId)) {
-      // A re-attach of the same account keeps the mails it held back.
-      const held = this.deferred.get(accountId);
       await this.detach(accountId);
-      if (held) this.deferred.set(accountId, held);
     }
 
     const applyPrefilter = options.applyPrefilter ?? true;
@@ -217,9 +215,7 @@ export class MailWatcher {
         } catch (err: unknown) {
           // Swallowed — survivors stay unseen. A deferral also holds them for the next poll, as
           // the provider will not list them again (see `deferred`).
-          if (err instanceof InboundMailDeferred) {
-            this.deferred.set(accountId, survivors.slice(0, DEFERRED_MAX_PER_ACCOUNT));
-          }
+          if (err instanceof InboundMailDeferred) this.hold(accountId, survivors);
         }
       },
     );
@@ -229,6 +225,19 @@ export class MailWatcher {
     return async () => {
       await this.detach(accountId);
     };
+  }
+
+  /**
+   * Hold deferred mails for the account's next poll, after what it already holds: a Gmail poll
+   * can overlap the one before it (no guard there), so a second deferral must not replace the
+   * first one's mails. Beyond the cap the newest are dropped, and the drop is logged.
+   */
+  private hold(accountId: string, survivors: ReadonlyArray<MailEnvelope>): void {
+    const all = withoutRepeats([...(this.deferred.get(accountId) ?? []), ...survivors]);
+    if (all.length > DEFERRED_MAX_PER_ACCOUNT) {
+      process.stderr.write(`[lynox] mail watcher: ${String(all.length - DEFERRED_MAX_PER_ACCOUNT)} deferred mail(s) for one account over the cap of ${String(DEFERRED_MAX_PER_ACCOUNT)} not held for the next poll\n`);
+    }
+    this.deferred.set(accountId, all.slice(0, DEFERRED_MAX_PER_ACCOUNT));
   }
 
   /** Detach a single provider. Idempotent. */
