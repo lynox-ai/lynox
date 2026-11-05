@@ -8,6 +8,7 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import { externalWriter, mintBulkContract, type ExternalClient, type ExternalImage, type ExternalRead } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { markupAddedByHost } from './bulk-html.js';
+import { htmlEqual } from './html-tree.js';
 import { runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import type { BeforeImage } from './bulk-ledger.js';
@@ -335,6 +336,52 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     }]);
     expect(ledger.htmlFieldsOf(undo)).toEqual(['description', 'short_description']);
   });
+
+  // Row 1121: a NEW run whose before-image is the value a write of another run kept marked.
+  it('leaves a product out of a new run whose before-image is the marked value, reformatted too; plans the others', async () => {
+    const { id } = await markedRun();
+    const marked = `<p>Neu</p>${SCRIPT}`;
+    for (const before of [marked, `<P>Neu</P>${SCRIPT.replace('<script>', '<SCRIPT >')}`]) {
+      const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: before }, { description: '<p>Alt 2</p>' }]);
+      expect(next).not.toBe(id);
+      expect(byKey(next, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+      // Kept with its before-image, so the preview shows what the product holds.
+      expect(byKey(next, `${LIST}/1`).before).toEqual({ absent: false, value: { description: before } });
+      expect(byKey(next, `${LIST}/2`).change).toBe('update');
+      // Its undo never sees the product: it was never written.
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(next);
+    }
+  });
+
+  it('plans a product whose before-image the owner changed since: one word is enough', async () => {
+    await markedRun();
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: `<p>Neu!</p>${SCRIPT}` }]);
+    expect(byKey(next, `${LIST}/1`).change).toBe('update');
+    // The control: the marked value itself on the same product is refused.
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(next);
+    const refused = approvedRun({ description: '<p>Neuer</p>' }, [{ description: `<p>Neu</p>${SCRIPT}` }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(refused, `${LIST}/1`).change).toBe('invalid');
+  });
+
+  it('names when the marked write was applied, and no date once that run is gone', async () => {
+    const { id } = await markedRun();
+    const at = (engineDb.getDb().prepare('SELECT applied_at FROM bulk_targets WHERE run_id = ? AND shop_added_markup = 1').get(id) as { applied_at: string }).applied_at;
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: `<p>Neu</p>${SCRIPT}` }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(next, `${LIST}/1`).shopMarkedAt).toBe(at);
+    // Only on that reason: a planned product carries no date.
+    expect(byKey(next, `${LIST}/2`)).not.toHaveProperty('shopMarkedAt');
+    engineDb.getDb().prepare('DELETE FROM bulk_targets WHERE run_id = ?').run(id);
+    expect(byKey(next, `${LIST}/1`)).toMatchObject({ error: 'before_has_shop_markup', shopMarkedAt: null });
+  });
+
+  it('counts a marked read-back that does not parse as the marked value', async () => {
+    const { id } = await markedRun();
+    engineDb.getDb().prepare('UPDATE bulk_targets SET after_actual = ? WHERE run_id = ? AND shop_added_markup = 1').run(engineDb.enc('{broken'), id);
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>anything</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(next, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+    // Only the product the broken mark is on.
+    expect(byKey(next, `${LIST}/2`).change).toBe('update');
+  });
 });
 
 describe('htmlFieldsOf: fail-closed on the product form (sec-core F6)', () => {
@@ -385,6 +432,27 @@ describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.
     expect(sameValue({ description: '<p>a</p></div><p>b</p>' }, { description: '<p>a</p><p>b</p></div>' }, html)).toBe(false);
     // The same bytes stay equal.
     expect(sameValue({ description: '<p>a</p></div>' }, { description: '<p>a</p></div>' }, html)).toBe(true);
+  });
+
+  it('compares a field byte for byte where whitespace shows: white-space in a style, pre and its kin (row 1137 (b))', () => {
+    const html = ['description'];
+    // The normalised form alone collapses the two spaces below a `div`: equal without the rule.
+    expect(htmlEqual('<div style="white-space:pre">a  b</div>', '<div style="white-space:pre">a b</div>')).toBe(true);
+    for (const [a, b] of [
+      ['<div style="white-space:pre">a  b</div>', '<div style="white-space:pre">a b</div>'],
+      ['<p style="color:red; WHITE-SPACE: pre-wrap">a\nb</p>', '<p style="color:red; WHITE-SPACE: pre-wrap">a b</p>'],
+      // The rest of the value reformatted, not the whitespace shown: byte for byte all the same.
+      ['<P>x</P><pre>a\nb</pre>', '<p>x</p><pre>a\nb</pre>'],
+      ['<P>x</P><xmp>a</xmp>', '<p>x</p><xmp>a</xmp>'],
+      ['<P>x</P><listing>a</listing>', '<p>x</p><listing>a</listing>'],
+      ['<P>x</P><textarea>a</textarea>', '<p>x</p><textarea>a</textarea>'],
+      ['<P>x</P><plaintext>a', '<p>x</p><plaintext>a'],
+    ] as const) {
+      expect(sameValue({ description: a }, { description: b }, html)).toBe(false);
+      expect(sameValue({ description: a }, { description: a }, html)).toBe(true);
+    }
+    // A style that names no white-space keeps the normalised comparison.
+    expect(sameValue({ description: '<P style="color:red">a  b</P>' }, { description: '<p style="color:red">a b</p>' }, html)).toBe(true);
   });
 
   it('keeps every other field byte for byte, and a field one side lacks as a difference', () => {

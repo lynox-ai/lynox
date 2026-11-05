@@ -24,7 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
-import { checkMarkup, droppedTagsOf, endsClosed, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
+import { checkMarkup, sameHtmlField, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
@@ -136,6 +136,10 @@ export type BulkInvalidReason =
   /** An undo would write back an `actual` whose read-back held markup the write never sent
    *  (`shop_added_markup`, PRD shopify-preset §21.2 item 7 (b)): never the owner's state. */
   | 'shop_added_markup'
+  /** A new run's before-image is, in an HTML field, a value an earlier write read back with markup
+   *  it never sent (`shop_added_markup`, any family; row 1121): writing it would take the store's
+   *  addition as the owner's state, and an undo of this run would write it back. */
+  | 'before_has_shop_markup'
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
   /** the target's current state holds something shaped like a credential, so it is not sent to a model */
   | 'secret_in_before'
@@ -631,6 +635,10 @@ export interface PreviewTarget {
    *  SEO title and description whose text gains an `&` (`shopifySeoEntityFields`), which a
    *  theme may show as an entity. A note to the owner; nothing is refused. Set only where it holds. */
   seoEntityFields?: string[] | undefined;
+  /** With `before_has_shop_markup` (row 1121): when the earlier write whose marked read-back the
+   *  before-image equals was applied, so the owner can find that run; null where it is no longer
+   *  in the ledger. Set only with that reason. */
+  shopMarkedAt?: string | null | undefined;
   /** With `secret_in_context`: the field of the rule's context C that held it, by its name, so the
    *  owner knows which one to clean. Never its value. */
   contextField?: string | undefined;
@@ -973,9 +981,10 @@ export function canonicalJson(value: unknown): string {
  * (`htmlFieldsOf`) of two objects, compared under `htmlEqual` where both sides are text (PRD
  * shopify-preset §21.2 item 5): a store re-serialises a description, so its reformatting is no
  * change, while one changed character, element or attribute still is. Only where both sides end
- * closed (`endsClosed`) and neither holds a stretch the parser drops (`droppedTagsOf`): the tree
- * never sees a tag left open at the end, a `<body onload>` or a stray end tag, nor where it sits,
- * while the page runs and places it all the same, so such a value compares byte for byte. A field
+ * closed (`endsClosed`), neither holds a stretch the parser drops (`droppedTagsOf`) and neither
+ * shows its whitespace (`showsWhitespace`, row 1137 (b)), all in `sameHtmlField`: the tree never
+ * sees a tag left open at the end, a `<body onload>` or a stray end tag, nor where it sits, nor a
+ * line break a `white-space: pre` shows, while the page does, so such a value compares byte for byte. A field
  * one side holds and the other does not differs; every other field stays byte-equal.
  */
 export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] = []): boolean {
@@ -985,9 +994,8 @@ export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] 
     if (Object.hasOwn(a, k) !== Object.hasOwn(b, k)) return false;
     const x = a[k];
     const y = b[k];
-    const same = htmlFields.includes(k) && typeof x === 'string' && typeof y === 'string' && endsClosed(x) && endsClosed(y)
-      && droppedTagsOf(x).length === 0 && droppedTagsOf(y).length === 0
-      ? htmlEqual(x, y) : canonicalJson(x) === canonicalJson(y);
+    const same = htmlFields.includes(k) && typeof x === 'string' && typeof y === 'string'
+      ? sameHtmlField(x, y) : canonicalJson(x) === canonicalJson(y);
     if (!same) return false;
   }
   return true;
@@ -1644,6 +1652,10 @@ export class BulkLedger {
         })
         : [];
       const seoEntityFields = seoNoted && r.change === 'update' ? shopifySeoEntityFields(prior, after) : [];
+      const shopMarkedAt = r.error !== 'before_has_shop_markup' ? undefined
+        : run !== undefined && prior !== null && typeof prior === 'object'
+          ? this.shopMarkedWriteOf(this.engineDb.dec(r.target_key), prior as Record<string, unknown>, this.shopMarkFields(run), runId)?.appliedAt ?? null
+          : null;
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
@@ -1657,6 +1669,7 @@ export class BulkLedger {
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
         ...(seoEntityFields.length > 0 ? { seoEntityFields } : {}),
+        ...(shopMarkedAt !== undefined ? { shopMarkedAt } : {}),
       };
     });
   }
@@ -2562,7 +2575,9 @@ export class BulkLedger {
       const row = step.get(at.runId, at.seq) as { after_actual: string | null; shop_added_markup: number; source_seq: number | null; source_run_id: string | null } | undefined;
       if (!row) return true;
       if (depth > 0 && row.shop_added_markup === 1 && row.after_actual !== null) {
-        const kept = (JSON.parse(this.engineDb.dec(row.after_actual)) as ActualImage).value;
+        // A read-back that does not parse counts as restoring the mark: its value is not known.
+        let kept: unknown;
+        try { kept = (JSON.parse(this.engineDb.dec(row.after_actual)) as ActualImage).value; } catch { return true; }
         if (kept !== null && typeof kept === 'object') {
           const held = kept as Record<string, unknown>;
           if (htmlFields.some((f) => {
@@ -2629,7 +2644,9 @@ export class BulkLedger {
       if (gidNumber(key) === null) return null;
       reads.push(key);
       if (r.change === 'update' && r.after_planned !== null) {
-        const after = JSON.parse(this.engineDb.dec(r.after_planned)) as Record<string, unknown>;
+        // An after-state that does not parse is left out like a write the check refuses (row 1137 (d)).
+        const after = this.parsedObject(r.after_planned);
+        if (after === undefined) continue;
         // Left out, not refused: no grant is minted for it, so its request is refused before it is
         // sent and the apply halts (`contract`). Nothing else changes here — this is also what the
         // approve and resume routes ask whether a run is a Shopify run.
@@ -2663,12 +2680,18 @@ export class BulkLedger {
       const src = this.engineDb.getDb().prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?')
         .get(run.source_run_id, row.source_seq) as { before: string | null } | undefined;
       if (!src || src.before === null) return false;
-      const image = JSON.parse(this.engineDb.dec(src.before)) as BeforeImage;
-      if (image.absent || image.value === null || typeof image.value !== 'object') return false;
+      const image = this.parsedImage(src.before);
+      if (image === undefined || image.absent || image.value === null || typeof image.value !== 'object') return false;
       const held = image.value as Record<string, unknown>;
-      return fields.every((f) => Object.hasOwn(held, f) && canonicalJson(held[f]) === canonicalJson(after[f]));
+      if (!fields.every((f) => Object.hasOwn(held, f) && canonicalJson(held[f]) === canonicalJson(after[f]))) return false;
+      // The planning check once more (row 1137 (c)): the ledger may have changed since `planUndo`
+      // read the chain, and an after-state equal to the source's before-image passes the check above.
+      return !this.restoresShopAddedMarkup(run.source_run_id, row.source_seq, after, fields);
     }
-    const image = row.before === null ? null : JSON.parse(this.engineDb.dec(row.before)) as BeforeImage;
+    const image = row.before === null ? null : this.parsedImage(row.before);
+    // A before-image that does not parse (row 1137 (d)): the write is left out, so the apply halts
+    // before it sends (`contract`), rather than this read throwing out of the grant.
+    if (image === undefined) return false;
     const prior = image === null || image.absent || image.value === null || typeof image.value !== 'object'
       ? {} : image.value as Record<string, unknown>;
     const startDomains = this.startDomainsOfRow(run) ?? [];
@@ -2681,6 +2704,56 @@ export class BulkLedger {
       if (typeof value !== 'string' || canonicalHtml(value) !== value) return false;
       return checkMarkup({ before: typeof was === 'string' ? was : null, after: value, storeHost: host, startDomains }).ok;
     });
+  }
+
+  /** The HTML fields a run's before-image is compared in against marked read-backs (row 1121):
+   *  its HTML fields, and on the Shopify product form `descriptionHtml` whatever list form is found
+   *  (fail-closed, as {@link shopifyApplyOf}). */
+  private shopMarkFields(run: RunRow): readonly string[] {
+    const html = this.htmlFieldsOf(run.id);
+    return this.shopifyFormOfRun(run) === 'shopify_product' ? [...new Set([...html, 'descriptionHtml'])] : html;
+  }
+
+  /**
+   * The latest write, in any run but `exceptRun` and in any family, whose read-back of the target
+   * `key` was marked (`shop_added_markup`) and equals `before` in one of `fields` under `htmlEqual`
+   * — the strict direction: a reformatted copy still counts (row 1121). Its `applied_at`, or null
+   * when there is none. A marked read-back that does not parse counts as equal: its value is not
+   * known. Marked rows are few, and the key is stored encrypted, so they are read and compared here.
+   */
+  private shopMarkedWriteOf(key: string, before: Readonly<Record<string, unknown>>, fields: readonly string[], exceptRun: string): { appliedAt: string | null } | null {
+    if (fields.length === 0) return null;
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT target_key, after_actual, applied_at FROM bulk_targets
+        WHERE shop_added_markup = 1 AND after_actual IS NOT NULL AND run_id != ? ORDER BY applied_at DESC`,
+    ).all(exceptRun) as { target_key: string; after_actual: string; applied_at: string | null }[];
+    for (const r of rows) {
+      if (this.engineDb.dec(r.target_key) !== key) continue;
+      let kept: unknown;
+      try { kept = (JSON.parse(this.engineDb.dec(r.after_actual)) as ActualImage).value; } catch { return { appliedAt: r.applied_at }; }
+      if (kept === null || typeof kept !== 'object') continue;
+      const held = kept as Record<string, unknown>;
+      if (fields.some((f) => typeof before[f] === 'string' && typeof held[f] === 'string' && htmlEqual(before[f] as string, held[f] as string))) {
+        return { appliedAt: r.applied_at };
+      }
+    }
+    return null;
+  }
+
+  /** A stored before-image, or undefined where the row does not decrypt or parse as one. */
+  private parsedImage(stored: string): BeforeImage | undefined {
+    try {
+      const image = JSON.parse(this.engineDb.dec(stored)) as unknown;
+      return image !== null && typeof image === 'object' && typeof (image as { absent?: unknown }).absent === 'boolean' ? image as BeforeImage : undefined;
+    } catch { return undefined; }
+  }
+
+  /** A stored after-state as an object, or undefined where the row does not decrypt or parse as one. */
+  private parsedObject(stored: string): Record<string, unknown> | undefined {
+    try {
+      const value = JSON.parse(this.engineDb.dec(stored)) as unknown;
+      return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+    } catch { return undefined; }
   }
 
   /** An unread external target: its URL and planned after-state. */
@@ -2720,9 +2793,17 @@ export class BulkLedger {
       return db.prepare(`UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, link_domain = ? WHERE ${guard}`)
         .run(read.invalid, this.linkDomainCell(read.invalid, read.linkDomain), runId, seq, runId).changes === 1;
     }
-    const row = db.prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { after_planned: string | null } | undefined;
+    const row = db.prepare('SELECT target_key, after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { target_key: string; after_planned: string | null } | undefined;
     if (!row || row.after_planned === null) return false;
     const before: BeforeImage = { absent: false, value: read.before };
+    // Row 1121: a before-image an earlier write left marked is the store's addition, not the
+    // owner's state. Refused with the image kept, so the preview can name that write.
+    const run = this.runRow(runId);
+    if (run !== undefined && run.kind !== 'undo'
+      && this.shopMarkedWriteOf(this.engineDb.dec(row.target_key), read.before, this.shopMarkFields(run), runId) !== null) {
+      return db.prepare(`UPDATE bulk_targets SET before = ?, change = 'invalid', undo = NULL, error = ? WHERE ${guard}`)
+        .run(this.engineDb.enc(JSON.stringify(before)), 'before_has_shop_markup' satisfies BulkInvalidReason, runId, seq, runId).changes === 1;
+    }
     // Stored canonical in its HTML fields (1130): the preview checked this after-state against this
     // before-image just now, and the write sends what is stored.
     const after = this.canonicalAfterOf(runId, completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown, read.before);

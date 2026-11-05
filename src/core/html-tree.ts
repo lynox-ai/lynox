@@ -159,11 +159,37 @@ const ASCII_WS_ONLY = /^[\t\n\f\r ]+$/;
 const isBlock = (node: HtmlChild | undefined): boolean =>
   node !== undefined && isElement(node) && node.namespaceURI === HTML_NS && BLOCK_ELEMENTS.has(node.tagName);
 
+const isHtml = (node: HtmlParent | HtmlChild | undefined, ...names: string[]): boolean =>
+  node !== undefined && 'tagName' in node && node.namespaceURI === HTML_NS && names.includes(node.tagName);
+
+/** A `style` attribute that names `white-space`: below it a line break may show. */
+const stylesWhitespace = (el: HtmlElement): boolean =>
+  defaultTreeAdapter.getAttrList(el).some((a) => a.name === 'style' && /white-space/i.test(a.value));
+
+/**
+ * A single line break Shopify inserts when it stores a description, measured (PRD shopify-preset
+ * §16.8 M6b; sec-core 2026-11-05), at exactly two places the block rule does not reach:
+ * - directly after `<li>`, before an inline element (`<li>\n<strong>x</strong>`);
+ * - inside a `tr`, between its start, a `td` or `th`, and its end (`<tr>\n<td>a</td>\n</tr>`).
+ * The third measured place, before `</li>` after a nested list, the block rule already explains.
+ * Only a text node that is exactly one LF, never one that touches text, and never below an element
+ * that keeps whitespace or a `style` naming `white-space` (the caller's `shown`).
+ */
+function storeLayoutBreak(parent: HtmlParent, nodes: readonly HtmlChild[], i: number): boolean {
+  const prev = nodes[i - 1];
+  const next = nodes[i + 1];
+  if (isHtml(parent, 'li')) return i === 0 && next !== undefined && isElement(next) && !isBlock(next);
+  if (isHtml(parent, 'tr')) {
+    return (prev === undefined || isHtml(prev, 'td', 'th')) && (next === undefined || isHtml(next, 'td', 'th'));
+  }
+  return false;
+}
+
 // The normalised tree, as arrays so that JSON.stringify gives one string per tree:
 // element ['E', namespace, name, attrs sorted, children], text ['T', value], comment ['C', data].
 type NormNode = readonly ['E', string, string, readonly (readonly [string, string, string, string])[], readonly NormNode[]] | readonly ['T', string] | readonly ['C', string];
 
-function normChildren(parent: HtmlParent, keepWs: boolean, parentIsBlock: boolean): NormNode[] {
+function normChildren(parent: HtmlParent, keepWs: boolean, parentIsBlock: boolean, shown = false): NormNode[] {
   const { nodes } = childrenOf(parent);
   const out: NormNode[] = [];
   nodes.forEach((node, i) => {
@@ -171,7 +197,7 @@ function normChildren(parent: HtmlParent, keepWs: boolean, parentIsBlock: boolea
       const attrs = attrsOf(node)
         .map((a) => [a.namespace ?? '', a.prefix ?? '', a.name, a.value] as const)
         .sort((x, y) => (x[0] + '\u0000' + x[1] + '\u0000' + x[2] < y[0] + '\u0000' + y[1] + '\u0000' + y[2] ? -1 : 1));
-      out.push(['E', node.namespaceURI as string, node.tagName, attrs, normChildren(node, keepWs || keepsWhitespace(node), isBlock(node))]);
+      out.push(['E', node.namespaceURI as string, node.tagName, attrs, normChildren(node, keepWs || keepsWhitespace(node), isBlock(node), shown || stylesWhitespace(node))]);
     } else if (defaultTreeAdapter.isTextNode(node)) {
       if (keepWs) { out.push(['T', node.value]); return; }
       if (ASCII_WS_ONLY.test(node.value)) {
@@ -180,6 +206,7 @@ function normChildren(parent: HtmlParent, keepWs: boolean, parentIsBlock: boolea
         const before = i === 0 ? parentIsBlock : isBlock(nodes[i - 1]);
         const after = i === nodes.length - 1 ? parentIsBlock : isBlock(nodes[i + 1]);
         if (before && after) return;
+        if (!shown && node.value === '\n' && storeLayoutBreak(parent, nodes, i)) return;
       }
       out.push(['T', node.value.replace(ASCII_WS_RUN, ' ')]);
     } else if (defaultTreeAdapter.isCommentNode(node)) {
@@ -204,6 +231,9 @@ function normChildren(parent: HtmlParent, keepWs: boolean, parentIsBlock: boolea
  * - whitespace-only text dropped only between two block boundaries (a block element, or the
  *   start or end of a block parent or of the fragment), never between inline elements, so
  *   `<b>a</b> <i>b</i>` stays apart from `<b>a</b><i>b</i>`;
+ * - one line break a store inserts after `<li>` before an inline element, or between the cells of
+ *   a `tr`, dropped ({@link storeLayoutBreak}, M6b), except below an element whose `style` names
+ *   `white-space`;
  * - comments are tokens, compared by their text;
  * - `template` contents are part of the tree.
  *

@@ -449,14 +449,10 @@ async function applyRunEffect(
         // (the target is marked sent), or someone else set the value, and the run sends
         // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
         // also what an undo must expect.
-        // Found only under the HTML comparison: the store holds the planned description in its own
-        // form — counted like a read-back stored otherwise than sent. A title or SEO title the store
-        // saved in its measured form is no description and not counted; neither is HTML, so that
-        // comparison runs without the HTML fields.
-        const rewritten = htmlFields.length > 0 && !sameImage(cur, t.after) && !(savedForm && sameInSavedForm(cur, t.after));
+        // Found only under the HTML comparison is not counted as a rewrite: the comparison explains
+        // the store's form of the planned description (row 1137 (a)), as for a read-back.
         return {
           kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null,
-          ...(rewritten ? { hostRewrote: true as const } : {}),
         };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected, htmlFields)) return { kind: 'conflict' };

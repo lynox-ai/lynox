@@ -5,7 +5,7 @@
  */
 import type { TargetWriter } from './bulk-apply.js';
 import { externalWriter, parseBulkContract, writeMethodOf, type ExternalClient, type ExternalImage } from './bulk-external.js';
-import { droppedTagsOf, htmlFieldsOfListForm, markupAddedByHost } from './bulk-html.js';
+import { droppedTagsOf, htmlFieldsOfListForm, markupAddedByHost, sameHtmlField } from './bulk-html.js';
 import { externalHostOf, type BulkLedger, type BulkRunForApply } from './bulk-ledger.js';
 import { shopifyTargetIo } from './bulk-shopify.js';
 import { productTitleOf } from './shopify-saved-form.js';
@@ -95,7 +95,9 @@ function productReadBack(storeHost: string, startDomains: readonly string[]): (s
     // one the store's read-back holds beyond the value sent is markup it added, live on the page.
     if (pairs.some(([s, b]) => !markupAddedByHost({ sent: s, back: b, storeHost, startDomains }).ok
       || (s !== b && moreDropped(droppedTagsOf(s), droppedTagsOf(b))))) return 'added';
-    // A sent text the store holds as no text (cleared) is a removal: counted like any other.
-    return pairs.length < fields.length || pairs.some(([s, b]) => s !== b) ? 'rewritten' : 'kept';
+    // A sent text the store holds as no text (cleared) is a removal: counted like any other. A
+    // re-serialisation the comparison explains is no rewrite (row 1137 (a); M6b: a store lays out
+    // every list it keeps), so only what `sameHtmlField` does not explain is counted.
+    return pairs.length < fields.length || pairs.some(([s, b]) => !sameHtmlField(s, b)) ? 'rewritten' : 'kept';
   };
 }

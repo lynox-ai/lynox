@@ -76,6 +76,48 @@ describe('normalizeHtml: what it equates', () => {
   });
 });
 
+// M6b, run m6b-2026-11-05T032430.881Z on the development store (PRD shopify-preset §16.8): the
+// canonical bytes sent, and what Shopify gave back. sec-core 2026-11-05: three places, one LF each.
+describe('normalizeHtml: the line breaks a store lays a list or a table out with (M6b)', () => {
+  const NEST_SENT = '<p><b>fett</b> <i>kursiv</i><span class="s">span</span><b>a</b><i>b</i></p><ul><li><strong>x</strong><ol><li>y<ul><li>z</li></ul></li></ol></li></ul>';
+  const NEST_BACK = '<p><b>fett</b> <i>kursiv</i><span class="s">span</span><b>a</b><i>b</i></p><ul><li>\n<strong>x</strong><ol><li>y<ul><li>z</li></ul>\n</li></ol>\n</li></ul>';
+  const TABLE_SENT = '<table><tbody><tr><td>a</td><td>b</td></tr></tbody></table>';
+  const TABLE_BACK = '<table><tbody><tr>\n<td>a</td>\n<td>b</td>\n</tr></tbody></table>';
+
+  it('equates what M6b sent with what Shopify gave back', () => {
+    expect(htmlEqual(NEST_SENT, NEST_BACK)).toBe(true);
+    expect(htmlEqual(TABLE_SENT, TABLE_BACK)).toBe(true);
+  });
+
+  // Each place, with its twins: a character other than whitespace there, and the same LF where
+  // whitespace shows (below `pre`, or an element whose `style` names `white-space`).
+  const places: readonly (readonly [string, string, string, readonly string[], boolean])[] = [
+    ['after <li>, before an inline element', '<ul><li><b>x</b></li></ul>', '<ul><li>\n<b>x</b></li></ul>',
+      ['<ul><li>y<b>x</b></li></ul>', '<ul><li> <b>x</b></li></ul>', '<ul><li>\n\n<b>x</b></li></ul>'], false],
+    ['before </li>, after a nested list', '<ul><li>a<ul><li>b</li></ul></li></ul>', '<ul><li>a<ul><li>b</li></ul>\n</li></ul>',
+      ['<ul><li>a<ul><li>b</li></ul>y</li></ul>'], true],
+    ['between the start of a tr, its cells and its end', '<table><tr><td>a</td><td>b</td></tr></table>', '<table><tr>\n<td>a</td>\n<td>b</td>\n</tr></table>',
+      ['<table><tr><td>a</td>y<td>b</td></tr></table>'], false],
+    ['between the cells of a tr, th too', '<table><tr><th>a</th><td>b</td></tr></table>', '<table><tr><th>a</th>\n<td>b</td></tr></table>', [], false],
+  ];
+  it.each(places)('equates a line break %s, and not its twins', (_name, sent, back, twins, blockRule) => {
+    expect(htmlEqual(sent, back)).toBe(true);
+    for (const twin of twins) expect(htmlEqual(sent, twin)).toBe(false);
+    // The same line break where whitespace shows is a change.
+    expect(htmlEqual(`<pre>${sent}</pre>`, `<pre>${back}</pre>`)).toBe(false);
+    // Below a style that names `white-space`, the widening does not reach; the place the block rule
+    // already explains is compared byte for byte there by `sameHtmlField` (`showsWhitespace`).
+    if (!blockRule) expect(htmlEqual(`<div style="white-space: pre-line">${sent}</div>`, `<div style="white-space: pre-line">${back}</div>`)).toBe(false);
+  });
+
+  it('does not equate a line break before text in a li, nor between inline elements', () => {
+    expect(htmlEqual('<ul><li>x</li></ul>', '<ul><li>\nx</li></ul>')).toBe(false);
+    expect(htmlEqual('<p><b>a</b><i>b</i></p>', '<p><b>a</b>\n<i>b</i></p>')).toBe(false);
+    // A style on the li itself shows its whitespace too.
+    expect(htmlEqual('<ul><li style="white-space:pre"><b>x</b></li></ul>', '<ul><li style="white-space:pre">\n<b>x</b></li></ul>')).toBe(false);
+  });
+});
+
 describe('normalizeHtml: what it keeps apart (§21.7)', () => {
   const apart: readonly (readonly [string, string, string])[] = [
     ['whitespace between inline elements', '<b>a</b> <i>b</i>', '<b>a</b><i>b</i>'],

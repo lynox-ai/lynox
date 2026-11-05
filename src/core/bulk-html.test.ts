@@ -93,6 +93,15 @@ describe('checkMarkup: the allowlist and the multiset', () => {
     expect(reason('<noscript>a</noscript>', '<noscript>b</noscript>')).toBe('content_changed');
   });
 
+  it('refuses a changed noscript whose change lies only in an attribute\'s text, as Shopify keeps it (M6b, sec-core 2026-11-05)', () => {
+    // What Shopify kept of the canonical noscript case: it parses with scripting off, so the
+    // case's `img` became attribute text of a `p` inside the noscript (PRD shopify-preset §16.8).
+    const kept = '<noscript><p title="&lt;/noscript&gt;&lt;img src=" x onerror="alert(1)">"&gt;</p></noscript>';
+    expect(reason(kept, kept)).toBe('ok');
+    expect(reason(kept, kept.replace('alert(1)', 'alert(2)'))).toBe('content_changed');
+    expect(reason(kept, kept.replace('&lt;img src=', '&lt;img src=y'))).toBe('content_changed');
+  });
+
   it('refuses a held foreign script whose text moves between it and an element below it', () => {
     const held = '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>';
     expect(reason(held, '<svg><script>a=1;<g>/*</g>b()<g>*/</g></script></svg>')).toBe('content_changed');
