@@ -27,16 +27,32 @@ export interface CreateRuleBody {
 }
 
 /**
- * The outcome of a create. `namesRuleLabel`: the server refused the name or description because
- * it holds a label such as "R1", which the rule check uses to tell rules apart. `notOneAddress`:
- * the server refused a sender rule whose value is not one whole sender address.
+ * A refusal the rule form can name next to the field it concerns:
+ * - `rule_label`: the name or description holds a label such as "R1", which the rule check uses to
+ *   tell rules apart;
+ * - `not_one_address`: a sender rule whose value is not one whole sender address;
+ * - `hidden_chars`: the value holds a character a reader does not see, a line break or a tab;
+ * - `subject_short`: a subject phrase under the minimum, which would match almost any mail;
+ * - `list_id`: a list id rule, which cannot be created while the mail's List-ID is not read.
  */
-export type CreateRuleResult = { ok: true; id: string } | { ok: false; namesRuleLabel: boolean; notOneAddress: boolean };
+export type CreateRuleRefusal = 'rule_label' | 'not_one_address' | 'hidden_chars' | 'subject_short' | 'list_id';
 
-/** The server's refusal of a name or description that holds a rule label (`api.ts`). */
-const RULE_LABEL_REFUSAL = /rule label such as R1/;
-/** The server's refusal of a sender that is not one whole address (`rule-text.ts` fixedValueProblem). */
-const FROM_ADDRESS_REFUSAL = /^matcherValue must be one sender address$/;
+/** The outcome of a create; `refusal` is null for a failure the form cannot name. */
+export type CreateRuleResult = { ok: true; id: string } | { ok: false; refusal: CreateRuleRefusal | null };
+
+/** The server's refusals the form names, as `api.ts` and `rule-text.ts` word them. */
+const REFUSALS: ReadonlyArray<readonly [RegExp, CreateRuleRefusal]> = [
+	[/rule label such as R1/, 'rule_label'],
+	[/^matcherValue must be one sender address$/, 'not_one_address'],
+	[/^(matcherValue|description) holds characters a reader does not see$/, 'hidden_chars'],
+	[/^(matcherValue|description) must be one line$/, 'hidden_chars'],
+	[/^subject phrase must be at least \d+ characters$/, 'subject_short'],
+	[/^list_id rules do not apply yet$/, 'list_id'],
+];
+
+function refusalOf(error: string): CreateRuleRefusal | null {
+	return REFUSALS.find(([pattern]) => pattern.test(error))?.[1] ?? null;
+}
 
 export async function createInboxRule(
 	apiBase: string,
@@ -56,12 +72,12 @@ export async function createInboxRule(
 			} catch {
 				// No JSON body: an unnamed refusal.
 			}
-			return { ok: false, namesRuleLabel: RULE_LABEL_REFUSAL.test(error), notOneAddress: FROM_ADDRESS_REFUSAL.test(error) };
+			return { ok: false, refusal: refusalOf(error) };
 		}
 		const data = (await res.json()) as { id?: string };
-		return typeof data.id === 'string' ? { ok: true, id: data.id } : { ok: false, namesRuleLabel: false, notOneAddress: false };
+		return typeof data.id === 'string' ? { ok: true, id: data.id } : { ok: false, refusal: null };
 	} catch {
-		return { ok: false, namesRuleLabel: false, notOneAddress: false };
+		return { ok: false, refusal: null };
 	}
 }
 

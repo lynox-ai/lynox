@@ -19,6 +19,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { inboxHeadline } from '../utils/inbox-headline.js';
+	import { senderRulePrefill, subjectRulePrefill } from '../inbox-rule-prefill.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
 	import Icon from '../primitives/Icon.svelte';
@@ -129,9 +130,13 @@
 		forwarded_by_person: 'inbox.rule_withheld_forwarded',
 	};
 
-	/** The hint's sentence, split around the rule's name so the name can link to the rule. */
+	/**
+	 * The hint's sentence, split around the rule's name so the name can link to the rule. A mandate
+	 * cannot create a rule, so where the sentence ends by offering a fixed rule, it reads the
+	 * variant that says the owner can.
+	 */
 	function withheldParts(w: InboxRuleWithheld): { before: string; name: string | null; after: string } {
-		const key = WITHHELD_KEYS[w.reason];
+		const key = w.reason !== 'rule_withheld_sensitive' && isMandateSession() ? `${WITHHELD_KEYS[w.reason]}_mandate` : WITHHELD_KEYS[w.reason];
 		if (w.name === null || w.name.length === 0) return { before: t(`${key}_unnamed`), name: null, after: '' };
 		const template = t(key);
 		const at = template.indexOf('{name}');
@@ -380,18 +385,19 @@
 					<div class="mb-4 rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 px-3 py-2 text-[12px] text-text" role="note" data-testid="inbox-rule-withheld">
 						<p data-testid="inbox-rule-withheld-text">{parts.before}{#if parts.name !== null}{#if ruleHref !== null}<a href={ruleHref} class="underline hover:text-accent-text" data-testid="inbox-rule-withheld-link">{parts.name}</a>{:else}{parts.name}{/if}{/if}{parts.after}</p>
 						{#if offersFixedRule(withheld)}
-							{@const sender = offersSenderRule(withheld) ? full.item.fromAddress.trim() : ''}
-							{@const subject = full.item.subject.trim()}
-							{#if sender.length > 0 || subject.length > 0}
+							<!-- Only a value the server takes as it is: no hidden character, one line, enough of it. -->
+							{@const sender = offersSenderRule(withheld) ? senderRulePrefill(full.item.fromAddress) : null}
+							{@const subject = subjectRulePrefill(full.item.subject)}
+							{#if sender !== null || subject !== null}
 								<div class="mt-2 flex flex-wrap gap-1.5">
-									{#if sender.length > 0}
+									{#if sender !== null}
 										<a
 											href={fixedRuleHref(full.item, 'from', sender)}
 											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] inline-flex items-center"
 											data-testid="inbox-rule-withheld-from-sender"
 										>{t('inbox.rule_withheld_from_sender')}</a>
 									{/if}
-									{#if subject.length > 0}
+									{#if subject !== null}
 										<a
 											href={fixedRuleHref(full.item, 'subject_contains', subject)}
 											class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-[11px] text-text-muted hover:text-text hover:border-border-hover min-h-[36px] pointer-coarse:min-h-[44px] inline-flex items-center"

@@ -208,6 +208,7 @@ export type {
 	InboxRule,
 	CreateRuleBody,
 	CreateRuleResult,
+	CreateRuleRefusal,
 	InboxRuleMatcherKind,
 	InboxRuleAction,
 	InboxRuleSource,

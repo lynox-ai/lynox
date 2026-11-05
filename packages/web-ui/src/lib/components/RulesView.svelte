@@ -28,6 +28,7 @@
 		deleteInboxRule,
 		isRulePending,
 		listInboxRules,
+		type CreateRuleRefusal,
 		type InboxRule,
 		type InboxRuleAction,
 		type InboxRuleBucket,
@@ -71,9 +72,15 @@
 		}
 	}
 
-	/** The bucket a rule files into, by its name in the inbox. */
+	/** The bucket a rule files into, as a rule's sentence names it: "Handled", not the inbox
+	 *  zone's "Handled today", which is about the day rather than the rule. */
 	function bucketLabel(bucket: InboxRuleBucket): string {
-		return bucket === 'requires_user' ? t('inbox.zone_needs_you') : t('inbox.zone_handled');
+		return bucket === 'requires_user' ? t('inbox.zone_needs_you') : t('inbox.rules_bucket_handled');
+	}
+
+	/** How many rules apply, as a count with its noun. */
+	function rulesCountLabel(n: number): string {
+		return n === 1 ? t('inbox.rules_count_one') : tf('inbox.rules_count', { count: String(n) });
 	}
 
 	/** A rule's name; unnamed, it is called by its value, as the server names it. */
@@ -97,10 +104,20 @@
 		return `/app/inbox?${params.toString()}`;
 	}
 
-	const MATCH_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains', 'list_id', 'matches_description'];
+	// The kinds a rule can be created with. No list id: the mail's List-ID is not read yet, so such a
+	// rule would never apply (the server refuses it too). A stored one still lists and can be deleted.
+	const MATCH_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains', 'matches_description'];
 	/** The kinds a link may prefill: the fixed ones, as the reading pane offers them. */
-	const PREFILL_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains', 'list_id'];
+	const PREFILL_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains'];
 	const NAME_MAX = 80;
+	/** Each refusal the form names, with its text. */
+	const REFUSAL_TEXT: Record<CreateRuleRefusal, { key: string; testId: string }> = {
+		rule_label: { key: 'inbox.rules_error_rule_label', testId: 'rules-label-error' },
+		not_one_address: { key: 'inbox.rules_error_from_address', testId: 'rules-from-address-error' },
+		hidden_chars: { key: 'inbox.rules_error_hidden_chars', testId: 'rules-hidden-chars-error' },
+		subject_short: { key: 'inbox.rules_error_subject_short', testId: 'rules-subject-short-error' },
+		list_id: { key: 'inbox.rules_error_list_id', testId: 'rules-list-id-error' },
+	};
 	const DESCRIPTION_MAX = 300;
 
 	let accounts = $state<MailAccountView[]>([]);
@@ -131,10 +148,8 @@
 	// null: nothing chosen yet (a form a link opened); Save waits for a choice.
 	let formPreset = $state<FormPreset | null>('archive');
 	let formSubmitting = $state(false);
-	// The server refused the name or description: it holds a label such as "R1".
-	let formRuleLabelError = $state(false);
-	// The server refused a sender that is not one whole address.
-	let formFromAddressError = $state(false);
+	// Why the server refused the rule, where the form can say it next to the field; null otherwise.
+	let formRefusal = $state<CreateRuleRefusal | null>(null);
 	let pendingDeleteId = $state<string | null>(null);
 	const formIsDescription = $derived(formMatchKind === 'matches_description');
 	// A description rule that files mail as handled applies only when the classifier agrees.
@@ -287,16 +302,14 @@
 		formMatchValue = '';
 		formName = '';
 		formPreset = preset;
-		formRuleLabelError = false;
-		formFromAddressError = false;
+		formRefusal = null;
 		formOpen = true;
 	}
 
 	function closeForm(): void {
 		formOpen = false;
 		formSubmitting = false;
-		formRuleLabelError = false;
-		formFromAddressError = false;
+		formRefusal = null;
 	}
 
 	async function submitForm(): Promise<void> {
@@ -304,8 +317,7 @@
 		const value = formMatchValue.trim();
 		if (accountId.length === 0 || value.length === 0 || formPreset === null) return;
 		formSubmitting = true;
-		formRuleLabelError = false;
-		formFromAddressError = false;
+		formRefusal = null;
 		const preset = PRESET_MAP[formPreset];
 		const name = formName.trim();
 		const result = await createInboxRule(getApiBase(), {
@@ -319,9 +331,8 @@
 		});
 		formSubmitting = false;
 		if (!result.ok) {
-			// A label such as "R1" is said in the form, where it can be rephrased.
-			if (result.namesRuleLabel) formRuleLabelError = true;
-			else if (result.notOneAddress) formFromAddressError = true;
+			// A refusal the owner can act on is said in the form, where the value can be changed.
+			if (result.refusal !== null) formRefusal = result.refusal;
 			else addToast(t('inbox.rules_error_create'), 'error');
 			return;
 		}
@@ -477,7 +488,7 @@
 
 			<div class="mb-3 flex items-center justify-between">
 				<span class="text-[11px] text-text-subtle uppercase tracking-widest">
-					{confirmedRules.length} {confirmedRules.length === 1 ? '·' : ''}
+					<span data-testid="rules-count">{rulesCountLabel(confirmedRules.length)}</span>
 				</span>
 				{#if !formOpen && isOwnerSession()}
 					<button
@@ -561,11 +572,8 @@
 						{/if}
 					</fieldset>
 
-					{#if formFromAddressError}
-						<p class="rounded-[var(--radius-sm)] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger" role="alert" data-testid="rules-from-address-error">{t('inbox.rules_error_from_address')}</p>
-					{/if}
-					{#if formRuleLabelError}
-						<p class="rounded-[var(--radius-sm)] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger" role="alert" data-testid="rules-label-error">{t('inbox.rules_error_rule_label')}</p>
+					{#if formRefusal !== null}
+						<p class="rounded-[var(--radius-sm)] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger" role="alert" data-testid={REFUSAL_TEXT[formRefusal].testId}>{t(REFUSAL_TEXT[formRefusal].key)}</p>
 					{/if}
 
 					<div class="flex items-center justify-end gap-2 pt-1 flex-wrap">
@@ -601,6 +609,9 @@
 									<p class="text-[11px] text-text-subtle mt-1">
 										→ {t(ruleDisplayLabelKey(rule))}
 									</p>
+									{#if rule.matcherKind === 'list_id'}
+										<p class="text-[11px] text-text-muted mt-1" data-testid="rules-list-id-inactive">{t('inbox.rules_list_id_inactive')}</p>
+									{/if}
 									<a
 										href={ruleItemsHref(rule)}
 										class="inline-block mt-1 text-[11px] text-accent-text hover:underline py-1"

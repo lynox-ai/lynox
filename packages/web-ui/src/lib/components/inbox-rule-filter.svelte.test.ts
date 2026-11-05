@@ -195,6 +195,18 @@ describe('InboxView — waiting proposals next to the rules entry', () => {
 		expect(spoken.filter((s) => s === t('inbox.rules_pending_count_one'))).toHaveLength(2);
 	});
 
+	// jsdom does no layout, so the overlap seen at 390 px cannot be measured here. What can be
+	// held is its cause: in a scrolling row every child must keep its width, or the flex row
+	// squeezes it below its content and the next child is drawn over it.
+	it('keeps every child of the scrolling mobile row at its own width', async () => {
+		await render({ rulesPending: 2 });
+		const row = byTestId('inbox-pill-rules')?.parentElement;
+		expect(row?.className).toContain('overflow-x-auto');
+		const children = [...(row?.children ?? [])];
+		expect(children.map((c) => c.getAttribute('role') ?? c.getAttribute('data-testid'))).toEqual(['tablist', 'inbox-pill-rules']);
+		for (const child of children) expect(child.classList.contains('shrink-0')).toBe(true);
+	});
+
 	it('shows no count while none waits, and the pill still leads to the rules', async () => {
 		await render({ rulesPending: 0 });
 		expect(byTestId('rules-pending-badge')).toBeNull();

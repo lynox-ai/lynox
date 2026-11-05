@@ -546,7 +546,7 @@
 						carries on md+. -->
 					<div class="md:hidden flex items-center gap-1 mb-3 overflow-x-auto scrollbar-none -mx-4 px-4 py-1">
 						<div
-							class="flex gap-1"
+							class="flex shrink-0 gap-1"
 							role="tablist"
 							aria-label={t('inbox.title')}
 						>

@@ -102,6 +102,21 @@ const SENTENCES: Record<Reason, { named: string; unnamed: string; key: string }>
 	},
 };
 const REASONS = Object.keys(SENTENCES) as Reason[];
+/** A mandate cannot create a rule: where the sentence offers a fixed rule, its last sentence says
+ *  the owner can. The sensitive sentence offers none and reads as for the owner. */
+const OWNER_LAST: Record<Reason, string> = {
+	rule_withheld_classifier: 'Soll die Regel hier immer greifen, mach daraus eine feste Regel.',
+	rule_withheld_unchecked: 'Soll die Regel ohne Prüfung greifen, mach daraus eine feste Regel.',
+	rule_withheld_sensitive: '',
+	forwarded_by_person: 'Soll die Regel auch hier greifen, mach daraus eine feste Regel.',
+};
+const MANDATE_LAST = 'Eine feste Regel daraus kann der Inhaber anlegen.';
+function forMandate(sentence: string, reason: Reason): string {
+	if (OWNER_LAST[reason] === '') return sentence;
+	expect(sentence.endsWith(` ${OWNER_LAST[reason]}`)).toBe(true);
+	return `${sentence.slice(0, -OWNER_LAST[reason].length)}${MANDATE_LAST}`;
+}
+const MANDATE = Object.fromEntries(REASONS.map((r) => [r, { named: forMandate(SENTENCES[r].named, r), unnamed: forMandate(SENTENCES[r].unnamed, r) }])) as Record<Reason, { named: string; unnamed: string }>;
 const OFFERS_FIXED: Record<Reason, boolean> = {
 	rule_withheld_classifier: true,
 	rule_withheld_unchecked: true,
@@ -170,9 +185,20 @@ describe('InboxReadingPane — a rule held back', () => {
 
 	it.each(REASONS)('%s: offers a mandate no fixed rule, and still says why the rule was held back', async (reason) => {
 		await render(item({ id: 'rul_1', name: 'Mahnungen', reason }), 'mandate');
-		expect(byTestId('inbox-rule-withheld-text')?.textContent).toBe(SENTENCES[reason].named);
+		expect(byTestId('inbox-rule-withheld-text')?.textContent).toBe(MANDATE[reason].named);
 		expect(byTestId('inbox-rule-withheld-from-sender')).toBeNull();
 		expect(byTestId('inbox-rule-withheld-from-subject')).toBeNull();
+	});
+
+	it.each(REASONS)('%s: tells a mandate, without a name too, that the owner can make the fixed rule', async (reason) => {
+		await render(item({ id: 'rul_1', name: null, reason }), 'mandate');
+		expect(byTestId('inbox-rule-withheld-text')?.textContent).toBe(MANDATE[reason].unnamed);
+	});
+
+	it('tells a mandate in English too', async () => {
+		setLocale('en');
+		await render(item({ id: 'rul_1', name: 'Dunning', reason: 'rule_withheld_unchecked' }), 'mandate');
+		expect(byTestId('inbox-rule-withheld-text')?.textContent).toBe('Rule “Dunning” held back: the check could not run, for example because of no AI budget or credit, so lynox shows you the mail. The owner can turn it into a fixed rule.');
 	});
 
 	it('offers no subject rule for a mail without subject, and no sender rule without sender', async () => {
@@ -182,6 +208,31 @@ describe('InboxReadingPane — a rule held back', () => {
 		if (component) unmount(component);
 		component = undefined;
 		await render(item({ id: 'rul_1', name: 'Mahnungen', reason: 'rule_withheld_classifier' }, { fromAddress: '' }));
+		expect(byTestId('inbox-rule-withheld-from-sender')).toBeNull();
+		expect(byTestId('inbox-rule-withheld-from-subject')).not.toBeNull();
+	});
+
+	it.each([
+		['a zero-width space', 'Newsletter\u200B KW 45', 'Newsletter'],
+		['a combining grapheme joiner padding', 'Sale \u034F\u034F\u034F jetzt kaufen', 'jetzt kaufen'],
+		['a tab of an unfolded header', 'Re: Rechnung\tNr. 42', 'Re: Rechnung'],
+		['a byte order mark in front', '\uFEFFZahlungserinnerung 42', 'Zahlungserinnerung 42'],
+	])('offers from a subject with %s only a piece the subject contains as it is', async (_label, subject, value) => {
+		await render(item({ id: 'rul_1', name: 'Mahnungen', reason: 'rule_withheld_classifier' }, { subject }));
+		const link = byTestId('inbox-rule-withheld-from-subject') as HTMLAnchorElement | null;
+		const prefilled = new URL(link!.getAttribute('href')!, 'http://localhost').searchParams.get('value');
+		expect(prefilled).toBe(value);
+		expect(subject.includes(prefilled!)).toBe(true);
+	});
+
+	it.each(['Hi', ' Re ', 'ab\u200Bcd', '\u{1F600}\u{1F600}'])('offers no subject rule for "%s", which has no piece of 3 characters', async (subject) => {
+		await render(item({ id: 'rul_1', name: 'Mahnungen', reason: 'rule_withheld_classifier' }, { subject }));
+		expect(byTestId('inbox-rule-withheld-from-subject')).toBeNull();
+		expect(byTestId('inbox-rule-withheld-from-sender')).not.toBeNull();
+	});
+
+	it.each(['Inkasso AG', 'undisclosed-recipients:;', '<mahnung@inkasso.example>', 'mahnung@inkasso.example\u200B'])('offers no sender rule for a sender "%s" that is not one address', async (fromAddress) => {
+		await render(item({ id: 'rul_1', name: 'Mahnungen', reason: 'rule_withheld_classifier' }, { fromAddress }));
 		expect(byTestId('inbox-rule-withheld-from-sender')).toBeNull();
 		expect(byTestId('inbox-rule-withheld-from-subject')).not.toBeNull();
 	});

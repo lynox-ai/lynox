@@ -379,6 +379,12 @@ describe('RulesView — prefill from a link', () => {
 		expect(target.querySelector('form')).toBeNull();
 	});
 
+	it('opens no form for a list id, which cannot be created', async () => {
+		pageUrl.href = 'http://localhost/app/inbox/rules?accountId=sales&kind=list_id&value=news.shop.example';
+		await render({ viewer: 'owner', rules: [] });
+		expect(target.querySelector('form')).toBeNull();
+	});
+
 	it('opens no form for a mandate', async () => {
 		pageUrl.href = 'http://localhost/app/inbox/rules?accountId=sales&kind=from&value=a%40b.example';
 		await render({ viewer: 'mandate', rules: [] });
@@ -482,8 +488,6 @@ describe('RulesView — the sender of a fixed rule', () => {
 		expect(textInputs()[1]!.placeholder).toBe(t('inbox.rules_match_from_placeholder'));
 		await choose('rule-match-kind', 'subject_contains');
 		expect(textInputs()[1]!.placeholder).toBe(t('inbox.rules_match_value_placeholder'));
-		await choose('rule-match-kind', 'list_id');
-		expect(textInputs()[1]!.placeholder).toBe(t('inbox.rules_match_value_placeholder'));
 	});
 
 	it.each(['noreply@', '@lieferant.ch', 'lieferant.ch'])('says in the form when the server refuses "%s" as not one whole address', async (value) => {
@@ -501,5 +505,83 @@ describe('RulesView — the sender of a fixed rule', () => {
 		expect(target.querySelector('form')).not.toBeNull();
 		expect(spy).not.toHaveBeenCalledWith(t('inbox.rules_error_create'), 'error');
 		spy.mockRestore();
+	});
+});
+
+describe('RulesView — what the form says when the server refuses the value', () => {
+	async function submitRefused(error: string, kind: string, value: string): Promise<ReturnType<typeof vi.spyOn>> {
+		const toasts = await import('../stores/toast.svelte.js');
+		const spy = vi.spyOn(toasts, 'addToast');
+		await render({ viewer: 'owner', rules: [], create: () => Response.json({ error }, { status: 400 }) });
+		await openForm();
+		await choose('rule-match-kind', kind);
+		await type(textInputs()[1]!, value);
+		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+		await settle();
+		return spy;
+	}
+	const ALERTS = ['rules-from-address-error', 'rules-label-error', 'rules-hidden-chars-error', 'rules-subject-short-error', 'rules-list-id-error'];
+
+	it.each([
+		['subject phrase must be at least 3 characters', 'subject_contains', 'Hi', 'rules-subject-short-error', 'inbox.rules_error_subject_short'],
+		['matcherValue holds characters a reader does not see', 'subject_contains', 'News\u200Bletter', 'rules-hidden-chars-error', 'inbox.rules_error_hidden_chars'],
+		['matcherValue must be one line', 'from', 'a@b.example', 'rules-hidden-chars-error', 'inbox.rules_error_hidden_chars'],
+		['description holds characters a reader does not see', 'matches_description', 'Mahnungen', 'rules-hidden-chars-error', 'inbox.rules_error_hidden_chars'],
+		['list_id rules do not apply yet', 'from', 'a@b.example', 'rules-list-id-error', 'inbox.rules_error_list_id'],
+	])('says "%s" in the form, as an alert, and toasts nothing', async (error, kind, value, testId, key) => {
+		const spy = await submitRefused(error, kind, value);
+		const alert = byTestId(testId);
+		expect(alert?.textContent).toBe(t(key));
+		expect(alert?.getAttribute('role')).toBe('alert');
+		expect(ALERTS.filter((id) => byTestId(id) !== null)).toEqual([testId]);
+		expect(target.querySelector('form')).not.toBeNull();
+		expect(spy).not.toHaveBeenCalled();
+		spy.mockRestore();
+	});
+});
+
+describe('RulesView — list id rules', () => {
+	const listRule = { ...confirmed, id: 'rul_l1', matcherKind: 'list_id', matcherValue: 'news.shop.example', name: 'Shop-Newsletter' };
+
+	it('offers no list id kind in the form', async () => {
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		const kinds = [...target.querySelectorAll<HTMLInputElement>('input[name="rule-match-kind"]')].map((r) => r.value);
+		expect(kinds).toEqual(['from', 'subject_contains', 'matches_description']);
+	});
+
+	it('says under a stored list id rule that it does not apply, keeps its delete, and says it under no other rule', async () => {
+		await render({ viewer: 'owner', rules: [confirmed, listRule] });
+		const items = [...target.querySelectorAll<HTMLLIElement>('li[id^="rule-"]')];
+		expect(items.map((li) => li.id)).toEqual(['rule-rul_c1', 'rule-rul_l1']);
+		expect(items[0]!.querySelector('[data-testid="rules-list-id-inactive"]')).toBeNull();
+		expect(items[1]!.querySelector('[data-testid="rules-list-id-inactive"]')?.textContent).toBe(t('inbox.rules_list_id_inactive'));
+		expect(items[1]!.textContent).toContain(t('inbox.rules_match_list_id'));
+		expect(items[1]!.querySelector(`button[aria-label="${t('inbox.rules_delete')}"]`)).not.toBeNull();
+		expect(target.querySelectorAll('[data-testid="rules-list-id-inactive"]')).toHaveLength(1);
+	});
+});
+
+describe('RulesView — the count and the bucket of a rule', () => {
+	it('counts the rules that apply with their noun, one and many', async () => {
+		await render({ viewer: 'owner', rules: [confirmed] });
+		expect(byTestId('rules-count')?.textContent).toBe('1 Regel');
+		if (component) unmount(component);
+		component = undefined;
+		await render({ viewer: 'owner', rules: [confirmed, { ...confirmed, id: 'rul_c2' }, { ...confirmed, id: 'rul_c3' }] });
+		expect(byTestId('rules-count')?.textContent).toBe('3 Regeln');
+		if (component) unmount(component);
+		component = undefined;
+		await render({ viewer: 'owner', rules: [] });
+		expect(byTestId('rules-count')?.textContent).toBe('0 Regeln');
+	});
+
+	// The server files every proposal under "Needs you"; a waiting rule that files mail as handled
+	// is not data it sends today. The label is held here so a rule sentence never names the zone.
+	it('names the handled bucket of a rule "Erledigt", not the zone "Erledigt heute"', async () => {
+		await render({ viewer: 'owner', rules: [{ ...proposal, bucket: 'auto_handled', action: 'archive' }] });
+		expect(byTestId('rules-confirm-text')!.textContent).toBe('Regel „Lieferantenrechnungen“ bestätigen? Wenn Absender ist „rechnung@lieferant.example“, dann „Erledigt“. Sie wirkt, sobald du bestätigst.');
+		expect(byTestId('rules-proposal')!.textContent).toContain('→ Erledigt');
+		expect(byTestId('rules-proposal')!.textContent).not.toContain(t('inbox.zone_handled'));
 	});
 });

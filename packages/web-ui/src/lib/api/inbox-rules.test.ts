@@ -113,38 +113,52 @@ describe('createInboxRule', () => {
 
 	it('reports a refusal of a rule label such as R1 apart from any other refusal', async () => {
 		installFetch(async () => jsonResponse({ error: 'name must not name a rule label such as R1' }, 400));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: true, notOneAddress: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: 'rule_label' });
 		installFetch(async () => jsonResponse({ error: 'description must not name a rule label such as R1' }, 400));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: true, notOneAddress: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: 'rule_label' });
 	});
 
-	it('reports a sender that is not one whole address apart from any other refusal', async () => {
-		installFetch(async () => jsonResponse({ error: 'matcherValue must be one sender address' }, 400));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: true });
-		installFetch(async () => jsonResponse({ error: 'matcherValue must be one line' }, 400));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
+	// Each refusal the form names, by the server's words (`inbox/api.ts`, `inbox/rule-text.ts`).
+	it.each([
+		['matcherValue must be one sender address', 'not_one_address'],
+		['matcherValue holds characters a reader does not see', 'hidden_chars'],
+		['description holds characters a reader does not see', 'hidden_chars'],
+		['matcherValue must be one line', 'hidden_chars'],
+		['description must be one line', 'hidden_chars'],
+		['subject phrase must be at least 3 characters', 'subject_short'],
+		['list_id rules do not apply yet', 'list_id'],
+	] as const)('reports "%s" as %s', async (error, refusal) => {
+		installFetch(async () => jsonResponse({ error }, 400));
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal });
+	});
+
+	it('names no refusal the form cannot act on', async () => {
+		for (const error of ['matcherValue exceeds 200 characters', 'description must be 3 to 300 characters', 'x matcherValue must be one line', 'invalid matcherKind']) {
+			installFetch(async () => jsonResponse({ error }, 400));
+			expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: null });
+		}
 	});
 
 	it('fails without the rule-label flag when the server rejects with another 400', async () => {
 		installFetch(async () => jsonResponse({ error: 'bad' }, 400));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: null });
 	});
 
 	it('fails without the rule-label flag when a refusal has no JSON body', async () => {
 		installFetch(async () => new Response('nope', { status: 400 }));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: null });
 	});
 
 	it('fails when the server omits the id field', async () => {
 		installFetch(async () => jsonResponse({}, 201));
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: null });
 	});
 
 	it('fails when fetch throws', async () => {
 		installFetch(async () => {
 			throw new Error('network');
 		});
-		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, namesRuleLabel: false, notOneAddress: false });
+		expect(await createInboxRule('/api', CREATE_BODY)).toEqual({ ok: false, refusal: null });
 	});
 });
 
