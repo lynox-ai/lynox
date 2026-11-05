@@ -50,7 +50,7 @@ function workerSamples(n: WorkerNotices): Record<string, string> {
 const ORDINARY_HALTS = [
   'timeBudget', 'failureRate', 'consecutiveFailures', 'stoppedByOwner', 'maxTargets', 'awaitingStart', 'expired',
   'unavailable', 'credential', 'unauthorized', 'blocked', 'contract', 'costCap', 'spendLimit', 'creditRefused',
-  'probeRequired', 'mandateEnded',
+  'probeRequired', 'mandateEnded', 'markupAddedByShop',
 ] as const satisfies readonly (keyof typeof BULK_HALT_REASONS)[];
 /** The unclear-send warning alone, as the counts open with it. */
 function applyWarning(n: BulkNotices, sentUnknown: number): string {

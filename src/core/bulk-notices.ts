@@ -130,6 +130,7 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.creditRefused]: 'KI-Aufruf abgelehnt: kein Guthaben, oder die Verbindung zu lynox war unterbrochen.',
     [BULK_HALT_REASONS.probeRequired]: 'Weitere Ziele schreibt lynox erst nach bestätigter Probe.',
     [BULK_HALT_REASONS.mandateEnded]: 'Der Zugang, über den der Lauf geplant wurde, endete vor der Freigabe. Geschrieben wurde nichts.',
+    [BULK_HALT_REASONS.markupAddedByShop]: 'Ein geschriebenes Produkt enthält Markup, das lynox nicht gesendet hat; es kam im Shop dazu. Produkt und Wege stehen unter Massenläufe.',
   });
   return deHaltReasons[reason];
 }
