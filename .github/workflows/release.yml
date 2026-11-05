@@ -299,7 +299,8 @@ jobs:
   #     --source-ref refs/tags/v<version> --deny-self-hosted-runners
   # A job of its own, so the OIDC token is in reach only of the steps here, none of which runs
   # repository code. npm does not wait for it: if this job fails, the package is out and the
-  # image is tagged but unattested; re-running the failed jobs attests it then.
+  # image is tagged but unattested. Re-running the failed jobs attests it while the build
+  # jobs' digest artifacts are kept (one day); after that this job fails on their count.
   docker-attest:
     needs: docker-manifest
     runs-on: ubuntu-24.04
@@ -345,7 +346,13 @@ jobs:
             echo "::error::expected the 2 digests this run built (amd64+arm64), got ${#BUILT[@]}"
             exit 1
           fi
-          EXPECTED=$(for d in "${BUILT[@]}"; do inspect "@${d}" | children; done | sort)
+          EXPECTED=""
+          for d in "${BUILT[@]}"; do
+            # One assignment per image, so a failed read of either stops the step here.
+            C=$(inspect "@${d}" | children)
+            EXPECTED+="${C}"$'\n'
+          done
+          EXPECTED=$(sort <<< "$EXPECTED" | sed '/^$/d')
           LIST=$(inspect ":${VERSION}")
           DIGEST=$(jq -r .digest <<< "$LIST")
           if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then

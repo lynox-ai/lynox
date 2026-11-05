@@ -135,7 +135,7 @@ describe('release.yml — the release image is attested', () => {
     });
   });
 
-  it('only the attesting job may mint an OIDC token or write attestations, also not the whole workflow', () => {
+  it('only the attesting job may mint an OIDC token or write attestations, and no workflow-wide grant does', () => {
     expect(job.permissions).toEqual({ contents: 'read', packages: 'write', 'id-token': 'write', attestations: 'write' });
     expect(workflow.permissions?.['id-token']).toBeUndefined();
     expect(workflow.permissions?.['attestations']).toBeUndefined();
@@ -153,6 +153,31 @@ describe('release.yml — the release image is attested', () => {
     expect(r.stdout).not.toContain('::warning::');
   });
 
+  it('accepts the list in any order of its manifests, as the registry returns it', () => {
+    // The real 2.17.1 list is not in digest order; the build files come back sorted by name.
+    for (const children of [[D('5'), D('6'), D('3'), D('4')], [D('5'), D('3'), D('6'), D('4')], [D('6'), D('5'), D('4'), D('3')]]) {
+      const r = runIndex(healthy({ ':2.19.0': list(D('a'), children) }));
+      expect(r.status, children.join()).toBe(0);
+      expect(r.outputs['digest'], children.join()).toBe(D('a'));
+    }
+  });
+
+  it('a build digest that is a single image counts as itself', () => {
+    const r = runIndex(healthy({
+      [`@${AMD}`]: JSON.stringify({ mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: AMD, size: 1 }),
+      ':2.19.0': list(D('a'), [AMD, D('5'), D('6')]),
+    }));
+    expect(r.status).toBe(0);
+    expect(r.outputs['digest']).toBe(D('a'));
+  });
+
+  it('refuses a version tag moved to a single image, though the image is one this run built', () => {
+    const r = runIndex(healthy({ ':2.19.0': JSON.stringify({ mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: D('3'), size: 1 }) }));
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('::error::2.19.0 does not point at the images this run built');
+    expect(r.outputs['digest']).toBeUndefined();
+  });
+
   it('refuses a version tag that points at other images, so a moved tag is not attested', () => {
     for (const children of [[D('3'), D('4'), D('5'), D('7')], [D('3'), D('4')], [...OURS, D('7')], []]) {
       const r = runIndex(healthy({ ':2.19.0': list(D('a'), children) }));
@@ -165,10 +190,14 @@ describe('release.yml — the release image is attested', () => {
   it('refuses when a built image cannot be read, or when not exactly two were built', () => {
     // The first or the last of the two: a failure in the loop's last pipeline fails the
     // assignment, one in an earlier pipeline leaves its children out of the expected set.
-    for (const d of [AMD, ARM]) {
-      const unreadable = runIndex(healthy({ [`@${d}`]: 'not json' }));
-      expect(unreadable.status, d).not.toBe(0);
-      expect(unreadable.outputs['digest'], d).toBeUndefined();
+    // Either of the two, and also when the version tag holds just the other image's manifests,
+    // so that what could be read matches what is listed.
+    for (const [d, rest] of [[AMD, [D('5'), D('6')]], [ARM, [D('3'), D('4')]]] as const) {
+      for (const tag of [OURS, rest]) {
+        const unreadable = runIndex(healthy({ [`@${d}`]: 'not json', ':2.19.0': list(D('a'), tag) }));
+        expect(unreadable.status, `${d} ${tag.join()}`).not.toBe(0);
+        expect(unreadable.outputs['digest'], d).toBeUndefined();
+      }
     }
     // Built images that list nothing, and a version tag on an empty list: equal, and still refused.
     const empty = runIndex(healthy({ [`@${AMD}`]: list(AMD, []), [`@${ARM}`]: list(ARM, []), ':2.19.0': list(D('a'), []) }));
