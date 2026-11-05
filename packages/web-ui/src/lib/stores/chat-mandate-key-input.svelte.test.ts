@@ -113,6 +113,41 @@ describe('a helper\'s message refused as carrying a key', () => {
 		expect(JSON.stringify([...saved.values()]), 'nothing saved in this browser holds it').not.toContain(KEY);
 	});
 
+	it('a queued message whose thread was left while it was out: that thread\'s saved copy keeps nothing', async () => {
+		let finishFirst: (r: Response) => void = () => {};
+		let answerSecond: (r: Response) => void = () => {};
+		let runs = 0;
+		serve((url) => undefined);
+		const plain = globalThis.fetch as unknown as (input: string | URL) => Promise<Response>;
+		vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+			const url = String(input);
+			if (url.endsWith('/run')) {
+				calls.push(url);
+				runs++;
+				return new Promise<Response>((r) => { if (runs === 1) finishFirst = r; else answerSecond = r; });
+			}
+			return plain(input);
+		}));
+		store.registerComposerDraft(() => true);
+
+		const first = store.sendMessage('Verbinde bitte unseren Shop.');
+		await settle();
+		await store.sendMessage(TYPED);
+		finishFirst(new Response('', { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+		await first;
+		await new Promise((r) => setTimeout(r, 250));
+		await settle();
+		expect(runs, 'the queued message is out').toBe(2);
+		expect(JSON.stringify([...saved.values()]), 'control: the thread\'s saved copy holds it as it leaves').toContain(KEY);
+		await store.resumeThread('t2');
+		await settle();
+		answerSecond(refused());
+		await new Promise((r) => setTimeout(r, 50));
+		await settle();
+
+		expect(JSON.stringify([...saved.values()]), 'nothing saved in this browser holds it').not.toContain(KEY);
+	});
+
 	it('says the other sentence when the field could not take the text back', async () => {
 		serve((url) => (url.endsWith('/run') ? refused() : undefined));
 		store.registerComposerDraft(() => false);

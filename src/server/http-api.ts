@@ -1335,18 +1335,22 @@ export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
 /**
  * Whether text a mandate's helper typed somewhere other than the chat reads as carrying a key — a
  * conversation's title, a task's fields, a compaction's focus — and was refused for it (422, the
- * fixed sentence). Every string in `value` is read, nested ones included. The owner is not checked.
+ * fixed sentence). Every string in `value` is read, nested ones and object keys included; a value
+ * nested deeper than four levels is refused unread. The owner is not checked.
  */
 function refusedMandateKeyIn(principal: RequestPrincipal, res: ServerResponse, value: unknown): boolean {
   if (isOwnerPrincipal(principal)) return false;
   const texts: string[] = [];
+  let tooDeep = false;
   const walk = (v: unknown, depth: number): void => {
-    if (typeof v === 'string') texts.push(v);
-    else if (depth < 4 && Array.isArray(v)) for (const x of v) walk(x, depth + 1);
-    else if (depth < 4 && v !== null && typeof v === 'object') for (const x of Object.values(v)) walk(x, depth + 1);
+    if (typeof v === 'string') { texts.push(v); return; }
+    if (v === null || typeof v !== 'object') return;
+    if (depth >= 4) { tooDeep = true; return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, depth + 1); return; }
+    for (const [k, x] of Object.entries(v)) { texts.push(k); walk(x, depth + 1); }
   };
   walk(value, 0);
-  if (!texts.some((t) => mandateCredentialInput(t) !== null)) return false;
+  if (!tooDeep && !texts.some((t) => mandateCredentialInput(t) !== null)) return false;
   errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
   return true;
 }

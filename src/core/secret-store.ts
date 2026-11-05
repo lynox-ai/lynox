@@ -375,12 +375,13 @@ const CONTEXT_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: 
 
 /** A word a person writes before a credential's value, German or English. */
 const CREDENTIAL_CUE = /(?<![\p{L}\p{N}])(?:api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret|secret|token|key|schlüssel|passwor[dt]|kennwort|zugangsdaten|credentials?)(?![\p{L}\p{N}])/giu;
-/** Short password cues count only with a colon or an equals sign after them ("PW:", "Login: …"). */
-const SHORT_PASSWORD_CUE = /(?<![\p{L}\p{N}])(?:pw|pwd|pass|login)\s*[:=]/giu;
-const PASSWORD_CUE = /^(?:passwor[dt]|kennwort|pw|pwd|pass|login)/i;
+/** Short password cues count only with a colon or an equals sign after them ("PW: …"). */
+const SHORT_PASSWORD_CUE = /(?<![\p{L}\p{N}])(?:pw|pwd|passwd)\s*[:=]/giu;
+const PASSWORD_CUE = /^(?:passwor[dt]|kennwort|pw|pwd|passwd)/i;
 const PASSWORD_LINK = /^(?:ist|lautet|heisst|heißt|is|=)$/i;
-/** How many words after a cue are read, across line breaks ("Der Key:\n<key>"). */
-const CUE_WINDOW = 6;
+/** How many words after a cue are read: on the cue's own line, or on the next line when the cue
+ *  ends its line ("Der Key:\n<key>"). */
+const CUE_WINDOW = 4;
 
 /**
  * Keys a helper of a small business is likely to paste whose form the run route's mask does not
@@ -389,13 +390,14 @@ const CUE_WINDOW = 6;
 const MANDATE_EXTRA_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = [
   { label: 'HubSpot private app token', pattern: /(?<![\w-])pat-(?:na|eu|ap)\d-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\w-])/i },
   { label: 'WooCommerce key', pattern: /(?<!\w)c[ks]_[0-9a-f]{40}(?!\w)/ },
-  { label: 'Mailchimp API key', pattern: /(?<!\w)[0-9a-f]{32}-us\d{1,2}(?!\w)/ },
+  { label: 'Mailchimp API key', pattern: /(?<![\w.-])[0-9a-f]{32}-us\d{1,2}(?![\w.-])/ },
   { label: 'SendGrid API key', pattern: /(?<![\w.])SG\.[\w-]{20,24}\.[\w-]{40,46}(?![\w-])/ },
   { label: 'Twilio API key', pattern: /(?<!\w)SK[0-9a-f]{32}(?!\w)/ },
 ];
 
-/** IDs with a prefix that are no secret (Stripe objects, not keys): never a key on its own. */
-const NON_SECRET_ID = /^(?:pi|pm|cus|ch|in|prod|price|sub|evt|acct|txn|seti|re|po|tr|src|card|ba|si|li|ii|il)_/;
+/** A Stripe object's id (payment, customer, charge …), which is no secret: never a key on its own.
+ *  The whole word in Stripe's form, so a vendor's key with a short prefix of its own is not let through. */
+const NON_SECRET_ID = /^(?:pi|pm|cus|ch|prod|price|sub|evt|acct|txn|seti)_[A-Za-z0-9]{14,30}$/;
 
 function entropyBits(s: string): number {
   const freq = new Map<string, number>();
@@ -423,7 +425,7 @@ function classChangeRate(run: string): number {
 
 /** A vault or env name (`SHOPIFY_ADMIN_TOKEN`), a link or an address names a credential; it is not one. */
 function isNameOrLink(tok: string): boolean {
-  return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok) || /@/.test(tok);
+  return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok);
 }
 
 /** Long enough, letters and digits, spread: a key's value. */
@@ -436,14 +438,20 @@ function passwordShaped(tok: string): boolean {
   return !isNameOrLink(tok) && tok.length >= 8 && charClasses(tok) >= 3;
 }
 
-/** The words after `from`, split at white space and quotes, at most `CUE_WINDOW`. */
-function rawWordsAfter(text: string, from: number): string[] {
-  return text.slice(from).split(/[\s"'`„“”]+/).filter((w) => w.length > 0).slice(0, CUE_WINDOW);
-}
-
-/** The same words with leading and trailing punctuation stripped. */
+/**
+ * The words after `from`, at most `CUE_WINDOW`, quotes and leading and trailing punctuation
+ * stripped: those on the same line, or, when nothing but a colon or an equals sign follows the cue
+ * on its line, those on the next line that holds any.
+ */
 function wordsAfter(text: string, from: number): string[] {
-  return rawWordsAfter(text, from).map((w) => w.replace(/^[:=(<[]+|[.,;:!?)>\]]+$/g, '')).filter((w) => w.length > 0);
+  const rest = text.slice(from);
+  const lines = rest.split('\n');
+  const own = lines[0]!;
+  const line = /^[\s:=]*$/.test(own) ? (lines.slice(1).find((l) => l.trim().length > 0) ?? '') : own;
+  return line.split(/[\s"'`„“”]+/)
+    .map((w) => w.replace(/^[:=(<[]+|[.,;:!?)>\]]+$/g, ''))
+    .filter((w) => w.length > 0)
+    .slice(0, CUE_WINDOW);
 }
 
 /**
@@ -454,16 +462,16 @@ function wordsAfter(text: string, from: number): string[] {
  *   1. a vendor shape or a JWT (`maskCredentialInput`), a private key block, and the further vendor
  *      shapes in `MANDATE_EXTRA_SHAPES`;
  *   2. a bearer header or user:pass in a URL;
- *   3. a cue word (key, token, secret …) followed, within the next six words and across line
- *      breaks, by a key-shaped word; a password cue (Passwort, Kennwort, or "PW:", "pass:",
- *      "Login:") followed by a password-shaped word that is the next word or comes after one
- *      linking word, or, anywhere in the next six words, one with letters, digits and a symbol;
+ *   3. a cue word (key, token, secret …) followed, within the next four words on its line (or on
+ *      the next line, when the cue ends its line), by a key-shaped word; a password cue (Passwort,
+ *      Kennwort, password, or "PW:") followed by a password-shaped word that is the next word or
+ *      comes after one linking word. A cue joined to a word by a hyphen ("Passwort-Manager",
+ *      "Key-Account") is that word, not a cue;
  *   4. a message that is one word (a code fence around it allowed), at least 20 characters, with an
  *      unbroken letter-and-digit run of 16 or more holding upper case, lower case and digits that
- *      change class as often as a random key does — a key pasted on its own.
- * Not caught: a key without a known form and without a cue word, unless it is pasted alone and
- * looks random (a bare hex key passes); a password without a cue word. Caught though not a key:
- * a random-looking ID pasted alone, such as a Google Drive file ID (a link to it passes).
+ *      change class as often as a random key does, and that is not a Stripe object's id — a key
+ *      pasted on its own. A random-looking id pasted alone, such as a Google Drive file id, reads
+ *      as one too; a link to it does not.
  * Returns a fixed label, never any part of the text.
  */
 export function mandateCredentialInput(text: string): string | null {
@@ -472,15 +480,14 @@ export function mandateCredentialInput(text: string): string | null {
   for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
   const cues = [...text.matchAll(CREDENTIAL_CUE), ...text.matchAll(SHORT_PASSWORD_CUE)];
   for (const cue of cues) {
-    const words = wordsAfter(text, (cue.index ?? 0) + cue[0].length);
+    const end = (cue.index ?? 0) + cue[0].length;
+    if (text[end] === '-') continue;
+    const words = wordsAfter(text, end);
     if (PASSWORD_CUE.test(cue[0])) {
-      // A password is short and word-like: it counts where it is plainly the value (the next word,
-      // or after one linking word), or further on when it mixes letters, digits and a symbol, which
-      // a word at the end of a sentence ("Kooperation!") does not.
+      // A password is short and word-like: it counts only where it is plainly the value (the next
+      // word, or after one linking word).
       const plain = PASSWORD_LINK.test(words[0] ?? '') ? words[1] : words[0];
       if (plain !== undefined && passwordShaped(plain)) return 'password';
-      // Read unstripped here: a password's last character is often the symbol ("Sommer2025!").
-      if (rawWordsAfter(text, (cue.index ?? 0) + cue[0].length).some((w) => passwordShaped(w) && /[0-9]/.test(w) && /[A-Za-z]/.test(w) && /[^A-Za-z0-9]/.test(w))) return 'password';
       continue;
     }
     if (words.some(keyShaped)) return 'credential after a cue word';

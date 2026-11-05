@@ -184,20 +184,29 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     const control = await call('PATCH', `/api/threads/${sid}`, { title: 'Shop einrichten' });
     expect(control.status, `control: an ordinary title is saved: ${control.text}`).toBeLessThan(300);
 
+    const ordinary = await call('POST', '/api/tasks', { title: 'Lager zählen', description: 'Bis Freitag.' });
+    expect(ordinary.status, `control: an ordinary task is created: ${ordinary.text}`).toBeLessThan(300);
     for (const body of [
       { title: TYPED },
       { title: 'Shop verbinden', description: TYPED },
       { title: 'Shop verbinden', params: { token: KEY } },
+      { title: 'Shop verbinden', params: { [TYPED]: 'x' } },
+      { title: 'Shop verbinden', params: { a: { b: { c: { d: 'x' } } } } },
     ]) {
       const task = await call('POST', '/api/tasks', body);
-      expect(task.status, JSON.stringify(Object.keys(body))).toBe(422);
+      expect(task.status, JSON.stringify(body).slice(0, 60)).toBe(422);
+      expect((JSON.parse(task.text) as { code?: string }).code).toBe(MANDATE_KEY_INPUT_CODE);
       expect(task.text).not.toContain(KEY.slice(-8));
     }
     const listed = await call('GET', '/api/tasks');
+    expect(listed.text, 'control: the listing shows the helper\'s tasks').toContain('Lager zählen');
     expect(listed.text).not.toContain(KEY.slice(-8));
 
     const compacted = await call('POST', `/api/sessions/${sid}/compact`, { focus: TYPED });
     expect(compacted.status).toBe(422);
+    expect((JSON.parse(compacted.text) as { code?: string }).code).toBe(MANDATE_KEY_INPUT_CODE);
+    const compactOk = await call('POST', `/api/sessions/${sid}/compact`, { focus: 'die Bestellungen' });
+    expect(compactOk.status, 'control: an ordinary focus is not refused for a key').not.toBe(422);
   }, 60_000);
 
   it('a key in a task edit is refused', async () => {
@@ -210,7 +219,13 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     await helperSession();
     const edited = await call('PATCH', `/api/tasks/${taskId!}`, { description: TYPED });
     expect(edited.status).toBe(422);
-    expect(JSON.stringify((await call('GET', '/api/tasks')).text)).not.toContain(KEY.slice(-8));
+    expect((JSON.parse(edited.text) as { code?: string }).code).toBe(MANDATE_KEY_INPUT_CODE);
+    const ok = await call('PATCH', `/api/tasks/${taskId!}`, { description: 'Bis Freitag.' });
+    expect(ok.status, `control: an ordinary edit is not refused for a key: ${ok.text}`).not.toBe(422);
+    as(OWNER_PRINCIPAL);
+    const listed = (await call('GET', '/api/tasks')).text;
+    expect(listed, 'control: the owner\'s listing shows the task').toContain('Lager zählen');
+    expect(listed).not.toContain(KEY.slice(-8));
   }, 60_000);
 
   it('the owner\'s message with the same text is not refused (the owner stores keys; the route masks known shapes)', async () => {

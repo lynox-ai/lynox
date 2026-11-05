@@ -926,6 +926,22 @@ const LLM_FIELDS: readonly unknown[] = ['gcp_project_id', 'api_base_url', 'model
 
 /** The server's refusal of a message or an answer that read as carrying a key in a mandate's
  *  chat (422, code `mandate_key_input`). */
+/** Remove a refused message from this browser's saved copy of `threadId`: its bubble and any queued
+ *  entry with its text. */
+function dropFromSavedThread(threadId: string, content: string, task: string): void {
+	if (typeof localStorage === 'undefined') return;
+	const root = readPersistedRoot();
+	const saved = root.threads[threadId];
+	if (saved) root.threads[threadId] = saved.filter((m) => !(m.role === 'user' && m.content === content));
+	const queued = root.queues?.[threadId];
+	if (queued) {
+		const left = queued.filter((q) => q.task !== task);
+		if (left.length > 0) root.queues![threadId] = left;
+		else delete root.queues![threadId];
+	}
+	writePersistedRoot(root);
+}
+
 function isKeyInputRefusal(status: number, detail: string | null): boolean {
 	if (status !== 422 || !detail) return false;
 	try { return (JSON.parse(detail) as { code?: unknown } | null)?.code === 'mandate_key_input'; } catch { return false; }
@@ -1584,9 +1600,10 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			// again by a retry. The message field was emptied when it was sent.
 			if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 			if (messages[userMsgIdx] === turn.userMsg) messages.splice(userMsgIdx, 1);
-			// Written now: a message that waited in the queue, or a save that ran while this request
-			// was out, put it in this browser's saved copy, and that copy keeps it until the next save.
-			persistChatNow();
+			// This browser's saved copy of the refused message's thread can hold it: a queued message
+			// is saved with its text, and its thread is saved again as it leaves the queue. The copy of
+			// that thread is cleaned by itself, since the helper may have moved to another one meanwhile.
+			dropFromSavedThread(sid, turn.userMsg?.content ?? display, task);
 			// The text goes back into the message field, in memory only, so a false alarm costs no
 			// retyping; that field is never stored.
 			const returned = composerDraft !== null && composerDraft(display);
