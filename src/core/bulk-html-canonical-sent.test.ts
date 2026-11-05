@@ -602,7 +602,7 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
       // A colon with a letter after it reads as a scheme, a label's too: the owner writes it by hand.
       '[caption]Foto:Max[/caption]', '[b]Zeit:12h[/b]', '[x a="a:b"]',
       // A scheme that runs something is read in a label's form too.
-      '[x url="ms-settings: x"]', '[b]search-ms: x[/b]', '[x url="MS-Msdt: /id"]',
+      '[x url="ms-settings: x"]', '[b]search-ms: x[/b]', '[x url="MS-Msdt: /id"]', '[x url="file: //evil.example"]',
     ]) expect(check(after), after).toMatchObject({ ok: false, reason: 'url_scheme' });
     // Twin: a label, a colon and then a space or nothing, is no link as written.
     for (const after of ['[b]Hinweis: neu[/b]', '[b]Hinweis:[/b]', '[x title="Kontakt: Anfrage"]', '[x title="Neu:"]']) {
@@ -648,6 +648,11 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     // Printed as written, a backslash is a `/` to the page: the host is the name before it.
     expect(check(`[video src="https://evil.example\\@${HOST}/a.mp4"]`)).toMatchObject({ ok: false, reason: 'url_control_char' });
     expect(check(`[embed]https://evil.example\\@${HOST}/x[/embed]`)).toMatchObject({ ok: false, reason: 'url_control_char' });
+    // esc_url keeps a web scheme it allows and drops the backslash, so the host is read: the
+    // domain is named, not only the backslash.
+    expect(check('[embed]http:\\evil.example/x[/embed]')).toEqual({ ok: false, reason: 'new_link_domain', detail: 'evil.example' });
+    // In a `mailto:` esc_url keeps an encoded line break, so the address is refused for it.
+    expect(check('[x m="mailto:a@evil.exa%0Ample"]')).toMatchObject({ ok: false, reason: 'url_control_char' });
     // A file name is a domain to `esc_url` as well.
     expect(check('[video src="a.mp4"]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'a.mp4' });
     // Twin: a value that names no host stays a word or a path on the store: a relative path, a
@@ -698,6 +703,9 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     for (const held of ['<p>Hersteller: [b]evil.example[/b]</p>', '<p>[x title="evil.example"]</p>', '<p>[b]https://evil.example/ ist Partner[/b]</p>']) {
       expect(check(`${held}[embed]https://evil.example/x[/embed]`, held), held).toEqual(foreign);
     }
+    // Nor a value with a control character in it; its twin without one lends.
+    expect(check('[embed]https://evil.example/x[/embed]', '<p>[x u="https://evil.example\u0001"]</p>')).toEqual(foreign);
+    expect(check('[embed]https://evil.example/x[/embed]', '<p>[x u="https://evil.example"]</p>')).toEqual({ ok: true });
   });
 
   it('asks before shortcode_changed, so a value offered to copy carries no foreign link', () => {

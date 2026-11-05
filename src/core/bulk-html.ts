@@ -907,8 +907,8 @@ function schemeOf(value: string): string | null {
 }
 
 /** Schemes that run something when a page follows them, refused wherever a value is read as a link,
- *  a label's form included (`ms-settings: x`): these, Windows's `search-ms`, and every `ms-` one. */
-const RUNNING_SCHEMES = new Set(['javascript', 'vbscript', 'data', 'search-ms']);
+ *  a label's form included (`ms-settings: x`): these, a local file, Windows's `search-ms`, and every `ms-` one. */
+const RUNNING_SCHEMES = new Set(['javascript', 'vbscript', 'data', 'file', 'search-ms']);
 
 function runsSomething(scheme: string): boolean {
   return RUNNING_SCHEMES.has(scheme) || scheme.startsWith('ms-');
@@ -1035,7 +1035,7 @@ function checkShortcodeLinks(input: MarkupCheckInput): MarkupCheckResult {
   const held = counts(beforeCandidates.map((c) => c.value));
   const linked = linkedDomains(markupOf(parseHtmlFragment(before)).triples, input.storeHost);
   for (const c of beforeCandidates) {
-    if (!ABSOLUTE_LINK.test(c.value) || /\s/.test(c.value.trim())) continue;
+    if (!ABSOLUTE_LINK.test(c.value) || /[\s\u0000-\u001f]/.test(c.value.trim())) continue;
     for (const form of linkForms(c)) {
       const target = linkTarget(form, input.storeHost);
       if (target.ok) linked.add(`${target.kind}:${target.domain}`);
