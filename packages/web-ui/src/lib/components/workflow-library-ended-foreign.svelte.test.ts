@@ -192,6 +192,7 @@ describe('a schedule refused after it was sent, in the reader\'s language (ux U-
 		const confirm = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === t('workflow_library.schedule_confirm'));
 		expect(confirm, 'the dialog is still open, with what was typed').toBeDefined();
 		expect(target.querySelector('[data-schedule-error]')?.textContent?.trim(), 'the sentence is in the dialog, not behind it').toBe(t('chat.mandate_key_input_other'));
+		expect(target.querySelector('[data-page-error]'), 'no second copy on the page behind the dialog').toBeNull();
 	});
 
 	it('CONTROL: a refusal without a known code still shows the engine\'s sentence', async () => {

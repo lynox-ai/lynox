@@ -166,6 +166,11 @@ describe('mandateCredentialInput', () => {
     'PW: BMW-X5-2024, LKW: keiner',
     'Fahrzeug PW: VW-Golf-2019',
     'pwd: /home/Shop-2024',
+    'Wir nutzen einen Passwort-Manager für das Team.',
+    'Unser Passwort-Manager ist Bitwarden.',
+    'Passwort-Hinweis: steht im Ordner',
+    'Bitte Kennwort-Hinweis lesen',
+    'Password-Manager: 1Password',
   ];
   it.each(ORDINARY)('passes an ordinary message: %s', (text) => {
     expect(mandateCredentialInput(text)).toBeNull();

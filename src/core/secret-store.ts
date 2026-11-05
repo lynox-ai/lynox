@@ -462,8 +462,9 @@ function wordsAfter(text: string, from: number): string[] {
  *   2. a bearer header or user:pass in a URL;
  *   3. a cue word (key, token, secret …) followed, within the next four words on its line (or on
  *      the next line, when a colon ends the cue's line), by a key-shaped word; a password cue
- *      (Passwort, Kennwort, password) followed by a password- or key-shaped word that is the next
- *      word or comes after one linking word;
+ *      (Passwort, Kennwort, password, not as the first part of a compound such as
+ *      "Passwort-Manager") followed by a password- or key-shaped word that is the next word or
+ *      comes after one linking word;
  *   4. a message that is one word (a code fence around it allowed), at least 20 characters, with an
  *      unbroken letter-and-digit run of 16 or more holding upper case, lower case and digits that
  *      change class as often as a random key does, and that is not a Stripe object's id — a key
@@ -476,8 +477,12 @@ export function mandateCredentialInput(text: string): string | null {
   if (shaped !== undefined) return shaped;
   for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
   for (const cue of text.matchAll(CREDENTIAL_CUE)) {
-    const words = wordsAfter(text, (cue.index ?? 0) + cue[0].length);
+    const end = (cue.index ?? 0) + cue[0].length;
+    const words = wordsAfter(text, end);
     if (PASSWORD_CUE.test(cue[0])) {
+      // "Passwort-Manager", "Kennwort-Hinweis": a compound word, not a password cue. Only here — a
+      // key cue joined by a hyphen ("Token-Wert: <key>", "key-<key>") still counts.
+      if (text[end] === '-') continue;
       // A password is short and word-like: it counts only where it is plainly the value (the next
       // word, or after one linking word).
       const plain = PASSWORD_LINK.test(words[0] ?? '') ? words[1] : words[0];

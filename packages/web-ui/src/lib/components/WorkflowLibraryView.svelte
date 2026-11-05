@@ -166,6 +166,9 @@
 	// schedule + the param values the unattended run will use, and the single
 	// POST /api/tasks stamps the first-run-confirm + creates the cron task.
 	let scheduleModalWf = $state<SavedWorkflow | null>(null);
+	/** The schedule dialog's own error: shown in the dialog, so a page error (a run, a delete) never lands
+	 *  there, and a refusal of the schedule is not covered by the dialog. */
+	let scheduleError = $state('');
 	let scheduleCron = $state('0 9 * * *');
 	let scheduling = $state(false);
 
@@ -228,7 +231,7 @@
 	function onScheduleClick(wf: SavedWorkflow): void {
 		paramValues = Object.fromEntries((wf.parameters ?? []).map((p) => [p.name, '']));
 		scheduleCron = '0 9 * * *';
-		error = '';
+		scheduleError = '';
 		grantOpen = false;
 		grantMethod = 'POST';
 		grantHost = '';
@@ -243,7 +246,7 @@
 		const wf = scheduleModalWf;
 		if (!wf || previewing) return;
 		previewing = true;
-		error = '';
+		scheduleError = '';
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${wf.id}/grant-preview`, {
 				method: 'POST',
@@ -260,12 +263,12 @@
 			const data = (await res.json().catch(() => null)) as (GrantPreview & { error?: string }) | null;
 			if (!res.ok || !data || !Array.isArray(data.tuples)) {
 				grantPreview = null;
-				error = data?.error ?? t('workflow_library.grant_preview_failed');
+				scheduleError = data?.error ?? t('workflow_library.grant_preview_failed');
 				return;
 			}
 			grantPreview = data;
 		} catch {
-			error = t('workflow_library.grant_preview_failed');
+			scheduleError = t('workflow_library.grant_preview_failed');
 		} finally {
 			previewing = false;
 		}
@@ -280,7 +283,7 @@
 
 	function cancelScheduleModal(): void {
 		scheduleModalWf = null;
-		error = '';
+		scheduleError = '';
 	}
 
 	// True only when the contract has at least one displayable outbound action —
@@ -301,14 +304,14 @@
 	async function submitSchedule(): Promise<void> {
 		const wf = scheduleModalWf;
 		if (!wf || scheduling) return;
-		if (!scheduleCron.trim()) { error = t('workflow_library.schedule_cron_required'); return; }
+		if (!scheduleCron.trim()) { scheduleError = t('workflow_library.schedule_cron_required'); return; }
 		if ((wf.parameters ?? []).some((p) => !paramValues[p.name]?.trim())) {
-			error = t('workflow_library.params_required');
+			scheduleError = t('workflow_library.params_required');
 			return;
 		}
-		if (grantOpen && !grantPreview) { error = t('workflow_library.grant_preview_required'); return; }
+		if (grantOpen && !grantPreview) { scheduleError = t('workflow_library.grant_preview_required'); return; }
 		scheduling = true;
-		error = '';
+		scheduleError = '';
 		try {
 			const res = await fetch(`${getApiBase()}/tasks`, {
 				method: 'POST',
@@ -337,7 +340,7 @@
 				// whose line asks them to confirm what they cannot.
 				if (awaitsStampRefusal(res.status, msg, wf.id) && viewer !== 'owner') {
 					// The contract's refusal carries no text of its own.
-					error = t('workflow_library.stamp.awaits_owner');
+					scheduleError = t('workflow_library.stamp.awaits_owner');
 					return;
 				}
 				if (awaitsStampRefusal(res.status, msg, wf.id)) {
@@ -349,14 +352,14 @@
 					return;
 				}
 				const refused = typeof msg?.code === 'string' ? SCHEDULE_REFUSALS[msg.code] : undefined;
-				error = refused !== undefined ? t(refused) : (msg?.error ?? t('workflow_library.schedule_failed'));
+				scheduleError = refused !== undefined ? t(refused) : (msg?.error ?? t('workflow_library.schedule_failed'));
 				return;
 			}
 			scheduleModalWf = null;
 			notice = t('workflow_library.scheduled');
 			await loadWorkflows();
 		} catch {
-			error = t('workflow_library.schedule_failed');
+			scheduleError = t('workflow_library.schedule_failed');
 		} finally {
 			scheduling = false;
 		}
@@ -676,8 +679,8 @@
 <div class="p-6 max-w-4xl mx-auto">
 	<h1 class="text-xl font-light tracking-tight mb-4">{t('workflow_library.title')}</h1>
 
-	{#if error && !scheduleModalWf}
-		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{#if error}
+		<div data-page-error class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
 	{/if}
 	{#if notice}
 		<div class="rounded-[var(--radius-md)] bg-success/10 border border-success/20 px-4 py-3 text-sm text-success mb-4">{notice}</div>
@@ -1017,8 +1020,8 @@
 			{/if}
 
 			<!-- In the dialog: on the page behind it, a refusal is covered by the dialog that stays open. -->
-			{#if error}
-				<p data-schedule-error class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mt-4">{error}</p>
+			{#if scheduleError}
+				<p data-schedule-error class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mt-4">{scheduleError}</p>
 			{/if}
 			<div class="flex items-center justify-end gap-2 mt-5">
 				<button

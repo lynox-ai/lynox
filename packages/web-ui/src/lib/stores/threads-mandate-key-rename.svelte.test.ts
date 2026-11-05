@@ -29,6 +29,12 @@ describe('a helper\'s title refused as carrying a key', () => {
 		expect(toasts).toEqual([t('chat.mandate_key_input_other')]);
 	});
 
+	it('CONTROL: the same code on another status is not this refusal', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'refused', code: 'mandate_key_input' }, 400)));
+		await store.renameThread('t1', 'irrelevant');
+		expect(toasts).toEqual([t('threads.error_rename')]);
+	});
+
 	it('CONTROL: another refusal keeps the general sentence', async () => {
 		vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'nope', code: 'other' }, 422)));
 		await store.renameThread('t1', 'irrelevant');
