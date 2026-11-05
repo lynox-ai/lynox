@@ -1427,7 +1427,9 @@ export class WorkerLoop {
               else this.#recordRun(taskManager, parked.id, WAIT_EXPIRED_RESULT, 'failed', run);
             } catch (err: unknown) {
               process.stderr.write(
-                `[lynox:worker] could not record the expired wait for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+                // Recording the run computes the next occurrence, whose error quotes the stored cron expression or a
+                // snippet of the watch config (URL, selector): text a model wrote.
+                `[lynox:worker] could not record the expired wait for ${parked.id}: ${processErrorText(err)}\n`,
               );
             }
             process.stderr.write(
@@ -1624,7 +1626,8 @@ export class WorkerLoop {
             this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
           } catch (err: unknown) {
             process.stderr.write(
-              `[lynox:worker] recording or releasing the interrupted run of ${task.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+              // Same as the expired wait above: the next occurrence's error quotes the cron or the watch config.
+              `[lynox:worker] recording or releasing the interrupted run of ${task.id} failed: ${processErrorText(err)}\n`,
             );
           }
           continue;

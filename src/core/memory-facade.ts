@@ -1,4 +1,5 @@
 import type { Memory } from './memory.js';
+import { processErrorText } from './error-egress.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { MemoryNamespace } from '../types/index.js';
 
@@ -150,6 +151,8 @@ export class MemoryFacade {
 
   /** A swallowed KG-mirror failure must leave a trace — else the privacy/recall promise breaks invisibly. */
   private _warnMirror(op: string, err: unknown): void {
-    process.stderr.write(`[lynox:memory-facade] KG mirror ${op} failed (document write kept): ${err instanceof Error ? err.message : String(err)}\n`);
+    // The mirror runs entity extraction over memory text; a malformed stored alias list fails with a SyntaxError
+    // that quotes entity names taken from run memory.
+    process.stderr.write(`[lynox:memory-facade] KG mirror ${op} failed (document write kept): ${processErrorText(err)}\n`);
   }
 }

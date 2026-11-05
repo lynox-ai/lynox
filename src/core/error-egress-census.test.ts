@@ -108,27 +108,86 @@ const JUDGED = [
 
 /**
  * Single sinks judged by hand, for a file whose other sinks are not: those on the paths a store
- * connection runs (setup, grant, renewal, bulk ledger). `marker` is a literal of the call and
+ * connection runs (setup, grant, renewal, bulk ledger), and those a run, a schedule or an HTTP
+ * request reaches (memory mirrors, the worker's trigger sweeps, workflow questions, the routes
+ * that delete or erase). Each `why` names what can throw in its try block, and none of it carries
+ * text a store, a provider, a model or a user wrote. `marker` is a literal of the call and
  * must match exactly `count` raw sinks of the file, so a judgement fails when its log line moves
  * away, changes or multiplies. It does NOT see a change in what the try block calls: a provider
  * call added there, or a callee that starts to reach the network, leaves the judgement green and
- * the `why` false. Whoever changes such a try block judges its sink again. As judged: none of
- * these calls a provider; the error is the grant ledger's, the vault's or SQLite's, or a module
- * that did not load.
+ * the `why` false. Whoever changes such a try block judges its sink again. A sink whose error can
+ * quote such text (a JSON.parse of stored data, a cron or a name a model wrote) is not judged but
+ * routed through processErrorText.
  */
 const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string }[]> = {
+  'core/workflow-questions.ts': [
+    { marker: 'asking a workflow question failed', count: 1, why: 'lynox constants, a session id, or the SQLite insert; the question text is bound, never quoted' },
+    { marker: 'withdrawing a workflow question failed', count: 1, why: 'a prompt expiry UPDATE by id' },
+    { marker: 'writing a workflow question to its thread failed', count: 1, why: 'SQLite or a constant error; the message text is bound, never quoted' },
+    { marker: "recording a workflow question's delivery failed", count: 1, why: 'the notify never rejects and the delivery reporter catches its own' },
+  ],
+  'core/worker-loop.ts': [
+    { marker: 'session abort threw while stopping', count: 1, why: 'only an AbortController abort can throw here' },
+    { marker: 'answer re-arm failed', count: 1, why: 'SQLite reads and updates by trigger id' },
+    { marker: 'prompt settle failed for', count: 1, why: 'a prompt expiry UPDATE by trigger id' },
+    { marker: 'wait sweep failed', count: 1, why: 'SQLite reads by id; the record and settle calls inside catch their own' },
+    { marker: 'consent reminder failed', count: 1, why: 'a SQLite claim of reminder rows; the notify is not awaited' },
+    { marker: 'Not started${again}', count: 1, why: 'reason is built by lynox from the budget caps' },
+    { marker: '] park failed for', count: 1, why: 'a SQLite UPDATE of status and deadline' },
+    { marker: 'prompt drain failed for', count: 1, why: 'a prompt expiry UPDATE by id' },
+    { marker: 'prompt detach failed for', count: 1, why: 'a trigger release UPDATE by id' },
+    { marker: 'un-park failed for', count: 1, why: 'the end of a trigger wait: SQLite' },
+    { marker: 'recording an escalation start failed', count: 1, why: 'a SQLite write of the trigger id and a timestamp' },
+  ],
+  'core/wire-capture.ts': [
+    { marker: 'wire capture sink refused', count: 1, why: 'reason is built from the env-configured sink path and its file mode' },
+  ],
+  'core/run-history.ts': [
+    { marker: 'verb-graph mirror write failed', count: 1, why: 'the task mirror upsert: SQLite; resolving the assignee returns null, it does not throw' },
+  ],
+  'core/retrieval-engine.ts': [
+    { marker: 'recall ${method} fell back to legacy', count: 1, why: 'the recall reads: SQLite' },
+  ],
+  'core/onboarding-promotion.ts': [
+    { marker: 'profile seed stopped after', count: 1, why: 'BlockOverLimitError names the block id and lengths; otherwise SQLite' },
+    { marker: 'profile seed failed', count: 1, why: 'the block read and the seed INSERT: SQLite' },
+  ],
+  'core/managed-hook.ts': [
+    { marker: 'Managed usage DROP', count: 1, why: 'reason is one of four lynox literals; the rest are counts' },
+  ],
+  'core/knowledge-store.ts': [
+    { marker: 'could not drop the retired line', count: 1, why: 'BlockOverLimitError names the block id and lengths; otherwise SQLite' },
+  ],
+  'core/knowledge-layer.ts': [
+    { marker: '[lynox:subject-graph] mirror failed for', count: 1, why: 'subject-graph mirror writes: SQLite, or lynox errors naming ids and kinds only' },
+    { marker: 'fell back to legacy: ', count: 1, why: 'engine.db reads: SQLite; decryption never throws and the alias parses are guarded' },
+    { marker: '[lynox:mirror-parity] CRITICAL', count: 1, why: 'purge and deactivate by id; the extractors swallow model errors' },
+    { marker: 'text-edit mirror failed', count: 1, why: 'a stub text UPDATE: SQLite names columns, never values' },
+    { marker: 'confidence mirror (', count: 1, why: 'a confidence UPDATE by id' },
+    { marker: 'tier-raise mirror failed', count: 1, why: 'stub supersede and upsert: SQLite' },
+  ],
+  'core/crm.ts': [
+    { marker: 'CRM contact mirror failed', count: 1, why: 'subject-graph mirror writes: SQLite, or lynox errors naming ids and kinds only' },
+  ],
   'core/api-store.ts': [
     { marker: 'Hosts of grant for', count: 2, why: 'ledger.recordHosts over hosts lynox derives from the profile' },
     { marker: 'Renewed credential for', count: 1, why: 'the row write of a profile lynox built' },
     { marker: 'Grant ${reason} for', count: 1, why: 'ledger.mint, the in-memory vault fingerprints, recordHosts and the row write, in one local transaction' },
   ],
   'core/engine.ts': [
+    { marker: '[escalation] recording the delivery failed', count: 1, why: 'a SQLite UPDATE binding a fixed delivery summary' },
+    { marker: '[escalation] a hook failed on the delivery', count: 1, why: 'the only hook posts a fixed body and swallows its own fetch' },
     { marker: 'Grant backfill failed', count: 1, why: 'backfillGrants and checkFingerprints read the ledger and the vault, no provider' },
     { marker: 'Grant host recompute failed', count: 1, why: 'recomputeGrantHosts, the same ledger write as above' },
     { marker: '[lynox:vault-bindings] Migration failed', count: 1, why: 'binds vault names to the hosts of stored profiles' },
     { marker: 'ending bulk runs of ended mandates failed', count: 1, why: 'the bulk ledger sweep, rows only' },
   ],
   'server/http-api.ts': [
+    { marker: 'mandate end not recorded', count: 1, why: 'an INSERT with bound values; the plan-pause listener reports through processErrorText' },
+    { marker: 'withdrawing the questions of deleted thread', count: 1, why: 'an UPDATE by thread id' },
+    { marker: 'stopping the run of deleted schedule', count: 1, why: 'map lookups and an abort; nothing that throws carries run text' },
+    { marker: 'data dir scan failed', count: 1, why: "fs errno naming entries of lynox's own data directory" },
+    { marker: 'GET /api/files failed', count: 1, why: 'prints the errno or class code that fs and workspace errors carry, not their path-bearing message' },
     { marker: 'Grant for the credential write to', count: 1, why: 'secretWritten mints a grant locally after the vault write' },
   ],
   'tools/builtin/http.ts': [
@@ -160,14 +219,13 @@ const FROZEN: Record<string, number> = {
   'core/api-store.ts': 8,
   'core/config.ts': 1,
   'core/crm.ts': 2,
-  'core/engine-init.ts': 2,
+  'core/engine-init.ts': 1,
   'core/engine.ts': 34,
-  'core/knowledge-layer.ts': 9,
+  'core/knowledge-layer.ts': 8,
   'core/knowledge-store.ts': 2,
   'core/llm-wire-rules.ts': 1,
   'core/managed-hook.ts': 1,
   'core/mandate-ends.ts': 1,
-  'core/memory-facade.ts': 1,
   'core/memory-graph-store.ts': 1,
   'core/mistral-health-check.ts': 1,
   'core/onboarding-promotion.ts': 2,
@@ -177,7 +235,7 @@ const FROZEN: Record<string, number> = {
   'core/transcribe/mistral-voxtral.ts': 2,
   'core/transcribe/whisper-cpp.ts': 2,
   'core/wire-capture.ts': 2,
-  'core/worker-loop.ts': 13,
+  'core/worker-loop.ts': 11,
   'core/workflow-questions.ts': 4,
   'egress-proxy/main.ts': 1,
   'integrations/google/google-auth.ts': 1,
@@ -187,7 +245,7 @@ const FROZEN: Record<string, number> = {
   'integrations/microsoft/microsoft-auth.ts': 1,
   'integrations/push/web-push-channel.ts': 1,
   'scripts/subject-sweep.ts': 1,
-  'server/http-api.ts': 8,
+  'server/http-api.ts': 7,
   'shell-sidecar/exec-daemon.ts': 1,
   'tools/builtin/http.ts': 1,
 };

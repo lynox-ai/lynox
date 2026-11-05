@@ -13794,7 +13794,8 @@ export class LynoxHTTPApi {
           wsAccess = workspaceAccessIfPresent();
           wsWalk = wsAccess === null ? null : await this._workspaceWalk(wsAccess, dataDir);
         } catch (err) {
-          process.stderr.write(`⚠ /api/data: workspace root unavailable: ${err instanceof Error ? err.message : String(err)}\n`);
+          // The walk's errno messages name the workspace entry, and those names are chosen by the agent or the user.
+          process.stderr.write(`⚠ /api/data: workspace root unavailable: ${processErrorText(err)}\n`);
           jsonResponse(res, 500, { deleted: false, failed: ['workspace'], error: 'Erasure incomplete — the workspace could not be reached, so nothing was erased' });
           return;
         }
