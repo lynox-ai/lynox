@@ -96,7 +96,7 @@ function productReadBack(storeHost: string, startDomains: readonly string[]): (s
     if (pairs.some(([s, b]) => !markupAddedByHost({ sent: s, back: b, storeHost, startDomains }).ok
       || (s !== b && moreDropped(droppedTagsOf(s), droppedTagsOf(b))))) return 'added';
     // A sent text the store holds as no text (cleared) is a removal: counted like any other. A
-    // re-serialisation the comparison explains is no rewrite (row 1137 (a); M6b: a store lays out
+    // re-serialisation the comparison explains is no rewrite (a store lays out
     // every list it keeps), so only what `sameHtmlField` does not explain is counted.
     return pairs.length < fields.length || pairs.some(([s, b]) => !sameHtmlField(s, b)) ? 'rewritten' : 'kept';
   };

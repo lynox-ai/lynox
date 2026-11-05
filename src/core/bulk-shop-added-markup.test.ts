@@ -488,7 +488,7 @@ describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.
     expect(sameValue({ description: '<p>a</p></div>' }, { description: '<p>a</p></div>' }, html)).toBe(true);
   });
 
-  it('compares a field byte for byte where whitespace shows: white-space in a style, pre and its kin (row 1137 (b))', () => {
+  it('compares a field byte for byte where whitespace shows: white-space in a style, pre and its kin', () => {
     const html = ['description'];
     // The normalised form alone collapses the two spaces below a `div`: equal without the rule.
     expect(htmlEqual('<div style="white-space:pre">a  b</div>', '<div style="white-space:pre">a b</div>')).toBe(true);
@@ -506,7 +506,7 @@ describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.
       expect(sameValue({ description: a }, { description: a }, html)).toBe(true);
     }
     // What else in the value can show a line break: an inline display, a CSS escape the name test
-    // does not read, a style element's own rules (refuter, 05.11.).
+    // does not read, a style element's own rules.
     for (const [a, b] of [
       ['<ul><li style="display:inline">\n<b>x</b></li></ul>', '<ul><li style="display:inline"><b>x</b></li></ul>'],
       ['<ul><li style="white\\-space:pre">\n<b>x</b></li></ul>', '<ul><li style="white\\-space:pre"><b>x</b></li></ul>'],

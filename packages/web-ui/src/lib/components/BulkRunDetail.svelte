@@ -305,7 +305,7 @@
 		if (Number.isNaN(d.getTime())) return iso;
 		return d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 	}
-	/** The day an earlier write was applied, as the owner reads a date (ux U-154). */
+	/** The day an earlier write was applied, as the owner reads a date. */
 	function markedDateText(iso: string): string | null {
 		const d = new Date(iso);
 		return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric' });

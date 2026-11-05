@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { setLocale, getLocale, t, tf } from '../i18n.svelte.js';
 import { bulkInvalidText, bulkMandateI18n, type BulkI18n } from './bulk-runs.js';
 
-// ux U-154 (row 1121): a new run leaves out a product whose description is the version an earlier
+// A new run leaves out a product whose description is the version an earlier
 // run wrote and the store added markup to. The sentence names that run by its date where the
 // ledger still holds it; a mandate's session reads it with "the shop" and "the owner". That the
 // run page hands over the date and the session's wording is asserted in bulk-runs.test.ts, which
@@ -16,7 +16,7 @@ const said = (i18n: BulkI18n, date: string | null): string =>
 const initial = getLocale();
 afterEach(() => { setLocale(initial); });
 
-describe('before_has_shop_markup: the sentence under the product (U-154)', () => {
+describe('before_has_shop_markup: the sentence under the product', () => {
 	it('words it as ux decided, in German, for the owner and a mandate, with and without the date', () => {
 		setLocale('de');
 		const tail = 'Pass die Beschreibung im Shopify-Admin so an, wie sie sein soll; soll sie so bleiben, ändere trotzdem ein Wort oder Satzzeichen, dann gilt sie als deine. Bitte lynox danach im Chat, den Lauf neu zu planen.';

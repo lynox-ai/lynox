@@ -487,7 +487,7 @@ export interface BulkTarget {
 	/** Written, and the store kept the description otherwise than sent, without outside markup. */
 	hostRewrote?: true | undefined;
 	/** With `before_has_shop_markup`: when the earlier write that left this description marked was
-	 *  applied, or null where that run is no longer kept (ux U-154). */
+	 *  applied, or null where that run is no longer kept. */
 	shopMarkedAt?: string | null | undefined;
 	/** The fields behind a Shopify product page's SEO title and description whose text gains an `&`,
 	 *  which a theme may show as `&amp;`. A note; nothing is refused. */
@@ -844,7 +844,7 @@ export function bulkInvalidText(
 	 *  With `before_has_shop_markup`: the date of the earlier write, already formatted, or null. */
 	context?: { field: string | undefined; host: string | null; dataStore: boolean; markedDate?: string | null | undefined },
 ): string {
-	// The description an earlier run wrote and the store added markup to (row 1121, ux U-154): named
+	// The description an earlier run wrote and the store added markup to: named
 	// by that run's date, so the owner can find it; without the date where the run is gone.
 	if (reason === 'before_has_shop_markup') {
 		const date = context?.markedDate ?? null;

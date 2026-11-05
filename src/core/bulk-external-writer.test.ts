@@ -87,8 +87,8 @@ describe('the read-back check of a written description (PRD shopify-preset §21.
     const product = { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] };
     const backing = (descriptionHtml: string): ExternalClient =>
       ({ ...host, graphqlRead: async () => ({ kind: 'ok', value: { product: { id: P1, ...kept, descriptionHtml } } }) }) as unknown as ExternalClient;
-    // A re-serialisation the comparison explains is no rewrite (row 1137 (a)): `<br/>` as `<br>`,
-    // and the line breaks a store lays a list out with (M6b).
+    // A re-serialisation the comparison explains is no rewrite: `<br/>` as `<br>`,
+    // and the line breaks a store lays a list out with.
     for (const [sent, back] of [
       ['<p>Neu<br/></p>', '<p>Neu<br></p>'],
       ['<ul><li><strong>x</strong></li><li>y</li></ul>', '<ul>\n<li>\n<strong>x</strong></li>\n<li>y</li>\n</ul>'],
@@ -98,7 +98,7 @@ describe('the read-back check of a written description (PRD shopify-preset §21.
       expect(out).not.toHaveProperty('hostRewrote');
       expect(out).not.toHaveProperty('hostAddedMarkup');
     }
-    // The same bytes otherwise: one space fewer where `white-space: pre` shows it (row 1137 (b)).
+    // The same bytes otherwise: one space fewer where `white-space: pre` shows it.
     const shown = '<div style="white-space:pre">Neu  alt</div>';
     const out = await externalRunWriter(run(`http:${HOST}`, store), product, () => backing('<div style="white-space:pre">Neu alt</div>'))!
       .write(P1, { absent: false, value: { descriptionHtml: shown } });

@@ -1293,7 +1293,7 @@ describe('applying a Shopify run', () => {
     return { id, undo: undo.status.id };
   };
 
-  it('mints no undo whose description a write up the chain kept marked, when the ledger changed after planning (row 1137 (c))', async () => {
+  it('mints no undo whose description a write up the chain kept marked, when the ledger changed after planning', async () => {
     const held = '<p>1</p><script>theirs()</script>';
     const { id, undo } = await undoOf(held);
     // The ledger after planning: the source now comes from a run whose write the store kept with
@@ -1311,7 +1311,7 @@ describe('applying a Shopify run', () => {
     expect(ledger.shopifyApplyOf(undo)!.reads).toEqual([gid(10)]);
   });
 
-  it('leaves out, without throwing, a write whose stored before-image or after-state does not parse (row 1137 (d))', async () => {
+  it('leaves out, without throwing, a write whose stored before-image or after-state does not parse', async () => {
     const held = '<p>1</p>';
     const { id, undo } = await undoOf(held);
     const db = engineDb.getDb();
@@ -1320,7 +1320,7 @@ describe('applying a Shopify run', () => {
     expect(ledger.shopifyApplyOf(undo)!).toMatchObject({ writes: [], reads: [gid(10)] });
   });
 
-  it('leaves out, without throwing, an apply\'s write whose before-image or after-state does not parse, and keeps the others (row 1137 (d))', async () => {
+  it('leaves out, without throwing, an apply\'s write whose before-image or after-state does not parse, and keeps the others', async () => {
     fill(3);
     const id = await previewed();
     plant(id, gid(20), { descriptionHtml: '<p>y</p>' });
@@ -1356,7 +1356,7 @@ describe('applying a Shopify run', () => {
     };
     await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => reader });
     expect(sent).toEqual([]);
-    // Found in the store's own form, which the comparison explains: no rewrite (row 1137 (a)).
+    // Found in the store's own form, which the comparison explains: no rewrite.
     expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0, hostRewrote: 0 });
   });
 

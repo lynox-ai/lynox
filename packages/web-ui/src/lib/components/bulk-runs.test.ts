@@ -229,7 +229,7 @@ describe('the approved unchecked-change texts', () => {
 		expect(page).toContain(`<p id="bulk-approve-confirm-first" `);
 	});
 
-	it('gives the marked-before sentence the date and the session\'s wording (ux U-154)', () => {
+	it('gives the marked-before sentence the date and the session\'s wording', () => {
 		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
 		// The mandate's wording (`view`), not the owner's (`i18n`), and the date from the target.
 		expect(page).toContain('bulkInvalidText(target.error, shopify, managed, view, {');

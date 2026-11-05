@@ -167,8 +167,8 @@ const stylesWhitespace = (el: HtmlElement): boolean =>
   defaultTreeAdapter.getAttrList(el).some((a) => a.name === 'style' && /white-space/i.test(a.value));
 
 /**
- * A single line break Shopify inserts when it stores a description, measured (PRD shopify-preset
- * §16.8 M6b; sec-core 2026-11-05), at exactly two places the block rule does not reach:
+ * A single line break Shopify inserts when it stores a description, measured on a
+ * development store, at exactly two places the block rule does not reach:
  * - directly after `<li>`, before an inline element (`<li>\n<strong>x</strong>`);
  * - inside a `tr`, between its start, a `td` or `th`, and its end (`<tr>\n<td>a</td>\n</tr>`).
  * The third measured place, before `</li>` after a nested list, the block rule already explains.
@@ -232,7 +232,7 @@ function normChildren(parent: HtmlParent, keepWs: boolean, parentIsBlock: boolea
  *   start or end of a block parent or of the fragment), never between inline elements, so
  *   `<b>a</b> <i>b</i>` stays apart from `<b>a</b><i>b</i>`;
  * - one line break a store inserts after `<li>` before an inline element, or between the cells of
- *   a `tr`, dropped ({@link storeLayoutBreak}, M6b), except below an element whose `style` names
+ *   a `tr`, dropped ({@link storeLayoutBreak}), except below an element whose `style` names
  *   `white-space`;
  * - comments are tokens, compared by their text;
  * - `template` contents are part of the tree.

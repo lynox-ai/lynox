@@ -450,7 +450,7 @@ async function applyRunEffect(
         // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
         // also what an undo must expect.
         // Found only under the HTML comparison is not counted as a rewrite: the comparison explains
-        // the store's form of the planned description (row 1137 (a)), as for a read-back.
+        // the store's form of the planned description, as for a read-back.
         return {
           kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null,
         };

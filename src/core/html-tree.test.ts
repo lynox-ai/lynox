@@ -76,15 +76,15 @@ describe('normalizeHtml: what it equates', () => {
   });
 });
 
-// M6b, run m6b-2026-11-05T032430.881Z on the development store (PRD shopify-preset §16.8): the
-// canonical bytes sent, and what Shopify gave back. sec-core 2026-11-05: three places, one LF each.
-describe('normalizeHtml: the line breaks a store lays a list or a table out with (M6b)', () => {
+// Measured on a development store: the canonical bytes sent, and what Shopify gave back. Three
+// places, one LF each.
+describe('normalizeHtml: the line breaks a store lays a list or a table out with', () => {
   const NEST_SENT = '<p><b>fett</b> <i>kursiv</i><span class="s">span</span><b>a</b><i>b</i></p><ul><li><strong>x</strong><ol><li>y<ul><li>z</li></ul></li></ol></li></ul>';
   const NEST_BACK = '<p><b>fett</b> <i>kursiv</i><span class="s">span</span><b>a</b><i>b</i></p><ul><li>\n<strong>x</strong><ol><li>y<ul><li>z</li></ul>\n</li></ol>\n</li></ul>';
   const TABLE_SENT = '<table><tbody><tr><td>a</td><td>b</td></tr></tbody></table>';
   const TABLE_BACK = '<table><tbody><tr>\n<td>a</td>\n<td>b</td>\n</tr></tbody></table>';
 
-  it('equates what M6b sent with what Shopify gave back', () => {
+  it('equates what was sent with what Shopify gave back', () => {
     expect(htmlEqual(NEST_SENT, NEST_BACK)).toBe(true);
     expect(htmlEqual(TABLE_SENT, TABLE_BACK)).toBe(true);
   });
