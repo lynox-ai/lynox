@@ -375,8 +375,27 @@ const CONTEXT_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: 
 
 /** A word a person writes before a credential's value, German or English. */
 const CREDENTIAL_CUE = /(?<![\p{L}\p{N}])(?:api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret|secret|token|key|schlüssel|passwor[dt]|kennwort|zugangsdaten|credentials?)(?![\p{L}\p{N}])/giu;
-const PASSWORD_CUE = /^(?:passwor[dt]|kennwort)$/i;
-const PASSWORD_LINK = /^(?:ist|lautet|heisst|heißt|is|lautet:|=)$/i;
+/** Short password cues count only with a colon or an equals sign after them ("PW:", "Login: …"). */
+const SHORT_PASSWORD_CUE = /(?<![\p{L}\p{N}])(?:pw|pwd|pass|login)\s*[:=]/giu;
+const PASSWORD_CUE = /^(?:passwor[dt]|kennwort|pw|pwd|pass|login)/i;
+const PASSWORD_LINK = /^(?:ist|lautet|heisst|heißt|is|=)$/i;
+/** How many words after a cue are read, across line breaks ("Der Key:\n<key>"). */
+const CUE_WINDOW = 6;
+
+/**
+ * Keys a helper of a small business is likely to paste whose form the run route's mask does not
+ * know, each with a prefix or a fixed layout that ordinary text does not have.
+ */
+const MANDATE_EXTRA_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = [
+  { label: 'HubSpot private app token', pattern: /(?<![\w-])pat-(?:na|eu|ap)\d-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\w-])/i },
+  { label: 'WooCommerce key', pattern: /(?<!\w)c[ks]_[0-9a-f]{40}(?!\w)/ },
+  { label: 'Mailchimp API key', pattern: /(?<!\w)[0-9a-f]{32}-us\d{1,2}(?!\w)/ },
+  { label: 'SendGrid API key', pattern: /(?<![\w.])SG\.[\w-]{20,24}\.[\w-]{40,46}(?![\w-])/ },
+  { label: 'Twilio API key', pattern: /(?<!\w)SK[0-9a-f]{32}(?!\w)/ },
+];
+
+/** IDs with a prefix that are no secret (Stripe objects, not keys): never a key on its own. */
+const NON_SECRET_ID = /^(?:pi|pm|cus|ch|in|prod|price|sub|evt|acct|txn|seti|re|po|tr|src|card|ba|si|li|ii|il)_/;
 
 function entropyBits(s: string): number {
   const freq = new Map<string, number>();
@@ -390,66 +409,88 @@ function charClasses(s: string): number {
   return [/[A-Z]/, /[a-z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(s)).length;
 }
 
-/** A vault or env name (`SHOPIFY_ADMIN_TOKEN`) or a link names a credential; it is not one. */
-function isNameOrLink(tok: string): boolean {
-  return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok);
+/**
+ * How often neighbouring characters change class (upper, lower, digit), per character. A random
+ * key changes class at about every second character; a word joined with a number or a camel-case
+ * name (`Rechnung2024November05Final`, `meinshop2024Zuerich`) at a quarter or fewer.
+ */
+function classChangeRate(run: string): number {
+  const cls = (c: string): number => (/[A-Z]/.test(c) ? 0 : /[a-z]/.test(c) ? 1 : 2);
+  let changes = 0;
+  for (let i = 1; i < run.length; i++) if (cls(run[i]!) !== cls(run[i - 1]!)) changes++;
+  return run.length > 1 ? changes / (run.length - 1) : 0;
 }
 
-/**
- * Whether a word is shaped like a credential's value: long enough, letters and digits, spread.
- * After a password cue a shorter word counts, if it mixes three character classes.
- */
-function valueShaped(tok: string, afterPasswordCue: boolean): boolean {
-  if (isNameOrLink(tok)) return false;
-  if (afterPasswordCue && tok.length >= 8 && charClasses(tok) >= 3) return true;
-  return tok.length >= 16 && /[A-Za-z]/.test(tok) && /[0-9]/.test(tok) && entropyBits(tok) >= 3.3;
+/** A vault or env name (`SHOPIFY_ADMIN_TOKEN`), a link or an address names a credential; it is not one. */
+function isNameOrLink(tok: string): boolean {
+  return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok) || /@/.test(tok);
+}
+
+/** Long enough, letters and digits, spread: a key's value. */
+function keyShaped(tok: string): boolean {
+  return !isNameOrLink(tok) && tok.length >= 16 && /[A-Za-z]/.test(tok) && /[0-9]/.test(tok) && entropyBits(tok) >= 3.3;
+}
+
+/** A password's value: eight or more characters in three classes. */
+function passwordShaped(tok: string): boolean {
+  return !isNameOrLink(tok) && tok.length >= 8 && charClasses(tok) >= 3;
+}
+
+/** The words after `from`, split at white space and quotes, at most `CUE_WINDOW`. */
+function rawWordsAfter(text: string, from: number): string[] {
+  return text.slice(from).split(/[\s"'`„“”]+/).filter((w) => w.length > 0).slice(0, CUE_WINDOW);
+}
+
+/** The same words with leading and trailing punctuation stripped. */
+function wordsAfter(text: string, from: number): string[] {
+  return rawWordsAfter(text, from).map((w) => w.replace(/^[:=(<[]+|[.,;:!?)>\]]+$/g, '')).filter((w) => w.length > 0);
 }
 
 /**
  * Why a message a mandate's helper typed reads as carrying a credential, or `null` when it does
- * not. Wider than `maskCredentialInput`, which
- * the run route applies to every message: in a mandate's turn no key is taken at all, so a key
- * without a vendor's prefix is caught as well, from its context. In order:
- *   1. a vendor shape or a JWT (`maskCredentialInput`), a private key block;
+ * not. Wider than `maskCredentialInput`, which the run route applies to every message: in a
+ * mandate's turn no key is taken at all, so a key without a vendor's prefix is caught as well,
+ * from its context. In order:
+ *   1. a vendor shape or a JWT (`maskCredentialInput`), a private key block, and the further vendor
+ *      shapes in `MANDATE_EXTRA_SHAPES`;
  *   2. a bearer header or user:pass in a URL;
- *   3. a cue word (key, token, secret, Passwort …) followed, within the next four words of the
- *      same line, by a value-shaped word;
- *   4. a message that is one word (a code fence around it allowed), at least 20 characters, with
- *      upper case, lower case and digits, and no link — a key pasted on its own.
- * Not caught: a key without a vendor prefix and without a cue word, unless it is pasted alone with
- * all three of upper case, lower case and digits (a bare hex key, a lower-case key such as
- * HubSpot's or WooCommerce's, written alone, pass); a password without a cue word.
+ *   3. a cue word (key, token, secret …) followed, within the next six words and across line
+ *      breaks, by a key-shaped word; a password cue (Passwort, Kennwort, or "PW:", "pass:",
+ *      "Login:") followed by a password-shaped word that is the next word or comes after one
+ *      linking word, or, anywhere in the next six words, one with letters, digits and a symbol;
+ *   4. a message that is one word (a code fence around it allowed), at least 20 characters, with an
+ *      unbroken letter-and-digit run of 16 or more holding upper case, lower case and digits that
+ *      change class as often as a random key does — a key pasted on its own.
+ * Not caught: a key without a known form and without a cue word, unless it is pasted alone and
+ * looks random (a bare hex key passes); a password without a cue word. Caught though not a key:
+ * a random-looking ID pasted alone, such as a Google Drive file ID (a link to it passes).
  * Returns a fixed label, never any part of the text.
  */
 export function mandateCredentialInput(text: string): string | null {
   const shaped = maskCredentialInput(text).labels[0];
   if (shaped !== undefined) return shaped;
-  for (const { label, pattern } of CONTEXT_SHAPES) if (pattern.test(text)) return label;
-  for (const cue of text.matchAll(CREDENTIAL_CUE)) {
-    const from = (cue.index ?? 0) + cue[0].length;
-    const lineEnd = text.indexOf('\n', from);
-    const words = text.slice(from, lineEnd < 0 ? undefined : lineEnd)
-      .split(/[\s"'`„“”]+/)
-      .map((w) => w.replace(/^[:=(<[]+|[.,;:!?)>\]]+$/g, ''))
-      .filter((w) => w.length > 0)
-      .slice(0, 4);
+  for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
+  const cues = [...text.matchAll(CREDENTIAL_CUE), ...text.matchAll(SHORT_PASSWORD_CUE)];
+  for (const cue of cues) {
+    const words = wordsAfter(text, (cue.index ?? 0) + cue[0].length);
     if (PASSWORD_CUE.test(cue[0])) {
-      // A password is short and word-like, so it counts only where it is plainly the value: the
-      // word right after the cue, or after one linking word ("Passwort ist …", "password: …").
-      const value = PASSWORD_LINK.test(words[0] ?? '') ? words[1] : words[0];
-      if (value !== undefined && valueShaped(value, true)) return 'password';
+      // A password is short and word-like: it counts where it is plainly the value (the next word,
+      // or after one linking word), or further on when it mixes letters, digits and a symbol, which
+      // a word at the end of a sentence ("Kooperation!") does not.
+      const plain = PASSWORD_LINK.test(words[0] ?? '') ? words[1] : words[0];
+      if (plain !== undefined && passwordShaped(plain)) return 'password';
+      // Read unstripped here: a password's last character is often the symbol ("Sommer2025!").
+      if (rawWordsAfter(text, (cue.index ?? 0) + cue[0].length).some((w) => passwordShaped(w) && /[0-9]/.test(w) && /[A-Za-z]/.test(w) && /[^A-Za-z0-9]/.test(w))) return 'password';
       continue;
     }
-    if (words.some((w) => valueShaped(w, false))) return 'credential after a cue word';
+    if (words.some(keyShaped)) return 'credential after a cue word';
   }
-  // A key pasted alone, a code fence around it allowed: one word of at least 20 characters with an
-  // unbroken letter-and-digit run of 16 or more that holds upper case, lower case and digits. A
-  // slug or an id joined from words (`S6-standing-practice`), a UUID or a hash has no such run. An
-  // integrity string (`sha512-…`) is not a key.
   const lone = text.trim().replace(/^```[\w-]*\s*/, '').replace(/\s*```$/, '');
   if (
     !/\s/.test(lone) && lone.length >= 20 && !isNameOrLink(lone) && !/^sha(?:256|384|512)-/.test(lone)
-    && (lone.match(/[A-Za-z0-9]{16,}/g) ?? []).some((run) => /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run))
+    && !NON_SECRET_ID.test(lone)
+    && (lone.match(/[A-Za-z0-9]{16,}/g) ?? []).some((run) =>
+      /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run) && classChangeRate(run) >= 0.35)
   ) return 'credential on its own';
   return null;
 }

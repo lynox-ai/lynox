@@ -37,7 +37,19 @@ function serve(route: (url: string) => Response | undefined): void {
 	}));
 }
 
+/** This browser's saved copy, as a plain map: the node test project has no storage of its own. */
+let saved: Map<string, string>;
+
 beforeEach(async () => {
+	saved = new Map();
+	vi.stubGlobal('localStorage', {
+		getItem: (k: string) => saved.get(k) ?? null,
+		setItem: (k: string, v: string) => { saved.set(k, String(v)); },
+		removeItem: (k: string) => { saved.delete(k); },
+		clear: () => { saved.clear(); },
+		key: (i: number) => [...saved.keys()][i] ?? null,
+		get length() { return saved.size; },
+	});
 	vi.stubGlobal('navigator', { onLine: true });
 	vi.stubGlobal('window', { addEventListener: () => {} });
 	vi.resetModules();
@@ -65,7 +77,40 @@ describe('a helper\'s message refused as carrying a key', () => {
 		expect(drafted).toEqual([TYPED]);
 		expect(store.getChatError()).toBe(text.returned);
 		expect(resets.length).toBe(1);
-		if (typeof localStorage !== 'undefined') expect(localStorage.getItem('lynox-chat') ?? '').not.toContain(KEY);
+		expect(JSON.stringify([...saved.values()]), 'nothing saved in this browser holds it').not.toContain(KEY);
+	});
+
+	it('a message that waited in the queue was saved; the refusal writes the saved copy over', async () => {
+		// The first message's run is still going, so the second waits in the queue, and a queued
+		// message is saved at once (so a reload keeps it) — with its text.
+		let finishFirst: (r: Response) => void = () => {};
+		let runs = 0;
+		serve((url) => undefined);
+		const plain = globalThis.fetch as unknown as (input: string | URL) => Promise<Response>;
+		vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+			const url = String(input);
+			if (url.endsWith('/run')) {
+				calls.push(url);
+				runs++;
+				return runs === 1 ? new Promise<Response>((r) => { finishFirst = r; }) : refused();
+			}
+			return plain(input);
+		}));
+		store.registerComposerDraft(() => true);
+
+		const first = store.sendMessage('Verbinde bitte unseren Shop.');
+		await settle();
+		await store.sendMessage(TYPED);
+		expect(JSON.stringify([...saved.values()]), 'control: the queued message was saved').toContain(KEY);
+		// The first run ends with an empty stream; the queue's next message goes out after it.
+		finishFirst(new Response('', { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+		await first;
+		await new Promise((r) => setTimeout(r, 250));
+		await settle();
+
+		expect(runs, 'the queued message was sent').toBe(2);
+		expect(JSON.stringify(store.getMessages())).not.toContain(KEY);
+		expect(JSON.stringify([...saved.values()]), 'nothing saved in this browser holds it').not.toContain(KEY);
 	});
 
 	it('says the other sentence when the field could not take the text back', async () => {

@@ -28,26 +28,49 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput(typed)).toBe('Shopify token');
   });
 
+  it('rule 1: the further vendor shapes, which the run route\'s mask does not know', () => {
+    const uuid = `${rnd(8, HEX)}-${rnd(4, HEX)}-${rnd(4, HEX)}-${rnd(4, HEX)}-${rnd(12, HEX)}`;
+    for (const [typed, label] of [
+      [`pat-eu1-${uuid}`, 'HubSpot private app token'],
+      [`${'c'}${'s'}_${rnd(40, HEX)}`, 'WooCommerce key'],
+      [`${rnd(32, HEX)}-us21`, 'Mailchimp API key'],
+      [`${'S'}${'G'}.${rnd(22, ALNUM)}.${rnd(43, ALNUM)}`, 'SendGrid API key'],
+      [`${'S'}${'K'}${rnd(32, HEX)}`, 'Twilio API key'],
+    ] as const) {
+      expect(maskCredentialInput(typed).labels, `the mask alone: ${label}`).toEqual([]);
+      expect(mandateCredentialInput(typed)).toBe(label);
+    }
+  });
+
   it('rule 2: a bearer header and user:pass in a URL', () => {
     expect(mandateCredentialInput(`Authorization: Bearer ${mixed(40)}`)).toBe('bearer token');
     expect(mandateCredentialInput(`https://admin:${mixed(16)}@shop.example.org/api`)).toBe('credential in URL');
   });
 
-  it('rule 3: a value-shaped word within four words after a cue word, on the same line', () => {
+  it('rule 3: a key-shaped word within six words after a cue word, across line breaks', () => {
     const key = mixed(32);
     expect(mandateCredentialInput(`API-Key: ${key}`)).toBe('credential after a cue word');
     expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
     expect(mandateCredentialInput(`Client Secret: ${rnd(4, ALNUM)}8Q~${rnd(30, ALNUM)}`)).toBe('credential after a cue word');
-    // Same value, but five words after the cue, or on the next line: not this rule.
-    expect(mandateCredentialInput(`Der Token ist bei mir und zwar ${rnd(32, HEX)}`)).toBeNull();
-    expect(mandateCredentialInput(`Der Token:\n${rnd(32, HEX)} und mehr`)).toBeNull();
+    expect(mandateCredentialInput(`Der Token:\n${rnd(32, HEX)} und mehr`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Hier der Key:\n\n${rnd(32, HEX)}`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Der Token ist bei mir und zwar ${rnd(32, HEX)}`)).toBe('credential after a cue word');
+    // The seventh word after the cue: not this rule.
+    expect(mandateCredentialInput(`Der Token ist bei mir und zwar hier ${rnd(32, HEX)}`)).toBeNull();
   });
 
-  it('rule 3, password: only where it is plainly the value', () => {
+  it('rule 3, password: plainly the value, or a word with letters, digits and a symbol', () => {
     expect(mandateCredentialInput('Das Passwort ist Sommer2026!Shop')).toBe('password');
     expect(mandateCredentialInput('Passwort lautet: Wald#Haus77')).toBe('password');
     expect(mandateCredentialInput('The password is Tr0ub4dor&3x')).toBe('password');
+    expect(mandateCredentialInput('PW: Wald#Haus77')).toBe('password');
+    expect(mandateCredentialInput('pass: Wald#Haus77')).toBe('password');
+    expect(mandateCredentialInput('Login: info@firma.ch / Sommer2025!')).toBe('password');
+    expect(mandateCredentialInput('Passwort für bexio Sommer2025!')).toBe('password');
     expect(mandateCredentialInput('My most-used password manager is 1Password with a work vault.')).toBeNull();
+    expect(mandateCredentialInput('Bitte ändern Sie Ihr Passwort bis 30.09. Danke für Ihre Kooperation!')).toBeNull();
+    // A short cue without its colon is a word ("Login-Seite", "pass auf").
+    expect(mandateCredentialInput('pass auf Wald#Haus77')).toBeNull();
   });
 
   it('rule 4: a key pasted on its own, a code fence around it allowed', () => {
@@ -58,6 +81,18 @@ describe('mandateCredentialInput', () => {
     // Under 20 characters, or no unbroken run of 16 with all three classes: not a key on its own.
     expect(mandateCredentialInput(mixed(19))).toBeNull();
     expect(mandateCredentialInput('S6-standing-practice-v2')).toBeNull();
+    // Words joined with numbers change class too rarely for a random key.
+    expect(mandateCredentialInput('Rechnung2024November05Final.pdf')).toBeNull();
+    expect(mandateCredentialInput('meinshop2024Zuerich-Store')).toBeNull();
+    // A Stripe object's id is no secret, however random the part after its prefix.
+    expect(mandateCredentialInput(`pi_${key}`)).toBeNull();
+    expect(mandateCredentialInput(`cus_${key}`)).toBeNull();
+  });
+
+  it('caught though not a key: a random-looking id pasted alone (a link to it passes)', () => {
+    const id = `1${mixed(32)}`;
+    expect(mandateCredentialInput(id)).toBe('credential on its own');
+    expect(mandateCredentialInput(`https://drive.google.com/file/d/${id}/view`)).toBeNull();
   });
 
   it('names no part of the text it read', () => {
@@ -70,9 +105,9 @@ describe('mandateCredentialInput', () => {
     }
   });
 
-  it('not caught: a bare lower-case or hex key without a cue word', () => {
+  it('not caught: a bare hex or lower-case key without a cue word', () => {
     expect(mandateCredentialInput(rnd(32, HEX))).toBeNull();
-    expect(mandateCredentialInput(`pat-eu1-${rnd(8, HEX)}-${rnd(4, HEX)}-${rnd(4, HEX)}-${rnd(4, HEX)}-${rnd(12, HEX)}`)).toBeNull();
+    expect(mandateCredentialInput(rnd(40, 'abcdefghijklmnopqrstuvwxyz0123456789'))).toBeNull();
   });
 
   // The helper's ordinary messages while setting up an instance. Each one passes.
@@ -106,6 +141,10 @@ describe('mandateCredentialInput', () => {
     'Schlüssel-Anhänger Art. AC-KEY-2026-RED kostet 12.90',
     'Die API-Key-Doku: https://shopify.dev/docs/apps/auth/admin-app-access-tokens',
     'https://shop.example.org/products/filter-2000?variant=4412',
+    'Bitte ändern Sie Ihr Passwort bis 30.09. Danke für Ihre Kooperation!',
+    'Login-Seite: https://shop.example.org/account/login',
+    'Login: info@firma.ch',
+    'Der Shop-Login heisst info@firma.ch, das Passwort hat der Inhaber.',
   ];
   it.each(ORDINARY)('passes an ordinary message: %s', (text) => {
     expect(mandateCredentialInput(text)).toBeNull();

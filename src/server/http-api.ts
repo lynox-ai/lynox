@@ -1332,6 +1332,25 @@ function authorshipOrNone(read: () => WorkflowAuthorship | undefined): WorkflowA
 /** The code beside `MANDATE_KEY_INPUT_REFUSAL`, read by the web UI. */
 export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
 
+/**
+ * Whether text a mandate's helper typed somewhere other than the chat reads as carrying a key — a
+ * conversation's title, a task's fields, a compaction's focus — and was refused for it (422, the
+ * fixed sentence). Every string in `value` is read, nested ones included. The owner is not checked.
+ */
+function refusedMandateKeyIn(principal: RequestPrincipal, res: ServerResponse, value: unknown): boolean {
+  if (isOwnerPrincipal(principal)) return false;
+  const texts: string[] = [];
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === 'string') texts.push(v);
+    else if (depth < 4 && Array.isArray(v)) for (const x of v) walk(x, depth + 1);
+    else if (depth < 4 && v !== null && typeof v === 'object') for (const x of Object.values(v)) walk(x, depth + 1);
+  };
+  walk(value, 0);
+  if (!texts.some((t) => mandateCredentialInput(t) !== null)) return false;
+  errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+  return true;
+}
+
 /** A mandate's typed answer refused for reading as a key (`MandateKeyInputError`): 422, fixed sentence. */
 function keyInputRefused(res: ServerResponse, err: unknown): boolean {
   if (!(err instanceof MandateKeyInputError)) return false;
@@ -4493,6 +4512,19 @@ export class LynoxHTTPApi {
       // A mandate runs only in a conversation it started (§3.13 E1, N2). Read on the thread
       // row, not on the session object: the session's principal is whoever ran last.
       if (this._refuseUnlessOwns(req, res, 'run this conversation', () => [this._threadRow(sessionId)])) return;
+      // A mandate's helper takes no key in this chat: a message that reads as carrying one is
+      // refused here, before the thread, the run history, the title, a log or the model see any of
+      // it, and before a busy or full queue (409, 429) or a takeover could answer instead — those
+      // keep the message in the helper's browser as failed and resendable. Not masked as for the
+      // owner below: what a mask leaves (a key's last characters) would still reach the owner's
+      // thread. The refusal is a fixed sentence and names no part of the text.
+      {
+        const typed = (body as Record<string, unknown> | null)?.['task'];
+        if (typeof typed === 'string' && !isOwnerPrincipal(this._principalOf(req)) && mandateCredentialInput(typed) !== null) {
+          errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+          return;
+        }
+      }
       // Which erasure this request started under; see `erasureGeneration`.
       const erasureGenAtEntry = this.erasureGeneration;
       const erasedSinceEntry = (): boolean => this.erasureGeneration !== erasureGenAtEntry;
@@ -4556,14 +4588,6 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const taskText = b && typeof b['task'] === 'string' ? b['task'] : '';
       if (!taskText) { errorResponse(res, 400, 'Missing task'); return; }
-      // A mandate's helper takes no key in this chat: a message that reads as carrying one is refused here, before the thread, the run
-      // history, the title, a log or the model see any of it. Not masked as for the owner below:
-      // what a mask leaves (a key's last characters) would still reach the owner's thread. The
-      // refusal is a fixed sentence and names no part of the text.
-      if (!isOwnerPrincipal(this._principalOf(req)) && mandateCredentialInput(taskText) !== null) {
-        errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
-        return;
-      }
 
       // Chat-with-context entry (Slice C, §4.6 context-seam): a "💬 Bearbeiten"
       // (kind 'workflow') / "💬 Fixen" (kind 'run') button opens this run with a
@@ -6021,6 +6045,7 @@ export class LynoxHTTPApi {
       }
       const b = body as Record<string, unknown> | null;
       const focus = typeof b?.['focus'] === 'string' ? b['focus'] : undefined;
+      if (refusedMandateKeyIn(this._principalOf(_req), res, focus)) return;
       const result = await session.compact(focus);
       // The occupancy pair travels on the manual path too: this route is a
       // blocking request with no SSE, so without it the UI would have to show
@@ -6112,6 +6137,7 @@ export class LynoxHTTPApi {
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       if (this._refuseUnlessOwns(_req, res, 'change this conversation', () => [thread])) return;
       const b = body as Record<string, unknown> | null;
+      if (refusedMandateKeyIn(this._principalOf(_req), res, b?.['title'])) return;
       const skipExtraction = typeof b?.['skip_extraction'] === 'boolean' ? b['skip_extraction'] : undefined;
       // A chat that read data through a store connection stays out of memory for its life
       // (`core/containment.ts`): private mode cannot be switched off there. Read from the
@@ -8847,6 +8873,8 @@ export class LynoxHTTPApi {
       const pipelineId = typeof b['pipelineId'] === 'string' && b['pipelineId'].length > 0 ? b['pipelineId'] : undefined;
       const hidden = hiddenInTaskText(b);
       if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
+      // The fields a person types; not the ids, which a random-looking id would fail.
+      if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
 
       // Slice B2: schedule a saved workflow on cron — the promote-to-cron consent
       // action. Validates the workflow is autonomous, binds + constrains the
@@ -8983,6 +9011,8 @@ export class LynoxHTTPApi {
       // Before the mark below: a refused edit is no mandate's edit.
       const hidden = hiddenInTaskText(b);
       if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
+      // The fields a person types; not the ids, which a random-looking id would fail.
+      if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
       // Checked here rather than left to `update`, which throws: a thrown error answers
       // 500, and a refused request must not mark the trigger as a mandate's edit either.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {

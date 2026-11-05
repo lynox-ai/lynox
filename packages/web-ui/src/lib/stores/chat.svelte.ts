@@ -1584,6 +1584,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			// again by a retry. The message field was emptied when it was sent.
 			if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 			if (messages[userMsgIdx] === turn.userMsg) messages.splice(userMsgIdx, 1);
+			// Written now: a message that waited in the queue, or a save that ran while this request
+			// was out, put it in this browser's saved copy, and that copy keeps it until the next save.
+			persistChatNow();
 			// The text goes back into the message field, in memory only, so a false alarm costs no
 			// retyping; that field is never stored.
 			const returned = composerDraft !== null && composerDraft(display);

@@ -163,6 +163,56 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     }
   }, 60_000);
 
+  it('a key is refused before a busy conversation could answer instead (409 keeps the message resendable)', async () => {
+    const sid = await helperSession();
+    const running = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+    running.set(sid, { streamAlive: true, lastEventAt: Date.now(), takeover: () => {} });
+    try {
+      const busy = await call('POST', `/api/sessions/${sid}/run`, { task: 'Verbinde bitte unseren Shopify-Shop.' });
+      expect(busy.status, 'control: an ordinary message gets the busy answer').toBe(409);
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: TYPED });
+      expect(res.status).toBe(422);
+      expect((JSON.parse(res.text) as { code?: string }).code).toBe(MANDATE_KEY_INPUT_CODE);
+    } finally { running.delete(sid); }
+  }, 60_000);
+
+  it('a key in a conversation\'s title, a task\'s fields or a compaction\'s focus is refused and not stored', async () => {
+    const sid = await helperSession();
+    const titled = await call('PATCH', `/api/threads/${sid}`, { title: TYPED });
+    expect(titled.status).toBe(422);
+    expect(JSON.stringify(engine().getThreadStore()!.getThread(sid))).not.toContain(KEY.slice(-8));
+    const control = await call('PATCH', `/api/threads/${sid}`, { title: 'Shop einrichten' });
+    expect(control.status, `control: an ordinary title is saved: ${control.text}`).toBeLessThan(300);
+
+    for (const body of [
+      { title: TYPED },
+      { title: 'Shop verbinden', description: TYPED },
+      { title: 'Shop verbinden', params: { token: KEY } },
+    ]) {
+      const task = await call('POST', '/api/tasks', body);
+      expect(task.status, JSON.stringify(Object.keys(body))).toBe(422);
+      expect(task.text).not.toContain(KEY.slice(-8));
+    }
+    const listed = await call('GET', '/api/tasks');
+    expect(listed.text).not.toContain(KEY.slice(-8));
+
+    const compacted = await call('POST', `/api/sessions/${sid}/compact`, { focus: TYPED });
+    expect(compacted.status).toBe(422);
+  }, 60_000);
+
+  it('a key in a task edit is refused', async () => {
+    as(OWNER_PRINCIPAL);
+    const created = await call('POST', '/api/tasks', { title: 'Lager zählen' });
+    expect(created.status, created.text).toBeLessThan(300);
+    const id = (JSON.parse(created.text) as { id?: string; task?: { id?: string } });
+    const taskId = id.id ?? id.task?.id;
+    expect(taskId).toBeTruthy();
+    await helperSession();
+    const edited = await call('PATCH', `/api/tasks/${taskId!}`, { description: TYPED });
+    expect(edited.status).toBe(422);
+    expect(JSON.stringify((await call('GET', '/api/tasks')).text)).not.toContain(KEY.slice(-8));
+  }, 60_000);
+
   it('the owner\'s message with the same text is not refused (the owner stores keys; the route masks known shapes)', async () => {
     as(OWNER_PRINCIPAL);
     const created = await call('POST', '/api/sessions', {});
