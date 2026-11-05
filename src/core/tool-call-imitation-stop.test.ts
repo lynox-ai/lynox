@@ -300,3 +300,24 @@ describe('the per-call controller on a long run', () => {
     expect(abortedAtStart).toEqual([false, true]);
   });
 });
+
+describe('what a stopped call used', () => {
+  it('goes to the cost guard and to a turn_end event, input as reported and output estimated from the text', async () => {
+    const events: Array<{ type: string; stop_reason?: string; usage?: { input_tokens: number; output_tokens: number } }> = [];
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', tools: [sendTool], costGuard: { maxBudgetUSD: 100 },
+      onStream: (e) => { events.push(e as (typeof events)[number]); },
+    });
+    textReply(COPY.repeat(5), 9);
+    const err = await agent.send('place the order').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ToolCallImitationError);
+    const snap = agent.getCostSnapshot()!;
+    expect(snap.inputTokens).toBe(100);
+    expect(snap.outputTokens).toBeGreaterThan(0);
+    const end = events.filter((e) => e.type === 'turn_end');
+    expect(end).toHaveLength(1);
+    expect(end[0]!.stop_reason).toBe('tool_call_imitation');
+    expect(end[0]!.usage).toMatchObject({ input_tokens: 100, output_tokens: snap.outputTokens });
+    expect((err as ToolCallImitationError).usage?.output_tokens).toBe(snap.outputTokens);
+  });
+});

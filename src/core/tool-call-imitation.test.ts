@@ -174,6 +174,10 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
   it('lets an import template with empty fields through', () => {
     const row = '  {"name": "", "email": "", "phone": ""}';
     expect(run(`Use this import template:\n\`\`\`json\n[\n${[row, row, row].join(',\n')}\n]\n\`\`\`\n`)).toBeNull();
+    const nulls = '{"name": null, "email": null, "phone": null}';
+    expect(run([nulls, nulls, nulls].join('\n') + '\n')).toBeNull();
+    const todo = '{"name": "TODO", "email": "xxx", "phone": "tbd"}';
+    expect(run([todo, todo, todo].join('\n') + '\n')).toBeNull();
     // The same rows with values stop.
     const filled = '  {"name": "Anna Muster", "email": "anna@example.ch", "phone": "+41 44 000 00 00"}';
     expect(run(`[\n${[filled, filled, filled].join(',\n')}\n]\n`)?.toolName).toBe('contacts_save');
