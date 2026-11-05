@@ -520,30 +520,45 @@ export interface VerdictTextRun {
 export function verdictTextRefusal(
   after: Readonly<Record<string, unknown>>, before: Readonly<Record<string, unknown>>, run: VerdictTextRun,
 ): BulkInvalidReason | null {
+  return verdictTextRefusalOf(after, before, run)?.reason ?? null;
+}
+
+/** A refusal of {@link verdictTextRefusalOf}: the reason, and with `new_link_domain` the domain the
+ *  new link points to, so the owner is told which one (1010). The domain is the link's host as the
+ *  check read it, in ASCII. */
+export interface VerdictTextRefusal {
+  reason: BulkInvalidReason;
+  linkDomain?: string | undefined;
+}
+
+/** {@link verdictTextRefusal} with the domain of a refused link. */
+export function verdictTextRefusalOf(
+  after: Readonly<Record<string, unknown>>, before: Readonly<Record<string, unknown>>, run: VerdictTextRun,
+): VerdictTextRefusal | null {
   const own = run.storeHost === null ? run.startDomains : [run.storeHost, ...run.startDomains];
   const seo = checkSeoAfter(run.listForm, after, before, own);
-  if (!seo.ok) return seo.reason;
+  if (!seo.ok) return { reason: seo.reason };
   const html = htmlFieldsOfListForm(run.listForm);
   // `shortcode_changed` is returned only once every field passed every other check: the preview
   // offers such a target's values to the owner to paste into the shop by hand (1130), so another
   // field's script, foreign link or hidden character must win over it.
-  let shortcode: BulkInvalidReason | null = null;
+  let shortcode: VerdictTextRefusal | null = null;
   for (const [field, value] of Object.entries(after)) {
     if (typeof value !== 'string') continue;
     const was = Object.hasOwn(before, field) && typeof before[field] === 'string' ? before[field] as string : null;
     if (value === was) continue;
     if (html.includes(field)) {
       // A list run always has its host; without one, links cannot be resolved: refused.
-      if (run.storeHost === null) return 'not_canonical';
+      if (run.storeHost === null) return { reason: 'not_canonical' };
       const checked = checkMarkup({ before: was, after: value, storeHost: run.storeHost, startDomains: run.startDomains });
-      if (!checked.ok && checked.reason === 'shortcode_changed') shortcode = checked.reason;
-      else if (!checked.ok) return checked.reason;
+      if (!checked.ok && checked.reason === 'shortcode_changed') shortcode = { reason: checked.reason };
+      else if (!checked.ok) return checked.reason === 'new_link_domain' ? { reason: checked.reason, linkDomain: checked.detail } : { reason: checked.reason };
       continue;
     }
-    if ((run.listForm !== null || run.storeHost !== null) && !plainTextMarkupOf(was, value).ok) return 'markup_in_text';
+    if ((run.listForm !== null || run.storeHost !== null) && !plainTextMarkupOf(was, value).ok) return { reason: 'markup_in_text' };
     const held = hiddenCounts(was ?? '');
     for (const [cp, n] of hiddenCounts(value)) {
-      if (n > (held.get(cp) ?? 0)) return 'hidden_char';
+      if (n > (held.get(cp) ?? 0)) return { reason: 'hidden_char' };
     }
   }
   return shortcode;
@@ -602,7 +617,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     if (!target) continue;
     const token = newToken();
     if (!ledger.claimJudge(runId, seq, token, now(), JUDGE_CLAIM_STALE_MS)) continue;
-    const record = (verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown>; contextField?: number }): void => {
+    const record = (verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown>; contextField?: number; linkDomain?: string | undefined }): void => {
       ledger.recordJudgement(runId, seq, token, verdict, now());
     };
     if (target.before.absent) {
@@ -733,10 +748,15 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
         }
         verdict = changed as Record<string, unknown>;
       }
-      const textRefused = verdictTextRefusal(verdict, beforeRow, textRun);
-      if (textRefused !== null) {
+      const refusal = verdictTextRefusalOf(verdict, beforeRow, textRun);
+      if (refusal !== null) {
+        const textRefused = refusal.reason;
         if (textRefused !== 'shortcode_changed') {
-          record({ invalid: textRefused });
+          // The domain of a refused link is shown to the owner (1010), so it is kept only where it
+          // holds no vault value and nothing shaped like a credential: the judge wrote it.
+          const domain = refusal.linkDomain;
+          const shown = domain !== undefined && deps.maskVault(domain) === domain && deps.scanSecret(domain) === null ? domain : undefined;
+          record({ invalid: textRefused, linkDomain: shown });
           return;
         }
         // A shortcode refusal shows the judge's values to the owner to copy into the shop (1130),

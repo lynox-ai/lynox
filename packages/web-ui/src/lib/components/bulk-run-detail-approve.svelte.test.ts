@@ -552,3 +552,40 @@ describe('a preview whose SEO text gains an &', () => {
 		expect(markedKeys()).toEqual(['gid://shopify/Product/2']);
 	});
 });
+
+// The markup a planned value adds and removes in an HTML field, listed as code text under the
+// target (1010): set as text, never rendered, so a link or a script in it shows and does not act.
+describe('the markup a target changes (1010)', () => {
+	const link = { kind: 'element' as const, namespace: 'html', element: 'a', attributes: [['href', 'https://evil.example/x?a=1&b=2']] as [string, string][], text: null, inTemplate: false };
+	const image = { kind: 'element' as const, namespace: 'html', element: 'img', attributes: [['src', '/a.jpg']] as [string, string][], text: null, inTemplate: false };
+	const script = { kind: 'element' as const, namespace: 'html', element: 'script', attributes: [] as [string, string][], text: 'steal()', inTemplate: false };
+	const codes = (block: Element): (string | null)[] => [...block.querySelectorAll('code')].map((c) => c.textContent);
+
+	it('lists what a write adds and removes as text, and renders none of it', async () => {
+		targets = targets.map((x) => (x.seq === 1 ? { ...x, markupChanges: [{ field: 'descriptionHtml', added: [link], removed: [image], addsOutsideAllowlist: true }] } : x));
+		await render();
+		const blocks = target.querySelectorAll('[data-testid="bulk-markup"]');
+		expect(blocks, 'one list, for the target that changes markup').toHaveLength(1);
+		expect(codes(blocks[0]!)).toEqual(['<a href="https://evil.example/x?a=1&b=2">', '<img src="/a.jpg">']);
+		expect(blocks[0]!.textContent).toContain(t('bulk.markup.added'));
+		expect(blocks[0]!.textContent).toContain(t('bulk.markup.removed'));
+		// Code text, not markup: no link to the domain, no image.
+		expect(target.querySelectorAll('a[href*="evil.example"]')).toHaveLength(0);
+		expect(blocks[0]!.querySelectorAll('a, img')).toHaveLength(0);
+		// A write is not an undo: no sentence about markup from before the run.
+		expect(target.querySelector('[data-testid="bulk-markup-restores-note"]')).toBeNull();
+	});
+
+	it('lists on an undo what it writes back, and says where that lies outside the allowlist', async () => {
+		run = makeRun({ kind: 'undo', sourceRunId: 'r0', total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false,
+			markupChanges: [{ field: 'descriptionHtml', added: [script], removed: [], addsOutsideAllowlist: true }] }];
+		await render();
+		const undo = target.querySelectorAll('[data-testid="bulk-undo-markup"]');
+		expect(undo).toHaveLength(1);
+		expect(codes(undo[0]!)).toEqual(['gid://shopify/Product/1', '<script>steal()</script>']);
+		expect(undo[0]!.textContent).toContain(t('bulk.markup.restores'));
+		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note'));
+		expect(target.querySelectorAll('script')).toHaveLength(0);
+	});
+});

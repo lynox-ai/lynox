@@ -293,6 +293,50 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     expect([shown.error, shown.refusedValues]).toEqual(['new_link_domain', undefined]);
   });
 
+  describe('the domain of a refused link (1010)', () => {
+    const linked = (href: string): Record<string, unknown> => ({ ...before, short_description: `<p>neu <a href="${href}">x</a></p>` });
+    const shownOf = (r: { id: string; seq: number }) => ledger.getPreview(r.id).find((p) => p.seq === r.seq)!;
+
+    it('names the domain the judge\'s link points to', async () => {
+      const shown = shownOf(await judge(linked('https://evil.example/x')));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', 'evil.example']);
+    });
+
+    it('names an internationalised domain in Punycode as it is written', async () => {
+      expect(shownOf(await judge(linked('https://xn--pple-43d.example/'))).linkDomain).toBe('xn--pple-43d.example');
+    });
+
+    it('names a domain written in Unicode in Punycode, never as the lookalike it spells', async () => {
+      // The host is read as `new URL` reads it: a Cyrillic а before „pple“.
+      expect(shownOf(await judge(linked('https://аpple.example/'))).linkDomain).toBe('xn--pple-43d.example');
+    });
+
+    it('keeps a long host whole, past the 200 characters a refusal\'s detail is cut at', async () => {
+      const host = `${Array.from({ length: 4 }, () => 'a'.repeat(60)).join('.')}.example`;
+      expect(host.length).toBeGreaterThan(200);
+      expect(shownOf(await judge(linked(`https://${host}/`))).linkDomain).toBe(host);
+    });
+
+    it('keeps no domain that holds a vault value', async () => {
+      const vaulted = shownOf(await judge(linked('https://evil.example/x'), { maskVault: (t) => t.replace('evil.example', '***') }));
+      expect([vaulted.error, vaulted.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('keeps no domain shaped like a credential', async () => {
+      const secret = shownOf(await judge(linked('https://sk-live-abc.evil.example/x')));
+      expect([secret.error, secret.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('stores a domain only with new_link_domain, whatever a caller hands in', () => {
+      const { id, seq } = listed({}, true, both);
+      expect(ledger.recordRead(id, seq, { before })).toBe(true);
+      expect(ledger.claimJudge(id, seq, 'tok', Date.now(), 60_000)).toBe(true);
+      expect(ledger.recordJudgement(id, seq, 'tok', { invalid: 'url_scheme', linkDomain: 'evil.example' })).toBe(true);
+      expect(shownOf({ id, seq })).toMatchObject({ error: 'url_scheme' });
+      expect(shownOf({ id, seq }).linkDomain).toBeUndefined();
+    });
+  });
+
   it('refuses a value for its link, script or hidden character before its shortcode, so none is offered to paste', () => {
     const sc = '[box a="1&2"]x[/box]';
     const at = (after: string): string => {

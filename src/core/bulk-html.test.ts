@@ -483,8 +483,24 @@ describe('markupChangesOf', () => {
   });
 
   it('leaves out a bare p that comes or goes', () => {
-    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [] });
-    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [] });
+    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false });
+    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false });
+  });
+
+  it('says whether an added item lies outside what a write may add (1010, ux U-092)', () => {
+    const outside = (before: string, after: string): boolean => markupChangesOf('d', before, after).addsOutsideAllowlist;
+    // Within: a link with its href only.
+    expect(outside('<p>a</p>', '<p>a <a href="/x">b</a></p>')).toBe(false);
+    // Outside, one condition each: an element off the list, a second attribute on a link, an
+    // attribute on another allowlisted element, raw text, a comment, an allowlisted element in a template.
+    expect(outside('<p>a</p>', '<p>a</p><img src="/i.jpg">')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="/x" target="_blank">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p class="x">a</p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><script>x()</script>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><!-- c -->')).toBe(true);
+    expect(outside('<p>a</p><template></template>', '<p>a</p><template><p>b</p></template>')).toBe(true);
+    // Only what is added counts: a removed image does not.
+    expect(outside('<p>a</p><img src="/i.jpg">', '<p>a</p>')).toBe(false);
   });
 
   it('names an allowlisted element with an attribute, and one inside a template', () => {

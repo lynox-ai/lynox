@@ -13,7 +13,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -100,7 +100,9 @@
 			// So is a run whose rollback left targets: the sentence names the marked ones, and each
 			// has to be on the page to be seen. So is a run with a product its store kept with markup
 			// lynox did not send: the halt's sentence points at it, and the mark outlives that halt.
-			const approving = r.body.phase === 'previewed' && r.body.kind === 'apply';
+			// An undo the owner approves is loaded whole too: each target that writes markup back is
+			// listed with it (1010), and an approval covers every one.
+			const approving = r.body.phase === 'previewed';
 			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
@@ -367,6 +369,25 @@
 	</div>
 {/snippet}
 
+<!-- The markup a target's new value adds and removes in an HTML field (1010), as code text with
+     every attribute whole (sec-core M3): set as text, never rendered, and wrapped so a long value
+     stays in view. On an undo it says what the undo writes back and takes out. -->
+{#snippet markupList(target: BulkTarget, undo: boolean)}
+	{#each target.markupChanges ?? [] as change (change.field)}
+		{@const list = bulkMarkupList(change, undo, shopify ? bulkFieldNamesText(host, [change.field], t) : bulkVisibleText(change.field), view)}
+		<div class="mt-1 text-xs" data-testid="bulk-markup">
+			{#if list.head}<div class="text-text-subtle">{list.head}</div>{/if}
+			{#if list.restoresNote}<p class="text-warning" data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
+			<ul class="space-y-0.5">
+				{#each list.lines as markupLine, i (i)}
+					<li class="min-w-0"><span class="text-text-subtle">{markupLine.label}</span> <code class="whitespace-pre-wrap break-all">{bulkVisibleText(markupLine.code)}</code>{#if markupLine.template} <span class="text-text-subtle">{markupLine.template}</span>{/if}</li>
+				{/each}
+			</ul>
+			<p class="text-text-subtle">{list.note}</p>
+		</div>
+	{/each}
+{/snippet}
+
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<ViewerUnavailableNotice />
 	<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.back')}</button>
@@ -473,6 +494,7 @@
 											{:else if target.error && target.change !== 'invalid'}
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
+											{@render markupList(target, false)}
 											{#if target.change === 'invalid' && target.error}
 												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store' })}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
@@ -745,6 +767,12 @@
 					<h2 class="text-sm font-medium">{t('bulk.undo.approve_title')}</h2>
 					<!-- The targets that get a value back; the entries the source created are listed apart. -->
 					<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
+					{#each targets.filter((x) => (x.markupChanges?.length ?? 0) > 0) as target (target.seq)}
+						<div class="text-sm" data-testid="bulk-undo-markup">
+							<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+							{@render markupList(target, true)}
+						</div>
+					{/each}
 					{#if run.changes.delete > 0}
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>

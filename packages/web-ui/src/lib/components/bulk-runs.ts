@@ -18,7 +18,7 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.intro', 'bulk.deselect.taken_out',
 	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
 	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
-	'bulk.halt.mandateEnded', 'bulk.halt.checksum',
+	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note',
 ]);
 
 /** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form. */
@@ -479,6 +479,73 @@ export interface BulkTarget {
 	refusedValues?: { field: string; value: string }[] | undefined;
 	/** With `secret_in_context`: the field the judge only reads that held it, by its name. */
 	contextField?: string | undefined;
+	/** Per HTML field an `update` target changes: the elements and comments its new value adds and
+	 *  removes, each with its full value (PRD shopify-preset §20.2 item 5, sec-core M3). Computed by
+	 *  the engine from the parser's tree; the page only lists it, as text. */
+	markupChanges?: BulkFieldMarkupChange[] | undefined;
+}
+
+/** One element or comment a new value adds or removes, as the engine's parser read it. */
+export interface BulkMarkupItem {
+	kind: 'element' | 'comment';
+	namespace: string;
+	element: string;
+	attributes: (readonly [name: string, value: string])[];
+	/** The raw text of an element that holds it (a `script`, a `style`), or a comment's text. */
+	text: string | null;
+	/** Inside a `template`'s content. */
+	inTemplate: boolean;
+}
+
+export interface BulkFieldMarkupChange {
+	field: string;
+	added: BulkMarkupItem[];
+	removed: BulkMarkupItem[];
+	/** An added item lies outside what a write may add (the engine's allowlist): on an undo, markup
+	 *  from before the run that it writes back. Optional: an older engine sends none. */
+	addsOutsideAllowlist?: boolean | undefined;
+}
+
+/** An element or comment as code text, every attribute with its whole value (sec-core M3: a
+ *  rewrite must not hide what a link points to). Never markup: the page sets it as text. Hidden
+ *  characters show as their marks (`bulkVisibleText`). */
+export function bulkMarkupItemText(item: BulkMarkupItem): string {
+	if (item.kind === 'comment') return bulkVisibleText(`<!--${item.text ?? ''}-->`);
+	const attrs = item.attributes.map(([name, value]) => ` ${name}="${value}"`).join('');
+	const open = `<${item.element}${attrs}>`;
+	return bulkVisibleText(item.text === null ? open : `${open}${item.text}</${item.element}>`);
+}
+
+/** One line of a target's markup list. */
+export interface BulkMarkupLine {
+	/** `added` or `removed`, by the run's kind: a write's „neu/entfernt“, an undo's „stellt wieder
+	 *  her / nimmt wieder heraus“ (ux U-151). */
+	label: string;
+	code: string;
+	/** Set where the element sits inside a `template`'s content. */
+	template: string | null;
+}
+
+/** What the page lists for one field's markup change (ux U-151): a head naming the field on a
+ *  write (none on an undo, whose lines say what it restores); on an undo that writes back markup
+ *  outside the allowlist, the sentence that it was in the shop before the run (U-092, in a
+ *  mandate's words through `i18n`); the lines; and the note that plain formatting is left out,
+ *  without which the list would read as complete. */
+export function bulkMarkupList(
+	change: BulkFieldMarkupChange, undo: boolean, fieldName: string, i18n: BulkI18n,
+): { head: string | null; restoresNote: string | null; lines: BulkMarkupLine[]; note: string } {
+	const template = i18n.t('bulk.markup.in_template');
+	const line = (key: string) => (item: BulkMarkupItem): BulkMarkupLine =>
+		({ label: i18n.t(key), code: bulkMarkupItemText(item), template: item.inTemplate ? template : null });
+	return {
+		head: undo ? null : i18n.tf('bulk.markup.head', { field: fieldName }),
+		restoresNote: undo && change.addsOutsideAllowlist === true ? i18n.t('bulk.markup.restores_note') : null,
+		lines: [
+			...change.added.map(line(undo ? 'bulk.markup.restores' : 'bulk.markup.added')),
+			...change.removed.map(line(undo ? 'bulk.markup.removes' : 'bulk.markup.removed')),
+		],
+		note: i18n.t('bulk.markup.plain_note'),
+	};
 }
 
 /** How much of a long value the preview shows before „show the whole text“ (ux U-103). */

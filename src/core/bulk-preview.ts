@@ -31,7 +31,7 @@ import {
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
-import { verdictTextRefusal } from './bulk-judge.js';
+import { verdictTextRefusalOf } from './bulk-judge.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { shopifyBulkReadEnabled, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { productTitleOf } from './shopify-saved-form.js';
@@ -52,9 +52,12 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
  */
 function planMarkupRefusal(
   after: unknown, before: unknown, list: BulkListRun | null, host: string, startDomains: readonly string[],
-): BulkInvalidReason | null {
+): { invalid: BulkInvalidReason; linkDomain?: string | undefined } | null {
   if (!isRecord(after)) return null;
-  return verdictTextRefusal(after, isRecord(before) ? before : {}, { listForm: list?.source.form ?? null, storeHost: host, startDomains });
+  // With `new_link_domain` the refused link's domain goes with the reason (1010). The planned
+  // after-state was scanned for credentials when the run was planned (`secret_in_after`).
+  const refusal = verdictTextRefusalOf(after, isRecord(before) ? before : {}, { listForm: list?.source.form ?? null, storeHost: host, startDomains });
+  return refusal === null ? null : { invalid: refusal.reason, linkDomain: refusal.linkDomain };
 }
 
 export interface BulkPreviewOutcome {
@@ -260,7 +263,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
         const after = shopifyPairedAfter(target.after, image.value);
         const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId));
-        if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+        if (markup !== null) ledger.recordRead(runId, seq, markup);
         else ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after,
           shopifyForm === 'shopify_media_alt' ? undefined : productTitleOf(image.value), contextOf(read.value));
       }
@@ -277,7 +280,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         continue;
       }
       const markup = planMarkupRefusal(target.after, read.value, list, host, ledger.startDomainsOf(runId));
-      if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+      if (markup !== null) ledger.recordRead(runId, seq, markup);
       else ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried(), undefined, undefined, contextOf(read.value));
       consecutive = 0;
       continue;

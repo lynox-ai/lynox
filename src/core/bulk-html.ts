@@ -798,7 +798,10 @@ function checkLink(value: string, input: MarkupCheckInput, linked: Set<string>):
   const same = [...linked].filter((l) => l.startsWith(`${target.kind}:`)).map((l) => l.slice(target.kind.length + 1));
   const allowed = [input.storeHost, ...input.startDomains, ...same];
   if (allowed.some((d) => hostMatches(target.domain, d))) return { ok: true };
-  return refused('new_link_domain', target.domain);
+  // Not through `refused`: its cut at DETAIL_MAX would shorten a host (up to 253 characters) without
+  // a sign, and the owner's page names this domain (1010). It is the host as `new URL` reads it,
+  // ASCII and lower case, an internationalised one in Punycode, so the page never shows a lookalike.
+  return { ok: false, reason: 'new_link_domain', detail: target.domain };
 }
 
 // --- Plain-text fields.
@@ -853,6 +856,19 @@ export interface FieldMarkupChange {
   field: string;
   added: MarkupItem[];
   removed: MarkupItem[];
+  /** Whether an added item lies outside what a write may add: an element off the allowlist, an
+   *  attribute other than an `a`'s `href`, raw text, a comment, anything inside a `template`. A
+   *  write's own value that did so is refused by `checkMarkup`, so a write that passed it lists
+   *  none; on an undo it says the undo writes back markup from before the run that the run itself
+   *  could not have sent (ux U-092). */
+  addsOutsideAllowlist: boolean;
+}
+
+/** Whether an item is one a write may add (`checkMarkup`): an allowlisted HTML element outside a
+ *  `template`, with no raw text and no attribute but an `a`'s `href`. */
+function withinAllowlist(item: MarkupItem): boolean {
+  return item.kind === 'element' && item.namespace === 'html' && ALLOWED_ELEMENTS.has(item.element) && item.text === null
+    && !item.inTemplate && item.attributes.every(([name]) => item.element === 'a' && name === 'href');
 }
 
 /** Whether an occurrence is worth naming. Left out is only a bare allowlisted element — on
@@ -873,7 +889,8 @@ function toItem(o: Occurrence): MarkupItem {
 export function markupChangesOf(field: string, before: string | null, after: string): FieldMarkupChange {
   const b = markupOf(parseHtmlFragment(before ?? '')).occurrences.filter(named);
   const a = markupOf(parseHtmlFragment(after)).occurrences.filter(named);
-  return { field, added: multisetMinus(a, b).map(toItem), removed: multisetMinus(b, a).map(toItem) };
+  const added = multisetMinus(a, b).map(toItem);
+  return { field, added, removed: multisetMinus(b, a).map(toItem), addsOutsideAllowlist: added.some((i) => !withinAllowlist(i)) };
 }
 
 function multisetMinus(xs: Occurrence[], ys: Occurrence[]): Occurrence[] {
