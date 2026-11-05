@@ -142,6 +142,8 @@ describe('mandateCredentialInput', () => {
     'Ich habe den API-Key, aber ich gebe ihn lieber dem Inhaber.',
     'Der Token liegt beim Inhaber unter SHOPIFY_ADMIN_API_TOKEN.',
     'Nimm den Key secret:STRIPE_SECRET_KEY aus dem Vault.',
+    'Der Token liegt im Vault als SHOPIFY_ADMIN_TOKEN_2026.',
+    'Nimm den Key BEXIO_API_TOKEN_V2_PROD dafür',
     'Key-Account: Müller AG, Ansprechpartnerin Frau Keller',
     'Der Token-Status ist abgelaufen, seit dem 03.11.2026.',
     'Passwort vergessen? Der Link: https://shop.example.org/account/reset?id=8823',
