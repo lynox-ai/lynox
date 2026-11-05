@@ -28,8 +28,13 @@ export const TOOL_CALL_IMITATION_REPEATS = 3;
 export const MAX_UNIT_CHARS = 2000;
 
 /** Most characters between the end of one copy and the start of the next for both to count
- *  as one run of copies. */
+ *  as one run of copies: for markup units, and for JSON whose own name, tool or function
+ *  field names a sent tool. */
 export const MAX_COPY_GAP = MAX_UNIT_CHARS;
+
+/** The same, for the other units: a tool's name before brackets, and JSON that is a call by
+ *  its keys or by the call it wraps. */
+export const MAX_NEAR_COPY_GAP = 300;
 
 /** String values that hold a slot rather than a value (compared trimmed, case-insensitive);
  *  `<…>` in angle brackets counts too. */
@@ -54,7 +59,7 @@ const DEFINITION_BEFORE = /(?:^|[^A-Za-z0-9_$])(?:async\s+)?(?:def|function|fn|f
 const MEMBER_BEFORE = /([A-Za-z0-9_$]*)\s*\.\s*$/;
 /** Receivers that hold the tools themselves in the call formats models write
  *  (`functions.bash`, `default_api.read_file`): a call through them is a tool call. */
-export const TOOL_NAMESPACES: ReadonlySet<string> = new Set(['functions', 'default_api', 'tools', 'tool']);
+export const TOOL_NAMESPACES: ReadonlySet<string> = new Set(['functions', 'default_api']);
 
 /** How many levels into a JSON object's values (objects and arrays) a call is looked for. */
 const JSON_DEPTH = 2;
@@ -103,7 +108,7 @@ const MARKUP: ReadonlyArray<{ open: RegExp; close: (opener: string) => string }>
 const MARKUP_START = String.raw`<tool_call>|<\|tool_calls?(?:_section)?_begin\|>|<function=[^>\n]{1,200}>|<invoke\s+name="[^"\n]{1,200}"\s*>|\[TOOL_CALLS\]|<\|python_tag\|>`;
 
 type Resolved =
-  | { kind: 'unit'; end: number; toolName: string | undefined }
+  | { kind: 'unit'; end: number; toolName: string | undefined; gap: number }
   | { kind: 'none' }
   | { kind: 'pending' };
 
@@ -173,7 +178,7 @@ export class ToolCallImitationDetector {
       re.lastIndex = r.end;
       const signature = this.buf.slice(at, r.end).replace(/\s+/g, ' ').trim();
       const prev = this.runs.get(signature);
-      const count = prev !== undefined && this.base + at - prev.end <= MAX_COPY_GAP ? prev.count + 1 : 1;
+      const count = prev !== undefined && this.base + at - prev.end <= r.gap ? prev.count + 1 : 1;
       this.runs.set(signature, { count, end: this.base + r.end });
       if (count >= TOOL_CALL_IMITATION_REPEATS && !this.toolUseSeen) {
         return { toolName: r.toolName, signature, count };
@@ -216,7 +221,7 @@ export class ToolCallImitationDetector {
       const limit = at + MAX_UNIT_CHARS;
       if (idx >= 0 && idx + close.length <= limit) {
         const end = close === '\n' ? idx : idx + close.length;
-        return { kind: 'unit', end, toolName: this.markupTool(matched, from, idx) };
+        return { kind: 'unit', end, toolName: this.markupTool(matched, from, idx), gap: MAX_COPY_GAP };
       }
       return this.buf.length < limit ? { kind: 'pending' } : { kind: 'none' };
     }
@@ -235,7 +240,7 @@ export class ToolCallImitationDetector {
     if (end === null) return { kind: 'none' };
     // A call carries something between its brackets.
     if (this.buf.slice(open + 1, end - 1).trim().length === 0) return { kind: 'none' };
-    return { kind: 'unit', end, toolName: name };
+    return { kind: 'unit', end, toolName: name, gap: MAX_NEAR_COPY_GAP };
   }
 
   private resolveJson(at: number): Resolved {
@@ -249,8 +254,10 @@ export class ToolCallImitationDetector {
     this.jsonSpanEnd = this.base + end;
     // The object itself, or a call it wraps (`{"tool_calls": [{…}]}`): then the whole object
     // is the unit.
+    const named = this.namedTool(parsed as Record<string, unknown>);
     const tool = this.objectTool(parsed as Record<string, unknown>) ?? this.wrappedTool(parsed, JSON_DEPTH);
-    return tool !== undefined ? { kind: 'unit', end, toolName: tool } : { kind: 'none' };
+    if (tool === undefined) return { kind: 'none' };
+    return { kind: 'unit', end, toolName: tool, gap: named !== undefined ? MAX_COPY_GAP : MAX_NEAR_COPY_GAP };
   }
 
   /** A call inside `value`'s objects and arrays, at most `depth` levels down. */

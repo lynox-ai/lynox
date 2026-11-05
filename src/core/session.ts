@@ -1330,13 +1330,15 @@ export class Session {
       });
 
       // In-run helper calls (the follow-up-chip recovery) spend on the pool key without
-      // producing tokens in `this.usage`, so the deltas above cannot see them.
+      // producing tokens in `this.usage`, so the deltas above cannot see them. Aborted helper
+      // calls and a main-model call the stream guard stopped add an estimate here too (and an
+      // upper bound to the cost caps); those two reach no tenant debit at all.
       //
       // ⚠ This is a DISPLAY term and must never reach `onAfterRun`. `costUsd` above is the
-      // value the managed hook DEBITS, and the helper already debited itself through its own
-      // `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`) under a fresh
-      // run id. `managed-hook.ts` dedups per run id, so adding the same dollars to `costUsd`
-      // bills the tenant twice — which a first version of this did, on the belief that the
+      // value the managed hook DEBITS, and a helper call that finished already debited itself
+      // through its own `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`)
+      // under a fresh run id. `managed-hook.ts` dedups per run id, so adding the same dollars
+      // to `costUsd` bills the tenant twice — which a first version of this did, on the belief that the
       // CP figure was the one missing them. It was the other way round: the CP was right and
       // the numbers the CUSTOMER reads were short.
       //

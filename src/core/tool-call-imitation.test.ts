@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   MAX_COPY_GAP,
+  MAX_NEAR_COPY_GAP,
   MAX_UNIT_CHARS,
   TOOL_CALL_IMITATION_REPEATS,
   ToolCallImitationDetector,
@@ -131,7 +132,7 @@ describe('ToolCallImitationDetector', () => {
     expect(feed(text, 5).hit).not.toBeNull();
   });
 
-  it('reads a long ordinary answer without stopping it, with work that grows linearly with its length', () => {
+  it('reads a long ordinary answer without stopping it, and the characters scanned grow linearly with its length', () => {
     const para = 'The quarterly report shows revenue of 1.2M, up 4% on the year (see table 3). '
       + 'Costs {fixed and variable} were flat; the http_request budget line is unchanged. '
       + 'Example config: {"region": "eu", "tier": "pro"}. Next steps follow below.\n';
@@ -162,6 +163,7 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     { name: 'save_workflow', input_schema: { properties: { description: {}, name: {}, workflow_id: {} } } },
     { name: 'task_create', input_schema: { properties: { assignee: {}, description: {}, due_date: {}, priority: {}, title: {}, tags: {} } } },
     { name: 'http_request', input_schema: { properties: { body: {}, headers: {}, method: {}, timeout_ms: {}, url: {} } } },
+    { name: 'web_search', input_schema: { properties: { query: {}, limit: {} } } },
   ]);
   const run = (text: string, step = 5): ImitationHit | null => feed(text, step, new ToolCallImitationDetector(SCHEMAS)).hit;
 
@@ -235,14 +237,17 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
   it('reads code that calls a method of that name on another object to the end', () => {
     expect(run('client.read_file(path)\nclient.read_file(path)\nclient.read_file(path)\n')).toBeNull();
     expect(run('fs . read_file(path)\nfs . read_file(path)\nfs . read_file(path)\n', 1)).toBeNull();
+    for (const line of ['data = self.tools.read_file("config.json")', 'result = tool.bash(command="ls")']) {
+      const code = [line, line, line].join('\n') + '\n';
+      expect(run(code)).toBeNull();
+      expect(run(code, 1)).toBeNull();
+    }
   });
 
   describe.each([
     ['default_api.', 'print(default_api.read_file(path="a.txt"))', 'read_file'],
     ['to=functions.', 'to=functions.bash {"command":"ls"}', 'bash'],
     ['functions.', 'functions.read_file(path="a.txt")', 'read_file'],
-    ['tools.', 'tools.http_request(url="https://a.ch", method="GET")', 'http_request'],
-    ['tool.', 'tool.bash(command="ls")', 'bash'],
   ])('a call through the tool namespace %s', (_ns, unit, tool) => {
     it('stops on the third copy', () => {
       expect(run([unit, unit, unit].join('\n') + '\n')?.toolName).toBe(tool);
@@ -264,20 +269,59 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
   it('stops a call that comes back after a long made-up result each time', () => {
     const copy = `<tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}</tool_call>\n<tool_response>\n${'lorem ipsum '.repeat(35)}\n</tool_response>`;
     expect(run(Array.from({ length: 6 }, () => copy).join('\n'))?.toolName).toBe('read_file');
+    expect(run(Array.from({ length: 6 }, () => copy).join('\n'), 1)?.toolName).toBe('read_file');
   });
 
   it('stops two long calls that alternate', () => {
     const a = `<tool_call>{"name":"write_file","arguments":{"path":"a","content":"${'x'.repeat(500)}"}}</tool_call>`;
     const b = `<tool_call>{"name":"write_file","arguments":{"path":"b","content":"${'x'.repeat(500)}"}}</tool_call>`;
     expect(run(Array.from({ length: 5 }, () => `${a}\n${b}`).join('\n'))?.toolName).toBe('write_file');
+    expect(run(Array.from({ length: 5 }, () => `${a}\n${b}`).join('\n'), 1)?.toolName).toBe('write_file');
   });
 
   it('counts copies that follow each other closely as one run', () => {
-    const gap = '~'.repeat(MAX_COPY_GAP + 1);
+    const gap = '~'.repeat(MAX_NEAR_COPY_GAP + 1);
     const call = 'bash("ls")';
     expect(run(`${call}\n${call}\n${gap}${call}\n${call}\n`)).toBeNull();
     expect(run(`${call}\n${call}\n${gap}${call}\n${call}\n${call}\n`)?.count).toBe(3);
-    expect(run(`${call}${'~'.repeat(MAX_COPY_GAP)}${call}${'~'.repeat(MAX_COPY_GAP)}${call}\n`)?.count).toBe(3);
+    expect(run(`${call}${'~'.repeat(MAX_NEAR_COPY_GAP)}${call}${'~'.repeat(MAX_NEAR_COPY_GAP)}${call}\n`)?.count).toBe(3);
+    const keys = '{"command": "ls", "timeout_ms": 500}';
+    expect(run(`${keys}${'~'.repeat(MAX_NEAR_COPY_GAP)}${keys}${'~'.repeat(MAX_NEAR_COPY_GAP)}${keys}\n`)?.toolName).toBe('bash');
+    expect(run(`${keys}${gap}${keys}${gap}${keys}\n`)).toBeNull();
+    // A short note between the copies keeps them one run; a paragraph does not.
+    const note = (n: number): string => `\n${'Running it again to be sure. '.repeat(20).slice(0, n)}\n`;
+    expect(run(`${call}${note(250)}${call}${note(250)}${call}\n`)?.toolName).toBe('bash');
+    expect(run(`${call}${note(400)}${call}${note(400)}${call}\n`)).toBeNull();
+  });
+
+  describe.each([
+    ['a call in markup', '<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>'],
+    ['a call object that names the tool', '{"name": "bash", "arguments": {"command": "ls"}}'],
+  ])('%s', (_label, unit) => {
+    it('counts copies with a long stretch of text between them as one run', () => {
+      const near = '~'.repeat(MAX_COPY_GAP);
+      const far = '~'.repeat(MAX_COPY_GAP + 1);
+      expect(run(`${unit}${near}${unit}${near}${unit}\n`)?.toolName).toBe('bash');
+      expect(run(`${unit}${near}${unit}${near}${unit}\n`, 1)?.toolName).toBe('bash');
+      expect(run(`${unit}${far}${unit}${far}${unit}\n`)).toBeNull();
+    });
+  });
+
+  describe('an answer that shows the same request more than once', () => {
+    const prose = (n: number): string => 'The request body below is the same in every language; only the client changes. '.repeat(Math.ceil(n / 80)).slice(0, n);
+    const body = '{"url": "https://api.acme.ch/v1/orders", "method": "POST"}';
+    const config = '{"server": {"url": "https://a.ch", "method": "GET", "timeout_ms": 5000}, "retries": 3}';
+    const search = '{"query": "lynox pricing", "limit": 5}';
+    it.each([
+      ...[600, 1200, 1900].map((g): [string, string] => [`in curl, Python and JavaScript, ${g} characters apart`,
+        `curl -X POST -d '${body}'\n${prose(g)}\nrequests.post(json=${body})\n${prose(g)}\nfetch(u, {body: JSON.stringify(${body})})\n`]),
+      ['as a nested configuration, three times', [config, config, config].join(`\n${prose(1200)}\n`)],
+      ['as a shell command between explanations', ['bash("ls")', 'bash("ls")', 'bash("ls")'].join(`\n${prose(800)}\n`)],
+      ['as the same search, three times', [search, search, search].join(`\n${prose(1500)}\n`)],
+    ])('%s is read to the end', (_label, text) => {
+      expect(run(text)).toBeNull();
+      expect(run(text, 1)).toBeNull();
+    });
   });
 
   describe.each([
