@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { requestLogUrl } from './request-log-url.js';
+import { MAX_LOGGED_PATH, requestLogUrl } from './request-log-url.js';
 
 describe('requestLogUrl', () => {
   it('keeps the path and the parameter names and replaces every value', () => {
@@ -44,6 +44,31 @@ describe('requestLogUrl', () => {
 
   it('replaces values behind a semicolon as part of the value', () => {
     expect(requestLogUrl('/a?a=1;t=s3cret')).toBe('/a?a=<redacted>');
+  });
+
+  it('writes a path past the bound as a placeholder, without decoding it', () => {
+    const long = `/${'%E0'.repeat(Math.ceil(MAX_LOGGED_PATH / 3) + 1)}`;
+    const started = performance.now();
+    expect(requestLogUrl(`${long}?a=1`)).toBe('<long path>?a=<redacted>');
+    expect(performance.now() - started).toBeLessThan(60);
+  });
+
+  it('does not throw on broken escapes', () => {
+    for (const p of ['/%', '/%E0%A4', '/%zz', '/%ED%A0%80', '/%C0%80']) expect(() => requestLogUrl(p)).not.toThrow();
+  });
+
+  it('escapes decoded whitespace, so the path cannot pose as the other fields', () => {
+    const line = requestLogUrl('/x%20404%201ms%0AGET%20/fake');
+    expect(line).not.toMatch(/[\s\u00a0\u3000]/u);
+    expect(requestLogUrl('/x%C2%A0y')).not.toContain('\u00a0');
+  });
+
+  it('takes the route token out of an encoded webhook segment too', () => {
+    expect(requestLogUrl('/api/webhook%73/tok3n')).not.toContain('tok3n');
+  });
+
+  it('writes an empty path as a slash', () => {
+    expect(requestLogUrl('HTTP://u:p@h')).toBe('/');
   });
 
   it('drops the fragment, and leaves a URL without a query as it is', () => {
