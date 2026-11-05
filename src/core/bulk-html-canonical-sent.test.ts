@@ -296,6 +296,7 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
   describe('the domain of a refused link (1010)', () => {
     const linked = (href: string): Record<string, unknown> => ({ ...before, short_description: `<p>neu <a href="${href}">x</a></p>` });
     const shownOf = (r: { id: string; seq: number }) => ledger.getPreview(r.id).find((p) => p.seq === r.seq)!;
+    const aws = (t: string): string | null => (/AKIA[A-Z0-9]{16}/.test(t) ? 'aws' : null);
 
     it('names the domain the judge\'s link points to', async () => {
       const shown = shownOf(await judge(linked('https://evil.example/x')));
@@ -306,9 +307,34 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
       expect(shownOf(await judge(linked('https://xn--pple-43d.example/'))).linkDomain).toBe('xn--pple-43d.example');
     });
 
-    it('names a domain written in Unicode in Punycode, never as the lookalike it spells', async () => {
-      // The host is read as `new URL` reads it: a Cyrillic а before „pple“.
-      expect(shownOf(await judge(linked('https://аpple.example/'))).linkDomain).toBe('xn--pple-43d.example');
+    it('keeps no domain the value spells only in Unicode or percent-encoded: its decoded form was never scanned as written', async () => {
+      // A Cyrillic а before „pple“: `new URL` reads it as xn--pple-43d.example, which the value does not spell.
+      expect(shownOf(await judge(linked('https://\u0430pple.example/'))).linkDomain).toBeUndefined();
+    });
+
+    it('keeps no domain the value spells only percent-encoded', async () => {
+      const shown = shownOf(await judge(linked('https://ev%69l.example/x')));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('names a domain the value spells in another case, as the check read it (twin)', async () => {
+      expect(shownOf(await judge(linked('https://Evil.Example/x'), { scanSecret: aws })).linkDomain).toBe('evil.example');
+    });
+
+    it('keeps no domain whose spelling holds a credential that lower case would hide', async () => {
+      // An AWS key is upper case; the host as `new URL` reads it is not, and passes the same scanner.
+      expect(aws('akiaiosfodnn7example.evil.example')).toBeNull();
+      // Built at run time, so no key-shaped literal sits in the source.
+      const key = `AKIA${'IOSFODNN7EXAMPLE'}`;
+      const shown = shownOf(await judge(linked(`https://${key}.evil.example/`), { scanSecret: aws }));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('keeps no domain whose spelling holds a vault value that lower case would hide', async () => {
+      const vault = (t: string): string => t.replaceAll('MyToken42', '***');
+      expect(vault('mytoken42.evil.example')).toBe('mytoken42.evil.example');
+      const shown = shownOf(await judge(linked('https://MyToken42.evil.example/'), { maskVault: vault }));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
     });
 
     it('keeps a long host whole, past the 200 characters a refusal\'s detail is cut at', async () => {
@@ -335,6 +361,14 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
       expect(shownOf({ id, seq })).toMatchObject({ error: 'url_scheme' });
       expect(shownOf({ id, seq }).linkDomain).toBeUndefined();
       // Not stored either: the column stays empty.
+      const cell = engineDb.getDb().prepare('SELECT link_domain FROM bulk_targets WHERE run_id = ? AND seq = ?').get(id, seq) as { link_domain: string | null };
+      expect(cell.link_domain).toBeNull();
+    });
+
+    it('stores a domain from a read only with new_link_domain, whatever a caller hands in', () => {
+      const { id, seq } = listed({ short_description: '<p>neu</p>' });
+      expect(ledger.recordRead(id, seq, { invalid: 'url_scheme', linkDomain: 'evil.example' })).toBe(true);
+      expect(shownOf({ id, seq })).toMatchObject({ error: 'url_scheme' });
       const cell = engineDb.getDb().prepare('SELECT link_domain FROM bulk_targets WHERE run_id = ? AND seq = ?').get(id, seq) as { link_domain: string | null };
       expect(cell.link_domain).toBeNull();
     });

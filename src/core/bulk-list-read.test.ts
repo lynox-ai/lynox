@@ -535,6 +535,14 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
     expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', 'evil.example'], ['new_link_domain', 'evil.example']]);
   });
 
+  it('keeps no domain a plan spells percent-encoded, which decodes to a credential\'s shape (1010)', async () => {
+    // The run's plan-time scan reads the text, where `%2D` breaks the shape; the link check
+    // decodes the host to `sk-ant-api03-…`, which the scanner names.
+    const href = 'https://sk%2Dant%2Dapi03%2Dabcdefghijklmnopqrstuvwxyz0123456789ABCD.evil.example/';
+    const id = await previewed({ description: `<p>New <a href="${href}">deal</a></p>` });
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', undefined], ['new_link_domain', undefined]]);
+  });
+
   it('keeps no domain with another markup refusal (twin)', async () => {
     const id = await previewed({ description: '<p>New</p><img src="https://evil.example/a.png">' });
     expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_img', undefined], ['new_img', undefined]]);

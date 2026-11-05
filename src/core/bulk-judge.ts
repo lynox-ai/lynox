@@ -529,6 +529,30 @@ export function verdictTextRefusal(
 export interface VerdictTextRefusal {
   reason: BulkInvalidReason;
   linkDomain?: string | undefined;
+  /** Every place the field's value spells that domain, in its own case. Empty where it spells it
+   *  only percent-encoded or in Unicode: `new URL` decoded it, and what it decoded to was never
+   *  scanned as written. */
+  linkDomainWritten?: string[] | undefined;
+}
+
+/**
+ * The domain of a refused link as the owner may be shown it (1010), or undefined. The check reads
+ * the host as `new URL` does: lower case, percent-escapes decoded, Unicode in Punycode. A credential
+ * spelled in a host can lose its shape that way (`AKIA…` in upper case) or gain it (`sk%2Dant…`),
+ * so the domain is shown only where the value spells it as it is, and only if no spelling of it
+ * and not the domain itself holds a vault value or a credential's shape.
+ */
+export function shownLinkDomain(refusal: VerdictTextRefusal, holdsSecret: (text: string) => boolean): string | undefined {
+  const domain = refusal.linkDomain;
+  const written = refusal.linkDomainWritten ?? [];
+  if (domain === undefined || written.length === 0) return undefined;
+  return [domain, ...written].some(holdsSecret) ? undefined : domain;
+}
+
+/** Each place `text` spells `domain`, ignoring case, as written. */
+function spellingsOf(text: string, domain: string): string[] {
+  const escaped = domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [...text.matchAll(new RegExp(escaped, 'gi'))].map((m) => m[0]);
 }
 
 /** {@link verdictTextRefusal} with the domain of a refused link. */
@@ -552,7 +576,11 @@ export function verdictTextRefusalOf(
       if (run.storeHost === null) return { reason: 'not_canonical' };
       const checked = checkMarkup({ before: was, after: value, storeHost: run.storeHost, startDomains: run.startDomains });
       if (!checked.ok && checked.reason === 'shortcode_changed') shortcode = { reason: checked.reason };
-      else if (!checked.ok) return checked.reason === 'new_link_domain' ? { reason: checked.reason, linkDomain: checked.detail } : { reason: checked.reason };
+      else if (!checked.ok) {
+        return checked.reason === 'new_link_domain'
+          ? { reason: checked.reason, linkDomain: checked.detail, linkDomainWritten: spellingsOf(value, checked.detail) }
+          : { reason: checked.reason };
+      }
       continue;
     }
     if ((run.listForm !== null || run.storeHost !== null) && !plainTextMarkupOf(was, value).ok) return { reason: 'markup_in_text' };
@@ -752,10 +780,8 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       if (refusal !== null) {
         const textRefused = refusal.reason;
         if (textRefused !== 'shortcode_changed') {
-          // The domain of a refused link is shown to the owner (1010), so it is kept only where it
-          // holds no vault value and nothing shaped like a credential: the judge wrote it.
-          const domain = refusal.linkDomain;
-          const shown = domain !== undefined && deps.maskVault(domain) === domain && deps.scanSecret(domain) === null ? domain : undefined;
+          // The domain of a refused link is shown to the owner (1010); the judge wrote it.
+          const shown = shownLinkDomain(refusal, (t) => deps.maskVault(t) !== t || deps.scanSecret(t) !== null);
           record({ invalid: textRefused, linkDomain: shown });
           return;
         }

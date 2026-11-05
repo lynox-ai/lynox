@@ -504,6 +504,10 @@ describe('markupChangesOf', () => {
     expect(outside('<p>a</p>', '<p>a</p><div>b</div>')).toBe(true);
     expect(outside('<p>a</p><svg></svg>', '<p>a</p><svg><a href="/x">b</a></svg>')).toBe(true);
     expect(outside('<p>a</p>', '<p href="/x">a</p>')).toBe(true);
+    // A link whose href the link check refuses: a script scheme, a mail link with a second recipient.
+    expect(outside('<p>a</p>', '<p>a <a href="javascript:steal()">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example?bcc=x@evil.example">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example">b</a></p>')).toBe(false);
     // A comment fails on its kind, its namespace and its name at once, and raw text lies only in
     // elements off the list: those two conditions hold no case of their own.
     // Only what is added counts: a removed image does not.

@@ -31,7 +31,7 @@ import {
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
-import { verdictTextRefusalOf } from './bulk-judge.js';
+import { shownLinkDomain, verdictTextRefusalOf } from './bulk-judge.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { shopifyBulkReadEnabled, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { productTitleOf } from './shopify-saved-form.js';
@@ -52,12 +52,14 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
  */
 function planMarkupRefusal(
   after: unknown, before: unknown, list: BulkListRun | null, host: string, startDomains: readonly string[],
+  holdsSecret: (text: string) => boolean,
 ): { invalid: BulkInvalidReason; linkDomain?: string | undefined } | null {
   if (!isRecord(after)) return null;
-  // With `new_link_domain` the refused link's domain goes with the reason (1010). The planned
-  // after-state was scanned for credentials when the run was planned (`secret_in_after`).
+  // With `new_link_domain` the refused link's domain goes with the reason (1010). The run was
+  // scanned for credentials as planned, as text; the domain is checked again as the link check
+  // read it, which decodes percent-escapes and folds case (`shownLinkDomain`).
   const refusal = verdictTextRefusalOf(after, isRecord(before) ? before : {}, { listForm: list?.source.form ?? null, storeHost: host, startDomains });
-  return refusal === null ? null : { invalid: refusal.reason, linkDomain: refusal.linkDomain };
+  return refusal === null ? null : { invalid: refusal.reason, linkDomain: shownLinkDomain(refusal, holdsSecret) };
 }
 
 export interface BulkPreviewOutcome {
@@ -156,6 +158,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? defaultSleep;
   const budget = deps.budget ?? BULK_HOST_BUDGET;
+  // Imported here as the other callers do: `http.ts` reaches back into core at load.
+  const { detectSecretInContent } = await import('../tools/builtin/http.js');
+  const holdsSecret = (text: string): boolean => detectSecretInContent(text) !== null;
   const run = ledger.getRunForPreview(runId);
   if (!run) return { status: 'refused', summary: 'No bulk run with this id.' };
   const host = externalHostOf(run.targetSystem);
@@ -262,7 +267,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       } else {
         // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
         const after = shopifyPairedAfter(target.after, image.value);
-        const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId));
+        const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId), holdsSecret);
         if (markup !== null) ledger.recordRead(runId, seq, markup);
         else ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after,
           shopifyForm === 'shopify_media_alt' ? undefined : productTitleOf(image.value), contextOf(read.value));
@@ -279,7 +284,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         consecutive = 0;
         continue;
       }
-      const markup = planMarkupRefusal(target.after, read.value, list, host, ledger.startDomainsOf(runId));
+      const markup = planMarkupRefusal(target.after, read.value, list, host, ledger.startDomainsOf(runId), holdsSecret);
       if (markup !== null) ledger.recordRead(runId, seq, markup);
       else ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried(), undefined, undefined, contextOf(read.value));
       consecutive = 0;

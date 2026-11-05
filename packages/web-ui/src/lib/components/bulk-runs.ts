@@ -522,12 +522,15 @@ export interface BulkFieldMarkupChange {
 
 /** An element or comment as code text, every attribute with its whole value (sec-core M3: a
  *  rewrite must not hide what a link points to). Never markup: the page sets it as text. Hidden
- *  characters show as their marks (`bulkVisibleText`). */
+ *  characters show as their marks (`bulkVisibleText`). A `"` in a value shows as `&quot;`, so a
+ *  value cannot close its quote and seem to set a second attribute; an element outside HTML
+ *  carries its namespace (`svg:a`), so an SVG link does not read as an HTML one. */
 export function bulkMarkupItemText(item: BulkMarkupItem): string {
 	if (item.kind === 'comment') return bulkVisibleText(`<!--${item.text ?? ''}-->`);
-	const attrs = item.attributes.map(([name, value]) => ` ${name}="${value}"`).join('');
-	const open = `<${item.element}${attrs}>`;
-	return bulkVisibleText(item.text === null ? open : `${open}${item.text}</${item.element}>`);
+	const attrs = item.attributes.map(([name, value]) => ` ${name}="${value.replaceAll('"', '&quot;')}"`).join('');
+	const name = item.namespace === 'html' ? item.element : `${item.namespace}:${item.element}`;
+	const open = `<${name}${attrs}>`;
+	return bulkVisibleText(item.text === null ? open : `${open}${item.text}</${name}>`);
 }
 
 /** One line of a target's markup list. */

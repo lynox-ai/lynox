@@ -1159,6 +1159,12 @@ describe('the markup list of a target (1010)', () => {
 		expect(bulkMarkupItemText(image)).toBe('<img src="/a.jpg" alt="Rot">');
 		expect(bulkMarkupItemText(script)).toBe('<script>steal()</script>');
 		expect(bulkMarkupItemText(comment)).toBe('<!-- c -->');
+		// A quote in a value cannot close it and seem to set a second attribute.
+		expect(bulkMarkupItemText({ ...link, attributes: [['title', '" href="https://shop.example/'], ['href', 'https://evil.example/']] }))
+			.toBe('<a title="&quot; href=&quot;https://shop.example/" href="https://evil.example/">');
+		// An element outside HTML carries its namespace: an SVG link does not read as an HTML one.
+		expect(bulkMarkupItemText({ ...link, namespace: 'svg' })).toBe('<svg:a href="https://partner.example/p?q=1&r=2">');
+		expect(bulkMarkupItemText({ ...script, namespace: 'svg' })).toBe('<svg:script>steal()</svg:script>');
 		// A hidden character in a value shows as its mark, never as nothing.
 		expect(bulkMarkupItemText({ ...link, attributes: [['href', 'https://a.example/​']] })).toBe(`<a href="https://a.example/${bulkVisibleText('​')}">`);
 	});

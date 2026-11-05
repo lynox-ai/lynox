@@ -857,18 +857,26 @@ export interface FieldMarkupChange {
   added: MarkupItem[];
   removed: MarkupItem[];
   /** Whether an added item lies outside what a write may add: an element off the allowlist, an
-   *  attribute other than an `a`'s `href`, raw text, a comment, anything inside a `template`. A
-   *  write's own value that did so is refused by `checkMarkup`, so a write that passed it lists
-   *  none; on an undo it says the undo writes back markup from before the run that the run itself
-   *  could not have sent (ux U-092). */
+   *  attribute other than an `a`'s `href`, an `href` whose scheme or characters the link check
+   *  refuses (`javascript:`, a control character), raw text, a comment, anything inside a
+   *  `template`. On an undo it says the undo writes back markup from before the run that the run
+   *  itself could not have sent (ux U-092).
+   *  It errs towards saying so: what `checkMarkup` lets a write keep because the before-image
+   *  already held it (content of a `template` it had, an attribute it had copied to another
+   *  element) counts as outside here. It does not judge a link's domain, which depends on what
+   *  the product pointed to before: a link to a domain new to the product counts as within. */
   addsOutsideAllowlist: boolean;
 }
 
+/** A base for resolving a relative `href`: the scheme and character checks do not read the host. */
+const ANY_STORE_HOST = 'store.invalid';
+
 /** Whether an item is one a write may add (`checkMarkup`): an allowlisted HTML element outside a
- *  `template`, with no raw text and no attribute but an `a`'s `href`. */
+ *  `template`, with no raw text and no attribute but an `a`'s `href`, one the link check reads. */
 function withinAllowlist(item: MarkupItem): boolean {
   return item.kind === 'element' && item.namespace === 'html' && ALLOWED_ELEMENTS.has(item.element) && item.text === null
-    && !item.inTemplate && item.attributes.every(([name]) => item.element === 'a' && name === 'href');
+    && !item.inTemplate
+    && item.attributes.every(([name, value]) => item.element === 'a' && name === 'href' && linkTarget(value, ANY_STORE_HOST).ok);
 }
 
 /** Whether an occurrence is worth naming. Left out is only a bare allowlisted element — on
