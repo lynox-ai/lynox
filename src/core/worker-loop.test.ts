@@ -4124,6 +4124,35 @@ describe('the worker holds how its run was started for the run (1184)', () => {
     expect(seen).toEqual(['hand']);
   });
 
+  it('a due trigger that picks up an answered question runs as answered, not as its schedule', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    const promptStore = { getAnsweredForTrigger: vi.fn(() => ({ id: 'prompt-1', session_id: 'thread-parked', question: 'Send the report?', answer: 'Yes.', hand_run: 0 })), releaseTrigger: vi.fn() } as unknown as PromptStore;
+    await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask()]), session, promptStore }), makeNotificationRouter(false), 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toEqual(['answered']);
+  });
+
+  it('a question store that cannot be read throws nothing out of the frame: the run ends as before, without reaching its session', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    const read = vi.fn(() => { throw new Error('engine.db busy'); });
+    const promptStore = { getAnsweredForTrigger: read, releaseTrigger: vi.fn() } as unknown as PromptStore;
+    const rejections: unknown[] = [];
+    const onRejection = (r: unknown): void => { rejections.push(r); };
+    process.on('unhandledRejection', onRejection);
+    try {
+      await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask()]), session, promptStore }), makeNotificationRouter(false), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+    expect(read, 'positive control: the store was asked').toHaveBeenCalled();
+    expect(rejections).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+
   it('outside a worker run there is none', () => {
     expect(currentWorkerRunStart()).toBeUndefined();
   });

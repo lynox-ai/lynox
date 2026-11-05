@@ -1016,26 +1016,29 @@ export interface WorkflowRunTrail {
 
 /**
  * Where the owner's start of a mandate's workflow came from: the library's Run, the owner's chat or
- * session, or a run of the owner's own worker (`worker-run-start.ts`) — by its schedule, by "Run
- * now", or by an event.
+ * session, or a run of the owner's own worker (`worker-run-start.ts`) — by "Run now", by its
+ * schedule, or in a way the record does not name (an event, a pickup after an answered question).
  */
-export type OwnerStart = 'library' | 'owner-chat' | 'owner-schedule' | 'owner-event';
+export type OwnerStart = 'library' | 'owner-chat' | 'owner-run-now' | 'owner-schedule' | 'owner-unsaid';
 
-/** The `started=` word of each: the trail view knows `hand` and `schedule` (`startedBy`); an event's
- *  start has no word there, so the row says none rather than a wrong one. */
+/** The `started=` word of each: the trail view knows `hand` and `schedule` (`startedBy`). An event
+ *  has no word there, and a pickup after an answer does not know how the run that asked was
+ *  started, so their rows name no start. */
 const OWNER_START_WORD: Readonly<Record<OwnerStart, 'hand' | 'schedule' | undefined>> = {
   'library': 'hand',
   'owner-chat': 'hand',
+  'owner-run-now': 'hand',
   'owner-schedule': 'schedule',
-  'owner-event': undefined,
+  'owner-unsaid': undefined,
 };
 
 /** The owner's start of a `run_workflow` call, read from the worker run it runs in, if any. */
 export function ownerStartOfCall(): OwnerStart {
   const start = currentWorkerRunStart();
+  if (start === undefined) return 'owner-chat';
+  if (start === 'hand') return 'owner-run-now';
   if (start === 'schedule') return 'owner-schedule';
-  if (start === 'event') return 'owner-event';
-  return 'owner-chat';
+  return 'owner-unsaid';
 }
 
 /**

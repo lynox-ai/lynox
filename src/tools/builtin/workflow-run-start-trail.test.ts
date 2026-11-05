@@ -36,4 +36,8 @@ describe("the start row of the owner's run of a mandate's workflow says how it w
   it('a run of the worker started by an event: no start word, never hand', () => {
     expect(startRow('event')).toBe('one_shot=no by=owner');
   });
+
+  it('a run of the worker picked up after an answered question: no start word, neither hand nor schedule', () => {
+    expect(startRow('answered')).toBe('one_shot=no by=owner');
+  });
 });
