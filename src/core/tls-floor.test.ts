@@ -40,7 +40,11 @@ async function serverAt(version: 'TLSv1.1' | 'TLSv1.2'): Promise<number> {
   return (server.address() as AddressInfo).port;
 }
 
-/** Connect with no `minVersion` of our own, so the process default decides. */
+/** The error a client gets when its floor is above what the server speaks (measured, Node 22). */
+const VERSION_REFUSED = 'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION';
+
+/** Connect with no `minVersion` of our own, so the process default decides. Resolves with the
+ *  negotiated protocol, or with the error code, so a refusal for another reason does not pass. */
 function connect(port: number): Promise<string> {
   return new Promise((ok) => {
     // The test certificate is trusted explicitly, so verification stays on.
@@ -49,7 +53,7 @@ function connect(port: number): Promise<string> {
       socket.destroy();
       ok(protocol);
     });
-    socket.on('error', () => ok('refused'));
+    socket.on('error', (e: NodeJS.ErrnoException) => ok(e.code ?? 'error without code'));
   });
 }
 
@@ -77,7 +81,7 @@ describe('pinTlsFloor', () => {
     expect(await connect(old)).toBe('TLSv1.1');
     pinTlsFloor();
     expect(tls.DEFAULT_MIN_VERSION).toBe(TLS_FLOOR);
-    expect(await connect(old)).toBe('refused');
+    expect(await connect(old)).toBe(VERSION_REFUSED);
     expect(await connect(current)).toBe('TLSv1.2');
   });
 
@@ -120,7 +124,7 @@ describe('Engine boot pins the floor', () => {
     const engine = new Engine({} as LynoxConfig);
     engines.push(engine);
     await engine.init();
-    expect(await connect(old)).toBe('refused');
+    expect(await connect(old)).toBe(VERSION_REFUSED);
     expect(await connect(current)).toBe('TLSv1.2');
   });
 });
@@ -129,20 +133,27 @@ describe('no code here lowers the floor on its own', () => {
   const root = fileURLToPath(new URL('../', import.meta.url)); // src/
   /** What would set a floor below TLS 1.2 for one connection or for the process. */
   const LOWERING = [
-    /minVersion\s*:\s*['"`]TLSv1(?:\.1)?['"`]/,
-    /\bsecureProtocol\s*:/,
+    /['"]?\bminVersion['"]?\s*[:=]\s*['"`]TLSv1(?:\.1)?['"`]/,
+    /['"]?\bsecureProtocol['"]?\s*[:=]/,
     /--tls-min-v1\.[01]\b/,
-    /DEFAULT_MIN_VERSION\s*=(?!=)/,
+    /DEFAULT_MIN_VERSION['"]?\]?\s*=(?!=)/,
+    /defineProperty\([^)]*DEFAULT_MIN_VERSION/,
   ];
   const sources = (dir: string): string[] => readdirSync(dir).flatMap((name) => {
     const path = join(dir, name);
     if (statSync(path).isDirectory()) return sources(path);
-    return /\.(ts|mts|mjs|js)$/.test(name) && !/\.test\.ts$/.test(name) ? [path] : [];
+    return /\.(ts|mts|cts|mjs|cjs|js)$/.test(name) && !/\.test\.ts$/.test(name) ? [path] : [];
   });
 
   it('positive control: each pattern finds what it is meant to find', () => {
-    const planted = [`minVersion: 'TLSv1'`, `secureProtocol: 'TLSv1_method'`, `node --tls-min-v1.0 x`, `tls.DEFAULT_MIN_VERSION = 'TLSv1'`];
-    planted.forEach((line, i) => expect(LOWERING[i]!.test(line)).toBe(true));
+    const planted: Array<[number, string]> = [
+      [0, `minVersion: 'TLSv1'`], [0, `'minVersion': "TLSv1.1"`], [0, `opts.minVersion = 'TLSv1'`],
+      [1, `secureProtocol: 'TLSv1_method'`], [1, `"secureProtocol": x`],
+      [2, `node --tls-min-v1.0 x`],
+      [3, `tls.DEFAULT_MIN_VERSION = 'TLSv1'`], [3, `tls['DEFAULT_MIN_VERSION'] = v`],
+      [4, `Object.defineProperty(tls, 'DEFAULT_MIN_VERSION', { value: 'TLSv1' })`],
+    ];
+    for (const [i, line] of planted) expect(LOWERING[i]!.test(line), line).toBe(true);
     expect(LOWERING.some((p) => p.test(`minVersion: 'TLSv1.2'`))).toBe(false);
   });
 
@@ -154,5 +165,16 @@ describe('no code here lowers the floor on its own', () => {
       .filter(({ line }) => LOWERING.some((p) => p.test(line))))
       .filter(({ at }) => !at.startsWith('core/tls-floor.ts:'));
     expect(hits).toEqual([]);
+  });
+
+  // Not a boot: the CLI entry runs commands (the installer checks a key over TLS) before any
+  // engine exists, and running it here would run a command. So this reads where the call sits.
+  it('the CLI entry pins the floor as its first statement', () => {
+    const index = readFileSync(join(root, 'index.ts'), 'utf8');
+    const body = /async function runCLI\(\): Promise<void> \{([\s\S]*?)\n\}/.exec(index)?.[1] ?? '';
+    // Positive control: the body was found (it parses the arguments).
+    expect(body).toContain('argv.slice(2)');
+    const statements = body.split('\n').map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('//'));
+    expect(statements[0]).toBe('pinTlsFloor();');
   });
 });

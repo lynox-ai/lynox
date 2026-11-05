@@ -146,6 +146,7 @@ const pkg = require('../package.json') as { version: string };
 import { getErrorMessage } from './core/utils.js';
 import { normalizeAllowedOrigins } from './server/cross-site-write.js';
 import { installSignalShutdown } from './server/signal-shutdown.js';
+import { pinTlsFloor } from './core/tls-floor.js';
 
 /**
  * Resolve the default ORIGIN env var for `--http-api` boot.
@@ -171,6 +172,9 @@ export function resolveDefaultOrigin(opts: {
 }
 
 async function runCLI(): Promise<void> {
+  // First, before any command can open a connection (the installer checks a key over TLS
+  // before an engine exists): no launch flag may lower the TLS floor (core/tls-floor.ts).
+  pinTlsFloor();
   const args = argv.slice(2);
 
   // Load vault key from ~/.lynox/.env before anything else
