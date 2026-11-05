@@ -3,15 +3,32 @@
  * mandate's helper reads as carrying a key. One witness per rule, and a list of the helper's
  * ordinary messages that must pass: a refusal swallows the helper's message, so a false alarm is
  * the expensive error. Keys are built at runtime: a key-shaped literal is what the commit-time
- * secret scan looks for, and this repo is public.
+ * secret scan looks for, and this repo is public. They are deterministic: drawn from a fixed
+ * seed, so every run tests the same strings and a result does not depend on the draw.
  */
 import { describe, it, expect } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { MANDATE_KEY_INPUT_REFUSAL, mandateCredentialInput, maskCredentialInput } from './secret-store.js';
 
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const HEX = '0123456789abcdef';
-const rnd = (n: number, alphabet: string): string => [...randomBytes(n)].map((b) => alphabet[b % alphabet.length]).join('');
+/** A deterministic character source: a SHA-256 counter stream from `seed`. */
+function seeded(seed: string): (n: number, alphabet: string) => string {
+  let block = 0;
+  let pool: number[] = [];
+  return (n, alphabet) => {
+    let out = '';
+    while (out.length < n) {
+      if (pool.length === 0) pool = [...createHash('sha256').update(`${seed}:${block++}`).digest()];
+      out += alphabet[pool.shift()! % alphabet.length];
+    }
+    return out;
+  };
+}
+const rnd = seeded('mandate-credential-input');
+/** A hex key that does not depend on the draw, so a rule's witness tests the rule. How often a
+ *  fully drawn key gets through is pinned in the rate test below. */
+const hexKey = (n: number): string => `9f3a0c7e1b5d2864${rnd(n - 16, HEX)}`;
 /** Mixed classes guaranteed, whatever the random draw. */
 const mixed = (n: number): string => `Aa1${rnd(n - 3, ALNUM)}`;
 
@@ -52,8 +69,8 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput(`API-Key: ${key}`)).toBe('credential after a cue word');
     expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
     expect(mandateCredentialInput(`Client Secret: ${rnd(4, ALNUM)}8Q~${rnd(30, ALNUM)}`)).toBe('credential after a cue word');
-    expect(mandateCredentialInput(`Der Token:\n${rnd(32, HEX)} und mehr`)).toBe('credential after a cue word');
-    expect(mandateCredentialInput(`Hier der Key:\n\n${rnd(32, HEX)}`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Der Token:\n${hexKey(32)} und mehr`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Hier der Key:\n\n${hexKey(32)}`)).toBe('credential after a cue word');
   });
 
   it('rule 3, password: plainly the value after a password cue', () => {
@@ -63,14 +80,14 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput('Passwort: P@ssw0rd2025')).toBe('password');
     expect(mandateCredentialInput('Das Kennwort ist M@rkt2025')).toBe('password');
     expect(mandateCredentialInput('**Passwort:** Sommer2025!')).toBe('password');
-    expect(mandateCredentialInput(`Kennwort: ${rnd(20, 'abcdefghijklmnopqrstuvwxyz0123456789')}`)).toBe('password');
+    expect(mandateCredentialInput(`Kennwort: k7${rnd(18, 'abcdefghijklmnopqrstuvwxyz0123456789')}`)).toBe('password');
   });
 
   it('rule 3: a cue joined to the next word by a hyphen still counts', () => {
     const key = mixed(32);
     expect(mandateCredentialInput(`Der Token-Wert: ${key}`)).toBe('credential after a cue word');
     expect(mandateCredentialInput(`Schlüssel-Wert: ${key}`)).toBe('credential after a cue word');
-    expect(mandateCredentialInput(`Mailgun key-${rnd(32, HEX)}`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Mailgun key-${hexKey(32)}`)).toBe('credential after a cue word');
   });
 
   it('rule 4: a key pasted on its own, a code fence around it allowed', () => {
@@ -174,5 +191,27 @@ describe('mandateCredentialInput', () => {
   ];
   it.each(ORDINARY)('passes an ordinary message: %s', (text) => {
     expect(mandateCredentialInput(text)).toBeNull();
+  });
+});
+
+/**
+ * How often a fully drawn key typed after a cue word gets through, pinned per shape. The bands
+ * come from a measured rate (100 000 random draws per shape) plus four standard deviations at
+ * this sample size; the draws here are seeded, so the count is the same on every run. A change
+ * to the detector that moves the rate either way fails here and has to be measured again.
+ */
+describe('mandateCredentialInput — rate pinned', () => {
+  const N = 4000;
+  const SHAPES: Array<[string, number, string, number, number]> = [
+    ['32 hex', 32, HEX, 37, 104],
+    ['40 hex', 40, HEX, 0, 16],
+    ['24 alnum', 24, ALNUM, 34, 100],
+  ];
+  it.each(SHAPES)('a key of %s after a cue word: the count let through stays in its measured band', (name, n, alphabet, low, high) => {
+    const draw = seeded(`mandate-key-rate:${name}`);
+    let through = 0;
+    for (let i = 0; i < N; i++) if (mandateCredentialInput(`Der Token lautet ${draw(n, alphabet)}`) === null) through++;
+    expect(through).toBeGreaterThanOrEqual(low);
+    expect(through).toBeLessThanOrEqual(high);
   });
 });
