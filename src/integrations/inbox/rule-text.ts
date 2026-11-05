@@ -29,6 +29,8 @@ export function ruleValue(raw: string): { value: string; hidden: boolean; multil
 
 /** A subject fragment shorter than this would file almost every mail. */
 export const SUBJECT_MIN = 3;
+/** The longest value of a fixed rule (sender, subject, list id), in characters (code points). */
+export const FIXED_VALUE_MAX = 200;
 
 /**
  * True when the value is one bare sender address, as a `from` rule compares it with the sender:
@@ -40,13 +42,15 @@ export function isOneSenderAddress(value: string): boolean {
 
 /**
  * Why the value of a fixed rule (sender, subject, list id) cannot be stored, or null. Checked on
- * the raw input, as `ruleValue` does: a character a reader does not see, a line break or tab, for
- * a sender anything but one address, for a subject fewer than `SUBJECT_MIN` characters.
+ * the raw input, as `ruleValue` does: a character a reader does not see, a line break or tab, more
+ * than `FIXED_VALUE_MAX` characters, for a sender anything but one address, for a subject fewer
+ * than `SUBJECT_MIN` characters.
  */
 export function fixedValueProblem(raw: string, kind: 'from' | 'subject_contains' | 'list_id'): string | null {
   const v = ruleValue(raw);
   if (v.hidden) return 'matcherValue holds characters a reader does not see';
   if (v.multiline) return 'matcherValue must be one line';
+  if (charCount(v.value) > FIXED_VALUE_MAX) return `matcherValue exceeds ${String(FIXED_VALUE_MAX)} characters`;
   if (kind === 'from' && !isOneSenderAddress(v.value.toLowerCase())) return 'matcherValue must be one sender address';
   if (kind === 'subject_contains' && charCount(v.value) < SUBJECT_MIN) return `subject phrase must be at least ${String(SUBJECT_MIN)} characters`;
   return null;

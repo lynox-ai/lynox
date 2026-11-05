@@ -145,6 +145,8 @@ describe('inbox_rule_propose — what it accepts', () => {
     ['a "from" with a scheme', { ...valid, matcher_value: 'mailto:kunde@example.com' }, /must be one sender address/],
     ['a "from" with a trailing comma', { ...valid, matcher_value: 'kunde@example.com,' }, /must be one sender address/],
     ['a subject phrase under 3 characters', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'ab' }, /at least 3 characters/],
+    // Counted in characters, as the owner's create counts them: two emoji are two, not four.
+    ['a subject phrase of two emoji', { ...valid, matcher_kind: 'subject_contains', matcher_value: '\u{1F600}\u{1F600}' }, /at least 3 characters/],
   ];
   for (const [label, input, msg] of refused) {
     it(`refuses ${label}, and stores nothing`, async () => {
@@ -166,6 +168,12 @@ describe('inbox_rule_propose — what it accepts', () => {
   it('accepts exactly 80 characters of name and 3 of subject phrase', async () => {
     expect(await propose({ ...valid, name: 'n'.repeat(80) })).toMatch(/^Proposed/);
     expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'abc' })).toMatch(/^Proposed/);
+  });
+
+  it('accepts a subject phrase of 3 emoji and one of exactly 200 characters', async () => {
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: '\u{1F600}'.repeat(3) })).toMatch(/^Proposed/);
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'y'.repeat(200) })).toMatch(/^Proposed/);
+    expect(inbox.listRulesForAccount(ACCOUNT.id).map((r) => r.matcherValue)).toEqual(['\u{1F600}'.repeat(3), 'y'.repeat(200)]);
   });
 
   it('cuts the name to one line before it stores it', async () => {

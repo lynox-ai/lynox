@@ -968,13 +968,12 @@ describe('rules endpoints — the value of a fixed rule, on create', () => {
   const base = { accountId: ACCOUNT.id, bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
 
   it('refuses a value a reader would not see as written, of every fixed kind', () => {
-    const cases: Array<['from' | 'subject_contains' | 'list_id', string, string]> = [
+    const cases: Array<['from' | 'subject_contains', string, string]> = [
       ['from', 'chef\u202E@firma.example', 'matcherValue holds characters a reader does not see'],
       ['subject_contains', 'Rech\u200Bnung', 'matcherValue holds characters a reader does not see'],
-      ['list_id', 'news\u2066.example', 'matcherValue holds characters a reader does not see'],
       ['from', 'a@firma.example\nb@firma.example', 'matcherValue must be one line'],
       ['subject_contains', 'Rechnung\nNr', 'matcherValue must be one line'],
-      ['list_id', 'news\t.example', 'matcherValue must be one line'],
+      ['subject_contains', 'Rechnung\tNr', 'matcherValue must be one line'],
     ];
     for (const [matcherKind, matcherValue, error] of cases) {
       expect(handleCreateRule(deps, { ...base, matcherKind, matcherValue })).toMatchObject({ status: 400, body: { error } });
@@ -997,15 +996,37 @@ describe('rules endpoints — the value of a fixed rule, on create', () => {
     expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
   });
 
-  it('stores a valid value of each kind: a whole address in any case, a subject with an emoji, a list id', () => {
+  it('stores a valid value of each kind it creates: a whole address in any case, a subject with an emoji', () => {
     expect(handleCreateRule(deps, { ...base, matcherKind: 'from', matcherValue: ' Rechnung@Lieferant.CH ' }).status).toBe(201);
     expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u26A0\uFE0F Mahnung' }).status).toBe(201);
-    expect(handleCreateRule(deps, { ...base, matcherKind: 'list_id', matcherValue: 'news.shop.example' }).status).toBe(201);
     expect(state.listRulesForAccount(ACCOUNT.id).map((r) => [r.matcherKind, r.matcherValue])).toEqual([
       ['from', 'Rechnung@Lieferant.CH'],
       ['subject_contains', '\u26A0\uFE0F Mahnung'],
-      ['list_id', 'news.shop.example'],
     ]);
+  });
+
+  it('counts the subject minimum and the maximum in characters, as the agent\'s proposals do', () => {
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: 'x'.repeat(201) })).toMatchObject({ status: 400, body: { error: 'matcherValue exceeds 200 characters' } });
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'from', matcherValue: `${'a'.repeat(190)}@lieferant.ch` })).toMatchObject({ status: 400, body: { error: 'matcherValue exceeds 200 characters' } });
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: 'y'.repeat(200) }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u{1F600}'.repeat(3) }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u{1F600}'.repeat(100) }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.matcherValue)).toEqual(['y'.repeat(200), '\u{1F600}'.repeat(3), '\u{1F600}'.repeat(100)]);
+  });
+
+  it('creates no list id rule, which would never apply, whatever its value', () => {
+    for (const v of ['news.shop.example', '<news.shop.example>']) {
+      expect(handleCreateRule(deps, { ...base, matcherKind: 'list_id', matcherValue: v })).toEqual({ status: 400, body: { error: 'list_id rules do not apply yet' } });
+    }
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('keeps a stored list id rule: it lists, and it can be deleted', () => {
+    const id = state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'list_id', matcherValue: 'news.shop.example', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    const listed = (handleListRules(deps, { accountId: ACCOUNT.id }).body as { rules: Array<{ id: string; matcherKind: string }> }).rules;
+    expect(listed.map((r) => [r.id, r.matcherKind])).toEqual([[id, 'list_id']]);
+    expect(handleDeleteRule(deps, id).status).toBe(204);
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
   });
 
   it('checks on create only: a stored rule with such a value still lists and loads', () => {

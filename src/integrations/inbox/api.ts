@@ -945,6 +945,11 @@ export interface CreateRuleBody {
   name?: string | undefined;
 }
 
+/**
+ * A rule without a name is called by what it matches. Every value a create accepts keeps a visible
+ * character, so the empty case cannot be reached today; it stays as a guard should a later check
+ * let such a value through, rather than storing an empty name.
+ */
 function fallbackName(name: string, matcherValue: string): { name?: string } {
   const chosen = name.length > 0 ? name : cutChars(ruleLine(matcherValue), MAX_RULE_NAME_CHARS);
   return chosen.length > 0 ? { name: chosen } : {};
@@ -968,9 +973,13 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
       return bad(`at most ${String(MAX_DESCRIPTION_RULES)} description rules per account`);
     }
   } else {
-    // A fixed value is checked as the agent's proposals are: the owner may open the form from a
-    // link, so what it carries has to read as stored and match a real sender or subject. Checked
-    // when a rule is created only; a stored rule loads as it is.
+    // The watcher does not pass a mail's List-ID to the rule match yet, so a new list id rule would
+    // never apply. Stored ones still list and can be deleted.
+    if (body.matcherKind === 'list_id') return bad('list_id rules do not apply yet');
+    // A fixed value is checked with the same rules as the agent's proposals (`rule-text.ts`: what a
+    // reader does not see, one line, the length, one sender address, the subject minimum): the owner
+    // may open the form from a link, so what it carries has to read as stored. Checked when a rule
+    // is created only; a stored rule loads as it is.
     const problem = fixedValueProblem(body.matcherValue, body.matcherKind);
     if (problem !== null) return bad(problem);
   }
@@ -987,7 +996,7 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     action: body.action,
     source: body.source,
     tenantId: body.tenantId,
-    // Unnamed, a rule is called by what it matches (cut to the name's length); nothing left, no name.
+    // Unnamed, a rule is called by what it matches (cut to the name's length; see `fallbackName`).
     ...(fallbackName(name, body.matcherValue)),
   });
   deps.rules?.invalidate(body.accountId, body.tenantId);
