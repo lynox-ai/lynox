@@ -280,7 +280,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // without it, so the rule's audit records it too: the store keeps 200 characters of what
     // the check read, and a reader of the item (`inbox_read`) withholds the mail by this.
     const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
-    // A rule that would file a sensitive mail as handled does not apply (PRD inbox-user-rules F1):
+    // A rule that would file a sensitive mail as handled does not apply:
     // the mail goes to "requires you" as a sensitive skip, whatever the mode, so neither a rule nor
     // the classifier silences it. The owner's own rules included.
     const withheldRule = rule && rule.bucket === 'auto_handled' && sensitive.isSensitive ? rule : null;

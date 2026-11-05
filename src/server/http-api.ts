@@ -12872,8 +12872,8 @@ export class LynoxHTTPApi {
       sendInbox(res, handleDeleteRule(deps!, params['id']!));
     }, ownerOnly('change inbox rules')));
 
-    // A rule the agent proposed applies only once the owner confirms it here (PRD inbox-user-rules
-    // E7). Owner-only: a mandate can neither propose (the tool is withheld) nor confirm.
+    // A rule the agent proposed applies only once the owner confirms it here.
+    // Owner-only: a mandate can neither propose (the tool is withheld) nor confirm.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/rules/:id/confirm', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;

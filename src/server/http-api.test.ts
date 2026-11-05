@@ -23939,8 +23939,8 @@ describe('moveMistralEndpointsToEu', () => {
   });
 });
 
-// PRD inbox-user-rules 3a over the wire: the route maps the body and the query itself, which the
-// handler tests in `integrations/inbox/api.test.ts` do not reach.
+// Rule names, confirming and the filter by rule over the wire: the route maps the body and the
+// query itself, which the handler tests in `integrations/inbox/api.test.ts` do not reach.
 describe('inbox rules over HTTP: name, confirm, filter by rule', () => {
   type Host = { engine: Record<string, unknown> };
   let orig: unknown;
