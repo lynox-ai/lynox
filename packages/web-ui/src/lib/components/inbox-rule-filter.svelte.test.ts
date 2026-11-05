@@ -65,6 +65,8 @@ const filed = {
 
 interface Answers {
 	rulesPending?: number;
+	/** Read on every counts request, so a test can change them between loads. */
+	counts?: { requires_user: number; draft_ready: number; auto_handled: number };
 	items?: unknown[];
 	rules?: unknown[];
 }
@@ -72,7 +74,7 @@ interface Answers {
 async function render(a: Answers = {}): Promise<void> {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = new URL(String(url), 'http://localhost');
-		if (u.pathname.endsWith('/inbox/counts')) return Response.json({ counts: { requires_user: 0, draft_ready: 0, auto_handled: 1 }, snoozed: 0, rulesPending: a.rulesPending ?? 0 });
+		if (u.pathname.endsWith('/inbox/counts')) return Response.json({ counts: { ...(a.counts ?? { requires_user: 0, draft_ready: 0, auto_handled: 1 }) }, snoozed: 0, rulesPending: a.rulesPending ?? 0 });
 		if (u.pathname.endsWith('/inbox/items')) {
 			itemQueries.push(u.searchParams);
 			return Response.json({ items: u.searchParams.get('ruleId') === null || a.items === undefined ? [filed] : a.items });
@@ -216,50 +218,125 @@ describe('InboxView — waiting proposals next to the rules entry', () => {
 });
 
 describe('InboxView — the mobile zone pills keep the active one in view', () => {
-	let scrolled: Array<{ el: Element; opts: unknown }>;
-	let original: typeof Element.prototype.scrollIntoView;
-	beforeEach(() => {
-		scrolled = [];
-		original = Element.prototype.scrollIntoView;
-		Element.prototype.scrollIntoView = function (this: Element, opts?: unknown) { scrolled.push({ el: this, opts }); };
-	});
-	afterEach(() => {
-		Element.prototype.scrollIntoView = original;
-	});
+	// jsdom does no layout. A small one stands in: the row is 390 px wide with 16 px padding, a pill
+	// is 8 px per character of its text (a count badge widens it) plus 24, 4 px apart. Only the row
+	// scrolls, sideways (`scrollLeft`); nothing asks the page to scroll an element into view.
+	const PAD = 16;
+	const ROW_WIDTH = 390;
+	const positions = new WeakMap<Element, number>();
+	const descriptors = new Map<string, PropertyDescriptor | undefined>();
+	let scrollIntoViewCalls: number;
+	let originalScrollIntoView: typeof Element.prototype.scrollIntoView;
 
-	/** The pill a scroll was last asked for, by its label, and only in the mobile row. */
-	function lastScrolledPill(): string | undefined {
-		const last = scrolled.at(-1);
-		expect(last?.el.closest('[role="tablist"]')?.parentElement?.contains(byTestId('inbox-pill-rules'))).toBe(true);
-		return last?.el.querySelector('span')?.textContent?.trim();
+	const isPill = (el: Element): boolean => el.matches('[role="tablist"] > button[data-zone]');
+	const isRow = (el: Element): boolean => el.querySelector(':scope > [data-testid="inbox-pill-rules"]') !== null;
+	const pillWidth = (el: Element): number => 8 * (el.textContent ?? '').replace(/\s+/g, ' ').trim().length + 24;
+	function pillLeft(el: Element): number {
+		let left = PAD;
+		for (let prev = el.previousElementSibling; prev !== null; prev = prev.previousElementSibling) left += pillWidth(prev) + 4;
+		return left;
 	}
 
-	it('scrolls "Erledigt heute" into view on arrival from a rule, and the new pill after a switch', async () => {
-		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
-		await render();
-		expect(lastScrolledPill()).toBe('Erledigt heute');
-		expect(scrolled.at(-1)?.opts).toEqual({ inline: 'nearest', block: 'nearest' });
-		const snoozed = [...target.querySelectorAll('[role="tablist"] button')].find((b) => b.textContent?.includes(t('inbox.zone_snoozed')));
-		snoozed!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-		await settle();
-		expect(lastScrolledPill()).toBe(t('inbox.zone_snoozed'));
+	function stub(name: 'offsetLeft' | 'offsetWidth' | 'clientWidth' | 'scrollLeft', get: (el: HTMLElement) => number | undefined, set?: (el: HTMLElement, v: number) => void): void {
+		const own = Object.getOwnPropertyDescriptor(HTMLElement.prototype, name);
+		descriptors.set(name, own);
+		const original = own ?? Object.getOwnPropertyDescriptor(Element.prototype, name);
+		Object.defineProperty(HTMLElement.prototype, name, {
+			configurable: true,
+			get(this: HTMLElement) { return get(this) ?? (original?.get?.call(this) as number); },
+			set(this: HTMLElement, v: number) { if (set !== undefined) set(this, v); else original?.set?.call(this, v); },
+		});
+	}
+
+	beforeEach(() => {
+		stub('offsetLeft', (el) => (isPill(el) ? pillLeft(el) : undefined));
+		stub('offsetWidth', (el) => (isPill(el) ? pillWidth(el) : undefined));
+		stub('clientWidth', (el) => (isRow(el) ? ROW_WIDTH : undefined));
+		stub('scrollLeft', (el) => positions.get(el) ?? 0, (el, v) => { positions.set(el, v); });
+		scrollIntoViewCalls = 0;
+		originalScrollIntoView = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function () { scrollIntoViewCalls++; };
+	});
+	afterEach(() => {
+		for (const [name, own] of descriptors) {
+			if (own !== undefined) Object.defineProperty(HTMLElement.prototype, name, own);
+			else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
+		}
+		descriptors.clear();
+		Element.prototype.scrollIntoView = originalScrollIntoView;
+		expect(scrollIntoViewCalls).toBe(0);
 	});
 
-	it('scrolls the active pill into view again when the pills change width (a badge, the web font)', async () => {
-		const observed: Array<{ el: Element; fire: () => void }> = [];
-		vi.stubGlobal('ResizeObserver', class {
-			readonly cb: () => void;
-			constructor(cb: () => void) { this.cb = cb; }
-			observe(el: Element): void { observed.push({ el, fire: () => this.cb() }); }
-			disconnect(): void {}
-		});
+	function row(): HTMLElement {
+		const r = byTestId('inbox-pill-rules')?.parentElement;
+		expect(r?.className).toContain('overflow-x-auto');
+		return r!;
+	}
+	function pill(zone: string): HTMLElement {
+		return row().querySelector<HTMLElement>(`[data-zone="${zone}"]`)!;
+	}
+	/** True when the pill lies whole inside the row's visible part. */
+	function fullyInView(zone: string): boolean {
+		const p = pill(zone);
+		return p.offsetLeft >= row().scrollLeft && p.offsetLeft + p.offsetWidth <= row().scrollLeft + ROW_WIDTH;
+	}
+
+	it('brings "Erledigt heute" into view on arrival from a rule, once the counts stand', async () => {
 		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
 		await render();
-		const watcher = observed.find((o) => o.el.getAttribute('role') === 'tablist');
-		expect(watcher).toBeDefined();
-		scrolled = [];
-		watcher!.fire();
-		expect(scrolled).toHaveLength(1);
-		expect(lastScrolledPill()).toBe('Erledigt heute');
+		expect(pill('auto_handled').textContent).toContain('Erledigt heute');
+		// The badge has arrived and widened the pill; without a scroll it would end past the edge.
+		expect(pill('auto_handled').textContent).toContain('1');
+		expect(pill('auto_handled').offsetLeft + pill('auto_handled').offsetWidth).toBeGreaterThan(ROW_WIDTH);
+		expect(row().scrollLeft).toBeGreaterThan(0);
+		expect(fullyInView('auto_handled')).toBe(true);
+	});
+
+	it('brings the new pill into view when the zone changes, in both directions', async () => {
+		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
+		await render();
+		const before = row().scrollLeft;
+		pill('snoozed').click();
+		await settle();
+		expect(row().scrollLeft).toBeGreaterThan(before);
+		expect(fullyInView('snoozed')).toBe(true);
+		pill('requires_user').click();
+		await settle();
+		expect(row().scrollLeft).toBe(pill('requires_user').offsetLeft);
+		expect(fullyInView('requires_user')).toBe(true);
+	});
+
+	it('leaves the row where it is when the counts change later', async () => {
+		const counts = { requires_user: 0, draft_ready: 0, auto_handled: 1 };
+		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
+		await render({ counts });
+		// The owner swipes the row back to its start.
+		row().scrollLeft = 0;
+		counts.auto_handled = 12;
+		counts.requires_user = 3;
+		const store = await import('../stores/inbox.svelte.js');
+		expect(await store.loadInboxCounts()).toBe(true);
+		await settle();
+		// The change reached the pills (positive control) ...
+		expect(pill('auto_handled').textContent).toContain('12');
+		expect(pill('requires_user').textContent).toContain('3');
+		// ... and the row did not move.
+		expect(row().scrollLeft).toBe(0);
+	});
+
+	it('waits for the web font before the first reveal, which widens the pills', async () => {
+		let fontsIn: () => void = () => {};
+		const ready = new Promise<void>((resolve) => { fontsIn = resolve; });
+		Object.defineProperty(document, 'fonts', { configurable: true, value: { ready } });
+		try {
+			pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
+			await render();
+			expect(row().scrollLeft).toBe(0);
+			fontsIn();
+			await settle();
+			expect(fullyInView('auto_handled')).toBe(true);
+		} finally {
+			delete (document as unknown as Record<string, unknown>)['fonts'];
+		}
 	});
 });

@@ -85,24 +85,28 @@
 	let ruleFilterId = $state<string | null>(getInboxRuleFilter());
 	let ruleFilterName = $state<string | null>(null);
 
-	// The mobile zone pills scroll sideways at narrow widths: the active one is scrolled into view
-	// on arrival (a link may open "Handled today", past the edge), whenever the zone changes, and
-	// whenever the pills change width (a count badge appears, the web font arrives) and could push
-	// the active one back out.
-	let mobileZoneTabs = $state<HTMLElement | null>(null);
+	// The mobile zone pills scroll sideways at narrow widths. The active one is brought into view
+	// once the row is built (counts loaded, so the badges stand, and the web font in, which widens
+	// the pills; a link may open "Handled today", past the edge) and when the zone changes; never
+	// on a later count change. Only the row scrolls, sideways: the list around it keeps its place.
+	let mobileZoneRow = $state<HTMLElement | null>(null);
+	let zoneRowBuilt = $state(false);
+	$effect(() => {
+		if (!countsLoaded || zoneRowBuilt) return;
+		const fontsIn = typeof document !== 'undefined' && 'fonts' in document ? document.fonts.ready : Promise.resolve();
+		const built = (): void => { zoneRowBuilt = true; };
+		void fontsIn.then(built, built);
+	});
 	$effect(() => {
 		const active = zone;
-		const row = mobileZoneTabs;
-		if (row === null) return;
-		const reveal = (): void => {
-			const tab = row.querySelector<HTMLElement>(`[data-zone="${active}"]`);
-			if (tab !== null && typeof tab.scrollIntoView === 'function') tab.scrollIntoView({ inline: 'nearest', block: 'nearest' });
-		};
-		reveal();
-		if (typeof ResizeObserver === 'undefined') return;
-		const observer = new ResizeObserver(reveal);
-		observer.observe(row);
-		return () => observer.disconnect();
+		const row = mobileZoneRow;
+		if (!zoneRowBuilt || row === null) return;
+		const tab = row.querySelector<HTMLElement>(`[data-zone="${active}"]`);
+		if (tab === null) return;
+		const start = tab.offsetLeft;
+		const end = start + tab.offsetWidth;
+		if (start < row.scrollLeft) row.scrollLeft = start;
+		else if (end > row.scrollLeft + row.clientWidth) row.scrollLeft = end - row.clientWidth;
 	});
 
 	async function resolveRuleFilterName(ruleId: string, accountId: string): Promise<void> {
@@ -564,12 +568,11 @@
 
 					<!-- Mobile-only zone pills (md+ uses InboxZoneRail), then the rules entry the rail
 						carries on md+. -->
-					<div class="md:hidden flex items-center gap-1 mb-3 overflow-x-auto scrollbar-none -mx-4 px-4 py-1">
+					<div class="md:hidden relative flex items-center gap-1 mb-3 overflow-x-auto scrollbar-none -mx-4 px-4 py-1" bind:this={mobileZoneRow}>
 						<div
 							class="flex shrink-0 gap-1"
 							role="tablist"
 							aria-label={t('inbox.title')}
-							bind:this={mobileZoneTabs}
 						>
 							<button
 								role="tab"
