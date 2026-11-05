@@ -438,6 +438,9 @@ vi.mock('./run-history.js', () => ({
     this.insertToolCall = vi.fn();
     // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
     this.getDescendantCostUsd = mockGetDescendantCostUsd;
+    // @ts-expect-error mock constructor — the cost record the daily/monthly caps read. A
+    // history without it is treated as no cost record, and every run is refused.
+    this.getCostByDay = vi.fn().mockReturnValue([]);
     this.getApiCallsOfRun = mockGetApiCallsOfRun;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);

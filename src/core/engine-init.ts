@@ -65,7 +65,9 @@ import type { Containment } from './containment.js';
  * Apply the cost, rate and egress settings to the ToolContext at boot.
  *
  * The HTTP/mail rate limits and the daily/monthly caps count against
- * RunHistory, so they need it. The session cap and the egress settings
+ * RunHistory, so they need it. Without it the daily/monthly caps refuse every run
+ * (fail-closed, see `configurePersistentBudget`); the HTTP/mail rate limits are not
+ * applied. The session cap and the egress settings
  * (`enforce_https`, `network_policy`, the operator host floor) do not, and are
  * applied whether or not RunHistory opened: an engine that boots without its
  * history must still enforce the limits it was configured with. Of these, only
