@@ -131,7 +131,7 @@ export interface BuildInboxRunnerOptions {
    */
   notifier?: InboxNotifier | undefined;
   /**
-   * Description rules (PRD inbox-user-rules E3): the account's confirmed `matches_description`
+   * Description rules: the account's confirmed `matches_description`
    * rules and the cheap model that checks them, between the budget check and the classifier.
    * Absent when the feature is off.
    */
@@ -139,7 +139,7 @@ export interface BuildInboxRunnerOptions {
 }
 
 /** A description rule named the mail: its bucket, unless it would file a sensitive or forwarded
- *  mail as handled (F1, E3) — then the mail is shown, and the rule is named as withheld. */
+ *  mail as handled — then the mail is shown, and the rule is named as withheld. */
 function ruleVerdict(rule: InboxRule, payload: InboxQueuePayload): ClassifyResult {
   const label = rule.name ?? 'ohne Namen';
   const base = { classifierVersion: `rule:${rule.id}`, bodyTruncated: false, confidence: 1 };
@@ -154,7 +154,7 @@ function ruleVerdict(rule: InboxRule, payload: InboxQueuePayload): ClassifyResul
 }
 
 /** An `auto_handled` hit the classifier does not confirm: its verdict stands, the rule is named as
- *  withheld (decision 801-3b A: a description rule files no mail the classifier would show). */
+ *  withheld: a description rule files no mail the classifier would show. */
 function ruleOverruled(rule: InboxRule, verdict: ClassifyResult): ClassifyResult {
   const label = rule.name ?? 'ohne Namen';
   return {

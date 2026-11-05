@@ -200,7 +200,7 @@ describe('InboxRulesLoader — cache', () => {
   });
 });
 
-describe('InboxRulesLoader — description rules (PRD inbox-user-rules E3)', () => {
+describe('InboxRulesLoader — description rules, read for the model check in the runner', () => {
   it('match() never applies a description rule, even when its text is in the sender or subject', () => {
     inbox.insertRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: 'Strategie', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
     inbox.insertRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: 'mustermann@example.com', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });

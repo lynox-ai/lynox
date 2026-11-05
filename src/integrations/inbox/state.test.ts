@@ -529,7 +529,7 @@ describe('InboxStateDb — rules the agent proposes and the owner confirms', () 
   });
 });
 
-describe('InboxStateDb — description rules are capped per account (PRD inbox-user-rules E11)', () => {
+describe('InboxStateDb — description rules are capped per account', () => {
   const desc = (i: number, accountId = TEST_ACCOUNT.id) => ({ accountId, matcherKind: 'matches_description' as const, matcherValue: `Beschreibung ${String(i)}`, name: `D${String(i)}` });
 
   it('refuses the proposal past MAX_DESCRIPTION_RULES, counting confirmed and waiting rules alike', () => {

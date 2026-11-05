@@ -265,7 +265,7 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
   });
 });
 
-describe('createInboxClassifierHook — description rules wait for the runner (PRD inbox-user-rules E3)', () => {
+describe('createInboxClassifierHook — description rules wait for the model check in the runner', () => {
   it('a fixed rule files the mail before any description rule is asked, even one created earlier', async () => {
     inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'auto_handled', action: 'mark_read', source: 'on_demand', createdAt: new Date(1_000) });
     const fixed = inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com', bucket: 'requires_user', action: 'show', source: 'on_demand', createdAt: new Date(2_000) });

@@ -276,7 +276,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       }
     }
   };
-  // The description-rule check (PRD inbox-user-rules E3): its own cheap model — ministral-8b in
+  // The description-rule check: its own cheap model — ministral-8b in
   // the EU, Haiku in the US — priced at that model's rates, against the same daily cap, debited
   // and recorded like the classifier, as its own run.
   const ruleModelId = region === 'eu' ? MISTRAL_MODEL_MAP.fast : getModelId('fast');

@@ -28,10 +28,11 @@ export type FailReason =
   | 'budget_exceeded'
   /** The model archived a mail a person forwarded (`forwarded.ts`); it is shown instead. */
   | 'forwarded_by_person'
-  /** A description rule would have filed a sensitive mail as handled; it is shown instead (F1). */
+  /** A description rule would have filed a sensitive mail as handled; it is shown instead. */
   | 'rule_withheld_sensitive'
   /** A description rule would have filed the mail as handled, but the classifier does not see it
-   *  as handled; the classifier's verdict stands (PRD inbox-user-rules E3, decision 801-3b A). */
+   *  as handled; the classifier's verdict stands, so a description rule files no mail the
+   *  classifier would show. */
   | 'rule_withheld_classifier'
   /** A description rule would have filed the mail as handled, and the classifier's check could not
    *  run (no budget, a failed call); the mail is shown. */

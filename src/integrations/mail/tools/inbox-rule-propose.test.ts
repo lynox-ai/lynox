@@ -217,7 +217,7 @@ describe('inbox_rule_propose — what it accepts', () => {
   });
 });
 
-describe('inbox_rule_propose — description rules (PRD inbox-user-rules E3/E11)', () => {
+describe('inbox_rule_propose — description rules', () => {
   const desc = { account: 'acct-1', matcher_kind: 'matches_description', matcher_value: '  Mahnungen von Lieferanten ', name: 'Mahnungen' };
 
   it('stores a waiting requires_user description rule, trimmed, that no fixed matcher applies', async () => {

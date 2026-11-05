@@ -31,7 +31,7 @@ export function ruleValue(raw: string): { value: string; hidden: boolean; multil
 export const DESCRIPTION_MIN = 3;
 export const DESCRIPTION_MAX = 300;
 /** At most this many description rules per account, in any state: each is in every model call
- *  of its account, so the list must stay short (PRD inbox-user-rules E3, E11). */
+ *  of its account, so the list must stay short. */
 export const MAX_DESCRIPTION_RULES = 20;
 
 /** Why a description cannot be stored, or null. Checked on the raw input, as `ruleValue` does. */
