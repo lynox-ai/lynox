@@ -61,23 +61,39 @@ async function render(): Promise<void> {
 	}
 }
 
-const alerts = (): string[] => [...target.querySelectorAll('[role="alert"]')].map((e) => e.textContent?.trim() ?? '');
+/** Each alert as its paragraphs; an alert without paragraphs (the vault line) as its one text. */
+const alerts = (): string[][] => [...target.querySelectorAll('[role="alert"]')].map((e) => {
+	const ps = [...e.querySelectorAll('p')];
+	return ps.length > 0 ? ps.map((p) => p.textContent?.trim() ?? '') : [e.textContent?.trim() ?? ''];
+});
 
-const line = (keys: string[]): string => keys.map((k) => t(k)).join(' ');
+const line = (keys: string[]): string[] => keys.map((k) => t(k));
 const ENGINE = 'status.boot_store_missing_engine';
+const ENGINE_MEMORY = 'status.boot_store_missing_engine_memory';
 const HISTORY = 'status.boot_store_missing_history';
 const SELF = 'status.boot_store_missing_selfhost';
 const MANAGED = 'status.boot_store_missing_managed';
 
-describe('the status bar line for a boot store that did not open (U-162)', () => {
-	it('shows one line with the store sentence and the self-host close when the poll names a store', async () => {
+describe('the status bar line for a boot store that did not open', () => {
+	it('shows one line, the store and the self-host close as separate paragraphs, when the poll names a store', async () => {
 		stubFetch({ boot_stores_missing: ['engine.db'] });
 		await render();
-		for (const k of [ENGINE, SELF]) expect(t(k)).not.toBe(k);
+		for (const k of [ENGINE, ENGINE_MEMORY, SELF]) expect(t(k)).not.toBe(k);
 		expect(alerts()).toEqual([line([ENGINE, SELF])]);
 	});
 
-	it('names both stores in one line, with the close once, and the managed close when alerted', async () => {
+	it('takes the engine.db sentence about old memory only for a literal true memory flag', async () => {
+		stubFetch({ boot_stores_missing: ['engine.db'], boot_store_memory_old: true });
+		await render();
+		expect(alerts()).toEqual([line([ENGINE_MEMORY, SELF])]);
+		if (component) unmount(component);
+		component = undefined;
+		stubFetch({ boot_stores_missing: ['engine.db'], boot_store_memory_old: 'true' });
+		await render();
+		expect(alerts()).toEqual([line([ENGINE, SELF])]);
+	});
+
+	it('names both stores in one line, a paragraph each, the close once, and the managed close when alerted', async () => {
 		stubFetch({ boot_stores_missing: ['history.db', 'engine.db'], boot_stores_alerted: true });
 		await render();
 		expect(alerts()).toEqual([line([ENGINE, HISTORY, MANAGED])]);
@@ -109,6 +125,6 @@ describe('the status bar line for a boot store that did not open (U-162)', () =>
 	it('stands next to the vault key line when both are reported', async () => {
 		stubFetch({ boot_stores_missing: ['history.db'], vault_key: 'missing_over_encrypted_data' });
 		await render();
-		expect(alerts()).toEqual([line([HISTORY, SELF]), t('status.vault_key_missing')]);
+		expect(alerts()).toEqual([line([HISTORY, SELF]), [t('status.vault_key_missing')]]);
 	});
 });

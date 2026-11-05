@@ -31,7 +31,7 @@ afterEach(async () => {
   reloadConfig();
 });
 
-async function boot(broken: ReadonlyArray<'engine.db' | 'history.db'>, managedId?: string): Promise<string> {
+async function boot(broken: ReadonlyArray<'engine.db' | 'history.db'>, managedId?: string, durable = 'true'): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-boot-store-field-'));
   for (const name of broken) mkdirSync(join(dir, name));
   vi.stubEnv('LYNOX_DATA_DIR', dir);
@@ -39,7 +39,7 @@ async function boot(broken: ReadonlyArray<'engine.db' | 'history.db'>, managedId
   vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
   vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', managedId);
   // A mandate is refused before any handler while durable knowledge is off.
-  vi.stubEnv('LYNOX_DURABLE_MEMORY_ENABLED', 'true');
+  vi.stubEnv('LYNOX_DURABLE_MEMORY_ENABLED', durable);
   reloadConfig();
   const api = new LynoxHTTPApi();
   booted = { api, dir };
@@ -80,6 +80,16 @@ describe('the owner sees which boot store did not open', () => {
     expect(Array.isArray(r.body['providers'])).toBe(true);
     expect(r.body['boot_stores_missing']).toEqual([...broken]);
     expect(r.text).not.toContain('boot_stores_alerted');
+    // Durable memory is on here: without engine.db it did not load, and the owner is told so.
+    expect(r.body['boot_store_memory_old']).toBe(broken.includes('engine.db') ? true : undefined);
+  }, 60_000);
+
+  it('does not say memory is old when durable memory is off: the old memory is then the live one', async () => {
+    const base = await boot(['engine.db'], undefined, 'false');
+    const { owner } = await cookies();
+    const r = await providers(base, owner);
+    expect(r.body['boot_stores_missing']).toEqual(['engine.db']);
+    expect(r.text).not.toContain('boot_store_memory_old');
   }, 60_000);
 
   it('says the control plane is alerted on an instance it runs', async () => {
@@ -96,7 +106,7 @@ describe('the owner sees which boot store did not open', () => {
     const { mandate } = await cookies();
     const r = await providers(base, mandate);
     expect(r.status).toBe(200);
-    expect(r.text).not.toContain('boot_stores_missing');
+    expect(r.text).not.toContain('boot_store');
     expect(r.text).not.toContain('history.db');
   }, 60_000);
 

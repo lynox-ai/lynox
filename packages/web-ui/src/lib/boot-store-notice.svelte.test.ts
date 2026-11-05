@@ -3,12 +3,17 @@ import { bootStoreLineKeys, bootStoresOf, type BootStore } from './boot-store-no
 import { t, setLocale, getLocale } from './i18n.svelte.js';
 
 /**
- * U-162, verbatim: the status bar line for a boot store that did not open, in both languages, for
- * every combination of stores and both closing sentences. The strings are written out here, not read
+ * Verbatim: the status bar line for a boot store that did not open, in both languages, for every
+ * combination of stores, both engine.db sentences and both closing sentences, paragraph by paragraph. The strings are written out here, not read
  * from the table, so a change of wording fails this test until the review has seen it.
  */
 
 const ENGINE = {
+	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; was du an ihnen änderst, geht verloren, sobald die Engine engine.db wieder öffnet.',
+	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed. API connections such as bexio or Shopify come from an older copy; what you change in them is lost once the engine opens engine.db again.',
+};
+// With durable memory on and not loaded for want of engine.db: memory is an old state, access cannot sign in.
+const ENGINE_MEMORY = {
 	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern, lynox kennt nur einen alten Stand seines Gedächtnisses, und Personen, denen du Zugang gegeben hast, können sich nicht anmelden. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; was du an ihnen änderst, geht verloren, sobald die Engine engine.db wieder öffnet.',
 	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed, lynox only knows an old state of its memory, and people you gave access cannot sign in. API connections such as bexio or Shopify come from an older copy; what you change in them is lost once the engine opens engine.db again.',
 };
@@ -28,24 +33,31 @@ const MANAGED = {
 const initial = getLocale();
 afterEach(() => setLocale(initial));
 
-const render = (missing: BootStore[], alerted: boolean): string => bootStoreLineKeys(missing, alerted).map((k) => t(k)).join(' ');
+const render = (missing: BootStore[], alerted: boolean, memoryOld = false): string[] =>
+	bootStoreLineKeys(missing, alerted, memoryOld).map((p) => p.map((k) => t(k)).join(' '));
 
-describe('the boot store line, verbatim (U-162)', () => {
+describe('the boot store line, verbatim, one paragraph per store and one for the close', () => {
 	for (const lang of ['de', 'en'] as const) {
 		for (const alerted of [false, true]) {
 			const close = alerted ? MANAGED[lang] : SELFHOST[lang];
 			const mode = alerted ? 'managed' : 'self-host';
 			it(`${lang}, ${mode}: engine.db alone`, () => {
 				setLocale(lang);
-				expect(render(['engine.db'], alerted)).toBe(`${ENGINE[lang]} ${close}`);
+				expect(render(['engine.db'], alerted)).toEqual([ENGINE[lang], close]);
 			});
-			it(`${lang}, ${mode}: history.db alone`, () => {
+			it(`${lang}, ${mode}: engine.db alone with durable memory not loaded`, () => {
 				setLocale(lang);
-				expect(render(['history.db'], alerted)).toBe(`${HISTORY[lang]} ${close}`);
+				expect(render(['engine.db'], alerted, true)).toEqual([ENGINE_MEMORY[lang], close]);
 			});
-			it(`${lang}, ${mode}: both, the closing sentence once`, () => {
+			it(`${lang}, ${mode}: history.db alone, the memory flag changes nothing`, () => {
 				setLocale(lang);
-				expect(render(['engine.db', 'history.db'], alerted)).toBe(`${ENGINE[lang]} ${HISTORY[lang]} ${close}`);
+				expect(render(['history.db'], alerted)).toEqual([HISTORY[lang], close]);
+				expect(render(['history.db'], alerted, true)).toEqual([HISTORY[lang], close]);
+			});
+			it(`${lang}, ${mode}: both, the closing paragraph once`, () => {
+				setLocale(lang);
+				expect(render(['engine.db', 'history.db'], alerted)).toEqual([ENGINE[lang], HISTORY[lang], close]);
+				expect(render(['engine.db', 'history.db'], alerted, true)).toEqual([ENGINE_MEMORY[lang], HISTORY[lang], close]);
 			});
 		}
 	}

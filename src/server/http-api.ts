@@ -3700,9 +3700,17 @@ export class LynoxHTTPApi {
     ];
     if (missing.length === 0) return {};
     // A control plane sets this id on every instance it runs, and its health monitor alerts on a
-    // degraded engine (lynox-pro#3490): the UI then says the team is told, not "read the log".
+    // degraded engine: the UI then says the team is told, not "read the log".
     const alerted = (process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '') !== '';
-    return { boot_stores_missing: missing, ...(alerted ? { boot_stores_alerted: true } : {}) };
+    // Durable memory was switched on and did not load because engine.db is missing: the engine runs
+    // on the old memory files, and a mandate cannot sign in. With durable memory off both are the
+    // normal state, so the UI says neither.
+    const memoryOld = engine.getEngineDb() === null && engine.getLegacyMemoryReason() === 'store_missing';
+    return {
+      boot_stores_missing: missing,
+      ...(alerted ? { boot_stores_alerted: true } : {}),
+      ...(memoryOld ? { boot_store_memory_old: true } : {}),
+    };
   }
 
   /** The keyless state for the owner's status field; absent for anyone else and when nothing was found. */
