@@ -499,6 +499,13 @@ describe('markupChangesOf', () => {
     expect(outside('<p>a</p>', '<p>a</p><script>x()</script>')).toBe(true);
     expect(outside('<p>a</p>', '<p>a</p><!-- c -->')).toBe(true);
     expect(outside('<p>a</p><template></template>', '<p>a</p><template><p>b</p></template>')).toBe(true);
+    // A bare element off the list, which fails on the list alone; a link in SVG, which fails on
+    // its namespace alone; an href on an element that is not a link.
+    expect(outside('<p>a</p>', '<p>a</p><div>b</div>')).toBe(true);
+    expect(outside('<p>a</p><svg></svg>', '<p>a</p><svg><a href="/x">b</a></svg>')).toBe(true);
+    expect(outside('<p>a</p>', '<p href="/x">a</p>')).toBe(true);
+    // A comment fails on its kind, its namespace and its name at once, and raw text lies only in
+    // elements off the list: those two conditions hold no case of their own.
     // Only what is added counts: a removed image does not.
     expect(outside('<p>a</p><img src="/i.jpg">', '<p>a</p>')).toBe(false);
   });

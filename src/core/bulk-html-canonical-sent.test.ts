@@ -334,6 +334,20 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
       expect(ledger.recordJudgement(id, seq, 'tok', { invalid: 'url_scheme', linkDomain: 'evil.example' })).toBe(true);
       expect(shownOf({ id, seq })).toMatchObject({ error: 'url_scheme' });
       expect(shownOf({ id, seq }).linkDomain).toBeUndefined();
+      // Not stored either: the column stays empty.
+      const cell = engineDb.getDb().prepare('SELECT link_domain FROM bulk_targets WHERE run_id = ? AND seq = ?').get(id, seq) as { link_domain: string | null };
+      expect(cell.link_domain).toBeNull();
+    });
+
+    it('shows no stored domain once the target holds another reason, or none', async () => {
+      const r = await judge(linked('https://evil.example/x'));
+      expect(shownOf(r).linkDomain).toBe('evil.example');
+      // A resume clears a target's error and leaves its other cells (bulk-ledger resume, `SET
+      // error = NULL`); the domain of the old reason is then not shown with the new one.
+      for (const error of [null, 'read_failed']) {
+        engineDb.getDb().prepare('UPDATE bulk_targets SET error = ? WHERE run_id = ? AND seq = ?').run(error, r.id, r.seq);
+        expect(shownOf(r).linkDomain, String(error)).toBeUndefined();
+      }
     });
   });
 
