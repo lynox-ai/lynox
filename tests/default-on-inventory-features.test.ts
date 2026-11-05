@@ -72,20 +72,22 @@ describe('default-on-inventory reads the feature flags\' defaults', () => {
     expect(out).toContain('  - feature:on-flag');
   });
 
-  // Fail-closed: each of these would otherwise read as "nothing default-ON".
-  const unreadable: Array<[string, string]> = [
-    ['a value that is a constant', block("  'on-flag': ON_BY_DEFAULT,\n")],
-    ['a value on the next line', block("  'on-flag':\n    true,\n")],
-    ['an unquoted key', block('  onFlag: true,\n')],
-    ['a spread', block("  ...OTHER_DEFAULTS,\n  'off-flag': false,\n")],
-    ['an empty table', block('')],
-    ['no table at all', 'export const nothing = 1;\n'],
+  // Fail-closed: each of these would otherwise read as "nothing default-ON". Each names its
+  // diagnosis: a missing table and an unreadable one are different repairs.
+  const UNREADABLE = /read \d+ of \d+ lines of CORE_FEATURE_DEFAULTS .* refusing to report a clean run/;
+  const unreadable: Array<[string, string, RegExp]> = [
+    ['a value that is a constant', block("  'on-flag': ON_BY_DEFAULT,\n"), UNREADABLE],
+    ['a value on the next line', block("  'on-flag':\n    true,\n"), UNREADABLE],
+    ['an unquoted key', block('  onFlag: true,\n'), UNREADABLE],
+    ['a spread', block("  ...OTHER_DEFAULTS,\n  'off-flag': false,\n"), UNREADABLE],
+    ['an empty table', block(''), UNREADABLE],
+    ['no table at all', 'export const nothing = 1;\n', /found no CORE_FEATURE_DEFAULTS block .* refusing to report a clean run/],
   ];
-  for (const [what, features] of unreadable) {
-    it(`refuses to report clean on ${what}`, () => {
+  for (const [what, features, diagnosis] of unreadable) {
+    it(`refuses to report clean on ${what}, and says why`, () => {
       const { code, out } = run(features, recorded());
       expect(code, out).toBe(1);
-      expect(out).toMatch(/refusing to report a clean run/);
+      expect(out).toMatch(diagnosis);
       expect(out).not.toMatch(/clean ✓/);
     });
   }
