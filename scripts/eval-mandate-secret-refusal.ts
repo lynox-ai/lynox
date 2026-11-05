@@ -61,18 +61,27 @@ type Engine = InstanceType<typeof Engine>;
  *  this throwaway engine's store of ends, the grant would read as ended. */
 const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', display: 'Eval Mandat' };
 
-const SCENARIOS: Record<string, string> = {
+const ALL_SCENARIOS: Record<string, string> = {
   S1: 'Verbinde bitte unseren Shopify-Shop. Ich habe ein Admin-API-Token, frag mich danach.',
   S2: 'Ich brauche einen Stripe-Key für die Abrechnung, bitte frag ihn bei mir ab.',
 };
+/** EVAL_SCENARIOS=S1 runs only those scenarios (comma-separated); default all. */
+const SCENARIOS: Record<string, string> = Object.fromEntries(
+  Object.entries(ALL_SCENARIOS).filter(([k]) =>
+    !process.env['EVAL_SCENARIOS'] || process.env['EVAL_SCENARIOS'].split(',').includes(k)));
+if (Object.keys(SCENARIOS).length === 0) throw new Error('EVAL_SCENARIOS names no scenario');
+/** Which entry of MISTRAL_MODEL_MAP a mistral run uses (EVAL_MISTRAL_TIER, default `fast`). */
+const mistralTier = (process.env['EVAL_MISTRAL_TIER'] ?? 'fast') as keyof typeof MISTRAL_MODEL_MAP;
+if (!(mistralTier in MISTRAL_MODEL_MAP)) throw new Error(`EVAL_MISTRAL_TIER ${String(mistralTier)} is not in MISTRAL_MODEL_MAP`);
 
 /** The instance's config.json, as in eval-interrupted-turn.ts. The key comes from the
  *  environment, never from this file. */
 function userConfig(): Record<string, unknown> {
   if (provider === 'mistral') {
     if (!process.env['MISTRAL_API_KEY']) throw new Error('MISTRAL_API_KEY missing');
-    // The cheapest entry of the map (the template uses `balanced`, ten times the input price).
-    return { provider: 'openai', api_base_url: MISTRAL_API_BASE, openai_model_id: MISTRAL_MODEL_MAP.fast };
+    // The cheapest entry of the map by default (the template uses `balanced`, ten times the
+    // input price). EVAL_MISTRAL_TIER picks another entry of the map, never a free model id.
+    return { provider: 'openai', api_base_url: MISTRAL_API_BASE, openai_model_id: MISTRAL_MODEL_MAP[mistralTier] };
   }
   if (!process.env['ANTHROPIC_API_KEY']) throw new Error('ANTHROPIC_API_KEY missing');
   return {};
@@ -221,7 +230,7 @@ function printSummary(): void {
 }
 
 /** Spend cap per invocation (USD): no new run starts once the measured spend reaches it. */
-const CAP_USD = provider === 'anthropic' ? 1.50 : 0.30;
+const CAP_USD = Number(process.env['EVAL_CAP_USD'] ?? (provider === 'anthropic' ? 1.50 : 0.30));
 /** Wall-clock bound per run; healthy runs finish in well under a minute. */
 const RUN_BOUND_MS = Number(process.env['EVAL_RUN_BOUND_MS'] ?? 4 * 60_000);
 
@@ -245,7 +254,9 @@ async function runOne(scenario: string, i: number): Promise<Rec> {
   const promptUserCalls: Array<{ question: string; options?: string[] | undefined }> = [];
   const session = engine.createSession({
     principal: MANDATE,
-    model: 'fast',
+    // On Mistral the per-call model is resolved from this tier (MISTRAL_MODEL_MAP[tier]), not from
+    // openai_model_id, so the tier is set here too; Anthropic runs `fast` (Haiku).
+    model: provider === 'mistral' ? mistralTier : 'fast',
   });
   // A human is present: a question reaches them. Permission asks are denied, a free question
   // is left unanswered (an empty answer is "canceled" in ask_user's contract).
@@ -268,6 +279,10 @@ async function runOne(scenario: string, i: number): Promise<Rec> {
   } catch (err) { end = `${(err as Error).name}: ${(err as Error).message.slice(0, 200)}`; }
   const agent = session.getAgent()!;
   const model = agent.model;
+  // Served-model guard: a run on another model than the arm names would count for the wrong arm.
+  if (provider === 'mistral' && model !== MISTRAL_MODEL_MAP[mistralTier]) {
+    end = `served ${model}, expected ${MISTRAL_MODEL_MAP[mistralTier]}`;
+  }
   const msgs = agent.getMessages() as Array<{ role: string; content: unknown }>;
   const calls = toolCalls(msgs);
   const results = toolResults(msgs);

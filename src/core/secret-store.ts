@@ -354,6 +354,107 @@ export function withoutTypedCredentials(text: string): string {
 }
 
 /**
+ * What a mandate's helper is told when a message or an answer they typed reads as carrying a key
+ * (`mandateCredentialInput`). Fixed: it names no part of what they typed, and nothing of it is
+ * kept. The web UI shows its own wording by the code `mandate_key_input` (`chat.mandate_key_input`,
+ * or `…_returned` when it put the text back into the message field); this is its English
+ * variant without the text put back, for any other client.
+ */
+// One literal, not joined: the web UI's wording test finds it verbatim in this file (ux U-150).
+export const MANDATE_KEY_INPUT_REFUSAL = 'Your input was not sent because it contains something that looks like a key, token or password. lynox does not take any in this chat. Only the owner of this instance stores keys, in a chat of their own; ask the owner to store it there. If it was not a key, send your input again without the part that looks like one.';
+
+/** Thrown where a mandate's typed answer reads as carrying a key; nothing of it was stored. */
+export class MandateKeyInputError extends Error {
+  constructor() { super(MANDATE_KEY_INPUT_REFUSAL); this.name = 'MandateKeyInputError'; }
+}
+
+/** The shapes that mark a credential by their context (a bearer header, user:pass in a URL). */
+const CONTEXT_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = SECRET_SHAPES
+  .filter((s) => s.kind === 'contextual')
+  .map((s) => ({ label: s.label, pattern: s.pattern as RegExp }));
+
+/** A word a person writes before a credential's value, German or English. */
+const CREDENTIAL_CUE = /(?<![\p{L}\p{N}])(?:api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret|secret|token|key|schlüssel|passwor[dt]|kennwort|zugangsdaten|credentials?)(?![\p{L}\p{N}])/giu;
+const PASSWORD_CUE = /^(?:passwor[dt]|kennwort)$/i;
+const PASSWORD_LINK = /^(?:ist|lautet|heisst|heißt|is|lautet:|=)$/i;
+
+function entropyBits(s: string): number {
+  const freq = new Map<string, number>();
+  for (const ch of s) freq.set(ch, (freq.get(ch) ?? 0) + 1);
+  let bits = 0;
+  for (const n of freq.values()) { const p = n / s.length; bits -= p * Math.log2(p); }
+  return bits;
+}
+
+function charClasses(s: string): number {
+  return [/[A-Z]/, /[a-z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(s)).length;
+}
+
+/** A vault or env name (`SHOPIFY_ADMIN_TOKEN`) or a link names a credential; it is not one. */
+function isNameOrLink(tok: string): boolean {
+  return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok);
+}
+
+/**
+ * Whether a word is shaped like a credential's value: long enough, letters and digits, spread.
+ * After a password cue a shorter word counts, if it mixes three character classes.
+ */
+function valueShaped(tok: string, afterPasswordCue: boolean): boolean {
+  if (isNameOrLink(tok)) return false;
+  if (afterPasswordCue && tok.length >= 8 && charClasses(tok) >= 3) return true;
+  return tok.length >= 16 && /[A-Za-z]/.test(tok) && /[0-9]/.test(tok) && entropyBits(tok) >= 3.3;
+}
+
+/**
+ * Why a message a mandate's helper typed reads as carrying a credential, or `null` when it does
+ * not. Wider than `maskCredentialInput`, which
+ * the run route applies to every message: in a mandate's turn no key is taken at all, so a key
+ * without a vendor's prefix is caught as well, from its context. In order:
+ *   1. a vendor shape or a JWT (`maskCredentialInput`), a private key block;
+ *   2. a bearer header or user:pass in a URL;
+ *   3. a cue word (key, token, secret, Passwort …) followed, within the next four words of the
+ *      same line, by a value-shaped word;
+ *   4. a message that is one word (a code fence around it allowed), at least 20 characters, with
+ *      upper case, lower case and digits, and no link — a key pasted on its own.
+ * Not caught: a key without a vendor prefix and without a cue word, unless it is pasted alone with
+ * all three of upper case, lower case and digits (a bare hex key, a lower-case key such as
+ * HubSpot's or WooCommerce's, written alone, pass); a password without a cue word.
+ * Returns a fixed label, never any part of the text.
+ */
+export function mandateCredentialInput(text: string): string | null {
+  const shaped = maskCredentialInput(text).labels[0];
+  if (shaped !== undefined) return shaped;
+  for (const { label, pattern } of CONTEXT_SHAPES) if (pattern.test(text)) return label;
+  for (const cue of text.matchAll(CREDENTIAL_CUE)) {
+    const from = (cue.index ?? 0) + cue[0].length;
+    const lineEnd = text.indexOf('\n', from);
+    const words = text.slice(from, lineEnd < 0 ? undefined : lineEnd)
+      .split(/[\s"'`„“”]+/)
+      .map((w) => w.replace(/^[:=(<[]+|[.,;:!?)>\]]+$/g, ''))
+      .filter((w) => w.length > 0)
+      .slice(0, 4);
+    if (PASSWORD_CUE.test(cue[0])) {
+      // A password is short and word-like, so it counts only where it is plainly the value: the
+      // word right after the cue, or after one linking word ("Passwort ist …", "password: …").
+      const value = PASSWORD_LINK.test(words[0] ?? '') ? words[1] : words[0];
+      if (value !== undefined && valueShaped(value, true)) return 'password';
+      continue;
+    }
+    if (words.some((w) => valueShaped(w, false))) return 'credential after a cue word';
+  }
+  // A key pasted alone, a code fence around it allowed: one word of at least 20 characters with an
+  // unbroken letter-and-digit run of 16 or more that holds upper case, lower case and digits. A
+  // slug or an id joined from words (`S6-standing-practice`), a UUID or a hash has no such run. An
+  // integrity string (`sha512-…`) is not a key.
+  const lone = text.trim().replace(/^```[\w-]*\s*/, '').replace(/\s*```$/, '');
+  if (
+    !/\s/.test(lone) && lone.length >= 20 && !isNameOrLink(lone) && !/^sha(?:256|384|512)-/.test(lone)
+    && (lone.match(/[A-Za-z0-9]{16,}/g) ?? []).some((run) => /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run))
+  ) return 'credential on its own';
+  return null;
+}
+
+/**
  * Mask known SHAPES and known VALUES in one pass, over the ORIGINAL text.
  *
  * Running the two maskers in sequence is unsafe in BOTH orders, and that is
