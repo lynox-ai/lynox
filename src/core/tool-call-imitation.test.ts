@@ -152,6 +152,32 @@ describe('ToolCallImitationDetector', () => {
     expect(large / small).toBeGreaterThan(3.5);
     expect(large / small).toBeLessThan(4.5);
   });
+
+  it.each([['<tool_call>'], ['<|tool_calls_section_begin|>'], ['read_file(']])('reads one large piece of %s openers without a closer to the end, and the characters scanned grow linearly with its size', (opener) => {
+    const work = (n: number): number => {
+      const d = new ToolCallImitationDetector(TOOLS);
+      expect(d.push(opener.repeat(Math.ceil(n / opener.length)).slice(0, n))).toBeNull();
+      return d.charsExamined();
+    };
+    const small = work(100_000);
+    const large = work(400_000);
+    expect(small).toBeGreaterThanOrEqual(100_000);
+    // Four times the text, about four times the characters examined.
+    expect(large / small).toBeLessThan(6);
+  });
+
+  it('keeps only the runs that a later copy can still extend', () => {
+    const d = new ToolCallImitationDetector(TOOLS);
+    let text = '';
+    for (let i = 0; text.length < 1_000_000; i++) text += `read_file("f${i}")\n`;
+    let most = 0;
+    for (let o = 0; o < text.length; o += 7) {
+      expect(d.push(text.slice(o, o + 7))).toBeNull();
+      most = Math.max(most, d.trackedRuns());
+    }
+    expect(most).toBeGreaterThan(0);
+    expect(most).toBeLessThanOrEqual(300);
+  });
 });
 
 describe('ToolCallImitationDetector on templates, code and provider call formats', () => {
@@ -270,6 +296,16 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     const copy = `<tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}</tool_call>\n<tool_response>\n${'lorem ipsum '.repeat(35)}\n</tool_response>`;
     expect(run(Array.from({ length: 6 }, () => copy).join('\n'))?.toolName).toBe('read_file');
     expect(run(Array.from({ length: 6 }, () => copy).join('\n'), 1)?.toolName).toBe('read_file');
+  });
+
+  it('stops a call that comes back between other, different calls each time', () => {
+    const call = '<tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}</tool_call>';
+    let others = '';
+    for (let i = 0; others.length < 1800; i++) others += `\n<tool_call>{"name":"read_file","arguments":{"path":"n${i}.txt"}}</tool_call>`;
+    for (let lead = 0; lead <= 2000; lead += 100) {
+      const text = `${'~'.repeat(lead)}${call}${others}\n${call}${others}\n${call}\n`;
+      expect(run(text)?.signature).toBe(call);
+    }
   });
 
   it('stops two long calls that alternate', () => {

@@ -125,9 +125,11 @@ export class ToolCallImitationDetector {
   private jsonSpanEnd = 0;
   /** Per signature: copies in the current run, and where (in the whole reply) the last one ended. */
   private readonly runs = new Map<string, { count: number; end: number }>();
+  /** Position in the whole reply from which `runs` is next cleared of copies too far back. */
+  private nextPrune = MAX_COPY_GAP;
   private toolUseSeen = false;
-  /** Characters handled: the kept text on every push (a scan handles all of it), and each
-   *  bracket group walked. */
+  /** Characters handled: the kept text on every push (a scan handles all of it), each
+   *  bracket group walked, and the stretch each search for a closer or a line start reads. */
   private examined = 0;
 
   constructor(tools: readonly ImitationTool[]) {
@@ -140,6 +142,11 @@ export class ToolCallImitationDetector {
   /** How many characters the detector has read so far: what its cost grows with. */
   charsExamined(): number {
     return this.examined;
+  }
+
+  /** How many signatures the detector still keeps a run for. */
+  trackedRuns(): number {
+    return this.runs.size;
   }
 
   /** A real tool call has started in this reply. */
@@ -180,12 +187,25 @@ export class ToolCallImitationDetector {
       const prev = this.runs.get(signature);
       const count = prev !== undefined && this.base + at - prev.end <= r.gap ? prev.count + 1 : 1;
       this.runs.set(signature, { count, end: this.base + r.end });
+      this.prune();
       if (count >= TOOL_CALL_IMITATION_REPEATS && !this.toolUseSeen) {
         return { toolName: r.toolName, signature, count };
       }
     }
     this.keepPartialStart();
     return null;
+  }
+
+  /** Drops runs whose last copy ended more than MAX_COPY_GAP before `pos`: every later copy
+   *  starts at or after `pos`, so none of them can extend such a run. Done once per
+   *  MAX_COPY_GAP characters read, so the cost stays linear. */
+  private prune(): void {
+    const read = this.base + this.pos;
+    if (read < this.nextPrune) return;
+    this.nextPrune = read + MAX_COPY_GAP;
+    for (const [signature, run] of this.runs) {
+      if (read - run.end > MAX_COPY_GAP) this.runs.delete(signature);
+    }
   }
 
   /**
@@ -213,12 +233,13 @@ export class ToolCallImitationDetector {
       if (!mk.open.test(matched)) continue;
       const close = mk.close(matched);
       const from = at + matched.length;
-      let idx = this.buf.indexOf(close, from);
+      const limit = at + MAX_UNIT_CHARS;
+      // Only a closer that ends within the unit's limit counts, so only that stretch is read.
+      let idx = this.find(close, from, limit);
       if (close === '\n') {
-        const next = this.buf.indexOf(matched, from);
+        const next = this.find(matched, from, limit - close.length + matched.length);
         if (next >= 0 && (idx < 0 || next < idx)) idx = next;
       }
-      const limit = at + MAX_UNIT_CHARS;
       if (idx >= 0 && idx + close.length <= limit) {
         const end = close === '\n' ? idx : idx + close.length;
         return { kind: 'unit', end, toolName: this.markupTool(matched, from, idx), gap: MAX_COPY_GAP };
@@ -230,8 +251,10 @@ export class ToolCallImitationDetector {
     const name = matched.slice(0, matched.length - 1).replace(/\[ARGS\]$/, '').trimEnd();
     // A definition of a function with the tool's name, or a method of another object, is
     // code, not a call of the tool.
-    const lineStart = this.buf.lastIndexOf('\n', at - 1) + 1;
-    const before = this.buf.slice(Math.max(lineStart, at - LOOK_BACK), at);
+    const back = Math.max(0, at - LOOK_BACK);
+    const span = this.buf.slice(back, at);
+    this.examined += span.length;
+    const before = span.slice(span.lastIndexOf('\n') + 1);
     if (DEFINITION_BEFORE.test(before)) return { kind: 'none' };
     const member = MEMBER_BEFORE.exec(before);
     if (member !== null && !TOOL_NAMESPACES.has(member[1]!)) return { kind: 'none' };
@@ -300,6 +323,14 @@ export class ToolCallImitationDetector {
       if (typeof v === 'string' && this.tools.has(v)) return v;
     }
     return undefined;
+  }
+
+  /** First index of `s` in `buf` that starts at or after `from` and ends by `end`, or -1. */
+  private find(s: string, from: number, end: number): number {
+    const span = this.buf.slice(from, end);
+    this.examined += span.length;
+    const i = span.indexOf(s);
+    return i < 0 ? -1 : from + i;
   }
 
   /** The tool a markup unit names, when one of the sent tools appears in it. */
