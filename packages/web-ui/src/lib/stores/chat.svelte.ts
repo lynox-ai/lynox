@@ -926,13 +926,22 @@ const LLM_FIELDS: readonly unknown[] = ['gcp_project_id', 'api_base_url', 'model
 
 /** The server's refusal of a message or an answer that read as carrying a key in a mandate's
  *  chat (422, code `mandate_key_input`). */
-/** Remove a refused message from this browser's saved copy of `threadId`: its bubble and any queued
- *  entry with its text. */
+/** Remove a refused message from this browser's saved copy of `threadId`: its bubble (the last one
+ *  with its text, so an earlier message with the same text stays), the empty reply saved after it,
+ *  and any queued entry with its text. */
 function dropFromSavedThread(threadId: string, content: string, task: string): void {
 	if (typeof localStorage === 'undefined') return;
 	const root = readPersistedRoot();
 	const saved = root.threads[threadId];
-	if (saved) root.threads[threadId] = saved.filter((m) => !(m.role === 'user' && m.content === content));
+	if (saved) {
+		let i = -1;
+		for (let j = saved.length - 1; j >= 0; j--) if (saved[j]!.role === 'user' && saved[j]!.content === content) { i = j; break; }
+		if (i >= 0) {
+			const next = saved[i + 1];
+			const emptyReply = next !== undefined && next.role === 'assistant' && !next.content && !next.blocks?.length && !next.toolCalls?.length;
+			saved.splice(i, emptyReply ? 2 : 1);
+		}
+	}
 	const queued = root.queues?.[threadId];
 	if (queued) {
 		const left = queued.filter((q) => q.task !== task);

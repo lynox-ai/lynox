@@ -375,12 +375,10 @@ const CONTEXT_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: 
 
 /** A word a person writes before a credential's value, German or English. */
 const CREDENTIAL_CUE = /(?<![\p{L}\p{N}])(?:api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret|secret|token|key|schlüssel|passwor[dt]|kennwort|zugangsdaten|credentials?)(?![\p{L}\p{N}])/giu;
-/** Short password cues count only with a colon or an equals sign after them ("PW: …"). */
-const SHORT_PASSWORD_CUE = /(?<![\p{L}\p{N}])(?:pw|pwd|passwd)\s*[:=]/giu;
-const PASSWORD_CUE = /^(?:passwor[dt]|kennwort|pw|pwd|passwd)/i;
+const PASSWORD_CUE = /^(?:passwor[dt]|kennwort)$/i;
 const PASSWORD_LINK = /^(?:ist|lautet|heisst|heißt|is|=)$/i;
-/** How many words after a cue are read: on the cue's own line, or on the next line when the cue
- *  ends its line ("Der Key:\n<key>"). */
+/** How many words after a cue are read: on the cue's own line, or on the next line when a colon
+ *  or an equals sign ends the cue's line ("Der Key:\n<key>"). */
 const CUE_WINDOW = 4;
 
 /**
@@ -439,17 +437,17 @@ function passwordShaped(tok: string): boolean {
 }
 
 /**
- * The words after `from`, at most `CUE_WINDOW`, quotes and leading and trailing punctuation
- * stripped: those on the same line, or, when nothing but a colon or an equals sign follows the cue
- * on its line, those on the next line that holds any.
+ * The words after `from`, at most `CUE_WINDOW`, quotes, markdown emphasis and leading and trailing
+ * punctuation stripped: those on the same line, or, when a colon or an equals sign and nothing
+ * else follows the cue on its line, those on the next line that holds any.
  */
 function wordsAfter(text: string, from: number): string[] {
   const rest = text.slice(from);
   const lines = rest.split('\n');
   const own = lines[0]!;
-  const line = /^[\s:=]*$/.test(own) ? (lines.slice(1).find((l) => l.trim().length > 0) ?? '') : own;
+  const line = /^[*_\s]*[:=][*_\s]*$/.test(own) ? (lines.slice(1).find((l) => l.trim().length > 0) ?? '') : own;
   return line.split(/[\s"'`„“”]+/)
-    .map((w) => w.replace(/^[:=(<[]+|[.,;:!?)>\]]+$/g, ''))
+    .map((w) => w.replace(/^[*_:=(<[]+|[*_.,;:!?)>\]]+$/g, ''))
     .filter((w) => w.length > 0)
     .slice(0, CUE_WINDOW);
 }
@@ -463,10 +461,9 @@ function wordsAfter(text: string, from: number): string[] {
  *      shapes in `MANDATE_EXTRA_SHAPES`;
  *   2. a bearer header or user:pass in a URL;
  *   3. a cue word (key, token, secret …) followed, within the next four words on its line (or on
- *      the next line, when the cue ends its line), by a key-shaped word; a password cue (Passwort,
- *      Kennwort, password, or "PW:") followed by a password-shaped word that is the next word or
- *      comes after one linking word. A cue joined to a word by a hyphen ("Passwort-Manager",
- *      "Key-Account") is that word, not a cue;
+ *      the next line, when a colon ends the cue's line), by a key-shaped word; a password cue
+ *      (Passwort, Kennwort, password) followed by a password- or key-shaped word that is the next
+ *      word or comes after one linking word;
  *   4. a message that is one word (a code fence around it allowed), at least 20 characters, with an
  *      unbroken letter-and-digit run of 16 or more holding upper case, lower case and digits that
  *      change class as often as a random key does, and that is not a Stripe object's id — a key
@@ -478,16 +475,13 @@ export function mandateCredentialInput(text: string): string | null {
   const shaped = maskCredentialInput(text).labels[0];
   if (shaped !== undefined) return shaped;
   for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
-  const cues = [...text.matchAll(CREDENTIAL_CUE), ...text.matchAll(SHORT_PASSWORD_CUE)];
-  for (const cue of cues) {
-    const end = (cue.index ?? 0) + cue[0].length;
-    if (text[end] === '-') continue;
-    const words = wordsAfter(text, end);
+  for (const cue of text.matchAll(CREDENTIAL_CUE)) {
+    const words = wordsAfter(text, (cue.index ?? 0) + cue[0].length);
     if (PASSWORD_CUE.test(cue[0])) {
       // A password is short and word-like: it counts only where it is plainly the value (the next
       // word, or after one linking word).
       const plain = PASSWORD_LINK.test(words[0] ?? '') ? words[1] : words[0];
-      if (plain !== undefined && passwordShaped(plain)) return 'password';
+      if (plain !== undefined && (passwordShaped(plain) || keyShaped(plain))) return 'password';
       continue;
     }
     if (words.some(keyShaped)) return 'credential after a cue word';

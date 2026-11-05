@@ -62,8 +62,15 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput('The password is Tr0ub4dor&3x')).toBe('password');
     expect(mandateCredentialInput('Passwort: P@ssw0rd2025')).toBe('password');
     expect(mandateCredentialInput('Das Kennwort ist M@rkt2025')).toBe('password');
-    expect(mandateCredentialInput('PW: Wald#Haus77')).toBe('password');
-    expect(mandateCredentialInput('pwd= Wald#Haus77')).toBe('password');
+    expect(mandateCredentialInput('**Passwort:** Sommer2025!')).toBe('password');
+    expect(mandateCredentialInput(`Kennwort: ${rnd(20, 'abcdefghijklmnopqrstuvwxyz0123456789')}`)).toBe('password');
+  });
+
+  it('rule 3: a cue joined to the next word by a hyphen still counts', () => {
+    const key = mixed(32);
+    expect(mandateCredentialInput(`Der Token-Wert: ${key}`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Schlüssel-Wert: ${key}`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Mailgun key-${rnd(32, HEX)}`)).toBe('credential after a cue word');
   });
 
   it('rule 4: a key pasted on its own, a code fence around it allowed', () => {
@@ -152,8 +159,11 @@ describe('mandateCredentialInput', () => {
     'pass: 2x Kurs Yoga-Basic1 am Mo!',
     'Login: siehe Doku, Version v2.3.1-beta',
     'Login: 2026-11-05T14:30!',
-    'Wir nutzen einen Passwort-Manager für das Team.',
-    'Kennwort-Richtlinie: min. 8 Zeichen, z.B. A1b2!',
+    'Wie erneuere ich den Token\nBestellung ORD-2024-Kx7Qm2Lp9R',
+    'Bitte prüf den Key\nCommit 3f9a1c2e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39',
+    'PW: BMW-X5-2024, LKW: keiner',
+    'Fahrzeug PW: VW-Golf-2019',
+    'pwd: /home/Shop-2024',
   ];
   it.each(ORDINARY)('passes an ordinary message: %s', (text) => {
     expect(mandateCredentialInput(text)).toBeNull();
