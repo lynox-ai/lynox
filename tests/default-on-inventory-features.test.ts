@@ -87,7 +87,8 @@ describe('default-on-inventory reads the feature flags\' defaults', () => {
     ['an unquoted key', block('  onFlag: true,\n'), UNREADABLE],
     ['a spread', block("  ...OTHER_DEFAULTS,\n  'off-flag': false,\n"), UNREADABLE],
     ['an empty table', block(''), UNREADABLE],
-    ['a block comment in front of an entry', block("  /* on */ 'on-flag': true,\n"), UNREADABLE],
+    // With a plain entry beside it, so the line itself decides (not an otherwise empty table).
+    ['a block comment in front of an entry', block("  'off-flag': false,\n  /* on */ 'on-flag': true,\n"), UNREADABLE],
     ['no table at all', 'export const nothing = 1;\n', NAMED],
     ['a write to the table after its declaration', block("  'on-flag': false,\n", "CORE_FEATURE_DEFAULTS['on-flag'] = true;\n"), NAMED],
     ['a write to the table in place of the read', `const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {\n  'on-flag': false,\n};\nCORE_FEATURE_DEFAULTS['on-flag'] = true;\n`, NAMED],
