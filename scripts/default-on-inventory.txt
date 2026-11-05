@@ -6,5 +6,6 @@ changeset_review
 feature:api-cost-display
 feature:api-setup-v2
 feature:flat-file-memory
+feature:inbox-user-rules
 feature:plugins
 http_html_extract
