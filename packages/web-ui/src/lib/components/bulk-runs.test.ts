@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
-	type BulkI18n, type BulkRunDetailData,
+	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
@@ -242,7 +242,7 @@ describe('the approved unchecked-change texts', () => {
 // site that forgets it fails here. Engine-authored text (halt reasons, the host from a parsed URL,
 // catalog labels) is not in the list.
 describe('the bulk pages show supplied text only through bulkVisibleText', () => {
-	const SUPPLIED = /target\.key|target\.error|target\.sentUnchanged|\bf\.field\b|\bline\b|\bfield\b|\bc\.key\b|run\.probe\.key|run\.probe\.fields|run\.listFirstPage|run\.listFilters|run\.judgeRule\.rule|merge\.dupName|merge\.canonicalName/g;
+	const SUPPLIED = /target\.key|target\.error|target\.sentUnchanged|\bf\.field\b|\bline\b|markupLine\.code|\bfield\b|\bc\.key\b|run\.probe\.key|run\.probe\.fields|run\.listFirstPage|run\.listFilters|run\.judgeRule\.rule|merge\.dupName|merge\.canonicalName/g;
 	const unwrapped = (svelte: string): string[] => {
 		const markup = svelte.split('</script>').slice(1).join('</script>');
 		// Every top-level {…} of the markup, braces counted, so an object literal inside a call
@@ -1128,5 +1128,80 @@ describe('bulkSeoEntityCount', () => {
 			{ seoEntityFields: [], deselected: false },
 			{ deselected: false },
 		])).toBe(2);
+	});
+});
+
+// The markup a target's new value adds and removes in an HTML field, as the approval view lists it
+// (1010, ux U-151 and U-092). Read from the i18n source, both languages, word for word.
+describe('the markup list of a target (1010)', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!.replace(/\\'/g, "'"); en[m[1]!] = m[3]!.replace(/\\'/g, "'"); }
+	}
+	const from = (table: Record<string, string>): BulkI18n => ({
+		t: (k) => table[k] ?? k,
+		tf: (k, vars) => Object.entries(vars).reduce((s, [name, v]) => s.split(`{${name}}`).join(v), table[k] ?? k),
+	});
+	const DE = from(de);
+	const EN = from(en);
+	const link: BulkMarkupItem = { kind: 'element', namespace: 'html', element: 'a', attributes: [['href', 'https://partner.example/p?q=1&r=2']], text: null, inTemplate: false };
+	const image: BulkMarkupItem = { kind: 'element', namespace: 'html', element: 'img', attributes: [['src', '/a.jpg'], ['alt', 'Rot']], text: null, inTemplate: false };
+	const script: BulkMarkupItem = { kind: 'element', namespace: 'html', element: 'script', attributes: [], text: 'steal()', inTemplate: false };
+	const comment: BulkMarkupItem = { kind: 'comment', namespace: '', element: '', attributes: [], text: ' c ', inTemplate: false };
+	const templated: BulkMarkupItem = { kind: 'element', namespace: 'html', element: 'p', attributes: [], text: null, inTemplate: true };
+
+	it('sets an item as code text with every attribute whole', () => {
+		expect(bulkMarkupItemText(link)).toBe('<a href="https://partner.example/p?q=1&r=2">');
+		expect(bulkMarkupItemText(image)).toBe('<img src="/a.jpg" alt="Rot">');
+		expect(bulkMarkupItemText(script)).toBe('<script>steal()</script>');
+		expect(bulkMarkupItemText(comment)).toBe('<!-- c -->');
+		// A quote in a value cannot close it and seem to set a second attribute.
+		expect(bulkMarkupItemText({ ...link, attributes: [['title', '" href="https://shop.example/'], ['href', 'https://evil.example/']] }))
+			.toBe('<a title="&quot; href=&quot;https://shop.example/" href="https://evil.example/">');
+		// An element outside HTML carries its namespace: an SVG link does not read as an HTML one.
+		expect(bulkMarkupItemText({ ...link, namespace: 'svg' })).toBe('<svg:a href="https://partner.example/p?q=1&r=2">');
+		expect(bulkMarkupItemText({ ...script, namespace: 'svg' })).toBe('<svg:script>steal()</svg:script>');
+		// A hidden character in a value shows as its mark, never as nothing.
+		expect(bulkMarkupItemText({ ...link, attributes: [['href', 'https://a.example/​']] })).toBe(`<a href="https://a.example/${bulkVisibleText('​')}">`);
+	});
+
+	it('lists a write under a head naming the field, added and removed, and says plain formatting is left out', () => {
+		const list = bulkMarkupList({ field: 'description', added: [link, templated], removed: [image], addsOutsideAllowlist: true }, false, 'Beschreibung', DE);
+		expect(list.head).toBe('Geändertes Markup in Beschreibung:');
+		expect(list.restoresNote).toBeNull();
+		expect(list.lines).toEqual([
+			{ label: 'neu:', code: '<a href="https://partner.example/p?q=1&r=2">', template: null },
+			{ label: 'neu:', code: '<p>', template: '(in einem <template>-Block)' },
+			{ label: 'entfernt:', code: '<img src="/a.jpg" alt="Rot">', template: null },
+		]);
+		expect(list.note).toBe('Einfache Formatierung wie Absätze, Fettschrift oder Listen ist nicht aufgeführt.');
+		const en = bulkMarkupList({ field: 'description', added: [templated], removed: [image] }, false, 'Description', EN);
+		expect([en.head, en.lines.map((l) => [l.label, l.template]), en.note]).toEqual([
+			'Markup that changes in Description:', [['added:', '(inside a <template> block)'], ['removed:', null]],
+			'Plain formatting such as paragraphs, bold text or lists is not listed.',
+		]);
+	});
+
+	it('lists an undo without a head, as what it restores and takes out', () => {
+		const de = bulkMarkupList({ field: 'description', added: [link], removed: [image], addsOutsideAllowlist: false }, true, 'Beschreibung', DE);
+		expect([de.head, de.restoresNote, de.lines.map((l) => l.label), de.note]).toEqual([
+			null, null, ['Stellt wieder her:', 'Nimmt wieder heraus:'], 'Einfache Formatierung wie Absätze, Fettschrift oder Listen ist nicht aufgeführt.',
+		]);
+		expect(bulkMarkupList({ field: 'd', added: [link], removed: [image] }, true, 'd', EN).lines.map((l) => l.label)).toEqual(['Restores:', 'Takes out again:']);
+	});
+
+	it('says an undo writes back markup from before the run only where it lies outside the allowlist, in a mandate\'s words in a mandate', () => {
+		const change = { field: 'description', added: [script], removed: [], addsOutsideAllowlist: true };
+		expect(bulkMarkupList(change, true, 'Beschreibung', DE).restoresNote).toBe('Dieses Markup war vor dem Lauf schon in deinem Shop. Die Rücknahme schreibt es wieder hinein, auch ein Skript.');
+		expect(bulkMarkupList(change, true, 'Description', EN).restoresNote).toBe('This markup was in your shop before the run. The undo writes it back, a script included.');
+		expect(bulkMarkupList(change, true, 'Beschreibung', bulkMandateI18n(DE)).restoresNote).toBe('Dieses Markup war vor dem Lauf schon im Shop. Die Rücknahme schreibt es wieder hinein, auch ein Skript.');
+		expect(bulkMarkupList(change, true, 'Description', bulkMandateI18n(EN)).restoresNote).toBe('This markup was in the shop before the run. The undo writes it back, a script included.');
+		// Twins: within the allowlist, and on a write, no such sentence.
+		expect(bulkMarkupList({ ...change, addsOutsideAllowlist: false }, true, 'd', DE).restoresNote).toBeNull();
+		expect(bulkMarkupList(change, false, 'd', DE).restoresNote).toBeNull();
 	});
 });

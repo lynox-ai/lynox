@@ -293,6 +293,133 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     expect([shown.error, shown.refusedValues]).toEqual(['new_link_domain', undefined]);
   });
 
+  describe('the domain of a refused link (1010)', () => {
+    const linked = (href: string): Record<string, unknown> => ({ ...before, short_description: `<p>neu <a href="${href}">x</a></p>` });
+    const shownOf = (r: { id: string; seq: number }) => ledger.getPreview(r.id).find((p) => p.seq === r.seq)!;
+    const aws = (t: string): string | null => (/AKIA[A-Z0-9]{16}/.test(t) ? 'aws' : null);
+
+    it('names the domain the judge\'s link points to', async () => {
+      const shown = shownOf(await judge(linked('https://evil.example/x')));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', 'evil.example']);
+    });
+
+    it('names an internationalised domain in Punycode as it is written', async () => {
+      expect(shownOf(await judge(linked('https://xn--pple-43d.example/'))).linkDomain).toBe('xn--pple-43d.example');
+    });
+
+    it('keeps no domain the value spells only in Unicode or percent-encoded: its decoded form was never scanned as written', async () => {
+      // A Cyrillic а before „pple“: `new URL` reads it as xn--pple-43d.example, which the value does not spell.
+      expect(shownOf(await judge(linked('https://\u0430pple.example/'))).linkDomain).toBeUndefined();
+    });
+
+    it('keeps no domain the value spells only percent-encoded', async () => {
+      const shown = shownOf(await judge(linked('https://ev%69l.example/x')));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('names a domain the value spells in another case, as the check read it (twin)', async () => {
+      expect(shownOf(await judge(linked('https://Evil.Example/x'), { scanSecret: aws })).linkDomain).toBe('evil.example');
+    });
+
+    it('keeps no domain whose spelling holds a credential that lower case would hide', async () => {
+      // An AWS key is upper case; the host as `new URL` reads it is not, and passes the same scanner.
+      expect(aws('akiaiosfodnn7example.evil.example')).toBeNull();
+      // Built at run time, so no key-shaped literal sits in the source.
+      const key = `AKIA${'IOSFODNN7EXAMPLE'}`;
+      const shown = shownOf(await judge(linked(`https://${key}.evil.example/`), { scanSecret: aws }));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('keeps no domain that holds a credential only once lower case, as the check read it', async () => {
+      // The judge's fake scanner knows the shape in lower case only; the value spells it in upper case.
+      expect(['SK-LIVE-abc.evil.example'].some((t) => t.includes('sk-live-'))).toBe(false);
+      const shown = shownOf(await judge(linked('https://SK-LIVE-abc.evil.example/x')));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('reads the spelling from the link itself, never from the same host written elsewhere', async () => {
+      // The link spells the key percent-encoded, which no scanner sees as one; a lower-case copy of
+      // the host, in the text or in the link's own path, is not how the link spells it. Built at run time.
+      const encoded = `AKIA${'%49OSFODNN7EXAMPLE'}.evil.example`;
+      const decoy = 'akiaiosfodnn7example.evil.example';
+      const inText = shownOf(await judge({ ...before, short_description: `<p>siehe ${decoy} <a href="https://${encoded}/">x</a></p>` }, { scanSecret: aws }));
+      expect([inText.error, inText.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('reads no spelling from the link\'s own path', async () => {
+      const encoded = `AKIA${'%49OSFODNN7EXAMPLE'}.evil.example`;
+      const inPath = shownOf(await judge(linked(`https://${encoded}/akiaiosfodnn7example.evil.example`), { scanSecret: aws }));
+      expect([inPath.error, inPath.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('reads no spelling outside ASCII, though it folds to the domain', async () => {
+      // U+212A KELVIN SIGN lower-cases to `k`, and `new URL` maps it so: the domain is `akia…`,
+      // which neither the spelling nor the domain shows to an upper-case scanner.
+      const kelvin = `A\u212AIA${'IOSFODNN7EXAMPLE'}.evil.example`;
+      expect(new URL(`https://${kelvin}/`).hostname).toBe('akiaiosfodnn7example.evil.example');
+      const shown = shownOf(await judge(linked(`https://${kelvin}/`), { scanSecret: aws }));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('names the domain of a link with user info and a port, as the check read it (twin)', async () => {
+      expect(shownOf(await judge(linked('https://user@Evil.Example.:8080/x'), { scanSecret: aws })).linkDomain).toBe('evil.example');
+    });
+
+    it('keeps no domain whose spelling holds a vault value that lower case would hide', async () => {
+      const vault = (t: string): string => t.replaceAll('MyToken42', '***');
+      expect(vault('mytoken42.evil.example')).toBe('mytoken42.evil.example');
+      const shown = shownOf(await judge(linked('https://MyToken42.evil.example/'), { maskVault: vault }));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('keeps a long host whole, past the 200 characters a refusal\'s detail is cut at', async () => {
+      const host = `${Array.from({ length: 4 }, () => 'a'.repeat(60)).join('.')}.example`;
+      expect(host.length).toBeGreaterThan(200);
+      expect(shownOf(await judge(linked(`https://${host}/`))).linkDomain).toBe(host);
+    });
+
+    it('keeps no domain that holds a vault value', async () => {
+      const vaulted = shownOf(await judge(linked('https://evil.example/x'), { maskVault: (t) => t.replace('evil.example', '***') }));
+      expect([vaulted.error, vaulted.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('keeps no domain shaped like a credential', async () => {
+      const secret = shownOf(await judge(linked('https://sk-live-abc.evil.example/x')));
+      expect([secret.error, secret.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('stores a domain only with new_link_domain, whatever a caller hands in', () => {
+      const { id, seq } = listed({}, true, both);
+      expect(ledger.recordRead(id, seq, { before })).toBe(true);
+      expect(ledger.claimJudge(id, seq, 'tok', Date.now(), 60_000)).toBe(true);
+      expect(ledger.recordJudgement(id, seq, 'tok', { invalid: 'url_scheme', linkDomain: 'evil.example' })).toBe(true);
+      expect(shownOf({ id, seq })).toMatchObject({ error: 'url_scheme' });
+      expect(shownOf({ id, seq }).linkDomain).toBeUndefined();
+      // Not stored either: the column stays empty.
+      const cell = engineDb.getDb().prepare('SELECT link_domain FROM bulk_targets WHERE run_id = ? AND seq = ?').get(id, seq) as { link_domain: string | null };
+      expect(cell.link_domain).toBeNull();
+    });
+
+    it('stores a domain from a read only with new_link_domain, whatever a caller hands in', () => {
+      const { id, seq } = listed({ short_description: '<p>neu</p>' });
+      expect(ledger.recordRead(id, seq, { invalid: 'url_scheme', linkDomain: 'evil.example' })).toBe(true);
+      expect(shownOf({ id, seq })).toMatchObject({ error: 'url_scheme' });
+      const cell = engineDb.getDb().prepare('SELECT link_domain FROM bulk_targets WHERE run_id = ? AND seq = ?').get(id, seq) as { link_domain: string | null };
+      expect(cell.link_domain).toBeNull();
+    });
+
+    it('shows no stored domain once the target holds another reason, or none', async () => {
+      const r = await judge(linked('https://evil.example/x'));
+      expect(shownOf(r).linkDomain).toBe('evil.example');
+      // A resume clears a target's error and leaves its other cells (bulk-ledger resume, `SET
+      // error = NULL`); the domain of the old reason is then not shown with the new one.
+      for (const error of [null, 'read_failed']) {
+        engineDb.getDb().prepare('UPDATE bulk_targets SET error = ? WHERE run_id = ? AND seq = ?').run(error, r.id, r.seq);
+        expect(shownOf(r).linkDomain, String(error)).toBeUndefined();
+      }
+    });
+  });
+
   it('refuses a value for its link, script or hidden character before its shortcode, so none is offered to paste', () => {
     const sc = '[box a="1&2"]x[/box]';
     const at = (after: string): string => {

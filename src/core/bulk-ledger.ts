@@ -612,6 +612,9 @@ export interface PreviewTarget {
    *  and removes, each with its full value (PRD shopify-preset §20.2 item 5, M3). Computed here
    *  from the parser's tree, so the view shows it and computes nothing. */
   markupChanges?: FieldMarkupChange[] | undefined;
+  /** A target refused for `new_link_domain` (1010): the domain the refused link points to, as the
+   *  check read it (ASCII, lower case, Punycode). Absent on a row recorded before it was kept. */
+  linkDomain?: string | undefined;
   /** A target refused for `shortcode_changed` (1130): each HTML field the value changes and whose
    *  shortcode the check refuses (against its before-image where the row holds one; a planned
    *  target refused at its read holds none), with its whole value as the planner or the judge
@@ -1589,13 +1592,13 @@ export class BulkLedger {
       // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test.
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (applied_at IS NOT NULL AND found_unsent = 0 AND ${WRITING_SQL}) AS written, undone_at IS NOT NULL AS undone,
-         shop_added_markup, host_rewrote, context_secret_field
+         shop_added_markup, host_rewrote, context_secret_field, link_domain
        FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
       deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
-      context_secret_field: number | null;
+      context_secret_field: number | null; link_domain: string | null;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
@@ -1649,6 +1652,7 @@ export class BulkLedger {
         ...(r.host_rewrote === 1 ? { hostRewrote: true as const } : {}),
         ...(r.error === 'secret_in_context' && r.context_secret_field !== null && contextNames[r.context_secret_field] !== undefined
           ? { contextField: contextNames[r.context_secret_field]! } : {}),
+        ...(r.error === 'new_link_domain' && r.link_domain !== null ? { linkDomain: this.engineDb.dec(r.link_domain) } : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
@@ -2348,7 +2352,9 @@ export class BulkLedger {
       // Not a target that failed on what it would send (`secret`): that fails the same way every
       // time, so retrying it first would halt a small run again at the same place and the rest
       // would never be written. It stays failed; the resume carries on with the others.
-      db.prepare(`UPDATE bulk_targets SET error = NULL, claimed_at = NULL WHERE run_id = ? AND applied_at IS NULL AND error IS NOT NULL AND error != 'secret'`)
+      // Nor a target left out when it was planned (`invalid`): it is never written, so there is
+      // nothing to retry, and its error is the reason the run page shows for it.
+      db.prepare(`UPDATE bulk_targets SET error = NULL, claimed_at = NULL WHERE run_id = ? AND applied_at IS NULL AND error IS NOT NULL AND error != 'secret' AND change != 'invalid'`)
         .run(runId);
       triggerId = this.armTrigger(run, now);
       return true;
@@ -2695,7 +2701,9 @@ export class BulkLedger {
    * written twice.
    */
   recordRead(
-    runId: string, seq: number, read: { before: Record<string, unknown> } | { invalid: BulkInvalidReason },
+    runId: string, seq: number,
+    /** `linkDomain`: with `new_link_domain`, the domain the refused link points to (1010). */
+    read: { before: Record<string, unknown> } | { invalid: BulkInvalidReason; linkDomain?: string | undefined },
     /** The connection the before-image was read under; recorded with the image, never without it. */
     via: AttachedConnection | null = null,
     /** The after-state the read completed (a Shopify target's seo pair): stored with the image, in one transaction, and classified against. */
@@ -2711,8 +2719,8 @@ export class BulkLedger {
     const guard = `run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
       AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL)`;
     if ('invalid' in read) {
-      return db.prepare(`UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ? WHERE ${guard}`)
-        .run(read.invalid, runId, seq, runId).changes === 1;
+      return db.prepare(`UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, link_domain = ? WHERE ${guard}`)
+        .run(read.invalid, this.linkDomainCell(read.invalid, read.linkDomain), runId, seq, runId).changes === 1;
     }
     const row = db.prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { after_planned: string | null } | undefined;
     if (!row || row.after_planned === null) return false;
@@ -2824,6 +2832,12 @@ export class BulkLedger {
   startDomainsOf(runId: string): string[] {
     const run = this.runRow(runId);
     return run ? this.startDomainsOfRow(run) ?? [] : [];
+  }
+
+  /** The `link_domain` cell of a refused target: the domain, encrypted, only with `new_link_domain`
+   *  (sec-core 1010: another reason's detail is the model's raw value and stays out). */
+  private linkDomainCell(reason: BulkInvalidReason, domain: string | undefined): string | null {
+    return reason === 'new_link_domain' && domain !== undefined && domain !== '' ? this.engineDb.enc(domain) : null;
   }
 
   private startDomainsOfRow(row: Pick<RunRow, 'start_domains'>): string[] | null {
@@ -3049,8 +3063,9 @@ export class BulkLedger {
    */
   recordJudgement(
     runId: string, seq: number, token: string,
-    /** `contextField`: with `secret_in_context`, the index in the rule's `context` of the field that held it. */
-    verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown> | undefined; contextField?: number | undefined },
+    /** `contextField`: with `secret_in_context`, the index in the rule's `context` of the field that held it.
+     *  `linkDomain`: with `new_link_domain`, the domain the refused link points to (1010). */
+    verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown> | undefined; contextField?: number | undefined; linkDomain?: string | undefined },
     now: number = Date.now(),
   ): boolean {
     const db = this.engineDb.getDb();
@@ -3062,8 +3077,8 @@ export class BulkLedger {
         const kept = verdict.invalid === 'shortcode_changed' && verdict.refused !== undefined
           ? this.engineDb.enc(JSON.stringify(verdict.refused)) : null;
         return db.prepare(
-          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, after_planned = COALESCE(?, after_planned), context_secret_field = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-        ).run(verdict.invalid, kept, verdict.contextField ?? null, at, runId, seq, token, runId).changes === 1;
+          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, after_planned = COALESCE(?, after_planned), context_secret_field = ?, link_domain = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+        ).run(verdict.invalid, kept, verdict.contextField ?? null, this.linkDomainCell(verdict.invalid, verdict.linkDomain), at, runId, seq, token, runId).changes === 1;
       }
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;
