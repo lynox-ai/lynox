@@ -505,7 +505,7 @@ describe('WorkerLoop', () => {
     const prompt = String(vi.mocked(analysisSession.run).mock.calls[0]![0]);
     expect(prompt).toContain('You are monitoring https://x.test/ for changes');
     expect(prompt).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
-    // A later check gets the last summary back into its prompt, and the run before wrote it.
+    // A watch saved before the summary was kept with its hash reads the run's result back instead, cleaned.
     mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v2', { status: 200 }));
     await fire(makeTask({ id: 't-hid', source: 'watch', effect: 'run_agent', last_run_result: `Price was 10.${hidden}`, watch_config: JSON.stringify({ url: 'https://x.test/', interval_minutes: 60, last_hash: 'an-earlier-hash' }) }));
     const later = String(vi.mocked(analysisSession.run).mock.calls[1]![0]);
@@ -516,7 +516,9 @@ describe('WorkerLoop', () => {
 
   it('executeWatch hands the next change the summary of the last one, not what a check without a change recorded', async () => {
     vi.useRealTimers();
-    const analysisSession = { run: vi.fn().mockResolvedValue('Price is 12.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    // The page decides what the summary says, so it can carry characters that render as nothing.
+    const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const analysisSession = { run: vi.fn().mockResolvedValue(`Price is 12.${hidden}`), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
     const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn(), startEscalation: vi.fn(() => true), recordEscalationOutcome: vi.fn(() => true) } as unknown as TaskManager;
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
@@ -532,7 +534,7 @@ describe('WorkerLoop', () => {
     mockFetchPinned.mockResolvedValueOnce(new Response('PRICE 12', { status: 200 }));
     await fire(makeTask({ id: 't-sum', source: 'watch', effect: 'run_agent', last_run_result: 'Price is 10.', watch_config: JSON.stringify({ url: 'https://x.test/', interval_minutes: 60, last_hash: 'an-earlier-hash' }) }));
     const kept = vi.mocked(taskManager.updateWatchConfig).mock.calls[0]![1] as { last_hash: string; last_summary: string };
-    expect(kept.last_summary).toBe('Price is 12.');
+    expect(kept.last_summary).toBe(`Price is 12.${hidden}`);
     // A check that finds the same page records only that, and leaves the kept summary alone.
     mockFetchPinned.mockResolvedValueOnce(new Response('PRICE 12', { status: 200 }));
     await fire(makeTask({ id: 't-sum', source: 'watch', effect: 'run_agent', last_run_result: 'Price is 12.', watch_config: JSON.stringify(kept) }));
@@ -545,6 +547,12 @@ describe('WorkerLoop', () => {
     const later = String(vi.mocked(analysisSession.run).mock.calls[1]![0]);
     expect(later).toContain('Previous summary was: Price is 12.\n');
     expect(later).not.toContain('No changes detected');
+    expect(later).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    // A summary that is not text is not used: the run's result stands in, cut like any summary.
+    mockFetchPinned.mockResolvedValueOnce(new Response('PRICE 20', { status: 200 }));
+    await fire(makeTask({ id: 't-sum', source: 'watch', effect: 'run_agent', last_run_result: `Price is 15.${'x'.repeat(3000)}`, watch_config: JSON.stringify({ ...kept, last_summary: 15 }) }));
+    const third = String(vi.mocked(analysisSession.run).mock.calls[2]![0]);
+    expect(third).toContain(`Previous summary was: Price is 15.${'x'.repeat(2000 - 'Price is 15.'.length)}\n`);
   });
 
   it('executeWatch records on the trigger whether its finding reached anyone', async () => {

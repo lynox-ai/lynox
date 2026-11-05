@@ -3899,8 +3899,9 @@ export class WorkerLoop {
     // The summary of the last change, kept with the hash it belongs to. The run's result is
     // not it: a check that found nothing records "No changes detected" there, and a failed
     // fetch its error, and either would stand in for the summary at the next change. A watch
-    // saved before the summary was kept has none yet and reads the result once more.
-    const previousSummary = config.last_summary ?? task.last_run_result;
+    // saved before the summary was kept has none yet and reads the result once more, and so
+    // does a config whose summary is not text, so it cannot throw on every change.
+    const previousSummary = typeof config.last_summary === 'string' ? config.last_summary : task.last_run_result;
     const analysisPrompt = isFirstRun
       ? `You are monitoring ${stripHidden(config.url)} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
       : `You are monitoring ${stripHidden(config.url)} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${previousSummary ? stripHidden(previousSummary.slice(0, WATCH_SUMMARY_CHARS)) : 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
