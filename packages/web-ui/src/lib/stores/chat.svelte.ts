@@ -34,7 +34,6 @@ import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 import { containedTextKeys, readContainedUnknown, type ContainedUnknown } from './contained-text.js';
-import { stripNowMarker } from '../utils/now-marker.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
 // `import { UsageInfo } from './chat.svelte.js'` callers keep working.
@@ -708,7 +707,6 @@ if (typeof window !== 'undefined') {
 						let lastRole: string | undefined;
 						let activeRun: boolean | undefined;
 						let scheduledQuestion = false;
-						let lastUserText: string | undefined;
 						if (!probeSid) return;
 						try {
 							const ar = await fetch(`${getApiBase()}/runs/active`);
@@ -722,23 +720,22 @@ if (typeof window !== 'undefined') {
 							const enc = encodeURIComponent(probeSid);
 							const r = await fetch(`${getApiBase()}/threads/${enc}/messages`);
 							if (r.ok) {
-								const md = await r.json() as { messages?: Array<{ role?: string; content?: unknown }> };
+								const md = await r.json() as { messages?: Array<{ role?: string }> };
 								// Parsed shape, not just status — see the same guard on the
 								// drop path: a captive portal answers 200 with HTML.
 								if (Array.isArray(md.messages)) {
 									reached = true;
 									lastRole = md.messages.at(-1)?.role;
-									const lastUser = md.messages.filter((m) => m.role === 'user').at(-1)?.content;
-									if (typeof lastUser === 'string') lastUserText = stripNowMarker(lastUser);
 								}
 							}
 						} catch { /* still blind — shouldRefireOfflineTurn declines */ }
 						if (sessionId !== probeSid) return; // thread switched mid-probe
 						// A scheduled run's question waits here (U-155). A transcript ending on it reads as
-						// "answered", which cleared the failed message and lost it. Unless the transcript's
-						// last own message is this one (it arrived: then as before), it stays failed and
-						// marked offline, is not sent past the question, and the card comes back.
-						if (scheduledQuestion && lastUserText !== lastFailed.content) {
+						// "answered", which cleared the failed message and lost it. It stays failed and marked
+						// offline, is not sent past the question, and the card comes back. Whether it arrived
+						// meanwhile is not decided here: text equality cannot tell it from an earlier message
+						// with the same words, so a tap after the question is answered asks the server again.
+						if (scheduledQuestion) {
 							sayQuestionWaiting(await checkPendingPrompt());
 							return;
 						}
@@ -1350,16 +1347,9 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 		return false;
 	}
 	if (live === null) return true;
-	// A run that waits for the user's answer is not working: the way on is to answer it. The
-	// sentence follows the card, as for a scheduled run's question; with none known, the one
-	// that names no card.
-	if (live.status === 'awaiting_input') {
-		const card = await checkPendingPrompt();
-		if (sessionId !== sid) return false;
-		addToast(t(questionWaitingKey(card) ?? 'chat.question_waiting_plain'), 'info', 6000);
-	} else {
-		addToast(t('chat.still_running'), 'info', 6000);
-	}
+	// A run that waits for the user's answer is not working: the way on is to answer it. Its card
+	// comes with the attached stream, so the sentence names none (and no X): it is true for any.
+	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting_plain' : 'chat.still_running'), 'info', 6000);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
@@ -1371,8 +1361,8 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 /**
  * Says that a scheduled run's question holds a message back, by the card that came back (U-155).
  * A decision card (approval, deep consent) has no X to cancel it, so its sentence names none, nor
- * does another kind of card (several questions, a secret, a mail connection). With no card back,
- * nothing is said: a sentence about one could be false.
+ * does another kind of card that came back (several questions, a secret, a mail connection). With
+ * no card restored, nothing is said: a sentence about one could be false.
  */
 function sayQuestionWaiting(card: PendingCard): void {
 	const key = questionWaitingKey(card);
@@ -3013,6 +3003,7 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 				receivedAt: createdAt,
 				origin,
 			};
+			card = 'other';
 		} else if (promptType === 'ask_user') {
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
@@ -3036,6 +3027,7 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 				origin,
 			};
 			secretPromptGeneration++;
+			card = 'other';
 		} else if (promptType === 'connect_mail' && data['mailConnect']) {
 			const mc = data['mailConnect'] as Record<string, unknown>;
 			pendingMailConnect = {
@@ -3052,8 +3044,8 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 				origin,
 			};
 			mailConnectGeneration++;
+			card = 'other';
 		}
-		if (card === null) card = 'other';
 	} catch {
 		// Non-critical — prompt check failed, user can still interact normally
 	}

@@ -131,31 +131,23 @@ describe('the tap on a failed message', () => {
 		expect(toastKeys()).toEqual(['chat.question_waiting_plain']);
 	});
 
-	it('with the chat’s own run waiting on a decision: the decision sentence, not the X', async () => {
+	it('with the chat’s own run waiting on a decision: the sentence that names no card, so no X', async () => {
 		await questionWaits(DECISION);
 		active = { runs: [{ runId: 'own', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }] };
 		store.getMessages().push({ role: 'user', content: 'again', failed: true });
 		await store.retryFailedTurn(store.getMessages().at(-1)!, 'again');
 		await settle();
 		expect(runPosts()).toBe(1);
-		expect(toastKeys()).toEqual(['chat.question_waiting_decision']);
+		expect(toastKeys()).toEqual(['chat.question_waiting_plain']);
 	});
 
-	it('with the chat’s own run waiting: says nothing and attaches nothing in a chat opened meanwhile', async () => {
-		await questionWaits(DECISION);
-		active = { runs: [{ runId: 'own', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }] };
+	it('with a prompt whose card cannot be shown: not sent, and nothing is said', async () => {
+		await questionWaits({ pending: true, promptType: 'connect_mail', promptId: 'p4' });
 		store.getMessages().push({ role: 'user', content: 'again', failed: true });
-		let release!: () => void;
-		holdPending = new Promise((r) => { release = r; });
-		const tap = store.retryFailedTurn(store.getMessages().at(-1)!, 'again');
+		await store.retryFailedTurn(store.getMessages().at(-1)!, 'again');
 		await settle();
-		expect(calls.some((c) => c.endsWith('/pending-prompt')), 'positive control: the card is being fetched').toBe(true);
-		store.newChat();
-		release();
-		await tap;
-		await settle();
+		expect(runPosts()).toBe(1);
 		expect(toasts).toEqual([]);
-		expect(calls.some((c) => c.includes('/runs/own'))).toBe(false);
 	});
 
 	it('with no question card back: not sent, and nothing is said about a question', async () => {
@@ -218,22 +210,6 @@ describe('the reconnect after a turn failed offline', () => {
 		expect(failedOne('offline turn').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
 		expect(store.getPendingPermission()?.question).toBe('⚠ mail_send needs your OK');
 		expect(toastKeys()).toEqual(['chat.question_waiting_decision']);
-	});
-
-	it('with a question waiting but the message in the transcript: it arrived — cleared, not sent', async () => {
-		await questionWaits(DECISION);
-		threadMessages = { messages: [
-			{ role: 'user', content: '[Now: 2026-11-05T15:00:00.000Z]\n\nfirst' },
-			{ role: 'user', content: '[Now: 2026-11-05T15:01:00.000Z; user local 16:01 Europe/Zurich]\n\noffline turn' },
-			{ role: 'assistant', content: 'done' },
-		], activeRun: null };
-		store.getMessages().push({ role: 'user', content: 'offline turn', failed: true, failedOffline: true });
-		listeners.online!();
-		await new Promise((r) => setTimeout(r, 700));
-		await settle();
-		expect(runPosts()).toBe(1);
-		expect(store.getMessages().some((m) => m.content === 'offline turn' && m.failed === true)).toBe(false);
-		expect(toasts).toEqual([]);
 	});
 
 	it('with nothing waiting and the same transcript: cleared as answered, as before', async () => {
