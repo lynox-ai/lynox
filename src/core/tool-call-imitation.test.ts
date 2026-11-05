@@ -144,7 +144,8 @@ describe('ToolCallImitationDetector', () => {
     };
     const small = work(answer(100_000));
     const large = work(answer(400_000));
-    expect(small).toBeGreaterThan(100_000);
+    // Every character is handled at least once, prose included.
+    expect(work('Plain prose without any brackets at all. '.repeat(2_500))).toBeGreaterThanOrEqual(100_000);
     // Four times the text, about four times the characters examined. Re-reading the whole
     // reply on every delta made it about sixteen.
     expect(large / small).toBeGreaterThan(3.5);

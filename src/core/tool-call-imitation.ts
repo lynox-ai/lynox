@@ -121,7 +121,8 @@ export class ToolCallImitationDetector {
   /** Per signature: copies in the current run, and where (in the whole reply) the last one ended. */
   private readonly runs = new Map<string, { count: number; end: number }>();
   private toolUseSeen = false;
-  /** Characters read: the stretch each scan starts from, and each bracket group walked. */
+  /** Characters handled: the kept text on every push (a scan handles all of it), and each
+   *  bracket group walked. */
   private examined = 0;
 
   constructor(tools: readonly ImitationTool[]) {
@@ -153,7 +154,7 @@ export class ToolCallImitationDetector {
       this.pos -= cut;
     }
     this.buf += text;
-    this.examined += this.buf.length - this.pos;
+    this.examined += this.buf.length;
     const re = this.start;
     re.lastIndex = this.pos;
     let m: RegExpExecArray | null;
