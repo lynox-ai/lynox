@@ -380,8 +380,9 @@ function profilesOnHost(url: string, apiStore: NonNullable<ToolContext['apiStore
   return [...ids].map((id) => apiStore.get(id)).filter((p): p is ApiProfile => p !== undefined);
 }
 
-/** Query keys a GraphQL server reads a document, its variables or a stored document from. */
-const GRAPHQL_QUERY_KEYS = new Set(['query', 'operationname', 'variables', 'extensions', 'graphql', 'documentid', 'doc_id', 'queryid']);
+/** Query keys a GraphQL server reads a document, its variables, its operation or a stored document
+ *  from (Relay and Hot Chocolate name a persisted operation `id`; Apollo's by `persistedQuery`). */
+const GRAPHQL_QUERY_KEYS = new Set(['query', 'operationname', 'operation_name', 'variables', 'extensions', 'graphql', 'id', 'documentid', 'doc_id', 'queryid', 'persistedquery', 'hash', 'sha256hash']);
 
 /**
  * Whether the query strings of a GraphQL write carry nothing but the credential an API profile
@@ -3627,7 +3628,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       contract !== undefined &&
       !outboundEffect &&
       !connectedAccount &&
-      named.every((m) => contractGrants('http_request', { ...input, method: m }, contract));
+      // The body as it is sent: the contract reads it (`bodyMayWriteGraphql`), and a repaired body
+      // can parse where the one the model wrote does not.
+      named.every((m) => contractGrants('http_request', { ...input, body: repairedBody?.body ?? input.body, method: m }, contract));
     // The one place where a grant lets an unattended write through, so the one place that
     // marks the call with it (`noteGrantLift`). A contract that names no accepted grant
     // (handed in through `AgentConfig` by an embedder or a test) leaves no mark: the write

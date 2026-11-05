@@ -1,5 +1,5 @@
 import { realpathSync, existsSync } from 'node:fs';
-import { bodyMayWriteGraphql, effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, isReadMethod } from '../core/outbound-write.js';
+import { bodyMayWriteGraphql, effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, isReadMethod, urlMayWriteGraphql } from '../core/outbound-write.js';
 import { isShopifyAdminHost } from '../core/shopify-host.js';
 import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyMediaListBody, shopifyTargetReadBody, shopifyWriteRequest, type ShopifyListFilters, type ShopifyWrite } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
@@ -788,6 +788,8 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   const sent = input as { body?: unknown; headers?: unknown };
   const sentHeaders = typeof sent.headers === 'object' && sent.headers !== null ? sent.headers as Record<string, string> : undefined;
   if (!isReadMethod(method) && bodyMayWriteGraphql(sent.body, sentHeaders)) return false;
+  // The same for the URL: some servers read `query` from it before the body.
+  if (!isReadMethod(method) && urlMayWriteGraphql(obj.url)) return false;
 
   let parsed: URL;
   try {

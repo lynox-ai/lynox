@@ -575,15 +575,53 @@ export function graphqlUrlWrites(url: string): boolean {
 }
 
 /**
- * A GraphQL operation that writes, read as its grammar has it: `mutation` or `subscription`, an
- * optional name, and then `(`, `{` or `@`, with blanks, commas, a byte-order mark and `#` comments
- * between them. Narrower than `GRAPHQL_WRITE_OPERATION`, so a REST body with the word in it
+ * Whether a text names a GraphQL operation that writes, read as its grammar has it: `mutation` or
+ * `subscription`, an optional name, and then `(`, `{` or `@`, with blanks, commas, a byte-order
+ * mark and `#` comments between them (blanks read as JavaScript's `\s`, wider than GraphQL's).
+ * Narrower than `GRAPHQL_WRITE_OPERATION`, so a REST body with the word in it
  * (`{"subscription":"premium"}`) is no hit; a miss of this one fails open, so it is used only where
- * the endpoint is not known to speak GraphQL. Comments are read in place, not stripped first: a
- * `#` inside a string (`query{a(s:"#")} mutation{b}`) would otherwise hide the mutation. Each
- * repetition has one way to match, so the time is linear in the text after the word.
+ * the endpoint is not known to speak GraphQL.
+ *
+ * Read from each occurrence of the word on its own, comments in place and not stripped first: a
+ * `#` inside a string (`query{a(s:"#")} mutation{b}`) would otherwise hide the mutation. A loop, not
+ * a pattern: a comment is skipped by a jump to the end of its line, so each run of ignored text is
+ * walked by at most the two words before it, and the time is linear in the text. (A pattern took
+ * quadratic time on `mutation#` repeated with no line break.)
  */
-const GRAPHQL_WRITE_FORM = /\b(?:mutation|subscription)\b(?:[\s,\uFEFF]|#[^\n\r]*[\n\r])*(?:[_A-Za-z]\w*(?:[\s,\uFEFF]|#[^\n\r]*[\n\r])*)?[({@]/i;
+export function namesGraphqlWrite(text: string): boolean {
+  let lineEnds: Int32Array | undefined;
+  const lineEnd = (from: number): number => {
+    if (lineEnds === undefined) {
+      lineEnds = new Int32Array(text.length + 1);
+      let next = text.length;
+      lineEnds[text.length] = next;
+      for (let i = text.length - 1; i >= 0; i--) {
+        if (text[i] === '\n' || text[i] === '\r') next = i;
+        lineEnds[i] = next;
+      }
+    }
+    return lineEnds[from]!;
+  };
+  const skipIgnored = (from: number): number => {
+    let i = from;
+    while (i < text.length) {
+      const c = text[i]!;
+      if (c === '#') i = lineEnd(i);
+      else if (/[\s,\uFEFF]/.test(c)) i++;
+      else break;
+    }
+    return i;
+  };
+  const keyword = /\b(?:mutation|subscription)\b/gi;
+  const name = /[_A-Za-z]\w*/y;
+  for (let m = keyword.exec(text); m !== null; m = keyword.exec(text)) {
+    let i = skipIgnored(m.index + m[0].length);
+    name.lastIndex = i;
+    if (name.exec(text) !== null) i = skipIgnored(name.lastIndex);
+    if (i < text.length && '({@'.includes(text[i]!)) return true;
+  }
+  return false;
+}
 
 /** Keys a persisted query names its stored document by; the server runs that document, which the request does not show. */
 const PERSISTED_QUERY_KEYS = new Set(['documentid', 'doc_id', 'queryid', 'persistedquery']);
@@ -591,12 +629,17 @@ const PERSISTED_QUERY_KEYS = new Set(['documentid', 'doc_id', 'queryid', 'persis
 /**
  * Whether a request body may carry a GraphQL write to an API whose URL does not say it speaks
  * GraphQL (`api.monday.com/v2`, `/api`, `/query`), read as such a server reads it:
- *  - a JSON body: the value of a `query` key at any depth (a batch included) that holds an
- *    operation that writes, a key that names a persisted query, or a key named twice in one object
+ *  - every body as form pairs (`queryReadings`, `queryKeyName`): a `query` that names a write, or a
+ *    key that names a persisted query. Whatever else the body parses as: a server that takes the
+ *    form media type reads `{"a":"&query=mutation{x}&"}` as a form;
+ *  - a body that parses as JSON: the value of a `query` key at any depth (a batch included) that
+ *    names a write, a key that names a persisted query, or a key named twice in one object
  *    (`jsonRepeatsAKey`: a server may keep the first). A `query` that is an object (a search API's)
  *    is no GraphQL document;
- *  - any other body: the same keys read as form pairs (`queryKeyName`), and the body as a whole as
- *    a document (`application/graphql`);
+ *  - a body that does not parse as JSON but may be read as JSON by a server more lenient than
+ *    `JSON.parse` (a byte-order mark before it, a value after it, a JSON media type): refused, as no
+ *    reading here can tell what that server runs;
+ *  - any other body as a whole, as a document (`application/graphql`);
  *  - a multipart body with an `operations` part, the GraphQL upload form, whose escapes no reading
  *    here undoes.
  * Other fields of a JSON body are not read: a description that says „Mutation (…)" is no request a
@@ -610,6 +653,13 @@ export function bodyMayWriteGraphql(body: unknown, headers: Readonly<Record<stri
   try {
     const contentType = Object.entries(headers ?? {}).filter(([name]) => name.trim().toLowerCase() === 'content-type').map(([, value]) => value).join(',');
     if (/multipart/i.test(contentType) && /\boperations\b/i.test(body)) return true;
+    for (const params of queryReadings(body)) {
+      for (const [key, value] of params) {
+        const name = queryKeyName(key);
+        if (PERSISTED_QUERY_KEYS.has(name)) return true;
+        if (name === 'query' && namesGraphqlWrite(value)) return true;
+      }
+    }
     let parsed: unknown;
     let json = true;
     try {
@@ -617,32 +667,41 @@ export function bodyMayWriteGraphql(body: unknown, headers: Readonly<Record<stri
     } catch {
       json = false;
     }
-    if (json) {
-      if (jsonRepeatsAKey(body)) return true;
-      // A loop, not a recursion: a deeply nested body costs no stack.
-      const pending: unknown[] = [parsed];
-      while (pending.length > 0) {
-        const node = pending.pop();
-        if (Array.isArray(node)) pending.push(...node);
-        else if (typeof node === 'object' && node !== null) {
-          for (const [key, value] of Object.entries(node)) {
-            const name = key.trim().toLowerCase();
-            if (PERSISTED_QUERY_KEYS.has(name)) return true;
-            if (name === 'query' && typeof value === 'string' && GRAPHQL_WRITE_FORM.test(value)) return true;
-            pending.push(value);
-          }
+    if (!json) return /json/i.test(contentType) || /^[\s\uFEFF]*[[{]/.test(body) || namesGraphqlWrite(body);
+    if (jsonRepeatsAKey(body)) return true;
+    // A loop, not a recursion: a deeply nested body costs no stack.
+    const pending: unknown[] = [parsed];
+    while (pending.length > 0) {
+      const node = pending.pop();
+      if (Array.isArray(node)) {
+        for (const item of node) pending.push(item);
+      } else if (typeof node === 'object' && node !== null) {
+        for (const [key, value] of Object.entries(node)) {
+          const name = key.trim().toLowerCase();
+          if (PERSISTED_QUERY_KEYS.has(name)) return true;
+          if (name === 'query' && typeof value === 'string' && namesGraphqlWrite(value)) return true;
+          pending.push(value);
         }
       }
-      return false;
     }
-    for (const params of queryReadings(body)) {
-      for (const [key, value] of params) {
-        const name = queryKeyName(key);
-        if (PERSISTED_QUERY_KEYS.has(name)) return true;
-        if (name === 'query' && GRAPHQL_WRITE_FORM.test(value)) return true;
-      }
-    }
-    return GRAPHQL_WRITE_FORM.test(body);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether a URL's query strings carry what a GraphQL server on any path may run: a `query` that
+ * names a write, or a key that names a persisted query, read every way a server may
+ * (`urlQueryStrings`, `queryReadings`, `queryKeyName`). Some servers read `query` from the URL
+ * before the body (express-graphql, graphene-django). For grants, as `bodyMayWriteGraphql`.
+ */
+export function urlMayWriteGraphql(url: string): boolean {
+  try {
+    return urlQueryStrings(url).some((search) => queryReadings(search).some((params) => [...params].some(([key, value]) => {
+      const name = queryKeyName(key);
+      return PERSISTED_QUERY_KEYS.has(name) || (name === 'query' && namesGraphqlWrite(value));
+    })));
   } catch {
     return true;
   }

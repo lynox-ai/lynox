@@ -4017,6 +4017,13 @@ describe('contractGrants on a GraphQL API whose URL does not say so', () => {
     expect(grants(JSON.stringify({ documentId: 'abc' }))).toBe(false);
   });
 
+  it('grants no write whose URL carries a mutation, whatever the body; CONTROL: a GET with one is not read here', () => {
+    const at = (method: string, url: string): boolean => contractGrants('http_request', { method, url, headers: JSON_CT, body: method === 'GET' ? undefined : '{}' }, contract() as never);
+    expect(at('POST', 'https://api.monday.com/v2?query=mutation%7Bx%7D')).toBe(false);
+    expect(at('POST', 'https://api.monday.com/v2?q=x')).toBe(true);
+    expect(at('GET', 'https://api.monday.com/v2?query=mutation%7Bx%7D')).toBe(true);
+  });
+
   it('CONTROL: grants a read there, and a REST POST whose data names a subscription under a reviewed contract', () => {
     expect(grants(JSON.stringify({ query: '{ boards { id } }' }))).toBe(true);
     expect(grants('{"subscription":"premium"}', 'reviewed')).toBe(true);

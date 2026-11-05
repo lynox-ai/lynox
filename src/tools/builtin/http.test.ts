@@ -6354,7 +6354,7 @@ describe('httpRequestTool', () => {
       });
 
       it('CONTROL: refuses a profile that declares a parameter a GraphQL server reads a document from, and a host whose profile sends a header', async () => {
-        for (const auth of [{ type: 'query', query_param: 'query', vault_keys: ['CF_TOKEN'] }, { type: 'bearer', vault_keys: ['CF_TOKEN'] }]) {
+        for (const auth of [{ type: 'query', query_param: 'query', vault_keys: ['CF_TOKEN'] }, { type: 'query', query_param: 'id', vault_keys: ['CF_TOKEN'] }, { type: 'bearer', vault_keys: ['CF_TOKEN'] }]) {
           const store = await storeFor('graphql.contentful.example', auth);
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
           vi.stubGlobal('fetch', fetchMock);
@@ -6362,7 +6362,7 @@ describe('httpRequestTool', () => {
           // The bearer profile sends `key`, the name a query profile that names none would take.
           const param = auth.query_param ?? 'key';
           const out = await visible({ url: `${GQL}?${param}=t`, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: doc('{ a }') }, agent);
-          expect(out, auth.type).toContain('is a GraphQL write with a query string');
+          expect(out, `${auth.type} ${param}`).toContain('is a GraphQL write with a query string');
           expect(fetchMock).not.toHaveBeenCalled();
         }
       });
