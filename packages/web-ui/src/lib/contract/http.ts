@@ -952,10 +952,10 @@ export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
  *
  * Next to the start token, not inside it. Signing it would protect nothing: the address
  * comes from no authenticated source, and the engine that mints the token would sign
- * whatever address it was given. What a start is safe on is the token, which binds it to
- * the instance whose owner asked for it, and the sign-in at Microsoft, which decides whose
- * mailbox is connected. The address names neither. The control plane's start route owes
- * the following:
+ * whatever address it was given. What a start rests on is the token, which ties it to the
+ * instance whose owner asked for it (not to a browser), and the sign-in at Microsoft, which
+ * decides whose mailbox is connected. The address names neither. The control plane's start
+ * route owes the following:
  *
  *  1. **A hint only.** The connected identity and its `tid` come from the token exchange
  *     alone (id_token, Graph `/me`). Nothing read from this parameter is stored, and it
@@ -965,14 +965,16 @@ export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
  *     address names a different tenant to compare with. A test signs in as someone other
  *     than the address names and finds only the signed-in identity stored. A plan that
  *     would store the address reopens the question of signing it.
- *  2. **Checked before it is used.** At most 254 characters, exactly one `@`, a domain of
- *     letters, digits and hyphens with at least one dot. `common`, `organizations` and
+ *  2. **Checked before it is used.** At most 254 characters, exactly one `@`; the domain is
+ *     turned into its ASCII form first (an internationalised domain such as `müller.ch`
+ *     is valid), and that form is letters, digits and hyphens with at least one dot and is
+ *     what the discovery uses. `common`, `organizations` and
  *     `consumers` are refused, or the start would fall back to a multi-tenant authority.
  *     The authority and the `tid` the route keeps come only from the discovered directory
  *     id, never from the raw domain, and `login_hint` is set as one encoded query value.
  *  3. **Token first.** The start token is verified before the tenant discovery runs, and
- *     the discovery is limited in rate and cached, so that one start link cannot drive
- *     outbound lookups or serve as an oracle for which domains have a tenant.
+ *     the discovery is limited in rate and cached, so that a start link cannot drive
+ *     unbounded outbound lookups.
  *  4. **Personal data in a URL.** The address is in a URL only on this last hop, from the
  *     browser to the control plane; it reaches the engine in a request body. It still lands
  *     in browser history and in whatever records the request URL. The control plane does
