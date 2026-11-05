@@ -204,7 +204,7 @@ describe('inbox_rule_propose — what it accepts', () => {
   });
 
   it('refuses a matched value with a character a reader does not see, rather than storing one that never matches', async () => {
-    for (const v of ['Re\u200b: Angebot', 'Mahnung\u202e', 'Rech\u{E0041}nung', 'Re\uFEFF: x', 'Re\u2028: x', 'Re\u2029: x', 'Re:\uFEFF']) {
+    for (const v of ['Re\u200b: Angebot', 'Mahnung\u202e', 'Rech\u{E0041}nung', 'Re\uFEFF: x', 'Re\u2028: x', 'Re\u2029: x', 'Re:\uFEFF', '\u200B\u200B\u200B']) {
       expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: v })).toMatch(/characters a reader does not see/);
     }
     expect(inbox.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);

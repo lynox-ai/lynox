@@ -1009,9 +1009,21 @@ describe('rules endpoints — the value of a fixed rule, on create', () => {
     expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: 'x'.repeat(201) })).toMatchObject({ status: 400, body: { error: 'matcherValue exceeds 200 characters' } });
     expect(handleCreateRule(deps, { ...base, matcherKind: 'from', matcherValue: `${'a'.repeat(190)}@lieferant.ch` })).toMatchObject({ status: 400, body: { error: 'matcherValue exceeds 200 characters' } });
     expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: 'y'.repeat(200) }).status).toBe(201);
+    // Two emoji are 4 UTF-16 units but 2 characters: under the minimum of 3.
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u{1F600}'.repeat(2) })).toMatchObject({ status: 400, body: { error: 'subject phrase must be at least 3 characters' } });
     expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u{1F600}'.repeat(3) }).status).toBe(201);
     expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u{1F600}'.repeat(100) }).status).toBe(201);
     expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.matcherValue)).toEqual(['y'.repeat(200), '\u{1F600}'.repeat(3), '\u{1F600}'.repeat(100)]);
+  });
+
+  it('creates no fixed rule whose value has nothing left once the match normalizes it', () => {
+    // Such a value would be contained in every subject (the loader skips one a database holds).
+    for (const v of ['\u200B\u200B\u200B', ' \u2060 \u2060 ', '\uFE0F\uFE0F\uFE0F', '\u{E0041}\u{E0042}\u{E0043}']) {
+      for (const kind of ['subject_contains', 'from'] as const) {
+        expect(handleCreateRule(deps, { ...base, matcherKind: kind, matcherValue: v }).status, `${kind} ${JSON.stringify(v)}`).toBe(400);
+      }
+    }
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
   });
 
   it('creates no list id rule, which would never apply, whatever its value', () => {

@@ -16,10 +16,10 @@ export function ruleLine(raw: string): string {
 }
 
 /**
- * A matched value is not rewritten: the loader compares it with the mail as it arrives, so a value
- * with a character turned into a space would never match (a warning sign as emoji is U+26A0 U+FE0F,
- * and a subject carries both), and neither would one with its spaces collapsed (a subject may hold
- * two, or a non-breaking one). So the value is only trimmed. The caller refuses one that holds a
+ * A matched value is stored as given, only trimmed: the loader compares the value and the mail
+ * both as the inbox stores a header (`rules-loader.ts`, `ruleMatchText`), so a value as the owner
+ * reads it and a value as the mail carries it (a warning sign as emoji is U+26A0 U+FE0F, a subject
+ * may hold two spaces, or a non-breaking one) both match. The caller refuses one that holds a
  * character a reader does not see, outside the places real text puts one (`hidden-chars.ts`,
  * checked on the raw input), or a line break or tab, which no subject or address carries.
  */
