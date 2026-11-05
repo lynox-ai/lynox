@@ -6,12 +6,91 @@
  * at a call site is listed in `worker-notices.test.ts`; that list only shrinks.
  *
  * What a sentence quotes — a task title, an error, a run's result, an id — is put in as it came.
- * The German wording is ux U-099.
+ * The German wording is ux U-099, U-105 and Rest-P.
+ *
+ * What stays English: a sentence the worker STORES as an event's reason or a plan's result and
+ * compares later (the constants below, `PLAN_ENDED_RESULT` and `ACCESS_ENDED_RESULT`). It is
+ * translated only when it is said ({@link WorkerNotices.eventReason}), so a row stored in English
+ * before, or by an instance in the other language, is said in the owner's language too.
  */
 import type { NoticeLanguage } from './notice-language.js';
+import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
+import { isProvisionedInstance } from './wire-capture.js';
+import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON } from '../server/webhook-receiver.js';
 
 /** An event whose run did not complete, in English; the worker also compares a sentence to it. */
 export const EVENT_RUN_FAILED_EN = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual. If it should have changed something, check whether that change is missing and make it by hand or ask lynox in a chat.';
+/** The stored English sentences of an event or a plan that did not run; each is compared or kept as a key. */
+export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
+export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
+export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
+/** Why a mandate's trigger the owner has not confirmed did not run. Stored as an event's reason, so
+ *  it stays as it was; only its German names where to confirm (ux Rest-P E4). */
+export const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
+export const EVENT_MAPPING_REFUSED = 'Not run: in this workflow, a value from the event decides what a step runs with, not only what its task says. Change the workflow so event values appear only in a step\'s task text, or ask lynox in a chat to find the step. Later events run once that is changed; this one does not run again.';
+export const EVENT_OUTCOME_UNKNOWN = 'An event was being run when the engine stopped. It may have run, and it is not run again by itself. Check whether it took effect before you do the same by hand.';
+/** Why a webhook run of a workflow that asks its owner did not start. */
+export const WEBHOOK_ASKS_RESULT = 'Not run: this workflow asks you a question while it runs, and a run started by a webhook event cannot wait for an answer. Change the workflow so it does not ask; later events then run, this one does not run again.';
+/** The fixed result of a mandate's start by hand of a plan that acts for another mandate. */
+export const PLAN_OF_ANOTHER_RESULT = 'Not run: this plan acts for another person with delegated access, so only the owner may start it by hand.';
+/** The fixed result of a plan's run that did not start because its start could not be recorded. */
+export const PLAN_RUN_UNRECORDED_RESULT = 'Not run: this plan acts for someone you let in, and its start cannot be recorded in the instance\'s log right now.';
+/**
+ * A run whose answered question came from a deleted contained conversation, and whose new one
+ * could not be contained (ux U-089). The way on depends on who runs the instance.
+ */
+export const RESUMED_RUN_NOT_CONTAINED = 'This run\'s chat was marked as holding data from a connected shop and was deleted before your answer came. lynox could not mark the new chat the same way, so the run did not continue and your answer was not used. Run the task again.';
+/** What a dropped event with no stored reason is told with. */
+export const NO_REASON_RECORDED = 'no reason recorded';
+
+/**
+ * A webhook trigger switched off because its workflow needs first-run confirmation: the event's
+ * stored reason, with the workflow's id in it. The writer and the reader below share these two
+ * parts, so the reader recognises exactly what the writer stores.
+ */
+const FIRST_RUN_HEAD = 'Workflow "';
+const FIRST_RUN_TAIL = '" needs first-run confirmation, so this trigger was switched off and refuses deliveries. Schedule it from the workflow library to confirm it, then switch the trigger on again.';
+export function firstRunUnconfirmedReason(workflowId: string): string {
+  return `${FIRST_RUN_HEAD}${workflowId}${FIRST_RUN_TAIL}`;
+}
+/** The workflow id of a stored {@link firstRunUnconfirmedReason}, or undefined for any other text. */
+function firstRunUnconfirmedId(stored: string): string | undefined {
+  if (stored.length <= FIRST_RUN_HEAD.length + FIRST_RUN_TAIL.length) return undefined;
+  if (!stored.startsWith(FIRST_RUN_HEAD) || !stored.endsWith(FIRST_RUN_TAIL)) return undefined;
+  return stored.slice(FIRST_RUN_HEAD.length, stored.length - FIRST_RUN_TAIL.length);
+}
+/**
+ * An event run by a workflow whose mode lets it ask for more than an answer: the event's stored
+ * reason, with the workflow's id and mode in it. Writer and reader share the parts, as above; the
+ * mode is one of the planner's words and never holds `MODE_MID`, so the reader splits at its last
+ * occurrence and an id that holds it is still read whole.
+ */
+const MODE_HEAD = 'Workflow "';
+const MODE_MID = '" is marked \'';
+const MODE_TAIL = '\' and may ask for more than an answer, which a run started by an event has nobody to give.';
+export function eventModeRefusedReason(workflowId: string, mode: string): string {
+  return `${MODE_HEAD}${workflowId}${MODE_MID}${mode}${MODE_TAIL}`;
+}
+/** The workflow id of a stored {@link eventModeRefusedReason}, or undefined for any other text. */
+function eventModeRefusedId(stored: string): string | undefined {
+  if (!stored.startsWith(MODE_HEAD) || !stored.endsWith(MODE_TAIL)) return undefined;
+  const inner = stored.slice(MODE_HEAD.length, stored.length - MODE_TAIL.length);
+  const mid = inner.lastIndexOf(MODE_MID);
+  return mid > 0 ? inner.slice(0, mid) : undefined;
+}
+/** A workflow id is not bounded where it comes from (a task's pipeline id can come from the API or a
+ *  sync), so a German sentence names at most this many of its UTF-16 units (ux Rest-P W18), cut
+ *  between characters so no half of a surrogate pair is left. */
+export const SAID_WORKFLOW_ID_MAX = 36;
+function saidWorkflowId(id: string): string {
+  if (id.length <= SAID_WORKFLOW_ID_MAX) return id;
+  let kept = '';
+  for (const char of id) {
+    if (kept.length + char.length > SAID_WORKFLOW_ID_MAX) break;
+    kept += char;
+  }
+  return `${kept}…`;
+}
 
 export interface WorkerNotices {
   /** The summary of more than a few triggers waiting for confirmation. */
@@ -71,6 +150,31 @@ export interface WorkerNotices {
   workflowGone(workflowId: string | undefined): string;
   /** An event whose run did not complete, with the way on (ux U-105 W1). */
   readonly eventRunFailed: string;
+  /**
+   * A stored English reason of an event, as it is said (ux Rest-P rule 1): lynox's own sentence in
+   * this language, the stored text as it is where there is none. English says it as stored.
+   */
+  eventReason(stored: string): string;
+  /** One or more dropped events of a trigger, with the reason as {@link eventReason} says it. */
+  eventsNotRun(count: number, why: string): string;
+  /** An event that was running when the engine stopped (E3). */
+  readonly eventOutcomeUnknown: string;
+  /** A mandate's schedule the owner has not confirmed (E4). */
+  readonly mandateUnstamped: string;
+  /** A schedule whose workflow's authors could not be read (E5). */
+  readonly planAuthorsUnreadable: string;
+  /** A schedule a mandate whose access ended shaped (E6); stored as `PLAN_ENDED_RESULT`. */
+  readonly planEnded: string;
+  /** A mandate's start by hand of another's plan (E7). */
+  readonly planOfAnother: string;
+  /** A mandate's plan whose start cannot be recorded (E8). */
+  readonly planRunUnrecorded: string;
+  /** A trigger effect the engine does not know, quoted (E9). */
+  unknownEffect(effect: string): string;
+  /** A resumed run whose new chat could not be contained (W14). */
+  resumedRunNotContained(provisioned: boolean): string;
+  /** A watched page that changed, with the analysis (E15): the push only, the thread's seed stays English. */
+  watchChanged(url: string, analysis: string): string;
 }
 
 /** The workflow statuses a notice names; any other, `unknown` included, is left out rather than quoted raw. */
@@ -115,7 +219,64 @@ const EN: WorkerNotices = Object.freeze({
   workflowGone: (workflowId: string | undefined) =>
     `${workflowId !== undefined ? `Workflow ${workflowId} no longer exists` : 'This plan\'s workflow no longer exists'}, so the run was skipped. Delete the plan under Automation › Triggers if you no longer need it.`,
   eventRunFailed: EVENT_RUN_FAILED_EN,
+  eventReason: (stored: string) => stored,
+  eventsNotRun: (count: number, why: string) => count === 1 ? `An event was not run: ${why}` : `${String(count)} events were not run: ${why}`,
+  eventOutcomeUnknown: EVENT_OUTCOME_UNKNOWN,
+  mandateUnstamped: MANDATE_UNSTAMPED_RESULT,
+  planAuthorsUnreadable: 'Could not read who set up the workflow this schedule runs, so it did not run.',
+  planEnded: PLAN_ENDED_RESULT,
+  planOfAnother: PLAN_OF_ANOTHER_RESULT,
+  planRunUnrecorded: PLAN_RUN_UNRECORDED_RESULT,
+  unknownEffect: (effect: string) => `Unknown trigger effect '${effect}' — skipped`,
+  resumedRunNotContained: (provisioned: boolean) => provisioned
+    ? `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`
+    : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`,
+  watchChanged: (url: string, analysis: string) => `${url} changed.\n\n${analysis}`,
 });
+
+/** A resumed run whose new chat could not be contained, in English (ux U-089). */
+export function resumedRunNotContained(provisioned: boolean = isProvisionedInstance()): string {
+  return EN.resumedRunNotContained(provisioned);
+}
+
+/**
+ * The German sentence for each stored English reason of an event (ux Rest-P). Built on first use,
+ * not at load, like `bulk-notices.ts`'s table: the constants of `plan-pause.ts` are read then.
+ */
+let deEventReasons: Readonly<Record<string, string>> | undefined;
+function deEventReason(stored: string): string {
+  deEventReasons ??= Object.freeze({
+    [NO_REASON_RECORDED]: 'kein Grund festgehalten',
+    [EVENT_RUN_FAILED_EN]: DE_EVENT_RUN_FAILED,
+    [EVENT_TRIGGER_NOT_LIVE]: 'Sein Auslöser nimmt keine Ereignisse an, darum laufen sie nicht. Sieh dir den Auslöser unter Automation → Trigger an.',
+    [EVENT_SHOP_MOVED]: 'Das Ereignis kam von einem anderen Shop als dem, mit dem der Auslöser jetzt verbunden ist; darum lief es nicht.',
+    [EVENT_VALUES_UNREADABLE]: 'Die Werte des Ereignisses liessen sich mit dem Schlüssel dieser Instanz nicht lesen; es lief nicht und läuft auch später nicht.',
+    [EVENT_MAPPING_REFUSED]: 'Nicht ausgeführt: Ein Wert aus dem Ereignis bestimmt in diesem Workflow, womit ein Schritt läuft; erlaubt ist er nur im Aufgabentext. Ändere den Workflow oder bitte lynox im Chat, den Schritt zu finden. Dieses Ereignis läuft nicht mehr.',
+    [WEBHOOK_ASKS_RESULT]: 'Nicht ausgeführt: Dieser Workflow stellt beim Laufen eine Frage, und ein Lauf durch ein Webhook-Ereignis kann nicht auf eine Antwort warten. Ändere den Workflow, damit er nicht fragt; dann laufen spätere Ereignisse, dieses nicht mehr.',
+    [ACCESS_ENDED_RESULT]: 'Mittendrin angehalten: Der Zugang einer Person, die diesen Plan eingerichtet oder geändert hat, ist beendet.',
+    [MANDATE_UNSTAMPED_RESULT]: DE_MANDATE_UNSTAMPED,
+    [PLAN_ENDED_RESULT]: DE_PLAN_ENDED,
+    // Stored by the webhook receiver when it does not keep a delivery (ux Rest-P, refuter 05.11.).
+    [QUEUE_FULL_REASON]: `Der Auslöser hatte schon ${String(MAX_WAITING_EVENTS)} Ereignisse in der Warteschlange; was darüber hinaus kam, hat lynox nicht aufbewahrt. Prüf, ob dabei Änderungen fehlen.`,
+    [SHOP_MISMATCH_REASON]: 'Die Lieferung nennt einen anderen Shop als die Verbindung des Auslösers. Prüf unter Automation → Trigger, mit welchem Shop er verbunden ist.',
+  });
+  const own = deEventReasons[stored];
+  if (own !== undefined) return own;
+  const workflowId = firstRunUnconfirmedId(stored);
+  if (workflowId !== undefined) {
+    return `Workflow „${saidWorkflowId(workflowId)}“ ist vor dem ersten Lauf noch nicht bestätigt; der Auslöser ist darum aus. Plane den Workflow in der Bibliothek ein und schalte den Auslöser wieder ein.`;
+  }
+  const modeId = eventModeRefusedId(stored);
+  if (modeId !== undefined) {
+    return `Workflow „${saidWorkflowId(modeId)}“ kann mehr als eine Antwort brauchen, und bei einem Lauf durch ein Ereignis gibt sie niemand. Bitte lynox im Chat, ihn ohne Rückfragen umzubauen.`;
+  }
+  return stored;
+}
+
+const DE_EVENT_RUN_FAILED = 'Der Lauf zu einem Ereignis wurde nicht fertig. lynox führt dieses Ereignis nicht noch einmal aus; spätere Ereignisse laufen wie gewohnt. Sollte es etwas ändern, prüf, ob das fehlt, und erledige es von Hand oder bitte lynox im Chat darum.';
+const DE_MANDATE_UNSTAMPED = 'Diesen Zeitplan hat jemand eingerichtet oder geändert, dem du Zugang gegeben hast. Er läuft erst nach deiner Bestätigung unter Automation → Trigger; übersprungen.';
+const DE_PLAN_ENDED = 'Diesen Zeitplan oder seinen Workflow hat jemand eingerichtet oder geändert, dessen Zugang beendet ist; darum läuft er nicht.';
+const DE_RESUMED_RUN_NOT_CONTAINED = 'Der Chat dieses Laufs wurde vor deiner Antwort gelöscht; lynox konnte den neuen nicht gleich schützen. Deine Antwort blieb ungenutzt. Starte die Aufgabe neu.';
 
 const DE: WorkerNotices = Object.freeze({
   consentManyTitle: (count: number) => `⏸ ${String(count)} geplante Aktionen warten auf deine Bestätigung`,
@@ -153,7 +314,20 @@ const DE: WorkerNotices = Object.freeze({
   workflowCompleted: (runId: string | undefined) => `Workflow abgeschlossen (Lauf ${runId ?? 'unbekannt'})`,
   workflowGone: (workflowId: string | undefined) =>
     `${workflowId !== undefined ? `Workflow ${workflowId} existiert` : 'Der Workflow dieses Plans existiert'} nicht mehr, deshalb wurde der Lauf übersprungen. Lösch den Plan unter Automation → Trigger, wenn du ihn nicht mehr brauchst.`,
-  eventRunFailed: 'Der Lauf zu einem Ereignis wurde nicht fertig. lynox führt dieses Ereignis nicht noch einmal aus; spätere Ereignisse laufen wie gewohnt. Sollte es etwas ändern, prüf, ob das fehlt, und erledige es von Hand oder bitte lynox im Chat darum.',
+  eventRunFailed: DE_EVENT_RUN_FAILED,
+  eventReason: deEventReason,
+  eventsNotRun: (count: number, why: string) => count === 1 ? `Ein Ereignis wurde nicht ausgeführt: ${why}` : `${String(count)} Ereignisse wurden nicht ausgeführt: ${why}`,
+  eventOutcomeUnknown: 'Ein Ereignis lief gerade, als die Engine anhielt. Es kann gewirkt haben und läuft nicht von selbst noch einmal. Prüf, ob es gewirkt hat, bevor du dasselbe von Hand tust.',
+  mandateUnstamped: DE_MANDATE_UNSTAMPED,
+  planAuthorsUnreadable: 'Wer den Workflow dieses Zeitplans eingerichtet hat, liess sich nicht lesen; darum lief er nicht.',
+  planEnded: DE_PLAN_ENDED,
+  planOfAnother: 'Nicht ausgeführt: Dieser Plan handelt für eine andere Person mit Zugang. Von Hand starten darf ihn nur der Inhaber.',
+  planRunUnrecorded: 'Nicht ausgeführt: Dieser Plan handelt für jemanden, dem du Zugang gegeben hast, und sein Start lässt sich gerade nicht im Protokoll der Instanz festhalten.',
+  unknownEffect: (effect: string) => `Unbekannte Wirkung „${effect}“ im Auslöser; übersprungen.`,
+  resumedRunNotContained: (provisioned: boolean) => provisioned
+    ? `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, schreib an support@lynox.ai.`
+    : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das Instanz-Protokoll den Grund.`,
+  watchChanged: (url: string, analysis: string) => `${url} hat sich geändert.\n\n${analysis}`,
 });
 
 export const WORKER_NOTICES: Readonly<Record<NoticeLanguage, WorkerNotices>> = Object.freeze({ en: EN, de: DE });
