@@ -26,9 +26,8 @@ function seeded(seed: string): (n: number, alphabet: string) => string {
   };
 }
 const rnd = seeded('mandate-credential-input');
-/** A hex key with every hex digit in it, the rest drawn: key-shaped by construction, so a rule's
- *  witness does not depend on the draw. How often a fully drawn key gets through is pinned in
- *  the rate test below. */
+/** A hex key that does not depend on the draw, so a rule's witness tests the rule. How often a
+ *  fully drawn key gets through is pinned in the rate test below. */
 const hexKey = (n: number): string => `9f3a0c7e1b5d2864${rnd(n - 16, HEX)}`;
 /** Mixed classes guaranteed, whatever the random draw. */
 const mixed = (n: number): string => `Aa1${rnd(n - 3, ALNUM)}`;
@@ -81,7 +80,7 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput('Passwort: P@ssw0rd2025')).toBe('password');
     expect(mandateCredentialInput('Das Kennwort ist M@rkt2025')).toBe('password');
     expect(mandateCredentialInput('**Passwort:** Sommer2025!')).toBe('password');
-    expect(mandateCredentialInput(`Kennwort: ${rnd(20, 'abcdefghijklmnopqrstuvwxyz0123456789')}`)).toBe('password');
+    expect(mandateCredentialInput(`Kennwort: k7${rnd(18, 'abcdefghijklmnopqrstuvwxyz0123456789')}`)).toBe('password');
   });
 
   it('rule 3: a cue joined to the next word by a hyphen still counts', () => {
