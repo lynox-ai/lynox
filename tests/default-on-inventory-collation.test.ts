@@ -59,6 +59,9 @@ function run(defaultOn: string[], recorded: string[]): { code: number; out: stri
     `export const Config = z.object({\n${defaultOn.map((f) => `  ${f}: z.boolean().optional(),`).join('\n')}\n});\n`,
   );
   writeFileSync(join(root, 'src/flags.ts'), defaultOn.map((f) => `export const ${f}_on = cfg.${f} ?? true;`).join('\n') + '\n');
+  // The script also reads the feature flags' defaults; one flag, off, adds nothing to the set.
+  mkdirSync(join(root, 'src/core'), { recursive: true });
+  writeFileSync(join(root, 'src/core/features.ts'), "const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {\n  'off-flag': false,\n};\n");
   writeFileSync(join(root, 'scripts/default-on-inventory.txt'), `# on record\n${recorded.join('\n')}\n`);
   const r = spawnSync('bash', [join(root, 'scripts/default-on-inventory.sh')], {
     encoding: 'utf8',
