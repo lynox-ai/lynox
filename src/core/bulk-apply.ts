@@ -246,15 +246,15 @@ async function applyRunEffect(
   const say = deps.notices ?? BULK_NOTICES.en;
   const now = deps.now ?? Date.now;
   const run = ledger.getRunForApply(runId);
-  if (!run) return { status: 'refused', summary: 'No bulk run with this id.' };
+  if (!run) return { status: 'refused', summary: say.noRun };
   if ((effect === 'bulk_undo') !== (run.kind === 'undo')) {
-    return { status: 'refused', summary: 'The trigger effect does not match the bulk run.' };
+    return { status: 'refused', summary: say.effectMismatch };
   }
   if (run.phase !== 'approved' && run.phase !== 'writing') {
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run is ${run.phase}, not approved — nothing written.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.notApproved(run.phase), say) };
   }
   if (run.haltReason !== null) {
-    return { status: 'refused', summary: summarize(ledger, runId, 'Bulk run is halted — resume it to continue.') };
+    return { status: 'refused', summary: summarize(ledger, runId, say.haltedResume, say) };
   }
   if (run.expiresAt === null || now() > Date.parse(run.expiresAt)) {
     ledger.halt(runId, BULK_HALT_REASONS.expired);
@@ -262,12 +262,12 @@ async function applyRunEffect(
   }
   if (run.approvalChecksum === null || ledger.computeChecksum(runId) !== run.approvalChecksum) {
     ledger.halt(runId, BULK_HALT_REASONS.checksum);
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.checksum}.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.checksum), say) };
   }
   // Approved before the store's bulk runs were switched off: it writes no further.
   if (ledger.isWriteSwitchedOff(runId)) {
     ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff);
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.shopifyWriteOff}.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.shopifyWriteOff), say) };
   }
   const writer = deps.writerFor(run);
   if (!writer) {
@@ -282,7 +282,7 @@ async function applyRunEffect(
       trail.begin();
     } catch {
       ledger.halt(runId, BULK_HALT_REASONS.runUnrecorded);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.runUnrecorded}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.runUnrecorded), say) };
     }
     opened(trail, run);
   }
@@ -315,7 +315,7 @@ async function applyRunEffect(
     // Another loop on the same ledger closed the run: nothing is left for this one.
     if (current?.phase === 'done') return { status: 'done', summary: summarize(ledger, runId, say.applyDone, say) };
     if (!current || current.phase !== 'writing' || current.haltReason !== null) {
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run stopped by another loop.') };
+      return { status: 'halted', summary: summarize(ledger, runId, say.otherLoop, say) };
     }
     // The owner's stop lands HERE, between targets and never inside a write: a target whose
     // write is under way when the stop arrives is finished and recorded first, so the ledger
@@ -336,7 +336,7 @@ async function applyRunEffect(
       // An atomic run must not stop half written: out of time, it rolls back instead. One that
       // has written nothing is not half written — a rollback would only end it for good, so it
       // halts like any run and can be resumed (as `endStopped` does for the owner's stop).
-      if (run.atomic && ledger.listAppliedDesc(runId).length > 0) return rollBack(ledger, writer, run, now, 'time');
+      if (run.atomic && ledger.listAppliedDesc(runId).length > 0) return rollBack(ledger, writer, run, now, say, 'time');
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.timeBudget), say) };
     }
@@ -372,7 +372,7 @@ async function applyRunEffect(
     // at the same target on every resume. It neither extends nor breaks a run of failures.
     // Only an external writer gives it, and an external run is never atomic.
     if (outcome.kind === 'sent_unknown') continue;
-    if (run.atomic) return rollBack(ledger, writer, run, now);
+    if (run.atomic) return rollBack(ledger, writer, run, now, say);
     if (outcome.kind === 'conflict') {
       // A conflict is not a failure, and it breaks a run of failures.
       consecutive = 0;
@@ -415,7 +415,7 @@ async function applyRunEffect(
     // a loop whose lease lapsed. A live loop writing the same atomic run would race the
     // rollback's read of what was applied — that takes two processes on one engine.db.
     if (ownerStopped()) return endStopped();
-    return { status: 'pending', summary: summarize(ledger, runId, 'Bulk run waiting for targets another loop holds.') };
+    return { status: 'pending', summary: summarize(ledger, runId, say.otherLoopHolds, say) };
   }
   ledger.finish(run);
   return { status: 'done', summary: summarize(ledger, runId, say.applyDone, say) };
@@ -431,7 +431,7 @@ async function applyRunEffect(
    *  on that resume, as planned, and counted then. */
   async function endStopped(): Promise<BulkEffectOutcome> {
     if (run!.atomic && ledger.listAppliedDesc(runId).length > 0) {
-      const rolled = await rollBack(ledger, writer!, run!, now, 'stopped');
+      const rolled = await rollBack(ledger, writer!, run!, now, say, 'stopped');
       return { ...rolled, status: 'stopped' };
     }
     ledger.halt(runId, BULK_HALT_REASONS.stoppedByOwner);
@@ -497,7 +497,7 @@ async function applyRunEffect(
  * view finds it. Local only — an external target has no transaction to lean on (PRD §3.4).
  */
 async function rollBack(
-  ledger: BulkLedger, writer: TargetWriter, run: BulkRunForApply, now: () => number,
+  ledger: BulkLedger, writer: TargetWriter, run: BulkRunForApply, now: () => number, say: BulkNotices,
   cause: 'failed' | 'stopped' | 'time' = 'failed',
 ): Promise<BulkEffectOutcome> {
   let complete = true;
@@ -520,12 +520,7 @@ async function rollBack(
       ? (complete ? BULK_HALT_REASONS.atomicTimeRolledBack : BULK_HALT_REASONS.atomicTimeRollbackIncomplete)
       : (complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
   ledger.setPhase(run.id, ['writing'], 'aborted', reason);
-  const lead = cause === 'stopped'
-    ? (complete ? 'Atomic bulk run stopped and rolled back.' : 'Atomic bulk run stopped; the rollback did not complete.')
-    : cause === 'time'
-      ? (complete ? 'Atomic bulk run out of time and rolled back.' : 'Atomic bulk run out of time; the rollback did not complete.')
-      : (complete ? 'Atomic bulk run aborted and rolled back.' : 'Atomic bulk run aborted; the rollback did not complete.');
-  return { status: 'aborted', summary: summarize(ledger, run.id, lead) };
+  return { status: 'aborted', summary: summarize(ledger, run.id, say.atomicEnded(cause, complete), say) };
 }
 
 // ── Target systems ────────────────────────────────────────────────────────────

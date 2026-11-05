@@ -200,6 +200,67 @@ describe('the webhook drain', () => {
     expect(pushes(EVENT_RUN_FAILED)).toBe(0);
   });
 
+  // ux Rest-P rule 1: a reason is stored in English and said in the owner's language, rows stored
+  // before included; one the table has no sentence for is quoted as stored.
+  it('tells a German owner of dropped events stored in English in German, one reason at a time', async () => {
+    (engine as unknown as { config: { language: string } }).config = { language: 'de' };
+    const t = sharedTrigger();
+    const stored = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
+    ledger.record({ triggerId: t, dedupKey: 'old-1', headers: {}, state: 'dropped', reason: stored });
+    ledger.record({ triggerId: t, dedupKey: 'old-2', headers: {}, state: 'dropped', reason: stored });
+    ledger.record({ triggerId: t, dedupKey: 'old-3', headers: {}, state: 'dropped', reason: 'misdelivered' });
+    ledger.record({ triggerId: t, dedupKey: 'old-4', headers: {}, state: 'dropped' });
+    await loop.tick();
+    const bodies = notify.mock.calls.map((c) => (c[0] as { body: string }).body).sort();
+    expect(bodies).toEqual([
+      '2 Ereignisse wurden nicht ausgeführt: Sein Auslöser nimmt keine Ereignisse an, darum laufen sie nicht. Sieh dir den Auslöser unter Automation → Trigger an.',
+      'Ein Ereignis wurde nicht ausgeführt: kein Grund festgehalten',
+      'Ein Ereignis wurde nicht ausgeführt: misdelivered',
+    ]);
+    // What is stored stays as it was.
+    expect(ledger.listByTrigger(t).map((e) => e.reason).sort()).toEqual([null, 'misdelivered', stored, stored].sort());
+  });
+
+  it('tells a German owner of a workflow nobody confirmed in German, naming it, and stores the reason in English', async () => {
+    (engine as unknown as { config: { language: string } }).config = { language: 'de' };
+    runner.confirmedAt.value = undefined;
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'dropped');
+    expect(eventOf(t, id).reason).toBe('Workflow "wf-orders" needs first-run confirmation, so this trigger was switched off and refuses deliveries. Schedule it from the workflow library to confirm it, then switch the trigger on again.');
+    await loop.tick();
+    expect(notify.mock.calls.map((c) => (c[0] as { body: string }).body)).toEqual([
+      'Ein Ereignis wurde nicht ausgeführt: Workflow „wf-orders“ ist vor dem ersten Lauf noch nicht bestätigt; der Auslöser ist darum aus. Plane den Workflow in der Bibliothek ein und schalte den Auslöser wieder ein.',
+    ]);
+  });
+
+  it('tells a German owner of a failed event of a workflow that asks in German, and stores the reason in English', async () => {
+    (engine as unknown as { config: { language: string } }).config = { language: 'de' };
+    runner.mode.value = 'interactive';
+    runner.steps.value = [{ id: 's1', task: 'ask', tools: ['ask_user'] }];
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'failed');
+    expect(eventOf(t, id).reason).toBe(WEBHOOK_ASKS_RESULT);
+    await loop.tick();
+    expect(notify.mock.calls.map((c) => (c[0] as { body: string }).body)).toEqual([
+      'Nicht ausgeführt: Dieser Workflow stellt beim Laufen eine Frage, und ein Lauf durch ein Webhook-Ereignis kann nicht auf eine Antwort warten. Ändere den Workflow, damit er nicht fragt; dann laufen spätere Ereignisse, dieses nicht mehr.',
+    ]);
+  });
+
+  it('tells a German owner of an event a lost process left running in German', async () => {
+    (engine as unknown as { config: { language: string } }).config = { language: 'de' };
+    const t = sharedTrigger();
+    const id = deliver(t);
+    expect(ledger.begin(id, 'attempt-of-a-lost-process')).toBe(true);
+    await loop.tick();
+    expect(notify.mock.calls.map((c) => (c[0] as { body: string }).body)).toEqual([
+      'Ein Ereignis lief gerade, als die Engine anhielt. Es kann gewirkt haben und läuft nicht von selbst noch einmal. Prüf, ob es gewirkt hat, bevor du dasselbe von Hand tust.',
+    ]);
+  });
+
   it('CONTROL: with the switch off it reads nothing and runs nothing', async () => {
     vi.stubEnv('LYNOX_FEATURE_INBOUND_WEBHOOKS', '');
     const t = sharedTrigger();

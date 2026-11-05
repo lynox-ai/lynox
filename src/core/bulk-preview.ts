@@ -162,11 +162,11 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   const { detectSecretInContent } = await import('../tools/builtin/http.js');
   const holdsSecret = (text: string): boolean => detectSecretInContent(text) !== null;
   const run = ledger.getRunForPreview(runId);
-  if (!run) return { status: 'refused', summary: 'No bulk run with this id.' };
+  if (!run) return { status: 'refused', summary: say.noRun };
   const host = externalHostOf(run.targetSystem);
-  if (host === null || run.kind !== 'apply') return { status: 'refused', summary: 'The bulk run has no external targets to read.' };
+  if (host === null || run.kind !== 'apply') return { status: 'refused', summary: say.noExternalTargets };
   if (run.phase !== 'planned' || run.haltReason !== null) {
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run is ${run.phase}${run.haltReason !== null ? ' and halted' : ''} — nothing read.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.notReadyToRead(run.phase, run.haltReason !== null), say) };
   }
   // Declared before the first halt: `costed` reads both.
   let client: ExternalClient | null = null;
