@@ -576,6 +576,13 @@ describe('the markup a target changes (1010)', () => {
 		expect(target.querySelector('[data-testid="bulk-markup-restores-note"]')).toBeNull();
 	});
 
+	it('sets a space between an item and the note that it lies in a template', async () => {
+		const templated = { kind: 'element' as const, namespace: 'html', element: 'p', attributes: [['class', 'x']] as [string, string][], text: null, inTemplate: true };
+		targets = targets.map((x) => (x.seq === 1 ? { ...x, markupChanges: [{ field: 'descriptionHtml', added: [templated], removed: [], addsOutsideAllowlist: true }] } : x));
+		await render();
+		expect(target.querySelector('[data-testid="bulk-markup"]')!.textContent).toContain(`<p class="x"> ${t('bulk.markup.in_template')}`);
+	});
+
 	it('lists on an undo what it writes back, and says where that lies outside the allowlist', async () => {
 		run = makeRun({ kind: 'undo', sourceRunId: 'r0', total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false,

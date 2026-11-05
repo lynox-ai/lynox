@@ -380,7 +380,7 @@
 			{#if list.restoresNote}<p class="text-warning" data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
 			<ul class="space-y-0.5">
 				{#each list.lines as markupLine, i (i)}
-					<li class="min-w-0"><span class="text-text-subtle">{markupLine.label}</span> <code class="whitespace-pre-wrap break-all">{bulkVisibleText(markupLine.code)}</code>{#if markupLine.template} <span class="text-text-subtle">{markupLine.template}</span>{/if}</li>
+					<li class="min-w-0"><span class="text-text-subtle">{markupLine.label}</span> <code class="whitespace-pre-wrap break-all">{bulkVisibleText(markupLine.code)}</code>{#if markupLine.template}{' '}<span class="text-text-subtle">{markupLine.template}</span>{/if}</li>
 				{/each}
 			</ul>
 			<p class="text-text-subtle">{list.note}</p>
