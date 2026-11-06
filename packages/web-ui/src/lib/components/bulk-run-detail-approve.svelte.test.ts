@@ -197,6 +197,13 @@ describe('approving a preview', () => {
 		await render();
 		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
 		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+		// Every kind of write counts, as the write counts it: one update and one create are two.
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', changes: { update: 1, create: 1, delete: 0, unchanged: 0, invalid: 1 } });
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).not.toContain(t('bulk.approve.only_one'));
 	});
 
 	it('writes one target first and leaves the rest to approve when there are two', async () => {

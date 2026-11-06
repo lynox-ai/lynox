@@ -12164,7 +12164,6 @@ describe('LynoxHTTPApi', () => {
       const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
-      bulkDb.getDb().prepare(`UPDATE bulk_targets SET change = 'update' WHERE run_id = ?`).run(id);
       const note = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as Record<string, unknown>)['writeFormNote'];
       expect(bulkLedger.countWriting(id)).toBe(2);
       expect(await note()).toBe(BULK_UNMEASURED_NOTE);
