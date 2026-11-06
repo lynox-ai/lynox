@@ -30,6 +30,7 @@ import {
 import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
+import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
@@ -1680,9 +1681,9 @@ function sendOAuthHtml(res: ServerResponse, status: number, message: string): vo
  * scopes by the time it arrives (`shown_scopes`). Not cached, for the same reason as
  * the pages above.
  */
-function sendConsentPage(res: ServerResponse, consent: ConsentNotice, scopes: readonly string[]): void {
+function sendConsentPage(res: ServerResponse, consent: ConsentNotice | undefined, scopes: readonly string[], note?: ConnectNote): void {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(consentPageHtml(consent, scopes));
+  res.end(consentPageHtml(consent, scopes, note));
 }
 
 /** A scope's readable name, or its id; own names only, so `toString` is not a name. */
@@ -1696,15 +1697,31 @@ function scopeNameOf(consent: ConsentNotice, scope: string): string {
  * and lists each write access by its readable name; without one, it keeps the English frame
  * and the raw ids, byte for byte as before the frame existed.
  */
-export function consentPageHtml(consent: ConsentNotice, scopes: readonly string[]): string {
-  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}`;
+export function consentPageHtml(consent: ConsentNotice | undefined, scopes: readonly string[], note?: ConnectNote): string {
+  // The note's version travels with the confirmation, so a confirmation is refused when the
+  // provider's note is another one by the time it arrives (`shown_note`).
+  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}${note ? `&shown_note=${note.version}` : ''}`;
   const head = (lang: string, title: string): string =>
     `<!DOCTYPE html><html lang="${escapeHtml(lang)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head><body>`;
+  // The note stands right before the button, word for word, in the page's language.
+  const noteIn = (lang: NoteLang): string =>
+    note ? `<p data-connect-note="${note.version}">${escapeHtml(noteText(note.version, lang, note.provider))}</p>` : '';
+  if (!consent) {
+    // Only a mandate's session reaches here: a connect without customer text has no page otherwise.
+    if (!note) return head('en', 'Authorization') + `</body></html>`;
+    const title = noteTitle(note.lang, note.provider);
+    return head(note.lang, title)
+      + `<h1>${escapeHtml(title)}</h1>`
+      + noteIn(note.lang)
+      + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${escapeHtml(noteButton(note.lang, note.provider))}</button></form>`
+      + `</body></html>`;
+  }
   const frame = consent.frame;
   if (!frame) {
-    return head('en', 'Authorization')
+    return head('en', note ? noteTitle('en', note.provider) : 'Authorization')
       + `<div lang="${escapeHtml(consent.lang)}">${consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')}</div>`
       + `<p>Write access this connection asks for: ${escapeHtml(consent.writeScopes.join(', '))}</p>`
+      + noteIn('en')
       + `<form method="post" action="${escapeHtml(action)}"><button type="submit">Continue</button></form>`
       + `</body></html>`;
   }
@@ -1713,6 +1730,8 @@ export function consentPageHtml(consent: ConsentNotice, scopes: readonly string[
     + `<p>${escapeHtml(frame.scopesIntro)}</p>`
     + `<ul>${consent.writeScopes.map((s) => `<li>${escapeHtml(scopeNameOf(consent, s))}</li>`).join('')}</ul>`
     + `<p>${escapeHtml(frame.scopesNote)}</p>`
+    // The customer text is in its own language; the note follows it, so the page reads in one.
+    + noteIn(consent.lang === 'de' ? 'de' : 'en')
     + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${escapeHtml(frame.button)}</button></form>`
     + (frame.afterButton ? `<p>${escapeHtml(frame.afterButton)}</p>` : '')
     + `</body></html>`;
@@ -11817,9 +11836,24 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // A mandate's session reads, before every connect, that the owner sees this connection
+      // (`connect-note.ts`). The owner's session never gets the note. `decideConnect` has
+      // established the preset, so a mandate's connect without one does not reach here.
+      const notePreset = principal.kind === 'mandate' ? OAUTH_PRESETS.get(profile?.auth?.oauth?.preset_id ?? '') : undefined;
+      const note = notePreset ? connectNoteFor(notePreset, noteLang(singleHeader(req.headers['accept-language']))) : undefined;
+      if (principal.kind === 'mandate' && !note) {
+        sendOAuthHtml(res, 409, 'This connection has no provider this instance knows, so it cannot show what the owner sees of it. Nothing was sent to the provider.');
+        return;
+      }
       // Last, so the page appears only for a connect that would otherwise go ahead.
-      if (decision.consent && !confirmed) {
-        sendConsentPage(res, decision.consent, decision.scopes);
+      if ((decision.consent || note) && !confirmed) {
+        sendConsentPage(res, decision.consent, decision.scopes, note);
+        return;
+      }
+      // The confirmation holds for the note the page showed: a profile moved to another provider
+      // in between would otherwise send the person on under a note that no longer applies.
+      if (note && new URL(req.url ?? '', 'http://x').searchParams.get('shown_note') !== note.version) {
+        sendOAuthHtml(res, 409, 'This connection now shows another note than the page you confirmed. Open the link again and read the page. Nothing was sent to the provider.');
         return;
       }
       // The confirmation holds for the scopes the page showed. A profile changed in between

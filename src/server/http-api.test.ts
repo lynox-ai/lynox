@@ -5651,13 +5651,13 @@ describe('LynoxHTTPApi', () => {
 
     async function connect(
       author: string | undefined, asMandate: boolean, id = 'books',
-      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean } = {},
+      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; method?: 'GET' | 'POST'; query?: string; lang?: string; scope?: string } = {},
     ): Promise<{ status: number; text: string; state: string | null; location: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
       store.register({
         id: 'books', name: 'Books', base_url: 'https://api.bexio.com/3.0', description: 'd',
-        auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: opts.clientIdKey ?? 'BOOKS_CLIENT_ID', client_secret_key: 'BOOKS_CLIENT_SECRET', scope: 'openid offline_access' } },
+        auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: opts.clientIdKey ?? 'BOOKS_CLIENT_ID', client_secret_key: 'BOOKS_CLIENT_SECRET', scope: opts.scope ?? 'openid offline_access' } },
         custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
         ...(author === undefined ? {} : { created_by: author }),
       });
@@ -5686,9 +5686,16 @@ describe('LynoxHTTPApi', () => {
       });
       try {
         const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
-        const res = await fetch(`${baseUrl}/api/oauth/connect/${id}`, {
+        // A mandate's connect goes on from the note page with a POST that names the note shown.
+        const method = opts.method ?? (asMandate ? 'POST' : 'GET');
+        const query = opts.query ?? (asMandate && method === 'POST' ? '?shown_note=3' : '');
+        const res = await fetch(`${baseUrl}/api/oauth/connect/${id}${query}`, {
+          method,
           redirect: 'manual',
-          headers: { cookie: `lynox_session=${token}`, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document' },
+          headers: {
+            cookie: `lynox_session=${token}`, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document',
+            ...(opts.lang === undefined ? {} : { 'Accept-Language': opts.lang }),
+          },
         });
         const set = res.headers.getSetCookie().find((c) => c.startsWith('lynox_profile_oauth_state='));
         const state = set === undefined ? null : decodeURIComponent(set.split(';')[0]!.slice('lynox_profile_oauth_state='.length));
@@ -5761,6 +5768,58 @@ describe('LynoxHTTPApi', () => {
         .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1' });
     });
 
+    // The note before the provider's login (legal POS-069, notes 6 and 7), word for word: a
+    // difference here is a text that was not approved.
+    const NOTE3_DE = 'Der Inhaber dieser Instanz sieht, dass du hier bexio mit deinem eigenen Login verbindest, und, wenn bexio es lynox mitteilt, mit welchem Konto. Ein Plan, den er bestätigt, kann diese Verbindung nutzen.';
+    const NOTE3_EN = 'The owner of this instance sees that you connect bexio here with your own login and, if bexio tells lynox, with which account. A plan they confirm can use this connection.';
+    const reEsc = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    /** The note, then right after it the form with the one button, posting the note's version. */
+    const noteThenButton = (note: string, button: string, version = '3'): RegExp =>
+      new RegExp(`<p data-connect-note="${version}">${reEsc(note)}</p><form method="post" action="\\?shown_scopes=[^"]*&amp;shown_note=${version}"><button type="submit">${reEsc(button)}</button></form>`);
+
+    it('shows a mandate\'s session the note before a connect that only reads, and starts nothing', async () => {
+      const r = await connect(TAG, true, 'books', { method: 'GET', lang: 'de-CH,de;q=0.9,en;q=0.8' });
+      expect(r.status).toBe(200);
+      expect([r.state, r.location]).toEqual([null, '']);
+      expect(r.text).toMatch(noteThenButton(NOTE3_DE, 'Weiter zu bexio'));
+      expect(r.text).toContain('<html lang="de">');
+      expect(r.text).toContain('<title>bexio verbinden</title>');
+      expect(r.text).toContain('<h1>bexio verbinden</h1>');
+      expect(r.text.match(/<button/g)).toHaveLength(1);
+    });
+
+    it.each([
+      ['no Accept-Language', undefined, 'en'],
+      ['de-DE', 'de-DE', 'de'],
+      ['English preferred over German', 'de;q=0.4, en-GB;q=0.9', 'en'],
+      ['a language it has no text in first', 'fr-CH, de;q=0.8', 'de'],
+    ])('writes the note page in the browser\'s language: %s', async (_label, lang, want) => {
+      const r = await connect(TAG, true, 'books', { method: 'GET', ...(lang === undefined ? {} : { lang }) });
+      expect(r.status).toBe(200);
+      expect(r.text).toMatch(want === 'de' ? noteThenButton(NOTE3_DE, 'Weiter zu bexio') : noteThenButton(NOTE3_EN, 'Continue to bexio'));
+      expect(r.text).toContain(want === 'de' ? '<title>bexio verbinden</title>' : '<title>Connect bexio</title>');
+    });
+
+    it('puts the note on the customer text\'s page, before its one button, when the connect asks to write', async () => {
+      const r = await connect(TAG, true, 'books', { method: 'GET', lang: 'en', scope: 'openid offline_access contact_show kb_invoice_edit note_edit' });
+      expect(r.status).toBe(200);
+      // The page is the customer text's, in its language and with its button and title.
+      expect(r.text).toMatch(noteThenButton(NOTE3_DE, 'Zustimmen und weiter zu bexio'));
+      expect(r.text).toContain('<title>Schreibrechte für bexio bestätigen</title>');
+      expect(r.text.match(/<button/g)).toHaveLength(1);
+      expect(r.text.indexOf('Rechnungen: Schreibzugriff')).toBeLessThan(r.text.indexOf('data-connect-note'));
+    });
+
+    it.each([
+      ['without the note it showed', '?shown_scopes=openid+offline_access'],
+      ['for another note than this provider\'s', '?shown_scopes=openid+offline_access&shown_note=1'],
+    ])('refuses a mandate\'s confirmation %s, and starts nothing', async (_label, query) => {
+      const r = await connect(TAG, true, 'books', { method: 'POST', query });
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('another note than the page you confirmed');
+      expect([r.state, r.location]).toEqual([null, '']);
+    });
+
     // H2i-2a-R: the client id is the owner's; a mandate's profile reads it only once released.
     it('gives a mandate\'s session no link while the owner has not released the client id, and says so', async () => {
       const r = await connect(TAG, true, 'books', { unreleased: true });
@@ -5771,8 +5830,10 @@ describe('LynoxHTTPApi', () => {
 
     it('control: the owner\'s session starts on a mandate\'s profile, signed as the owner', async () => {
       const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
-      const r = await connect(TAG, false);
+      const r = await connect(TAG, false, 'books', { lang: 'de-CH' });
+      // Straight to the provider: the owner's session never gets the note page.
       expect(r.status).toBe(302);
+      expect(r.text).not.toContain('data-connect-note');
       expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by).toEqual({ tag: 'owner' });
     });
 
