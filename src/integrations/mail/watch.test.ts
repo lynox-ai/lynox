@@ -571,6 +571,20 @@ describe('MailWatcher — a deferred mail is kept across a restart', () => {
     expect(state.deferredMail('acct-a')).toEqual([]);
   });
 
+  it('logs the mails beyond the cap that are not kept across a restart', async () => {
+    handler.mockImplementationOnce(() => { throw new InboundMailDeferred('test'); });
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const provider = new FakeProvider('acct-a');
+      await watcher.attach(provider, { applyPrefilter: false });
+      await provider.emit({ type: 'new', envelopes: Array.from({ length: 503 }, (_, i) => envelope(i + 1, { messageId: `<k-${String(i + 1)}@x>` })) });
+      expect(errSpy.mock.calls.some((c) => /3 deferred mail\(s\).*not kept across a restart/.test(String(c[0])))).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(state.deferredMail('acct-a')).toHaveLength(500);
+  });
+
   it('keeps a mail deferred after the account was detached (a restore defers, then exits)', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });

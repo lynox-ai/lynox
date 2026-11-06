@@ -265,7 +265,10 @@ export class MailWatcher {
    */
   private keep(accountId: string, envelopes: ReadonlyArray<MailEnvelope>): void {
     try {
-      this.state.holdDeferredMail(accountId, envelopes, DEFERRED_MAX_PER_ACCOUNT);
+      const notKept = this.state.holdDeferredMail(accountId, envelopes, DEFERRED_MAX_PER_ACCOUNT);
+      if (notKept > 0) {
+        process.stderr.write(`[lynox] mail watcher: ${String(notKept)} deferred mail(s) for one account over the cap of ${String(DEFERRED_MAX_PER_ACCOUNT)} not kept across a restart\n`);
+      }
     } catch (err: unknown) {
       process.stderr.write(`[lynox] mail watcher: deferred mail not kept across a restart: ${err instanceof Error ? err.message : String(err)}\n`);
     }

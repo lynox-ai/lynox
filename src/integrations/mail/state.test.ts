@@ -1108,9 +1108,11 @@ describe('MailStateDb — deferred mails kept across a restart (v20)', () => {
     expect(db.deferredMail('no-such-account')).toEqual([]);
   });
 
-  it('keeps at most the cap per account; the newest beyond it are not kept', () => {
-    db.holdDeferredMail('gm-a', [env(1, '<1@x>'), env(2, '<2@x>'), env(3, '<3@x>')], 2);
-    db.holdDeferredMail('gm-b', [env(4, '<4@x>')], 2);
+  it('keeps at most the cap per account; the newest beyond it are not kept, and counted', () => {
+    expect(db.holdDeferredMail('gm-a', [env(1, '<1@x>'), env(2, '<2@x>'), env(3, '<3@x>')], 2)).toBe(1);
+    expect(db.holdDeferredMail('gm-b', [env(4, '<4@x>')], 2)).toBe(0);
+    expect(db.holdDeferredMail('gm-a', [env(1, '<1@x>')], 2), 'one already kept counts as kept').toBe(0);
+    expect(db.holdDeferredMail('no-such-account', [env(5, '<5@x>')], 2)).toBe(0);
     expect(db.deferredMail('gm-a').map((e) => e.messageId)).toEqual(['<1@x>', '<2@x>']);
     expect(db.deferredMail('gm-b')).toHaveLength(1);
   });
@@ -1129,6 +1131,26 @@ describe('MailStateDb — deferred mails kept across a restart (v20)', () => {
     expect(db.deleteAccount('gm-a')).toBe(true);
     expect(db.deferredMail('gm-a')).toEqual([]);
     expect(db.deferredMail('gm-b')).toHaveLength(1);
+  });
+
+  it('gives an IMAP mail back with its uid, which holds across a restart', () => {
+    db.upsertAccount({ ...ACCOUNT, id: 'imap-a', address: 'i@example.org', preset: 'custom', imap: { host: 'imap.example.org', port: 993, secure: true }, authType: 'imap' });
+    db.holdDeferredMail('imap-a', [env(42, '<i@x>')], 500);
+    expect(db.deferredMail('imap-a')[0]?.uid).toBe(42);
+  });
+
+  it('drops the kept mails when the account id comes to name another mailbox, not on another update', () => {
+    db.holdDeferredMail('gm-a', [env(1, '<1@x>')], 500);
+    db.upsertAccount({ ...ACCOUNT, displayName: 'renamed' });
+    expect(db.deferredMail('gm-a'), 'a new display name is the same mailbox').toHaveLength(1);
+    db.upsertAccount({ ...ACCOUNT, address: 'other@example.org' });
+    expect(db.deferredMail('gm-a')).toEqual([]);
+    for (const change of [{ imap: { host: 'h2', port: 0, secure: true } }, { imap: { host: '', port: 993, secure: true } }, { authType: 'imap' as const }]) {
+      db.upsertAccount(ACCOUNT);
+      db.holdDeferredMail('gm-a', [env(1, '<1@x>')], 500);
+      db.upsertAccount({ ...ACCOUNT, ...change });
+      expect(db.deferredMail('gm-a'), JSON.stringify(change)).toEqual([]);
+    }
   });
 
   it('deletes a row that does not parse, and gives back the rest', () => {

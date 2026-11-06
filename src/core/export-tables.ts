@@ -184,6 +184,8 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
     },
     name: {
       mail_delta_cursors: 'mail sync state',
+      // Mails the inbox deferred, waiting to be classified: copies of what the mailbox holds.
+      mail_deferred: 'mail sync state',
       processed_mail_messages: 'mail sync state',
       schema_version: MARKER,
     },
