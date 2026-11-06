@@ -241,17 +241,18 @@ describe('a sentence that names an act of the owner\'s', () => {
 	});
 
 	const nothing = { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 };
-	const cases: { name: string; run: Partial<BulkRunDetailData>; targets?: BulkTarget[]; key: string; vars?: Record<string, string> }[] = [
+	// `mandate`: the mandate's key where it is not `<key>_mandate` — a count of one reads `_mandate_one`.
+	const cases: { name: string; run: Partial<BulkRunDetailData>; targets?: BulkTarget[]; key: string; mandate?: string; vars?: Record<string, string> }[] = [
 		{ name: 'lynox skips a target of a preview', run: { total: 2, changes: { ...nothing, update: 1, invalid: 1 } },
 			targets: [TARGETS[0]!, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false }],
-			key: 'bulk.skipped.products', vars: { n: '1' } },
+			key: 'bulk.skipped.products_one', mandate: 'bulk.skipped.products_mandate_one', vars: { n: '1' } },
 		{ name: 'lynox skips one target of another host and one was taken out', run: { targetSystem: 'http:api.example.com', total: 3, deselected: 1, changes: { ...nothing, update: 1, invalid: 1 } },
 			targets: [
 				{ ...TARGETS[0]!, key: 'https://api.example.com/items/1' },
 				{ seq: 2, key: 'https://api.example.com/items/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false },
 				{ ...TARGETS[0]!, seq: 3, key: 'https://api.example.com/items/3', deselected: true },
 			],
-			key: 'bulk.skipped.both_targets', vars: { n: '1', m: '1' } },
+			key: 'bulk.skipped.both_targets_one', mandate: 'bulk.skipped.both_targets_mandate_one', vars: { n: '1', m: '1' } },
 		{ name: 'a target was taken out', run: { total: 2, deselected: 1, changes: { ...nothing, update: 1 } },
 			targets: [TARGETS[0]!, { ...TARGETS[0]!, seq: 2, key: 'gid://shopify/Product/2', deselected: true }],
 			key: 'bulk.deselect.taken_out' },
@@ -283,13 +284,14 @@ describe('a sentence that names an act of the owner\'s', () => {
 				component = undefined;
 				return seen;
 			};
+			const mandateKey = c.mandate ?? `${c.key}_mandate`;
 			const asMandate = await show('mandate');
-			expect(asMandate).toContain(text(`${c.key}_mandate`));
+			expect(asMandate).toContain(text(mandateKey));
 			expect(asMandate).not.toContain(text(c.key));
 			const asOwner = await show('owner');
 			expect(asOwner).toContain(text(c.key));
 			// A mandate's form may be the owner's first sentence alone; the owner's full one is asserted above.
-			if (!text(c.key).includes(text(`${c.key}_mandate`))) expect(asOwner).not.toContain(text(`${c.key}_mandate`));
+			if (!text(c.key).includes(text(mandateKey))) expect(asOwner).not.toContain(text(mandateKey));
 		});
 	}
 

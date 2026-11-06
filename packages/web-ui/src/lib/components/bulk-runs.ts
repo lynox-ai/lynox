@@ -21,10 +21,21 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note',
 ]);
 
-/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form. */
+/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form, a key's
+ *  singular (`_one`, {@link bulkOne}) in its `_mandate_one` form. */
 export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
-	const key = (k: string): string => (BULK_MANDATE_KEYS.has(k) ? `${k}_mandate` : k);
+	const key = (k: string): string => {
+		if (BULK_MANDATE_KEYS.has(k)) return `${k}_mandate`;
+		const base = k.endsWith('_one') ? k.slice(0, -'_one'.length) : null;
+		return base !== null && BULK_MANDATE_KEYS.has(base) ? `${base}_mandate_one` : k;
+	};
 	return { t: (k) => i18n.t(key(k)), tf: (k, vars) => i18n.tf(key(k), vars) };
+}
+
+/** A count's sentence at one: the key's `_one` form, which says "1 product", not "1 products".
+ *  Only for the keys that have a worded singular. */
+export function bulkOne(key: string, n: number): string {
+	return n === 1 ? `${key}_one` : key;
 }
 
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
@@ -875,11 +886,11 @@ export function bulkSkippedHead(
 	const judged = n > 0 && run.judge !== null ? ` ${i18n.t(shopify ? 'bulk.skipped.judged' : 'bulk.skipped.judged_targets')}` : '';
 	if (bulkWriting(run) === 0) {
 		// "All" holds only where every target is one lynox leaves out.
-		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(`bulk.nothing.all_skipped_${noun}`, { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
+		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(bulkOne(`bulk.nothing.all_skipped_${noun}`, n), { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
 		return { text: text + judged, nothing: true };
 	}
-	if (n > 0 && m > 0) return { text: i18n.tf(`bulk.skipped.both_${noun}`, { n: String(n), m: String(m) }) + judged, nothing: false };
-	if (n > 0) return { text: i18n.tf(`bulk.skipped.${noun}`, { n: String(n) }) + judged, nothing: false };
+	if (n > 0 && m > 0) return { text: i18n.tf(bulkOne(`bulk.skipped.both_${noun}`, n), { n: String(n), m: String(m) }) + judged, nothing: false };
+	if (n > 0) return { text: i18n.tf(bulkOne(`bulk.skipped.${noun}`, n), { n: String(n) }) + judged, nothing: false };
 	if (m > 0) return { text: i18n.tf('bulk.skipped.taken_out', { m: String(m) }), nothing: false };
 	return { text: null, nothing: false };
 }

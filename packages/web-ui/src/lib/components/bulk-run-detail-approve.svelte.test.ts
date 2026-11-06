@@ -112,9 +112,19 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain(t('bulk.invalid.not_found'));
 		expect(target.textContent).toContain('Product/1');
 		expect(target.textContent).not.toContain('Product/2');
-		buttonByText(t('bulk.preview.show_unchanged').replace('{n}', '1'))!.click();
+		buttonByText(t('bulk.preview.show_unchanged_one'))!.click();
 		await settle();
 		expect(target.textContent).toContain('Product/2');
+	});
+
+	it('folds the one unchanged target of another host under a button in the singular', async () => {
+		run = makeRun({ targetSystem: 'http:api.example.com' });
+		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
+		await render();
+		expect(target.textContent).not.toContain('items/2');
+		buttonByText(t('bulk.preview.show_unchanged_targets_one'))!.click();
+		await settle();
+		expect(target.textContent).toContain('items/2');
 	});
 
 	it('shows a description lynox does not write for a shortcode, whole, under the reason (1130)', async () => {
@@ -158,7 +168,7 @@ describe('approving a preview', () => {
 
 	it('offers no way out on a product lynox leaves out, and none on an unchanged one', async () => {
 		await render();
-		buttonByText(t('bulk.preview.show_unchanged').replace('{n}', '1'))!.click();
+		buttonByText(t('bulk.preview.show_unchanged_one'))!.click();
 		await settle();
 		expect([...target.querySelectorAll('button')].filter((b) => b.textContent?.trim() === t('bulk.deselect.off'))).toHaveLength(1);
 	});
