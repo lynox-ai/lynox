@@ -2727,9 +2727,7 @@ ${draftJson}
       if (grant?.origin === 'callback' && (grant.state === 'connected' || grant.state === 'no-refresh')) {
         return `"${id}" is already connected. Show the user this link only if they want to authorize again: ${link}\n\nA new authorization replaces the stored token, so anything running against the old one stops working the moment it is used.`;
       }
-      const opens = pageWrites.length === 0
-        ? `It opens ${endpoints.host}`
-        : `It first shows a page on this instance with what lynox may do there and the write access this link asks for (${pageWrites.join(', ')}); they read it and continue to ${endpoints.host}`;
+      const opens = connectOpensLine(endpoints.host, pageWrites, !isOwnerPrincipal(agent.principal));
       return `Show the user this link and let them click it: ${link}\n\n${opens}, where they authorize this engine. They come back to this instance, and the connection is stored for you — do not ask them to paste a token, and do not build this link yourself.`;
     }
 
@@ -3777,4 +3775,20 @@ export function waitingConnectionsNote(agent: IAgent): string {
   const more = ids.length > 10 ? ` and ${String(ids.length - 10)} more` : '';
   const one = ids.length === 1;
   return `\n\nWaiting for the owner: the connection of ${shown}${more} ${one ? 'was' : 'were'} authorized in a mandate's session that is no longer active, so ${one ? 'its tokens are' : 'their tokens are'} not used for anything. Tell the user. To keep one, call api_setup with action "adopt_connection" and its id (the user is asked first); otherwise it can be deleted.`;
+}
+
+/**
+ * What the person walks into after clicking the connect link, for the reply the model reads. A
+ * mandate's session always gets the instance's page first, with what the owner sees of the
+ * connection (`connect-note.ts`); a link that asks for a preset's write access gets it too, with
+ * the customer text. The owner's read-only link goes straight to the provider.
+ */
+export function connectOpensLine(host: string, pageWrites: readonly string[], helper: boolean): string {
+  const shows = [
+    ...(pageWrites.length > 0 ? [`what lynox may do there and the write access this link asks for (${pageWrites.join(', ')})`] : []),
+    ...(helper ? ['what the owner of this instance sees of this connection'] : []),
+  ];
+  return shows.length === 0
+    ? `It opens ${host}`
+    : `It first shows a page on this instance with ${shows.join(', and ')}; they read it and continue to ${host}`;
 }

@@ -11721,7 +11721,9 @@ export class LynoxHTTPApi {
     // error to say so. Neither belongs here; only the first is an exploit.
     //
     // A link that asks for a write scope of a preset with a customer text (`consentNotice`) is
-    // answered with a page first: the text, the write access asked for, and a button. Only the
+    // answered with a page first: the text, the write access asked for, and a button. So is
+    // every link a mandate's session opens, with the note on what the owner sees
+    // (`connect-note.ts`). Only the
     // button's POST mints the state cookie and sends the person on. A GET never does, whatever
     // the link carries, because the model hands out the link and could add to it; a form POST
     // comes from this page in the person's browser, and one from another site is refused.
@@ -12407,7 +12409,7 @@ export class LynoxHTTPApi {
       } finally {
         this.profileGrantsPending--;
       }
-    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by GET /api/oauth/connect/:id, where a mandate connects only a profile it set up'));
+    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by /api/oauth/connect/:id (for a mandate only by the POST from the note page), where a mandate connects only a profile it set up'));
 
     // ── Knowledge Graph ──────────────────────────────────────────
 

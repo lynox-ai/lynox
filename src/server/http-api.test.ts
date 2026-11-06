@@ -5651,7 +5651,7 @@ describe('LynoxHTTPApi', () => {
 
     async function connect(
       author: string | undefined, asMandate: boolean, id = 'books',
-      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; method?: 'GET' | 'POST'; query?: string; lang?: string; scope?: string } = {},
+      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string } = {},
     ): Promise<{ status: number; text: string; state: string | null; location: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
@@ -5808,6 +5808,26 @@ describe('LynoxHTTPApi', () => {
       expect(r.text).toContain('<title>Schreibrechte für bexio bestätigen</title>');
       expect(r.text.match(/<button/g)).toHaveLength(1);
       expect(r.text.indexOf('Rechnungen: Schreibzugriff')).toBeLessThan(r.text.indexOf('data-connect-note'));
+    });
+
+    it('answers a mandate\'s HEAD like its GET: no cookie, nobody sent on', async () => {
+      const r = await connect(TAG, true, 'books', { method: 'HEAD' });
+      expect(r.status).toBe(200);
+      expect([r.state, r.location]).toEqual([null, '']);
+    });
+
+    it('holds a confirmation of the write page to the note as well as to the scopes it showed', async () => {
+      const scope = 'openid offline_access contact_show kb_invoice_edit note_edit';
+      const page = await connect(TAG, true, 'books', { method: 'GET', scope });
+      const action = /<form method="post" action="([^"]+)">/.exec(page.text)?.[1]?.replaceAll('&amp;', '&') ?? '';
+      expect(action).toMatch(/^\?shown_scopes=.+&shown_note=3$/);
+      const without = await connect(TAG, true, 'books', { method: 'POST', scope, query: action.replace('&shown_note=3', '') });
+      expect(without.status).toBe(409);
+      expect(without.text).toContain('another note than the page you confirmed');
+      expect(without.state).toBeNull();
+      // Control: the page's own address goes on, so the refusal above is the note's.
+      const confirmed = await connect(TAG, true, 'books', { method: 'POST', scope, query: action });
+      expect(confirmed.status).toBe(302);
     });
 
     it.each([

@@ -1359,4 +1359,19 @@ describe('connect refuses before the link what the route would refuse', () => {
     store.register({ ...scoped(), created_by: TAG });
     expect(await connect(mandateAgent(store))).toContain('/api/oauth/connect/shop-api');
   });
+
+  // The route shows a mandate's session the note page before every connect; the reply says so,
+  // so the model does not tell the helper they go straight to the provider.
+  it('tells a mandate the instance page comes first, and the owner that the provider opens', async () => {
+    const store = new ApiStore();
+    store.register({ ...scoped(), created_by: TAG });
+    const helper = await connect(mandateAgent(store));
+    expect(helper).toContain('It first shows a page on this instance with what the owner of this instance sees of this connection; they read it and continue to ');
+    expect(helper).not.toContain('It opens ');
+    const ownerStore = new ApiStore();
+    ownerStore.register(scoped());
+    const owner = await connect(agentWith(ownerStore));
+    expect(owner).toContain('It opens ');
+    expect(owner).not.toContain('what the owner of this instance sees');
+  });
 });

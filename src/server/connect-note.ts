@@ -59,7 +59,7 @@ export function noteLang(acceptLanguage: string | undefined): NoteLang {
   if (acceptLanguage === undefined) return 'en';
   const ranges = acceptLanguage.split(',').map((part, index) => {
     const [tag = '', ...params] = part.trim().split(';');
-    const q = params.map((p) => p.trim()).find((p) => p.startsWith('q='));
+    const q = params.map((p) => p.trim().toLowerCase()).find((p) => p.startsWith('q='));
     const weight = q === undefined ? 1 : Number(q.slice(2));
     return { primary: tag.trim().toLowerCase().split('-')[0] ?? '', weight: Number.isFinite(weight) ? weight : 0, index };
   });

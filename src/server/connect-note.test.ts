@@ -58,6 +58,7 @@ describe('the note before a helper connects', () => {
     ['fr, it', 'en'],
     ['de;q=0, en;q=0.1', 'en'],
     ['de;q=x', 'en'],
+    ['de;Q=0.1, en;q=0.9', 'en'],
   ] as const)('reads %j as %s', (header, want) => {
     expect(noteLang(header)).toBe(want);
   });
