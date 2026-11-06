@@ -107,12 +107,13 @@ describe('bulk run helpers', () => {
 			['n=2 writing on that host', stepState(2, { phase: 'writing', probeConfirmed: true }), noProbe, 'run'],
 			['n=2 local', stepState(2, { targetSystem: 'workspace' }), noProbe, 'approval'],
 			['n=1 update + 1 create', stepState(1, { changes: { update: 1, create: 1, delete: 0, unchanged: 0, invalid: 0 } }), all, 'approval'],
+			['n=1 update + 1 delete', stepState(1, { changes: { update: 1, create: 0, delete: 1, unchanged: 0, invalid: 0 } }), all, 'approval'],
 		];
 		for (const [name, state, steps, at] of table) {
 			expect([...bulkSteps(state)], name).toEqual(steps);
 			expect(bulkStep(state), name).toBe(at);
 		}
-		// Without a host and a probe field (the older pick), a probe halt still reads as the probe step.
+		// Without `probeOwn` (an engine that does not send it), a run at its probe still reads as the probe step.
 		expect(bulkStep({ ...probeState({ phase: 'writing', probe, haltReason: 'x' }), targetSystem: 'http:h', probeConfirmed: false, changes: stepState(3).changes })).toBe('probe');
 	});
 
