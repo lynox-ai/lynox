@@ -244,3 +244,51 @@ export function shortModelLabel(model: string): string {
 export function formatUsageMeta(u: UsageInfo, includeCost: boolean): string {
 	return formatUsageMetaParts(u, includeCost).map((p) => p.text).join(' · ');
 }
+
+/** Where a footer separator `·` shows: nowhere, only from `sm` up, or on every width. */
+export type FooterSeparator = 'none' | 'wide' | 'always';
+
+/** One segment of the footer stats line, in render order. */
+export interface FooterStatPart extends UsageMetaPart {
+	/** The token total: it carries the sum tooltip, which the caller supplies. */
+	tokens?: true;
+	/** The `·` in front of this segment. The first segment has none; a segment whose only
+	 *  predecessors leave the row on a narrow screen (`ownLineWhenNarrow`) has one only from `sm`
+	 *  up, so the row never starts with a separator. */
+	sep: FooterSeparator;
+}
+
+/**
+ * The footer stats line as the segments that have a known value — the line shows a segment only
+ * when there is something to say. A turn that ended before any token was counted (a stop before
+ * the model answered, a stream the guard cut off) has a token total of 0, which is not a known
+ * value, so the `Σ` segment is left out; and the cost then shows only when there is an amount —
+ * `formatCost`'s `-` would be the one segment without a value. Cache share, the model id and the
+ * third-party API calls are values in their own right and stay. With tokens counted the line is
+ * exactly `formatTurnTokens` followed by `formatUsageMetaParts`, unchanged. An empty list means
+ * there is no stats line at all.
+ */
+export function footerStatParts(u: UsageInfo, includeCost: boolean): FooterStatPart[] {
+	const hasTokens = u.tokensIn + u.tokensOut > 0;
+	const known: Array<Omit<FooterStatPart, 'sep'>> = [];
+	if (hasTokens) known.push({ text: formatTurnTokens(u), tokens: true });
+	formatUsageMetaParts(u, includeCost).forEach((p, i) => {
+		// The cost leads the parts when shown; without tokens its `-` is no value.
+		if (!hasTokens && includeCost && i === 0 && p.text === formatCost(0)) return;
+		known.push(p);
+	});
+	let before = false;
+	let beforeOnNarrow = false;
+	return known.map((p) => {
+		const sep: FooterSeparator = !before ? 'none' : beforeOnNarrow ? 'always' : 'wide';
+		before = true;
+		if (!p.ownLineWhenNarrow) beforeOnNarrow = true;
+		return { ...p, sep };
+	});
+}
+
+/** The `·` between the context chip and the stats that follow it (see {@link footerStatParts}). */
+export function footerChipSeparator(parts: readonly FooterStatPart[]): FooterSeparator {
+	if (parts.length === 0) return 'none';
+	return parts.some((p) => !p.ownLineWhenNarrow) ? 'always' : 'wide';
+}
