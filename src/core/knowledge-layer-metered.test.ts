@@ -9,10 +9,18 @@ import type { MemoryScopeRef } from '../types/index.js';
 // WITHOUT a real provider call. shouldExtractV2 forced true so store() takes the
 // V2 path; extractEntitiesV2 returns a known cost.
 const mockExtractV2 = vi.hoisted(() => vi.fn());
+const mockShouldExtractV2 = vi.hoisted(() => vi.fn(() => true));
 vi.mock('./entity-extractor-v2.js', async (importActual) => ({
   ...(await importActual<typeof import('./entity-extractor-v2.js')>()),
-  shouldExtractV2: () => true,
+  shouldExtractV2: mockShouldExtractV2,
   extractEntitiesV2: mockExtractV2,
+}));
+// The V1 extractor, used by the pre-cutover text-update re-extraction. Its gate test
+// (`shouldUseLLMExtraction`) stays real.
+const mockExtractV1 = vi.hoisted(() => vi.fn());
+vi.mock('./entity-extractor.js', async (importActual) => ({
+  ...(await importActual<typeof import('./entity-extractor.js')>()),
+  extractEntities: mockExtractV1,
 }));
 
 import { KnowledgeLayer } from './knowledge-layer.js';
@@ -33,6 +41,10 @@ describe('KnowledgeLayer — managed KG-extraction gate + debit', () => {
     layer = new KnowledgeLayer(join(dir, 'test.db'), new LocalProvider(), fakeClient);
     await layer.init();
     mockExtractV2.mockReset();
+    mockShouldExtractV2.mockReset();
+    mockShouldExtractV2.mockReturnValue(true);
+    mockExtractV1.mockReset();
+    mockExtractV1.mockResolvedValue({ entities: [], relations: [], costUsd: 0.0001 });
     mockExtractV2.mockResolvedValue({
       entities: [{ canonicalName: 'Acme', type: 'organization', confidence: 0.9, aliases: [], evidenceSpan: 'Acme' }],
       relations: [],
@@ -80,7 +92,7 @@ describe('KnowledgeLayer — managed KG-extraction gate + debit', () => {
     expect(res.stored).toBe(true);
   });
 
-  it('runs extraction ungated + undebited when no metered host is set (self-host)', async () => {
+  it('runs extraction undebited when no metered host is set (self-host, under the caps)', async () => {
     const res = await layer.store(text, 'knowledge', scope);
     expect(mockExtractV2).toHaveBeenCalledOnce();
     expect(res.entities.length).toBe(1);
@@ -111,5 +123,49 @@ describe('KnowledgeLayer — managed KG-extraction gate + debit', () => {
 
     expect(mockExtractV2).toHaveBeenCalledOnce();
     expect(res.entities.length).toBe(1);
+  });
+
+  describe('the gate runs only for an extraction that calls a model', () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const atCap = () => configurePersistentBudget({
+      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+      dailyCapUSD: 5, monthlyCapUSD: 500,
+    });
+
+    it('a text the extractors read without a model is not gated, and its extraction still runs at the cap', async () => {
+      atCap();
+      mockShouldExtractV2.mockReturnValue(false);
+      const onBeforeRun = vi.fn();
+      layer.setMeteredHost({ getHooks: () => [{ onBeforeRun }], getContext: () => undefined });
+
+      // `status` is a namespace the V1 extractor never sends to a model.
+      const res = await layer.store('Acme Corp signed with Beta GmbH in Zurich last week.', 'status', scope);
+
+      expect(onBeforeRun).not.toHaveBeenCalled();
+      expect(mockExtractV2).not.toHaveBeenCalled();
+      expect(res.stored).toBe(true);
+      // The extraction runs (its regex step is free); it is only the model call that the cap stops.
+      expect(mockExtractV1).toHaveBeenCalledOnce();
+    });
+
+    it('the text-update re-extraction is not made at the cap, with no host', async () => {
+      const stored = await layer.store(text, 'knowledge', scope);
+      expect(stored.stored).toBe(true);
+      atCap();
+
+      const changed = await layer.updateMemoryText(text, `${text} They renewed for two years.`, 'knowledge', scope);
+
+      expect(changed).toBe(true);
+      expect(mockExtractV1).not.toHaveBeenCalled();
+    });
+
+    it('the text-update re-extraction is made under the cap, with no host', async () => {
+      await layer.store(text, 'knowledge', scope);
+
+      const changed = await layer.updateMemoryText(text, `${text} They renewed for two years.`, 'knowledge', scope);
+
+      expect(changed).toBe(true);
+      expect(mockExtractV1).toHaveBeenCalledOnce();
+    });
   });
 });

@@ -10722,9 +10722,10 @@ export class LynoxHTTPApi {
       // instances, so it must clear the same onBeforeRun gate as a chat run:
       // a credit-exhausted tenant (or one whose control plane is stale →
       // fail-closed) is blocked here BEFORE any provider spend, and before the
-      // 200 SSE head is written so the client gets a clean error status. No-op
-      // on self-host (no hooks registered). The matching debit fires after
-      // synthesis below, keyed on this run id.
+      // 200 SSE head is written so the client gets a clean error status. The
+      // gate checks the instance's daily and monthly spending caps first, on
+      // every instance. The matching debit fires after synthesis below, keyed on
+      // this run id.
       const gate = await fireBeforeRunGate(engine, 'fast');
       if (gate.blockedReason) {
         errorResponse(res, 402, gate.blockedReason);
@@ -10833,12 +10834,16 @@ export class LynoxHTTPApi {
       if (!audioData) { errorResponse(res, 400, 'Missing audio (base64)'); return; }
       const buffer = Buffer.from(audioData, 'base64');
 
-      // Managed credit gate — STT shares the lynox-supplied pool key, so a
-      // credit-exhausted / fail-closed tenant is blocked here before any
-      // provider spend (same onBeforeRun gate as TTS + chat runs). No-op on
-      // self-host. The matching onAfterRun debit fires after transcription
-      // below, keyed on this run id, when Voxtral (pool key) was the backend.
-      const sttGate = await fireBeforeRunGate(engine, 'fast');
+      // Admission for a transcription that spends — Voxtral, on a provider key: the
+      // instance's daily and monthly spending caps, then the managed credit gate (a
+      // credit-exhausted / fail-closed tenant is blocked before any provider spend).
+      // Local whisper.cpp costs nothing and is not gated. The matching onAfterRun
+      // debit fires after transcription below, keyed on this run id, when Voxtral
+      // was the backend.
+      const sttSpends = getActiveTranscribeProvider()?.name !== 'whisper-cpp';
+      const sttGate = sttSpends
+        ? await fireBeforeRunGate(engine, 'fast')
+        : { runId: randomUUID(), blockedReason: null, capReached: null };
       if (sttGate.blockedReason) {
         errorResponse(res, 402, sttGate.blockedReason);
         return;

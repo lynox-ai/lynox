@@ -24,7 +24,7 @@ import { embedToBlob } from './embedding.js';
 import { EntityResolver, toEntityRecord } from './entity-resolver.js';
 import { RetrievalEngine } from './retrieval-engine.js';
 import type { RetrievalOptions } from './retrieval-engine.js';
-import { extractEntities } from './entity-extractor.js';
+import { extractEntities, shouldUseLLMExtraction } from './entity-extractor.js';
 import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
 import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
 import { detectContradictions, hasHeuristicContradiction, subjectsDisagree, properNounTokens, subjectTokensDisagree } from './contradiction-detector.js';
@@ -541,9 +541,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // Admission for the extraction call: gate BEFORE the spend so a reached daily or
     // monthly spending cap (every instance) or an exhausted/stale managed tenant
     // blocks it (extraction is best-effort enrichment, safely skipped), debit AFTER
-    // with the extractor's reported cost when a host is wired. The gate fires
-    // whenever a client exists (an LLM call is possible); without one there is no
-    // call to admit.
+    // with the extractor's reported cost when a host is wired. The gate fires only
+    // when the extraction would call a model; a text the extractor reads with its
+    // free regex step alone is not gated and keeps its entities at the cap.
     //
     // The extraction SPEND is what the gate blocks — NOT the engine.db memory STUB.
     // The stub (subject-graph mirror / authoritative write) must land on every stored
@@ -554,7 +554,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     let resolvedRelations: RelationRecord[] = [];
     // What this write creates in the graph, for a derived write's outcome row (660a-3).
     const created = noneCreated();
-    const extractGate = this.anthropicClient
+    const extractGate = this._extractionCallsModel(trimmedText, namespace)
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
     // The legacy row above is committed. If the switch flipped during the gate, its purge
@@ -682,6 +682,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /** V1 extraction path — regex + optional Haiku free-text JSON. */
+  /**
+   * Whether extracting entities from this text calls a model — the same tests the
+   * extractors make (`shouldExtractV2`, `shouldUseLLMExtraction`). A text that fails
+   * them is read by the free regex step only, so there is no spend to admit.
+   */
+  private _extractionCallsModel(text: string, namespace: MemoryNamespace): boolean {
+    if (!this.anthropicClient) return false;
+    if (this.useV2Extractor && shouldExtractV2(text, namespace)) return true;
+    return shouldUseLLMExtraction(text, namespace, []);
+  }
+
   private async _extractAndPersistV1(
     trimmedText: string,
     namespace: MemoryNamespace,
@@ -1941,7 +1952,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // managed spend that survived credit exhaustion and was injection-loopable via the
     // `update_memory` tool. The text update itself (above) is local + always applies; only
     // the LLM re-extraction is credit-gated, so an exhausted tenant's edit still lands.
-    const extractGate = this.anthropicClient
+    const extractGate = this._extractionCallsModel(newText, namespace)
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;

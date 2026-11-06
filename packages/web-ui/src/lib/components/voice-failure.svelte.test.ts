@@ -6,7 +6,7 @@ let locale: ReturnType<typeof getLocale>;
 beforeEach(() => { locale = getLocale(); });
 afterEach(() => { setLocale(locale); });
 
-describe('a 402 from a voice route says the AI budget is reached', () => {
+describe('the toast for a voice route\'s 402 says the AI budget is reached', () => {
 	it('dictation, in German and English', () => {
 		setLocale('de');
 		expect(transcribeFailureText(402)).toBe('Diktieren geht gerade nicht: Dein KI-Budget ist erreicht.');

@@ -468,7 +468,8 @@ describe('KnowledgeLayer', () => {
       onAfterRun.mockClear();
 
       const ok = await layer.updateMemoryText(
-        'Acme is on the managed plan.', 'Acme is on the pro plan.', 'knowledge', s,
+        // At least 30 characters, so the re-extraction would call a model and is gated.
+        'Acme is on the managed plan.', 'Acme is on the pro plan since this spring.', 'knowledge', s,
       );
       expect(ok).toBe(true);
       // The fix fires the gate on the re-extraction (pre-fix: never called). Blocked →

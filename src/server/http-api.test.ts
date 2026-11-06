@@ -560,6 +560,7 @@ vi.mock('../core/audio-duration.js', async (importActual) => ({
 // === Import after mocks ===
 
 const { LynoxHTTPApi } = await import('./http-api.js');
+const { configurePersistentBudget, resetPersistentBudget } = await import('../core/session-budget.js');
 
 // === Helpers ===
 
@@ -17617,6 +17618,8 @@ describe('metered audio routes: managed credit gate + debit', () => {
       // touches extractSessionContext / transcribeWithStream — so a denied
       // tenant gets a 402 and the pool key is never used for STT.
       mockEngineHooks = [{ onBeforeRun: vi.fn().mockRejectedValue(new Error('AI budget for this period reached.')) }];
+      // Voxtral spends on a provider key, so it is gated; local whisper.cpp is free and is not.
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
       const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
       expect(res.status).toBe(402);
       const body = await res.json() as { error: string };
@@ -17626,19 +17629,50 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(mockTranscribeWithStream).not.toHaveBeenCalled();
     });
 
-    it('does not debit when the active STT backend is local whisper (free, no pool-key spend)', async () => {
+    it('neither gates nor debits when the active STT backend is local whisper (free), even at the spending cap', async () => {
       const onBeforeRun = vi.fn();
       const onAfterRun = vi.fn();
       mockEngineHooks = [{ onBeforeRun, onAfterRun }];
       mockGetActiveTranscribeProvider.mockReturnValue({ name: 'whisper-cpp' });
       mockGetAudioDurationSec.mockResolvedValue(120);
-      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      let res: Response;
+      try {
+        res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      } finally {
+        resetPersistentBudget();
+      }
       expect(res.status).toBe(200);
       await readSse(res);
-      expect(onBeforeRun).toHaveBeenCalledOnce();
+      expect(onBeforeRun).not.toHaveBeenCalled();
       expect(mockTranscribeWithStream).toHaveBeenCalledOnce();
       // Local whisper is free — no pool-key spend, so no debit even with a known duration.
       expect(onAfterRun).not.toHaveBeenCalled();
+    });
+
+    it('blocks Voxtral with 402 at the daily spending cap, with no hooks (self-host) — provider never touched', async () => {
+      repayRateWindow();
+      mockEngineHooks = [];
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      let res: Response;
+      try {
+        res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      } finally {
+        resetPersistentBudget();
+      }
+      expect(res.status).toBe(402);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe('Daily spending cap ($5) reached. Today: $5.00.');
+      expect(mockTranscribeWithStream).not.toHaveBeenCalled();
     });
 
     it('debits Voxtral pool-key STT via onAfterRun ($0.003/min) keyed on the gate run id', async () => {

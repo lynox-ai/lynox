@@ -2418,7 +2418,8 @@ export class Session {
       // Gate this pool-key call through the managed credit lifecycle: on a
       // credit-exhausted (or fail-closed) managed tenant, skip the LLM title and
       // keep the heuristic placeholder — the title is best-effort enrichment, not
-      // worth spending against an empty balance. No-op on self-host/BYOK.
+      // worth spending against an empty balance. The gate also checks the
+      // instance's spending caps, which this run already passed at its start.
       const titleGate = await fireBeforeRunGate(this.engine, 'fast');
       if (titleGate.blockedReason !== null) return;
       const prompt =
