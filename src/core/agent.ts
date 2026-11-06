@@ -5697,14 +5697,23 @@ export function isRetryable(err: unknown): boolean {
     // An `error` event inside the stream arrives with status undefined. The SDK's stream parser
     // throws it as `new APIError(undefined, body, undefined, headers, body.error.type)`, where
     // `body` is the whole event: `{ type: 'error', error: { type: 'overloaded_error', … } }`.
-    // The three transient types are retried like their HTTP twins (529, 429, 500).
+    // When the provider names a type, the type alone decides: the three transient types are
+    // retried like their HTTP twins (529, 429, 500), every other type is not. `err.message`
+    // then carries the provider's own text (the whole event as JSON), which may contain any
+    // word — "ECONNRESET", "ThrottlingException" — and must not turn a deterministic error
+    // into a paid replay; so none of the text checks below read a typed error.
     const type = apiErrorType(err);
-    if (type === 'overloaded_error' || type === 'rate_limit_error' || type === 'api_error') {
-      return true;
+    if (type !== undefined) {
+      return type === 'overloaded_error' || type === 'rate_limit_error' || type === 'api_error';
     }
-    // Legacy AWS-style transient error names — kept as defense-in-depth for
-    // OpenAI-compatible adapters that may proxy AWS-backed models. lynox
-    // itself uses Anthropic + Mistral (EU); no direct Bedrock integration.
+    // From here: an APIError without a provider type — an HTTP error whose body is not the
+    // provider's envelope (a gateway or proxy in front of it), or the SDK's connection error.
+    // Legacy AWS-style transient error names in its message — kept as defense-in-depth for
+    // gateways that may proxy AWS-backed models, but only for a gateway whose body carries no
+    // `error.type` at all (one that names any type is decided above; throttling from a gateway
+    // usually arrives as 429/5xx and is caught by the status check). lynox itself uses Anthropic + Mistral (EU);
+    // no direct Bedrock integration. (The OpenAI-compat adapter throws plain Errors, which
+    // never reach this check.)
     const msg = err.message ?? '';
     if (msg.includes('ThrottlingException') || msg.includes('TooManyRequestsException')
       || msg.includes('ServiceUnavailableException') || msg.includes('ModelTimeoutException')
@@ -5717,6 +5726,9 @@ export function isRetryable(err: unknown): boolean {
   // surfaces NOT as an APIError but as a `TransformError` or a 'terminated' TypeError from the
   // fetch/undici stream, so the status/body checks above miss it. Without this the Agent would
   // fail the whole turn instead of retrying the transient drop.
+  // Reached by plain Errors (the OpenAI-compat adapter, undici) and by untyped APIErrors (the
+  // SDK's connection error carries the transport failure in its `.cause` chain); a typed
+  // APIError returned above.
   if (err instanceof Error) {
     return isTransportError(err, 0);
   }
