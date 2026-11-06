@@ -138,8 +138,9 @@
 	/**
 	 * The nonce leaves the URL before the claim is sent, so a reload while it runs cannot park an
 	 * already-spent nonce again. Only when the engine says it refused the claim before asking the
-	 * control plane (`kept`) is the nonce still good: it is parked again, in the URL and the card,
-	 * as long as the page is still the one the claim was confirmed on.
+	 * control plane (`kept`) is the nonce still good: it goes back into the URL while the page is
+	 * still the one the claim was confirmed on, and onto the card while this instance is mounted.
+	 * One that was left and opened again finds it in the URL on the next reload.
 	 */
 	function confirmPendingClaim(): void {
 		const nonce = pendingClaimNonce;
@@ -148,11 +149,11 @@
 		const page = typeof window === 'undefined' ? null : window.location.pathname;
 		void claimManagedGoogleTokens(nonce).then((outcome) => {
 			if (outcome !== 'kept' || page === null || window.location.pathname !== page) return;
-			if (pendingClaimNonce !== null) return;
 			const url = new URL(window.location.href);
 			url.searchParams.set('google_oauth', nonce);
-			window.history.replaceState({}, '', url.toString());
-			parkClaim(nonce);
+			// The router's own entry state is kept: `{}` would drop its history index.
+			window.history.replaceState(window.history.state, '', url.toString());
+			if (mounted) parkClaim(nonce);
 		});
 	}
 
@@ -196,7 +197,9 @@
 		}
 	});
 
+	let mounted = true;
 	onDestroy(() => {
+		mounted = false;
 		stopAuthPoll();
 	});
 </script>

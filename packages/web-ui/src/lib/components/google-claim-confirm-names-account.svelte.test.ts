@@ -316,6 +316,38 @@ describe('the Google claim nonce in the URL', () => {
 		expect(hasButton('Connect')).toBe(false);
 	});
 
+	it('stays gone when the claim gets no answer at all', async () => {
+		const claim = holdClaim();
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		button('Connect').click();
+		await settle();
+		claim.release(Promise.reject(new TypeError('Failed to fetch')) as unknown as Response);
+		await settle();
+		expect(param()).toBeNull();
+		expect(hasButton('Connect')).toBe(false);
+	});
+
+	it('left and opened again while the claim is out: the nonce is back in the URL for the next load', async () => {
+		const claim = holdClaim();
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		button('Connect').click();
+		await settle();
+		unmount(component!);
+		component = undefined;
+		resetSettingsViewer();
+		posts = [];
+		await render();
+		claim.release(refusal({ error: 'An erasure is running', code: 'erasure_in_progress', claim_kept: true }));
+		await settle();
+		expect(param()).toBe('nonce-9');
+		// Only the instance that sent the claim was told; a dead one parks nothing.
+		expect(posts.filter((p) => p.path === '/google/claim-managed/preview')).toHaveLength(0);
+	});
+
 	it('is not parked again on another page', async () => {
 		const claim = holdClaim();
 		await render();
