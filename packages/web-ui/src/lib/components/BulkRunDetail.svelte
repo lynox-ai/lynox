@@ -378,7 +378,7 @@
 
 <!-- Taking the run back: offered on its own, and beside writing on a run that halted. -->
 {#snippet filterLineOf(text: string)}
-	<p class="text-sm" tabindex="-1" bind:this={filterLine}>{text}{#if filtersFolded > 0}{' '}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => showAllFilters()}>{tf('bulk.list.showAll', { n: String(filtersFolded) })}</button>{/if}</p>
+	<p class="text-sm" tabindex="-1" bind:this={filterLine}>{filtersFolded > 0 ? `${text} ` : text}{#if filtersFolded > 0}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => showAllFilters()}>{tf('bulk.list.showAll', { n: String(filtersFolded) })}</button>{/if}</p>
 {/snippet}
 
 {#snippet undoOffer()}
