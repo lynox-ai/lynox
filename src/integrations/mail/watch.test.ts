@@ -506,3 +506,81 @@ describe('MailWatcher — a deferred batch is held for the next poll', () => {
     }
   });
 });
+
+// Gmail and Graph do not list a mail again after a restart, so a held mail must outlive the
+// process: the state DB keeps it, and a new watcher takes it back on attach.
+describe('MailWatcher — a deferred mail is kept across a restart', () => {
+  const ACCOUNT = {
+    id: 'acct-a', displayName: 'a', address: 'a@example.org', preset: 'gmail' as const,
+    imap: { host: '', port: 0, secure: true }, smtp: { host: '', port: 0, secure: true },
+    authType: 'oauth_google' as const, type: 'personal' as const,
+  };
+  beforeEach(() => { state.upsertAccount(ACCOUNT); });
+
+  /** Defer one mail on the fixture watcher, then stop it as a shutdown does. */
+  async function deferThenStop(): Promise<void> {
+    handler.mockImplementationOnce(() => { throw new InboundMailDeferred('test'); });
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider, { applyPrefilter: false });
+    await provider.emit({ type: 'new', envelopes: [envelope(4, { messageId: '<r-1@x>' })] });
+    await watcher.stopAll();
+  }
+
+  it('a new watcher hands the kept mail over on its first poll, with uid 0, and releases it', async () => {
+    await deferThenStop();
+    const handed: MailEnvelope[] = [];
+    const next = new MailWatcher(state, async (_a, envs) => { handed.push(...envs); });
+    const provider = new FakeProvider('acct-a');
+    try {
+      await next.attach(provider, { applyPrefilter: false });
+      await provider.emit({ type: 'ok' });
+    } finally {
+      await next.stopAll();
+    }
+    expect(handed.map((e) => [e.messageId, e.uid])).toEqual([['<r-1@x>', 0]]);
+    expect(state.countForAccount('acct-a')).toBe(1);
+    expect(state.deferredMail('acct-a')).toEqual([]);
+  });
+
+  it('takes the copy the provider lists now, with its uid, over the kept one', async () => {
+    await deferThenStop();
+    const handed: MailEnvelope[] = [];
+    const next = new MailWatcher(state, async (_a, envs) => { handed.push(...envs); });
+    const provider = new FakeProvider('acct-a');
+    try {
+      await next.attach(provider, { applyPrefilter: false });
+      await provider.emit({ type: 'new', envelopes: [envelope(9, { messageId: '<r-1@x>' })] });
+    } finally {
+      await next.stopAll();
+    }
+    expect(handed.map((e) => [e.messageId, e.uid])).toEqual([['<r-1@x>', 9]]);
+  });
+
+  it('releases a kept mail that is already marked seen', async () => {
+    await deferThenStop();
+    state.markSeen('acct-a', envelope(4, { messageId: '<r-1@x>' }));
+    const next = new MailWatcher(state, handler);
+    const provider = new FakeProvider('acct-a');
+    try {
+      await next.attach(provider, { applyPrefilter: false });
+      await provider.emit({ type: 'ok' });
+    } finally {
+      await next.stopAll();
+    }
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(state.deferredMail('acct-a')).toEqual([]);
+  });
+
+  it('keeps a mail deferred after the account was detached (a restore defers, then exits)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    handler.mockImplementationOnce(async () => { await gate; throw new InboundMailDeferred('test'); });
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider, { applyPrefilter: false });
+    const poll = provider.emit({ type: 'new', envelopes: [envelope(5, { messageId: '<late@x>' })] });
+    await watcher.stopAll();
+    release();
+    await poll;
+    expect(state.deferredMail('acct-a').map((e) => e.messageId)).toEqual(['<late@x>']);
+  });
+});
