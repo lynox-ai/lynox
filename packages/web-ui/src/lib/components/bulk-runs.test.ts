@@ -201,15 +201,25 @@ describe('a Shopify run\'s field names and note', () => {
 	});
 
 	it('names a filtered list\'s group by its product type, vendor or both, with hidden characters shown', () => {
-		const t: BulkI18n = { t: (k) => k, tf: (k, vars) => `${k}${JSON.stringify(vars)}` };
-		expect(bulkListFilterText({ product_type: 'Tee' }, t)).toBe('bulk.list.filter_type{"type":"Tee"}');
-		expect(bulkListFilterText({ vendor: 'Acme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"Acme"}');
-		expect(bulkListFilterText({ product_type: 'Tee', vendor: 'Acme' }, t)).toBe('bulk.list.filter_both{"type":"Tee","vendor":"Acme"}');
-		expect(bulkListFilterText({ product_type: 'T\u200Bee', vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_both{"type":"T⟨U+200B⟩ee","vendor":"Ac⟨U+202E⟩me"}');
-		expect(bulkListFilterText({ product_type: 'T\u200Bee' }, t)).toBe('bulk.list.filter_type{"type":"T⟨U+200B⟩ee"}');
-		expect(bulkListFilterText({ vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"Ac⟨U+202E⟩me"}');
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		expect(bulkListFilterText({ product_type: 'Tee' }, t)).toBe('bulk.list.filter_type{"type":"[Tee]"}');
+		expect(bulkListFilterText({ vendor: 'Acme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"[Acme]"}');
+		expect(bulkListFilterText({ product_type: 'Tee', vendor: 'Acme' }, t)).toBe('bulk.list.filter_both{"type":"[Tee]","vendor":"[Acme]"}');
+		expect(bulkListFilterText({ product_type: 'T\u200Bee', vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_both{"type":"[T⟨U+200B⟩ee]","vendor":"[Ac⟨U+202E⟩me]"}');
+		expect(bulkListFilterText({ product_type: 'T\u200Bee' }, t)).toBe('bulk.list.filter_type{"type":"[T⟨U+200B⟩ee]"}');
+		expect(bulkListFilterText({ vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"[Ac⟨U+202E⟩me]"}');
 		expect(bulkListFilterText(null, t)).toBeNull();
 		expect(bulkListFilterText({}, t)).toBeNull();
+	});
+
+	it('names every value of a list, each in its own quotes and with its hidden characters shown, the last after "or"', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		expect(bulkListFilterText({ product_type: ['Tee', 'Kaffee'] }, t)).toBe('bulk.list.filter_type{"type":"[Tee] <bulk.list.or> [Kaffee]"}');
+		expect(bulkListFilterText({ product_type: ['A', 'B\u200B', 'C'] }, t)).toBe('bulk.list.filter_type{"type":"[A], [B⟨U+200B⟩] <bulk.list.or> [C]"}');
+		expect(bulkListFilterText({ product_type: ['A', 'B'], vendor: ['X', 'Y', 'Z'] }, t)).toBe('bulk.list.filter_both{"type":"[A] <bulk.list.or> [B]","vendor":"[X], [Y] <bulk.list.or> [Z]"}');
+		const fifty = Array.from({ length: 50 }, (_, i) => `G${String(i)}`);
+		const text = bulkListFilterText({ vendor: fifty }, t)!;
+		for (const v of fifty) expect(text).toContain(`[${v}]`);
 	});
 
 	it('knows a store host exactly, not by a suffix', () => {

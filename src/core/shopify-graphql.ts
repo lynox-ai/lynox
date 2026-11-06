@@ -82,8 +82,39 @@ export function shopifyGraphqlEndpoint(host: string): string | null {
 /** The fields a Shopify list may be narrowed by, in the order `$q` names them (PRD shopify-preset §22). */
 export const SHOPIFY_LIST_FILTER_KEYS = ['product_type', 'vendor'] as const;
 export type ShopifyListFilterKey = (typeof SHOPIFY_LIST_FILTER_KEYS)[number];
+/** How many values one filter may list: a store's groups. Measured on a development store
+ *  (2026-11-06, Admin API 2026-10): 250 values of about 40 characters in one search, 13 362
+ *  characters, listed exactly; the longest a list here can build (2 × 50 × 255) is not measured.
+ *  Either way it fails closed: a search the store refuses fails the read, and a term it dropped
+ *  is caught by the check after the read (`shopifyInFilter`). */
+export const SHOPIFY_LIST_FILTER_MAX_VALUES = 50;
+/** One filter's value: one value, or a list of 2–{@link SHOPIFY_LIST_FILTER_MAX_VALUES}, any of which matches. */
+export type ShopifyListFilterValue = string | readonly string[];
 /** A Shopify list's filters: each key at most once, none when the list reads every product. */
-export type ShopifyListFilters = Readonly<Partial<Record<ShopifyListFilterKey, string>>>;
+export type ShopifyListFilters = Readonly<Partial<Record<ShopifyListFilterKey, ShopifyListFilterValue>>>;
+
+/** A filter's values as a list: one value is a list of one. */
+export function shopifyFilterValues(value: ShopifyListFilterValue): readonly string[] {
+  return typeof value === 'string' ? [value] : value;
+}
+
+/** A text with only `A`–`Z` made lower case: no locale and no Unicode case mapping takes part. */
+export function asciiLower(text: string): string {
+  return text.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/**
+ * Whether a filter's value is one value the rule takes, or a list of 2–{@link SHOPIFY_LIST_FILTER_MAX_VALUES}
+ * such values, no two equal up to ASCII letter case (the check after the read could not tell them
+ * apart). Values the store's search folds together (`Gemüse`, `Gemuse`) are taken: they only
+ * overlap. A list of one, or an empty one, is refused rather than read as one value or as no filter.
+ */
+export function isShopifyFilterValues(value: unknown): value is ShopifyListFilterValue {
+  if (typeof value === 'string') return isShopifyFilterValue(value);
+  if (!Array.isArray(value) || value.length < 2 || value.length > SHOPIFY_LIST_FILTER_MAX_VALUES) return false;
+  if (!value.every((v) => isShopifyFilterValue(v))) return false;
+  return new Set((value as string[]).map(asciiLower)).size === value.length;
+}
 
 /**
  * The punctuation a filter value may hold inside a word, besides `-` (which has a rule of its
@@ -95,6 +126,11 @@ const FILTER_PUNCTUATION = "_.&'/+";
 /** The one sentence every refusal of the value rule gives; the key is filled in, never the value. */
 export function shopifyFilterRefusal(key: string): string {
   return `source_list.filters.${key} may hold ${SHOPIFY_FILTER_VALUE_RULE}.`;
+}
+
+/** The one sentence a refused list of values gives: its size and its duplicates, never a value. */
+export function shopifyFilterListRefusal(key: string): string {
+  return `source_list.filters.${key} as a list holds 2 to ${String(SHOPIFY_LIST_FILTER_MAX_VALUES)} values, no two the same up to letter case; for one value give it as text.`;
 }
 
 /** What a filter value may hold, in the words of its refusal; the form's rules in bulk_plan say the same. */
@@ -140,15 +176,18 @@ export function isShopifyListFilters(filters: unknown): filters is ShopifyListFi
   const keys = Object.keys(filters);
   return keys.length > 0
     && keys.every((k) => (SHOPIFY_LIST_FILTER_KEYS as readonly string[]).includes(k))
-    && keys.every((k) => isShopifyFilterValue((filters as Record<string, unknown>)[k]));
+    && keys.every((k) => isShopifyFilterValues((filters as Record<string, unknown>)[k]));
 }
 
-/** `$q` of one list page: the products after `afterId`, then each filter as a quoted value. */
+/** `$q` of one list page: the products after `afterId`, then each filter as a quoted value, a list
+ *  as its values joined by OR in parentheses (without them `id:>N AND a OR b` would not bind the
+ *  cursor to `b`). One value builds as it always did. */
 function shopifyListQuery(afterId: number, filters: ShopifyListFilters): string {
   let q = `id:>${String(afterId)}`;
   for (const key of SHOPIFY_LIST_FILTER_KEYS) {
     const value = filters[key];
-    if (value !== undefined) q += ` AND ${key}:"${value}"`;
+    if (value === undefined) continue;
+    q += typeof value === 'string' ? ` AND ${key}:"${value}"` : ` AND (${value.map((v) => `${key}:"${v}"`).join(' OR ')})`;
   }
   return q;
 }
@@ -290,15 +329,55 @@ export type ShopifyRead =
   | { readonly form: 'shopify_media_list'; readonly afterId: number }
   | { readonly form: 'shopify_media_read'; readonly gid: string };
 
+/** The room a list search has in its trail row when the caller does not say: the row holds 400
+ *  characters (`audit-log.ts` TARGET_MAX) and cuts the rest unmarked, and `POST <host>/admin/api/
+ *  <version>/graphql.json shopify_products_list ` takes 59 of them plus the host, 77 for a store
+ *  name of 63 characters (the longest a DNS label holds). The client passes the room its own
+ *  row has, so a shorter store name leaves more. */
+export const SHOPIFY_READ_DETAIL_MAX = 264;
+
+/**
+ * The search of a list page as its trail row names it: as sent where it fits; otherwise the
+ * search as sent up to the end of the last whole value that fits, then how many values it leaves
+ * out. It is the sent text itself, operators and all, cut at a value's end and saying so: never
+ * a value cut in two, never a cut the row does not say, never a search that was not sent.
+ */
+function shopifyListDetail(afterId: number, filters: ShopifyListFilters, room: number): string {
+  const sent = shopifyListQuery(afterId, filters);
+  if (sent.length <= room) return sent;
+  // The same text as `shopifyListQuery`, with the offset where each value's term ends.
+  let q = `id:>${String(afterId)}`;
+  const ends: number[] = [];
+  for (const key of SHOPIFY_LIST_FILTER_KEYS) {
+    const value = filters[key];
+    if (value === undefined) continue;
+    const values = shopifyFilterValues(value);
+    q += typeof value === 'string' ? ' AND ' : ' AND (';
+    values.forEach((v, i) => {
+      q += `${i === 0 ? '' : ' OR '}${key}:"${v}"`;
+      ends.push(q.length);
+    });
+    if (typeof value !== 'string') q += ')';
+  }
+  // Never name a search other than the one sent: should the two ever differ, name no value.
+  if (q !== sent) ends.length = 0;
+  const cut = (left: number): string => ` … [cut here: ${String(left)} of ${String(ends.length)} values left out]`;
+  let shown = 0;
+  while (shown < ends.length && ends[shown]! + cut(ends.length - shown - 1).length <= room) shown++;
+  const kept = shown === 0 ? `id:>${String(afterId)}` : sent.slice(0, ends[shown - 1]);
+  return `${kept}${cut(ends.length - shown)}`;
+}
+
 /**
  * The body a read sends and the line its actor-trail row names — both built here from the
  * form and the value bound into it, so the row cannot say other than what was sent and no
- * caller's text reaches the trail. Null for a value that does not fit.
+ * caller's text reaches the trail. A list search too long for the row names the values that
+ * fit and how many it leaves out ({@link shopifyListDetail}). Null for a value that does not fit.
  */
-export function shopifyReadRequest(read: ShopifyRead): { body: string; detail: string } | null {
+export function shopifyReadRequest(read: ShopifyRead, room = SHOPIFY_READ_DETAIL_MAX): { body: string; detail: string } | null {
   if (read.form === 'shopify_products_list') {
     const body = shopifyListBody(read.afterId, read.filters);
-    return body === null ? null : { body, detail: `${read.form} ${shopifyListQuery(read.afterId, read.filters)}` };
+    return body === null ? null : { body, detail: `${read.form} ${shopifyListDetail(read.afterId, read.filters, room)}` };
   }
   if (read.form === 'shopify_media_list') {
     const body = shopifyMediaListBody(read.afterId);

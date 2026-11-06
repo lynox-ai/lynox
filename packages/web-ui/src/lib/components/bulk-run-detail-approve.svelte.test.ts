@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t, tf } from '../i18n.svelte.js';
+import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // The approval of a preview: the owner sees every target, why lynox leaves one out, can take one
@@ -107,6 +107,27 @@ const buttonByText = (text: string): HTMLButtonElement | undefined =>
 	[...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === text);
 
 describe('approving a preview', () => {
+	it('folds a long filter list until asked, then shows it whole and moves focus to it (ux U-175)', async () => {
+		const groups = (n: number, name: string): string[] => Array.from({ length: n }, (_, i) => `${name} ${String(i + 1).padStart(2, '0')}`);
+		const before = getLocale();
+		setLocale('de');
+		onTestFinished(() => setLocale(before));
+		run = makeRun({ listFilters: { product_type: groups(50, 'Gruppe'), vendor: groups(7, 'Anbieter') } });
+		await render();
+		const folded = tf('bulk.list.filter_both', { type: `„Gruppe 01“, „Gruppe 02“, „Gruppe 03“ ${tf('bulk.list.more', { n: '47' })}`, vendor: `„Anbieter 01“, „Anbieter 02“, „Anbieter 03“ ${tf('bulk.list.more', { n: '4' })}` });
+		const line = (): HTMLParagraphElement | undefined => [...target.querySelectorAll('p')].find((p) => p.textContent?.startsWith(folded.slice(0, 30)));
+		expect(line()!.textContent).toBe(`${folded} ${tf('bulk.list.showAll', { n: '57' })}`);
+		buttonByText(tf('bulk.list.showAll', { n: '57' }))!.click();
+		await settle();
+		const full = tf('bulk.list.filter_both', {
+			type: `${groups(49, 'Gruppe').map((g) => `„${g}“`).join(', ')} ${t('bulk.list.or')} „Gruppe 50“`,
+			vendor: `${groups(6, 'Anbieter').map((g) => `„${g}“`).join(', ')} ${t('bulk.list.or')} „Anbieter 07“`,
+		});
+		expect(line()!.textContent).toBe(full);
+		expect(buttonByText(tf('bulk.list.showAll', { n: '57' }))).toBeUndefined();
+		expect(document.activeElement).toBe(line());
+	});
+
 	it('shows why lynox leaves a product out, and folds the unchanged one until asked', async () => {
 		await render();
 		expect(target.textContent).toContain(t('bulk.invalid.not_found'));

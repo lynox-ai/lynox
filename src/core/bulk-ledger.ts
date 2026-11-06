@@ -304,7 +304,7 @@ export interface BulkRunStatus {
 export interface BulkListStatus {
   state: ListState;
   path: string;
-  filters: Record<string, string>;
+  filters: BulkListSource['filters'];
   idField: string;
   /** Null for a Shopify list, which only reads. */
   method: string | null;
