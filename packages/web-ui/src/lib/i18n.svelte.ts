@@ -493,6 +493,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.list.filter_both': { de: 'Gelesen werden nur die Produkte vom Produkttyp {type} und des Anbieters {vendor}.', en: 'Only the products of product type {type} and vendor {vendor} are read.' },
 	'bulk.list.value': { de: '„{value}“', en: '“{value}”' },
 	'bulk.list.or': { de: 'oder', en: 'or' },
+	// A list of more than 5 values, folded: its first 3, then this in place of „oder <last>“ (n ≥ 3).
+	'bulk.list.more': { de: 'oder {n} weiteren', en: 'or {n} others' },
+	// {n}: every value the click shows, of all folded lists together.
+	'bulk.list.showAll': { de: 'Alle {n} zeigen', en: 'Show all {n}' },
 	'bulk.start.list_explain': { de: 'lynox liest zuerst die Liste bei {provider}, Seite für Seite, ab dieser Adresse: {address}. Danach siehst du, welche Ziele sie enthält, und startest das Lesen der Ziele selbst. Prüfe sie, bevor du startest.', en: 'lynox first reads the list at {provider}, page by page, starting at this address: {address}. Then you see which targets it holds, and you start reading them yourself. Check it before you start.' },
 	'bulk.start.list': { de: 'Liste lesen', en: 'Read the list' },
 	'bulk.start.list_note': { de: 'Die Liste wurde Seite für Seite gelesen, nicht auf einen Schlag. Kam beim Anbieter während des Lesens etwas dazu, fiel etwas weg oder wurde umsortiert, kann es bei den Zielen fehlen oder nur einmal stehen, obwohl es sich verschoben hat.', en: 'The list was read page by page, not at one instant: an element added, removed or re-sorted on the host while it was read can be missing from the targets, or listed once only though it moved.' },

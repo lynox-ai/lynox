@@ -450,11 +450,27 @@ export const bulkVisibleText: (text: string) => string = visibleText;
 
 /** The line naming a filtered Shopify list's group, where the run is started and approved. The
  *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter. */
-export function bulkListFilterText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n): string | null {
+/** A list of more values than this is folded until the owner shows it all (ux U-175). */
+export const BULK_LIST_FILTER_UNFOLDED_MAX = 5;
+/** How many values a folded list shows before the count of the rest. */
+const BULK_LIST_FILTER_FOLDED_SHOWN = 3;
+
+/** How many values the folded filter line leaves out a click would show: every value of each
+ *  list longer than {@link BULK_LIST_FILTER_UNFOLDED_MAX}, together. 0 when nothing folds. */
+export function bulkListFilterFolded(filters: Readonly<Record<string, string | readonly string[]>> | null): number {
+	if (filters === null) return 0;
+	return Object.values(filters).reduce((n, v) => (typeof v !== 'string' && v.length > BULK_LIST_FILTER_UNFOLDED_MAX ? n + v.length : n), 0);
+}
+
+export function bulkListFilterText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n, folded = false): string | null {
 	if (filters === null) return null;
-	// Every value in its own quotes, all of them shown: they are the scope the owner approves (ux U-175).
+	// Every value in its own quotes: they are the scope the owner approves. Folded, a long list
+	// shows its first values and the count of the rest, so the line stays true (ux U-175).
 	const values = (v: string | readonly string[]): string => {
 		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
+		if (folded && quoted.length > BULK_LIST_FILTER_UNFOLDED_MAX) {
+			return `${quoted.slice(0, BULK_LIST_FILTER_FOLDED_SHOWN).join(', ')} ${i18n.tf('bulk.list.more', { n: String(quoted.length - BULK_LIST_FILTER_FOLDED_SHOWN) })}`;
+		}
 		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
 	};
 	const type = filters['product_type'];
