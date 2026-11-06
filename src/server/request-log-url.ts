@@ -8,7 +8,9 @@
 // The path is read as sent and never decoded. This runs on every request, before anyone is
 // known, so it does only linear work on a bounded string: a path longer than `MAX_LOGGED_PATH`
 // is replaced whole; a segment that holds an address (`@`, or `%40` under any number of `%25`)
-// is replaced whole, because some routes name a contact by address in the path; a known secret
+// is replaced whole, because some routes name a contact by address in the path; the contact
+// segment of the CRM routes (`/api/crm/contacts/:name/…`) is replaced, because it holds a
+// person's name and no general rule can tell a name from an id; a known secret
 // shape is masked; everything after an encoded `?` is replaced; the webhook route token is taken
 // out; an absolute-form target loses its scheme and authority. Because nothing is decoded, the
 // path keeps the shape the HTTP parser admitted, with no space in it, so it cannot pose as the
@@ -30,6 +32,21 @@ const PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_.\-[\]]{0,63}$/;
 /** A path segment that holds an address as sent: a plain or percent-encoded `@`, also the
  *  full-width one, under any number of `%25`. */
 const HOLDS_ADDRESS = /@|%(?:25)*40|%(?:25)*EF%(?:25)*BC%(?:25)*A0/i;
+
+const CONTACT = '<contact>';
+/** The segments before a contact in the CRM routes, as `split('/')` yields them. */
+const CRM_CONTACTS = ['', 'api', 'crm', 'contacts'] as const;
+/** A contact segment that names no one: a row id (`DELETE /api/crm/contacts/:id`), or empty
+ *  (the list route with a trailing slash). */
+const ROW_ID = /^\d*$/;
+
+/** The segment at `index`, as the log line writes it. */
+function logSegment(segment: string, index: number, segments: readonly string[]): string {
+  if (index === CRM_CONTACTS.length && !ROW_ID.test(segment) && CRM_CONTACTS.every((s, i) => segments[i] === s)) {
+    return CONTACT;
+  }
+  return HOLDS_ADDRESS.test(segment) ? ADDRESS : segment;
+}
 
 /**
  * `rawUrl` fit for the request log: the path as `logPath` writes it, every query value
@@ -56,7 +73,7 @@ function logPath(rawPath: string): string {
   if (rawPath.length > MAX_LOGGED_PATH) return LONG_PATH;
   const encodedQuery = rawPath.search(/%3F/i);
   const path = encodedQuery === -1 ? rawPath : rawPath.slice(0, encodedQuery);
-  const segments = redactWebhookPath(path).split('/').map((segment) => (HOLDS_ADDRESS.test(segment) ? ADDRESS : segment));
+  const segments = redactWebhookPath(path).split('/').map(logSegment);
   const written = maskSecretPatterns(segments.join('/'), { includeGeneric: true }) || '/';
   return encodedQuery === -1 ? written : `${written}%3F${REDACTED}`;
 }
