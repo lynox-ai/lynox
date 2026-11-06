@@ -6,7 +6,7 @@ import {
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead, bulkOne,
 } from './bulk-runs.js';
-import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
 import { BULK_HALT_REASONS } from '../../../../../src/core/bulk-ledger.js';
 import { MERGE_REFUSAL_CODES } from '../../../../../src/core/subject-merge-runner.js';
@@ -225,8 +225,23 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.confirm_first')).toBe(entry('bulk.approve.confirm_first',
 			'Setz zuerst das Häkchen oben, dann kannst du freigeben.', 'Tick the box above first, then you can approve.'));
 		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
-		expect(page).toContain(`aria-describedby={skipped.nothing ? 'bulk-approve-nothing' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
+		expect(page).toContain(`aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
 		expect(page).toContain(`<p id="bulk-approve-confirm-first" `);
+	});
+
+	it('holds the sentence and the button for a run of one target to write', () => {
+		expect(line('bulk.approve.only_one')).toBe(entry('bulk.approve.only_one',
+			'Es gibt nur dieses eine Ziel, deshalb kommt vorher keine Probe: Du gibst gleich den ganzen Lauf frei.', 'There is only this one target, so there is no probe first: you approve the whole run now.'));
+		expect(line('bulk.approve.write_only')).toBe(entry('bulk.approve.write_only', 'Das Ziel schreiben', 'Write the target'));
+	});
+
+	it('holds the note of a run with one target to write: the first two sentences, approved word for word', () => {
+		const approved = 'lynox has not checked this kind of change with this provider. It can trigger something else there, such as emails to your customers, a payment or an invoice.';
+		expect(BULK_UNMEASURED_NOTE_ONE).toBe(approved);
+		expect(BULK_UNMEASURED_NOTE.startsWith(`${BULK_UNMEASURED_NOTE_ONE} `)).toBe(true);
+		expect(line('bulk.approve.unmeasured_note_one')).toBe(entry('bulk.approve.unmeasured_note_one',
+			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung.',
+			BULK_UNMEASURED_NOTE_ONE));
 	});
 
 	it('holds the confirmation', () => {
