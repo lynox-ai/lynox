@@ -752,6 +752,8 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       const { engine, inflight, handover } = await engineWithHangingDrain(true);
+      const mailContext: { hooks: { onInboundMail?: InboundHook } } = { hooks: {} };
+      (engine as unknown as { _mailContext: unknown })._mailContext = mailContext;
       await engine.reloadCredentials();
       const running = inflight();
       await vi.advanceTimersByTimeAsync(REBOOTSTRAP_INBOX_DRAIN_MS);
@@ -763,9 +765,77 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       expect(handle._inboxRetiringRuntime).toBeNull();
       // Nothing to hand over to: the old runtime's jobs are surfaced as failed classifications.
       expect(handover.handOver?.({ threadKey: 'imap:t1' })).toBe(false);
+      // No deferring stand-in is left behind: it would hold every mail back until a restart.
+      expect(mailContext.hooks.onInboundMail).toBeUndefined();
     } finally {
       vi.useRealTimers();
       errSpy.mockRestore();
+    }
+  });
+
+  it('a second switch during the handover waits for the first, then switches again', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { engine, inflight, handover } = await engineWithHangingDrain();
+      const handle = engine as unknown as { _inboxRuntime: MockRuntime | null; _inboxClassifierSuspended: boolean; _inboxRebootstrapInflight: Promise<void> | null };
+      await engine.reloadCredentials();
+      const first = inflight();
+      await vi.advanceTimersByTimeAsync(REBOOTSTRAP_INBOX_DRAIN_MS);
+      await vi.waitFor(() => expect(handover.finish, 'handover started').toBeDefined());
+      const euRuntime = mockBootstrapInbox.mock.results[0]?.value as MockRuntime;
+      expect(handle._inboxRuntime, 'fixture: the new runtime is live during the handover').toBe(euRuntime);
+
+      // Back to the first region while the old runtime still hands over.
+      const usAgain = makeRuntime('us-again');
+      mockBootstrapInbox.mockReturnValueOnce(usAgain);
+      mockLoadConfig.mockReturnValueOnce({ api_key: 'sk-ant-old', provider: 'anthropic' } satisfies LynoxUserConfig);
+      mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-old');
+      await engine.reloadCredentials();
+      const second = handle._inboxRebootstrapInflight;
+      expect(second, 'the second switch is tracked').not.toBeNull();
+      expect(second).not.toBe(first);
+      expect(euRuntime.shutdown, 'the second has not started while the first hands over').not.toHaveBeenCalled();
+
+      handover.finish!();
+      await first;
+      // The first one settling leaves the second tracked; it is the one that switches now.
+      expect(handle._inboxRebootstrapInflight).toBe(second);
+      await second;
+      expect(handle._inboxRebootstrapInflight).toBeNull();
+      expect(euRuntime.shutdown).toHaveBeenCalled();
+      expect(handle._inboxRuntime).toBe(usAgain);
+      expect(handle._inboxClassifierSuspended).toBe(false);
+      expect(mockBootstrapInbox).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a second switch during the drain, before any runtime is live, is not lost', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { engine, inflight, handover } = await engineWithHangingDrain();
+      const handle = engine as unknown as { _inboxRuntime: MockRuntime | null; _inboxRebootstrapInflight: Promise<void> | null };
+      await engine.reloadCredentials();
+      const first = inflight();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(handle._inboxRuntime, 'fixture: no runtime is live during the drain').toBeNull();
+
+      const usAgain = makeRuntime('us-again');
+      mockBootstrapInbox.mockReturnValueOnce(usAgain);
+      mockLoadConfig.mockReturnValueOnce({ api_key: 'sk-ant-old', provider: 'anthropic' } satisfies LynoxUserConfig);
+      mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-old');
+      await engine.reloadCredentials();
+      const second = handle._inboxRebootstrapInflight;
+      expect(second).not.toBe(first);
+
+      await vi.advanceTimersByTimeAsync(REBOOTSTRAP_INBOX_DRAIN_MS);
+      await vi.waitFor(() => expect(handover.finish).toBeDefined());
+      handover.finish!();
+      await second;
+      expect(handle._inboxRuntime).toBe(usAgain);
+    } finally {
+      vi.useRealTimers();
     }
   });
 

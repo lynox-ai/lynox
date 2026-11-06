@@ -873,10 +873,18 @@ export class Engine {
     // path (constructor's _recreateClient via _initContextAndIdentity) is a
     // no-op. Once initialised, defer to the async helper so the await chain
     // doesn't leak into this sync method's signature.
-    if (this._inboxRuntime) {
-      this._inboxRebootstrapInflight = this
-        ._rebootstrapInboxOnProviderSwitch()
-        .finally(() => { this._inboxRebootstrapInflight = null; });
+    // One rebootstrap at a time: a switch while one runs (its drain, or its handover, when the new
+    // runtime is already live) waits for it and then reads the region again. Two at once would
+    // each lift the suspension and clear the in-flight mark the other still needs.
+    const prev = this._inboxRebootstrapInflight;
+    if (this._inboxRuntime || prev) {
+      const run = prev
+        ? prev.catch(() => { /* logged by the rebootstrap */ }).then(() => this._rebootstrapInboxOnProviderSwitch())
+        : this._rebootstrapInboxOnProviderSwitch();
+      const inflight: Promise<void> = run.finally(() => {
+        if (this._inboxRebootstrapInflight === inflight) this._inboxRebootstrapInflight = null;
+      });
+      this._inboxRebootstrapInflight = inflight;
     }
   }
 
