@@ -139,7 +139,7 @@
 								<tr class="border-b border-border hover:bg-bg-muted cursor-pointer" onclick={() => openRun(run.id)}>
 									<td class="py-2 pr-3">
 										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkLabel(run, i18n)}</button>
-										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden"> · {bulkSystemName(run.targetSystem, i18n)}</span></div>
+										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden">{` · ${bulkSystemName(run.targetSystem, i18n)}`}</span></div>
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">

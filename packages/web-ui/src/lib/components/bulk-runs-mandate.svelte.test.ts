@@ -232,6 +232,11 @@ describe('a sentence that names an act of the owner\'s', () => {
 					expect(mandate, `${lang} ${key}`).not.toBe(`${key}_mandate`);
 					expect(mandate, `${lang} ${key}`).not.toBe(t(key));
 					expect(bulkMandateI18n({ t, tf }).t(key), `${lang} ${key}`).toBe(mandate);
+					// A key with a singular has the mandate's singular too, so neither reads as a raw key.
+					if (t(`${key}_one`) !== `${key}_one`) {
+						expect(t(`${key}_mandate_one`), `${lang} ${key}_mandate_one`).not.toBe(`${key}_mandate_one`);
+						expect(bulkMandateI18n({ t, tf }).t(`${key}_one`), `${lang} ${key}_one`).toBe(t(`${key}_mandate_one`));
+					}
 				}
 				expect(bulkMandateI18n({ t, tf }).t('bulk.halt.wait_owner_only')).toBe(t('bulk.halt.wait_owner_only'));
 			}
@@ -294,6 +299,15 @@ describe('a sentence that names an act of the owner\'s', () => {
 			if (!text(c.key).includes(text(mandateKey))) expect(asOwner).not.toContain(text(mandateKey));
 		});
 	}
+
+	it('sets a space between a run\'s date and its system on a narrow list', async () => {
+		viewer = 'owner';
+		await renderList();
+		const system = target.querySelector('tbody span.sm\\:hidden');
+		expect(system?.textContent?.startsWith(' · ')).toBe(true);
+		unmount(component!);
+		component = undefined;
+	});
 
 	it('tells a mandate on the list who approves and takes back, and the owner that it is them', async () => {
 		await renderList();

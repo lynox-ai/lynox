@@ -153,17 +153,32 @@ describe('approving a preview', () => {
 
 	it('takes a product out against the checksum it showed, and then shuts an approval with nothing left', async () => {
 		await render();
-		const approve = buttonByText(t('bulk.approve.write_one'))!;
+		// One target to write: the first write is the whole run.
+		const approve = buttonByText(t('bulk.approve.write_only'))!;
 		expect(approve.disabled).toBe(false);
+		expect(target.textContent).toContain(t('bulk.approve.only_one'));
+		expect(target.textContent).not.toContain(t('bulk.approve.one_first'));
+		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
 		buttonByText(t('bulk.deselect.off'))!.click();
 		await settle();
 		expect(posts).toEqual([{ url: expect.stringMatching(/\/bulk\/runs\/r1\/targets\/1\/deselect$/) as unknown as string, body: { checksum: 'c1' } }]);
 		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
 		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
-		const shut = buttonByText(t('bulk.approve.write_one'))!;
-		expect(shut.disabled).toBe(true);
-		expect(shut.getAttribute('aria-describedby')).toBe('bulk-approve-nothing');
-		expect(target.querySelector('#bulk-approve-nothing')?.textContent).toBe(t('bulk.nothing.products'));
+		// Nothing left to write: the sentence and a way back, no button that cannot act and no note on a write.
+		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
+		expect(block.querySelector('#bulk-approve-nothing')?.textContent).toBe(t('bulk.nothing.products'));
+		expect([...block.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual([t('bulk.not_now')]);
+		for (const key of ['bulk.approve.only_one', 'bulk.approve.one_first', 'bulk.approve.shopify_visible']) expect(block.textContent).not.toContain(t(key));
+	});
+
+	it('writes one target first and leaves the rest to approve when there are two', async () => {
+		run = makeRun({ changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = targets.map((x) => (x.seq === 2 ? { ...x, change: 'update', diff: TARGETS[0]!.diff } : x));
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+		expect(target.textContent).not.toContain(t('bulk.approve.only_one'));
+		expect(buttonByText(t('bulk.approve.write_one'))?.disabled).toBe(false);
+		expect(buttonByText(t('bulk.approve.write_only'))).toBeUndefined();
 	});
 
 	it('offers no way out on a product lynox leaves out, and none on an unchanged one', async () => {

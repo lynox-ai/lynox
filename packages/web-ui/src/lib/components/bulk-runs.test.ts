@@ -225,8 +225,14 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.confirm_first')).toBe(entry('bulk.approve.confirm_first',
 			'Setz zuerst das Häkchen oben, dann kannst du freigeben.', 'Tick the box above first, then you can approve.'));
 		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
-		expect(page).toContain(`aria-describedby={skipped.nothing ? 'bulk-approve-nothing' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
+		expect(page).toContain(`aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
 		expect(page).toContain(`<p id="bulk-approve-confirm-first" `);
+	});
+
+	it('holds the sentence and the button for a run of one target to write', () => {
+		expect(line('bulk.approve.only_one')).toBe(entry('bulk.approve.only_one',
+			'Es gibt nur dieses eine Ziel. lynox schreibt es, danach ist der Lauf fertig.', 'There is only this one target. lynox writes it, and then the run is done.'));
+		expect(line('bulk.approve.write_only')).toBe(entry('bulk.approve.write_only', 'Das Ziel schreiben', 'Write the target'));
 	});
 
 	it('holds the confirmation', () => {
