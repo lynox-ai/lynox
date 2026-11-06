@@ -894,6 +894,8 @@ export class Engine {
           return this._rebootstrapInboxOnProviderSwitch();
         })
         : this._rebootstrapInboxOnProviderSwitch();
+      // run-group-starter: only clears the in-flight mark and reports no spend; the classifier
+      // jobs a rebootstrap starts run outside any group (`ClassifierQueue._tryStart`).
       const inflight: Promise<void> = run.finally(() => {
         if (this._inboxRebootstrapInflight === inflight) this._inboxRebootstrapInflight = null;
       });
