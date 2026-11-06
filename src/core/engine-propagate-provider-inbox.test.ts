@@ -685,7 +685,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     expect((engine as unknown as { _inboxIntakeClosed: boolean })._inboxIntakeClosed).toBe(false);
   });
 
-  // 1249: the old runtime's drain is bounded. A drain that hangs no longer holds new mail back
+  // The old runtime's drain is bounded. A drain that hangs no longer holds new mail back
   // until a restart: after the bound the new runtime is wired, and what the old one still holds
   // goes to it.
   async function engineWithHangingDrain(bootstrapFails = false): Promise<{ engine: Engine; usRuntime: MockRuntime; inflight: () => Promise<void> | null; handover: { within?: { classifyUntil: number; cutOffAt: number }; handOver?: (p: unknown) => boolean; finish?: () => void } }> {
