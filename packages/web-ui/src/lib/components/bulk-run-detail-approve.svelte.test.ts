@@ -151,7 +151,7 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('short_description:');
 	});
 
-	it('takes a product out against the checksum it showed, and then shuts an approval with nothing left', async () => {
+	it('says a run of one target is done after it, takes the product out against the checksum it showed, and then keeps only why nothing is left', async () => {
 		await render();
 		// One target to write: the first write is the whole run.
 		const approve = buttonByText(t('bulk.approve.write_only'))!;
