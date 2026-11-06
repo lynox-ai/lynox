@@ -31,7 +31,8 @@ import { headlessRefusalNote } from './write-notes.js';
 import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS, MISTRAL_EU_HOST, MISTRAL_GLOBAL_HOST } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
-import { StreamProcessor } from './stream.js';
+import { StreamProcessor, type PartialReply } from './stream.js';
+import { ToolCallImitationDetector, imitationToolsFrom } from './tool-call-imitation.js';
 import { CostGuard } from './cost-guard.js';
 import { classifyProviderFailure, type RunFailure } from './provider-failure.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.js';
@@ -397,6 +398,24 @@ export class ThinkingOnlyLoopError extends ContinuationLoopError {
     super('');
     this.message = 'Run stopped: two truncated turns in a row held only thinking, with no answer and no tool call';
     this.name = 'ThinkingOnlyLoopError';
+  }
+}
+
+/**
+ * The reply wrote the same tool call out as text, again and again, instead of calling the
+ * tool (stream.ts, tool-call-imitation.ts). Nothing of it ran. The call is ended upstream so
+ * the provider stops generating, and the run stops instead of retrying the same request.
+ */
+export class ToolCallImitationError extends RunAbortedError {
+  /** The tool the repeated text names or whose input it carries, when known; for logs. */
+  readonly toolName: string | undefined;
+  /** The stopped reply as far as it came; the provider bills it, so the call is booked from it. */
+  readonly partial: PartialReply | undefined;
+  constructor(toolName?: string | undefined, partial?: PartialReply | undefined) {
+    super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+    this.name = 'ToolCallImitationError';
+    this.toolName = toolName;
+    this.partial = partial;
   }
 }
 
@@ -786,6 +805,8 @@ export class Agent implements IAgent {
   private static readonly MAX_RETRIES = 3;
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
   private static RETRY_BASE_MS = 2000;
+  /** How long one main-model call may stream before it is ended. Not readonly: tests shorten it. */
+  private static STREAM_TIMEOUT_MS = 600_000;
 
   /** Default max chars for a single tool result before truncation. Configurable via `max_tool_result_chars`. */
   private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = DEFAULT_MAX_TOOL_RESULT_CHARS;
@@ -2549,6 +2570,10 @@ export class Agent implements IAgent {
    * one, on roughly every turn that needs the recovery. Accumulated here rather than folded
    * into `usage`, because these tokens are priced on the FAST model and adding them to a run's
    * own token counts would misprice them at the run's `pricePerM`.
+   *
+   * It also carries the estimate of aborted calls — helpers (`_bookAbortedHelper`) and the
+   * run's own model calls ended by the guard, by a stop of the run or by the stream timeout,
+   * after the provider answered (`_bookStoppedCall`) — which are never debited.
    */
   private _helperCostUsd = 0;
 
@@ -2578,6 +2603,17 @@ export class Agent implements IAgent {
   /** {@link _helperCostUsd} for the run that just finished; reset at the start of each `send`. */
   getHelperCostUsd(): number { return this._helperCostUsd; }
 
+  /**
+   * Upper bounds that {@link _bookStoppedCall} added to the session counter (`sessionCounters.costUSD`,
+   * the session cap) in the current run; reset at the start of each `send`. Read by `spawn.ts`
+   * only: a spawned child's session-cap share is the spawn's reservation, so once the child has
+   * settled the spawn takes these bounds back off the shared counter.
+   */
+  private _stoppedCallSessionUsd = 0;
+
+  /** {@link _stoppedCallSessionUsd} for the run that just finished. */
+  getStoppedCallSessionCostUsd(): number { return this._stoppedCallSessionUsd; }
+
   async send(
     userMessage: string | unknown[],
     opts?: {
@@ -2596,6 +2632,7 @@ export class Agent implements IAgent {
   ): Promise<string> {
     // Per RUN, not per session: `Session` reads it once after this returns.
     this._helperCostUsd = 0;
+    this._stoppedCallSessionUsd = 0;
     this._askedNobodyInRun = undefined;
     // F5: everything already in the buffer is a PREVIOUS turn — replace the
     // bodies of successfully saved artifacts with a reference (next-turn
@@ -2753,6 +2790,12 @@ export class Agent implements IAgent {
       // completed tool pairs before the cut-off turns are work the next turn can build on.
       if (err instanceof ContinuationLoopError
         && this._keepCompletedPrefix(userTurn, { code: 'continuation_loop', detail: continuationLoopDetail(err.loopPrefix) })) {
+        throw err;
+      }
+      // And for a tool call written out as text: nothing of the reply ran, so the reply itself is
+      // dropped, while the question and the completed tool pairs before it stay.
+      if (err instanceof ToolCallImitationError
+        && this._keepCompletedPrefix(userTurn, { code: 'tool_call_imitation' })) {
         throw err;
       }
       this.messages.length = Math.min(snapshot, this.messages.length);
@@ -3683,7 +3726,26 @@ export class Agent implements IAgent {
       }
     }
 
+    const imitationTools = toolsDef.length > 0 ? imitationToolsFrom(toolsDef) : [];
     for (let attempt = 0; attempt <= Agent.MAX_RETRIES; attempt++) {
+      // Each call gets its own controller, linked to the run's: a run abort still ends the
+      // call, and the guard below can end the call alone. Leaving the stream's iteration does
+      // not end the request on every wire (the openai-compat adapter only releases its reader),
+      // so the provider would keep generating, and billing, a reply nobody reads.
+      const callController = new AbortController();
+      const onRunAbort = (): void => { callController.abort(signal?.reason); };
+      if (signal) {
+        if (signal.aborted) callController.abort(signal.reason);
+        // run-group-starter: removed in this attempt's `finally`, or fired once; it only aborts this call and reports no spend.
+        else signal.addEventListener('abort', onRunAbort, { once: true });
+      }
+      // Whether this attempt's request went out, and what of its reply came back: a user stop
+      // books a call that was sent (see the catch below), and only that one.
+      let issued = false;
+      let processor: StreamProcessor | undefined;
+      // This attempt's stream timeout: the timer, and the error it ended the call with.
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+      let timeoutError: Error | undefined;
       try {
         const stream = this.client.beta.messages.stream({
           model: this.model,
@@ -3710,22 +3772,82 @@ export class Agent implements IAgent {
             ? ({ prompt_cache_key: buildPromptCacheKey(this.currentThreadId, this.name) } as object)
             : {} ),
           tools: toolsDef,
-        }, { signal });
+        }, { signal: callController.signal });
+        // Neither wire sends a request whose signal is already stopped (a run stopped between
+        // two calls): such a call costs nothing. The converse does not hold: a live signal here
+        // means the request MAY have gone out, not that it did (see the catch below).
+        issued = !callController.signal.aborted;
 
         const handler = this.onStream ?? (() => {});
-        const processor = new StreamProcessor(handler, this.name);
+        // The call is ended while the stream is still being read, so the wire's own abort
+        // listener is still in place when it fires.
+        processor = new StreamProcessor(handler, this.name, imitationTools.length > 0
+          ? {
+            detector: new ToolCallImitationDetector(imitationTools),
+            stop: (hit, partial) => {
+              callController.abort();
+              return new ToolCallImitationError(hit.toolName, partial);
+            },
+          }
+          : undefined);
 
-        // Per-stream timeout: 10 minutes max for a single API call
-        const streamTimeout = 600_000;
+        // Per-stream timeout: 10 minutes max for a single API call. Cleared in `finally`, so a
+        // finished call leaves no timer behind.
         const result = await Promise.race([
           processor.process(stream),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('Stream timeout: API response exceeded 10 minutes')), streamTimeout),
-          ),
+          new Promise<never>((_, reject) => {
+            // run-group-starter: cleared in this attempt's `finally`; it only rejects this call and reports no spend.
+            timeoutTimer = setTimeout(() => {
+              timeoutError = new Error('Stream timeout: API response exceeded 10 minutes');
+              reject(timeoutError);
+            }, Agent.STREAM_TIMEOUT_MS);
+          }),
         ]);
         return result;
       } catch (err: unknown) {
-        if (signal?.aborted) throw err;
+        const request = { system: systemBlocks, messages: outboundMessages, tools: toolsDef };
+        // The reply was stopped on purpose; the same request would write the same text again.
+        // What it used is booked as an aborted call before the run ends. Checked before the
+        // run's own stop: when both coincide the call is booked once, under the guard, whose
+        // partial is the reply at the moment it was ended.
+        if (err instanceof ToolCallImitationError) {
+          this._bookStoppedCall('agent.tool_call_imitation', err.partial, request, { estimate: true });
+          throw err;
+        }
+        // The stream timeout ended the call; `finally` below cancels the request. The provider
+        // bills what it generated until then, as for a stop, so it is booked the same way: the
+        // bound to the run ceiling and the session cap; and, if the provider answered (the
+        // stream delivered an event), the estimate to the run's cost line and one count for
+        // this site. The partial is the reply at the moment the timeout fired. Booked once per
+        // timed-out attempt, here and nowhere else, before the error goes on unchanged to the
+        // retry decision below (which does not retry it today) or out of the call; a retried
+        // attempt would be a new request with its own timer and its own booking. When the run
+        // is stopped in the same instant, the timeout ended the call: it is booked here, under
+        // the timeout, and the stop's booking below is skipped.
+        const timedOut = err !== undefined && err === timeoutError;
+        if (timedOut && issued) {
+          this._bookStoppedCall('agent.stream_timeout', processor?.partial(), request, { estimate: processor?.answered() === true });
+        }
+        // The run was stopped while this call was out — for example by the person, the
+        // wall-clock backstop, a takeover of the run, an ended mandate, a workflow step's
+        // timeout, or a spawned child's deadline. What is booked depends on what is known:
+        // - The provider answered (the stream delivered an event): it bills the prompt and what
+        //   it generated until the stop. On the openai-compatible wire the adapter emits its
+        //   first event once the provider accepted the request (HTTP 200), before any body. Booked as an aborted call: the bound to the caps, the
+        //   estimate to the run's cost line, and counted per site.
+        // - No answer yet: the request may or may not have reached the provider. The SDK
+        //   retries 429/529/5xx and connection errors inside the call, so a live signal at
+        //   `stream()` does not mean the request was sent, let alone accepted; and whether a
+        //   provider bills a sent request it never answered is not observable here. Only the
+        //   caps take it (overstating a cap is the safe direction); no estimate, no count.
+        // - Never sent (the signal was already stopped): nothing. An abort during the retry
+        //   wait below never reaches this catch, as no request of the next attempt was sent.
+        if (signal?.aborted) {
+          if (issued && !timedOut) {
+            this._bookStoppedCall('agent.user_abort', processor?.partial(), request, { estimate: processor?.answered() === true });
+          }
+          throw err;
+        }
         if (attempt < Agent.MAX_RETRIES && isRetryable(err)) {
           const delay = Agent.RETRY_BASE_MS * Math.pow(2, attempt);
           if (this.onStream) {
@@ -3745,11 +3867,48 @@ export class Agent implements IAgent {
         // everything that is not a billing stop.
         this._lastProviderFailure = classifyProviderFailure(err, this._providerHost());
         throw err;
+      } finally {
+        clearTimeout(timeoutTimer);
+        // The run's signal lives across calls; one listener per call would pile up.
+        signal?.removeEventListener('abort', onRunAbort);
+        // A stream that lost the race above is still being read and generated; this ends it.
+        // After a finished call it does nothing.
+        callController.abort();
       }
     }
 
     // Unreachable, but satisfies TypeScript
     throw new Error('Exhausted retries');
+  }
+
+  /**
+   * Book a main-model call that was ended mid-stream — by the guard on a tool call written out
+   * as text, by a stop of the run, or by the per-call stream timeout — as an aborted call
+   * (aborted-call.ts): the run ceiling and the session cap get the upper bound, and the tenant
+   * debit gets nothing. With
+   * `estimate` (the provider answered), the run's cost line also gets the estimate and the
+   * call is counted per site; without it only the caps take the call. The prompt is the
+   * provider's count when it sent one (the Anthropic wire's `message_start`), else the
+   * request's size (the openai-compatible wire reports none before its last chunk).
+   */
+  private _bookStoppedCall(
+    site: 'agent.tool_call_imitation' | 'agent.user_abort' | 'agent.stream_timeout',
+    partial: PartialReply | undefined,
+    request: unknown,
+    opts: { estimate: boolean },
+  ): void {
+    try {
+      const cost = abortedCallCost({ model: this.model, maxTokens: this.maxTokens, request, partial });
+      this.costGuard?.recordCapOnlyCost(cost.upperBoundUsd);
+      recordSessionCost(this.sessionCounters, cost.upperBoundUsd);
+      // The same amount `recordSessionCost` just added (it adds only a finite figure above 0).
+      if (Number.isFinite(cost.upperBoundUsd) && cost.upperBoundUsd > 0) this._stoppedCallSessionUsd += cost.upperBoundUsd;
+      if (!opts.estimate) return;
+      this._helperCostUsd += cost.estimateUsd;
+      reportAbortedCall(site, this.model, cost);
+    } catch {
+      // Booking must not replace the stop it books.
+    }
   }
 
   private _buildSystemPrompt(): Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> {

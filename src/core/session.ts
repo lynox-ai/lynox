@@ -30,7 +30,7 @@ import { effectiveContextWindow, profileNamed } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } from './agent.js';
 import { isInputRequired } from './input-required.js';
 import { loopGuardStopReason } from './loop-guard-stop.js';
 import type { SendStop } from './agent.js';
@@ -162,6 +162,7 @@ export function classifyRunFailure(err: unknown): { noteCode: string; report: bo
   if (err instanceof ThinkingOnlyLoopError) return { noteCode: 'thinking_loop', report: true };
   if (err instanceof ContinuationLoopError) return { noteCode: 'continuation_loop', report: true };
   if (err instanceof ToolLoopBreakError) return { noteCode: 'tool_loop_break', report: true };
+  if (err instanceof ToolCallImitationError) return { noteCode: 'tool_call_imitation', report: true };
   if (err instanceof RunAbortedError) return { noteCode: 'run_interrupted', report: true };
   return { noteCode: 'provider_error', report: true };
 }
@@ -1329,13 +1330,16 @@ export class Session {
       });
 
       // In-run helper calls (the follow-up-chip recovery) spend on the pool key without
-      // producing tokens in `this.usage`, so the deltas above cannot see them.
+      // producing tokens in `this.usage`, so the deltas above cannot see them. Aborted helper
+      // calls and a main-model call ended mid-stream (by the stream guard, or by a stop of the
+      // run after the provider answered) add an estimate here too (and an upper bound to the
+      // cost caps); those reach no tenant debit at all.
       //
       // ⚠ This is a DISPLAY term and must never reach `onAfterRun`. `costUsd` above is the
-      // value the managed hook DEBITS, and the helper already debited itself through its own
-      // `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`) under a fresh
-      // run id. `managed-hook.ts` dedups per run id, so adding the same dollars to `costUsd`
-      // bills the tenant twice — which a first version of this did, on the belief that the
+      // value the managed hook DEBITS, and a helper call that finished already debited itself
+      // through its own `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`)
+      // under a fresh run id. `managed-hook.ts` dedups per run id, so adding the same dollars
+      // to `costUsd` bills the tenant twice — which a first version of this did, on the belief that the
       // CP figure was the one missing them. It was the other way round: the CP was right and
       // the numbers the CUSTOMER reads were short.
       //

@@ -139,6 +139,25 @@ describe('a turn that rendered something and then lost its run shows the run\'s 
 	});
 });
 
+describe('a turn stopped because it wrote an action out as text', () => {
+	it('keeps the text the user read in the bubble and puts the stop note behind it', async () => {
+		// The server ends such a run like a stop: the stream closes without `done`, the
+		// transcript holds the question and the note, and the cut-off reply is not stored.
+		const STOPPED = { role: 'assistant', content: '', note: { code: 'tool_call_imitation' } };
+		const { run, turn } = await startTurn({ transcript: [USER, STOPPED] });
+		const copy = 'I will send it now: {"url":"https://example.com/api","method":"POST"} ';
+		run.send('text', { text: copy + copy, agent: 'lynox' });
+		await settle();
+		run.close();
+		await turn; await settle();
+
+		const rows = afterUser();
+		expect(rows[0]?.content).toBe(copy + copy);
+		expect(rows[1]?.note?.code).toBe('tool_call_imitation');
+		expect(rows).toHaveLength(2);
+	});
+});
+
 describe('nothing is added where the note is not this turn\'s, or not yet known', () => {
 	it('registry unreachable: no note, and the transcript is not asked', async () => {
 		// Without an answer from the registry the run may still be going; its note

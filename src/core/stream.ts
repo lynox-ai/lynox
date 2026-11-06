@@ -13,12 +13,56 @@ import type {
   BetaRawMessageDeltaEvent,
   BetaUsage,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import type { ImitationHit, ToolCallImitationDetector } from './tool-call-imitation.js';
+
+/** A reply cut off mid-stream, as far as it came: the usage the provider reported
+ *  (`message_start`, any `message_delta`) and the content blocks streamed so far. */
+export interface PartialReply {
+  readonly usage: BetaUsage | undefined;
+  readonly content: readonly BetaContentBlock[];
+}
+
+/**
+ * Stops a reply that writes a tool call out as text again and again. `stop` is
+ * called once, when the detector trips, before the stream is left: it is where
+ * the caller ends the upstream request, and the error it returns is thrown out
+ * of `process()`.
+ */
+export interface ImitationGuard {
+  readonly detector: ToolCallImitationDetector;
+  readonly stop: (hit: ImitationHit, partial: PartialReply) => Error;
+}
 
 export class StreamProcessor {
   constructor(
     private onEvent: EmittingStreamHandler,
     private agentName: string,
+    private guard?: ImitationGuard | undefined,
   ) {}
+
+  /** Usage seen so far in the current stream; the `message_delta` merge updates it in place. */
+  private _usage: BetaUsage | undefined;
+  /** Content blocks streamed so far in the current stream; filled in place as events arrive. */
+  private _content: BetaContentBlock[] = [];
+  /**
+   * Stream events received so far: more than zero once the provider has answered. On the
+   * openai-compatible wire the adapter's first event follows the provider's accepting HTTP
+   * response, before any body; on the Anthropic wire it is the provider's own first event.
+   */
+  private _events = 0;
+
+  /** Whether the provider answered this stream with at least one event. */
+  answered(): boolean {
+    return this._events > 0;
+  }
+
+  /**
+   * The reply as far as it came: for a caller that ends the stream from outside (a user stop)
+   * and books what the provider billed. Before the first event, no usage and no content.
+   */
+  partial(): PartialReply {
+    return { usage: this._usage, content: this._content };
+  }
 
   async process(stream: AsyncIterable<BetaRawMessageStreamEvent>): Promise<{
     content: BetaContentBlock[];
@@ -26,11 +70,13 @@ export class StreamProcessor {
     usage: BetaUsage;
   }> {
     const content: BetaContentBlock[] = [];
+    this._content = content;
     const rawInputs = new Map<number, string>();
     let stopReason = 'end_turn';
     let usage: BetaUsage | undefined;
 
     for await (const event of stream) {
+      this._events++;
       switch (event.type) {
         case 'content_block_start':
           this._handleBlockStart(event, content, rawInputs);
@@ -55,6 +101,7 @@ export class StreamProcessor {
 
         case 'message_start':
           usage = event.message.usage;
+          this._usage = usage;
           break;
 
         case 'message_stop':
@@ -91,6 +138,8 @@ export class StreamProcessor {
     if (block.type === 'tool_use') {
       rawInputs.set(event.index, '');
     }
+    // A real call has started (a server tool, such as web search, counts as one).
+    if (block.type === 'tool_use' || block.type === 'server_tool_use') this.guard?.detector.noteToolUse();
   }
 
   private async _handleBlockDelta(
@@ -107,6 +156,10 @@ export class StreamProcessor {
         const textDelta = delta as BetaTextDelta;
         const textBlock = block as BetaTextBlock;
         (textBlock as { text: string }).text += textDelta.text;
+        // Checked before the delta is shown: the delta that completes a stopping
+        // copy is not rendered.
+        const hit = this.guard?.detector.push(textDelta.text) ?? null;
+        if (hit !== null && this.guard) throw this.guard.stop(hit, { usage: this._usage, content });
         await this.onEvent({ type: 'text', text: textDelta.text, agent: this.agentName });
         break;
       }

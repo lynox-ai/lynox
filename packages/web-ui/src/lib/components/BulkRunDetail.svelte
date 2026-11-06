@@ -13,7 +13,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -326,10 +326,14 @@
 
 	const host = $derived(run ? bulkHostOf(run.targetSystem) : null);
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
-	const step = $derived(run ? bulkStep(run) : 0);
+	const step = $derived(run ? bulkStep(run) : 'planned');
+	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
-	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote ? t('bulk.approve.unmeasured_note') : run.writeFormNote);
+	// With one target to write the note keeps its first two sentences, here and in the engine's own (EN).
+	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote
+		? t(run !== null && bulkWriting(run) === 1 ? 'bulk.approve.unmeasured_note_one' : 'bulk.approve.unmeasured_note')
+		: run.writeFormNote);
 	const unmeasuredConfirmation = $derived(getLocale() === 'de' || !run?.writeFormConfirmation ? t('bulk.approve.unmeasured_confirm') : run.writeFormConfirmation);
 	const canUndo = $derived(run !== null && bulkCanUndo(run));
 	const startKind = $derived(run ? bulkStartKind(run) : null);
@@ -406,8 +410,8 @@
 			<h1 class="text-lg font-medium">{bulkLabel(run, i18n)}</h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
-				{#each BULK_STEPS as s, i (s)}
-					<li class="rounded-full px-2 py-0.5 {i === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={i === step ? 'step' : undefined}>{t(`bulk.step.${s}`)}</li>
+				{#each steps as s (s)}
+					<li class="rounded-full px-2 py-0.5 {s === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={s === step ? 'step' : undefined}>{t(`bulk.step.${s}`)}</li>
 				{/each}
 			</ol>
 
@@ -527,7 +531,7 @@
 						</table>
 					</div>
 					{#if foldedUnchanged > 0}
-						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? 'bulk.preview.show_unchanged' : 'bulk.preview.show_unchanged_targets', { n: String(foldedUnchanged) })}</button>
+						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? bulkOne('bulk.preview.show_unchanged', foldedUnchanged) : bulkOne('bulk.preview.show_unchanged_targets', foldedUnchanged), { n: String(foldedUnchanged) })}</button>
 					{/if}
 					{#if targets.length < run.total}
 						<button type="button" class="{btnPlain} mt-2" onclick={showMore}>{tf('bulk.preview.show_all', { n: String(run.total) })}</button>
@@ -712,6 +716,13 @@
 			{:else if run.phase === 'previewed' && run.kind === 'apply'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.approve.title')}</h2>
+					{#if skipped.nothing}
+						<!-- Nothing left to write: no note on what a write does, no button that cannot act. -->
+						<p id="bulk-approve-nothing" class="text-sm">{skipped.text}</p>
+						<div class="flex flex-wrap gap-2">
+							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+						</div>
+					{:else}
 					{#if listFilterText}<p class="text-sm">{listFilterText}</p>{/if}
 					{#if run.writeForm === 'unmeasured'}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{unmeasuredNote}</p>
@@ -724,7 +735,8 @@
 						<p class="text-sm">{t('bulk.approve.shopify_visible')}</p>
 					{/if}
 					{#if host !== null && !run.probeConfirmed}
-						<p class="text-sm">{t('bulk.approve.one_first')}</p>
+						<!-- With one target to write, the first is the whole run: nothing is left to approve after it. -->
+						<p class="text-sm">{t(bulkWriting(run) === 1 ? 'bulk.approve.only_one' : 'bulk.approve.one_first')}</p>
 					{:else}
 						<label class="flex items-center gap-2 text-sm">
 							{t('bulk.approve.at_most')}
@@ -734,17 +746,16 @@
 					{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary}
-							disabled={busy || skipped.nothing || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
-							aria-describedby={skipped.nothing ? 'bulk-approve-nothing' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
+							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
+							aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>
-							{host !== null && !run.probeConfirmed ? t('bulk.approve.write_one') : t('bulk.approve.approve')}
+							{host !== null && !run.probeConfirmed ? t(bulkWriting(run) === 1 ? 'bulk.approve.write_only' : 'bulk.approve.write_one') : t('bulk.approve.approve')}
 						</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
-					{#if skipped.nothing}
-						<p id="bulk-approve-nothing" class="text-sm">{skipped.text}</p>
-					{:else if run.writeForm === 'unmeasured' && !unmeasuredOk}
+					{#if run.writeForm === 'unmeasured' && !unmeasuredOk}
 						<p id="bulk-approve-confirm-first" class="text-xs text-text-subtle">{t('bulk.approve.confirm_first')}</p>
+					{/if}
 					{/if}
 				</div>
 			{:else if atProbe && run.probe}

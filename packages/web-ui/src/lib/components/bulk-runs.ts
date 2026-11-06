@@ -22,10 +22,21 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.invalid.before_has_shop_markup', 'bulk.invalid.before_has_shop_markup_undated',
 ]);
 
-/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form. */
+/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form, a key's
+ *  singular (`_one`, {@link bulkOne}) in its `_mandate_one` form. */
 export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
-	const key = (k: string): string => (BULK_MANDATE_KEYS.has(k) ? `${k}_mandate` : k);
+	const key = (k: string): string => {
+		if (BULK_MANDATE_KEYS.has(k)) return `${k}_mandate`;
+		const base = k.endsWith('_one') ? k.slice(0, -'_one'.length) : null;
+		return base !== null && BULK_MANDATE_KEYS.has(base) ? `${base}_mandate_one` : k;
+	};
 	return { t: (k) => i18n.t(key(k)), tf: (k, vars) => i18n.tf(key(k), vars) };
+}
+
+/** A count's sentence at one: the key's `_one` form, which says "1 product", not "1 products".
+ *  Only for the keys that have a worded singular. */
+export function bulkOne(key: string, n: number): string {
+	return n === 1 ? `${key}_one` : key;
 }
 
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
@@ -87,6 +98,9 @@ export interface BulkRunDetailData extends BulkRun {
 	/** The target the run waits on as its probe. `found`: lynox sent to it without a clear answer
 	 *  and then found it as planned, so it cannot say it wrote it; absent reads as written. */
 	probe: { key: string; fields: string[]; found?: boolean } | null;
+	/** Whether this run confirmed a probe of its own: it stays a step the run went through once
+	 *  the probe holds. Absent reads as false. */
+	probeOwn?: boolean;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
@@ -797,14 +811,32 @@ export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntity
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
+export type BulkStepName = (typeof BULK_STEPS)[number];
 
-/** Which of {@link BULK_STEPS} the run is at. */
-export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase'>): number {
-	if (run.phase === 'planned') return 0;
-	if (run.phase === 'previewed') return 2;
-	if (bulkAtProbe(run)) return 3;
-	if (run.phase === 'approved' || run.phase === 'writing') return 4;
-	return 5;
+type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>;
+
+/** Whether the run has a probe step: two or more targets to write (counted as the write counts
+ *  them), and its probe does not hold yet or it confirmed one of its own. A run at its probe is
+ *  the first: the server names a probe only for an external run whose probe does not hold.
+ *  With one target the one write is the whole run, also where the engine files it as a probe. */
+export function bulkHasProbeStep(run: BulkStepRun): boolean {
+	if (bulkWriting(run) < 2) return false;
+	return (bulkHostOf(run.targetSystem) !== null && !run.probeConfirmed) || run.probeOwn === true;
+}
+
+/** The steps the run shows: {@link BULK_STEPS}, without the probe where it has none. */
+export function bulkSteps(run: BulkStepRun): readonly BulkStepName[] {
+	return bulkHasProbeStep(run) ? BULK_STEPS : BULK_STEPS.filter((s) => s !== 'probe');
+}
+
+/** Which of {@link BULK_STEPS} the run is at. A run without a probe step writes its one target
+ *  under "run", though the engine may hold it there as at a probe. */
+export function bulkStep(run: BulkStepRun): BulkStepName {
+	if (run.phase === 'planned') return 'planned';
+	if (run.phase === 'previewed') return 'approval';
+	if (bulkAtProbe(run) && bulkHasProbeStep(run)) return 'probe';
+	if (run.phase === 'approved' || run.phase === 'writing') return 'run';
+	return 'done';
 }
 
 /** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),
@@ -886,11 +918,11 @@ export function bulkSkippedHead(
 	const judged = n > 0 && run.judge !== null ? ` ${i18n.t(shopify ? 'bulk.skipped.judged' : 'bulk.skipped.judged_targets')}` : '';
 	if (bulkWriting(run) === 0) {
 		// "All" holds only where every target is one lynox leaves out.
-		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(`bulk.nothing.all_skipped_${noun}`, { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
+		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(bulkOne(`bulk.nothing.all_skipped_${noun}`, n), { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
 		return { text: text + judged, nothing: true };
 	}
-	if (n > 0 && m > 0) return { text: i18n.tf(`bulk.skipped.both_${noun}`, { n: String(n), m: String(m) }) + judged, nothing: false };
-	if (n > 0) return { text: i18n.tf(`bulk.skipped.${noun}`, { n: String(n) }) + judged, nothing: false };
+	if (n > 0 && m > 0) return { text: i18n.tf(bulkOne(`bulk.skipped.both_${noun}`, n), { n: String(n), m: String(m) }) + judged, nothing: false };
+	if (n > 0) return { text: i18n.tf(bulkOne(`bulk.skipped.${noun}`, n), { n: String(n) }) + judged, nothing: false };
 	if (m > 0) return { text: i18n.tf('bulk.skipped.taken_out', { m: String(m) }), nothing: false };
 	return { text: null, nothing: false };
 }

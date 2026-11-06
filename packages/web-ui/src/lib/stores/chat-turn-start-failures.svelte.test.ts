@@ -325,7 +325,8 @@ describe('sending a failed turn again', () => {
 			? json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }] })
 			: undefined));
 		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
-		expect(toasts).toEqual([{ message: t('chat.question_waiting'), type: 'info' }]);
+		// No card known here, so the sentence that names no card (and no X).
+		expect(toasts).toEqual([{ message: t('chat.question_waiting_plain'), type: 'info' }]);
 		await settle();
 		expect(runPosts()).toBe(0);
 	});
