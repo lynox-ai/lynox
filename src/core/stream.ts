@@ -42,6 +42,27 @@ export class StreamProcessor {
 
   /** Usage seen so far in the current stream; the `message_delta` merge updates it in place. */
   private _usage: BetaUsage | undefined;
+  /** Content blocks streamed so far in the current stream; filled in place as events arrive. */
+  private _content: BetaContentBlock[] = [];
+  /**
+   * Stream events received so far: more than zero once the provider has answered. On the
+   * openai-compatible wire the adapter's first event follows the provider's accepting HTTP
+   * response, before any body; on the Anthropic wire it is the provider's own first event.
+   */
+  private _events = 0;
+
+  /** Whether the provider answered this stream with at least one event. */
+  answered(): boolean {
+    return this._events > 0;
+  }
+
+  /**
+   * The reply as far as it came: for a caller that ends the stream from outside (a user stop)
+   * and books what the provider billed. Before the first event, no usage and no content.
+   */
+  partial(): PartialReply {
+    return { usage: this._usage, content: this._content };
+  }
 
   async process(stream: AsyncIterable<BetaRawMessageStreamEvent>): Promise<{
     content: BetaContentBlock[];
@@ -49,11 +70,13 @@ export class StreamProcessor {
     usage: BetaUsage;
   }> {
     const content: BetaContentBlock[] = [];
+    this._content = content;
     const rawInputs = new Map<number, string>();
     let stopReason = 'end_turn';
     let usage: BetaUsage | undefined;
 
     for await (const event of stream) {
+      this._events++;
       switch (event.type) {
         case 'content_block_start':
           this._handleBlockStart(event, content, rawInputs);

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
-interface Script { events: Array<Record<string, unknown>>; yielded: number; returned: boolean; abortedAtReturn?: boolean; hang?: boolean }
+interface Script { events: Array<Record<string, unknown>>; yielded: number; returned: boolean; abortedAtReturn?: boolean; hang?: boolean; failWith?: Error }
 
 const { calls, scripts, onCall } = vi.hoisted(() => ({
   calls: [] as Array<{ params: { messages: BetaMessageParam[] }; signal: AbortSignal | undefined }>,
@@ -32,6 +32,7 @@ vi.mock('@anthropic-ai/sdk', () => {
             return {
               next: async () => {
                 if (script.yielded < script.events.length) return { done: false, value: script.events[script.yielded++] };
+                if (script.failWith) throw script.failWith;
                 if (!script.hang) return { done: true, value: undefined };
                 // A reply still being generated: the read waits until the call is aborted.
                 return new Promise((_res, rej) => {
@@ -365,5 +366,210 @@ describe('what a stopped call used', () => {
     // More than the output alone: the request's size priced as input.
     const outputOnly = abortedCallCost({ model: 'claude-sonnet-4-6', maxTokens: (agent as unknown as { maxTokens: number }).maxTokens, request: '', partial: err.partial }).estimateUsd;
     expect(agent.getHelperCostUsd()).toBeGreaterThan(outputOnly);
+  });
+});
+
+describe('what a call the person stopped used', () => {
+  type Booked = { costGuard: { capOnlyUSD: number; recordCapOnlyCost: (usd: number) => boolean }; maxTokens: number };
+  const site = 'agent.user_abort';
+  const model = 'claude-sonnet-4-6';
+
+  /** A reply that starts and then keeps generating until its call is aborted. */
+  function hangingReply(events: Array<Record<string, unknown>>): Script {
+    const s = script(events);
+    s.hang = true;
+    return s;
+  }
+
+  async function untilRead(s: Script): Promise<void> {
+    for (let i = 0; i < 2000 && s.yielded < s.events.length; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(s.yielded).toBe(s.events.length);
+    // The processor handles the last event before it asks for the next.
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  /** The error `_callAPI` itself rethrows, before `send` turns an abort into a RunAbortedError. */
+  function captureCallError(agent: Agent): { err: unknown } {
+    const seen: { err: unknown } = { err: undefined };
+    const a = agent as unknown as { _callAPI: () => Promise<unknown> };
+    const orig = a._callAPI.bind(agent);
+    a._callAPI = async () => { try { return await orig(); } catch (e) { seen.err = e; throw e; } };
+    return seen;
+  }
+
+  function newAgent(counters?: import('../types/agent.js').SessionCounters): Agent {
+    return new Agent({ name: 'test', model, tools: [sendTool], costGuard: { maxBudgetUSD: 100 }, sessionCounters: counters });
+  }
+
+  it('a stop after the first event books the call: the bound to the caps, the estimate to the cost line, the error unchanged', async () => {
+    const counters = { costUSD: 0, spawnCount: 0, spawnCostUSD: 0 } as unknown as import('../types/agent.js').SessionCounters;
+    const agent = newAgent(counters);
+    const callErr = captureCallError(agent);
+    const before = abortedCallCounts().notBilled[site] ?? 0;
+    const uncountedBefore = abortedCallCounts().uncounted[site] ?? 0;
+    const s = hangingReply([{ type: 'message_start', message: { usage: { ...usage } } }]);
+    const turn = agent.send('list everything');
+    await untilRead(s);
+    agent.abort();
+    const err = await turn.catch((e: unknown) => e);
+
+    // The error is the one the stream threw, and the run's stop as before.
+    expect((callErr.err as Error).message).toBe('Request was aborted.');
+    expect(callErr.err).not.toBeInstanceOf(RunAbortedError);
+    expect(err).toBeInstanceOf(RunAbortedError);
+    expect((err as Error).message).toBe(new RunAbortedError().message);
+
+    // Priced from the provider's own count (message_start carried 100), nothing generated yet.
+    const expected = abortedCallCost({
+      model, maxTokens: (agent as unknown as Booked).maxTokens, request: '',
+      partial: { usage: { ...usage }, content: [] },
+    });
+    expect(expected.fromSnapshot).toBe(true);
+    expect(agent.getHelperCostUsd()).toBeCloseTo(expected.estimateUsd, 12);
+    expect(agent.getHelperCostUsd()).toBeGreaterThan(0);
+    expect((agent as unknown as Booked).costGuard.capOnlyUSD).toBeCloseTo(expected.upperBoundUsd, 12);
+    expect(counters.costUSD).toBeCloseTo(expected.upperBoundUsd, 12);
+    // Counted under its own site, and as counted by the provider.
+    expect(abortedCallCounts().notBilled[site]).toBe(before + 1);
+    expect(abortedCallCounts().uncounted[site] ?? 0).toBe(uncountedBefore);
+    expect(agent.getCostSnapshot()!.inputTokens).toBe(0);
+  });
+
+  it('a stop before the provider answered books the bound to the caps only: no estimate, no count', async () => {
+    const counters = { costUSD: 0, spawnCount: 0, spawnCostUSD: 0 } as unknown as import('../types/agent.js').SessionCounters;
+    const agent = newAgent(counters);
+    const before = abortedCallCounts();
+    const s = hangingReply([]);
+    const turn = agent.send('list everything');
+    await untilRead(s);
+    agent.abort();
+    await turn.catch(() => undefined);
+    // The bound: the request's size priced as the prompt, above a bound with no prompt at all.
+    const promptless = abortedCallCost({ model, maxTokens: (agent as unknown as Booked).maxTokens, request: '', partial: { content: [] } }).upperBoundUsd;
+    const capOnly = (agent as unknown as Booked).costGuard.capOnlyUSD;
+    expect(capOnly).toBeGreaterThan(promptless);
+    expect(counters.costUSD).toBeCloseTo(capOnly, 12);
+    // Whether the request even reached the provider is unknown, so nothing on the cost line.
+    expect(agent.getHelperCostUsd()).toBe(0);
+    expect(abortedCallCounts().notBilled[site] ?? 0).toBe(before.notBilled[site] ?? 0);
+    expect(abortedCallCounts().uncounted[site] ?? 0).toBe(before.uncounted[site] ?? 0);
+  });
+
+  it('booking that fails does not replace the stop', async () => {
+    const agent = newAgent();
+    const callErr = captureCallError(agent);
+    (agent as unknown as Booked).costGuard.recordCapOnlyCost = () => { throw new Error('booking broke'); };
+    const s = hangingReply([{ type: 'message_start', message: { usage: { ...usage } } }]);
+    const turn = agent.send('list everything');
+    await untilRead(s);
+    agent.abort();
+    const err = await turn.catch((e: unknown) => e);
+    expect((callErr.err as Error).message).toBe('Request was aborted.');
+    expect(err).toBeInstanceOf(RunAbortedError);
+  });
+
+  it('a call that starts after the run was stopped books nothing, while the one before it counts as a finished turn', async () => {
+    const agent = newAgent();
+    const before = abortedCallCounts().notBilled[site] ?? 0;
+    handler.mockImplementation(() => {
+      (agent as unknown as { abortController: AbortController }).abortController.abort();
+      return Promise.resolve('ok');
+    });
+    toolUseReply('tu_1', { url: 'https://x.test/1' });
+    // The mock yields this call's events although its signal is stopped: the processor sees
+    // usage, and still nothing may be booked, as neither wire sends such a request.
+    hangingReply([{ type: 'message_start', message: { usage: { ...usage } } }]);
+    const err = await agent.send('go').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.signal?.aborted).toBe(true);
+    // The first call's usage (100 in, 20 out) as a turn; nothing of the second.
+    expect(agent.getCostSnapshot()!.inputTokens).toBe(100);
+    expect(agent.getCostSnapshot()!.outputTokens).toBe(20);
+    expect(agent.getHelperCostUsd()).toBe(0);
+    expect((agent as unknown as Booked).costGuard.capOnlyUSD).toBe(0);
+    expect(abortedCallCounts().notBilled[site] ?? 0).toBe(before);
+  });
+
+  it('a stop during the wait before a retry books nothing', { timeout: 15_000 }, async () => {
+    const before = abortedCallCounts().notBilled[site] ?? 0;
+    let agent: Agent | null = null;
+    agent = new Agent({
+      name: 'test', model, tools: [sendTool], costGuard: { maxBudgetUSD: 100 },
+      // The wait before the second attempt is two seconds; the stop comes inside it.
+      onStream: (e) => { if ((e as { type: string }).type === 'retry') setTimeout(() => { agent!.abort(); }, 50); },
+    });
+    const s = script([{ type: 'message_start', message: { usage: { ...usage } } }]);
+    s.failWith = new TypeError('terminated');
+    script([{ type: 'message_start', message: { usage: { ...usage } } }]);
+    const started = Date.now();
+    const err = await agent.send('go').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+    // Stopped inside the wait, and the second attempt never started.
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(calls).toHaveLength(1);
+    expect(agent.getHelperCostUsd()).toBe(0);
+    expect((agent as unknown as Booked).costGuard.capOnlyUSD).toBe(0);
+    expect(abortedCallCounts().notBilled[site] ?? 0).toBe(before);
+  });
+
+  it('a guard stop that coincides with the run\'s stop is booked once, under the guard', async () => {
+    const counters = { costUSD: 0, spawnCount: 0, spawnCostUSD: 0 } as unknown as import('../types/agent.js').SessionCounters;
+    let agent: Agent | null = null;
+    // The run is stopped on the first text the reply shows; the scripted stream reads on until
+    // the guard trips, so both stops are in place when the call's error is caught.
+    agent = new Agent({
+      name: 'test', model, tools: [sendTool], costGuard: { maxBudgetUSD: 100 }, sessionCounters: counters,
+      onStream: (e) => { if ((e as { type: string }).type === 'text') agent!.abort(); },
+    });
+    const callErr = captureCallError(agent);
+    const userBefore = abortedCallCounts().notBilled[site] ?? 0;
+    const guardBefore = abortedCallCounts().notBilled['agent.tool_call_imitation'] ?? 0;
+    textReply(COPY.repeat(5), 9);
+    const err = await agent.send('place the order').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+    expect(callErr.err).toBeInstanceOf(ToolCallImitationError);
+    expect(abortedCallCounts().notBilled['agent.tool_call_imitation']).toBe(guardBefore + 1);
+    expect(abortedCallCounts().notBilled[site] ?? 0).toBe(userBefore);
+    const expected = abortedCallCost({ model, maxTokens: (agent as unknown as Booked).maxTokens, request: '', partial: (callErr.err as ToolCallImitationError).partial });
+    expect(agent.getHelperCostUsd()).toBeCloseTo(expected.estimateUsd, 12);
+    expect((agent as unknown as Booked).costGuard.capOnlyUSD).toBeCloseTo(expected.upperBoundUsd, 12);
+    expect(counters.costUSD).toBeCloseTo(expected.upperBoundUsd, 12);
+  });
+
+  it('a run the person stops mid-stream is recorded aborted, with the call\'s estimate in its cost and not in the debit', async () => {
+    const engine = await boot();
+    const debited = new Map<string, number[]>();
+    engine.registerHooks({ onAfterRun: (runId: string, costUsd: number) => { debited.set(runId, [...(debited.get(runId) ?? []), costUsd]); } });
+    const session = engine.createSession();
+    handler.mockResolvedValue('200 OK');
+    // A finished call first, so the run has a cost of its own that the debit must carry.
+    toolUseReply('tu_1', { url: 'https://x.test/1' });
+    const s = hangingReply([
+      { type: 'message_start', message: { usage: { ...usage } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Here is the first part of the list' } },
+    ]);
+    const turn = session.run('list everything');
+    await untilRead(s);
+    session.abort();
+    const err = await turn.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+    const run = engine.getRunHistory()!.getRunsBySession(session.sessionId)[0]!;
+    expect(run.status).toBe('aborted');
+    const agent = session.getAgent()!;
+    const expected = abortedCallCost({
+      model: run.model_id, maxTokens: (agent as unknown as Booked).maxTokens, request: '',
+      partial: { usage: { ...usage }, content: [{ type: 'text', text: 'Here is the first part of the list' }] },
+    });
+    const finishedCost = calculateCost(run.model_id, { input_tokens: 100, output_tokens: 20 });
+    expect(run.tokens_in).toBe(100);
+    expect(run.tokens_out).toBe(20);
+    expect(expected.estimateUsd).toBeGreaterThan(0);
+    expect(run.cost_usd).toBeCloseTo(finishedCost + expected.estimateUsd, 12);
+    // The debit gets the finished call's cost, without the estimate.
+    const debit = debited.get(run.id) ?? [];
+    expect(debit).toHaveLength(1);
+    expect(debit[0]).toBeCloseTo(finishedCost, 12);
   });
 });

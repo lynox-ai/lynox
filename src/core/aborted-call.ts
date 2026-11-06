@@ -1,9 +1,13 @@
 /**
- * What a helper call cost when it was aborted before its reply arrived.
+ * What a model call cost when it was aborted before its reply arrived.
  *
  * A timeout or a user stop ends a helper stream early, and `finalMessage()` rejects. Every
  * helper books its spend from the reply, so an aborted call booked nothing — while the
- * provider still bills the prompt and whatever it generated before the abort.
+ * provider still bills the prompt and whatever it generated before the abort. The same holds
+ * for the run's own model call when it is ended mid-stream, by the guard on a tool call
+ * written out as text or by a stop of the run: its usage would arrive only with the last
+ * event. Both kinds are booked here, the same way. A stopped main call the provider had not
+ * answered yet gets only the cap bound (agent.ts, `_callAPI`): it may not have been sent.
  *
  * The exact amount cannot be known here: the output count arrives only with the stream's
  * last event. So this module produces two numbers, for two different readers:
@@ -16,8 +20,9 @@
  *   monthly caps also sum. It is a best guess, not a bound.
  *
  * Neither number goes to the tenant debit. The customer has never paid for an aborted
- * helper call, and still does not; the provider bills us for it. {@link reportAbortedCall}
- * counts every such call per site, so the unbilled amount stays measurable.
+ * call, helper or main, and still does not; the provider bills us for it. {@link reportAbortedCall}
+ * counts every such call per site, so the unbilled amount stays measurable — except a main
+ * call stopped before the provider answered, which only the caps take (see `_callAPI`).
  */
 import { calculateCost } from './pricing.js';
 
@@ -131,7 +136,7 @@ export function abortedCallCost(input: {
   };
 }
 
-/** Aborted helper calls per site since process start: none of them reached the tenant debit. */
+/** Aborted calls per site since process start: none of them reached the tenant debit. */
 const notBilled = new Map<string, number>();
 /** The subset whose prompt size was not counted by the provider, so the bound is from the request. */
 const uncounted = new Map<string, number>();
@@ -142,7 +147,7 @@ export function abortedCallCounts(): { notBilled: Record<string, number>; uncoun
 }
 
 /**
- * Say, by name, that a helper call was aborted and is not billed to the tenant. One stderr
+ * Say, by name, that a call was aborted and is not billed to the tenant. One stderr
  * line with site, model and the two amounts — never request or reply text. Never throws.
  */
 export function reportAbortedCall(site: string, model: string, cost: AbortedCallCost): void {
