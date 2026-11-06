@@ -2078,8 +2078,8 @@ async function executeThinker(
     // bound onto the same counter (`_bookStoppedCall`), which counted that call a second
     // time, on top of the reservation, for the rest of the session. Take exactly those bounds
     // back now that the child is settled; until here the counter held both, which errs closed
-    // while the child runs. A grandchild's bounds are taken back by its own spawn, one level
-    // down. Fenced: a throw here would replace the error the catch is rethrowing.
+    // while the child runs. A child cannot spawn (`SPAWN_EXCLUDED`), so each bound is taken
+    // back exactly once, here, by the spawn that started the child. Fenced: a throw here would replace the error the catch is rethrowing.
     if (childAgent) {
       try { adjustSessionCost(parentAgent.sessionCounters, -childAgent.getStoppedCallSessionCostUsd()); } catch { /* never mask the child's own outcome */ }
     }

@@ -66,6 +66,7 @@ import { calculateCost } from '../../core/pricing.js';
 import type { Session } from '../../core/session.js';
 import type { RunRecord } from '../../core/run-history.js';
 import type { LynoxConfig } from '../../types/config.js';
+import type { ToolEntry } from '../../types/index.js';
 
 const usage = { input_tokens: 100, output_tokens: 0, cache_creation: null, cache_creation_input_tokens: null, cache_read_input_tokens: null, inference_geo: null, iterations: null, server_tool_use: null, service_tier: null, speed: null };
 
@@ -108,6 +109,23 @@ function stallingReply(): Script {
   ], true);
 }
 
+/** A tool the child can call, so its first call finishes and a second one follows. */
+const lookupTool: ToolEntry = {
+  definition: { name: 'lookup_orders', description: 'Look up orders', input_schema: { type: 'object' as const, properties: {} } },
+  handler: () => Promise.resolve('3 orders'),
+};
+
+function lookupReply(): Script {
+  return script([
+    { type: 'message_start', message: { usage: { ...usage } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_lookup', name: 'lookup_orders', input: {} } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 20 } },
+    { type: 'message_stop' },
+  ]);
+}
+
 const COPY = 'Sending it now:\n{"url": "https://shop.example.com/api/orders", "method": "POST", "body": "{\\"sku\\": \\"A-17\\"}"}\n';
 
 const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_VAULT_KEY', 'ANTHROPIC_API_KEY', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_EMBEDDING_PROVIDER'] as const;
@@ -134,6 +152,7 @@ async function boot(): Promise<{ engine: Engine; session: Session; debits: Array
   const engine = new Engine({} as LynoxConfig);
   engines.push(engine);
   await engine.init();
+  engine.registerTool(lookupTool);
   // Every tenant debit passes `onAfterRun`: the run's own (the session) and a child's (through
   // the engine as metered host, under a fresh id).
   const debits: Array<{ runId: string; usd: number }> = [];
@@ -282,6 +301,41 @@ describe('a spawned child whose own call is ended mid-stream', { timeout: 60_000
     expect(parent.cost_usd).toBeCloseTo(own, 12);
     expect(debits.filter((d) => d.runId === parent.id).map((d) => d.usd)).toEqual([own]);
     expect(debits.filter((d) => d.runId !== parent.id)).toEqual([]);
+    expect(child.sessionCounters.costUSD).toBeCloseTo(reservation, 12);
+  });
+
+  it('stopped after a finished call: the child row is its own spend plus the estimate, the debit its own spend only', async () => {
+    const { engine, session, debits } = await boot();
+    const seen = watchChild(session);
+    spawnReply();
+    lookupReply();
+    const ended = stallingReply();
+    const turn = session.run('find the order list');
+    await waitFor(() => ended.yielded === ended.events.length);
+    const child = seen.child();
+    const reservation = seen.reservation();
+    session.abort();
+    const err = await turn.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+
+    const own = child.getCostSnapshot()?.ownCostUSD ?? 0;
+    const estimate = child.getHelperCostUsd();
+    const { parent, child: childRow } = rows(engine, session);
+    // The finished call is the child's own spend, priced from its tokens.
+    expect(own).toBeCloseTo(calculateCost(childRow.model_id, { input_tokens: 100, output_tokens: 20 }), 12);
+    expect(own).toBeGreaterThan(0);
+    expect(estimate).toBeGreaterThan(0);
+    expect(child.costGuard.capOnlyUSD).toBeGreaterThan(0);
+    expect(childRow.status).toBe('aborted');
+    // Both terms, added: not the larger of the two, not either alone.
+    expect(childRow.cost_usd).toBeCloseTo(own + estimate, 12);
+    const parentOwn = parentOwnCost(parent.model_id, false);
+    expect(parent.cost_usd).toBeCloseTo(parentOwn, 12);
+    // The debit: the parent's own call and the child's own finished call, no estimate.
+    expect(debits.filter((d) => d.runId === parent.id).map((d) => d.usd)).toEqual([parentOwn]);
+    const childDebits = debits.filter((d) => d.runId !== parent.id).map((d) => d.usd);
+    expect(childDebits).toHaveLength(1);
+    expect(childDebits[0]).toBeCloseTo(own, 12);
     expect(child.sessionCounters.costUSD).toBeCloseTo(reservation, 12);
   });
 });
