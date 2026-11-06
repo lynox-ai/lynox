@@ -701,7 +701,9 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     handle._inboxLlmRegion = 'us';
     const handover: { within?: { classifyUntil: number; cutOffAt: number }; handOver?: (p: unknown) => boolean; finish?: () => void } = {};
     usRuntime.shutdown.mockImplementation((opts?: { within?: { classifyUntil: number; cutOffAt: number }; handOver?: (p: unknown) => boolean }) => {
-      // The plain drain never settles; the handover settles once the test says so.
+      // The plain drain never settles; a shutdown's bounded drain settles at once; the handover
+      // settles once the test says so.
+      if (opts?.within && !opts.handOver) return Promise.resolve();
       if (opts?.handOver) {
         handover.within = opts.within; handover.handOver = opts.handOver;
         return new Promise<void>((resolve) => { handover.finish = resolve; });
@@ -795,6 +797,10 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       expect(second, 'the second switch is tracked').not.toBeNull();
       expect(second).not.toBe(first);
       expect(euRuntime.shutdown, 'the second has not started while the first hands over').not.toHaveBeenCalled();
+      // Meanwhile new mail is held back: the live runtime classifies in the region being left.
+      const hookOf = (engine as unknown as { _inboundMailHook: (r: MockRuntime) => InboundHook })._inboundMailHook(euRuntime);
+      await expect(hookOf('acct-1', { messageId: 'm-wait' } as unknown as import('../integrations/mail/context.js').MailEnvelope)).rejects.toBeInstanceOf(InboundMailDeferred);
+      expect(euRuntime.hook).not.toHaveBeenCalled();
 
       handover.finish!();
       await first;
@@ -806,6 +812,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       expect(handle._inboxRuntime).toBe(usAgain);
       expect(handle._inboxClassifierSuspended).toBe(false);
       expect(mockBootstrapInbox).toHaveBeenCalledTimes(2);
+      expect((engine as unknown as { _inboxSwitchesWaiting: number })._inboxSwitchesWaiting).toBe(0);
     } finally {
       vi.useRealTimers();
     }
@@ -834,6 +841,29 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       handover.finish!();
       await second;
       expect(handle._inboxRuntime).toBe(usAgain);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a switch waiting when a shutdown begins bootstraps nothing after it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { engine, handover } = await engineWithHangingDrain();
+      await engine.reloadCredentials();
+      await vi.advanceTimersByTimeAsync(1_000);
+      mockBootstrapInbox.mockReturnValueOnce(makeRuntime('us-again'));
+      mockLoadConfig.mockReturnValueOnce({ api_key: 'sk-ant-old', provider: 'anthropic' } satisfies LynoxUserConfig);
+      mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-old');
+      await engine.reloadCredentials();
+
+      const done = engine.shutdown({ inboxBacklog: 'bounded' });
+      await vi.advanceTimersByTimeAsync(REBOOTSTRAP_INBOX_DRAIN_MS);
+      await vi.waitFor(() => expect(handover.finish).toBeDefined());
+      handover.finish!();
+      await done;
+      // The first rebootstrap finished its switch; the waiting one started no runtime after the shutdown.
+      expect(mockBootstrapInbox).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

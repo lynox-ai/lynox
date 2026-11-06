@@ -445,6 +445,15 @@ export class Engine {
    */
   private _inboxClassifierSuspended: boolean = false;
   /**
+   * Provider switches waiting for a running rebootstrap (`_propagateProviderSwitch`). While one
+   * waits, new mail is held back as under the suspension: the region it leaves is the one the
+   * live runtime classifies in. The waiting run counts itself off when it starts, in the same
+   * turn in which it sets the suspension.
+   */
+  private _inboxSwitchesWaiting = 0;
+  /** Set when `shutdown` begins, never cleared: a rebootstrap that starts afterwards does nothing. */
+  private _inboxShutdownBegun = false;
+  /**
    * Set when a migration restore's shutdown begins, never cleared: the process ends next. From
    * then on every inbound mail is deferred, so a rebootstrap still finishing behind a restore
    * that gave up on it cannot hand a mail to a runtime the exit then kills.
@@ -878,8 +887,12 @@ export class Engine {
     // each lift the suspension and clear the in-flight mark the other still needs.
     const prev = this._inboxRebootstrapInflight;
     if (this._inboxRuntime || prev) {
+      if (prev) this._inboxSwitchesWaiting += 1;
       const run = prev
-        ? prev.catch(() => { /* logged by the rebootstrap */ }).then(() => this._rebootstrapInboxOnProviderSwitch())
+        ? prev.catch(() => { /* logged by the rebootstrap */ }).then(() => {
+          this._inboxSwitchesWaiting -= 1;
+          return this._rebootstrapInboxOnProviderSwitch();
+        })
         : this._rebootstrapInboxOnProviderSwitch();
       const inflight: Promise<void> = run.finally(() => {
         if (this._inboxRebootstrapInflight === inflight) this._inboxRebootstrapInflight = null;
@@ -944,7 +957,7 @@ export class Engine {
   ): (accountId: string, envelope: import('../integrations/mail/provider.js').MailEnvelope) => Promise<void> {
     return async (accountId, envelope) => {
       if (this._inboxIntakeClosed) throw new InboundMailDeferred('the engine is shutting down for a restore');
-      if (this._inboxClassifierSuspended) throw new InboundMailDeferred('the inbox classifier is switching regions');
+      if (this._inboxClassifierSuspended || this._inboxSwitchesWaiting > 0) throw new InboundMailDeferred('the inbox classifier is switching regions');
       // Discard the hook's outcome — the MailContext contract is
       // Promise<void>; only the inbox-internal cold-start path reads it.
       await runtime.hook(accountId, envelope);
@@ -952,6 +965,9 @@ export class Engine {
   }
 
   private async _rebootstrapInboxOnProviderSwitch(): Promise<void> {
+    // A switch that waited for an earlier rebootstrap can start after a shutdown began: the
+    // shutdown drains what it found, and a new runtime now would outlive it.
+    if (this._inboxShutdownBegun) return;
     if (!this._inboxRuntime || !this._mailStateDb) return;
     const newRegion = resolveInboxLlmRegion({
       envOverride: process.env['LYNOX_INBOX_LLM_REGION'],
@@ -3456,6 +3472,7 @@ export class Engine {
    */
   async shutdown(options: { inboxBacklog?: 'classify' | 'dead-letter' | 'bounded' | undefined } = {}): Promise<void> {
     const forRestore = options.inboxBacklog === 'dead-letter';
+    this._inboxShutdownBegun = true;
     const startedAt = Date.now();
     const within = options.inboxBacklog === 'bounded'
       ? { classifyUntil: startedAt + SHUTDOWN_INBOX_CLASSIFY_MS, cutOffAt: startedAt + SHUTDOWN_INBOX_CUTOFF_MS }
