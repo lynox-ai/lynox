@@ -105,7 +105,7 @@ export interface BulkRunDetailData extends BulkRun {
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
 	listFirstPage: string | null;
 	/** A Shopify list narrowed to a product type and/or vendor: the values as the planner gave them (supplied text). */
-	listFilters: Readonly<Record<string, string>> | null;
+	listFilters: Readonly<Record<string, string | readonly string[]>> | null;
 	listStartChecksum: string | null;
 	/** The engine's note on a list read page by page (English). */
 	listNote: string | null;
@@ -450,13 +450,18 @@ export const bulkVisibleText: (text: string) => string = visibleText;
 
 /** The line naming a filtered Shopify list's group, where the run is started and approved. The
  *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter. */
-export function bulkListFilterText(filters: Readonly<Record<string, string>> | null, i18n: BulkI18n): string | null {
+export function bulkListFilterText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n): string | null {
 	if (filters === null) return null;
+	// Every value in its own quotes, all of them shown: they are the scope the owner approves (ux U-175).
+	const values = (v: string | readonly string[]): string => {
+		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
+		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
+	};
 	const type = filters['product_type'];
 	const vendor = filters['vendor'];
-	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: bulkVisibleText(type), vendor: bulkVisibleText(vendor) });
-	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: bulkVisibleText(type) });
-	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: bulkVisibleText(vendor) });
+	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: values(type), vendor: values(vendor) });
+	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: values(type) });
+	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: values(vendor) });
 	return null;
 }
 

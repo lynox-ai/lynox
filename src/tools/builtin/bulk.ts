@@ -10,7 +10,7 @@ import {
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
 import { contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
-import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
+import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
 /**
@@ -177,7 +177,7 @@ function isPlannerShopifyForm(form: unknown): form is typeof SHOPIFY_LIST_FORM |
  *  the first fault, and the schema does not describe the form, so a model would learn the rules
  *  one refusal at a time. */
 const SHOPIFY_FORM_RULES: Record<string, string> = {
-  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com), all of them or those of one product type and/or vendor: no path, id_field or write_method; source_list.filters may name product_type, vendor or both, each the value as the store shows it (letter case of A-Z aside, nothing else), which may hold ${SHOPIFY_FILTER_VALUE_RULE} (a value that does not fit is refused, never changed); source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string".`,
+  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com), all of them or those of some product types and/or vendors: no path, id_field or write_method; source_list.filters may name product_type, vendor or both, each one value as text or several (2 to ${String(SHOPIFY_LIST_FILTER_MAX_VALUES)}) as a list, of which a product matches any one — one run for several groups, not a run per group; each value as the store shows it (letter case of A-Z aside, nothing else), which may hold ${SHOPIFY_FILTER_VALUE_RULE} (a value that does not fit is refused, never changed); source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string".`,
   shopify_media: `Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only ${SHOPIFY_MEDIA_WRITABLE_FIELDS.join(', ')}, as text of at most ${String(SHOPIFY_ALT_MAX_CHARS)} characters or null. For product fields, use form shopify.`,
 };
 
@@ -347,7 +347,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           properties: {
             form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com); shopify_media: the images of its products, only where the store connection may write files (scope write_files or write_themes).' },
             path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for the Shopify forms.' },
-            filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status; values are 1–64 letters, digits, - or _). shopify: product_type, vendor or both, each the value as the store shows it (letter case of A-Z aside, nothing else). Not for shopify_media.' },
+            filters: { type: 'object', description: `Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status; values are 1–64 letters, digits, - or _). shopify: product_type, vendor or both, each one value, or a list of 2–${String(SHOPIFY_LIST_FILTER_MAX_VALUES)} values of which a product matches any one; each value as the store shows it (letter case of A-Z aside, nothing else). Not for shopify_media.` },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
             after: { type: 'object', description: 'The fields to set on every listed element (text, number, true/false or null); not the id field. Not with judge.' },
           },

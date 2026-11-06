@@ -8,9 +8,11 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_READ_DOCUMENTS, isShopifyFilterValue, isShopifyListFilters, shopifyFilterRefusal, shopifyListBody, shopifyReadRequest,
+  SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_READ_DOCUMENTS, isShopifyFilterValue, isShopifyFilterValues, isShopifyListFilters,
+  shopifyFilterListRefusal, shopifyFilterRefusal, shopifyListBody, shopifyReadRequest,
 } from './shopify-graphql.js';
-import { parseListSource, type BulkListSource } from './bulk-list.js';
+import { listPageUrl, listQueryParams, parseListSource, type BulkListSource } from './bulk-list.js';
+import { shopifyInFilter } from './bulk-shopify.js';
 import { contractGrants, withShopifyRead } from '../tools/permission-guard.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
@@ -233,6 +235,76 @@ describe('the grant of a filtered list page', () => {
 
   it('is not minted for filters the rule refuses', () => {
     expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: { vendor: 'a OR b' } })).toThrow(/filters the value rule takes/);
+  });
+});
+
+describe('a filter with a list of values', () => {
+  const parse = (filters: unknown, scan: (t: string) => string | null = () => null): BulkListSource =>
+    parseListSource(HOST, { form: 'shopify', filters, after: { title: 'x' } }, 'PATCH', scan);
+  const q = (body: string | null): unknown => (body === null ? null : (JSON.parse(body) as { variables: { q: string } }).variables.q);
+  const many = (n: number): string[] => Array.from({ length: n }, (_, i) => `Gruppe ${String(i)}`);
+
+  it('takes 2 to the maximum of values the rule takes, none two the same up to ASCII letter case', () => {
+    expect(isShopifyFilterValues(['Tee', 'Kaffee'])).toBe(true);
+    expect(isShopifyFilterValues(many(SHOPIFY_LIST_FILTER_MAX_VALUES))).toBe(true);
+    expect(isShopifyFilterValues('Tee')).toBe(true);
+    for (const v of [[], ['Tee'], many(SHOPIFY_LIST_FILTER_MAX_VALUES + 1), ['Tee', 'tee'], ['Tee', 'Tee'], ['Tee', ''], ['Tee', 'a" OR vendor:"b'], ['Tee', 'x)'], ['Tee', 5], ['Tee', ['Mug']]]) {
+      expect(isShopifyFilterValues(v), JSON.stringify(v)).toBe(false);
+    }
+    // Diacritics are not folded: Gemüse and Gemuse are two values, as the check after the read sees them.
+    expect(isShopifyFilterValues(['Gemüse', 'Gemuse'])).toBe(true);
+  });
+
+  it('is parsed as written, in the planner\'s order, and refused whole otherwise', () => {
+    expect(parse({ product_type: ['Kaffee', 'Tee'], vendor: 'Acme' })).toMatchObject({ form: 'shopify_filtered', filters: { product_type: ['Kaffee', 'Tee'], vendor: 'Acme' } });
+    for (const v of [[], ['Tee'], many(SHOPIFY_LIST_FILTER_MAX_VALUES + 1), ['Tee', 'TEE']]) {
+      expect(() => parse({ product_type: v }), JSON.stringify(v)).toThrow(shopifyFilterListRefusal('product_type'));
+    }
+    expect(() => parse({ vendor: ['Acme', 'a OR b'] })).toThrow(shopifyFilterRefusal('vendor'));
+    expect(() => parse({ vendor: ['Acme', 'Beta'] }, (t) => (t === 'Beta' ? 'token' : null))).toThrow('source_list.filters.vendor holds something that looks like a credential.');
+    expect(shopifyFilterListRefusal('vendor')).toBe(`source_list.filters.vendor as a list holds 2 to ${String(SHOPIFY_LIST_FILTER_MAX_VALUES)} values, no two the same up to letter case; for one value give it as text.`);
+  });
+
+  it('puts a list in $q as its values joined by OR in parentheses, one value as before', () => {
+    expect(q(shopifyListBody(7, { product_type: ['Tee', 'Kaffee'] }))).toBe('id:>7 AND (product_type:"Tee" OR product_type:"Kaffee")');
+    expect(q(shopifyListBody(7, { vendor: ['A', 'B'], product_type: ['Tee', 'Mug'] }))).toBe('id:>7 AND (product_type:"Tee" OR product_type:"Mug") AND (vendor:"A" OR vendor:"B")');
+    expect(q(shopifyListBody(7, { product_type: ['Tee', 'Mug'], vendor: 'Acme' }))).toBe('id:>7 AND (product_type:"Tee" OR product_type:"Mug") AND vendor:"Acme"');
+    // One value builds byte for byte as before lists existed.
+    expect(shopifyListBody(7, { product_type: 'Tee' })).toBe(JSON.stringify({ query: SHOPIFY_READ_DOCUMENTS.shopify_products_list, variables: { n: SHOPIFY_LIST_PAGE_SIZE, q: 'id:>7 AND product_type:"Tee"' } }));
+    for (const f of [{ product_type: ['Tee'] }, { product_type: [] }, { product_type: ['Tee', 'tee'] }, { product_type: ['Tee', 'a" OR x:"b'] }, { product_type: many(SHOPIFY_LIST_FILTER_MAX_VALUES + 1) }]) {
+      expect(shopifyListBody(0, f), JSON.stringify(f).slice(0, 80)).toBeNull();
+    }
+  });
+
+  it('is granted with its own list only — not another order, not a subset, not one value of it', () => {
+    const base: CapabilityContract = { version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: [], hostPatterns: [HOST], pathPatterns: [], paramConstraints: {} };
+    const post = (contract: CapabilityContract, body: unknown): boolean =>
+      contractGrants('http_request', { method: 'POST', url: ENDPOINT, headers: { 'content-type': 'application/json' }, body }, contract);
+    const g = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: { product_type: ['Tee', 'Kaffee'] } });
+    expect(post(g, shopifyListBody(0, { product_type: ['Tee', 'Kaffee'] }))).toBe(true);
+    for (const f of [{ product_type: ['Kaffee', 'Tee'] }, { product_type: 'Tee' }, { product_type: ['Tee', 'Kaffee', 'Mug'] }, {}]) {
+      expect(post(g, shopifyListBody(0, f)), JSON.stringify(f)).toBe(false);
+    }
+    expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: { product_type: ['Tee'] } })).toThrow(/filters the value rule takes/);
+  });
+
+  it('holds a product whose field equals any one value, by the same rule as one value, and none of an empty list', () => {
+    const product = (productType: unknown, vendor: unknown = 'Acme'): unknown => ({ product: { productType, vendor } });
+    expect(shopifyInFilter(product('Kaffee'), { product_type: ['Tee', 'Kaffee'] })).toBe(true);
+    expect(shopifyInFilter(product('KAFFEE'), { product_type: ['Tee', 'Kaffee'] })).toBe(true);
+    expect(shopifyInFilter(product('Mug'), { product_type: ['Tee', 'Kaffee'] })).toBe(false);
+    expect(shopifyInFilter(product('Gemuse'), { product_type: ['Tee', 'Gemüse'] })).toBe(false);
+    expect(shopifyInFilter(product('KAFFEÉ'), { product_type: ['Kaffeé'] as never })).toBe(false);
+    expect(shopifyInFilter(product(null), { product_type: ['Tee', 'Kaffee'] })).toBe(false);
+    expect(shopifyInFilter(product('Tee'), { product_type: [] as never })).toBe(false);
+    expect(shopifyInFilter(product('Tee', 'Beta'), { product_type: ['Tee', 'Mug'], vendor: ['Acme', 'Beta'] })).toBe(true);
+    expect(shopifyInFilter(product('Tee', 'Gamma'), { product_type: ['Tee', 'Mug'], vendor: ['Acme', 'Beta'] })).toBe(false);
+  });
+
+  it('never reaches the address or the query grant of a list form other than Shopify\'s', () => {
+    const woo: BulkListSource = { form: 'woocommerce', path: '/wp-json/wc/v3/products', filters: { category: ['1', '2'] }, idField: 'id', method: 'PATCH', after: { absent: false, value: {} } } as never;
+    expect(() => listPageUrl('shop.example.com', woo, 1)).toThrow('only a Shopify list takes a list of filter values');
+    expect(() => listQueryParams(woo)).toThrow('only a Shopify list takes a list of filter values');
   });
 });
 

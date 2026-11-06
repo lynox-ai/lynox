@@ -26,7 +26,7 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
-import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoneLeftSentence, shopifyPairedAfter, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyPairedAfter, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
 import { SHOPIFY_READ_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { ApiStore } from './api-store.js';
@@ -521,6 +521,45 @@ describe('reading a store\'s product list narrowed by a filter', () => {
       ]);
     });
 
+    // ux U-175: with a list of values the sentences speak of values; one value each reads as above.
+    it('words every case of a filter with a list of values as ux decided it (U-175)', () => {
+      const en = BULK_NOTICES.en; const de = BULK_NOTICES.de;
+      expect([en.listNoMatch('product_type', true), en.listNoMatch('vendor', true), en.listNoMatch('both', true)]).toEqual([
+        'List read: no product has any of the product types in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.',
+        'List read: no product has any of the vendors in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.',
+        'List read: no product has both a product type and a vendor in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.',
+      ]);
+      expect([de.listNoMatch('product_type', true), de.listNoMatch('vendor', true), de.listNoMatch('both', true)]).toEqual([
+        'Liste gelesen: Kein Produkt hat einen der Produkttypen aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.',
+        'Liste gelesen: Kein Produkt hat einen der Anbieter aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.',
+        'Liste gelesen: Kein Produkt hat zugleich einen Produkttyp und einen Anbieter aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.',
+      ]);
+      expect([en.listNoneLeft('product_type', true), en.listNoneLeft('vendor', true), en.listNoneLeft('both', true)]).toEqual([
+        'Preview: products found, but none with a product type spelled as one in the filter. Ask lynox in a chat to plan again with the spellings the store shows.',
+        'Preview: products found, but none with a vendor spelled as one in the filter. Ask lynox in a chat to plan again with the spellings the store shows.',
+        'Preview: products found, but none with both product type and vendor spelled as a value in the filter. Ask lynox in a chat to plan again with the spellings the store shows.',
+      ]);
+      expect([de.listNoneLeft('product_type', true), de.listNoneLeft('vendor', true), de.listNoneLeft('both', true)]).toEqual([
+        'Vorschau: Produkte gefunden, aber bei keinem ist der Produkttyp so geschrieben wie einer im Filter. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.',
+        'Vorschau: Produkte gefunden, aber bei keinem ist der Anbieter so geschrieben wie einer im Filter. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.',
+        'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter beide wie im Filter geschrieben. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.',
+      ]);
+      // One value each: the sentence of U-143/U-123, unchanged, whether `many` is left out or false.
+      for (const say of [en, de]) for (const kind of ['product_type', 'vendor', 'both'] as const) {
+        expect(say.listNoMatch(kind, false)).toBe(say.listNoMatch(kind));
+        expect(say.listNoneLeft(kind, false)).toBe(say.listNoneLeft(kind));
+      }
+    });
+
+    it('picks the sentence of values when any filter lists them, and of one value otherwise', () => {
+      const say = BULK_NOTICES.en; const all = { total: 2, invalidReasons: { not_in_filter: 2 } };
+      expect(shopifyNoneLeftSentence({ product_type: ['Tee', 'Mug'] }, all, say)).toBe(say.listNoneLeft('product_type', true));
+      expect(shopifyNoneLeftSentence({ product_type: 'Tee', vendor: ['A', 'B'] }, all, say)).toBe(say.listNoneLeft('both', true));
+      expect(shopifyNoneLeftSentence({ product_type: 'Tee', vendor: 'A' }, all, say)).toBe(say.listNoneLeft('both'));
+      expect(shopifyNoMatchSentence({ vendor: ['A', 'B'] }, say)).toBe(say.listNoMatch('vendor', true));
+      expect(shopifyNoMatchSentence({ vendor: 'A' }, say)).toBe(say.listNoMatch('vendor'));
+    });
+
     it('says nothing of a run without targets, or of one where another reason left a target out', () => {
       const say = BULK_NOTICES.en;
       expect(shopifyNoneLeftSentence({ product_type: 'Gemuse' }, { total: 0, invalidReasons: {} }, say)).toBeNull();
@@ -536,7 +575,7 @@ describe('reading a store\'s product list narrowed by a filter', () => {
         // The sentence comes only when every target is out as not_in_filter: its counts are 0 read
         // or judged and N invalid of N, at most BULK_MAX_TARGETS.
         const counts = [say.previewCounts(0, BULK_MAX_TARGETS, 0, BULK_MAX_TARGETS), say.judgeCounts(0, BULK_MAX_TARGETS, 0, BULK_MAX_TARGETS)];
-        for (const c of counts) expect(`${say.listNoneLeft(kind)} ${c}`.length, `${kind} ${c}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+        for (const c of counts) for (const many of [false, true]) expect(`${say.listNoneLeft(kind, many)} ${c}`.length, `${kind} ${String(many)} ${c}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
       }
     });
 

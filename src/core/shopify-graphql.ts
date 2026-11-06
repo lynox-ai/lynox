@@ -82,8 +82,35 @@ export function shopifyGraphqlEndpoint(host: string): string | null {
 /** The fields a Shopify list may be narrowed by, in the order `$q` names them (PRD shopify-preset §22). */
 export const SHOPIFY_LIST_FILTER_KEYS = ['product_type', 'vendor'] as const;
 export type ShopifyListFilterKey = (typeof SHOPIFY_LIST_FILTER_KEYS)[number];
+/** How many values one filter may list: a store's groups, with the search well inside what was
+ *  measured to work in one query (250 values). */
+export const SHOPIFY_LIST_FILTER_MAX_VALUES = 50;
+/** One filter's value: one value, or a list of 2–{@link SHOPIFY_LIST_FILTER_MAX_VALUES}, any of which matches. */
+export type ShopifyListFilterValue = string | readonly string[];
 /** A Shopify list's filters: each key at most once, none when the list reads every product. */
-export type ShopifyListFilters = Readonly<Partial<Record<ShopifyListFilterKey, string>>>;
+export type ShopifyListFilters = Readonly<Partial<Record<ShopifyListFilterKey, ShopifyListFilterValue>>>;
+
+/** A filter's values as a list: one value is a list of one. */
+export function shopifyFilterValues(value: ShopifyListFilterValue): readonly string[] {
+  return typeof value === 'string' ? [value] : value;
+}
+
+/** A text with only `A`–`Z` made lower case: no locale and no Unicode case mapping takes part. */
+export function asciiLower(text: string): string {
+  return text.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/**
+ * Whether a filter's value is one value the rule takes, or a list of 2–{@link SHOPIFY_LIST_FILTER_MAX_VALUES}
+ * such values, no two equal up to ASCII letter case (they would match the same products). A list of
+ * one, or an empty one, is refused rather than read as one value or as no filter.
+ */
+export function isShopifyFilterValues(value: unknown): value is ShopifyListFilterValue {
+  if (typeof value === 'string') return isShopifyFilterValue(value);
+  if (!Array.isArray(value) || value.length < 2 || value.length > SHOPIFY_LIST_FILTER_MAX_VALUES) return false;
+  if (!value.every((v) => isShopifyFilterValue(v))) return false;
+  return new Set((value as string[]).map(asciiLower)).size === value.length;
+}
 
 /**
  * The punctuation a filter value may hold inside a word, besides `-` (which has a rule of its
@@ -95,6 +122,11 @@ const FILTER_PUNCTUATION = "_.&'/+";
 /** The one sentence every refusal of the value rule gives; the key is filled in, never the value. */
 export function shopifyFilterRefusal(key: string): string {
   return `source_list.filters.${key} may hold ${SHOPIFY_FILTER_VALUE_RULE}.`;
+}
+
+/** The one sentence a refused list of values gives: its size and its duplicates, never a value. */
+export function shopifyFilterListRefusal(key: string): string {
+  return `source_list.filters.${key} as a list holds 2 to ${String(SHOPIFY_LIST_FILTER_MAX_VALUES)} values, no two the same up to letter case; for one value give it as text.`;
 }
 
 /** What a filter value may hold, in the words of its refusal; the form's rules in bulk_plan say the same. */
@@ -140,15 +172,18 @@ export function isShopifyListFilters(filters: unknown): filters is ShopifyListFi
   const keys = Object.keys(filters);
   return keys.length > 0
     && keys.every((k) => (SHOPIFY_LIST_FILTER_KEYS as readonly string[]).includes(k))
-    && keys.every((k) => isShopifyFilterValue((filters as Record<string, unknown>)[k]));
+    && keys.every((k) => isShopifyFilterValues((filters as Record<string, unknown>)[k]));
 }
 
-/** `$q` of one list page: the products after `afterId`, then each filter as a quoted value. */
+/** `$q` of one list page: the products after `afterId`, then each filter as a quoted value, a list
+ *  as its values joined by OR in parentheses (without them `id:>N AND a OR b` would not bind the
+ *  cursor to `b`). One value builds as it always did. */
 function shopifyListQuery(afterId: number, filters: ShopifyListFilters): string {
   let q = `id:>${String(afterId)}`;
   for (const key of SHOPIFY_LIST_FILTER_KEYS) {
     const value = filters[key];
-    if (value !== undefined) q += ` AND ${key}:"${value}"`;
+    if (value === undefined) continue;
+    q += typeof value === 'string' ? ` AND ${key}:"${value}"` : ` AND (${value.map((v) => `${key}:"${v}"`).join(' OR ')})`;
   }
   return q;
 }
