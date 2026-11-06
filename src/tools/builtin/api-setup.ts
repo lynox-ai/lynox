@@ -41,7 +41,7 @@ import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../cor
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -2890,10 +2890,14 @@ ${draftJson}
         // A preset profile that reads its refresh token from a name of its own: a connect stores the
         // token under the derived name and, since this profile does not read that one, leaves it
         // without a grant type again (`readersRefreshSlot`, the OAuth callback). Sending it to
-        // connect alone would bring it back here; the field has to go first.
+        // connect alone would bring it back here; the field has to go first. Unless the slot is
+        // another profile's grant this one shares through the same provider: that sharing is on
+        // purpose, and what it lacks is the grant type, not a connection of its own.
         const ownReadSlot = readersRefreshSlot(profile) !== refreshTokenKey(input.id);
         const next = tokenPreset === undefined
           ? 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.'
+          : ownReadSlot && apiStore !== undefined && sharesAnotherGrant(apiStore, profile)
+            ? 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.'
           : ownReadSlot
             ? 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.'
             : 'Call api_setup with action "connect" for this profile and show the user the link.';

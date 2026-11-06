@@ -270,6 +270,21 @@ describe('deleting the owner of a grant a reader shares through a built-in provi
     return store;
   };
 
+  it('a reader that lost its grant type is told to set it again, not to drop the sharing', async () => {
+    const dir = join(lynoxDir, 'apis');
+    mkdirSync(dir, { recursive: true });
+    const r = reader();
+    const { grant_type: _cleared, ...withoutGrant } = r.auth!.oauth!;
+    for (const p of [owner(), { ...r, auth: { ...r.auth!, oauth: withoutGrant } }]) writeFileSync(join(dir, `${p.id}.json`), JSON.stringify(p));
+    const store = new ApiStore();
+    store.loadFromDirectory(dir);
+    expect(store.get('bexio-b')?.auth?.oauth?.grant_type, 'fixture: no grant type').toBeUndefined();
+    const result = await tool(store, vaultOf(VAULT), { action: 'fetch_token', id: 'bexio-b' });
+    expect(result).toContain('set auth.oauth.grant_type to "refresh_token" with api_setup update');
+    expect(result).not.toContain('Remove auth.oauth.refresh_token_key');
+    expect(tokenPosts()).toHaveLength(0);
+  });
+
   it('control: both are registered, and the reader exchanges the owner\'s refresh token at the provider\'s endpoint', async () => {
     const store = booted();
     expect(store.get('bexio-a')).toBeDefined();

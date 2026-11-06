@@ -852,6 +852,7 @@ describe('fetch_token — a grant a user gave is never renewed as an app token',
     // Naming the derived name itself is no slot of its own: connect alone is the way.
     { name: 'a preset profile the callback connected, naming the derived refresh slot', profile: ownSlot(withPreset(withoutGrantType(crmProfile({ ...CALLBACK, custom_endpoint_ack: ACK2 }))), REFRESH), says: `${AUTHORIZED} through the "bexio" provider`, next: CONNECT_ONLY, notSays: [PRESET_ONLY, OWNER, 'Remove auth.oauth.refresh_token_key'] },
     { name: 'a profile the callback connected, no preset', profile: withoutGrantType(crmProfile(CALLBACK)), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT] },
+    { name: 'a profile the callback connected, naming a preset this engine does not know and a refresh slot of its own', profile: ownSlot(withPreset(withoutGrantType(crmProfile(CALLBACK)), 'not-a-provider')), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT, 'not-a-provider', 'Remove auth.oauth.refresh_token_key'] },
     { name: 'a profile the callback connected, naming a preset this engine does not know', profile: withPreset(withoutGrantType(crmProfile(CALLBACK)), 'not-a-provider'), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT, 'not-a-provider'] },
   ];
 
