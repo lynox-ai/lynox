@@ -78,11 +78,8 @@ describe('mandateCredentialInput', () => {
     const key = 'aabbccdd11223344'.repeat(2);
     expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
     expect(mandateCredentialInput(`Passwort: ${key.slice(0, 16)}`)).toBe('password');
-    // Five symbols, evenly: 2.3 bits, too little spread even for hex.
     expect(mandateCredentialInput(`Der Token lautet ${'aaaabbbb11112222cccc'}`)).toBeNull();
-    // The lower floor is for hex only: the same spread in letters beyond hex does not count.
     expect(mandateCredentialInput(`Der Token lautet ${'gghhkkmm11223344'.repeat(2)}`)).toBeNull();
-    // Nor in hex letters of both cases.
     expect(mandateCredentialInput(`Der Token lautet ${'aAbB1122'.repeat(4)}`)).toBeNull();
   });
 
@@ -94,16 +91,12 @@ describe('mandateCredentialInput', () => {
   it('rule 3: a key of letters alone, with capitals side by side as in a random key', () => {
     const key = ['XqLMpzRT', 'vbNcKDwf', 'HjSAyueG'].join('');
     expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
-    // Lower case only: no capitals side by side.
     expect(mandateCredentialInput(`Der Token lautet ${key.toLowerCase()}`)).toBeNull();
-    // One pair of capitals side by side is not enough: two capitals in a row.
-    expect(mandateCredentialInput('Der Key kommt aus getIOsKeyForAnAppOnMyPc')).toBeNull();
-    // Capitals paired, but the case changes too rarely: a name ending in acronyms.
-    expect(mandateCredentialInput('Der Key steht in MailboxNotEnabledForRESTAPI')).toBeNull();
-    // Case changing and capitals paired, but a repeated pattern.
     expect(mandateCredentialInput(`Der Token lautet ${'ABab'.repeat(5)}`)).toBeNull();
-    // Letters alone means letters alone: with hyphens between them, this rule does not read it.
     expect(mandateCredentialInput(`Der Token lautet ${['XqLM', 'pzRT', 'vbNc', 'KDwf'].join('-')}`)).toBeNull();
+    // Ordinary camel-case names.
+    expect(mandateCredentialInput('Der Key kommt aus getIOsKeyForAnAppOnMyPc')).toBeNull();
+    expect(mandateCredentialInput('Der Key steht in MailboxNotEnabledForRESTAPI')).toBeNull();
   });
 
   it('caught though not a key: a camel-case name with capitals side by side twice, after a cue word', () => {
