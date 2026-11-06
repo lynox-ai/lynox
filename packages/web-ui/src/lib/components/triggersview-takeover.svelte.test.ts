@@ -141,6 +141,27 @@ describe('a completed plan that keeps its pause', () => {
 	});
 });
 
+describe('Run now at a paused plan (ux U-179)', () => {
+	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
+	it('is not offered at a completed plan that keeps its pause', async () => {
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		// The row is there, so the button is missing at it, not with an empty list.
+		expect(target.textContent).toContain('Wochenreport');
+		expect(runNow()).toBeNull();
+	});
+	it('stays at an open paused plan, where the refusal names the takeover the row offers', async () => {
+		await render();
+		expect(runNow()?.textContent).toContain('Jetzt ausführen');
+		expect(button()).not.toBeNull();
+	});
+	it('stays at a completed plan that is not paused', async () => {
+		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await render();
+		expect(runNow()).not.toBeNull();
+	});
+});
+
 describe('the notice of an ended access', () => {
 	it('says the full address, which the push shortens, and that there was no advance notice', async () => {
 		await render();
