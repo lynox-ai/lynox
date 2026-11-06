@@ -1313,6 +1313,28 @@ export class Agent implements IAgent {
   }
 
   /**
+   * Charge the upper bounds of a spawned child's ended calls against this run's cost ceiling
+   * ONLY — the counterpart of {@link chargeExternalCost} for the dollars the child's own
+   * ceiling counted but its snapshot leaves out ({@link getCapOnlyCostUsd}).
+   *
+   * Booked as cap-only, not as spend: this run's snapshot (what its cost warning shows) and
+   * every debit stay without the bound, the same split the child's own guard keeps.
+   */
+  chargeExternalCapOnlyCost(usd: number): void {
+    this.costGuard?.recordCapOnlyCost(usd);
+  }
+
+  /**
+   * The upper bounds this run's ceiling counts for calls that were ended (a stop, the guard,
+   * the stream timeout) or helper calls that were aborted, and that its cost snapshot leaves
+   * out. 0 without a ceiling. Read by `spawn.ts` when a child settles, to hand the delegating
+   * run's ceiling the child's whole ceiling figure: snapshot spend plus these bounds.
+   */
+  getCapOnlyCostUsd(): number {
+    return this.costGuard?.capOnlyCostUSD() ?? 0;
+  }
+
+  /**
    * Dollars left under THIS run's cost ceiling, or `null` when it has none.
    *
    * ⚠ `null` means NO CEILING — self-host or BYOK with no configured budget. It does
