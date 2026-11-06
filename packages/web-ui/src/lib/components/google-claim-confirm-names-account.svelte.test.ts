@@ -250,6 +250,86 @@ describe('the Google claim nonce in the URL', () => {
 		expect(param()).toBeNull();
 	});
 
+	/** Answers the claim POST with `res` once `release` is called; until then it is out. */
+	function holdClaim(): { release: (res: Response) => void } {
+		let release: (res: Response) => void = () => {};
+		const pending = new Promise<Response>((r) => { release = r; });
+		const inner = vi.mocked(fetch);
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (String(url).endsWith('/google/claim-managed') && init?.method === 'POST') {
+				posts.push({ path: '/google/claim-managed', body: JSON.parse(String(init.body ?? '{}')) as unknown });
+				return pending;
+			}
+			return inner(url, init);
+		}));
+		return { release: (res) => release(res) };
+	}
+	const refusal = (body: Record<string, unknown>): Response =>
+		new Response(JSON.stringify(body), { status: 409, headers: { 'Content-Type': 'application/json' } });
+
+	it('comes back when the engine refused the claim before asking the control plane', async () => {
+		const claim = holdClaim();
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		button('Connect').click();
+		await settle();
+		expect(param()).toBeNull();
+		claim.release(refusal({ error: 'An erasure is running', code: 'erasure_in_progress', claim_kept: true }));
+		await settle();
+		// Unspent at the control plane: parked again, in the URL and on the card, and looked up again.
+		expect(param()).toBe('nonce-9');
+		expect(hasButton('Connect')).toBe(true);
+		expect(posts.filter((p) => p.path === '/google/claim-managed/preview')).toHaveLength(2);
+	});
+
+	it('stays gone when the claim failed after the control plane answered', async () => {
+		const claim = holdClaim();
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		button('Connect').click();
+		await settle();
+		claim.release(refusal({ error: 'An erasure is running', code: 'erasure_in_progress' }));
+		await settle();
+		expect(param()).toBeNull();
+		expect(hasButton('Connect')).toBe(false);
+	});
+
+	it('shows no card on a reload while a claim is out', async () => {
+		const claim = holdClaim();
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		button('Connect').click();
+		await settle();
+		// The reload, while the claim is still out: the nonce is no longer in the URL.
+		unmount(component!);
+		component = undefined;
+		resetSettingsViewer();
+		await render();
+		expect(param()).toBeNull();
+		expect(hasButton('Connect')).toBe(false);
+		claim.release(new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+		await settle();
+		expect(param()).toBeNull();
+		expect(hasButton('Connect')).toBe(false);
+	});
+
+	it('is not parked again on another page', async () => {
+		const claim = holdClaim();
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		button('Connect').click();
+		await settle();
+		window.history.replaceState({}, '', '/app/chat');
+		claim.release(refusal({ error: 'An erasure is running', code: 'erasure_in_progress', claim_kept: true }));
+		await settle();
+		expect(param()).toBeNull();
+		expect(hasButton('Connect')).toBe(false);
+	});
+
 	it('leaves on Cancel', async () => {
 		await render();
 		releasePreview(answer({ email: 'owner@example.com' }));

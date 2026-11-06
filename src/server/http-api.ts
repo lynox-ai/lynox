@@ -11485,7 +11485,10 @@ export class LynoxHTTPApi {
       }
 
       if (this.erasureInProgress) {
-        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+        // Refused before the control plane is asked: the nonce is unspent there, and `claim_kept`
+        // lets the page park it again. The refusal after the control plane answered (below) does
+        // not carry it: that nonce is spent.
+        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress', claim_kept: true });
         return;
       }
       // Counted as a pending grant for as long as the claim is out: one that started
