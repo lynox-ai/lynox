@@ -18,6 +18,7 @@ import {
   type MailWatchHandle,
 } from './provider.js';
 import { InboundMailDeferred } from './inbound-deferred.js';
+import { processErrorText } from '../../core/error-egress.js';
 import { prefilter } from './triage/rules.js';
 import type { MailStateDb } from './state.js';
 
@@ -270,7 +271,7 @@ export class MailWatcher {
         process.stderr.write(`[lynox] mail watcher: ${String(notKept)} deferred mail(s) for one account over the cap of ${String(DEFERRED_MAX_PER_ACCOUNT)} not kept across a restart\n`);
       }
     } catch (err: unknown) {
-      process.stderr.write(`[lynox] mail watcher: deferred mail not kept across a restart: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`[lynox] mail watcher: deferred mail not kept across a restart: ${processErrorText(err)}\n`);
     }
   }
 
@@ -279,7 +280,7 @@ export class MailWatcher {
     try {
       this.state.releaseDeferredMail(accountId, envelopes);
     } catch (err: unknown) {
-      process.stderr.write(`[lynox] mail watcher: kept deferred mail not released: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`[lynox] mail watcher: kept deferred mail not released: ${processErrorText(err)}\n`);
     }
   }
 
@@ -287,7 +288,7 @@ export class MailWatcher {
     try {
       return this.state.deferredMail(accountId);
     } catch (err: unknown) {
-      process.stderr.write(`[lynox] mail watcher: kept deferred mail not read: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`[lynox] mail watcher: kept deferred mail not read: ${processErrorText(err)}\n`);
       return [];
     }
   }
