@@ -4,6 +4,9 @@
 
 ### Upgrade notes
 
+- `IAgent` has a new required member, `chargeExternalCapOnlyCost(usd)`. It books a
+  spawned sub-agent's upper bounds of ended calls against the delegating run's cost
+  ceiling only. An `IAgent` implementation outside this repository has to add it.
 - A control plane may now emit `LYNOX_FEATURE_SHOPIFY_BULK_READ`, per instance
   and never fleet-wide. It reads or writes a store only where bulk runs are open
   on that instance.
