@@ -426,8 +426,7 @@ function isNameOrLink(tok: string): boolean {
   return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok);
 }
 
-/** Every character a hex digit, in lower case: a key drawn from sixteen symbols. In capitals it
- *  reads as an env name (`isNameOrLink`) and is no key here. */
+/** Every character a hex digit, in lower case: a key drawn from sixteen symbols. */
 const HEX_ONLY = /^[0-9a-f]+$/;
 
 /**

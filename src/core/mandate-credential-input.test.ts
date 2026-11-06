@@ -86,18 +86,16 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput(`Der Token lautet ${'aAbB1122'.repeat(4)}`)).toBeNull();
   });
 
-  it('let through though a key: hex in capitals reads as an env name', () => {
-    // Also what keeps a GPG key id or a certificate thumbprint, printed in capitals, from a refusal.
-    expect(mandateCredentialInput(`Der Token lautet ${hexKey(32).toUpperCase()}`)).toBeNull();
-    expect(mandateCredentialInput(`Der Token lautet ${hexKey(32)}`)).toBe('credential after a cue word');
+  it('passes a GPG key id or a certificate thumbprint, printed in capitals, after a cue word', () => {
+    expect(mandateCredentialInput(`Mein GPG-Key: ${hexKey(16).toUpperCase()}`)).toBeNull();
+    expect(mandateCredentialInput(`Der Schlüssel hat den Thumbprint ${hexKey(40).toUpperCase()}`)).toBeNull();
   });
 
   it('rule 3: a key of letters alone, with capitals side by side as in a random key', () => {
     const key = ['XqLMpzRT', 'vbNcKDwf', 'HjSAyueG'].join('');
     expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
-    // Lower case only: no capitals side by side. Capitals only: read as an env name.
+    // Lower case only: no capitals side by side.
     expect(mandateCredentialInput(`Der Token lautet ${key.toLowerCase()}`)).toBeNull();
-    expect(mandateCredentialInput(`Der Token lautet ${key.toUpperCase()}`)).toBeNull();
     // One pair of capitals side by side is not enough: two capitals in a row.
     expect(mandateCredentialInput('Der Key kommt aus getIOsKeyForAnAppOnMyPc')).toBeNull();
     // Capitals paired, but the case changes too rarely: a name ending in acronyms.
@@ -253,8 +251,8 @@ describe('mandateCredentialInput', () => {
 describe('mandateCredentialInput — rate pinned', () => {
   const N = 4000;
   const SHAPES: Array<[string, number, string, number, number]> = [
-    // Measured: 0 of 100 000 for both hex shapes, 417 of 200 000 for 24 alnum (letters alone
-    // whose capitals do not pair). The band floor stays at 0 where the rate is that low.
+    // Measured: 0 of 100 000 for both hex shapes, 417 of 200 000 for 24 alnum. The band floor
+    // stays at 0 where the rate is that low.
     ['32 hex', 32, HEX, 0, 0],
     ['40 hex', 40, HEX, 0, 0],
     ['24 alnum', 24, ALNUM, 0, 20],
