@@ -150,6 +150,20 @@ describe('Run now at a paused plan (ux U-179)', () => {
 		expect(target.textContent).toContain('Wochenreport');
 		expect(runNow()).toBeNull();
 	});
+	it('is not offered to a helper there either, who is told the pause without the names', async () => {
+		viewer = 'mandate';
+		const row = { id: 'p1', title: 'Wochenreport', effect: 'run_agent', source: 'cron', confirmed_at: '2026-10-01T00:00:00.000Z', paused: true };
+		rows = [{ ...row, status: 'completed' }];
+		await render();
+		expect(target.textContent).toContain('Wochenreport');
+		expect(runNow()).toBeNull();
+		// The same row, open: the helper has the button, so its absence above is the pause's.
+		unmount(component!);
+		component = undefined;
+		rows = [{ ...row, status: 'open' }];
+		await render();
+		expect(runNow()).not.toBeNull();
+	});
 	it('stays at an open paused plan, where the refusal names the takeover the row offers', async () => {
 		await render();
 		expect(runNow()?.textContent).toContain('Jetzt ausführen');
