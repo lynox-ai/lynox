@@ -199,17 +199,23 @@ function serve(s: Store): () => void {
     }
     if (typeof variables['q'] === 'string') {
       // The search as the store reads it, strictly: a `$q` of another shape fails the test.
-      const m = /^id:>(\d+)((?: AND (?:product_type|vendor):"[^"]*")*)$/.exec(variables['q'])!;
+      // A term is one quoted value, or a list of them joined by OR in parentheses, all of one key.
+      const m = /^id:>(\d+)((?: AND (?:(?:product_type|vendor):"[^"]*"|\((?:product_type|vendor):"[^"]*"(?: OR (?:product_type|vendor):"[^"]*")+\)))*)$/.exec(variables['q'])!;
       const afterId = Number(m[1]);
-      const terms = [...m[2]!.matchAll(/ AND (product_type|vendor):"([^"]*)"/g)].map((t) => [t[1] as 'product_type' | 'vendor', t[2]!] as const);
+      const terms = [...m[2]!.matchAll(/ AND (?:\(([^)]*)\)|((?:product_type|vendor):"[^"]*"))/g)].map((t) => {
+        const parts = [...(t[1] ?? t[2]!).matchAll(/(product_type|vendor):"([^"]*)"/g)];
+        const key = parts[0]![1] as 'product_type' | 'vendor';
+        if (parts.some((x) => x[1] !== key)) throw new Error(`an OR group mixes keys: ${variables['q'] as string}`);
+        return [key, parts.map((x) => x[2]!)] as const;
+      });
       const special = s.listAnswer?.(afterId);
       if (special !== undefined) return new Response(JSON.stringify(special), { status: 200 });
       // Matched like Shopify matches a quoted value: whole value, letter case ignored (measured,
       // M-F1), and diacritics folded, so `Gemuse` lists `Gemüse` too (measured, M-F2).
       const folded = (t: string): string => t.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-      const inGroup = (id: number): boolean => terms.every(([k, v]) => {
+      const inGroup = (id: number): boolean => terms.every(([k, vs]) => {
         const held = s.groups?.get(id)?.[k];
-        return held !== undefined && folded(held) === folded(v);
+        return held !== undefined && vs.some((v) => folded(held) === folded(v));
       });
       const ids = [...s.products.keys()].filter((id) => id > afterId && inGroup(id)).sort((a, b) => a - b).slice(0, variables['n'] as number);
       return new Response(JSON.stringify({ data: { products: { nodes: ids.map((id) => ({ id: gid(id) })) } } }), { status: 200 });
@@ -340,7 +346,7 @@ describe('reading a store\'s product list', () => {
 });
 
 describe('reading a store\'s product list narrowed by a filter', () => {
-  const filtered = (filters: Record<string, string>): BulkListSource =>
+  const filtered = (filters: Record<string, string | string[]>): BulkListSource =>
     parseListSource(HOST, { form: 'shopify', filters, after: { seo_title: 'New title' } }, 'PATCH', scan);
   /** Products 10..60; 20, 40 and 60 are tees, 40 and 60 of Acme, 50 an Acme mug, 30 of Beta. */
   function groups(): void {
@@ -372,6 +378,33 @@ describe('reading a store\'s product list narrowed by a filter', () => {
     expect(s.requests.map((r) => r.variables['q'])).toEqual(['id:>0 AND product_type:"Tee" AND vendor:"Acme"']);
     expect(minted).toEqual([{ phase: 'list', afterId: 0, filters: { vendor: 'Acme', product_type: 'Tee' } }]);
     expect(ledger.externalTargetKeys(id)).toEqual([gid(40), gid(60)]);
+  });
+
+  it('reads a list of values as one search, pages on with it, and leaves out a product spelled as none of them', async () => {
+    fill(600);
+    // 600 products, so the two listed groups fill more than one page: two groups listed, one not; one of the listed spelled with a fold only Shopify makes.
+    s.groups = new Map([...s.products.keys()].map((k) => [k, { product_type: k % 3 === 0 ? 'Tee' : k % 3 === 1 ? 'Kaffee' : 'Mug' }]));
+    const folded = [...s.products.keys()].find((k) => k % 3 === 1)!;
+    s.groups.set(folded, { product_type: 'Kaffée' });
+    const src = filtered({ product_type: ['Tee', 'Kaffee'] });
+    expect(src.filters).toEqual({ product_type: ['Tee', 'Kaffee'] });
+    const id = startedList(src);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    const pages = s.requests.map((r) => r.variables['q']).filter((q) => typeof q === 'string');
+    expect(pages[0]).toBe('id:>0 AND (product_type:"Tee" OR product_type:"Kaffee")');
+    expect(pages.every((q) => / AND \(product_type:"Tee" OR product_type:"Kaffee"\)$/.test(q as string))).toBe(true);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(minted.length).toBeGreaterThan(1);
+    for (const m of minted) expect(m).toMatchObject({ phase: 'list', filters: { product_type: ['Tee', 'Kaffee'] } });
+    const listed = [...s.products.keys()].filter((k) => k % 3 !== 2).sort((a, b) => a - b);
+    expect(ledger.externalTargetKeys(id)).toEqual(listed.map((k) => gid(k)));
+    // The read of each listed product, under the flag: the check after it decides what stays.
+    vi.stubEnv(FLAG, '1');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    const preview = ledger.getPreview(id);
+    // Kaffée is listed by the store's fold, and left out by the check, which does not fold.
+    expect(preview.filter((t) => t.error === 'not_in_filter').map((t) => t.key)).toEqual([gid(folded)]);
   });
 
   it('pages on from the last id with the same filter', async () => {
