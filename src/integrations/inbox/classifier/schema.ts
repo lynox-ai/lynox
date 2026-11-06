@@ -28,7 +28,7 @@ export type FailReason =
   | 'budget_exceeded'
   /** The model archived a mail a person forwarded (`forwarded.ts`); it is shown instead. */
   | 'forwarded_by_person'
-  /** The model archived a mail the sensitive check flagged (`mask`/`allow`); it is shown instead. */
+  /** The model filed a mail the sensitive check flagged (`mask`/`allow`) as handled; it is shown instead. */
   | 'sensitive_content';
 
 export interface ClassifierVerdict {

@@ -353,10 +353,15 @@ describe('buildInboxRunner — a mail the sensitive check flagged is never filed
   const handled: LLMCaller = async () =>
     JSON.stringify({ bucket: 'auto_handled', confidence: 0.95, one_line_why_de: 'Newsletter' });
 
-  async function run(sensitive: InboxQueuePayload['sensitive'], llm: LLMCaller = handled) {
+  async function run(
+    sensitive: InboxQueuePayload['sensitive'],
+    llm: LLMCaller = handled,
+    input: Partial<InboxQueuePayload['classifierInput']> = {},
+  ) {
     const notifyNewItem = vi.fn(async () => undefined);
     const queue = buildInboxRunner({ state: inbox, llm, notifier: { notifyNewItem } });
-    queue.enqueue(payload(sensitive === undefined ? {} : { sensitive }));
+    const classifierInput = { ...payload().classifierInput, ...input };
+    queue.enqueue(payload(sensitive === undefined ? { classifierInput } : { sensitive, classifierInput }));
     await queue.drain();
     const items = inbox.listItems();
     expect(items).toHaveLength(1);
@@ -393,6 +398,17 @@ describe('buildInboxRunner — a mail the sensitive check flagged is never filed
     expect(notifyNewItem).not.toHaveBeenCalled();
   });
 
+  it('keeps the reason of a flagged mail the classifier already held back as forwarded', async () => {
+    const { item, audit } = await run({ categories: ['otp'], masked: true, redactionCount: 1 }, handled, {
+      subject: 'Fwd: Ihr Anmeldecode',
+      fromAddress: 'a.mustermann@example.com',
+    });
+    expect(item.bucket).toBe('requires_user');
+    expect(item.reasonDe).not.toBe(SENSITIVE_WITHHELD_REASON_DE);
+    expect(audit).toMatchObject({ fail_reason: 'forwarded_by_person' });
+    expect(audit).not.toHaveProperty('classifier_bucket');
+  });
+
   it('keeps any other verdict on a flagged mail as the classifier gave it', async () => {
     const draft: LLMCaller = async () =>
       JSON.stringify({ bucket: 'draft_ready', confidence: 0.9, one_line_why_de: 'Antwort vorbereitet' });
@@ -406,12 +422,7 @@ describe('buildInboxRunner — a mail the sensitive check flagged is never filed
 
 describe('withheldSensitive', () => {
   const verdict = { bucket: 'auto_handled', confidence: 0.9, reasonDe: 'r', failReason: null, classifierVersion: 'v', bodyTruncated: false } as const;
-  const flagged = { sensitive: { categories: ['otp'], masked: true, redactionCount: 1 } };
 
-  it('leaves a verdict already held back with its own reason alone', () => {
-    const held = { ...verdict, bucket: 'requires_user', reasonDe: 'Budget', failReason: 'budget_exceeded' } as const;
-    expect(withheldSensitive(held, flagged)).toBe(held);
-  });
 
   it('returns the very verdict when nothing changes, so the audit adds no classifier bucket', () => {
     expect(withheldSensitive(verdict, {})).toBe(verdict);
