@@ -31,7 +31,8 @@ import { headlessRefusalNote } from './write-notes.js';
 import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS, MISTRAL_EU_HOST, MISTRAL_GLOBAL_HOST } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
-import { StreamProcessor } from './stream.js';
+import { StreamProcessor, type PartialReply } from './stream.js';
+import { ToolCallImitationDetector, imitationToolsFrom } from './tool-call-imitation.js';
 import { CostGuard } from './cost-guard.js';
 import { classifyProviderFailure, type RunFailure } from './provider-failure.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.js';
@@ -397,6 +398,24 @@ export class ThinkingOnlyLoopError extends ContinuationLoopError {
     super('');
     this.message = 'Run stopped: two truncated turns in a row held only thinking, with no answer and no tool call';
     this.name = 'ThinkingOnlyLoopError';
+  }
+}
+
+/**
+ * The reply wrote the same tool call out as text, again and again, instead of calling the
+ * tool (stream.ts, tool-call-imitation.ts). Nothing of it ran. The call is ended upstream so
+ * the provider stops generating, and the run stops instead of retrying the same request.
+ */
+export class ToolCallImitationError extends RunAbortedError {
+  /** The tool the repeated text names or whose input it carries, when known; for logs. */
+  readonly toolName: string | undefined;
+  /** The stopped reply as far as it came; the provider bills it, so the call is booked from it. */
+  readonly partial: PartialReply | undefined;
+  constructor(toolName?: string | undefined, partial?: PartialReply | undefined) {
+    super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+    this.name = 'ToolCallImitationError';
+    this.toolName = toolName;
+    this.partial = partial;
   }
 }
 
@@ -2549,6 +2568,9 @@ export class Agent implements IAgent {
    * one, on roughly every turn that needs the recovery. Accumulated here rather than folded
    * into `usage`, because these tokens are priced on the FAST model and adding them to a run's
    * own token counts would misprice them at the run's `pricePerM`.
+   *
+   * It also carries the estimate of aborted calls (`_bookAbortedHelper`, `_bookStoppedCall`),
+   * which are never debited.
    */
   private _helperCostUsd = 0;
 
@@ -2753,6 +2775,12 @@ export class Agent implements IAgent {
       // completed tool pairs before the cut-off turns are work the next turn can build on.
       if (err instanceof ContinuationLoopError
         && this._keepCompletedPrefix(userTurn, { code: 'continuation_loop', detail: continuationLoopDetail(err.loopPrefix) })) {
+        throw err;
+      }
+      // And for a tool call written out as text: nothing of the reply ran, so the reply itself is
+      // dropped, while the question and the completed tool pairs before it stay.
+      if (err instanceof ToolCallImitationError
+        && this._keepCompletedPrefix(userTurn, { code: 'tool_call_imitation' })) {
         throw err;
       }
       this.messages.length = Math.min(snapshot, this.messages.length);
@@ -3683,7 +3711,19 @@ export class Agent implements IAgent {
       }
     }
 
+    const imitationTools = toolsDef.length > 0 ? imitationToolsFrom(toolsDef) : [];
     for (let attempt = 0; attempt <= Agent.MAX_RETRIES; attempt++) {
+      // Each call gets its own controller, linked to the run's: a run abort still ends the
+      // call, and the guard below can end the call alone. Leaving the stream's iteration does
+      // not end the request on every wire (the openai-compat adapter only releases its reader),
+      // so the provider would keep generating, and billing, a reply nobody reads.
+      const callController = new AbortController();
+      const onRunAbort = (): void => { callController.abort(signal?.reason); };
+      if (signal) {
+        if (signal.aborted) callController.abort(signal.reason);
+        // run-group-starter: removed in this attempt's `finally`, or fired once; it only aborts this call and reports no spend.
+        else signal.addEventListener('abort', onRunAbort, { once: true });
+      }
       try {
         const stream = this.client.beta.messages.stream({
           model: this.model,
@@ -3710,10 +3750,20 @@ export class Agent implements IAgent {
             ? ({ prompt_cache_key: buildPromptCacheKey(this.currentThreadId, this.name) } as object)
             : {} ),
           tools: toolsDef,
-        }, { signal });
+        }, { signal: callController.signal });
 
         const handler = this.onStream ?? (() => {});
-        const processor = new StreamProcessor(handler, this.name);
+        // The call is ended while the stream is still being read, so the wire's own abort
+        // listener is still in place when it fires.
+        const processor = new StreamProcessor(handler, this.name, imitationTools.length > 0
+          ? {
+            detector: new ToolCallImitationDetector(imitationTools),
+            stop: (hit, partial) => {
+              callController.abort();
+              return new ToolCallImitationError(hit.toolName, partial);
+            },
+          }
+          : undefined);
 
         // Per-stream timeout: 10 minutes max for a single API call
         const streamTimeout = 600_000;
@@ -3726,6 +3776,12 @@ export class Agent implements IAgent {
         return result;
       } catch (err: unknown) {
         if (signal?.aborted) throw err;
+        // The reply was stopped on purpose; the same request would write the same text again.
+        // What it used is booked as an aborted call before the run ends.
+        if (err instanceof ToolCallImitationError) {
+          this._bookStoppedCall(err.partial, { system: systemBlocks, messages: outboundMessages, tools: toolsDef });
+          throw err;
+        }
         if (attempt < Agent.MAX_RETRIES && isRetryable(err)) {
           const delay = Agent.RETRY_BASE_MS * Math.pow(2, attempt);
           if (this.onStream) {
@@ -3745,11 +3801,35 @@ export class Agent implements IAgent {
         // everything that is not a billing stop.
         this._lastProviderFailure = classifyProviderFailure(err, this._providerHost());
         throw err;
+      } finally {
+        // The run's signal lives across calls; one listener per call would pile up.
+        signal?.removeEventListener('abort', onRunAbort);
+        // A stream that lost the race above is still being read and generated; this ends it.
+        // After a finished call it does nothing.
+        callController.abort();
       }
     }
 
     // Unreachable, but satisfies TypeScript
     throw new Error('Exhausted retries');
+  }
+
+  /**
+   * Book a call the guard stopped mid-stream, as an aborted call (aborted-call.ts): the run
+   * ceiling and the session cap get the upper bound, the run's cost line gets the estimate,
+   * and the tenant debit gets nothing. The prompt is the provider's count when it sent one,
+   * else the request's size.
+   */
+  private _bookStoppedCall(partial: PartialReply | undefined, request: unknown): void {
+    try {
+      const cost = abortedCallCost({ model: this.model, maxTokens: this.maxTokens, request, partial });
+      this.costGuard?.recordCapOnlyCost(cost.upperBoundUsd);
+      recordSessionCost(this.sessionCounters, cost.upperBoundUsd);
+      this._helperCostUsd += cost.estimateUsd;
+      reportAbortedCall('agent.tool_call_imitation', this.model, cost);
+    } catch {
+      // Booking must not replace the stop it books.
+    }
   }
 
   private _buildSystemPrompt(): Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> {

@@ -23,7 +23,7 @@ import type { BetaContentBlockParam, BetaMessageParam } from '@anthropic-ai/sdk/
 import type { ThreadMessageRecord } from './thread-store.js';
 import { sanitizeNoteDetail } from './render-projection.js';
 
-export type RunStopCode = 'run_interrupted' | 'tool_loop_break' | 'thinking_loop' | 'continuation_loop';
+export type RunStopCode = 'run_interrupted' | 'tool_loop_break' | 'thinking_loop' | 'continuation_loop' | 'tool_call_imitation';
 
 export interface RunStop {
   readonly code: RunStopCode;
@@ -36,7 +36,8 @@ const RUN_STOP = Symbol('lynox.runStop');
 type WithStop = BetaMessageParam & { [RUN_STOP]?: RunStop };
 
 export function isRunStopCode(code: unknown): code is RunStopCode {
-  return code === 'run_interrupted' || code === 'tool_loop_break' || code === 'thinking_loop' || code === 'continuation_loop';
+  return code === 'run_interrupted' || code === 'tool_loop_break' || code === 'thinking_loop' || code === 'continuation_loop'
+    || code === 'tool_call_imitation';
 }
 
 /** The display-note detail for a loop break, from `ToolLoopBreakError.loopKey`
@@ -80,6 +81,9 @@ export function runStopText(stop: RunStop): string {
   }
   if (stop.code === 'continuation_loop') {
     return '[This run was stopped because the answer was cut off at the output limit several times in a row without progress. The steps above are kept. Next time, take a smaller step instead of writing everything in one answer.]';
+  }
+  if (stop.code === 'tool_call_imitation') {
+    return '[This run was stopped because the previous reply wrote a tool call out as text, repeatedly, instead of calling the tool. Nothing of it was run. The steps above are kept. To use a tool, call it; do not write the call into the reply.]';
   }
   return '[This run was interrupted before it finished. The steps above are kept.]';
 }
