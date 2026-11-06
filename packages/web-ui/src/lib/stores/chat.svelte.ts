@@ -3512,7 +3512,8 @@ function runEnded(answer: ChatMessage | null): void {
 export const RUN_ENDED_EVENT = 'lynox:run-ended';
 
 function signalRunEnded(): void {
-	if (typeof window !== 'undefined') window.dispatchEvent(new Event(RUN_ENDED_EVENT));
+	// Only a notice: a page without window events (a test's stand-in) does not stop a run's end.
+	if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') window.dispatchEvent(new Event(RUN_ENDED_EVENT));
 }
 
 /** The stream of the open chat's run stopped: no longer streaming, and {@link runEnded}. The only
