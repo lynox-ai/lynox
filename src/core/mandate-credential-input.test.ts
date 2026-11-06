@@ -82,24 +82,23 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput(`Der Token lautet ${'aaaabbbb11112222cccc'}`)).toBeNull();
     // The lower floor is for hex only: the same spread in letters beyond hex does not count.
     expect(mandateCredentialInput(`Der Token lautet ${'gghhkkmm11223344'.repeat(2)}`)).toBeNull();
-    // Nor in hex letters of both cases: a hex key is written in one case.
+    // Nor in hex letters of both cases.
     expect(mandateCredentialInput(`Der Token lautet ${'aAbB1122'.repeat(4)}`)).toBeNull();
   });
 
-  it('rule 3: a hex key in capitals, which is written like an env name but is none', () => {
-    expect(mandateCredentialInput(`Der Token lautet ${hexKey(32).toUpperCase()}`)).toBe('credential after a cue word');
-    expect(mandateCredentialInput(`Der Token lautet ${'AABBCCDD11223344'.repeat(2)}`)).toBe('credential after a cue word');
-    // An env name with letters beyond hex stays a name.
-    expect(mandateCredentialInput('Der Token liegt unter SHOPIFY_ADMIN_TOKEN_2026')).toBeNull();
-    expect(mandateCredentialInput('Der Token liegt unter ABCDEFGHIJ1234567890')).toBeNull();
+  it('let through though a key: hex in capitals reads as an env name', () => {
+    // Also what keeps a GPG key id or a certificate thumbprint, printed in capitals, from a refusal.
+    expect(mandateCredentialInput(`Der Token lautet ${hexKey(32).toUpperCase()}`)).toBeNull();
+    expect(mandateCredentialInput(`Der Token lautet ${hexKey(32)}`)).toBe('credential after a cue word');
   });
 
   it('rule 3: a key of letters alone, with capitals side by side as in a random key', () => {
     const key = ['XqLMpzRT', 'vbNcKDwf', 'HjSAyueG'].join('');
     expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
-    // Lower case only: no capitals side by side, so no key of letters alone.
+    // Lower case only: no capitals side by side. Capitals only: read as an env name.
     expect(mandateCredentialInput(`Der Token lautet ${key.toLowerCase()}`)).toBeNull();
-    // One pair of capitals side by side is not enough: a name with one acronym.
+    expect(mandateCredentialInput(`Der Token lautet ${key.toUpperCase()}`)).toBeNull();
+    // One pair of capitals side by side is not enough: two capitals in a row.
     expect(mandateCredentialInput('Der Key kommt aus getIOsKeyForAnAppOnMyPc')).toBeNull();
     // Capitals paired, but the case changes too rarely: a name ending in acronyms.
     expect(mandateCredentialInput('Der Key steht in MailboxNotEnabledForRESTAPI')).toBeNull();
@@ -109,8 +108,10 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput(`Der Token lautet ${['XqLM', 'pzRT', 'vbNc', 'KDwf'].join('-')}`)).toBeNull();
   });
 
-  it('caught though not a key: a camel-case name with two acronyms or more after a cue word', () => {
+  it('caught though not a key: a camel-case name with capitals side by side twice, after a cue word', () => {
+    // Three capitals in a row (AIM, APIT) or two acronyms apart (API, JWT).
     expect(mandateCredentialInput('Der Key kommt aus getOpenAIModelMap')).toBe('credential after a cue word');
+    expect(mandateCredentialInput('Der Token kommt aus getAPITokenForShop')).toBe('credential after a cue word');
     expect(mandateCredentialInput('Das Token-Feld heisst xAPIKeyOrJWTForCLI')).toBe('credential after a cue word');
     // With its capitals apart, a camel-case name passes.
     expect(mandateCredentialInput('Der Key kommt aus loadVaultKeyFromDotEnv')).toBeNull();
@@ -242,21 +243,21 @@ describe('mandateCredentialInput', () => {
 
 /**
  * How often a fully drawn key typed after a cue word gets through, pinned per shape. The bands
- * come from a measured rate (100 000 random draws per shape) plus four standard deviations at
- * this sample size; the draws here are seeded, so the count is the same on every run. A change
- * to the detector that lets more through fails here and has to be measured again. Where the
- * measured rate is that low, the floor is 0: one that refuses more is not caught here but by the
- * ordinary messages above, which must pass.
+ * come from a measured rate (random draws, counts below) plus four standard deviations at this
+ * sample size; the draws here are seeded, so the count is the same on every run. A change to the
+ * detector that lets more through than the band holds fails here and has to be measured again; a
+ * smaller rise inside the band does not. Where the measured rate is that low, the floor is 0, so a
+ * change that refuses more is not caught here at all, only where it refuses one of the ordinary
+ * messages above.
  */
 describe('mandateCredentialInput — rate pinned', () => {
   const N = 4000;
   const SHAPES: Array<[string, number, string, number, number]> = [
-    // Measured: 0 of 100 000 for each hex shape, 417 of 200 000 for 24 alnum (letters alone
+    // Measured: 0 of 100 000 for both hex shapes, 417 of 200 000 for 24 alnum (letters alone
     // whose capitals do not pair). The band floor stays at 0 where the rate is that low.
     ['32 hex', 32, HEX, 0, 0],
     ['40 hex', 40, HEX, 0, 0],
     ['24 alnum', 24, ALNUM, 0, 20],
-    ['32 hex in capitals', 32, HEX.toUpperCase(), 0, 0],
   ];
   it.each(SHAPES)('a key of %s after a cue word: the count let through stays in its measured band', (name, n, alphabet, low, high) => {
     const draw = seeded(`mandate-key-rate:${name}`);

@@ -426,8 +426,9 @@ function isNameOrLink(tok: string): boolean {
   return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok);
 }
 
-/** Every character a hex digit, in one case: a key drawn from sixteen symbols. */
-const HEX_ONLY = /^(?:[0-9a-f]+|[0-9A-F]+)$/;
+/** Every character a hex digit, in lower case: a key drawn from sixteen symbols. In capitals it
+ *  reads as an env name (`isNameOrLink`) and is no key here. */
+const HEX_ONLY = /^[0-9a-f]+$/;
 
 /**
  * How spread a key's characters must be. A key drawn from sixteen symbols spreads less than one
@@ -446,11 +447,11 @@ function capitalPairs(tok: string): number {
  * Long enough, spread: a key's value. Letters and digits; or letters alone, changing case as
  * often as a random key and with capitals side by side at least twice, since one key in sixty of
  * 24 random letters and digits holds no digit. Most camel-case names have their capitals apart;
- * one with two acronyms or more (`getOpenAIModelMap`) reads as a key.
- * Hex in capitals is no env name, though written like one.
+ * one with capitals side by side twice (three in a row, as AIM in `getOpenAIModelMap`, or two
+ * acronyms apart) reads as a key.
  */
 function keyShaped(tok: string): boolean {
-  if (tok.length < 16 || (isNameOrLink(tok) && !/^[0-9A-F]+$/.test(tok))) return false;
+  if (isNameOrLink(tok) || tok.length < 16) return false;
   if (/[A-Za-z]/.test(tok) && /[0-9]/.test(tok)) {
     return entropyBits(tok) >= (HEX_ONLY.test(tok) ? HEX_KEY_SPREAD_BITS : KEY_SPREAD_BITS);
   }
