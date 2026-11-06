@@ -54,5 +54,12 @@ export const BULK_UNMEASURED_NOTE =
   'emails to your customers, a payment or an invoice. So lynox writes one target first. Check it there before you ' +
   'approve the rest.';
 
+/** The note of an unmeasured run with exactly one target to write: its first two sentences. With
+ *  one target the first write is the whole run, so "one target first … the rest" would promise a
+ *  step that does not come (customer text, approved 2026-11-06). */
+export const BULK_UNMEASURED_NOTE_ONE =
+  'lynox has not checked this kind of change with this provider. It can trigger something else there, such as ' +
+  'emails to your customers, a payment or an invoice.';
+
 /** What the approver of an unmeasured run confirms (customer text, approved 2026-10-13). */
 export const BULK_UNMEASURED_CONFIRMATION = 'I know lynox has not checked this kind of change, and I approve it anyway.';

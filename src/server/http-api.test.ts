@@ -33,7 +33,7 @@ import { CpRefusalTally, CpTrail } from '../core/cp-trail.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
 import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
-import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
@@ -12066,7 +12066,8 @@ describe('LynoxHTTPApi', () => {
       try {
         // Shown with its note and the statement to confirm; approved only with the literal `true`.
         const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
-        expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+        // One target to write: the note keeps its first two sentences.
+        expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
         for (const extra of [{}, { unmeasuredConfirmed: 'true' }, { unmeasuredConfirmed: 1 }]) {
           const unconfirmed = await approve(extra);
           expect(unconfirmed.status, JSON.stringify(extra)).toBe(409);
@@ -12149,12 +12150,29 @@ describe('LynoxHTTPApi', () => {
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
       const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
-      expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+      expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
       // The same run read as an undo: it restores under its source's confirmation, and does
       // not write one target first, so neither the note nor the statement applies.
       bulkDb.getDb().prepare(`UPDATE bulk_runs SET kind = 'undo' WHERE id = ?`).run(id);
       const asUndo = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
       expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
+    });
+
+    it('gives the unmeasured note its first two sentences at one target to write, counted as the write counts', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((n) => `https://${host}/products/${String(n)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkDb.getDb().prepare(`UPDATE bulk_targets SET change = 'update' WHERE run_id = ?`).run(id);
+      const note = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as Record<string, unknown>)['writeFormNote'];
+      expect(bulkLedger.countWriting(id)).toBe(2);
+      expect(await note()).toBe(BULK_UNMEASURED_NOTE);
+      // One taken out: the write counts one, and the note says nothing of "the rest".
+      const deselected = bulkDb.getDb().prepare(`UPDATE bulk_targets SET deselected_at = 1 WHERE run_id = ? AND seq = (SELECT MAX(seq) FROM bulk_targets WHERE run_id = ?)`).run(id, id);
+      expect(deselected.changes).toBe(1);
+      expect(bulkLedger.countWriting(id)).toBe(1);
+      expect(await note()).toBe(BULK_UNMEASURED_NOTE_ONE);
     });
 
     it('says when the probe was found as planned after a send without a clear answer, not written', async () => {

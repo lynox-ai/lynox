@@ -324,7 +324,10 @@
 	const step = $derived(run ? bulkStep(run) : 0);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
-	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote ? t('bulk.approve.unmeasured_note') : run.writeFormNote);
+	// With one target to write the note keeps its first two sentences, here and in the engine's own (EN).
+	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote
+		? t(run !== null && bulkWriting(run) === 1 ? 'bulk.approve.unmeasured_note_one' : 'bulk.approve.unmeasured_note')
+		: run.writeFormNote);
 	const unmeasuredConfirmation = $derived(getLocale() === 'de' || !run?.writeFormConfirmation ? t('bulk.approve.unmeasured_confirm') : run.writeFormConfirmation);
 	const canUndo = $derived(run !== null && bulkCanUndo(run));
 	const startKind = $derived(run ? bulkStartKind(run) : null);

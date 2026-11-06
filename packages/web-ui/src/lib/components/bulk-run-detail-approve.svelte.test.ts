@@ -171,6 +171,34 @@ describe('approving a preview', () => {
 		for (const key of ['bulk.approve.only_one', 'bulk.approve.one_first', 'bulk.approve.shopify_visible']) expect(block.textContent).not.toContain(t(key));
 	});
 
+	it('keeps only why nothing is left on an unchecked filtered run: no note, no confirmation, no filter', async () => {
+		run = makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', listFilters: { product_type: 'Tee' }, total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'https://api.example.com/items/1', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false }];
+		await render();
+		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
+		expect(block.querySelector('#bulk-approve-nothing')).not.toBeNull();
+		expect(block.querySelectorAll('input')).toHaveLength(0);
+		for (const key of ['bulk.approve.unmeasured_note', 'bulk.approve.unmeasured_note_one', 'bulk.approve.unmeasured_confirm']) expect(block.textContent).not.toContain(t(key));
+		expect(block.textContent).not.toContain('Tee');
+	});
+
+	it('cuts the unchecked note to its first two sentences at one target to write, and keeps it whole at two', async () => {
+		const unchecked = (update: number): BulkRunDetailData => makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', changes: { update, create: 0, delete: 0, unchanged: 0, invalid: 3 - update } });
+		run = unchecked(1);
+		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note_one'));
+		expect(target.textContent).not.toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).toContain(t('bulk.approve.only_one'));
+		unmount(component!);
+		component = undefined;
+		run = unchecked(2);
+		targets = targets.map((x) => (x.seq === 2 ? { ...x, change: 'update', diff: TARGETS[0]!.diff } : x));
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+	});
+
 	it('writes one target first and leaves the rest to approve when there are two', async () => {
 		run = makeRun({ changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
 		targets = targets.map((x) => (x.seq === 2 ? { ...x, change: 'update', diff: TARGETS[0]!.diff } : x));
@@ -203,6 +231,7 @@ describe('approving a preview', () => {
 		await render();
 		expect(target.textContent).toContain(t('common.load_failed'));
 		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
+		expect(buttonByText(t('bulk.approve.write_only'))).toBeUndefined();
 		expect(target.textContent).not.toContain('Product/1');
 	});
 
