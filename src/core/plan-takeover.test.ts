@@ -299,8 +299,22 @@ describe('the workflow’s side', () => {
     plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
     ended(b, 'h@x.ch');
     writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-edited'], closedPrompt: false }]);
+    // The workflow now names h's grant as its creator only: the pause's change stays, the creation is added.
     const p = takeoverPreview(deps(b), 'p');
-    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-edited']]]);
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-edited', 'workflow-created']]]);
+  });
+
+  it('a pause that knew the workflow’s creation gains a later change by the same grant', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-created'], closedPrompt: false }]);
+    renewed(b, 'h@x.ch');
+    editor(b, 'workflows', 'w', 'h@x.ch', 'g-h@x.ch', null);
+    b.db.prepare("UPDATE workflows SET mandate_edited_at = datetime('now', '+1 minute') WHERE id = 'w'").run();
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-created', 'workflow-edited']]]);
   });
 
   it('a renewal: the member the plan was paused for is live again and is still covered', () => {

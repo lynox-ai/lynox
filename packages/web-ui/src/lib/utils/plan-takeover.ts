@@ -83,12 +83,13 @@ function roleLines(m: TakeoverMember, workflow: string | null, saidByF2: Takeove
 
 /**
  * F2: the workflow is taken over with the plan. Named after the member it is taken over from: the
- * one with a workflow role, its change before its creation. Without plans released, the last
- * sentence goes.
+ * one with a workflow role, its change before its creation. Of two with the same role, the later
+ * one: the engine lists the members in the order the plan was paused for them, then those whose
+ * mark the plan or the workflow holds now. Without plans released, the last sentence goes.
  */
 function f2Line(p: TakeoverPreview): { line: TakeoverLine; by: TakeoverMember; role: 'workflow-edited' | 'workflow-created' } | null {
 	if (p.workflow === null || !p.workflow.takenOver) return null;
-	const by = p.members.find((m) => m.roles.includes('workflow-edited')) ?? p.members.find((m) => m.roles.includes('workflow-created'));
+	const by = p.members.findLast((m) => m.roles.includes('workflow-edited')) ?? p.members.findLast((m) => m.roles.includes('workflow-created'));
 	if (by === undefined) return null;
 	const changed = by.roles.includes('workflow-edited');
 	const role = changed ? 'workflow-edited' : 'workflow-created';
