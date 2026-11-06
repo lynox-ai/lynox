@@ -3,9 +3,12 @@
 // each against a real HTTP server that keeps writing until the client goes away. What the
 // prompt is priced from differs by wire: the Anthropic wire reports the provider's input count
 // in its first event, the openai-compatible wire only in its last chunk, which never comes.
+// A stop before the provider answered at all gets the cap bound only: the request may not have
+// been sent (the Anthropic SDK retries an overloaded provider inside the call), and whether a
+// sent request with no answer is billed cannot be seen from here.
 
 import { describe, it, expect } from 'vitest';
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { Agent, RunAbortedError } from './agent.js';
 import { abortedCallCost, abortedCallCounts } from './aborted-call.js';
 
@@ -104,4 +107,83 @@ describe('a call the person stops mid-stream is booked', () => {
     expect(agent.getHelperCostUsd()).toBeGreaterThan(outputOnly);
     expect(inside.costGuard.capOnlyUSD).toBeGreaterThan(agent.getHelperCostUsd());
   }, 15_000);
+});
+
+/** A provider that handles each request with `respond`; counts the requests it received. */
+async function provider(respond: (res: ServerResponse) => void): Promise<{ url: string; hits: () => number; close: () => void }> {
+  let hits = 0;
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    req.resume();
+    req.on('end', () => { hits++; respond(res); });
+  });
+  await new Promise<void>((r) => server.listen(0, r));
+  const addr = server.address();
+  const port = typeof addr === 'object' && addr ? addr.port : 0;
+  return { url: `http://127.0.0.1:${String(port)}`, hits: () => hits, close: () => { server.closeAllConnections(); server.close(); } };
+}
+
+/** The error `_callAPI` itself rethrows, before `send` turns an abort into a RunAbortedError. */
+function captureCallError(agent: Agent): { err: unknown } {
+  const seen: { err: unknown } = { err: undefined };
+  const a = agent as unknown as { _callAPI: () => Promise<unknown> };
+  const orig = a._callAPI.bind(agent);
+  a._callAPI = async () => { try { return await orig(); } catch (e) { seen.err = e; throw e; } };
+  return seen;
+}
+
+function expectCapOnly(agent: Agent, before: ReturnType<typeof abortedCallCounts>): void {
+  const inside = agent as unknown as Inside;
+  // The bound: at least the whole output budget, whatever the prompt was.
+  const floor = abortedCallCost({ model: inside.model, maxTokens: inside.maxTokens, request: '', partial: { content: [] } }).upperBoundUsd;
+  expect(inside.costGuard.capOnlyUSD).toBeGreaterThan(floor);
+  expect(agent.getHelperCostUsd()).toBe(0);
+  const after = abortedCallCounts();
+  expect(after.notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
+  expect(after.uncounted[SITE] ?? 0).toBe(before.uncounted[SITE] ?? 0);
+}
+
+describe('a call the person stops before the provider answered', () => {
+  it('during the Anthropic SDK\'s own wait after an overloaded answer: the bound to the caps, no estimate, no count', async () => {
+    const p = await provider((res) => {
+      res.writeHead(529, { 'content-type': 'application/json', 'retry-after': '1' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }));
+    });
+    try {
+      const agent = agentOn('anthropic', p.url);
+      const callErr = captureCallError(agent);
+      const before = abortedCallCounts();
+      const turn = agent.send('hello');
+      for (let i = 0; i < 200 && p.hits() < 1; i++) await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 100));
+      agent.abort();
+      const err = await turn.catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(RunAbortedError);
+      // The SDK's own abort, unchanged; the provider was asked once and answered no.
+      expect((callErr.err as Error).constructor.name).toBe('APIUserAbortError');
+      expect(p.hits()).toBe(1);
+      expectCapOnly(agent, before);
+    } finally {
+      p.close();
+    }
+  }, 15_000);
+
+  for (const wire of ['anthropic', 'openai'] as const) {
+    it(`on the ${wire} wire, sent and not answered yet: the bound to the caps, no estimate, no count`, async () => {
+      // Takes the request and never answers.
+      const p = await provider(() => undefined);
+      try {
+        const agent = agentOn(wire, wire === 'openai' ? `${p.url}/v1` : p.url);
+        const before = abortedCallCounts();
+        const turn = agent.send('hello');
+        for (let i = 0; i < 200 && p.hits() < 1; i++) await new Promise((r) => setTimeout(r, 10));
+        expect(p.hits()).toBe(1);
+        agent.abort();
+        const err = await turn.catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(RunAbortedError);
+        expectCapOnly(agent, before);
+      } finally {
+        p.close();
+      }
+    }, 15_000);
+  }
 });

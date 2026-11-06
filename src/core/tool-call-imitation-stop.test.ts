@@ -435,18 +435,24 @@ describe('what a call the person stopped used', () => {
     expect(agent.getCostSnapshot()!.inputTokens).toBe(0);
   });
 
-  it('a stop before the first event prices the prompt from the request', async () => {
-    const agent = newAgent();
-    const uncountedBefore = abortedCallCounts().uncounted[site] ?? 0;
+  it('a stop before the provider answered books the bound to the caps only: no estimate, no count', async () => {
+    const counters = { costUSD: 0, spawnCount: 0, spawnCostUSD: 0 } as unknown as import('../types/agent.js').SessionCounters;
+    const agent = newAgent(counters);
+    const before = abortedCallCounts();
     const s = hangingReply([]);
     const turn = agent.send('list everything');
     await untilRead(s);
     agent.abort();
     await turn.catch(() => undefined);
-    expect(abortedCallCounts().uncounted[site]).toBe(uncountedBefore + 1);
-    // More than nothing: the request's size priced as input.
-    const promptless = abortedCallCost({ model, maxTokens: (agent as unknown as Booked).maxTokens, request: '', partial: { content: [] } }).estimateUsd;
-    expect(agent.getHelperCostUsd()).toBeGreaterThan(promptless);
+    // The bound: the request's size priced as the prompt, above a bound with no prompt at all.
+    const promptless = abortedCallCost({ model, maxTokens: (agent as unknown as Booked).maxTokens, request: '', partial: { content: [] } }).upperBoundUsd;
+    const capOnly = (agent as unknown as Booked).costGuard.capOnlyUSD;
+    expect(capOnly).toBeGreaterThan(promptless);
+    expect(counters.costUSD).toBeCloseTo(capOnly, 12);
+    // Whether the request even reached the provider is unknown, so nothing on the cost line.
+    expect(agent.getHelperCostUsd()).toBe(0);
+    expect(abortedCallCounts().notBilled[site] ?? 0).toBe(before.notBilled[site] ?? 0);
+    expect(abortedCallCounts().uncounted[site] ?? 0).toBe(before.uncounted[site] ?? 0);
   });
 
   it('booking that fails does not replace the stop', async () => {
@@ -462,7 +468,7 @@ describe('what a call the person stopped used', () => {
     expect(err).toBeInstanceOf(RunAbortedError);
   });
 
-  it('a call that starts after the run was stopped books nothing, while the one before it was booked as finished', async () => {
+  it('a call that starts after the run was stopped books nothing, while the one before it counts as a finished turn', async () => {
     const agent = newAgent();
     const before = abortedCallCounts().notBilled[site] ?? 0;
     handler.mockImplementation(() => {
@@ -477,6 +483,9 @@ describe('what a call the person stopped used', () => {
     expect(err).toBeInstanceOf(RunAbortedError);
     expect(calls).toHaveLength(2);
     expect(calls[1]!.signal?.aborted).toBe(true);
+    // The first call's usage (100 in, 20 out) as a turn; nothing of the second.
+    expect(agent.getCostSnapshot()!.inputTokens).toBe(100);
+    expect(agent.getCostSnapshot()!.outputTokens).toBe(20);
     expect(agent.getHelperCostUsd()).toBe(0);
     expect((agent as unknown as Booked).costGuard.capOnlyUSD).toBe(0);
     expect(abortedCallCounts().notBilled[site] ?? 0).toBe(before);
@@ -528,9 +537,14 @@ describe('what a call the person stopped used', () => {
     expect(counters.costUSD).toBeCloseTo(expected.upperBoundUsd, 12);
   });
 
-  it('a run the person stops mid-stream is recorded aborted, with the call\'s estimate in its cost', async () => {
+  it('a run the person stops mid-stream is recorded aborted, with the call\'s estimate in its cost and not in the debit', async () => {
     const engine = await boot();
+    const debited = new Map<string, number[]>();
+    engine.registerHooks({ onAfterRun: (runId: string, costUsd: number) => { debited.set(runId, [...(debited.get(runId) ?? []), costUsd]); } });
     const session = engine.createSession();
+    handler.mockResolvedValue('200 OK');
+    // A finished call first, so the run has a cost of its own that the debit must carry.
+    toolUseReply('tu_1', { url: 'https://x.test/1' });
     const s = hangingReply([
       { type: 'message_start', message: { usage: { ...usage } } },
       { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
@@ -548,7 +562,14 @@ describe('what a call the person stopped used', () => {
       model: run.model_id, maxTokens: (agent as unknown as Booked).maxTokens, request: '',
       partial: { usage: { ...usage }, content: [{ type: 'text', text: 'Here is the first part of the list' }] },
     });
-    expect(run.cost_usd).toBeGreaterThan(0);
-    expect(run.cost_usd).toBeCloseTo(expected.estimateUsd, 12);
+    const finishedCost = calculateCost(run.model_id, { input_tokens: 100, output_tokens: 20 });
+    expect(run.tokens_in).toBe(100);
+    expect(run.tokens_out).toBe(20);
+    expect(expected.estimateUsd).toBeGreaterThan(0);
+    expect(run.cost_usd).toBeCloseTo(finishedCost + expected.estimateUsd, 12);
+    // The debit gets the finished call's cost, without the estimate.
+    const debit = debited.get(run.id) ?? [];
+    expect(debit).toHaveLength(1);
+    expect(debit[0]).toBeCloseTo(finishedCost, 12);
   });
 });

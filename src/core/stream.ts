@@ -44,6 +44,13 @@ export class StreamProcessor {
   private _usage: BetaUsage | undefined;
   /** Content blocks streamed so far in the current stream; filled in place as events arrive. */
   private _content: BetaContentBlock[] = [];
+  /** Stream events received so far: more than zero once the provider has answered. */
+  private _events = 0;
+
+  /** Whether the provider answered this stream with at least one event. */
+  answered(): boolean {
+    return this._events > 0;
+  }
 
   /**
    * The reply as far as it came: for a caller that ends the stream from outside (a user stop)
@@ -65,6 +72,7 @@ export class StreamProcessor {
     let usage: BetaUsage | undefined;
 
     for await (const event of stream) {
+      this._events++;
       switch (event.type) {
         case 'content_block_start':
           this._handleBlockStart(event, content, rawInputs);
