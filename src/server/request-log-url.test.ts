@@ -38,22 +38,41 @@ describe('requestLogUrl', () => {
     expect(requestLogUrl('/c/jane%ef%bc%a0customer.ch')).toBe('/c/<address>');
   });
 
-  // Every CRM route that takes a contact in the path, read from the route table's source, so a
-  // route added later is checked as well.
+  // Every route that takes a contact in the path below /api/crm/contacts/, read from the route
+  // table's source in any registration form, so a route added later is checked as well. The
+  // row-id route (`:id`) names no one and is checked below.
   const crmContactRoutes = [...readFileSync(new URL('./http-api.ts', import.meta.url), 'utf8')
-    .matchAll(/parseDynamicRoute\('[a-z]+', '[A-Z]+', '(\/api\/crm\/contacts\/:name[^']*)'/g)]
-    .map((m) => m[1]!);
+    .matchAll(/['`](\/api\/crm\/contacts\/:([A-Za-z]+)[^'`]*)['`]/g)]
+    .filter((m) => m[2] !== 'id')
+    .map((m) => m[1]!.replace(/:[A-Za-z]+/, ':name'));
 
   it('finds the CRM routes that name a contact in the path', () => {
     expect(crmContactRoutes).toEqual(expect.arrayContaining(['/api/crm/contacts/:name/interactions', '/api/crm/contacts/:name/deals']));
   });
 
   it.each(crmContactRoutes)('writes the contact of %s as a placeholder', (route) => {
-    for (const name of ['Jane%20Doe', 'M%C3%BCller', 'Jane', '42a']) {
+    const written = route.replace(':name', '<contact>');
+    for (const name of ['Jane%20Doe', 'M%C3%BCller', 'Jane', '42a', 'Jane%3Fx', 'Jane%2Fdoe']) {
       const url = route.replace(':name', name);
-      expect(requestLogUrl(url)).toBe(route.replace(':name', '<contact>'));
-      expect(requestLogUrl(`${url}/`)).toBe(`${route.replace(':name', '<contact>')}/`);
+      expect(requestLogUrl(url)).toBe(written);
+      expect(requestLogUrl(`${url}/`)).toBe(`${written}/`);
+      expect(requestLogUrl(`${url}?limit=5`)).toBe(`${written}?limit=<redacted>`);
     }
+  });
+
+  // The router reads the path through `URL` and accepts `/api/v1/` for `/api/`; each of these
+  // reaches the deals route of the contact Jane.
+  it.each([
+    ['/api/v1/crm/contacts/Jane/deals', '/api/v1/crm/contacts/<contact>/deals'],
+    ['//host/api/crm/contacts/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['http://host/api/crm/contacts/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api/crm/./contacts/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api/crm/x/../contacts/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api/crm/contacts/./Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api/crm/contacts/%2e/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api\\crm\\contacts\\Jane\\deals', '/api/crm/contacts/<contact>/deals'],
+  ])('writes the contact as a placeholder when %s reaches the route', (url, written) => {
+    expect(requestLogUrl(url)).toBe(written);
   });
 
   it('keeps the contact row id and the list route as they are', () => {
