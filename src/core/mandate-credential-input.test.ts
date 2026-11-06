@@ -82,6 +82,8 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput(`Der Token lautet ${'aaaabbbb11112222cccc'}`)).toBeNull();
     // The lower floor is for hex only: the same spread in letters beyond hex does not count.
     expect(mandateCredentialInput(`Der Token lautet ${'gghhkkmm11223344'.repeat(2)}`)).toBeNull();
+    // Nor in hex letters of both cases: a hex key is written in one case.
+    expect(mandateCredentialInput(`Der Token lautet ${'aAbB1122'.repeat(4)}`)).toBeNull();
   });
 
   it('rule 3: a key of letters alone, with capitals side by side as in a random key', () => {
@@ -94,6 +96,8 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput('Der Key steht in MailboxNotEnabledForRESTAPI')).toBeNull();
     // Case changing and capitals paired, but a repeated pattern.
     expect(mandateCredentialInput(`Der Token lautet ${'ABab'.repeat(5)}`)).toBeNull();
+    // Letters alone means letters alone: with hyphens between them, this rule does not read it.
+    expect(mandateCredentialInput(`Der Token lautet ${['XqLM', 'pzRT', 'vbNc', 'KDwf'].join('-')}`)).toBeNull();
   });
 
   it('caught though not a key: a camel-case name with two acronyms after a cue word', () => {
