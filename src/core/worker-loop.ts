@@ -2544,6 +2544,7 @@ export class WorkerLoop {
         gate: (tier) => fireBeforeRunGate(this.engine, tier),
         report: (gateRunId, usd, tier) => reportMeteredCost(this.engine, gateRunId, usd, tier),
         bookSpend: (entry) => history?.recordBulkJudgeCost(entry),
+        settleSpend: (row, entry) => history?.settleBulkJudgeCost(row, entry),
         budgetAllows: () => checkPersistentBudget().allowed,
         scanSecret: detectSecretInContent,
         maskVault: (text) => secretStore ? secretStore.maskSecrets(text) : text,
