@@ -3057,6 +3057,13 @@ export class BulkLedger {
     this.engineDb.getDb().prepare('UPDATE bulk_runs SET cost_usd = cost_usd + ? WHERE id = ?').run(usd, runId);
   }
 
+  /** Replace a call's provisional booking (its worst case, booked with `addJudgeCost` before the
+   *  call) by what it cost: `usd` 0 takes it back. Never below zero. */
+  settleJudgeCost(runId: string, provisionalUsd: number, usd: number): void {
+    if (!Number.isFinite(provisionalUsd) || !Number.isFinite(usd) || provisionalUsd < 0 || usd < 0) return;
+    this.engineDb.getDb().prepare('UPDATE bulk_runs SET cost_usd = MAX(0, cost_usd - ? + ?) WHERE id = ?').run(provisionalUsd, usd, runId);
+  }
+
   /**
    * Record one target's verdict — its after-state and the change that follows — or why it has
    * none. Only under the claim's own token (compare-and-set), only while the target has no

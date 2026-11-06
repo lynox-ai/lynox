@@ -1584,7 +1584,7 @@ describe('a judged Shopify run', () => {
       resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as Anthropic }),
       gate: async () => ({ runId: 'gate', blockedReason: null }),
       report: () => {},
-      bookSpend: () => {},
+      bookSpend: () => undefined, settleSpend: () => {},
       budgetAllows: () => true,
       scanSecret: () => null,
       maskVault: (t) => t,
@@ -1788,7 +1788,7 @@ describe('the context C of a judged Shopify run (PRD shopify-preset §20.2 item 
       deps: {
         ledger, readTargets: () => runBulkPreview(id, deps()),
         resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as Anthropic }),
-        gate: async () => ({ runId: 'gate', blockedReason: null }), report: () => {}, bookSpend: () => {}, budgetAllows: () => true,
+        gate: async () => ({ runId: 'gate', blockedReason: null }), report: () => {}, bookSpend: () => undefined, settleSpend: () => {}, budgetAllows: () => true,
         scanSecret: (t) => (t.includes('sk-live-') ? 'api_key' : null), maskVault: (t) => t, call,
       },
     };

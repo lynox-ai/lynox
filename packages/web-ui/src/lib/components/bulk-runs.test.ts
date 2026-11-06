@@ -495,7 +495,15 @@ describe('going on from a run that halted', () => {
 			.toBe('You can continue. If the run halts again right away, shop.example.invalid or the AI model is not answering yet; try again later.');
 		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
-			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, verbraucht 0.0034 USD.');
+			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, angerechnet sind 0.0034 USD.');
+		// What counts toward the limit, not what was paid: a judge call without an answer counts at
+		// its worst case (ux U-174).
+		expect([de['bulk.halt.costCap'], en['bulk.halt.costCap'], de['bulk.halt.costCap_mandate'], en['bulk.halt.costCap_mandate']]).toEqual([
+			'Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: {cap} USD, angerechnet sind {spent} USD.',
+			'The run reached the AI cost limit you set at its start: {cap} USD, with {spent} USD counted toward it.',
+			'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap} USD, angerechnet sind {spent} USD.',
+			'The run reached the AI cost limit the owner set at its start: {cap} USD, with {spent} USD counted toward it.',
+		]);
 		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
 			cause: 'Deine Instanz darf shop.example.invalid nicht erreichen.',
 			before: 'Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
