@@ -445,10 +445,12 @@ function capitalPairs(tok: string): number {
 /**
  * Long enough, spread: a key's value. Letters and digits; or letters alone, changing case as
  * often as a random key and with capitals side by side at least twice, since one key in sixty of
- * 24 random letters and digits holds no digit. A camel-case name has its capitals apart.
+ * 24 random letters and digits holds no digit. Most camel-case names have their capitals apart;
+ * one with two acronyms or more (`getOpenAIModelMap`) reads as a key.
+ * Hex in capitals is no env name, though written like one.
  */
 function keyShaped(tok: string): boolean {
-  if (isNameOrLink(tok) || tok.length < 16) return false;
+  if (tok.length < 16 || (isNameOrLink(tok) && !/^[0-9A-F]+$/.test(tok))) return false;
   if (/[A-Za-z]/.test(tok) && /[0-9]/.test(tok)) {
     return entropyBits(tok) >= (HEX_ONLY.test(tok) ? HEX_KEY_SPREAD_BITS : KEY_SPREAD_BITS);
   }
