@@ -27,7 +27,9 @@ export type FailReason =
   /** Daily classifier budget (InboxCostBudget) was exhausted — no LLM call. */
   | 'budget_exceeded'
   /** The model archived a mail a person forwarded (`forwarded.ts`); it is shown instead. */
-  | 'forwarded_by_person';
+  | 'forwarded_by_person'
+  /** The model archived a mail the sensitive check flagged (`mask`/`allow`); it is shown instead. */
+  | 'sensitive_content';
 
 export interface ClassifierVerdict {
   bucket: InboxBucket;

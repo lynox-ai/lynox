@@ -88,6 +88,21 @@ export function sensitiveAudit(payload: Pick<InboxQueuePayload, 'sensitive'>): R
     : {};
 }
 
+/** Shown for a mail the classifier would have filed as handled although the sensitive check
+ *  flagged it. */
+export const SENSITIVE_WITHHELD_REASON_DE = 'Sensibler Inhalt — nicht als erledigt abgelegt, bitte ansehen.';
+
+/**
+ * A mail the sensitive check flagged is never filed as handled. In `skip` (the default) it does not
+ * reach the classifier; under `mask` or `allow` it does, and the mails the check flags are the ones
+ * a person most needs to see, while a mail's own text can steer a classifier. Such a mail is shown
+ * instead. Any other verdict is kept as it is, so a result already held back keeps its own reason.
+ */
+export function withheldSensitive(result: ClassifyResult, payload: Pick<InboxQueuePayload, 'sensitive'>): ClassifyResult {
+  if (payload.sensitive === undefined || result.bucket !== 'auto_handled') return result;
+  return { ...result, bucket: 'requires_user', reasonDe: SENSITIVE_WITHHELD_REASON_DE, failReason: 'sensitive_content' };
+}
+
 /** Subset of ClassifierQueueOptions the wiring exposes — callbacks are owned. */
 export interface InboxRunnerPolicy {
   maxConcurrency?: number | undefined;
@@ -165,7 +180,8 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
         classifierVersion: opts.classifierVersionOverride,
       });
     },
-    onSuccess: (payload, result) => {
+    onSuccess: (payload, classified) => {
+      const result = withheldSensitive(classified, payload);
       const envelopeFields = payload.envelope ?? {};
       const metadataWarning = _detectEmptyMetadata(payload.envelope);
       const itemId = state.insertItemWithAudit(
@@ -191,6 +207,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
             fail_reason: result.failReason,
             body_truncated: result.bodyTruncated,
             ...sensitiveAudit(payload),
+            ...(result !== classified ? { classifier_bucket: classified.bucket } : {}),
             ...(metadataWarning ? { warning: 'classified_with_empty_metadata', missing: metadataWarning } : {}),
           }),
         },

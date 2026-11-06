@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
-import { buildInboxRunner, scrubErrorMessage, type InboxQueuePayload } from './runner.js';
+import { buildInboxRunner, scrubErrorMessage, SENSITIVE_WITHHELD_REASON_DE, withheldSensitive, type InboxQueuePayload } from './runner.js';
 import { InboxCostBudget } from './cost-budget.js';
 import type { LLMCaller } from './classifier/index.js';
 import type { MailAccountConfig } from '../mail/provider.js';
@@ -343,5 +343,77 @@ describe('buildInboxRunner — policy passthrough', () => {
     expect(queue.enqueue(payload({ threadKey: 'b' }))).toBe(true);
     expect(queue.enqueue(payload({ threadKey: 'c' }))).toBe(true);
     expect(queue.enqueue(payload({ threadKey: 'd' }))).toBe(false);
+  });
+});
+
+describe('buildInboxRunner — a mail the sensitive check flagged is never filed as handled', () => {
+  // Under `skip` (the default) such a mail never reaches the classifier
+  // (watcher-hook.test.ts: "detects an OTP-shaped mail and skips the LLM"). Under `mask` and
+  // `allow` it does, and the classifier's verdict is the one path that could file it as handled.
+  const handled: LLMCaller = async () =>
+    JSON.stringify({ bucket: 'auto_handled', confidence: 0.95, one_line_why_de: 'Newsletter' });
+
+  async function run(sensitive: InboxQueuePayload['sensitive'], llm: LLMCaller = handled) {
+    const notifyNewItem = vi.fn(async () => undefined);
+    const queue = buildInboxRunner({ state: inbox, llm, notifier: { notifyNewItem } });
+    queue.enqueue(payload(sensitive === undefined ? {} : { sensitive }));
+    await queue.drain();
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    const audit = JSON.parse(inbox.listAuditForItem(items[0]!.id)[0]!.payloadJson) as Record<string, unknown>;
+    return { item: items[0]!, audit, notifyNewItem };
+  }
+
+  for (const [mode, sensitive] of [
+    ['mask', { categories: ['otp'], masked: true, redactionCount: 1 }],
+    ['allow', { categories: ['otp'], masked: false, redactionCount: 0 }],
+  ] as const) {
+    it(`shows it under ${mode} when the classifier files it as handled, and the audit says why`, async () => {
+      const { item, audit, notifyNewItem } = await run(sensitive);
+      expect(item.bucket).toBe('requires_user');
+      expect(item.reasonDe).toBe(SENSITIVE_WITHHELD_REASON_DE);
+      expect(audit).toMatchObject({
+        bucket: 'requires_user',
+        fail_reason: 'sensitive_content',
+        classifier_bucket: 'auto_handled',
+        sensitive_categories: ['otp'],
+        sensitive_masked: sensitive.masked,
+      });
+      // Shown like any mail that needs the owner: the notification goes out.
+      expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('keeps the classifier\'s bucket for a mail without the flag (control)', async () => {
+    const { item, audit, notifyNewItem } = await run(undefined);
+    expect(item.bucket).toBe('auto_handled');
+    expect(item.reasonDe).toBe('Newsletter');
+    expect(audit).toMatchObject({ bucket: 'auto_handled', fail_reason: null });
+    expect(audit).not.toHaveProperty('classifier_bucket');
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  it('keeps any other verdict on a flagged mail as the classifier gave it', async () => {
+    const draft: LLMCaller = async () =>
+      JSON.stringify({ bucket: 'draft_ready', confidence: 0.9, one_line_why_de: 'Antwort vorbereitet' });
+    const { item, audit } = await run({ categories: ['iban'], masked: true, redactionCount: 1 }, draft);
+    expect(item.bucket).toBe('draft_ready');
+    expect(item.reasonDe).toBe('Antwort vorbereitet');
+    expect(audit).toMatchObject({ fail_reason: null });
+    expect(audit).not.toHaveProperty('classifier_bucket');
+  });
+});
+
+describe('withheldSensitive', () => {
+  const verdict = { bucket: 'auto_handled', confidence: 0.9, reasonDe: 'r', failReason: null, classifierVersion: 'v', bodyTruncated: false } as const;
+  const flagged = { sensitive: { categories: ['otp'], masked: true, redactionCount: 1 } };
+
+  it('leaves a verdict already held back with its own reason alone', () => {
+    const held = { ...verdict, bucket: 'requires_user', reasonDe: 'Budget', failReason: 'budget_exceeded' } as const;
+    expect(withheldSensitive(held, flagged)).toBe(held);
+  });
+
+  it('returns the very verdict when nothing changes, so the audit adds no classifier bucket', () => {
+    expect(withheldSensitive(verdict, {})).toBe(verdict);
   });
 });
