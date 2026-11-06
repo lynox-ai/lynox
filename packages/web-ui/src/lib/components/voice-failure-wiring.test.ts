@@ -17,6 +17,6 @@ describe('ChatView hands a failed voice request\'s status to these helpers', () 
 	});
 
 	it('read-aloud answered with an error status', () => {
-		expect(SRC).toContain("case 'http':        return speakHttpFailureText(err.status);");
+		expect(SRC).toMatch(/case 'http':\s*return speakHttpFailureText\(err\.status\);/);
 	});
 });

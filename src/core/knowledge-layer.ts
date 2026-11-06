@@ -681,18 +681,19 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     };
   }
 
-  /** V1 extraction path — regex + optional Haiku free-text JSON. */
   /**
    * Whether extracting entities from this text calls a model — the same tests the
    * extractors make (`shouldExtractV2`, `shouldUseLLMExtraction`). A text that fails
    * them is read by the free regex step only, so there is no spend to admit.
+   * `v2Possible` is false where the caller only ever runs the V1 extractor.
    */
-  private _extractionCallsModel(text: string, namespace: MemoryNamespace): boolean {
+  private _extractionCallsModel(text: string, namespace: MemoryNamespace, v2Possible = true): boolean {
     if (!this.anthropicClient) return false;
-    if (this.useV2Extractor && shouldExtractV2(text, namespace)) return true;
+    if (v2Possible && this.useV2Extractor && shouldExtractV2(text, namespace)) return true;
     return shouldUseLLMExtraction(text, namespace, []);
   }
 
+  /** V1 extraction path — regex + optional Haiku free-text JSON. */
   private async _extractAndPersistV1(
     trimmedText: string,
     namespace: MemoryNamespace,
@@ -1952,7 +1953,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // managed spend that survived credit exhaustion and was injection-loopable via the
     // `update_memory` tool. The text update itself (above) is local + always applies; only
     // the LLM re-extraction is credit-gated, so an exhausted tenant's edit still lands.
-    const extractGate = this._extractionCallsModel(newText, namespace)
+    // Under the read cutover the re-extraction may run V2; before it, only V1.
+    const cutover = this.memoryReadsActive && this.subjectStore !== null && this.relationshipStore !== null && this.memoryGraphStore !== null;
+    const extractGate = this._extractionCallsModel(newText, namespace, cutover)
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;

@@ -148,6 +148,30 @@ describe('KnowledgeLayer — managed KG-extraction gate + debit', () => {
       expect(mockExtractV1).toHaveBeenCalledOnce();
     });
 
+    it('a V1 extraction that would call a model is gated and blocked at the cap', async () => {
+      atCap();
+      mockShouldExtractV2.mockReturnValue(false);
+
+      // `knowledge`, at least 30 characters: the V1 extractor would send this to a model.
+      const res = await layer.store(text, 'knowledge', scope);
+
+      expect(res.stored).toBe(true);
+      expect(mockExtractV1).not.toHaveBeenCalled();
+      expect(mockExtractV2).not.toHaveBeenCalled();
+    });
+
+    it('a text update the extractor reads without a model still runs its extraction at the cap', async () => {
+      const original = 'Acme Corp signed with Beta GmbH in Zurich last week.';
+      await layer.store(original, 'status', scope);
+      mockExtractV1.mockClear();
+      atCap();
+
+      const changed = await layer.updateMemoryText(original, `${original} Renewed.`, 'status', scope);
+
+      expect(changed).toBe(true);
+      expect(mockExtractV1).toHaveBeenCalledOnce();
+    });
+
     it('the text-update re-extraction is not made at the cap, with no host', async () => {
       const stored = await layer.store(text, 'knowledge', scope);
       expect(stored.stored).toBe(true);
