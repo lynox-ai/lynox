@@ -2218,3 +2218,72 @@ describe('OpenAIAdapter terminal events', () => {
     await expect(new StreamProcessor(async () => { /* no-op */ }, 'test-agent').process(replay())).rejects.toBeInstanceOf(StreamIncompleteError);
   });
 });
+
+// An error chunk (`{"error": …}`, as vLLM sends before its `[DONE]`) breaks the reply off: the
+// `[DONE]` after it does not end the reply as a complete one, on either path.
+describe('OpenAIAdapter error chunk before [DONE]', () => {
+  const errorChunk = `data: ${JSON.stringify({ error: { message: 'upstream failed', type: 'internal_error', code: 500 } })}\n\n`;
+  async function run(write: (res: ServerResponse) => void, path: 'process' | 'create'): Promise<{ err: unknown; tools: number }> {
+    const server = await createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      write(res);
+    });
+    try {
+      const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model' });
+      const params = { model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }] };
+      let tools = 0;
+      try {
+        if (path === 'create') await adapter.messages.create(params);
+        else await new StreamProcessor((e) => { if (e.type === 'tool_call') tools++; }, 'test-agent').process(adapter.beta.messages.stream(params));
+      } catch (err) {
+        return { err, tools };
+      }
+      return { err: undefined, tools };
+    } finally {
+      server.close();
+    }
+  }
+  const shapeA = (res: ServerResponse): void => {
+    res.write(sseChunk({ id: 'e', choices: [{ index: 0, delta: { content: 'partial answer' }, finish_reason: null }] }));
+    res.write(errorChunk);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  };
+
+  it('text, error chunk, [DONE]: the stream processor reports the reply incomplete', async () => {
+    expect((await run(shapeA, 'process')).err).toBeInstanceOf(StreamIncompleteError);
+  });
+
+  it('text, error chunk, [DONE]: messages.create throws instead of returning the partial reply', async () => {
+    expect(String((await run(shapeA, 'create')).err)).toMatch(/incomplete/);
+  });
+
+  it('a tool call with torn arguments, error chunk, [DONE]: no tool call is dispatched, the reply is incomplete', async () => {
+    const { err, tools } = await run((res) => {
+      res.write(sseChunk({ id: 'e', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{"path":"/a/b' } }] }, finish_reason: null }] }));
+      res.write(errorChunk);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }, 'process');
+    expect(err).toBeInstanceOf(StreamIncompleteError);
+    expect(tools).toBe(0);
+  });
+
+  it('text, error chunk, then a final [DONE] frame with no trailing newline: still incomplete', async () => {
+    expect((await run((res) => {
+      res.write(sseChunk({ id: 'e', choices: [{ index: 0, delta: { content: 'partial answer' }, finish_reason: null }] }));
+      res.write(errorChunk);
+      res.end('data: [DONE]');
+    }, 'process')).err).toBeInstanceOf(StreamIncompleteError);
+  });
+
+  it('control: the same stream without the error chunk is a complete reply on both paths', async () => {
+    const clean = (res: ServerResponse): void => {
+      res.write(sseChunk({ id: 'e', choices: [{ index: 0, delta: { content: 'whole answer' }, finish_reason: null }] }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    };
+    expect((await run(clean, 'process')).err).toBeUndefined();
+    expect((await run(clean, 'create')).err).toBeUndefined();
+  });
+});

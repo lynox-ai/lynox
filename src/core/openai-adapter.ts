@@ -380,6 +380,12 @@ function extractDeltaText(content: unknown): string {
   return '';
 }
 
+/** Whether a stream chunk carries a provider error (`{"error": …}`) instead of, or next to, choices. */
+function hasErrorField(chunk: unknown): boolean {
+  const err = (chunk as { error?: unknown } | undefined)?.error;
+  return err !== undefined && err !== null;
+}
+
 async function* translateStream(
   response: Response,
 ): AsyncIterable<BetaRawMessageStreamEvent> {
@@ -438,6 +444,9 @@ async function* translateStream(
   // with `[DONE]` only (seen via OpenRouter); that is a complete reply. A stream with neither
   // `[DONE]` nor a `finish_reason` was cut off and gets no terminal events.
   let sawDone = false;
+  // Whether the provider sent an error chunk (`{"error": …}`, e.g. vLLM before its `[DONE]`). The
+  // reply it broke off is not complete, so a later `[DONE]` does not end it as one.
+  let sawError = false;
 
   // Close the open blocks (text, reasoning, every tool call) at the end of the reply.
   function* closeOpenBlocks(): Generator<BetaRawMessageStreamEvent> {
@@ -484,6 +493,7 @@ async function* translateStream(
 
         let chunk: OpenAIStreamChunk;
         try { chunk = JSON.parse(data) as OpenAIStreamChunk; } catch { continue; }
+        if (hasErrorField(chunk)) sawError = true;
 
         // Track usage from streaming chunks
         if (chunk.usage) {
@@ -665,6 +675,7 @@ async function* translateStream(
       } else {
         let chunk: OpenAIStreamChunk | undefined;
         try { chunk = JSON.parse(data) as OpenAIStreamChunk; } catch { /* torn frame — keep accumulated totals */ }
+        if (hasErrorField(chunk)) sawError = true;
         if (chunk?.usage) {
           totalInputTokens = chunk.usage.prompt_tokens ?? totalInputTokens;
           totalOutputTokens = chunk.usage.completion_tokens ?? totalOutputTokens;
@@ -679,8 +690,9 @@ async function* translateStream(
     }
 
     // `[DONE]` without any `finish_reason`: a complete reply whose provider never names a stop
-    // reason. It ended on a tool call if one was opened, else as a turn.
-    if (finishStopReason === null && sawDone) {
+    // reason. It ended on a tool call if one was opened, else as a turn. Not after an error chunk:
+    // that reply was broken off, and gets no terminal events.
+    if (finishStopReason === null && sawDone && !sawError) {
       yield* closeOpenBlocks();
       finishStopReason = toolBlockMap.size > 0 ? 'tool_use' : 'end_turn';
     }
@@ -849,8 +861,9 @@ export class OpenAIAdapter {
               }
             }
 
-            // `message_delta` is emitted only once a finish_reason arrives, and it carries the
-            // token totals. A stream that ends without one is a TRUNCATED response — but it
+            // `message_delta` is emitted only once the reply ended — a finish_reason, or `[DONE]`
+            // with no error chunk before it — and it carries the token totals (0/0 when the
+            // provider sent no usage). A stream that ends without one is a TRUNCATED response — but it
             // assembles into a message that looks entirely ordinary: partial content,
             // `stop_reason: 'end_turn'`, and usage 0/0. `process-capture.ts` then debits zero
             // for a real call and records it as a success. Throwing is the right way to be
