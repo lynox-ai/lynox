@@ -329,33 +329,43 @@ export type ShopifyRead =
   | { readonly form: 'shopify_media_list'; readonly afterId: number }
   | { readonly form: 'shopify_media_read'; readonly gid: string };
 
-/** The longest list search a trail row names as sent. The row holds 400 characters
- *  (`audit-log.ts` TARGET_MAX) and cuts the rest unmarked; `POST <endpoint> <form> ` takes up to
- *  about 140 of them for the longest store name. */
-export const SHOPIFY_READ_DETAIL_MAX = 240;
+/** The room a list search has in its trail row when the caller does not say: the row holds 400
+ *  characters (`audit-log.ts` TARGET_MAX) and cuts the rest unmarked, and `POST <host>/admin/api/
+ *  <version>/graphql.json shopify_products_list ` takes 59 of them plus the host, 77 for a store
+ *  name of 63 characters (the longest a DNS label holds). The client passes the room its own
+ *  row has, so a shorter store name leaves more. */
+export const SHOPIFY_READ_DETAIL_MAX = 264;
 
 /**
- * The search of a list page as its trail row names it: as sent where it fits; otherwise whole
- * values, in the order sent, until the row is full, then how many the row leaves out — never a
- * value cut in two, never a cut the row does not say.
+ * The search of a list page as its trail row names it: as sent where it fits; otherwise the
+ * search as sent up to the end of the last whole value that fits, then how many values it leaves
+ * out. It is the sent text itself, operators and all, cut at a value's end and saying so: never
+ * a value cut in two, never a cut the row does not say, never a search that was not sent.
  */
-function shopifyListDetail(afterId: number, filters: ShopifyListFilters): string {
+function shopifyListDetail(afterId: number, filters: ShopifyListFilters, room: number): string {
   const sent = shopifyListQuery(afterId, filters);
-  if (sent.length <= SHOPIFY_READ_DETAIL_MAX) return sent;
-  const terms = SHOPIFY_LIST_FILTER_KEYS.flatMap((key) => {
+  if (sent.length <= room) return sent;
+  // The same text as `shopifyListQuery`, with the offset where each value's term ends.
+  let q = `id:>${String(afterId)}`;
+  const ends: number[] = [];
+  for (const key of SHOPIFY_LIST_FILTER_KEYS) {
     const value = filters[key];
-    return value === undefined ? [] : shopifyFilterValues(value).map((v) => `${key}:"${v}"`);
-  });
-  const marker = (left: number): string => ` … (+${String(left)} more of ${String(terms.length)}, as sent)`;
-  let out = `id:>${String(afterId)}`;
-  let shown = 0;
-  for (const term of terms) {
-    const next = `${out} ${term}`;
-    if (next.length + marker(terms.length - shown - 1).length > SHOPIFY_READ_DETAIL_MAX) break;
-    out = next;
-    shown++;
+    if (value === undefined) continue;
+    const values = shopifyFilterValues(value);
+    q += typeof value === 'string' ? ' AND ' : ' AND (';
+    values.forEach((v, i) => {
+      q += `${i === 0 ? '' : ' OR '}${key}:"${v}"`;
+      ends.push(q.length);
+    });
+    if (typeof value !== 'string') q += ')';
   }
-  return `${out}${marker(terms.length - shown)}`;
+  // Never name a search other than the one sent: should the two ever differ, name no value.
+  if (q !== sent) ends.length = 0;
+  const cut = (left: number): string => ` … [cut here: ${String(left)} of ${String(ends.length)} values left out]`;
+  let shown = 0;
+  while (shown < ends.length && ends[shown]! + cut(ends.length - shown - 1).length <= room) shown++;
+  const kept = shown === 0 ? `id:>${String(afterId)}` : sent.slice(0, ends[shown - 1]);
+  return `${kept}${cut(ends.length - shown)}`;
 }
 
 /**
@@ -364,10 +374,10 @@ function shopifyListDetail(afterId: number, filters: ShopifyListFilters): string
  * caller's text reaches the trail. A list search too long for the row names the values that
  * fit and how many it leaves out ({@link shopifyListDetail}). Null for a value that does not fit.
  */
-export function shopifyReadRequest(read: ShopifyRead): { body: string; detail: string } | null {
+export function shopifyReadRequest(read: ShopifyRead, room = SHOPIFY_READ_DETAIL_MAX): { body: string; detail: string } | null {
   if (read.form === 'shopify_products_list') {
     const body = shopifyListBody(read.afterId, read.filters);
-    return body === null ? null : { body, detail: `${read.form} ${shopifyListDetail(read.afterId, read.filters)}` };
+    return body === null ? null : { body, detail: `${read.form} ${shopifyListDetail(read.afterId, read.filters, room)}` };
   }
   if (read.form === 'shopify_media_list') {
     const body = shopifyMediaListBody(read.afterId);

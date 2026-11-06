@@ -448,8 +448,6 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
-/** The line naming a filtered Shopify list's group, where the run is started and approved. The
- *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter. */
 /** A list of more values than this is folded until the owner shows it all (ux U-175). */
 export const BULK_LIST_FILTER_UNFOLDED_MAX = 5;
 /** How many values a folded list shows before the count of the rest. */
@@ -462,6 +460,9 @@ export function bulkListFilterFolded(filters: Readonly<Record<string, string | r
 	return Object.values(filters).reduce((n, v) => (typeof v !== 'string' && v.length > BULK_LIST_FILTER_UNFOLDED_MAX ? n + v.length : n), 0);
 }
 
+/** The line naming a filtered Shopify list's group, where the run is started and approved. The
+ *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter.
+ *  `folded` shows each list of more than {@link BULK_LIST_FILTER_UNFOLDED_MAX} values folded. */
 export function bulkListFilterText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n, folded = false): string | null {
 	if (filters === null) return null;
 	// Every value in its own quotes: they are the scope the owner approves. Folded, a long list

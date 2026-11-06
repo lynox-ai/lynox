@@ -205,24 +205,45 @@ describe('the body of a filtered list page', () => {
     expect(shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: { vendor: 'a OR b' } })).toBeNull();
   });
 
-  it('records a list search as sent where it fits, and otherwise whole values in order and how many it leaves out', () => {
-    const fits = { product_type: ['Tee', 'Kaffee'], vendor: 'Acme' };
-    expect(shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: fits })?.detail)
-      .toBe('shopify_products_list id:>7 AND (product_type:"Tee" OR product_type:"Kaffee") AND vendor:"Acme"');
+  it('records a list search as sent where it fits, and otherwise the sent text cut at a value\'s end, saying how many it leaves out', () => {
+    const detail = (filters: Parameters<typeof shopifyListBody>[1], room?: number): string =>
+      shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters }, room)!.detail.slice('shopify_products_list '.length);
+    expect(detail({ product_type: ['Tee', 'Kaffee'], vendor: 'Acme' })).toBe('id:>7 AND (product_type:"Tee" OR product_type:"Kaffee") AND vendor:"Acme"');
+    // One value of the longest the rule takes: whole where the row has room, else said to be left out.
+    const longest = `A${'b'.repeat(254)}`;
+    expect(detail({ product_type: longest }, 300)).toBe(`id:>7 AND product_type:"${longest}"`);
+    expect(detail({ product_type: longest })).toBe('id:>7 … [cut here: 1 of 1 values left out]');
+    expect(SHOPIFY_READ_DETAIL_MAX).toBe(400 - 59 - (63 + '.myshopify.com'.length));
     const values = Array.from({ length: 50 }, (_, i) => `Obergruppe Nummer ${String(i + 1).padStart(2, '0')}`);
-    const long = { product_type: values, vendor: 'Acme' };
-    const detail = shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: long })!.detail;
-    const shown = detail.slice('shopify_products_list '.length);
+    const filters = { product_type: values, vendor: 'Acme' };
+    const sent = `id:>7 AND (${values.map((v) => `product_type:"${v}"`).join(' OR ')}) AND vendor:"Acme"`;
+    const shown = detail(filters);
     expect(shown.length).toBeLessThanOrEqual(SHOPIFY_READ_DETAIL_MAX);
-    const terms = [...values.map((v) => `product_type:"${v}"`), 'vendor:"Acme"'];
-    const kept = [...shown.matchAll(/(product_type|vendor):"[^"]*"/g)].map((m) => m[0]);
-    // Whole values only, the first ones sent, in the order sent; the rest counted, not cut.
-    expect(kept.length).toBeGreaterThan(0);
-    expect(kept).toEqual(terms.slice(0, kept.length));
-    expect(shown).toBe(`id:>7 ${kept.join(' ')} … (+${String(terms.length - kept.length)} more of ${String(terms.length)}, as sent)`);
-    // As full as the row allows: one more value would not fit.
-    expect(`id:>7 ${terms.slice(0, kept.length + 1).join(' ')} … (+${String(terms.length - kept.length - 1)} more of ${String(terms.length)}, as sent)`.length)
+    const m = /^(.*) … \[cut here: (\d+) of 51 values left out\]$/.exec(shown)!;
+    // The sent text itself, operators and all, cut right after a value.
+    expect(sent.startsWith(m[1]!)).toBe(true);
+    expect(m[1]!.endsWith('"')).toBe(true);
+    const kept = [...m[1]!.matchAll(/product_type:"[^"]*"/g)].length;
+    expect(kept).toBeGreaterThan(0);
+    expect(m[1]).toBe(`id:>7 AND (${values.slice(0, kept).map((v) => `product_type:"${v}"`).join(' OR ')}`);
+    expect(Number(m[2])).toBe(51 - kept);
+    // As full as the row allows: the next value would not fit.
+    expect(`id:>7 AND (${values.slice(0, kept + 1).map((v) => `product_type:"${v}"`).join(' OR ')} … [cut here: ${String(50 - kept)} of 51 values left out]`.length)
       .toBeGreaterThan(SHOPIFY_READ_DETAIL_MAX);
+  });
+
+  it('never says it cut nothing: a search just over the row leaves out at least one value', () => {
+    // Seven values of length L: the sent search is 141 + 7·L, from under the budget to just over it.
+    let cuts = 0;
+    for (let L = 17; L <= 25; L++) {
+      const values = Array.from({ length: 7 }, (_, i) => `W${String(i)}${'x'.repeat(L - 2)}`);
+      const d = shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: { product_type: values } })!.detail;
+      const m = / \[cut here: (\d+) of 7 values left out\]$/.exec(d);
+      if (m === null) continue;
+      cuts++;
+      expect(Number(m[1]), d).toBeGreaterThan(0);
+    }
+    expect(cuts).toBeGreaterThan(0);
   });
 });
 
@@ -327,10 +348,15 @@ describe('a filter with a list of values', () => {
       const filters = { product_type: tampered } as never;
       expect(() => shopifyInFilter(product, filters), JSON.stringify(tampered)).not.toThrow();
     }
-    expect(shopifyInFilter(product, { product_type: [5, 'Kaffee'] } as never)).toBe(false);
+    expect(shopifyInFilter(product, { product_type: [5, 'Tee'] } as never)).toBe(false);
     expect(shopifyInFilter(product, { product_type: { 0: 'Tee' } } as never)).toBe(false);
-    // A text among them still matches: the guard leaves out what is not text, nothing else.
-    expect(shopifyInFilter(product, { product_type: [5, 'Tee'] } as never)).toBe(true);
+    // Nor a list the rule refuses, though its values are text and one of them matches.
+    expect(shopifyInFilter(product, { product_type: ['Tee'] } as never)).toBe(false);
+    expect(shopifyInFilter(product, { product_type: ['Tee', 'tee'] } as never)).toBe(false);
+    expect(shopifyInFilter(product, { product_type: ['Tee', 'a OR b'] } as never)).toBe(false);
+    expect(shopifyInFilter(product, { product_type: 'Tee OR Mug' } as never)).toBe(false);
+    // The same list, as the rule takes it, holds it.
+    expect(shopifyInFilter(product, { product_type: ['Tee', 'Kaffee'] })).toBe(true);
   });
 
   it('never reaches the address or the query grant of a list form other than Shopify\'s', () => {
