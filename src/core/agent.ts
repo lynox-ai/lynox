@@ -5709,7 +5709,9 @@ export function isRetryable(err: unknown): boolean {
     // From here: an APIError without a provider type — an HTTP error whose body is not the
     // provider's envelope (a gateway or proxy in front of it), or the SDK's connection error.
     // Legacy AWS-style transient error names in its message — kept as defense-in-depth for
-    // gateways that may proxy AWS-backed models. lynox itself uses Anthropic + Mistral (EU);
+    // gateways that may proxy AWS-backed models, but only for a gateway whose body carries no
+    // `error.type` at all (one that names any type is decided above; throttling from a gateway
+    // usually arrives as 429/5xx and is caught by the status check). lynox itself uses Anthropic + Mistral (EU);
     // no direct Bedrock integration. (The OpenAI-compat adapter throws plain Errors, which
     // never reach this check.)
     const msg = err.message ?? '';
