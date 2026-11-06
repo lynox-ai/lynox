@@ -3502,8 +3502,9 @@ function runEnded(answer: ChatMessage | null): void {
 }
 
 /**
- * Window event sent when a run of the open chat stopped streaming: done, a stop, an error, a
- * dropped stream. The status bar reads today's cost again on it, instead of waiting for its next
+ * Window event sent when a run of the open chat stopped streaming in this tab: done, a stop, an
+ * error, a dropped stream. Not every run end: runs in other tabs, a run in a chat the user left,
+ * and a stop from a tab without the stream send none. The status bar reads today's cost again on it, instead of waiting for its next
  * poll. Several may come for one run (a stop sends one when the server confirms the stop and one
  * when the stream closes); a listener coalesces them. Only the one at the stream's close is sure
  * to come after the server stored the run: the stop's confirmation arrives while the run may

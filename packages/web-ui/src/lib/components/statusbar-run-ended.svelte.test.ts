@@ -62,18 +62,27 @@ let stream: ReturnType<typeof sseStream>;
 /** What the server has stored for today: changed by a test where the server would write the run. */
 let storedCost: number;
 let costReads: number;
+/** When set, the next cost read waits for the test to answer it, with what was stored when it was asked. */
+let holdNext: ((answer: () => void) => void) | null;
 
 beforeEach(async () => {
 	vi.stubGlobal('ResizeObserver', class { observe(): void {} unobserve(): void {} disconnect(): void {} });
 	vi.stubGlobal('navigator', { onLine: true });
 	storedCost = 0;
 	costReads = 0;
+	holdNext = null;
 	stream = sseStream();
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
 		const url = String(input);
 		if (url.includes('/history/cost/daily')) {
 			costReads++;
-			return json([{ day: today(), cost_usd: storedCost, run_count: 1, user_turns: 1 }]);
+			const answer = json([{ day: today(), cost_usd: storedCost, run_count: 1, user_turns: 1 }]);
+			if (holdNext) {
+				const hold = holdNext;
+				holdNext = null;
+				return new Promise<Response>((resolve) => hold(() => resolve(answer)));
+			}
+			return answer;
 		}
 		if (url.endsWith('/sessions')) return json({ sessionId: 's1' });
 		if (url.endsWith('/sessions/s1/run')) return new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
@@ -172,6 +181,25 @@ describe('the status bar reads today\'s cost again when a chat run ends', () => 
 		window.dispatchEvent(new Event(store.RUN_ENDED_EVENT));
 		await afterDelay();
 		expect(costReads).toBe(2);
+	});
+
+	it('an older poll that answers last does not put back its value', async () => {
+		let releaseOld!: () => void;
+		storedCost = 0.01;
+		holdNext = (answer) => { releaseOld = answer; };
+		window.dispatchEvent(new Event(store.RUN_ENDED_EVENT));
+		await afterDelay(); // the older poll: asked before the run was stored, still out
+
+		storedCost = 0.33;
+		window.dispatchEvent(new Event(store.RUN_ENDED_EVENT));
+		await afterDelay();
+		expect(target.textContent).toContain('$0.33');
+
+		releaseOld();
+		await settle();
+		expect(costReads).toBe(3);
+		expect(target.textContent).toContain('$0.33');
+		expect(target.textContent).not.toContain('$0.01');
 	});
 
 	it('stops listening when it is removed', async () => {
