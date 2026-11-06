@@ -9,7 +9,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_READ_DOCUMENTS, isShopifyFilterValue, isShopifyFilterValues, isShopifyListFilters,
-  shopifyFilterListRefusal, shopifyFilterRefusal, shopifyListBody, shopifyReadRequest,
+  SHOPIFY_READ_DETAIL_MAX, shopifyFilterListRefusal, shopifyFilterRefusal, shopifyListBody, shopifyReadRequest,
 } from './shopify-graphql.js';
 import { listPageUrl, listQueryParams, parseListSource, type BulkListSource } from './bulk-list.js';
 import { shopifyInFilter } from './bulk-shopify.js';
@@ -204,6 +204,26 @@ describe('the body of a filtered list page', () => {
     expect(shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: {} })?.detail).toBe('shopify_products_list id:>7');
     expect(shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: { vendor: 'a OR b' } })).toBeNull();
   });
+
+  it('records a list search as sent where it fits, and otherwise whole values in order and how many it leaves out', () => {
+    const fits = { product_type: ['Tee', 'Kaffee'], vendor: 'Acme' };
+    expect(shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: fits })?.detail)
+      .toBe('shopify_products_list id:>7 AND (product_type:"Tee" OR product_type:"Kaffee") AND vendor:"Acme"');
+    const values = Array.from({ length: 50 }, (_, i) => `Obergruppe Nummer ${String(i + 1).padStart(2, '0')}`);
+    const long = { product_type: values, vendor: 'Acme' };
+    const detail = shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: long })!.detail;
+    const shown = detail.slice('shopify_products_list '.length);
+    expect(shown.length).toBeLessThanOrEqual(SHOPIFY_READ_DETAIL_MAX);
+    const terms = [...values.map((v) => `product_type:"${v}"`), 'vendor:"Acme"'];
+    const kept = [...shown.matchAll(/(product_type|vendor):"[^"]*"/g)].map((m) => m[0]);
+    // Whole values only, the first ones sent, in the order sent; the rest counted, not cut.
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept).toEqual(terms.slice(0, kept.length));
+    expect(shown).toBe(`id:>7 ${kept.join(' ')} … (+${String(terms.length - kept.length)} more of ${String(terms.length)}, as sent)`);
+    // As full as the row allows: one more value would not fit.
+    expect(`id:>7 ${terms.slice(0, kept.length + 1).join(' ')} … (+${String(terms.length - kept.length - 1)} more of ${String(terms.length)}, as sent)`.length)
+      .toBeGreaterThan(SHOPIFY_READ_DETAIL_MAX);
+  });
 });
 
 describe('the grant of a filtered list page', () => {
@@ -299,6 +319,18 @@ describe('a filter with a list of values', () => {
     expect(shopifyInFilter(product('Tee'), { product_type: [] as never })).toBe(false);
     expect(shopifyInFilter(product('Tee', 'Beta'), { product_type: ['Tee', 'Mug'], vendor: ['Acme', 'Beta'] })).toBe(true);
     expect(shopifyInFilter(product('Tee', 'Gamma'), { product_type: ['Tee', 'Mug'], vendor: ['Acme', 'Beta'] })).toBe(false);
+  });
+
+  it('holds no product for a stored list no parse built, and does not throw', () => {
+    const product = { product: { productType: 'Tee', vendor: 'Acme' } };
+    for (const tampered of [[5, 'Tee'], ['Tee', null], { 0: 'Tee' }, 7]) {
+      const filters = { product_type: tampered } as never;
+      expect(() => shopifyInFilter(product, filters), JSON.stringify(tampered)).not.toThrow();
+    }
+    expect(shopifyInFilter(product, { product_type: [5, 'Kaffee'] } as never)).toBe(false);
+    expect(shopifyInFilter(product, { product_type: { 0: 'Tee' } } as never)).toBe(false);
+    // A text among them still matches: the guard leaves out what is not text, nothing else.
+    expect(shopifyInFilter(product, { product_type: [5, 'Tee'] } as never)).toBe(true);
   });
 
   it('never reaches the address or the query grant of a list form other than Shopify\'s', () => {

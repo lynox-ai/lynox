@@ -82,8 +82,11 @@ export function shopifyGraphqlEndpoint(host: string): string | null {
 /** The fields a Shopify list may be narrowed by, in the order `$q` names them (PRD shopify-preset §22). */
 export const SHOPIFY_LIST_FILTER_KEYS = ['product_type', 'vendor'] as const;
 export type ShopifyListFilterKey = (typeof SHOPIFY_LIST_FILTER_KEYS)[number];
-/** How many values one filter may list: a store's groups, with the search well inside what was
- *  measured to work in one query (250 values). */
+/** How many values one filter may list: a store's groups. Measured on a development store
+ *  (2026-11-06, Admin API 2026-10): 250 values of about 40 characters in one search, 13 362
+ *  characters, listed exactly; the longest a list here can build (2 × 50 × 255) is not measured.
+ *  Either way it fails closed: a search the store refuses fails the read, and a term it dropped
+ *  is caught by the check after the read (`shopifyInFilter`). */
 export const SHOPIFY_LIST_FILTER_MAX_VALUES = 50;
 /** One filter's value: one value, or a list of 2–{@link SHOPIFY_LIST_FILTER_MAX_VALUES}, any of which matches. */
 export type ShopifyListFilterValue = string | readonly string[];
@@ -102,8 +105,9 @@ export function asciiLower(text: string): string {
 
 /**
  * Whether a filter's value is one value the rule takes, or a list of 2–{@link SHOPIFY_LIST_FILTER_MAX_VALUES}
- * such values, no two equal up to ASCII letter case (they would match the same products). A list of
- * one, or an empty one, is refused rather than read as one value or as no filter.
+ * such values, no two equal up to ASCII letter case (the check after the read could not tell them
+ * apart). Values the store's search folds together (`Gemüse`, `Gemuse`) are taken: they only
+ * overlap. A list of one, or an empty one, is refused rather than read as one value or as no filter.
  */
 export function isShopifyFilterValues(value: unknown): value is ShopifyListFilterValue {
   if (typeof value === 'string') return isShopifyFilterValue(value);
@@ -325,15 +329,45 @@ export type ShopifyRead =
   | { readonly form: 'shopify_media_list'; readonly afterId: number }
   | { readonly form: 'shopify_media_read'; readonly gid: string };
 
+/** The longest list search a trail row names as sent. The row holds 400 characters
+ *  (`audit-log.ts` TARGET_MAX) and cuts the rest unmarked; `POST <endpoint> <form> ` takes up to
+ *  about 140 of them for the longest store name. */
+export const SHOPIFY_READ_DETAIL_MAX = 240;
+
+/**
+ * The search of a list page as its trail row names it: as sent where it fits; otherwise whole
+ * values, in the order sent, until the row is full, then how many the row leaves out — never a
+ * value cut in two, never a cut the row does not say.
+ */
+function shopifyListDetail(afterId: number, filters: ShopifyListFilters): string {
+  const sent = shopifyListQuery(afterId, filters);
+  if (sent.length <= SHOPIFY_READ_DETAIL_MAX) return sent;
+  const terms = SHOPIFY_LIST_FILTER_KEYS.flatMap((key) => {
+    const value = filters[key];
+    return value === undefined ? [] : shopifyFilterValues(value).map((v) => `${key}:"${v}"`);
+  });
+  const marker = (left: number): string => ` … (+${String(left)} more of ${String(terms.length)}, as sent)`;
+  let out = `id:>${String(afterId)}`;
+  let shown = 0;
+  for (const term of terms) {
+    const next = `${out} ${term}`;
+    if (next.length + marker(terms.length - shown - 1).length > SHOPIFY_READ_DETAIL_MAX) break;
+    out = next;
+    shown++;
+  }
+  return `${out}${marker(terms.length - shown)}`;
+}
+
 /**
  * The body a read sends and the line its actor-trail row names — both built here from the
  * form and the value bound into it, so the row cannot say other than what was sent and no
- * caller's text reaches the trail. Null for a value that does not fit.
+ * caller's text reaches the trail. A list search too long for the row names the values that
+ * fit and how many it leaves out ({@link shopifyListDetail}). Null for a value that does not fit.
  */
 export function shopifyReadRequest(read: ShopifyRead): { body: string; detail: string } | null {
   if (read.form === 'shopify_products_list') {
     const body = shopifyListBody(read.afterId, read.filters);
-    return body === null ? null : { body, detail: `${read.form} ${shopifyListQuery(read.afterId, read.filters)}` };
+    return body === null ? null : { body, detail: `${read.form} ${shopifyListDetail(read.afterId, read.filters)}` };
   }
   if (read.form === 'shopify_media_list') {
     const body = shopifyMediaListBody(read.afterId);

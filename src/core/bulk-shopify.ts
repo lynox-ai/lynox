@@ -17,7 +17,7 @@
 import { isPlainObject, type ExternalClient, type ExternalRead, type TargetIo } from './bulk-external.js';
 import type { BulkInvalidReason, BulkRunStatus, ListPageItem } from './bulk-ledger.js';
 import type { BulkNotices } from './bulk-notices.js';
-import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, asciiLower, mediaImageGidNumber, productGidNumber, shopifyFilterValues, type ShopifyListFilterValue, type ShopifyWriteForm } from './shopify-graphql.js';
+import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, asciiLower, mediaImageGidNumber, productGidNumber, type ShopifyListFilterValue, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
 import { presetStoreHost } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
@@ -179,7 +179,9 @@ export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, 
   return Object.entries(filters).every(([key, value]) => {
     const name = Object.hasOwn(field, key) ? field[key]! : null;
     const held = name === null ? undefined : product[name];
-    return typeof held === 'string' && shopifyFilterValues(value).some((v) => asciiLower(held) === asciiLower(v));
+    // A value that is not a list of texts (a stored source no parse built) holds no product.
+    const values: readonly unknown[] = typeof value === 'string' ? [value] : Array.isArray(value) ? value : [];
+    return typeof held === 'string' && values.some((v) => typeof v === 'string' && asciiLower(held) === asciiLower(v));
   });
 }
 
