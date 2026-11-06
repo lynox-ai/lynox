@@ -2603,6 +2603,17 @@ export class Agent implements IAgent {
   /** {@link _helperCostUsd} for the run that just finished; reset at the start of each `send`. */
   getHelperCostUsd(): number { return this._helperCostUsd; }
 
+  /**
+   * Upper bounds that {@link _bookStoppedCall} added to the session counter (`sessionCounters.costUSD`,
+   * the session cap) in the current run; reset at the start of each `send`. Read by `spawn.ts`
+   * only: a spawned child's session-cap share is the spawn's reservation, so once the child has
+   * settled the spawn takes these bounds back off the shared counter.
+   */
+  private _stoppedCallSessionUsd = 0;
+
+  /** {@link _stoppedCallSessionUsd} for the run that just finished. */
+  getStoppedCallSessionCostUsd(): number { return this._stoppedCallSessionUsd; }
+
   async send(
     userMessage: string | unknown[],
     opts?: {
@@ -2621,6 +2632,7 @@ export class Agent implements IAgent {
   ): Promise<string> {
     // Per RUN, not per session: `Session` reads it once after this returns.
     this._helperCostUsd = 0;
+    this._stoppedCallSessionUsd = 0;
     this._askedNobodyInRun = undefined;
     // F5: everything already in the buffer is a PREVIOUS turn — replace the
     // bodies of successfully saved artifacts with a reference (next-turn
@@ -3889,6 +3901,8 @@ export class Agent implements IAgent {
       const cost = abortedCallCost({ model: this.model, maxTokens: this.maxTokens, request, partial });
       this.costGuard?.recordCapOnlyCost(cost.upperBoundUsd);
       recordSessionCost(this.sessionCounters, cost.upperBoundUsd);
+      // The same amount `recordSessionCost` just added (it adds only a finite figure above 0).
+      if (Number.isFinite(cost.upperBoundUsd) && cost.upperBoundUsd > 0) this._stoppedCallSessionUsd += cost.upperBoundUsd;
       if (!opts.estimate) return;
       this._helperCostUsd += cost.estimateUsd;
       reportAbortedCall(site, this.model, cost);

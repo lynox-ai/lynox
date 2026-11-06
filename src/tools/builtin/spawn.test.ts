@@ -36,10 +36,14 @@ interface MockedAgentShape {
   getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
   getRecordedToolCallCount: () => number;
   getLastStop: () => import('../../core/agent.js').SendStop | null;
+  getHelperCostUsd: () => number;
+  getStoppedCallSessionCostUsd: () => number;
 }
 
 /** How many tool calls each constructed child reports having recorded. */
 let mockRecordedToolCalls = 0;
+/** The estimate of ended calls each constructed child reports (`getHelperCostUsd`). */
+let mockHelperCostUsd = 0;
 /** Why each constructed child says its `send()` ended (null = clean end_turn). */
 let mockLastStop: import('../../core/agent.js').SendStop | null = null;
 
@@ -96,6 +100,11 @@ vi.mock('../../core/agent.js', () => ({
     // `mockRecordedToolCalls` and then asserts the value REACHED updateRun.
     this.getRecordedToolCallCount = () => mockRecordedToolCalls;
     this.getLastStop = () => mockLastStop;
+    // By default no ended calls in a mocked child: nothing on its cost line beyond the
+    // snapshot, and nothing to take back off the session cap. The real booking is pinned in
+    // `spawn-stopped-call-cost.test.ts`, against a real child agent.
+    this.getHelperCostUsd = () => mockHelperCostUsd;
+    this.getStoppedCallSessionCostUsd = () => 0;
   }),
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
   // factory mock replaces the whole module, so this export must exist or the
@@ -287,6 +296,7 @@ describe('spawn_agent tool', () => {
     mockCostSnapshot = null;
     mockCostSnapshotQueue = null;
     mockRecordedToolCalls = 0;
+    mockHelperCostUsd = 0;
     mockLastStop = null;
     testCounters = {
       httpRequests: 0,
@@ -4984,6 +4994,17 @@ describe('spawn_agent tool', () => {
         expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited once, its own spend').toEqual([0.2]);
         expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'recorded the same').toBe(0.2);
         expect(charged, 'the delegating ceiling sees the whole').toEqual([0.5]);
+      });
+
+      it('when it succeeds with an ended call on its cost line: the row adds the estimate, the debit does not', async () => {
+        delegated();
+        mockHelperCostUsd = 0.07;
+        const charged: number[] = [];
+        const { agent, onAfterRun, updateRun } = parent(charged);
+        await spawnAgentTool.handler({ agents: [{ name: 'delegator', task: 'x' }] }, agent);
+        expect((updateRun.mock.calls[0]![1] as { status: string }).status).toBe('completed');
+        expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'own spend plus the estimate').toBeCloseTo(0.27, 12);
+        expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited its own spend only').toEqual([0.2]);
       });
 
       it('when it fails', async () => {
