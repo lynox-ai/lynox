@@ -97,6 +97,9 @@ export interface BulkRunDetailData extends BulkRun {
 	/** The target the run waits on as its probe. `found`: lynox sent to it without a clear answer
 	 *  and then found it as planned, so it cannot say it wrote it; absent reads as written. */
 	probe: { key: string; fields: string[]; found?: boolean } | null;
+	/** Whether this run confirmed a probe of its own: it stays a step the run went through once
+	 *  the probe holds. Absent reads as false. */
+	probeOwn?: boolean;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
@@ -804,14 +807,31 @@ export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntity
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
+export type BulkStepName = (typeof BULK_STEPS)[number];
 
-/** Which of {@link BULK_STEPS} the run is at. */
-export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase'>): number {
-	if (run.phase === 'planned') return 0;
-	if (run.phase === 'previewed') return 2;
-	if (bulkAtProbe(run)) return 3;
-	if (run.phase === 'approved' || run.phase === 'writing') return 4;
-	return 5;
+type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>;
+
+/** Whether the run has a probe step: two or more targets to write (counted as the write counts
+ *  them), and it stands at its probe, its probe does not hold yet, or it confirmed one of its own.
+ *  With one target the one write is the whole run, also where the engine files it as a probe. */
+export function bulkHasProbeStep(run: BulkStepRun): boolean {
+	if (bulkWriting(run) < 2) return false;
+	return bulkAtProbe(run) || (bulkHostOf(run.targetSystem) !== null && !run.probeConfirmed) || run.probeOwn === true;
+}
+
+/** The steps the run shows: {@link BULK_STEPS}, without the probe where it has none. */
+export function bulkSteps(run: BulkStepRun): readonly BulkStepName[] {
+	return bulkHasProbeStep(run) ? BULK_STEPS : BULK_STEPS.filter((s) => s !== 'probe');
+}
+
+/** Which of {@link BULK_STEPS} the run is at. A run without a probe step writes its one target
+ *  under "run", though the engine may hold it there as at a probe. */
+export function bulkStep(run: BulkStepRun): BulkStepName {
+	if (run.phase === 'planned') return 'planned';
+	if (run.phase === 'previewed') return 'approval';
+	if (bulkAtProbe(run) && bulkHasProbeStep(run)) return 'probe';
+	if (run.phase === 'approved' || run.phase === 'writing') return 'run';
+	return 'done';
 }
 
 /** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),

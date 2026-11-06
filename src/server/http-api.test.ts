@@ -12242,8 +12242,13 @@ describe('LynoxHTTPApi', () => {
       expect(await blockOf()).toBeNull();
       bulkLedger.halt(id, BULK_HALT_REASONS.probeRequired);
       expect(await blockOf()).toEqual(block);
+      const ownOf = async (runId: string): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${runId}`)).json()) as { probeOwn: unknown }).probeOwn;
+      expect(await ownOf(id)).toBe(false);
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
       expect(await probeOf()).toBeNull();
+      // Confirmed, the probe stays this run's step, and only this run's.
+      expect(await ownOf(id)).toBe(true);
+      expect(await ownOf(planRun())).toBe(false);
     });
 
     it('offers no probe for a target found already holding its value, and names the halt and what an undo takes back', async () => {

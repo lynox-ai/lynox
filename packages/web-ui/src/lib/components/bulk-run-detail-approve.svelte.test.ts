@@ -206,6 +206,26 @@ describe('approving a preview', () => {
 		expect(target.textContent).not.toContain(t('bulk.approve.only_one'));
 	});
 
+	it('shows no probe step for a run of one target, and the run as the step it writes in', async () => {
+		const chips = (): string[] => [...target.querySelectorAll('ol li')].map((li) => li.textContent ?? '');
+		const current = (): string | null | undefined => target.querySelector('ol li[aria-current="step"]')?.textContent;
+		run = makeRun({ targetSystem: 'http:api.example.com' });
+		await render();
+		expect(chips()).not.toContain(t('bulk.step.probe'));
+		expect(current()).toBe(t('bulk.step.approval'));
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ targetSystem: 'http:api.example.com', phase: 'writing', probe: { key: 'https://api.example.com/items/1', fields: ['title'] }, haltReason: 'x', haltKey: 'maxTargets' });
+		await render();
+		expect(chips()).not.toContain(t('bulk.step.probe'));
+		expect(current()).toBe(t('bulk.step.run'));
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ targetSystem: 'http:api.example.com', changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		await render();
+		expect(chips()).toContain(t('bulk.step.probe'));
+	});
+
 	it('writes one target first and leaves the rest to approve when there are two', async () => {
 		run = makeRun({ changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
 		targets = targets.map((x) => (x.seq === 2 ? { ...x, change: 'update', diff: TARGETS[0]!.diff } : x));
