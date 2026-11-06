@@ -812,11 +812,12 @@ export type BulkStepName = (typeof BULK_STEPS)[number];
 type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>;
 
 /** Whether the run has a probe step: two or more targets to write (counted as the write counts
- *  them), and it stands at its probe, its probe does not hold yet, or it confirmed one of its own.
+ *  them), and its probe does not hold yet or it confirmed one of its own. A run at its probe is
+ *  the first: the server names a probe only for an external run whose probe does not hold.
  *  With one target the one write is the whole run, also where the engine files it as a probe. */
 export function bulkHasProbeStep(run: BulkStepRun): boolean {
 	if (bulkWriting(run) < 2) return false;
-	return bulkAtProbe(run) || (bulkHostOf(run.targetSystem) !== null && !run.probeConfirmed) || run.probeOwn === true;
+	return (bulkHostOf(run.targetSystem) !== null && !run.probeConfirmed) || run.probeOwn === true;
 }
 
 /** The steps the run shows: {@link BULK_STEPS}, without the probe where it has none. */
