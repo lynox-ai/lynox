@@ -714,8 +714,8 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     // and the cost the owner sees in one, so for such a call it shows the bound, not a cost. The
     // control plane is not told of such a call (the tenant is debited only for what was answered).
     // A provisional booking that cannot be written stops the run before the call is made. A worst
-    // case that is no finite amount (a malformed pricing override) books nothing provisionally, so
-    // the settlement still adds what the call cost.
+    // case that is no finite amount books nothing provisionally, so the settlement still adds what
+    // the call cost — a guard only: pricing drops a malformed override when it loads.
     const provisional = Number.isFinite(worst) && worst > 0 ? worst : 0;
     let spendRow: number | undefined;
     let added = false;
