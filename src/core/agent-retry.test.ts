@@ -94,3 +94,32 @@ describe('isRetryable — provider errors inside the stream (status undefined)',
     expect(isRetryable(new APIError(undefined, envelope('invalid_request_error'), undefined, new Headers(), undefined))).toBe(false);
   });
 });
+
+describe('isRetryable — a typed provider error is decided by its type, never by its text', () => {
+  const event = (type: string, message: string): APIError =>
+    new APIError(undefined, { type: 'error', error: { type, message } }, undefined, new Headers(), type);
+  const untyped = (message: string): APIError => new APIError(400, { message }, undefined, new Headers(), undefined);
+
+  it('does not retry a non-transient type whose provider text names a transport failure or an AWS throttle', () => {
+    for (const text of ['upstream read ECONNRESET', 'fetch failed', 'socket hang up', 'ThrottlingException', 'InternalServerException']) {
+      expect(isRetryable(event('invalid_request_error', text)), text).toBe(false);
+    }
+  });
+
+  it('still retries a transient type, whatever its text', () => {
+    expect(isRetryable(event('overloaded_error', 'bad request'))).toBe(true);
+  });
+
+  it('reads the text of an APIError without a type: AWS names and transport words', () => {
+    expect(isRetryable(untyped('ThrottlingException: rate exceeded'))).toBe(true);
+    expect(isRetryable(untyped('read ECONNRESET'))).toBe(true);
+    expect(isRetryable(untyped('bad request'))).toBe(false);
+  });
+
+  it('reads the cause chain of an APIError without a type (the SDK connection error)', () => {
+    const conn = Object.assign(new APIError(undefined, undefined, 'Connection error.', undefined), {
+      cause: Object.assign(new TypeError('fetch failed'), { cause: new Error('read ECONNRESET') }),
+    });
+    expect(isRetryable(conn)).toBe(true);
+  });
+});

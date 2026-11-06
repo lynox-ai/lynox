@@ -38,10 +38,10 @@ function reply(res: ServerResponse, text: string): void {
 }
 
 /** A reply that starts, streams a piece, and then ends in an `error` event of `type`. */
-function errorMidStream(res: ServerResponse, type: string): void {
+function errorMidStream(res: ServerResponse, type: string, message = 'mid-stream failure'): void {
   begin(res);
   sse(res, 'content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial answer ' } });
-  sse(res, 'error', { type: 'error', error: { type, message: 'mid-stream failure' } });
+  sse(res, 'error', { type: 'error', error: { type, message } });
   res.end();
 }
 
@@ -228,6 +228,81 @@ describe('a provider error inside the stream', () => {
     expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
     expect(inside.costGuard.capOnlyUSD).toBe(0);
     expect(agent.getHelperCostUsd()).toBe(0);
+  }, 10_000);
+});
+
+// The provider's error text is not a classification: whatever words it carries, a typed
+// provider error is decided by its type. Text-based checks are for errors that carry no type.
+describe('the retry decision reads the provider type before any text', () => {
+  const seam = Agent as unknown as { RETRY_BASE_MS: number };
+  let saved = 0;
+  beforeAll(() => { saved = seam.RETRY_BASE_MS; seam.RETRY_BASE_MS = 1; });
+  afterAll(() => { seam.RETRY_BASE_MS = saved; });
+
+  /** The connection dropped before any response: the SDK's connection error, which has no type. */
+  const drop = (res: ServerResponse): void => { res.socket?.destroy(); };
+  /** An HTTP 400 whose body is not the provider's error envelope, so the SDK's error has no type. */
+  const untyped400 = (text: string) => (res: ServerResponse): void => {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ message: text }));
+  };
+  /** An HTTP 400 in the provider's envelope, typed `invalid_request_error`. */
+  const typed400 = (text: string) => (res: ServerResponse): void => {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: text } }));
+  };
+
+  for (const text of ['upstream read ECONNRESET', 'ThrottlingException: rate exceeded']) {
+    it(`mid-stream invalid_request_error with "${text}" in the provider text: exactly one request, the run fails`, async () => {
+      const { hits, result, err, retryReasons } = await runAgainst((hit, res) => {
+        if (hit === 1) errorMidStream(res, 'invalid_request_error', text); else reply(res, 'should not be asked');
+      });
+      expect(result).toBeUndefined();
+      expect((err as { type?: unknown }).type).toBe('invalid_request_error');
+      expect((err as Error).message).toContain(text);
+      expect(hits).toBe(1);
+      expect(retryReasons).toHaveLength(0);
+    }, 10_000);
+  }
+
+  it('HTTP 400 typed invalid_request_error with "ECONNRESET" in its text: one request', async () => {
+    const { hits, err } = await runAgainst((_hit, res) => { typed400('upstream read ECONNRESET')(res); });
+    expect((err as { status?: unknown }).status).toBe(400);
+    expect(hits).toBe(1);
+  }, 10_000);
+
+  it('control: a dropped connection is still retried, read through its cause chain', async () => {
+    // Three drops: the SDK's own two retries inside the call, then the Agent's retry.
+    const { hits, result, retryReasons } = await runAgainst((hit, res) => {
+      if (hit <= 3) drop(res); else reply(res, 'recovered');
+    });
+    expect(result).toBe('recovered');
+    expect(hits).toBe(4);
+    expect(retryReasons).toHaveLength(1);
+    expect(retryReasons[0]).toMatch(/^unknown: Connection error/);
+  }, 10_000);
+
+  it('control: an untyped HTTP 400 naming an AWS throttle is still retried', async () => {
+    const { hits, result, retryReasons } = await runAgainst((hit, res) => {
+      if (hit === 1) untyped400('ThrottlingException: rate exceeded')(res); else reply(res, 'recovered');
+    });
+    expect(result).toBe('recovered');
+    expect(hits).toBe(2);
+    expect(retryReasons).toHaveLength(1);
+    expect(retryReasons[0]).toMatch(/^400: .*ThrottlingException/);
+  }, 10_000);
+
+  it('control: an untyped HTTP 400 naming ECONNRESET is still retried', async () => {
+    const { hits, result } = await runAgainst((hit, res) => {
+      if (hit === 1) untyped400('read ECONNRESET')(res); else reply(res, 'recovered');
+    });
+    expect(result).toBe('recovered');
+    expect(hits).toBe(2);
+  }, 10_000);
+
+  it('control: an untyped HTTP 400 with neither is not retried', async () => {
+    const { hits } = await runAgainst((_hit, res) => { untyped400('bad request')(res); });
+    expect(hits).toBe(1);
   }, 10_000);
 });
 
