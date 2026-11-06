@@ -1253,11 +1253,34 @@ describe('the singular of a count of one (1198)', () => {
 		});
 	}
 
-	it('offers the unchanged products to show in the singular at one', () => {
-		const show = (i: BulkI18n, n: number): string => i.tf(bulkOne('bulk.preview.show_unchanged', n), { n: String(n) });
-		expect(show(DE, 1)).toBe('1 unverändertes Produkt anzeigen');
-		expect(show(EN, 1)).toBe('Show 1 unchanged product');
-		expect(show(DE, 2)).toBe('2 unveränderte Produkte anzeigen');
-		expect(show(EN, 2)).toBe('Show 2 unchanged products');
+	it('offers the unchanged products and targets to show in the singular at one', () => {
+		const show = (key: string, i: BulkI18n, n: number): string => i.tf(bulkOne(key, n), { n: String(n) });
+		expect(show('bulk.preview.show_unchanged', DE, 1)).toBe('1 unverändertes Produkt anzeigen');
+		expect(show('bulk.preview.show_unchanged', EN, 1)).toBe('Show 1 unchanged product');
+		expect(show('bulk.preview.show_unchanged', DE, 2)).toBe('2 unveränderte Produkte anzeigen');
+		expect(show('bulk.preview.show_unchanged', EN, 2)).toBe('Show 2 unchanged products');
+		expect(show('bulk.preview.show_unchanged_targets', DE, 1)).toBe('1 unverändertes Ziel anzeigen');
+		expect(show('bulk.preview.show_unchanged_targets', EN, 1)).toBe('Show 1 unchanged target');
+		expect(show('bulk.preview.show_unchanged_targets', DE, 2)).toBe('2 unveränderte Ziele anzeigen');
+		expect(show('bulk.preview.show_unchanged_targets', EN, 2)).toBe('Show 2 unchanged targets');
 	});
+
+	// [shopify, n, DE, EN]: every target one lynox leaves out, nothing left to approve.
+	const none: [boolean, number, string, string][] = [
+		[true, 1, 'lynox lässt das einzige Produkt aus, es bleibt nichts zum Freigeben. Der Grund steht beim Produkt. Bitte lynox im Chat, den Lauf neu zu planen, wenn du die Ursache behoben hast.',
+			'lynox skips the only product, so there is nothing to approve. The reason is shown on the product. Ask lynox in the chat to plan the run again once you have fixed the cause.'],
+		[true, 2, 'lynox lässt alle 2 Produkte aus, es bleibt nichts zum Freigeben. Die Gründe stehen bei jedem Produkt. Bitte lynox im Chat, den Lauf neu zu planen, wenn du die Ursache behoben hast.',
+			'lynox skips all 2 products, so there is nothing to approve. The reason is shown on each product. Ask lynox in the chat to plan the run again once you have fixed the cause.'],
+		[false, 1, 'lynox lässt das einzige Ziel aus, es bleibt nichts zum Freigeben. Der Grund steht beim Ziel. Bitte lynox im Chat, den Lauf neu zu planen, wenn du die Ursache behoben hast.',
+			'lynox skips the only target, so there is nothing to approve. The reason is shown on the target. Ask lynox in the chat to plan the run again once you have fixed the cause.'],
+		[false, 2, 'lynox lässt alle 2 Ziele aus, es bleibt nichts zum Freigeben. Die Gründe stehen bei jedem Ziel. Bitte lynox im Chat, den Lauf neu zu planen, wenn du die Ursache behoben hast.',
+			'lynox skips all 2 targets, so there is nothing to approve. The reason is shown on each target. Ask lynox in the chat to plan the run again once you have fixed the cause.'],
+	];
+	for (const [shopify, n, deText, enText] of none) {
+		it(`says all ${String(n)} ${shopify ? 'products' : 'targets'} left out word for word`, () => {
+			const run = { changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: n }, deselected: 0, judge: null };
+			expect(bulkSkippedHead(run, shopify, DE)).toEqual({ text: deText, nothing: true });
+			expect(bulkSkippedHead(run, shopify, EN)).toEqual({ text: enText, nothing: true });
+		});
+	}
 });

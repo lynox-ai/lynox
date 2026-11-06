@@ -117,6 +117,16 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('Product/2');
 	});
 
+	it('folds the one unchanged target of another host under a button in the singular (1198)', async () => {
+		run = makeRun({ targetSystem: 'http:api.example.com' });
+		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
+		await render();
+		expect(target.textContent).not.toContain('items/2');
+		buttonByText(t('bulk.preview.show_unchanged_targets_one'))!.click();
+		await settle();
+		expect(target.textContent).toContain('items/2');
+	});
+
 	it('shows a description lynox does not write for a shortcode, whole, under the reason (1130)', async () => {
 		const planned = '<p>Neu</p>[button url="https://shop.example.com/sale?cat=tee&size=m"]Zum Angebot[/button]';
 		// The fixture's third product, refused for the shortcode instead of not being found.
