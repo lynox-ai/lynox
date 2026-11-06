@@ -1366,12 +1366,12 @@ describe('connect refuses before the link what the route would refuse', () => {
     const store = new ApiStore();
     store.register({ ...scoped(), created_by: TAG });
     const helper = await connect(mandateAgent(store));
-    expect(helper).toContain('It first shows a page on this instance with what the owner of this instance sees of this connection; they read it and continue to ');
+    expect(helper).toContain('It first shows a page on this instance that says what the owner of this instance learns about this connection; from there they continue to ');
     expect(helper).not.toContain('It opens ');
     const ownerStore = new ApiStore();
     ownerStore.register(scoped());
     const owner = await connect(agentWith(ownerStore));
     expect(owner).toContain('It opens ');
-    expect(owner).not.toContain('what the owner of this instance sees');
+    expect(owner).not.toContain('what the owner of this instance learns');
   });
 });

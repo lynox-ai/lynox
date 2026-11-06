@@ -3784,11 +3784,12 @@ export function waitingConnectionsNote(agent: IAgent): string {
  * the customer text. The owner's read-only link goes straight to the provider.
  */
 export function connectOpensLine(host: string, pageWrites: readonly string[], helper: boolean): string {
-  const shows = [
-    ...(pageWrites.length > 0 ? [`what lynox may do there and the write access this link asks for (${pageWrites.join(', ')})`] : []),
-    ...(helper ? ['what the owner of this instance sees of this connection'] : []),
-  ];
-  return shows.length === 0
-    ? `It opens ${host}`
-    : `It first shows a page on this instance with ${shows.join(', and ')}; they read it and continue to ${host}`;
+  const writes = pageWrites.length > 0
+    ? `with what lynox may do there and the write access this link asks for (${pageWrites.join(', ')})`
+    : '';
+  if (!helper) return writes === '' ? `It opens ${host}` : `It first shows a page on this instance ${writes}; they read it and continue to ${host}`;
+  // ux U-180: the page says what the owner learns; the reply does not say it, so the model has
+  // nothing to paraphrase into a claim about what the owner sees (the page's note is binding text).
+  const says = 'that says what the owner of this instance learns about this connection';
+  return `It first shows a page on this instance ${writes === '' ? says : `${writes}, and ${says}`}; from there they continue to ${host}`;
 }
