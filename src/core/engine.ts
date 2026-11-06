@@ -38,6 +38,7 @@ import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
+import { fireBeforeRunGate } from './metered-request.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
 import { connectionTokenAllowed, connectionTokenHolders } from './profile-secret-view.js';
@@ -3295,10 +3296,15 @@ export class Engine {
   // ── Batch ──
 
   async batch(reqs: BatchRequest[], sessionConfig?: { systemPromptSuffix?: string | undefined }): Promise<string> {
+    const modelTier = this.config.model ?? 'deep';
+    // A batch is a paid model call outside `Session.run()`: the same admission as
+    // every other one — the daily and monthly spending caps, then the hooks.
+    const gate = await fireBeforeRunGate(this, modelTier);
+    if (gate.blockedReason !== null) throw new Error(gate.blockedReason);
     const result = await submitBatch(
       this.client, reqs,
       {
-        modelTier: this.config.model ?? 'deep',
+        modelTier,
         maxTokens: this.config.maxTokens ?? 8192,
         systemPrompt: this.config.systemPrompt,
         systemPromptSuffix: sessionConfig?.systemPromptSuffix,

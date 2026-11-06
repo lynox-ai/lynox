@@ -17,6 +17,7 @@ vi.mock('./entity-extractor-v2.js', async (importActual) => ({
 
 import { KnowledgeLayer } from './knowledge-layer.js';
 import { LocalProvider } from './embedding.js';
+import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
 
 describe('KnowledgeLayer — managed KG-extraction gate + debit', () => {
   let dir: string;
@@ -40,6 +41,7 @@ describe('KnowledgeLayer — managed KG-extraction gate + debit', () => {
   });
 
   afterEach(async () => {
+    resetPersistentBudget();
     await layer.close();
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   });
@@ -80,6 +82,33 @@ describe('KnowledgeLayer — managed KG-extraction gate + debit', () => {
 
   it('runs extraction ungated + undebited when no metered host is set (self-host)', async () => {
     const res = await layer.store(text, 'knowledge', scope);
+    expect(mockExtractV2).toHaveBeenCalledOnce();
+    expect(res.entities.length).toBe(1);
+  });
+
+  it('skips extraction but still stores the memory when the daily cap is reached with no host', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    configurePersistentBudget({
+      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+      dailyCapUSD: 5, monthlyCapUSD: 500,
+    });
+
+    const res = await layer.store(text, 'knowledge', scope);
+
+    expect(mockExtractV2).not.toHaveBeenCalled();
+    expect(res.entities.length).toBe(0);
+    expect(res.stored).toBe(true);
+  });
+
+  it('runs extraction with no host when spend is under the cap', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    configurePersistentBudget({
+      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 4.99, run_count: 1 }] },
+      dailyCapUSD: 5, monthlyCapUSD: 500,
+    });
+
+    const res = await layer.store(text, 'knowledge', scope);
+
     expect(mockExtractV2).toHaveBeenCalledOnce();
     expect(res.entities.length).toBe(1);
   });

@@ -2722,6 +2722,40 @@ describe('Engine + Session (Orchestrator)', () => {
       );
     });
 
+    it('rejects with the cap reason and submits nothing when the daily cap is reached (no host)', async () => {
+      const { engine } = await createEngineAndSession();
+      mockBatchCreate.mockClear();
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        await expect(engine.batch([{ id: 'r1', task: 'hello' }]))
+          .rejects.toThrow('Daily spending cap ($5) reached. Today: $5.00.');
+        expect(mockBatchCreate).not.toHaveBeenCalled();
+      } finally {
+        resetPersistentBudget();
+      }
+    });
+
+    it('submits the batch when spend is under the cap (no host)', async () => {
+      const { engine } = await createEngineAndSession();
+      mockBatchCreate.mockClear();
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 4.99, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        const batchId = await engine.batch([{ id: 'r1', task: 'hello' }]);
+        expect(mockBatchCreate).toHaveBeenCalledOnce();
+        expect(batchId).toBe('batch-abc');
+      } finally {
+        resetPersistentBudget();
+      }
+    });
+
     it('inserts promptHash on child runs', async () => {
       const { engine } = await createEngineAndSession();
 

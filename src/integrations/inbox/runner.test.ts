@@ -5,6 +5,7 @@ import { buildInboxRunner, scrubErrorMessage, type InboxQueuePayload } from './r
 import { InboxCostBudget } from './cost-budget.js';
 import type { LLMCaller } from './classifier/index.js';
 import type { MailAccountConfig } from '../mail/provider.js';
+import { configurePersistentBudget, resetPersistentBudget } from '../../core/session-budget.js';
 
 const ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
@@ -328,6 +329,68 @@ describe('buildInboxRunner — managed credit gate', () => {
     expect(onBeforeRun).toHaveBeenCalledOnce();
     expect(llm).toHaveBeenCalledTimes(1);
     expect(inbox.listItems()[0]?.bucket).toBe('auto_handled');
+  });
+});
+
+describe('buildInboxRunner — the instance spending caps', () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const spentToday = (usd: number) => ({ getCostByDay: () => [{ day: today, cost_usd: usd, run_count: 1 }] });
+  afterEach(() => { resetPersistentBudget(); });
+
+  it('without a host and at the daily cap, makes no classify call and writes the cap verdict', async () => {
+    configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const llm: LLMCaller = vi.fn(async () => 'should-not-be-called');
+    const queue = buildInboxRunner({ state: inbox, llm });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(llm).not.toHaveBeenCalled();
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.bucket).toBe('requires_user');
+    expect(items[0]?.reasonDe).toBe('Tägliches KI-Budget erreicht — manuell prüfen.');
+    const audit = inbox.listAuditForItem(items[0]!.id);
+    const payloadJson = JSON.parse(audit[0]!.payloadJson) as Record<string, unknown>;
+    expect(payloadJson['fail_reason']).toBe('budget_exceeded');
+  });
+
+  it('at the monthly cap, names the monthly budget in the verdict', async () => {
+    configurePersistentBudget({ costProvider: spentToday(20), dailyCapUSD: 100, monthlyCapUSD: 20 });
+    const llm: LLMCaller = vi.fn(async () => 'should-not-be-called');
+    const queue = buildInboxRunner({ state: inbox, llm });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(llm).not.toHaveBeenCalled();
+    expect(inbox.listItems()[0]?.reasonDe).toBe('Monatliches KI-Budget erreicht — manuell prüfen.');
+  });
+
+  it('without a host and under the cap, still makes the classify call', async () => {
+    configurePersistentBudget({ costProvider: spentToday(4.99), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const llm: LLMCaller = vi.fn(async () =>
+      JSON.stringify({ bucket: 'auto_handled', confidence: 0.95, one_line_why_de: 'k' }),
+    );
+    const queue = buildInboxRunner({ state: inbox, llm });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(inbox.listItems()[0]?.bucket).toBe('auto_handled');
+  });
+
+  it('a hook block under the cap keeps the credit text, not the cap text', async () => {
+    configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const llm: LLMCaller = vi.fn(async () => 'should-not-be-called');
+    const meteredHost = {
+      getHooks: () => [{ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } }],
+      getContext: () => undefined,
+    };
+    const queue = buildInboxRunner({ state: inbox, llm, meteredHost });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(llm).not.toHaveBeenCalled();
+    expect(inbox.listItems()[0]?.reasonDe).toBe('AI-Guthaben erschöpft — manuell prüfen.');
   });
 });
 

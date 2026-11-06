@@ -153,8 +153,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   /**
    * Managed gate+debit host for the pool-key KG-extraction call. Set by the
    * engine after construction (the engine isn't available at construction time).
-   * Null on self-host / tests → extraction runs ungated + undebited, exactly as
-   * before. When set on a managed instance, extraction clears the same
+   * Null on self-host / tests → extraction is undebited and only the instance's
+   * own daily and monthly spending caps admit it. When set on a managed instance, extraction clears the same
    * onBeforeRun credit gate as a chat run (so an exhausted tenant is blocked on
    * every ingest-triggered extraction path) and reports its cost via onAfterRun.
    */
@@ -538,12 +538,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
 
     // 6. Extract entities and relations (async LLM call — outside transaction).
-    // Managed credit lifecycle for the pool-key extraction call: gate BEFORE the
-    // spend so an exhausted/stale tenant is blocked (extraction is best-effort
-    // enrichment, safely skipped), debit AFTER with the extractor's reported
-    // cost. The gate fires only when a host is wired AND a client exists (an LLM
-    // call is possible); a null gate (self-host / no client) runs extraction
-    // unchanged + never debits.
+    // Admission for the extraction call: gate BEFORE the spend so a reached daily or
+    // monthly spending cap (every instance) or an exhausted/stale managed tenant
+    // blocks it (extraction is best-effort enrichment, safely skipped), debit AFTER
+    // with the extractor's reported cost when a host is wired. The gate fires
+    // whenever a client exists (an LLM call is possible); without one there is no
+    // call to admit.
     //
     // The extraction SPEND is what the gate blocks — NOT the engine.db memory STUB.
     // The stub (subject-graph mirror / authoritative write) must land on every stored
@@ -554,7 +554,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     let resolvedRelations: RelationRecord[] = [];
     // What this write creates in the graph, for a derived write's outcome row (660a-3).
     const created = noneCreated();
-    const extractGate = this.meteredHost && this.anthropicClient
+    const extractGate = this.anthropicClient
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
     // The legacy row above is committed. If the switch flipped during the gate, its purge
@@ -1941,7 +1941,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // managed spend that survived credit exhaustion and was injection-loopable via the
     // `update_memory` tool. The text update itself (above) is local + always applies; only
     // the LLM re-extraction is credit-gated, so an exhausted tenant's edit still lands.
-    const extractGate = this.meteredHost && this.anthropicClient
+    const extractGate = this.anthropicClient
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;

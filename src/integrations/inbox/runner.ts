@@ -113,8 +113,9 @@ export interface BuildInboxRunnerOptions {
    * Managed credit lifecycle host. When wired (managed tenants), each classify
    * fires the `onBeforeRun` gate BEFORE the pool-key LLM call, so a
    * credit-exhausted (or fail-closed) tenant short-circuits to `requires_user`
-   * instead of spending against an empty balance. No-op on self-host / BYOK (no
-   * hooks registered). Distinct from `budget`, the local per-instance daily $ cap.
+   * instead of spending against an empty balance. The instance's own daily and
+   * monthly spending caps are checked with or without it. Distinct from `budget`,
+   * the classifier's own daily $ cap.
    */
   meteredHost?: HookHost | undefined;
   /**
@@ -151,14 +152,16 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       if (budget?.isExceeded()) {
         return budgetExceededVerdict('Tagesbudget für Klassifizierer erreicht — manuell prüfen.');
       }
-      // Managed credit gate: a credit-exhausted (or control-plane-stale →
-      // fail-closed) managed tenant must not drive the pool key per inbound
-      // mail. No-op on self-host / BYOK.
-      if (meteredHost) {
-        const gate = await fireBeforeRunGate(meteredHost, 'fast');
-        if (gate.blockedReason !== null) {
-          return budgetExceededVerdict('AI-Guthaben erschöpft — manuell prüfen.');
-        }
+      // The instance's daily and monthly spending caps, on every instance; then the
+      // managed credit gate: a credit-exhausted (or control-plane-stale →
+      // fail-closed) managed tenant must not drive the pool key per inbound mail.
+      const gate = await fireBeforeRunGate(meteredHost ?? null, 'fast');
+      if (gate.blockedReason !== null) {
+        return budgetExceededVerdict(
+          gate.capReached === 'daily' ? 'Tägliches KI-Budget erreicht — manuell prüfen.'
+            : gate.capReached === 'monthly' ? 'Monatliches KI-Budget erreicht — manuell prüfen.'
+              : gate.capReached === 'unknown' ? 'Tägliches oder monatliches KI-Budget erreicht — manuell prüfen.'
+                : 'AI-Guthaben erschöpft — manuell prüfen.');
       }
       return classifyMail(payload.classifierInput, llm, {
         signal: ctx.signal,
