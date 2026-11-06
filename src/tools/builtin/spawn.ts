@@ -20,7 +20,7 @@ import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, getActiveRou
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../../core/llm/provider-keys.js';
 import { resolveTools } from '../resolve-tools.js';
 
-import { checkSessionBudget } from '../../core/session-budget.js';
+import { adjustSessionCost, checkSessionBudget } from '../../core/session-budget.js';
 import { compose, engineText, escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
 import { childFilingContext } from '../../core/approval-filing.js';
@@ -38,15 +38,37 @@ import {
 const SPAWN_TIMEOUT = 10 * 60 * 1000;
 
 /**
- * What a child's run is recorded and debited with: its OWN spend. What was booked onto it
+ * What a child's run is debited with: its OWN spend. What was booked onto it
  * from outside is left out: a grandchild it delegated to records and debits its own spend,
  * and an in-run helper call debits itself (spawned children run none, see
  * `recordExternalCost`). The child's ceiling still counts it (`estimatedCostUSD`, which
- * `onSettled` hands to the delegating run).
+ * `onSettled` hands to the delegating run). The child's run row adds one display term on
+ * top, see {@link childRowCostUSD}.
  */
 function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
   if (!snap) return 0;
   return snap.ownCostUSD ?? snap.estimatedCostUSD;
+}
+
+/**
+ * What a child's run ROW is written with (`cost_usd`): its own spend ({@link childOwnCostUSD})
+ * plus `getHelperCostUsd()`, the estimate of its main-model calls that a stop, its guard or the
+ * stream timeout ended after the provider answered. The same display term `session.ts` adds to
+ * the main run's row. The row is read by the cost lines: the run history, the thread totals,
+ * the delegating run's `spawnCostUsd` (`getDescendantCostUsd`) and the daily and monthly sums.
+ *
+ * ⚠ DISPLAY, never a debit: the tenant debit (`reportMeteredCost`) stays
+ * {@link childOwnCostUSD}, as an ended call is never debited (aborted-call.ts). And it is
+ * counted in this row only: the delegating run's own row is priced from its own tokens and
+ * its own `getHelperCostUsd()`, which never holds a child's estimate (the child is a separate
+ * agent), so the footer's parent figure plus `spawnCostUsd` holds each dollar once.
+ *
+ * Spawned children keep both helper fallbacks off (see `recordExternalCost`), so their
+ * `getHelperCostUsd()` holds nothing but these estimates.
+ */
+function childRowCostUSD(agent: Agent | undefined): number {
+  if (!agent) return 0;
+  return childOwnCostUSD(agent.getCostSnapshot()) + agent.getHelperCostUsd();
 }
 
 /**
@@ -1940,7 +1962,8 @@ async function executeThinker(
           responseText: notedResult,
           tokensIn: snap?.inputTokens ?? 0,
           tokensOut: snap?.outputTokens ?? 0,
-          costUsd: childOwnCostUSD(snap),
+          // Display: own spend plus the estimate of ended calls (`childRowCostUSD`), not the debit.
+          costUsd: childRowCostUSD(childAgent),
           durationMs: Date.now() - childStart,
           // The child's calls are now written to the child's own run, so this
           // column has to be written too — otherwise the rows exist while the
@@ -2000,7 +2023,8 @@ async function executeThinker(
         runHistory.updateRun(childRunId, {
           tokensIn: snap?.inputTokens ?? 0,
           tokensOut: snap?.outputTokens ?? 0,
-          costUsd: childOwnCostUSD(snap),
+          // Display, as on the success path (`childRowCostUSD`); the debit below stays own spend.
+          costUsd: childRowCostUSD(childAgent),
           durationMs: Date.now() - childStart,
           // Same column on the terminal-failure path: a child that made 60 calls
           // and then died must not read as "0 tools", which is exactly the
@@ -2047,6 +2071,18 @@ async function executeThinker(
     // the required-ness. (An earlier version of this comment said "one of exactly two",
     // which was the count from before the line it sits on.)
     if (childAgent) parentAgent.abortScope?.members.delete(childAgent);
+    // The session cap (`sessionCounters.costUSD`, shared with the parent): the handler's
+    // `checkSessionBudget` reserved this child's estimate there, and that reservation is the
+    // child's whole share of the cap, deliberately not reconciled to actual (see the success
+    // path). A main-model call the child's stop, guard or stream timeout ended books its upper
+    // bound onto the same counter (`_bookStoppedCall`), which counted that call a second
+    // time, on top of the reservation, for the rest of the session. Take exactly those bounds
+    // back now that the child is settled; until here the counter held both, which errs closed
+    // while the child runs. A grandchild's bounds are taken back by its own spawn, one level
+    // down. Fenced: a throw here would replace the error the catch is rethrowing.
+    if (childAgent) {
+      try { adjustSessionCost(parentAgent.sessionCounters, -childAgent.getStoppedCallSessionCostUsd()); } catch { /* never mask the child's own outcome */ }
+    }
     // The child is settled: whatever it abandoned may not ask or stream through the
     // parent any more (see `childGone` where the callbacks are built).
     childGone.abort();

@@ -36,6 +36,8 @@ interface MockedAgentShape {
   getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
   getRecordedToolCallCount: () => number;
   getLastStop: () => import('../../core/agent.js').SendStop | null;
+  getHelperCostUsd: () => number;
+  getStoppedCallSessionCostUsd: () => number;
 }
 
 /** How many tool calls each constructed child reports having recorded. */
@@ -96,6 +98,11 @@ vi.mock('../../core/agent.js', () => ({
     // `mockRecordedToolCalls` and then asserts the value REACHED updateRun.
     this.getRecordedToolCallCount = () => mockRecordedToolCalls;
     this.getLastStop = () => mockLastStop;
+    // No ended calls in a mocked child: nothing on its cost line beyond the snapshot, and
+    // nothing to take back off the session cap. The real booking is pinned in
+    // `spawn-stopped-call-cost.test.ts`, against a real child agent.
+    this.getHelperCostUsd = () => 0;
+    this.getStoppedCallSessionCostUsd = () => 0;
   }),
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
   // factory mock replaces the whole module, so this export must exist or the
