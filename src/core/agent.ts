@@ -2572,8 +2572,8 @@ export class Agent implements IAgent {
    * own token counts would misprice them at the run's `pricePerM`.
    *
    * It also carries the estimate of aborted calls — helpers (`_bookAbortedHelper`) and the
-   * run's own model calls ended by the guard or by a stop of the run after the provider
-   * answered (`_bookStoppedCall`) — which are never debited.
+   * run's own model calls ended by the guard, by a stop of the run or by the stream timeout,
+   * after the provider answered (`_bookStoppedCall`) — which are never debited.
    */
   private _helperCostUsd = 0;
 
