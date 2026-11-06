@@ -713,13 +713,19 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     // the run's limit and the daily limit count it as at most that. `cost_usd` is the run's limit
     // and the cost the owner sees in one, so for such a call it shows the bound, not a cost. The
     // control plane is not told of such a call (the tenant is debited only for what was answered).
-    // A provisional booking that cannot be written stops the run before the call is made.
+    // A provisional booking that cannot be written stops the run before the call is made. A worst
+    // case that is no finite amount (a malformed pricing override) books nothing provisionally, so
+    // the settlement still adds what the call cost.
+    const provisional = Number.isFinite(worst) && worst > 0 ? worst : 0;
     let spendRow: number | undefined;
+    let added = false;
     try {
-      ledger.addJudgeCost(runId, worst);
-      spendRow = deps.bookSpend({ runId, modelId: model.modelId, tokensIn: 0, tokensOut: 0, costUsd: worst });
+      ledger.addJudgeCost(runId, provisional);
+      added = true;
+      spendRow = deps.bookSpend({ runId, modelId: model.modelId, tokensIn: 0, tokensOut: 0, costUsd: provisional });
     } catch (err: unknown) {
-      try { ledger.settleJudgeCost(runId, worst, 0); } catch { /* the worst case stays counted */ }
+      // Only what was added is taken back: a failed `addJudgeCost` added nothing.
+      if (added) try { ledger.settleJudgeCost(runId, provisional, 0); } catch { /* the worst case stays counted */ }
       try { ledger.releaseJudgeClaim(runId, seq, token); } catch { /* the claim goes stale */ }
       deps.captureError?.(judgeErrorForTracker(err, 'bulk_judge booking'));
       return halt(BULK_HALT_REASONS.unavailable);
@@ -727,14 +733,14 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     // The settlement of one call: the control plane's report for what was paid, then both
     // provisional bookings replaced, each on its own — a failure of one (a busy database) must not
     // take the others with it. The report never throws. A settlement that failed leaves that
-    // booking at the call's worst case, which counts the call as more than it cost, never less,
-    // and stops the run before its next paid call. `costUsd` 0 takes the bookings back: a call
-    // never sent, or refused with a 429.
+    // booking at the call's worst case, which counts the call as more than it cost, never less;
+    // after an answer it stops this pass before its next paid call. `costUsd` 0 takes the bookings
+    // back: a call never sent, or refused with a 429 or 529.
     const book = (costUsd: number, tokensIn: number, tokensOut: number): void => {
       const paid = costUsd > 0 ? costUsd : 0;
       if (paid > 0) deps.report(gate.runId, paid, model.tier);
       for (const write of [
-        () => { ledger.settleJudgeCost(runId, worst, paid); },
+        () => { ledger.settleJudgeCost(runId, provisional, paid); },
         () => { if (spendRow !== undefined) deps.settleSpend(spendRow, { tokensIn, tokensOut, costUsd: paid }); },
       ]) {
         try {
@@ -773,16 +779,19 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     } catch (err: unknown) {
       const spent = extractionSpendOf(err);
       const failure = classifyCallFailure(err, deps.signal?.aborted === true);
-      // A reply that came back is booked at what it cost. Without one, only a call that cannot
-      // have been processed is taken back: one the helper refused before sending it (`invalid`,
-      // its pre-flight) and a 429, which the provider refuses before it processes the request.
-      // Every other call without a reply — a timeout, a dropped connection, a 529 or 5xx, a 4xx —
+      // A reply that came back is booked at what it cost (every `invalid` answer carries its
+      // spend). Without one, only a call that cannot have been processed is taken back: one the
+      // helper refused before sending it (its pre-flight, `invalid` without spend), and a 429 or
+      // 529, which the provider refuses before it processes the request — kept, each retry a
+      // minute later would add another worst case for as long as the provider is overloaded.
+      // Every other call without a reply — a timeout, a dropped connection, another 5xx, a 4xx —
       // keeps its worst case: whether the provider billed it is not visible here. It is counted
       // under its own site; a call lost with the process is not, but its day row stays with no
       // tokens and its worst case, which is where such calls can be counted from.
+      const status = providerStatus(err);
       if (spent) book(spent.costUsd, spent.inputTokens ?? 0, spent.outputTokens ?? 0);
-      else if (failure.kind === 'invalid' || providerStatus(err) === 429) book(0, 0, 0);
-      else reportAbortedCall('bulk_judge.unanswered', model.modelId, { upperBoundUsd: worst, estimateUsd: worst, fromSnapshot: false });
+      else if (failure.kind === 'invalid' || status === 429 || status === 529) book(0, 0, 0);
+      else reportAbortedCall('bulk_judge.unanswered', model.modelId, { upperBoundUsd: provisional, estimateUsd: provisional, fromSnapshot: false });
       if (failure.kind === 'invalid') {
         if (!afterPaid(() => { record({ invalid: failure.reason }); })) return halt(BULK_HALT_REASONS.unavailable);
         continue;

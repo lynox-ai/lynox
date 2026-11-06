@@ -435,16 +435,17 @@ describe('runBulkJudge over data-store rows', () => {
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);
     let kept = 0;
-    for (const status of [429, 529, 503]) {
+    for (const status of [429, 529, 529, 503]) {
       const h = harness(() => { throw Object.assign(new Error(`provider said ${MARK}`), { status }); });
       const out = await runBulkJudge(id, h.deps);
       expect(out.status).toBe('pending');
       expect(ledger.getStatus(id)!.judge!.unjudged).toBe(1);
       expect(ledger.getStatus(id)!.haltReason).toBeNull();
-      // A 429 is refused before it is processed: taken back. A 529 or 5xx may have been billed:
-      // it keeps its worst case, so the run's spend grows by it on each.
+      // A 429 or 529 is refused before it is processed: taken back, so a provider overloaded for
+      // an hour adds nothing however often the target is retried. Another 5xx may have been
+      // billed: it keeps its worst case.
       expect(h.booked).toHaveLength(1);
-      expect(h.booked[0]!.costUsd === 0).toBe(status === 429);
+      expect(h.booked[0]!.costUsd === 0).toBe(status !== 503);
       expect(ledger.getStatus(id)!.costUsd).toBeCloseTo(kept += h.booked[0]!.costUsd, 10);
     }
     expect(kept).toBeGreaterThan(0);
@@ -560,6 +561,23 @@ describe('runBulkJudge over data-store rows', () => {
     const again = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     expect((await runBulkJudge(id, again.deps)).status).toBe('done');
     expect(again.calls).toHaveLength(2);
+  });
+
+  it('a run booking that cannot be written takes nothing back: the calls paid before it stay counted', async () => {
+    const id = await plan(['A', 'B']);
+    expect(start(id).ok).toBe(true);
+    const real = ledger.addJudgeCost.bind(ledger);
+    let n = 0;
+    const spy = vi.spyOn(ledger, 'addJudgeCost').mockImplementation((runId, usd) => {
+      if (++n === 2) throw new Error('SQLITE_BUSY');
+      real(runId, usd);
+    });
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('halted');
+    spy.mockRestore();
+    expect(h.calls).toHaveLength(1);
+    const s = ledger.getStatus(id)!;
+    expect([s.haltReason, s.costUsd, s.judge!.unjudged]).toEqual([BULK_HALT_REASONS.unavailable, 0.01, 1]);
   });
 
   it('a settlement that fails keeps the others and the verdict, and stops the run before its next paid call', async () => {
