@@ -5,7 +5,7 @@
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
-	import { getAuthError } from '../stores/chat.svelte.js';
+	import { getAuthError, RUN_ENDED_EVENT } from '../stores/chat.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled, toggleAutoSpeak } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from '../stores/voice-autosend.svelte.js';
@@ -304,6 +304,23 @@
 		function onProviderChanged() { void poll(); }
 		window.addEventListener('lynox:provider-changed', onProviderChanged);
 		return () => window.removeEventListener('lynox:provider-changed', onProviderChanged);
+	});
+
+	// Read today's cost again when a chat run ends, instead of showing the value from before the
+	// run for up to 30s. The signals one run sends close together (a stop sends one when the
+	// server confirms it and one when the stream closes) make one poll; a later one makes another.
+	const RUN_END_POLL_DELAY_MS = 300;
+	$effect(() => {
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		function onRunEnded() {
+			if (timer !== null) clearTimeout(timer);
+			timer = setTimeout(() => { timer = null; void poll(); }, RUN_END_POLL_DELAY_MS);
+		}
+		window.addEventListener(RUN_ENDED_EVENT, onRunEnded);
+		return () => {
+			window.removeEventListener(RUN_ENDED_EVENT, onRunEnded);
+			if (timer !== null) clearTimeout(timer);
+		};
 	});
 
 	$effect(() => {

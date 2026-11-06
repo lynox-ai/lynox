@@ -3501,11 +3501,26 @@ function runEnded(answer: ChatMessage | null): void {
 	void refreshThreadContained({ afterRun: true, answer });
 }
 
+/**
+ * Window event sent when a run of the open chat stopped streaming: done, a stop, an error, a
+ * dropped stream. The status bar reads today's cost again on it, instead of waiting for its next
+ * poll. Several may come for one run (a stop sends one when the server confirms the stop and one
+ * when the stream closes); a listener coalesces them. Only the one at the stream's close is sure
+ * to come after the server stored the run: the stop's confirmation arrives while the run may
+ * still be winding down.
+ */
+export const RUN_ENDED_EVENT = 'lynox:run-ended';
+
+function signalRunEnded(): void {
+	if (typeof window !== 'undefined') window.dispatchEvent(new Event(RUN_ENDED_EVENT));
+}
+
 /** The stream of the open chat's run stopped: no longer streaming, and {@link runEnded}. The only
  *  way to clear `isStreaming` but for the resets of a new or reopened chat. */
 function endStreaming(answer: ChatMessage | null = null): void {
 	isStreaming = false;
 	runEnded(answer);
+	signalRunEnded();
 }
 
 async function refreshThreadContained(opts: { afterRun?: boolean; answer?: ChatMessage | null } = {}): Promise<void> {
@@ -3848,7 +3863,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
-	if (!res.ok || !res.body) { runEnded(null); return; }
+	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); return; }
 	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return; }
 
 	const myEpoch = ++streamEpoch;
