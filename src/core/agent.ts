@@ -2569,8 +2569,9 @@ export class Agent implements IAgent {
    * into `usage`, because these tokens are priced on the FAST model and adding them to a run's
    * own token counts would misprice them at the run's `pricePerM`.
    *
-   * It also carries the estimate of aborted calls (`_bookAbortedHelper`, `_bookStoppedCall`),
-   * which are never debited.
+   * It also carries the estimate of aborted calls — helpers (`_bookAbortedHelper`) and the
+   * run's own model calls ended by the guard or by a user stop (`_bookStoppedCall`) — which
+   * are never debited.
    */
   private _helperCostUsd = 0;
 
@@ -3724,6 +3725,10 @@ export class Agent implements IAgent {
         // run-group-starter: removed in this attempt's `finally`, or fired once; it only aborts this call and reports no spend.
         else signal.addEventListener('abort', onRunAbort, { once: true });
       }
+      // Whether this attempt's request went out, and what of its reply came back: a user stop
+      // books a call that was sent (see the catch below), and only that one.
+      let issued = false;
+      let processor: StreamProcessor | undefined;
       try {
         const stream = this.client.beta.messages.stream({
           model: this.model,
@@ -3751,11 +3756,14 @@ export class Agent implements IAgent {
             : {} ),
           tools: toolsDef,
         }, { signal: callController.signal });
+        // Neither wire sends a request whose signal is already stopped (a run stopped between
+        // two calls): such a call costs nothing.
+        issued = !callController.signal.aborted;
 
         const handler = this.onStream ?? (() => {});
         // The call is ended while the stream is still being read, so the wire's own abort
         // listener is still in place when it fires.
-        const processor = new StreamProcessor(handler, this.name, imitationTools.length > 0
+        processor = new StreamProcessor(handler, this.name, imitationTools.length > 0
           ? {
             detector: new ToolCallImitationDetector(imitationTools),
             stop: (hit, partial) => {
@@ -3775,11 +3783,21 @@ export class Agent implements IAgent {
         ]);
         return result;
       } catch (err: unknown) {
-        if (signal?.aborted) throw err;
+        const request = { system: systemBlocks, messages: outboundMessages, tools: toolsDef };
         // The reply was stopped on purpose; the same request would write the same text again.
-        // What it used is booked as an aborted call before the run ends.
+        // What it used is booked as an aborted call before the run ends. Checked before the
+        // run's own stop: when both coincide the call is booked once, under the guard, whose
+        // partial is the reply at the moment it was ended.
         if (err instanceof ToolCallImitationError) {
-          this._bookStoppedCall(err.partial, { system: systemBlocks, messages: outboundMessages, tools: toolsDef });
+          this._bookStoppedCall('agent.tool_call_imitation', err.partial, request);
+          throw err;
+        }
+        // The person stopped the run while this call was out. The provider bills the prompt
+        // and what it generated until the stop, so the call is booked as an aborted call too.
+        // A call that was never sent books nothing; an abort during the retry wait below
+        // never reaches this catch, as no request of the next attempt was sent.
+        if (signal?.aborted) {
+          if (issued) this._bookStoppedCall('agent.user_abort', processor?.partial(), request);
           throw err;
         }
         if (attempt < Agent.MAX_RETRIES && isRetryable(err)) {
@@ -3815,18 +3833,20 @@ export class Agent implements IAgent {
   }
 
   /**
-   * Book a call the guard stopped mid-stream, as an aborted call (aborted-call.ts): the run
-   * ceiling and the session cap get the upper bound, the run's cost line gets the estimate,
-   * and the tenant debit gets nothing. The prompt is the provider's count when it sent one,
-   * else the request's size.
+   * Book a main-model call that was ended mid-stream — by the guard on a tool call written out
+   * as text, or by the person's stop — as an aborted call (aborted-call.ts): the run ceiling
+   * and the session cap get the upper bound, the run's cost line gets the estimate, and the
+   * tenant debit gets nothing. The prompt is the provider's count when it sent one (the
+   * Anthropic wire's `message_start`), else the request's size (the openai-compatible wire
+   * reports none before its last chunk).
    */
-  private _bookStoppedCall(partial: PartialReply | undefined, request: unknown): void {
+  private _bookStoppedCall(site: 'agent.tool_call_imitation' | 'agent.user_abort', partial: PartialReply | undefined, request: unknown): void {
     try {
       const cost = abortedCallCost({ model: this.model, maxTokens: this.maxTokens, request, partial });
       this.costGuard?.recordCapOnlyCost(cost.upperBoundUsd);
       recordSessionCost(this.sessionCounters, cost.upperBoundUsd);
       this._helperCostUsd += cost.estimateUsd;
-      reportAbortedCall('agent.tool_call_imitation', this.model, cost);
+      reportAbortedCall(site, this.model, cost);
     } catch {
       // Booking must not replace the stop it books.
     }

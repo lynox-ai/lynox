@@ -42,6 +42,16 @@ export class StreamProcessor {
 
   /** Usage seen so far in the current stream; the `message_delta` merge updates it in place. */
   private _usage: BetaUsage | undefined;
+  /** Content blocks streamed so far in the current stream; filled in place as events arrive. */
+  private _content: BetaContentBlock[] = [];
+
+  /**
+   * The reply as far as it came: for a caller that ends the stream from outside (a user stop)
+   * and books what the provider billed. Before the first event, no usage and no content.
+   */
+  partial(): PartialReply {
+    return { usage: this._usage, content: this._content };
+  }
 
   async process(stream: AsyncIterable<BetaRawMessageStreamEvent>): Promise<{
     content: BetaContentBlock[];
@@ -49,6 +59,7 @@ export class StreamProcessor {
     usage: BetaUsage;
   }> {
     const content: BetaContentBlock[] = [];
+    this._content = content;
     const rawInputs = new Map<number, string>();
     let stopReason = 'end_turn';
     let usage: BetaUsage | undefined;
