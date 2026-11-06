@@ -75,7 +75,7 @@
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
-	import { formatTurnTokens, formatUsageMetaParts } from '../stores/chat-usage.js';
+	import { footerChipSeparator, footerStatParts } from '../stores/chat-usage.js';
 	import { formatCompactionDelta } from '../stores/compaction-result.js';
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
@@ -2067,9 +2067,11 @@
 	// `formatTurnTokens` (the per-turn SUM, with a `Σ` prefix + tooltip so it
 	// no longer reads as a single over-window prompt) and `formatUsageMetaParts`
 	// (the $ / cache / model tail as an array, so the footer can set off every
-	// segment with one consistent `·` separator). The real current window fill is
-	// shown separately as the co-located occupancy chip. `includeCost` gates only
-	// the dollar figures (demo tenants pass false). See chat-usage.ts for rationale.
+	// segment with one consistent `·` separator). `footerStatParts` joins the two
+	// and keeps only segments with a known value, separators included. The real
+	// current window fill is shown separately as the co-located occupancy chip.
+	// `includeCost` gates only the dollar figures (demo tenants pass false). See
+	// chat-usage.ts for rationale.
 
 	// Diagnostics panel helpers (opt-in via Advanced metrics setting).
 	function fmtMs(ms: number): string {
@@ -2345,6 +2347,10 @@
 {/snippet}
 
 {#snippet messageActions(msgKey: string, msgContent: string, hasArtifact: boolean, usage: UsageInfo | undefined, isStreamingMsg: boolean, isLast: boolean)}
+	<!-- Only the segments with a known value: a turn without counted tokens shows no `Σ 0 tokens`
+	     and no `-` for its cost, and with nothing known there is no stats line. -->
+	{@const statParts = usage ? footerStatParts(usage, !getDemoMode()) : []}
+	{@const chipSep = footerChipSeparator(statParts)}
 	<!-- Inline footer: usage stats on the left, action icons (speak +
 	     copy) on the right. Right-alignment of the tappable buttons puts
 	     them in the thumb sweep zone for right-handed mobile users — the
@@ -2361,7 +2367,7 @@
 	     broken over-window figure. The chip only rides the LAST message because
 	     `ctxBudget` is a single live session value, not a per-message stat. -->
 	<div class="flex items-center gap-2 mt-2">
-		{#if !isStreamingMsg && (usage || (isLast && ctxBudget))}
+		{#if !isStreamingMsg && (statParts.length > 0 || (isLast && ctxBudget))}
 			<!-- One coherent stats line — Σ tokens · $ · cache · model · context
 			     meter — every segment set off by the SAME `·` separator at the
 			     same gap. Horizontally swipeable on mobile when a long model id
@@ -2397,20 +2403,18 @@
 				</span>
 				<span class="text-[10px] {txtColor}">{pct}%</span>
 			</span>
-			{#if usage}<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{/if}
+			{#if chipSep !== 'none'}<span class="shrink-0 text-text-subtle/40{chipSep === 'wide' ? ' hidden sm:inline' : ''}" aria-hidden="true">·</span>{/if}
 			{/if}
-				{#if usage}
-					<span
+				{#each statParts.filter((p) => p.tokens) as part (part.text)}<span
 						class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
 						title={t('chat.footer_tokens_tooltip')}
-					>{formatTurnTokens(usage)}</span><span class="sr-only">{t('chat.footer_tokens_tooltip')}</span>
-					{#each formatUsageMetaParts(usage, !getDemoMode()) as part}
-						<span class={part.ownLineWhenNarrow ? 'hidden sm:contents' : 'contents'}><span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
-								class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
-								title={part.title}
-							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}</span>
-					{/each}
-				{/if}
+					>{part.text}</span><span class="sr-only">{t('chat.footer_tokens_tooltip')}</span>{/each}
+				{#each statParts.filter((p) => !p.tokens) as part}
+					<span class={part.ownLineWhenNarrow ? 'hidden sm:contents' : 'contents'}>{#if part.sep !== 'none'}<span class="shrink-0 text-text-subtle/40{part.sep === 'wide' ? ' hidden sm:inline' : ''}" aria-hidden="true">·</span>{/if}{#if part.title}<span
+							class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
+							title={part.title}
+						>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}</span>
+				{/each}
 			</div>
 		{/if}
 		<div class="ml-auto flex items-center gap-1">
@@ -2429,8 +2433,8 @@
 	</div>
 	<!-- A part too important to be swiped out of view (the run's API calls, ux U-096) gets its own
 	     line under the stats on a narrow screen; from `sm` it sits in the row above. -->
-	{#if usage && !isStreamingMsg}
-		{#each formatUsageMetaParts(usage, !getDemoMode()).filter((p) => p.ownLineWhenNarrow) as part}
+	{#if !isStreamingMsg}
+		{#each statParts.filter((p) => p.ownLineWhenNarrow) as part}
 			<div class="sm:hidden mt-0.5 text-[11px] font-mono text-text-subtle">{#if part.title}<span
 					class="cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
 					title={part.title}
