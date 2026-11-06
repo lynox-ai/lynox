@@ -79,19 +79,20 @@ type Inside = { costGuard: { capOnlyUSD: number }; sessionCounters: { costUSD: n
 type Consumer = { turnEndUsageCounted?: boolean; throwOnTurnEnd?: boolean };
 
 async function runAgainst(respond: (hit: number, res: ServerResponse) => void, consumer: Consumer = {}): Promise<{
-  agent: Agent; hits: number; result: string | undefined; err: unknown; retryReasons: string[]; turnEnds: number[]; before: ReturnType<typeof abortedCallCounts>;
+  agent: Agent; hits: number; result: string | undefined; err: unknown; retryReasons: string[]; turnEnds: number[]; retryAfterTurnEnd: Array<boolean | undefined>; before: ReturnType<typeof abortedCallCounts>;
 }> {
   const p = await provider(respond);
   try {
     const retryReasons: string[] = [];
     const turnEnds: number[] = [];
+    const retryAfterTurnEnd: Array<boolean | undefined> = [];
     const agent = new Agent({
       name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', apiBaseURL: p.url, apiKey: 'not-a-key',
       costGuard: { maxBudgetUSD: 100 },
       sessionCounters: { costUSD: 0, spawnCount: 0, spawnCostUSD: 0 } as unknown as import('../types/agent.js').SessionCounters,
       ...(consumer.turnEndUsageCounted === true ? { turnEndUsageCounted: true } : {}),
       onStream: (e) => {
-        if (e.type === 'retry') retryReasons.push(e.reason);
+        if (e.type === 'retry') { retryReasons.push(e.reason); retryAfterTurnEnd.push(e.afterTurnEnd); }
         if (e.type === 'turn_end') {
           turnEnds.push(e.usage.output_tokens);
           if (consumer.throwOnTurnEnd === true) throw new Error('consumer failed after counting');
@@ -102,7 +103,7 @@ async function runAgainst(respond: (hit: number, res: ServerResponse) => void, c
     let result: string | undefined;
     let err: unknown;
     try { result = await agent.send('hello'); } catch (e) { err = e; }
-    return { agent, hits: p.hits(), result, err, retryReasons, turnEnds, before };
+    return { agent, hits: p.hits(), result, err, retryReasons, turnEnds, retryAfterTurnEnd, before };
   } finally {
     p.close();
   }
@@ -203,6 +204,15 @@ describe('a provider error inside the stream', () => {
     expect(agent.getHelperCostUsd()).toBe(0);
     expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
     expect((agent as unknown as Inside).costGuard.capOnlyUSD).toBeCloseTo(bound(agent).upperBoundUsd, 12);
+  }, 10_000);
+
+  it('the retry event says whether the failed attempt had sent its turn_end', async () => {
+    const after = await runAgainst((hit, res) => { if (hit === 1) errorAfterTurnEnd(res); else reply(res, 'recovered'); });
+    expect(after.retryAfterTurnEnd).toEqual([true]);
+    const before = await runAgainst((hit, res) => { if (hit === 1) errorMidStream(res, 'overloaded_error'); else reply(res, 'recovered'); });
+    expect(before.retryAfterTurnEnd).toEqual([false]);
+    const unanswered = await runAgainst((hit, res) => { if (hit <= 3) overloadedStatus(res); else reply(res, 'recovered'); });
+    expect(unanswered.retryAfterTurnEnd).toEqual([false]);
   }, 10_000);
 
   it('control: an HTTP 529 before any event is retried on the same machinery and books nothing', async () => {

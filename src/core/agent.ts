@@ -3868,7 +3868,9 @@ export class Agent implements IAgent {
             const reason = err instanceof APIError
               ? `${err.status ?? apiErrorType(err) ?? 'unknown'}: ${err.message}`
               : String(err);
-            await this.onStream({ type: 'retry', attempt: attempt + 1, maxAttempts: Agent.MAX_RETRIES + 1, delayMs: delay, reason, agent: this.name });
+            let afterTurnEnd = false;
+            try { afterTurnEnd = processor?.turnEnded() === true; } catch { /* reported as not ended */ }
+            await this.onStream({ type: 'retry', attempt: attempt + 1, maxAttempts: Agent.MAX_RETRIES + 1, delayMs: delay, reason, agent: this.name, afterTurnEnd });
           }
           await sleep(delay, signal);
           continue;

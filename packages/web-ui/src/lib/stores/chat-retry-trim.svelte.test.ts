@@ -97,6 +97,35 @@ describe('a provider call the engine retries', () => {
 		expect(msg?.content).toBe('Looking it up.\n\nFound 3 orders.');
 	});
 
+	it('a call that fails after its own turn_end: its text is taken out, the retry\'s answer stands alone', async () => {
+		const { send } = await startRun();
+		await send('text', { text: 'full answer' });
+		await send('turn_end', { stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 5 } });
+		await send('retry', { ...retry, afterTurnEnd: true });
+		await send('text', { text: 'recovered' });
+		const msg = reply();
+		expect(msg?.content).toBe('recovered');
+		expect(msg?.blocks).toEqual([{ type: 'text', text: 'recovered' }]);
+	});
+
+	it('a tool call that fails after its own turn_end: its text and chip go, the earlier call\'s stay', async () => {
+		const { send } = await startRun();
+		await send('text', { text: 'Looking it up.' });
+		await send('tool_call', { name: 'lookup_orders', input: {} });
+		await send('turn_end', { stop_reason: 'tool_use', usage: { input_tokens: 1, output_tokens: 1 } });
+		await send('tool_result', { name: 'lookup_orders', result: '3 orders' });
+		await send('text', { text: 'Now mailing.' });
+		await send('tool_call', { name: 'send_mail', input: { to: 'x' } });
+		await send('turn_end', { stop_reason: 'tool_use', usage: { input_tokens: 1, output_tokens: 1 } });
+		await send('retry', { ...retry, afterTurnEnd: true });
+		await send('text', { text: 'Mailing now.' });
+		await send('tool_call', { name: 'send_mail', input: { to: 'y' } });
+		const msg = reply();
+		expect(msg?.toolCalls?.map((c) => [c.name, c.input])).toEqual([['lookup_orders', {}], ['send_mail', { to: 'y' }]]);
+		expect(msg?.content).toBe('Looking it up.\n\nMailing now.');
+		expect(msg?.content).not.toContain('Now mailing.');
+	});
+
 	it('a second retry of the same call takes out only that attempt', async () => {
 		const { send } = await startRun();
 		await send('text', { text: 'first try' });

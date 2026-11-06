@@ -2552,11 +2552,11 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const maxAttempts = data['maxAttempts'] as number;
 			retryStatus = { attempt, maxAttempts };
 			// The call that failed is sent again: what it streamed is taken back out, so the
-			// answer does not show twice. A `turn_end` not yet followed by content means the
-			// failed call streamed nothing after the previous call ended, so that end is where
-			// it began. (A call that failed after its own `turn_end` keeps what it streamed:
-			// the two cases send the same events.)
-			const start = msg._callEnd ?? msg._callStart;
+			// answer does not show twice. The engine says whether the failed call had sent its
+			// own `turn_end` (`afterTurnEnd`): then the last end seen is that call's, and its
+			// start is `_callStart`. Otherwise a `turn_end` not yet followed by content was the
+			// previous call's, and the failed call, which streamed nothing, began there.
+			const start = data['afterTurnEnd'] === true ? msg._callStart : (msg._callEnd ?? msg._callStart);
 			if (start) trimToMark(msg, start);
 			msg._callStart = start ?? markCall(msg);
 			msg._callEnd = undefined;
