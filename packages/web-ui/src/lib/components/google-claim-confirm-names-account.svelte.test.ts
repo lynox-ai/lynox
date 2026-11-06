@@ -348,6 +348,20 @@ describe('the Google claim nonce in the URL', () => {
 		expect(posts.filter((p) => p.path === '/google/claim-managed/preview')).toHaveLength(0);
 	});
 
+	it('does not overwrite a newer claim that reached the URL meanwhile', async () => {
+		const claim = holdClaim();
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		button('Connect').click();
+		await settle();
+		window.history.replaceState(window.history.state, '', '/app/settings/channels/google?google_oauth=nonce-new');
+		claim.release(refusal({ error: 'An erasure is running', code: 'erasure_in_progress', claim_kept: true }));
+		await settle();
+		expect(param()).toBe('nonce-new');
+		expect(hasButton('Connect')).toBe(false);
+	});
+
 	it('is not parked again on another page', async () => {
 		const claim = holdClaim();
 		await render();

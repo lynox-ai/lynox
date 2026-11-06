@@ -150,6 +150,8 @@
 		void claimManagedGoogleTokens(nonce).then((outcome) => {
 			if (outcome !== 'kept' || page === null || window.location.pathname !== page) return;
 			const url = new URL(window.location.href);
+			// A newer claim reached the URL meanwhile (an in-app link): it is the one to keep.
+			if (url.searchParams.has('google_oauth')) return;
 			url.searchParams.set('google_oauth', nonce);
 			// The router's own entry state is kept: `{}` would drop its history index.
 			window.history.replaceState(window.history.state, '', url.toString());
