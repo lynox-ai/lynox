@@ -241,7 +241,7 @@ describe('a sentence that names an act of the owner\'s', () => {
 	});
 
 	const nothing = { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 };
-	// `mandate`: the mandate's key where it is not `<key>_mandate` — a count of one reads `_mandate_one` (1198).
+	// `mandate`: the mandate's key where it is not `<key>_mandate` — a count of one reads `_mandate_one`.
 	const cases: { name: string; run: Partial<BulkRunDetailData>; targets?: BulkTarget[]; key: string; mandate?: string; vars?: Record<string, string> }[] = [
 		{ name: 'lynox skips a target of a preview', run: { total: 2, changes: { ...nothing, update: 1, invalid: 1 } },
 			targets: [TARGETS[0]!, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false }],

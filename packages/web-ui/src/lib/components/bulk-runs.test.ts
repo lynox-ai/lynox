@@ -1206,9 +1206,9 @@ describe('the markup list of a target (1010)', () => {
 	});
 });
 
-// A count of one reads in the singular (1198, ux 06.11.): "1 Produkt", never "1 Produkte". Read
+// A count of one reads in the singular: "1 Produkt", never "1 Produkte". Read
 // from the i18n source, both languages, word for word, at one and at two.
-describe('the singular of a count of one (1198)', () => {
+describe('the singular of a count of one', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
 	const de: Record<string, string> = {};

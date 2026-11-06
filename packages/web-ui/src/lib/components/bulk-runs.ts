@@ -32,8 +32,8 @@ export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
 	return { t: (k) => i18n.t(key(k)), tf: (k, vars) => i18n.tf(key(k), vars) };
 }
 
-/** A count's sentence at one: the key's `_one` form, which says "1 product", not "1 products"
- *  (ux, 1198). Only for the keys ux worded a singular for. */
+/** A count's sentence at one: the key's `_one` form, which says "1 product", not "1 products".
+ *  Only for the keys that have a worded singular. */
 export function bulkOne(key: string, n: number): string {
 	return n === 1 ? `${key}_one` : key;
 }

@@ -117,7 +117,7 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('Product/2');
 	});
 
-	it('folds the one unchanged target of another host under a button in the singular (1198)', async () => {
+	it('folds the one unchanged target of another host under a button in the singular', async () => {
 		run = makeRun({ targetSystem: 'http:api.example.com' });
 		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
 		await render();
