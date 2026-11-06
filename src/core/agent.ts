@@ -3721,6 +3721,7 @@ export class Agent implements IAgent {
       const onRunAbort = (): void => { callController.abort(signal?.reason); };
       if (signal) {
         if (signal.aborted) callController.abort(signal.reason);
+        // run-group-starter: removed in this attempt's `finally`, or fired once; it only aborts this call and reports no spend.
         else signal.addEventListener('abort', onRunAbort, { once: true });
       }
       try {
