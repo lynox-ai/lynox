@@ -832,15 +832,27 @@ describe('fetch_token — a grant a user gave is never renewed as an app token',
   const PRESET_ONLY = 'connects through the "bexio" provider, which issues its tokens only through a user\'s authorization';
   const CONNECT = 'action "connect"';
   const OWNER = 'needs re-authorizing by the person who owns it';
+  const REMOVE_FIRST = 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect"';
+  const CONNECT_ONLY = 'Call api_setup with action "connect"';
+  /** A refresh slot of the profile's own, not the derived name a connect writes to. */
+  const ownSlot = (p: ApiProfile, key = 'CRM_OWN_REFRESH'): ApiProfile =>
+    ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, refresh_token_key: key } } });
   const refused: { name: string; profile: ApiProfile; says: string; next: string; notSays: readonly string[] }[] = [
     // Never connected: a preset profile created and sent to fetch_token (the attach says
     // "Mint one first with: api_setup fetch_token" for any oauth2 profile without a token).
     { name: 'a preset profile never connected, client_credentials named', profile: withPreset(crmProfile({ custom_endpoint_ack: ACK2 }, 'client_credentials')), says: PRESET_ONLY, next: CONNECT, notSays: [AUTHORIZED, OWNER] },
     // The file the callback left, back in the store without its grant record.
     { name: 'a preset profile with no grant type and no grant record', profile: withPreset(withoutGrantType(crmProfile({ custom_endpoint_ack: ACK2 }))), says: PRESET_ONLY, next: CONNECT, notSays: [AUTHORIZED, OWNER] },
-    { name: 'a preset profile the callback connected', profile: withPreset(withoutGrantType(crmProfile({ ...CALLBACK, custom_endpoint_ack: ACK2 }))), says: `${AUTHORIZED} through the "bexio" provider`, next: CONNECT, notSays: [PRESET_ONLY, OWNER] },
+    { name: 'a preset profile the callback connected', profile: withPreset(withoutGrantType(crmProfile({ ...CALLBACK, custom_endpoint_ack: ACK2 }))), says: `${AUTHORIZED} through the "bexio" provider`, next: CONNECT_ONLY, notSays: [PRESET_ONLY, OWNER, 'Remove auth.oauth.refresh_token_key'] },
     // `connect` runs only for a built-in preset, so these two are not sent there.
+    // The callback leaves a preset profile that reads a refresh slot of its own without a grant type
+    // on every connect: connect alone would end here again, so the field goes first.
+    { name: 'a preset profile the callback connected, reading a refresh slot of its own', profile: ownSlot(withPreset(withoutGrantType(crmProfile({ ...CALLBACK, custom_endpoint_ack: ACK2 })))), says: `${AUTHORIZED} through the "bexio" provider`, next: REMOVE_FIRST, notSays: [PRESET_ONLY, OWNER, CONNECT_ONLY] },
+    { name: 'a preset profile never connected, reading a refresh slot of its own', profile: ownSlot(withPreset(withoutGrantType(crmProfile({ custom_endpoint_ack: ACK2 })))), says: PRESET_ONLY, next: REMOVE_FIRST, notSays: [AUTHORIZED, OWNER, CONNECT_ONLY] },
+    // Naming the derived name itself is no slot of its own: connect alone is the way.
+    { name: 'a preset profile the callback connected, naming the derived refresh slot', profile: ownSlot(withPreset(withoutGrantType(crmProfile({ ...CALLBACK, custom_endpoint_ack: ACK2 }))), REFRESH), says: `${AUTHORIZED} through the "bexio" provider`, next: CONNECT_ONLY, notSays: [PRESET_ONLY, OWNER, 'Remove auth.oauth.refresh_token_key'] },
     { name: 'a profile the callback connected, no preset', profile: withoutGrantType(crmProfile(CALLBACK)), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT] },
+    { name: 'a profile the callback connected, naming a preset this engine does not know and a refresh slot of its own', profile: ownSlot(withPreset(withoutGrantType(crmProfile(CALLBACK)), 'not-a-provider')), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT, 'not-a-provider', 'Remove auth.oauth.refresh_token_key'] },
     { name: 'a profile the callback connected, naming a preset this engine does not know', profile: withPreset(withoutGrantType(crmProfile(CALLBACK)), 'not-a-provider'), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT, 'not-a-provider'] },
   ];
 
