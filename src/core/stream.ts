@@ -44,7 +44,11 @@ export class StreamProcessor {
   private _usage: BetaUsage | undefined;
   /** Content blocks streamed so far in the current stream; filled in place as events arrive. */
   private _content: BetaContentBlock[] = [];
-  /** Stream events received so far: more than zero once the provider has answered. */
+  /**
+   * Stream events received so far: more than zero once the provider has answered. On the
+   * openai-compatible wire the adapter's first event follows the provider's accepting HTTP
+   * response, before any body; on the Anthropic wire it is the provider's own first event.
+   */
   private _events = 0;
 
   /** Whether the provider answered this stream with at least one event. */

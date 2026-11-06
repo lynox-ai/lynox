@@ -3793,11 +3793,12 @@ export class Agent implements IAgent {
           this._bookStoppedCall('agent.tool_call_imitation', err.partial, request, { estimate: true });
           throw err;
         }
-        // The run was stopped while this call was out — by the person, the wall-clock
-        // backstop, a takeover of the run, or a spawned child's deadline. What is booked
-        // depends on what is known:
+        // The run was stopped while this call was out — for example by the person, the
+        // wall-clock backstop, a takeover of the run, an ended mandate, a workflow step's
+        // timeout, or a spawned child's deadline. What is booked depends on what is known:
         // - The provider answered (the stream delivered an event): it bills the prompt and what
-        //   it generated until the stop. Booked as an aborted call: the bound to the caps, the
+        //   it generated until the stop. On the openai-compatible wire the adapter emits its
+        //   first event once the provider accepted the request (HTTP 200), before any body. Booked as an aborted call: the bound to the caps, the
         //   estimate to the run's cost line, and counted per site.
         // - No answer yet: the request may or may not have reached the provider. The SDK
         //   retries 429/529/5xx and connection errors inside the call, so a live signal at

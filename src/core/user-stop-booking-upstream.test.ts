@@ -52,11 +52,15 @@ async function endlessProvider(wire: 'anthropic' | 'openai'): Promise<{ url: str
 
 function agentOn(wire: 'anthropic' | 'openai', url: string): Agent {
   return wire === 'anthropic'
-    ? new Agent({ name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', apiBaseURL: url, apiKey: 'not-a-key', costGuard: { maxBudgetUSD: 100 } })
-    : new Agent({ name: 'test', model: 'm', provider: 'openai', apiBaseURL: url, openaiModelId: 'm', apiKey: 'k', costGuard: { maxBudgetUSD: 100 } });
+    ? new Agent({ name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', apiBaseURL: url, apiKey: 'not-a-key', costGuard: { maxBudgetUSD: 100 }, sessionCounters: sessionCounters() })
+    : new Agent({ name: 'test', model: 'm', provider: 'openai', apiBaseURL: url, openaiModelId: 'm', apiKey: 'k', costGuard: { maxBudgetUSD: 100 }, sessionCounters: sessionCounters() });
 }
 
-type Inside = { costGuard: { capOnlyUSD: number }; maxTokens: number; model: string };
+function sessionCounters(): import('../types/agent.js').SessionCounters {
+  return { costUSD: 0, spawnCount: 0, spawnCostUSD: 0 } as unknown as import('../types/agent.js').SessionCounters;
+}
+
+type Inside = { costGuard: { capOnlyUSD: number }; sessionCounters: { costUSD: number }; maxTokens: number; model: string };
 
 async function stopMidStream(wire: 'anthropic' | 'openai'): Promise<{ agent: Agent; err: unknown; text: string }> {
   const provider = await endlessProvider(wire);
@@ -136,6 +140,8 @@ function expectCapOnly(agent: Agent, before: ReturnType<typeof abortedCallCounts
   // The bound: at least the whole output budget, whatever the prompt was.
   const floor = abortedCallCost({ model: inside.model, maxTokens: inside.maxTokens, request: '', partial: { content: [] } }).upperBoundUsd;
   expect(inside.costGuard.capOnlyUSD).toBeGreaterThan(floor);
+  // Both caps: the run ceiling above, and the session cap.
+  expect(inside.sessionCounters.costUSD).toBeCloseTo(inside.costGuard.capOnlyUSD, 12);
   expect(agent.getHelperCostUsd()).toBe(0);
   const after = abortedCallCounts();
   expect(after.notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);

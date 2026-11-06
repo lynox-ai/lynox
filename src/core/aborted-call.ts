@@ -21,7 +21,8 @@
  *
  * Neither number goes to the tenant debit. The customer has never paid for an aborted
  * call, helper or main, and still does not; the provider bills us for it. {@link reportAbortedCall}
- * counts every such call per site, so the unbilled amount stays measurable.
+ * counts every such call per site, so the unbilled amount stays measurable — except a main
+ * call stopped before the provider answered, which only the caps take (see `_callAPI`).
  */
 import { calculateCost } from './pricing.js';
 
