@@ -78,14 +78,19 @@ describe('F2: the workflow is taken over with the plan', () => {
 		expect(f2(preview({ members, workflow: { ...wf, from } }))).toBe(changedBy('a@x.ch'));
 		expect(f2(preview({ members: [...members].reverse(), workflow: { ...wf, from } }))).toBe(changedBy('a@x.ch'));
 		expect(f2(preview({ members, workflow: { ...wf, from: { name: 'b@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('b@x.ch'));
-		// The role is the mark's: a member who also created it is said to have changed it when the mark is the change.
+		// The role is the mark's, not the member's: a member who also changed it is said to have created it when the
+		// mark is the creation. (Not a state the engine makes today: a covered editor's mark is covered with the creator's.)
 		const both = [wfMember(['workflow-created'], 'b@x.ch'), wfMember(['workflow-created', 'workflow-edited'], 'a@x.ch')];
 		expect(f2(preview({ members: both, workflow: { ...wf, from: { name: 'a@x.ch', role: 'workflow-created' } } }))).toBe(
 			'Dieser Plan nutzt den Workflow „Rechnungen“, den a@x.ch angelegt hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
 		);
 		// The mark's address alone is not enough: a member under it without the mark's role is not named for it.
+		// (Guards the fallback; the engine always lists a member with the mark's address and role.)
 		const other = [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')];
 		expect(f2(preview({ members: other, workflow: { ...wf, from: { name: 'a@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('b@x.ch'));
+		// The member named takes the place of its role line; the other member's line stays.
+		const lines = takeoverLines(preview({ members, workflow: { ...wf, from: { name: 'b@x.ch', role: 'workflow-edited' } } }), fmt);
+		expect(lines.filter((l) => l.kind === 'role').map((l) => l.text)).toEqual(['Nutzt den Workflow „Rechnungen“, den a@x.ch geändert hat']);
 		// No member under the mark's address with its role: the change first, then the creation, in the list's order.
 		expect(f2(preview({ members, workflow: { ...wf, from: { name: 'z@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('a@x.ch'));
 	});
