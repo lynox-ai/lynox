@@ -805,6 +805,8 @@ export class Agent implements IAgent {
   private static readonly MAX_RETRIES = 3;
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
   private static RETRY_BASE_MS = 2000;
+  /** How long one main-model call may stream before it is ended. Not readonly: tests shorten it. */
+  private static STREAM_TIMEOUT_MS = 600_000;
 
   /** Default max chars for a single tool result before truncation. Configurable via `max_tool_result_chars`. */
   private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = DEFAULT_MAX_TOOL_RESULT_CHARS;
@@ -3729,6 +3731,9 @@ export class Agent implements IAgent {
       // books a call that was sent (see the catch below), and only that one.
       let issued = false;
       let processor: StreamProcessor | undefined;
+      // This attempt's stream timeout: the timer, and the error it ended the call with.
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+      let timeoutError: Error | undefined;
       try {
         const stream = this.client.beta.messages.stream({
           model: this.model,
@@ -3774,13 +3779,17 @@ export class Agent implements IAgent {
           }
           : undefined);
 
-        // Per-stream timeout: 10 minutes max for a single API call
-        const streamTimeout = 600_000;
+        // Per-stream timeout: 10 minutes max for a single API call. Cleared in `finally`, so a
+        // finished call leaves no timer behind.
         const result = await Promise.race([
           processor.process(stream),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('Stream timeout: API response exceeded 10 minutes')), streamTimeout),
-          ),
+          new Promise<never>((_, reject) => {
+            // run-group-starter: cleared in this attempt's `finally`; it only rejects this call and reports no spend.
+            timeoutTimer = setTimeout(() => {
+              timeoutError = new Error('Stream timeout: API response exceeded 10 minutes');
+              reject(timeoutError);
+            }, Agent.STREAM_TIMEOUT_MS);
+          }),
         ]);
         return result;
       } catch (err: unknown) {
@@ -3792,6 +3801,20 @@ export class Agent implements IAgent {
         if (err instanceof ToolCallImitationError) {
           this._bookStoppedCall('agent.tool_call_imitation', err.partial, request, { estimate: true });
           throw err;
+        }
+        // The stream timeout ended the call; `finally` below cancels the request. The provider
+        // bills what it generated until then, as for a stop, so it is booked the same way: the
+        // bound to the run ceiling and the session cap; and, if the provider answered (the
+        // stream delivered an event), the estimate to the run's cost line and one count for
+        // this site. The partial is the reply at the moment the timeout fired. Booked once per
+        // timed-out attempt, here and nowhere else, before the error goes on unchanged to the
+        // retry decision below (which does not retry it today) or out of the call; a retried
+        // attempt would be a new request with its own timer and its own booking. When the run
+        // is stopped in the same instant, the timeout ended the call: it is booked here, under
+        // the timeout, and the stop's booking below is skipped.
+        const timedOut = err !== undefined && err === timeoutError;
+        if (timedOut && issued) {
+          this._bookStoppedCall('agent.stream_timeout', processor?.partial(), request, { estimate: processor?.answered() === true });
         }
         // The run was stopped while this call was out — for example by the person, the
         // wall-clock backstop, a takeover of the run, an ended mandate, a workflow step's
@@ -3808,7 +3831,7 @@ export class Agent implements IAgent {
         // - Never sent (the signal was already stopped): nothing. An abort during the retry
         //   wait below never reaches this catch, as no request of the next attempt was sent.
         if (signal?.aborted) {
-          if (issued) {
+          if (issued && !timedOut) {
             this._bookStoppedCall('agent.user_abort', processor?.partial(), request, { estimate: processor?.answered() === true });
           }
           throw err;
@@ -3833,6 +3856,7 @@ export class Agent implements IAgent {
         this._lastProviderFailure = classifyProviderFailure(err, this._providerHost());
         throw err;
       } finally {
+        clearTimeout(timeoutTimer);
         // The run's signal lives across calls; one listener per call would pile up.
         signal?.removeEventListener('abort', onRunAbort);
         // A stream that lost the race above is still being read and generated; this ends it.
@@ -3847,15 +3871,16 @@ export class Agent implements IAgent {
 
   /**
    * Book a main-model call that was ended mid-stream — by the guard on a tool call written out
-   * as text, or by a stop of the run — as an aborted call (aborted-call.ts): the run ceiling
-   * and the session cap get the upper bound, and the tenant debit gets nothing. With
+   * as text, by a stop of the run, or by the per-call stream timeout — as an aborted call
+   * (aborted-call.ts): the run ceiling and the session cap get the upper bound, and the tenant
+   * debit gets nothing. With
    * `estimate` (the provider answered), the run's cost line also gets the estimate and the
    * call is counted per site; without it only the caps take the call. The prompt is the
    * provider's count when it sent one (the Anthropic wire's `message_start`), else the
    * request's size (the openai-compatible wire reports none before its last chunk).
    */
   private _bookStoppedCall(
-    site: 'agent.tool_call_imitation' | 'agent.user_abort',
+    site: 'agent.tool_call_imitation' | 'agent.user_abort' | 'agent.stream_timeout',
     partial: PartialReply | undefined,
     request: unknown,
     opts: { estimate: boolean },

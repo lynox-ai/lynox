@@ -5,9 +5,10 @@
  * helper books its spend from the reply, so an aborted call booked nothing — while the
  * provider still bills the prompt and whatever it generated before the abort. The same holds
  * for the run's own model call when it is ended mid-stream, by the guard on a tool call
- * written out as text or by a stop of the run: its usage would arrive only with the last
- * event. Both kinds are booked here, the same way. A stopped main call the provider had not
- * answered yet gets only the cap bound (agent.ts, `_callAPI`): it may not have been sent.
+ * written out as text, by a stop of the run, or by its stream timeout: its usage would arrive
+ * only with the last event. Both kinds are booked here, the same way. A stopped or timed-out
+ * main call the provider had not answered yet gets only the cap bound (agent.ts, `_callAPI`):
+ * it may not have been sent.
  *
  * The exact amount cannot be known here: the output count arrives only with the stream's
  * last event. So this module produces two numbers, for two different readers:
