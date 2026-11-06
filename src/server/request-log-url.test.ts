@@ -77,6 +77,9 @@ describe('requestLogUrl', () => {
 
   it('keeps the contact row id and the list route as they are', () => {
     expect(requestLogUrl('/api/crm/contacts/17')).toBe('/api/crm/contacts/17');
+    expect(requestLogUrl('/api/crm/contacts/17/')).toBe('/api/crm/contacts/17/');
+    expect(requestLogUrl('/api/crm/contacts/0791234567/deals')).toBe('/api/crm/contacts/<contact>/deals');
+    expect(requestLogUrl(`/api/crm/contacts/Jane/deals/${'{'.repeat(1990)}`)).toBe('<long path>');
     expect(requestLogUrl('/api/crm/contacts/')).toBe('/api/crm/contacts/');
     expect(requestLogUrl('/api/crm/contacts?limit=5')).toBe('/api/crm/contacts?limit=<redacted>');
     expect(requestLogUrl('/api/crm/deals')).toBe('/api/crm/deals');

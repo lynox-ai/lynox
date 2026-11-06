@@ -37,7 +37,8 @@ const HOLDS_ADDRESS = /@|%(?:25)*40|%(?:25)*EF%(?:25)*BC%(?:25)*A0/i;
 const CONTACT = '<contact>';
 /** A CRM route with a contact in the path, matched on the path as the router reads it. */
 const CRM_CONTACT_ROUTE = /^\/api\/(v1\/)?crm\/contacts\/([^/]+)(\/.*)?$/;
-/** A contact segment that names no one: a row id (`DELETE /api/crm/contacts/:id`). */
+/** A contact segment that names no one: the row id of `DELETE /api/crm/contacts/:id`, which
+ *  ends there. Followed by more path, digits are a contact's name like any other. */
 const ROW_ID = /^\d+$/;
 
 /**
@@ -55,8 +56,9 @@ function crmContactPath(rawPath: string): string | null {
     return null;
   }
   const match = CRM_CONTACT_ROUTE.exec(pathname);
-  if (match === null || ROW_ID.test(match[2]!)) return null;
-  return `/api/${match[1] ?? ''}crm/contacts/${CONTACT}${match[3] ?? ''}`;
+  const rest = match?.[3] ?? '';
+  if (match === null || (ROW_ID.test(match[2]!) && (rest === '' || rest === '/'))) return null;
+  return `/api/${match[1] ?? ''}crm/contacts/${CONTACT}${rest}`;
 }
 
 /**
@@ -82,7 +84,9 @@ export function requestLogUrl(rawUrl: string): string {
 /** The path part of the log line, read as sent (see the head of this file). */
 function logPath(rawPath: string): string {
   if (rawPath.length > MAX_LOGGED_PATH) return LONG_PATH;
+  // `URL` escapes what it reads, so the route written can be longer than the path sent.
   const source = crmContactPath(rawPath) ?? rawPath;
+  if (source.length > MAX_LOGGED_PATH) return LONG_PATH;
   const encodedQuery = source.search(/%3F/i);
   const path = encodedQuery === -1 ? source : source.slice(0, encodedQuery);
   const segments = redactWebhookPath(path).split('/').map((segment) => (HOLDS_ADDRESS.test(segment) ? ADDRESS : segment));
