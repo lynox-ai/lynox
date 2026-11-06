@@ -326,6 +326,19 @@ describe('the workflow’s side', () => {
     expect(p.kind === 'preview' && p.preview.workflow?.from).toEqual({ name: 'h@x.ch', role: 'workflow-edited' });
   });
 
+  it('says the creator’s mark where the editor’s is covered, as `planMandate` reads it (cover set in the table)', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'c@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'workflows', 'w', 'h@x.ch');
+    // A takeover covers both marks at once; the editor's alone is set here to read the order.
+    b.db.prepare('UPDATE workflows SET covered_edited_by = mandate_editor, covered_edited_id = mandate_editor_id, covered_edited_at = mandate_edited_at WHERE id = ?').run('w');
+    ended(b, 'c@x.ch');
+    pause(b, 'p', 'c@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.workflow?.from).toEqual({ name: 'c@x.ch', role: 'workflow-created' });
+  });
+
   it('a pause that knew the workflow’s creation gains the change the same grant made to it, renewed', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });

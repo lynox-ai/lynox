@@ -83,6 +83,9 @@ describe('F2: the workflow is taken over with the plan', () => {
 		expect(f2(preview({ members: both, workflow: { ...wf, from: { name: 'a@x.ch', role: 'workflow-created' } } }))).toBe(
 			'Dieser Plan nutzt den Workflow „Rechnungen“, den a@x.ch angelegt hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
 		);
+		// The mark's address alone is not enough: a member under it without the mark's role is not named for it.
+		const other = [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')];
+		expect(f2(preview({ members: other, workflow: { ...wf, from: { name: 'a@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('b@x.ch'));
 		// No member under the mark's address with its role: the change first, then the creation, in the list's order.
 		expect(f2(preview({ members, workflow: { ...wf, from: { name: 'z@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('a@x.ch'));
 	});
