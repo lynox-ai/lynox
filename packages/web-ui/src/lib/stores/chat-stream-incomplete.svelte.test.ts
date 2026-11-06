@@ -74,7 +74,7 @@ describe('a reply the AI service cut off on every attempt', () => {
 
 		const text = 'Der KI-Dienst hat die Antwort abgebrochen, bevor sie fertig war, auch beim letzten Versuch. Steht oben ein Teil davon, ist er unvollständig. Versuche es nochmal.';
 		expect(store.getChatError()).toBe(text);
-		expect(lastToast()).toBe(`Diese Antwort ist fehlgeschlagen: ${text}`);
+		expect(lastToast()).toBe('Diese Antwort ist fehlgeschlagen.');
 		expect(store.getChatErrorDetail()).toBe(RAW);
 		// The part that arrived stays where it was.
 		expect(store.getMessages().filter((m) => m.role === 'assistant').at(-1)?.content).toBe('partial answer');
@@ -86,7 +86,7 @@ describe('a reply the AI service cut off on every attempt', () => {
 
 		const text = 'The AI service cut the reply off before it was finished, on the last attempt too. Any part of it shown above is incomplete. Try again.';
 		expect(store.getChatError()).toBe(text);
-		expect(lastToast()).toBe(`This response failed: ${text}`);
+		expect(lastToast()).toBe('This response failed.');
 	});
 
 	it('control: an error without the code keeps the general wording and the raw text in the toast', async () => {

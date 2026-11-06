@@ -2600,10 +2600,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// scrolled the chat error banner off-screen (mobile + long threads).
 			// Truncate the raw upstream string so a paragraph-long stack from a
 			// noisy provider doesn't blow up the toast layout.
-			// A failure the engine names by code is worded here; its raw text stays in the detail.
-			const detailSnippet = errCode === STREAM_INCOMPLETE_CODE ? t('chat.error_incomplete')
-				: rawErr.length > 140 ? `${rawErr.slice(0, 140)}…` : rawErr;
-			addToast(`${t('chat.error_toast_prefix')}: ${detailSnippet}`, 'error', 8000);
+			// A failure the engine names by code is worded in the banner; the toast then only
+			// says that the reply failed, and the raw text stays in the detail.
+			const detailSnippet = rawErr.length > 140 ? `${rawErr.slice(0, 140)}…` : rawErr;
+			addToast(errCode === STREAM_INCOMPLETE_CODE
+				? `${t('chat.error_toast_prefix')}.`
+				: `${t('chat.error_toast_prefix')}: ${detailSnippet}`, 'error', 8000);
 			// Remove empty assistant message and mark user message as failed —
 			// UNLESS the caller owns that decision. The engine emits `error` both
 			// for a dead turn and for an incident it recovers from (see the
