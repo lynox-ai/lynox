@@ -79,8 +79,9 @@ export const rememberTool: ToolEntry<RememberInput> = {
       'Also NOT for what you wrote in a draft the operator asked for (a newsletter, a product or SEO text, a post, an about-us page): ' +
       'what the draft says about the business, its products, its range or its history is yours, not a fact, and so is the ' +
       'draft text. A fact the operator states about the business is still a fact when it comes with the order ' +
-      '("we have been family-run since 1950"): record it, it is not an instruction about the job. A choice they left to you ' +
-      '("decide yourself") is yours, not confirmed. Keep a draft text only when the operator asks you to. ' +
+      '("we only sell to businesses"): record it. What they want this text to say word for word stays an instruction ' +
+      'about the job, even when it reads like a fact. A detail of the draft they left to you ("decide yourself") is ' +
+      'yours, not confirmed. Keep a draft text only when the operator asks you to. ' +
       'Record a durable fact before you finish the turn.',
     eager_input_streaming: true,
     input_schema: {

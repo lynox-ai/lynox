@@ -136,7 +136,7 @@
     {
       "id": "S7-draft-with-fact",
       "expect": "capture",
-      "why": "The control for N7 and N8: a draft ordered the same way, but the operator also states a durable fact about the business. A change that silences N7 and N8 by not recording anything on a draft turn fails here. The fact is said, not asked for in the text, so it is not a job instruction (N4). A write that keeps only the fact is a hit; one that keeps what the draft invented is a miss, so read the texts.",
+      "why": "The control for N7 and N8: a draft ordered the same way, but the operator also states a durable fact about the business. A change that silences N7 and N8 by not recording anything on a draft turn fails here. The fact is said, not asked for in the text, so it is not a job instruction (N4). The runner counts any write as a hit; read the texts: a write that keeps only the fact is a hit, one that keeps what the draft invented is a miss.",
       "cases": [
         "Schreib einen kurzen Über-uns-Text für Mühlbach{N}, etwa 80 Wörter. Zur Info: Wir sind seit 1950 ein Familienbetrieb und beschäftigen zwölf Leute.",
         "Entwirf einen Newsletter für Sonnhalde{N}, drei kurze Absätze. Hintergrund: Seit diesem Monat liefern wir auch nach Österreich.",
