@@ -2810,6 +2810,9 @@ export class Session {
       durableMemoryEnabled: userConfig.durable_memory_enabled === true,
       costGuard: this.agentOverrides.costGuard,
       onStream: streamHandler,
+      // The handler adds each `turn_end` usage into `this.usage` (above), which the run's cost
+      // line and debit are priced from.
+      turnEndUsageCounted: true,
       // F-Eager-Persist (2026-05-18): Persist messages to the ThreadStore at
       // each stable point in the agent loop (after assistant reply, after
       // tool_results). Without this the end-of-run persist (line 506-526)

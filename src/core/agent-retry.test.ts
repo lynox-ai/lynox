@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { APIError } from '@anthropic-ai/sdk';
 import { isRetryable } from './agent.js';
 
 const named = (name: string, message = 'x'): Error => Object.assign(new Error(message), { name });
@@ -62,5 +63,34 @@ describe('isRetryable — stream-transport failures', () => {
     expect(isRetryable(new Error('OpenAI-compatible API error 503: overloaded'))).toBe(true);
     // a mid-message "terminated" in a plain (non-adapter) error is not undici's shape either
     expect(isRetryable(new Error('subscription terminated by admin'))).toBe(false);
+  });
+});
+
+describe('isRetryable — provider errors inside the stream (status undefined)', () => {
+  // The shape the SDK's stream parser throws for an `error` event: status undefined, the whole
+  // event as the body, and the event's error type as `type` (core/streaming.js).
+  const envelope = (type: string): { type: string; error: { type: string; message: string } } =>
+    ({ type: 'error', error: { type, message: 'mid-stream failure' } });
+  const midStream = (type: string): APIError => new APIError(undefined, envelope(type), undefined, new Headers(), type);
+
+  it('retries the three transient types, like their HTTP twins', () => {
+    expect(isRetryable(midStream('overloaded_error'))).toBe(true);
+    expect(isRetryable(midStream('rate_limit_error'))).toBe(true);
+    expect(isRetryable(midStream('api_error'))).toBe(true);
+  });
+
+  it('does not retry any other type', () => {
+    for (const type of ['invalid_request_error', 'authentication_error', 'permission_error', 'not_found_error', 'request_too_large', 'billing_error', 'error']) {
+      expect(isRetryable(midStream(type)), type).toBe(false);
+    }
+  });
+
+  it('reads `type` alone, without a body', () => {
+    expect(isRetryable(new APIError(undefined, undefined, 'x', new Headers(), 'overloaded_error'))).toBe(true);
+  });
+
+  it('reads the envelope alone, for an APIError built without the type argument', () => {
+    expect(isRetryable(new APIError(undefined, envelope('overloaded_error'), undefined, new Headers(), undefined))).toBe(true);
+    expect(isRetryable(new APIError(undefined, envelope('invalid_request_error'), undefined, new Headers(), undefined))).toBe(false);
   });
 });
