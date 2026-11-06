@@ -41,7 +41,8 @@ export interface TakeoverPreview {
 	members: TakeoverMember[];
 	/** `owner`, or the tag of the workflow's member that stays. */
 	runsAs: string;
-	workflow: { id: string; name: string; takenOver: boolean } | null;
+	/** `from`: whose mark on the workflow the takeover reads, by address and role (engine `planMandate`). */
+	workflow: { id: string; name: string; takenOver: boolean; from?: { name: string; role: 'workflow-edited' | 'workflow-created' } | null } | null;
 	memberChanges: TakeoverMemberChange[];
 	alsoReleased: Array<{ id: string; title: string }>;
 	connections: TakeoverConnection[];
@@ -83,16 +84,18 @@ function roleLines(m: TakeoverMember, workflow: string | null, saidByF2: Takeove
 
 /**
  * F2: the workflow is taken over with the plan. Named after the member it is taken over from: the
- * one with a workflow role, its change before its creation. Of two with the same role, the later
- * one: the engine lists the members in the order the plan was paused for them, then those whose
- * mark the plan or the workflow holds now. Without plans released, the last sentence goes.
+ * one whose mark the takeover reads (`workflow.from`); without it, the one with a workflow role,
+ * its change before its creation. Without plans released, the last sentence goes.
  */
 function f2Line(p: TakeoverPreview): { line: TakeoverLine; by: TakeoverMember; role: 'workflow-edited' | 'workflow-created' } | null {
 	if (p.workflow === null || !p.workflow.takenOver) return null;
-	const by = p.members.findLast((m) => m.roles.includes('workflow-edited')) ?? p.members.findLast((m) => m.roles.includes('workflow-created'));
+	const from = p.workflow.from ?? null;
+	const marked = from === null ? undefined : p.members.find((m) => m.name === from.name && m.roles.includes(from.role));
+	const by = marked
+		?? p.members.find((m) => m.roles.includes('workflow-edited')) ?? p.members.find((m) => m.roles.includes('workflow-created'));
 	if (by === undefined) return null;
-	const changed = by.roles.includes('workflow-edited');
-	const role = changed ? 'workflow-edited' : 'workflow-created';
+	const role = marked !== undefined && from !== null ? from.role : by.roles.includes('workflow-edited') ? 'workflow-edited' : 'workflow-created';
+	const changed = role === 'workflow-edited';
 	const vars = { workflow: p.workflow.name, name: by.name };
 	const head = tf(changed ? 'takeover.f2.changed' : 'takeover.f2.created', vars);
 	const text = p.alsoReleased.length === 0 ? head : `${head} ${tf('takeover.f2.released', { plans: planList(p.alsoReleased.map((r) => r.title)) })}`;

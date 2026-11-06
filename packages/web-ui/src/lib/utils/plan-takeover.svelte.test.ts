@@ -69,18 +69,22 @@ describe('F2: the workflow is taken over with the plan', () => {
 			'Dieser Plan nutzt den Workflow „Rechnungen“, den b@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
 		);
 	});
-	it('of two members with the same workflow role, it names the later one, whatever the role', () => {
+	it('names the member whose mark the takeover reads, wherever the list has it', () => {
 		const f2 = (p: TakeoverPreview): string | undefined => takeoverLines(p, fmt).find((l) => l.kind === 'f2')?.text;
-		expect(f2(preview({ members: [wfMember(['workflow-edited'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf }))).toBe(
-			'Dieser Plan nutzt den Workflow „Rechnungen“, den b@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
+		const changedBy = (name: string): string => `Dieser Plan nutzt den Workflow „Rechnungen“, den ${name} geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow.`;
+		// Both paused with a change to the workflow; the workflow's mark is a@x.ch's now.
+		const members = [wfMember(['workflow-edited'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')];
+		const from = { name: 'a@x.ch', role: 'workflow-edited' as const };
+		expect(f2(preview({ members, workflow: { ...wf, from } }))).toBe(changedBy('a@x.ch'));
+		expect(f2(preview({ members: [...members].reverse(), workflow: { ...wf, from } }))).toBe(changedBy('a@x.ch'));
+		expect(f2(preview({ members, workflow: { ...wf, from: { name: 'b@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('b@x.ch'));
+		// The role is the mark's: a member who also created it is said to have changed it when the mark is the change.
+		const both = [wfMember(['workflow-created'], 'b@x.ch'), wfMember(['workflow-created', 'workflow-edited'], 'a@x.ch')];
+		expect(f2(preview({ members: both, workflow: { ...wf, from: { name: 'a@x.ch', role: 'workflow-created' } } }))).toBe(
+			'Dieser Plan nutzt den Workflow „Rechnungen“, den a@x.ch angelegt hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
 		);
-		expect(f2(preview({ members: [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-created'], 'b@x.ch')], workflow: wf }))).toBe(
-			'Dieser Plan nutzt den Workflow „Rechnungen“, den b@x.ch angelegt hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
-		);
-		// The change still before the creation: an earlier member who changed it over a later one who created it.
-		expect(f2(preview({ members: [wfMember(['workflow-edited'], 'a@x.ch'), wfMember(['workflow-created'], 'b@x.ch')], workflow: wf }))).toBe(
-			'Dieser Plan nutzt den Workflow „Rechnungen“, den a@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
-		);
+		// No member under the mark's address with its role: the change first, then the creation, in the list's order.
+		expect(f2(preview({ members, workflow: { ...wf, from: { name: 'z@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('a@x.ch'));
 	});
 	it('without plans released, the last sentence goes', () => {
 		const p = preview({ members: [wfMember(['workflow-created'])], workflow: wf });
@@ -95,9 +99,9 @@ describe('F2: the workflow is taken over with the plan', () => {
 		const two = preview({ members: [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf });
 		expect(texts(two)[0]).toBe('Nutzt den Workflow „Rechnungen“, den a@x.ch angelegt hat');
 		expect(kinds(two).slice(0, 2)).toEqual(['role', 'f2']);
-		// Another member with the same role keeps its line: F2 names one member, the later one.
+		// Another member with the same role keeps its line: F2 names one member.
 		const same = preview({ members: [wfMember(['workflow-edited'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf });
-		expect(texts(same)[0]).toBe('Nutzt den Workflow „Rechnungen“, den a@x.ch geändert hat');
+		expect(texts(same)[0]).toBe('Nutzt den Workflow „Rechnungen“, den b@x.ch geändert hat');
 		expect(kinds(same).slice(0, 2)).toEqual(['role', 'f2']);
 		// Not taken over: no F2, every role line stays.
 		expect(kinds(preview({ members: [wfMember(['workflow-created'])], workflow: { ...wf, takenOver: false } })).slice(0, 1)).toEqual(['role']);

@@ -238,7 +238,7 @@ describe('the workflow’s side', () => {
     ended(b, 'h@x.ch');
     pause(b, 'p', 'h@x.ch');
     const p = takeoverPreview(deps(b), 'p');
-    expect(p.kind === 'preview' && [p.preview.runsAs, p.preview.workflow]).toEqual(['owner', { id: 'w', name: 'W', takenOver: true }]);
+    expect(p.kind === 'preview' && [p.preview.runsAs, p.preview.workflow]).toEqual(['owner', { id: 'w', name: 'W', takenOver: true, from: { name: 'h@x.ch', role: 'workflow-created' } }]);
     take(b, 'p');
     expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))).toBeUndefined();
   });
@@ -315,7 +315,18 @@ describe('the workflow’s side', () => {
     expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-created']]]);
   });
 
-  it('a pause that knew the workflow’s creation gains a later change by the same grant', () => {
+  it('says whose mark on the workflow the takeover reads: the editor’s before the creator’s', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'c@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'workflows', 'w', 'h@x.ch');
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.workflow?.from).toEqual({ name: 'h@x.ch', role: 'workflow-edited' });
+  });
+
+  it('a pause that knew the workflow’s creation gains the change the same grant made to it, renewed', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });
     plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
