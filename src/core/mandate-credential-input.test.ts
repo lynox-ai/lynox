@@ -251,11 +251,11 @@ describe('mandateCredentialInput', () => {
 describe('mandateCredentialInput — rate pinned', () => {
   const N = 4000;
   const SHAPES: Array<[string, number, string, number, number]> = [
-    // Measured: 0 of 100 000 for both hex shapes, 417 of 200 000 for 24 alnum. The band floor
+    // Measured: 0 of 100 000 for both hex shapes, 665 of 300 000 for 24 alnum. The band floor
     // stays at 0 where the rate is that low.
     ['32 hex', 32, HEX, 0, 0],
     ['40 hex', 40, HEX, 0, 0],
-    ['24 alnum', 24, ALNUM, 0, 20],
+    ['24 alnum', 24, ALNUM, 0, 21],
   ];
   it.each(SHAPES)('a key of %s after a cue word: the count let through stays in its measured band', (name, n, alphabet, low, high) => {
     const draw = seeded(`mandate-key-rate:${name}`);
