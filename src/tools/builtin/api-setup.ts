@@ -2887,9 +2887,16 @@ ${draftJson}
         const subject = profile.oauth_grant?.origin === 'callback' || tokenPreset === undefined
           ? `was authorized by a user${tokenPreset !== undefined ? ` through the "${tokenPreset.id}" provider` : ''}, and it declares no refresh_token grant to renew that authorization with. Nothing was sent: requesting an app-level token instead would replace the user's authorization with a different one.`
           : `connects through the "${tokenPreset.id}" provider, which issues its tokens only through a user's authorization, and it declares no refresh_token grant. Nothing was sent: fetch_token does not request an app-level token for it.`;
-        const next = tokenPreset !== undefined
-          ? 'Call api_setup with action "connect" for this profile and show the user the link.'
-          : 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.';
+        // A preset profile that reads its refresh token from a name of its own: a connect stores the
+        // token under the derived name and, since this profile does not read that one, leaves it
+        // without a grant type again (`readersRefreshSlot`, the OAuth callback). Sending it to
+        // connect alone would bring it back here; the field has to go first.
+        const ownReadSlot = readersRefreshSlot(profile) !== refreshTokenKey(input.id);
+        const next = tokenPreset === undefined
+          ? 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.'
+          : ownReadSlot
+            ? 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.'
+            : 'Call api_setup with action "connect" for this profile and show the user the link.';
         return `Error: profile "${input.id}" ${subject} ${next}`;
       }
       // A preset's token endpoint takes the body its provider documents, whatever the profile says.
