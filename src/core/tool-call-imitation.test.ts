@@ -159,9 +159,9 @@ describe('ToolCallImitationDetector', () => {
       expect(d.push(opener.repeat(Math.ceil(n / opener.length)).slice(0, n))).toBeNull();
       return d.charsExamined();
     };
-    const small = work(100_000);
-    const large = work(400_000);
-    expect(small).toBeGreaterThanOrEqual(100_000);
+    const small = work(25_000);
+    const large = work(100_000);
+    expect(small).toBeGreaterThanOrEqual(25_000);
     // Four times the text, about four times the characters examined.
     expect(large / small).toBeLessThan(6);
   });
