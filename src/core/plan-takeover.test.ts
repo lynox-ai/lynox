@@ -304,6 +304,17 @@ describe('the workflow’s side', () => {
     expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-edited', 'workflow-created']]]);
   });
 
+  it('only workflow roles are read for a pause: its roles on the plan stay as the pause knew them', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'triggers', 'p', 'h@x.ch');
+    ended(b, 'h@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-created'], closedPrompt: false }]);
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-created']]]);
+  });
+
   it('a pause that knew the workflow’s creation gains a later change by the same grant', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });
