@@ -10,8 +10,8 @@
  * `fireBeforeRunGate` before the call; each call booked at its worst case into the run's
  * `cost_usd` and into history.db before it is made; and every answered call settled at what it
  * cost there and reported to the control plane under the gate's run id, whatever its verdict turns
- * out to be. A call is paid the moment it is answered (PRD bulk-loop §3.1); one that never answers
- * keeps its worst case.
+ * out to be. A call is paid the moment it is answered; one that never answers keeps
+ * its worst case.
  *
  * Nothing of a target reaches a model of the session, a notification or the error tracker: the
  * summaries are counts, the invalid reasons a fixed vocabulary, and an error is reported by its
