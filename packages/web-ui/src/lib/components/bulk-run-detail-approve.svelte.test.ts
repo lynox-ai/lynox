@@ -112,7 +112,7 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain(t('bulk.invalid.not_found'));
 		expect(target.textContent).toContain('Product/1');
 		expect(target.textContent).not.toContain('Product/2');
-		buttonByText(t('bulk.preview.show_unchanged').replace('{n}', '1'))!.click();
+		buttonByText(t('bulk.preview.show_unchanged_one'))!.click();
 		await settle();
 		expect(target.textContent).toContain('Product/2');
 	});
@@ -158,7 +158,7 @@ describe('approving a preview', () => {
 
 	it('offers no way out on a product lynox leaves out, and none on an unchanged one', async () => {
 		await render();
-		buttonByText(t('bulk.preview.show_unchanged').replace('{n}', '1'))!.click();
+		buttonByText(t('bulk.preview.show_unchanged_one'))!.click();
 		await settle();
 		expect([...target.querySelectorAll('button')].filter((b) => b.textContent?.trim() === t('bulk.deselect.off'))).toHaveLength(1);
 	});

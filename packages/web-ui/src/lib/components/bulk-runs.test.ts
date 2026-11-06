@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
-	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead,
+	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead, bulkOne,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -1054,11 +1054,11 @@ describe('what the preview says about a target lynox leaves out', () => {
 		expect(bulkSkippedHead(counts({ update: 3, invalid: 2 }, 1), true, echo)).toEqual({ text: 'bulk.skipped.both_products n=2 m=1', nothing: false });
 		expect(bulkSkippedHead(counts({ update: 3 }, 1), false, echo)).toEqual({ text: 'bulk.skipped.taken_out m=1', nothing: false });
 		expect(bulkSkippedHead(counts({ update: 3, unchanged: 4 }), true, echo)).toEqual({ text: null, nothing: false });
-		expect(bulkSkippedHead(counts({ create: 1, invalid: 1 }), false, echo).text).toBe('bulk.skipped.targets n=1');
+		expect(bulkSkippedHead(counts({ create: 1, invalid: 1 }), false, echo).text).toBe('bulk.skipped.targets_one n=1');
 	});
 	it('says on a judged run that planning again judges all of it again, only where something was left out', () => {
 		const judge = { tier: 'standard', unjudged: 0 };
-		expect(bulkSkippedHead(counts({ update: 1, invalid: 1 }, 0, judge), true, echo).text).toBe('bulk.skipped.products n=1 bulk.skipped.judged');
+		expect(bulkSkippedHead(counts({ update: 1, invalid: 1 }, 0, judge), true, echo).text).toBe('bulk.skipped.products_one n=1 bulk.skipped.judged');
 		expect(bulkSkippedHead(counts({ update: 1 }, 2, judge), true, echo).text).toBe('bulk.skipped.taken_out m=2');
 		// Nothing left out, nothing to write: no planning again is suggested, so no cost of it is named.
 		expect(bulkSkippedHead(counts({ unchanged: 2 }, 0, judge), true, echo).text).toBe('bulk.nothing.products');
@@ -1203,5 +1203,61 @@ describe('the markup list of a target (1010)', () => {
 		// Twins: within the allowlist, and on a write, no such sentence.
 		expect(bulkMarkupList({ ...change, addsOutsideAllowlist: false }, true, 'd', DE).restoresNote).toBeNull();
 		expect(bulkMarkupList(change, false, 'd', DE).restoresNote).toBeNull();
+	});
+});
+
+// A count of one reads in the singular (1198, ux 06.11.): "1 Produkt", never "1 Produkte". Read
+// from the i18n source, both languages, word for word, at one and at two.
+describe('the singular of a count of one (1198)', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!.replace(/\\'/g, "'"); en[m[1]!] = m[3]!.replace(/\\'/g, "'"); }
+	}
+	const from = (table: Record<string, string>): BulkI18n => ({
+		t: (k) => table[k] ?? k,
+		tf: (k, vars) => Object.entries(vars).reduce((s, [name, v]) => s.split(`{${name}}`).join(v), table[k] ?? k),
+	});
+	const DE = from(de);
+	const EN = from(en);
+	const counts = (invalid: number, deselected: number) =>
+		({ changes: { update: 5, create: 0, delete: 0, unchanged: 0, invalid }, deselected, judge: null });
+
+	// [shopify, deselected, mandate, n, DE, EN]
+	const cases: [boolean, number, boolean, number, string, string][] = [
+		[true, 0, false, 1, '1 Produkt lässt lynox aus. Die übrigen kannst du trotzdem freigeben.', 'lynox skips 1 product. You can still approve the rest.'],
+		[true, 0, false, 2, '2 Produkte lässt lynox aus. Die übrigen kannst du trotzdem freigeben.', 'lynox skips 2 products. You can still approve the rest.'],
+		[false, 0, false, 1, '1 Ziel lässt lynox aus. Die übrigen kannst du trotzdem freigeben.', 'lynox skips 1 target. You can still approve the rest.'],
+		[false, 0, false, 2, '2 Ziele lässt lynox aus. Die übrigen kannst du trotzdem freigeben.', 'lynox skips 2 targets. You can still approve the rest.'],
+		[true, 3, false, 1, '1 Produkt lässt lynox aus, 3 hast du herausgenommen. Die übrigen kannst du freigeben.', 'lynox skips 1 product and you took out 3. You can approve the rest.'],
+		[true, 3, false, 2, '2 Produkte lässt lynox aus, 3 hast du herausgenommen. Die übrigen kannst du freigeben.', 'lynox skips 2 products and you took out 3. You can approve the rest.'],
+		[false, 3, false, 1, '1 Ziel lässt lynox aus, 3 hast du herausgenommen. Die übrigen kannst du freigeben.', 'lynox skips 1 target and you took out 3. You can approve the rest.'],
+		[false, 3, false, 2, '2 Ziele lässt lynox aus, 3 hast du herausgenommen. Die übrigen kannst du freigeben.', 'lynox skips 2 targets and you took out 3. You can approve the rest.'],
+		[true, 0, true, 1, '1 Produkt lässt lynox aus.', 'lynox skips 1 product.'],
+		[true, 0, true, 2, '2 Produkte lässt lynox aus.', 'lynox skips 2 products.'],
+		[false, 0, true, 1, '1 Ziel lässt lynox aus.', 'lynox skips 1 target.'],
+		[false, 0, true, 2, '2 Ziele lässt lynox aus.', 'lynox skips 2 targets.'],
+		[true, 3, true, 1, '1 Produkt lässt lynox aus, 3 hat der Inhaber herausgenommen.', 'lynox skips 1 product and the owner took out 3.'],
+		[true, 3, true, 2, '2 Produkte lässt lynox aus, 3 hat der Inhaber herausgenommen.', 'lynox skips 2 products and the owner took out 3.'],
+		[false, 3, true, 1, '1 Ziel lässt lynox aus, 3 hat der Inhaber herausgenommen.', 'lynox skips 1 target and the owner took out 3.'],
+		[false, 3, true, 2, '2 Ziele lässt lynox aus, 3 hat der Inhaber herausgenommen.', 'lynox skips 2 targets and the owner took out 3.'],
+	];
+	for (const [shopify, m, mandate, n, deText, enText] of cases) {
+		it(`says ${String(n)} left out${m > 0 ? ' and some taken out' : ''} of ${shopify ? 'products' : 'targets'}${mandate ? ' to a mandate' : ''} word for word`, () => {
+			const view = (i: BulkI18n): BulkI18n => (mandate ? bulkMandateI18n(i) : i);
+			expect(bulkSkippedHead(counts(n, m), shopify, view(DE)).text).toBe(deText);
+			expect(bulkSkippedHead(counts(n, m), shopify, view(EN)).text).toBe(enText);
+		});
+	}
+
+	it('offers the unchanged products to show in the singular at one', () => {
+		const show = (i: BulkI18n, n: number): string => i.tf(bulkOne('bulk.preview.show_unchanged', n), { n: String(n) });
+		expect(show(DE, 1)).toBe('1 unverändertes Produkt anzeigen');
+		expect(show(EN, 1)).toBe('Show 1 unchanged product');
+		expect(show(DE, 2)).toBe('2 unveränderte Produkte anzeigen');
+		expect(show(EN, 2)).toBe('Show 2 unchanged products');
 	});
 });
