@@ -489,4 +489,36 @@ describe("the delegating run's ceiling after a child settled", { timeout: 60_000
     expect(childSpend).toBeCloseTo(calculateCost(rows(engine, session).child.model_id, { input_tokens: 100, output_tokens: 30 }), 12);
     check('child-finished', session, engine, child, true, debits, childDone);
   });
+
+  // Today a child that returns normally has no ended call (a stopped, guarded or timed-out call
+  // ends the child's run). Should one ever carry a bound (a retried timeout), the bound still
+  // reaches the delegating ceiling only, never the child's debit or the figure shown for it.
+  it('a finished child that carries a bound: the ceiling gets it, the debit and display do not', async () => {
+    const { engine, session, debits, childDone } = await bootWithCeiling();
+    const BOUND = 0.3;
+    const spy = vi.spyOn(Agent.prototype, 'getCapOnlyCostUsd').mockReturnValue(BOUND);
+    try {
+      const seen = watchChild(session);
+      spawnReply();
+      textReply('Three orders, all shipped.');
+      textReply('The researcher found three orders.');
+      await session.run('find the order list');
+      const child = seen.child();
+      const { parent, child: childRow } = rows(engine, session);
+      expect(childRow.status).toBe('completed');
+      const own = parentOwnCost(parent.model_id, true);
+      const childSpend = child.getCostSnapshot()?.estimatedCostUSD ?? 0;
+      expect(childSpend).toBeGreaterThan(0);
+      expect(ceilingFigure(session)).toBeCloseTo(own + childSpend + BOUND, 12);
+      expect(session.getAgent()!.getCostSnapshot()?.estimatedCostUSD).toBeCloseTo(own + childSpend, 12);
+      expect(childDone).toHaveLength(1);
+      expect(childDone[0]).toBeCloseTo(childSpend, 12);
+      const childDebits = debits.filter((d) => d.runId !== parent.id).map((d) => d.usd);
+      expect(childDebits).toHaveLength(1);
+      expect(childDebits[0]).toBeCloseTo(childSpend, 12);
+      expect(childRow.cost_usd).toBeCloseTo(childSpend, 12);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
