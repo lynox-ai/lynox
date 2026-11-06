@@ -343,3 +343,22 @@ describe('a spawned child whose own call is ended mid-stream', { timeout: 60_000
     expect(child.sessionCounters.costUSD).toBeCloseTo(reservation, 12);
   });
 });
+
+describe('the bounds an agent took back off the session counter are per run', { timeout: 30_000 }, () => {
+  it('a finished run after a stopped one reports none', async () => {
+    const counters = { costUSD: 0, spawnCount: 0, spawnCostUSD: 0 } as unknown as import('../../types/agent.js').SessionCounters;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', costGuard: { maxBudgetUSD: 100 }, sessionCounters: counters });
+    const ended = stallingReply();
+    const first = agent.send('list everything');
+    await waitFor(() => ended.yielded === ended.events.length);
+    agent.abort();
+    expect(await first.catch((e: unknown) => e)).toBeInstanceOf(RunAbortedError);
+    const booked = agent.getStoppedCallSessionCostUsd();
+    expect(booked, 'the stopped call put its bound on the counter').toBeGreaterThan(0);
+    expect(counters.costUSD).toBeCloseTo(booked, 12);
+
+    textReply('All done.');
+    await agent.send('and now finish');
+    expect(agent.getStoppedCallSessionCostUsd(), 'the second run ended no call').toBe(0);
+  });
+});
