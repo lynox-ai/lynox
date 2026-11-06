@@ -2108,6 +2108,13 @@ export class BulkLedger {
     return { ok: true };
   }
 
+  /** Whether this run confirmed a probe of its own ({@link confirmProbe} files it under its id).
+   *  A measured kind's row is shared by host, verb and kind: a later run that confirms the same
+   *  kind takes it over, and this run then reads false. */
+  probeOwn(runId: string): boolean {
+    return this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE run_id = ? LIMIT 1').get(runId) !== undefined;
+  }
+
   /** The target {@link confirmProbe} would accept as this run's probe, with its host and
    *  verb: an external apply run that stopped with exactly one applied target, and that one
    *  written — or sent to by this run without a clear answer and then found holding the planned

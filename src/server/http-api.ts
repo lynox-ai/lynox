@@ -9607,6 +9607,8 @@ export class LynoxHTTPApi {
         writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply'
           ? (ledger.countWriting(params['id']!) === 1 ? BULK_UNMEASURED_NOTE_ONE : BULK_UNMEASURED_NOTE) : null,
         writeFormConfirmation: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_CONFIRMATION : null,
+        // A probe this run confirmed stays a step it went through, after it holds.
+        probeOwn: ledger.probeOwn(params['id']!),
         // The context C goes to the judge's provider with the record (PRD shopify-preset §20.2 item 7):
         // the owner sees it before the start the hash binds, never only the fields it decides.
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier, ...(judgeRule.context !== undefined ? { context: judgeRule.context } : {}) } : null,

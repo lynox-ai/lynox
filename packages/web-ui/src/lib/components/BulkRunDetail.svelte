@@ -13,7 +13,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -321,7 +321,8 @@
 
 	const host = $derived(run ? bulkHostOf(run.targetSystem) : null);
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
-	const step = $derived(run ? bulkStep(run) : 0);
+	const step = $derived(run ? bulkStep(run) : 'planned');
+	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
 	// With one target to write the note keeps its first two sentences, here and in the engine's own (EN).
@@ -404,8 +405,8 @@
 			<h1 class="text-lg font-medium">{bulkLabel(run, i18n)}</h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
-				{#each BULK_STEPS as s, i (s)}
-					<li class="rounded-full px-2 py-0.5 {i === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={i === step ? 'step' : undefined}>{t(`bulk.step.${s}`)}</li>
+				{#each steps as s (s)}
+					<li class="rounded-full px-2 py-0.5 {s === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={s === step ? 'step' : undefined}>{t(`bulk.step.${s}`)}</li>
 				{/each}
 			</ol>
 
