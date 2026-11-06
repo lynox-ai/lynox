@@ -57,6 +57,18 @@ export class StreamProcessor {
   }
 
   /**
+   * Whether this stream's `turn_end` was handed on, with the usage of its `message_delta`. A
+   * consumer counts that usage into the run's own (Session does), so a call ended after it
+   * must not add an estimate of the same reply on top.
+   */
+  private _turnEnded = false;
+
+  /** Whether `turn_end` was handed on for this stream (see {@link _turnEnded}). */
+  turnEnded(): boolean {
+    return this._turnEnded;
+  }
+
+  /**
    * The reply as far as it came: for a caller that ends the stream from outside (a user stop)
    * and books what the provider billed. Before the first event, no usage and no content.
    */
@@ -254,6 +266,8 @@ export class StreamProcessor {
     };
 
     if (stopReason !== null && stopReason !== undefined) {
+      // Set before the hand-off, so a consumer that throws on it still leaves it set.
+      this._turnEnded = true;
       await this.onEvent({
         type: 'turn_end',
         stop_reason: stopReason,

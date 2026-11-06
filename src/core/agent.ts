@@ -596,6 +596,8 @@ export class Agent implements IAgent {
   conversationGrants?: ConversationGrants | undefined;
   /** See `AgentConfig.conversationRoot`. */
   readonly conversationRoot: boolean;
+  /** See `AgentConfig.turnEndUsageCounted`. */
+  private readonly turnEndUsageCounted: boolean;
   readonly spawnDepth: number;
 
   /**
@@ -1561,6 +1563,7 @@ export class Agent implements IAgent {
     this.recordToolCall = config.recordToolCall;
     this.conversationGrants = config.conversationGrants;
     this.conversationRoot = config.conversationRoot === true;
+    this.turnEndUsageCounted = config.turnEndUsageCounted === true;
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;
     this.briefingOwnBlocks = config.briefingOwnBlocks;
@@ -2594,8 +2597,8 @@ export class Agent implements IAgent {
    * own token counts would misprice them at the run's `pricePerM`.
    *
    * It also carries the estimate of aborted calls — helpers (`_bookAbortedHelper`) and the
-   * run's own model calls ended by the guard, by a stop of the run or by the stream timeout,
-   * after the provider answered (`_bookStoppedCall`) — which are never debited.
+   * run's own model calls ended by the guard, by a stop of the run, by the stream timeout or by
+   * an error, after the provider answered (`_bookStoppedCall`) — which are never debited.
    */
   private _helperCostUsd = 0;
 
@@ -3848,7 +3851,7 @@ export class Agent implements IAgent {
         // the timeout, and the stop's booking below is skipped.
         const timedOut = err !== undefined && err === timeoutError;
         if (timedOut && issued) {
-          this._bookStoppedCall('agent.stream_timeout', processor?.partial(), request, { estimate: processor?.answered() === true });
+          this._bookEndedCall('agent.stream_timeout', processor, request);
         }
         // The run was stopped while this call was out — for example by the person, the
         // wall-clock backstop, a takeover of the run, an ended mandate, a workflow step's
@@ -3866,17 +3869,30 @@ export class Agent implements IAgent {
         //   wait below never reaches this catch, as no request of the next attempt was sent.
         if (signal?.aborted) {
           if (issued && !timedOut) {
-            this._bookStoppedCall('agent.user_abort', processor?.partial(), request, { estimate: processor?.answered() === true });
+            this._bookEndedCall('agent.user_abort', processor, request);
           }
           throw err;
         }
+        // Any other error after the provider answered (the stream delivered an event) ended a
+        // reply it had begun: for example an `error` event inside the stream (an overloaded
+        // provider), or a dropped connection. The provider bills the prompt and what it
+        // generated until then (assumed, not confirmed by the provider), so the attempt is
+        // booked like a stopped one: the bound to the run ceiling and the session cap, the
+        // estimate to the run's cost line, one count for this site (only the bound once its
+        // `turn_end` was handed on; see `_bookEndedCall`). Booked once per attempt, whether the decision below retries it (the next
+        // attempt is a new request with its own booking) or gives up. An error before any event
+        // (an HTTP 529, a refused connection) books nothing: no reply was generated. An answered
+        // stream was sent, and a timed-out attempt was booked above.
+        if (!timedOut) this._bookEndedCall('agent.stream_error', processor, request, { onlyIfAnswered: true });
         if (attempt < Agent.MAX_RETRIES && isRetryable(err)) {
           const delay = Agent.RETRY_BASE_MS * Math.pow(2, attempt);
           if (this.onStream) {
             const reason = err instanceof APIError
-              ? `${err.status ?? (err.error as { type?: string } | undefined)?.type ?? 'unknown'}: ${err.message}`
+              ? `${err.status ?? apiErrorType(err) ?? 'unknown'}: ${err.message}`
               : String(err);
-            await this.onStream({ type: 'retry', attempt: attempt + 1, maxAttempts: Agent.MAX_RETRIES + 1, delayMs: delay, reason, agent: this.name });
+            let afterTurnEnd = false;
+            try { afterTurnEnd = processor?.turnEnded() === true; } catch { /* reported as not ended */ }
+            await this.onStream({ type: 'retry', attempt: attempt + 1, maxAttempts: Agent.MAX_RETRIES + 1, delayMs: delay, reason, agent: this.name, afterTurnEnd });
           }
           await sleep(delay, signal);
           continue;
@@ -3904,8 +3920,46 @@ export class Agent implements IAgent {
   }
 
   /**
+   * Book a main-model call ended by its stream timeout, a stop of the run, or an error, from
+   * what its stream processor saw. One rule for the three:
+   * - Not answered (no event yet): the bound to the caps only; with `onlyIfAnswered`, nothing.
+   * - Answered, `turn_end` not handed on yet: the bound to the caps, the estimate to the run's
+   *   cost line, one count for the site.
+   * - Answered, `turn_end` handed on, and this agent's stream consumer counts its usage
+   *   (`turnEndUsageCounted`, set by Session): the bound to the caps only. The consumer has
+   *   already counted that turn's usage into the run's own, which the cost line and the tenant
+   *   debit are priced from, so an estimate would count the reply twice, and the call is no
+   *   longer one the tenant is not billed for. The caps take the bound alone: the run
+   *   ceiling's regular booking (`recordTurn`) runs only after a call returns, and the session
+   *   cap gets no turn usage. A consumer that does not count it (a spawned child's stream
+   *   drops `turn_end`) gets the estimate and the count, as before `turn_end`.
+   * Reading the processor cannot fail the call's own error: if it throws, the bound alone
+   * still goes to the caps.
+   */
+  private _bookEndedCall(
+    site: 'agent.user_abort' | 'agent.stream_timeout' | 'agent.stream_error',
+    processor: StreamProcessor | undefined,
+    request: unknown,
+    opts: { onlyIfAnswered?: boolean } = {},
+  ): void {
+    let partial: PartialReply | undefined;
+    let estimate: boolean;
+    try {
+      const answered = processor?.answered() === true;
+      if (opts.onlyIfAnswered === true && !answered) return;
+      estimate = answered && !(this.turnEndUsageCounted && processor?.turnEnded() === true);
+      partial = processor?.partial();
+    } catch {
+      partial = undefined;
+      estimate = false;
+    }
+    this._bookStoppedCall(site, partial, request, { estimate });
+  }
+
+  /**
    * Book a main-model call that was ended mid-stream — by the guard on a tool call written out
-   * as text, by a stop of the run, or by the per-call stream timeout — as an aborted call
+   * as text, by a stop of the run, by the per-call stream timeout, or by an error after the
+   * provider answered — as an aborted call
    * (aborted-call.ts): the run ceiling and the session cap get the upper bound, and the tenant
    * debit gets nothing. With
    * `estimate` (the provider answered), the run's cost line also gets the estimate and the
@@ -3914,7 +3968,7 @@ export class Agent implements IAgent {
    * request's size (the openai-compatible wire reports none before its last chunk).
    */
   private _bookStoppedCall(
-    site: 'agent.tool_call_imitation' | 'agent.user_abort' | 'agent.stream_timeout',
+    site: 'agent.tool_call_imitation' | 'agent.user_abort' | 'agent.stream_timeout' | 'agent.stream_error',
     partial: PartialReply | undefined,
     request: unknown,
     opts: { estimate: boolean },
@@ -5622,6 +5676,17 @@ export function safeToolNames(names: readonly string[]): string[] {
   return out;
 }
 
+/**
+ * The provider's error type of an SDK APIError: `err.type`, which the SDK sets from the body's
+ * `error.type`; else the body itself, `err.error.error.type` (the `{ type: 'error', error: {…} }`
+ * envelope), for an APIError built without the type argument.
+ */
+function apiErrorType(err: APIError): string | undefined {
+  if (typeof err.type === 'string') return err.type;
+  const inner = (err.error as { error?: { type?: unknown } } | undefined)?.error?.type;
+  return typeof inner === 'string' ? inner : undefined;
+}
+
 /** Exported for tests. */
 export function isRetryable(err: unknown): boolean {
   if (err instanceof APIError) {
@@ -5629,10 +5694,12 @@ export function isRetryable(err: unknown): boolean {
     if (err.status === 429 || err.status === 529 || (err.status !== undefined && err.status >= 500 && err.status < 600)) {
       return true;
     }
-    // SSE stream error events arrive with status=undefined — check the error body
-    // Shape: { type: "overloaded_error" | "rate_limit_error" | "api_error", message: string }
-    const body = err.error as { type?: string } | undefined;
-    if (body?.type === 'overloaded_error' || body?.type === 'rate_limit_error' || body?.type === 'api_error') {
+    // An `error` event inside the stream arrives with status undefined. The SDK's stream parser
+    // throws it as `new APIError(undefined, body, undefined, headers, body.error.type)`, where
+    // `body` is the whole event: `{ type: 'error', error: { type: 'overloaded_error', … } }`.
+    // The three transient types are retried like their HTTP twins (529, 429, 500).
+    const type = apiErrorType(err);
+    if (type === 'overloaded_error' || type === 'rate_limit_error' || type === 'api_error') {
       return true;
     }
     // Legacy AWS-style transient error names — kept as defense-in-depth for

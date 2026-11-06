@@ -20,6 +20,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
+import { markCall, trimToMark, type CallMark } from './stream-attempt.js';
 import { turnEndSettlesTools, promptCreatedAtMs, lostPromptRecheckVerdict, shouldArmRecheck } from './prompt-liveness.js';
 import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, anchorKnowledgeChips, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
@@ -149,6 +150,10 @@ export interface ChatMessage {
 	createdAt?: string;
 	/** @internal — tracks whether a tool call happened between text segments */
 	_toolSinceText?: boolean;
+	/** @internal — where the provider call now streaming began (see `stream-attempt.ts`). */
+	_callStart?: CallMark;
+	/** @internal — where the last call ended (`turn_end`); the next call's start once it streams. */
+	_callEnd?: CallMark;
 }
 
 export type { ToolCallInfo, SpawnProgress, SubAgentActivity } from './chat-attribution.js';
@@ -2029,6 +2034,18 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		void loadThreads();
 	}
 
+	// The main agent's call streams content: the first content of a run marks where its call
+	// began, and the first after a `turn_end` makes that end the start of the next call. A
+	// child's tool calls are not the main agent's call.
+	if (type === 'text' || type === 'thinking' || (type === 'tool_call' && !isChildEvent(data['subAgentId'], data['subAgent']))) {
+		if (msg._callEnd) {
+			msg._callStart = msg._callEnd;
+			msg._callEnd = undefined;
+		} else if (!msg._callStart) {
+			msg._callStart = markCall(msg);
+		}
+	}
+
 	switch (type) {
 		case 'text': {
 			const text = String(data['text'] ?? '');
@@ -2293,6 +2310,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		case 'turn_end': {
 			retryStatus = null;
+			if (msg._callEnd) msg._callStart = msg._callEnd;
+			msg._callEnd = markCall(msg);
 			// Recovery for a dropped/late `tool_result` event: if the agent has
 			// finished its turn the engine MUST have received every tool's
 			// result server-side (otherwise the model couldn't have produced
@@ -2533,6 +2552,15 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const attempt = data['attempt'] as number;
 			const maxAttempts = data['maxAttempts'] as number;
 			retryStatus = { attempt, maxAttempts };
+			// The call that failed is sent again: what it streamed is taken back out, so the
+			// answer does not show twice. The engine says whether the failed call had sent its
+			// own `turn_end` (`afterTurnEnd`): then the last end seen is that call's, and its
+			// start is `_callStart`. Otherwise a `turn_end` not yet followed by content was the
+			// previous call's, and the failed call, which streamed nothing, began there.
+			const start = data['afterTurnEnd'] === true ? msg._callStart : (msg._callEnd ?? msg._callStart);
+			if (start) trimToMark(msg, start);
+			msg._callStart = start ?? markCall(msg);
+			msg._callEnd = undefined;
 			break;
 		}
 		case 'error': {

@@ -212,7 +212,41 @@ function parentOwnCost(model: string, closing: boolean): number {
   return calculateCost(model, { input_tokens: closing ? 200 : 100, output_tokens: closing ? 50 : 20 });
 }
 
+/** A child reply that reaches its `message_delta` (so `turn_end` is handed on) and then stalls until its call is ended. */
+function stallingAfterTurnEnd(): Script {
+  return script([
+    { type: 'message_start', message: { usage: { ...usage } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Here is the whole list' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 30 } },
+  ], true);
+}
+
 describe('a spawned child whose own call is ended mid-stream', { timeout: 60_000 }, () => {
+  it('stopped after its turn_end: the child row still carries the estimate, as a child\'s stream does not count turn_end usage', async () => {
+    const { engine, session, debits } = await boot();
+    const seen = watchChild(session);
+    spawnReply();
+    const childCall = stallingAfterTurnEnd();
+    const turn = session.run('find the order list');
+    await waitFor(() => childCall.yielded === childCall.events.length);
+    const child = seen.child();
+    session.abort();
+    const err = await turn.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+
+    const estimate = child.getHelperCostUsd();
+    expect(child.costGuard.capOnlyUSD).toBeGreaterThan(0);
+    // The call's turn_end went out, but nothing counted its usage for the child: the estimate
+    // is the only place the call shows up, so it stays on the child's line.
+    expect(estimate).toBeGreaterThan(0);
+    expect(estimate).toBeLessThan(child.costGuard.capOnlyUSD);
+    const { parent, child: childRow } = rows(engine, session);
+    expect(childRow.cost_usd).toBeCloseTo(estimate, 12);
+    expect(debits.filter((d) => d.runId !== parent.id)).toEqual([]);
+  });
+
   it('stopped by the parent: the child row carries the estimate, the debit does not, the session cap holds only the reservation', async () => {
     const { engine, session, debits } = await boot();
     const seen = watchChild(session);
