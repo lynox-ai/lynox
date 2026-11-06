@@ -582,6 +582,23 @@ const MIGRATIONS: string[] = [
    INSERT OR IGNORE INTO schema_version (version) VALUES (19);
    ALTER TABLE inbox_thread_messages ADD COLUMN auto_reply INTEGER;
    COMMIT;`,
+
+  // v20: mails the inbox deferred (`InboundMailDeferred`), per account, as the watcher holds them
+  // for its next poll (`watch.ts`). In memory they were lost on a restart, and Gmail and Graph do
+  // not list a mail again. Keyed by Message-ID, the dedup key; the envelope as JSON. A row goes
+  // once its mail is marked seen, and with its account (ON DELETE CASCADE). One transaction and
+  // `IF NOT EXISTS`, as v18.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (20);
+   CREATE TABLE IF NOT EXISTS mail_deferred (
+     account_id TEXT NOT NULL,
+     message_id TEXT NOT NULL,
+     envelope TEXT NOT NULL,
+     held_at TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (account_id, message_id),
+     FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
+   );
+   COMMIT;`,
 ];
 
 export interface MailStateDbOptions {
@@ -1061,6 +1078,14 @@ export class MailStateDb {
         + `those are reserved for inbox_items polymorphic account ids.`,
       );
     }
+    // An update keeps the row, so its ON DELETE CASCADE does not run. Mails kept for the account
+    // (`mail_deferred`) belong to the mailbox it named: when the id now names another one, they go.
+    this.db
+      .prepare(
+        `DELETE FROM mail_deferred WHERE account_id = ? AND EXISTS (SELECT 1 FROM mail_accounts WHERE id = ?
+           AND (lower(address) <> lower(?) OR imap_host <> ? OR imap_port <> ? OR auth_type <> ?))`,
+      )
+      .run(account.id, account.id, account.address, account.imap.host, account.imap.port, account.authType);
     this.db
       .prepare(
         `INSERT INTO mail_accounts (id, display_name, address, preset, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, type, persona_prompt, auth_type, oauth_provider_key, is_default, created_at, updated_at)
@@ -1175,6 +1200,66 @@ export class MailStateDb {
 
   clearDeltaCursor(accountId: string, folder: string): void {
     this.db.prepare('DELETE FROM mail_delta_cursors WHERE account_id = ? AND folder = ?').run(accountId, folder);
+  }
+
+  // ── Deferred mails (the watcher's held mails, v20) ──────────────────────
+
+  /**
+   * Keep deferred mails across a restart, in order, up to `max` per account; beyond it the
+   * newest are not kept. A mail without a Message-ID is not kept (no key to release it by), nor
+   * one already kept, nor one of an account that has no row (removed, or never stored).
+   * Returns how many mails with a Message-ID of an existing account are not kept (the cap).
+   */
+  holdDeferredMail(accountId: string, envelopes: ReadonlyArray<MailEnvelope>, max: number): number {
+    const stmt = this.db.prepare(
+      `INSERT OR IGNORE INTO mail_deferred (account_id, message_id, envelope)
+       SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM mail_accounts WHERE id = ?)
+         AND (SELECT COUNT(*) FROM mail_deferred WHERE account_id = ?) < ?`,
+    );
+    const isKept = this.db.prepare<[string, string], ExistsRow>('SELECT 1 as c FROM mail_deferred WHERE account_id = ? AND message_id = ?');
+    return this.db.transaction(() => {
+      let notKept = 0;
+      for (const env of envelopes) {
+        if (!env.messageId) continue;
+        stmt.run(accountId, env.messageId, JSON.stringify(env), accountId, accountId, max);
+        if (isKept.get(accountId, env.messageId) === undefined) notKept++;
+      }
+      return this.getAccount(accountId) === null ? 0 : notKept;
+    })();
+  }
+
+  /**
+   * The account's kept deferred mails, oldest first. An IMAP uid holds across a restart and
+   * stays. Any other comes back as uid 0: a uid of Gmail or Graph names a message only within
+   * the process that listed it (`uidToGmailId`), and in a new one the same number can name
+   * another message. No provider gives out 0, so a read by it fails instead of reading the wrong
+   * message (on Graph that leaves a kept follow-up's auto-reply question unknown, and the hook
+   * reopens), and `getUidByMessageId` reads 0 as no uid. A row that does not parse is deleted.
+   */
+  deferredMail(accountId: string): MailEnvelope[] {
+    const rows = this.db
+      .prepare<[string], { message_id: string; envelope: string }>('SELECT message_id, envelope FROM mail_deferred WHERE account_id = ? ORDER BY rowid')
+      .all(accountId);
+    const stableUid = this.getAccount(accountId)?.authType === 'imap';
+    const out: MailEnvelope[] = [];
+    const drop = this.db.prepare('DELETE FROM mail_deferred WHERE account_id = ? AND message_id = ?');
+    for (const row of rows) {
+      try {
+        const env = JSON.parse(row.envelope) as MailEnvelope & { date: string };
+        out.push({ ...env, uid: stableUid ? env.uid : 0, date: new Date(env.date) });
+      } catch {
+        drop.run(accountId, row.message_id);
+      }
+    }
+    return out;
+  }
+
+  /** Forget the kept deferred mails among `envelopes`: they were handled or are known. */
+  releaseDeferredMail(accountId: string, envelopes: ReadonlyArray<MailEnvelope>): void {
+    const stmt = this.db.prepare('DELETE FROM mail_deferred WHERE account_id = ? AND message_id = ?');
+    this.db.transaction(() => {
+      for (const env of envelopes) if (env.messageId) stmt.run(accountId, env.messageId);
+    })();
   }
 
   // ── Follow-ups ──────────────────────────────────────────────────────────
