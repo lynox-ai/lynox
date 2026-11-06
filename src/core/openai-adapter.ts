@@ -434,6 +434,39 @@ async function* translateStream(
   // 0/0 tokens for those providers. Mistral attaches usage to the finish
   // chunk itself; both shapes are covered by deferring the emission.
   let finishStopReason: string | null = null;
+  // Whether the provider sent its `[DONE]`. Some send `finish_reason: null` on every chunk and end
+  // with `[DONE]` only (seen via OpenRouter); that is a complete reply. A stream with neither
+  // `[DONE]` nor a `finish_reason` was cut off and gets no terminal events.
+  let sawDone = false;
+
+  // Close the open blocks (text, reasoning, every tool call) at the end of the reply.
+  function* closeOpenBlocks(): Generator<BetaRawMessageStreamEvent> {
+    if (activeTextBlock) {
+      yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+      blockIndex++;
+      activeTextBlock = false;
+    }
+    // A reasoning-only turn (model spent the whole budget thinking and
+    // emitted no content) ends here with the thinking block still open.
+    if (activeThinkingBlock) {
+      yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+      blockIndex++;
+      activeThinkingBlock = false;
+    }
+    for (const [, bi] of toolBlockMap) {
+      yield { type: 'content_block_stop', index: bi } as BetaRawMessageStreamEvent;
+    }
+  }
+
+  // OpenAI/Mistral/Ollama spec uses 'length' for max-tokens-hit; the
+  // Anthropic stream-event spec uses 'max_tokens'. Without this map
+  // the downstream StreamProcessor treats 'length' as an unknown
+  // stop_reason and the calling Agent loop silently drops the
+  // truncated turn (no continuation, no user-visible error). T2-P1.
+  const translateFinish = (reason: string): string => (reason === 'tool_calls' ? 'tool_use'
+    : reason === 'stop' ? 'end_turn'
+    : reason === 'length' ? 'max_tokens'
+    : reason);
 
   try {
     while (true) {
@@ -447,7 +480,7 @@ async function* translateStream(
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
+        if (data === '[DONE]') { sawDone = true; continue; }
 
         let chunk: OpenAIStreamChunk;
         try { chunk = JSON.parse(data) as OpenAIStreamChunk; } catch { continue; }
@@ -613,32 +646,8 @@ async function* translateStream(
 
         // Finish
         if (choice.finish_reason) {
-          // Close any active blocks
-          if (activeTextBlock) {
-            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
-            blockIndex++;
-            activeTextBlock = false;
-          }
-          // A reasoning-only turn (model spent the whole budget thinking and
-          // emitted no content) ends here with the thinking block still open.
-          if (activeThinkingBlock) {
-            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
-            blockIndex++;
-            activeThinkingBlock = false;
-          }
-          for (const [, bi] of toolBlockMap) {
-            yield { type: 'content_block_stop', index: bi } as BetaRawMessageStreamEvent;
-          }
-
-          // OpenAI/Mistral/Ollama spec uses 'length' for max-tokens-hit; the
-          // Anthropic stream-event spec uses 'max_tokens'. Without this map
-          // the downstream StreamProcessor treats 'length' as an unknown
-          // stop_reason and the calling Agent loop silently drops the
-          // truncated turn (no continuation, no user-visible error). T2-P1.
-          finishStopReason = choice.finish_reason === 'tool_calls' ? 'tool_use'
-            : choice.finish_reason === 'stop' ? 'end_turn'
-            : choice.finish_reason === 'length' ? 'max_tokens'
-            : choice.finish_reason;
+          yield* closeOpenBlocks();
+          finishStopReason = translateFinish(choice.finish_reason);
         }
       }
     }
@@ -646,20 +655,34 @@ async function* translateStream(
     // A final `data:` frame with no trailing newline stays in `buffer` after
     // the read loop — for providers that end the stream right after the
     // trailing usage frame, that IS the usage. Flush it through the same
-    // usage parse (choices/content in a torn final frame are not recoverable).
+    // usage parse, and read its `finish_reason` (or a final `[DONE]`) so the reply is not taken
+    // for a cut-off one (its content deltas are not recovered).
     const tail = (buffer + decoder.decode()).trim();
     if (tail.startsWith('data: ')) {
       const data = tail.slice(6).trim();
-      if (data !== '[DONE]') {
-        try {
-          const chunk = JSON.parse(data) as OpenAIStreamChunk;
-          if (chunk.usage) {
-            totalInputTokens = chunk.usage.prompt_tokens ?? totalInputTokens;
-            totalOutputTokens = chunk.usage.completion_tokens ?? totalOutputTokens;
-            totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
-          }
-        } catch { /* torn frame — keep accumulated totals */ }
+      if (data === '[DONE]') {
+        sawDone = true;
+      } else {
+        let chunk: OpenAIStreamChunk | undefined;
+        try { chunk = JSON.parse(data) as OpenAIStreamChunk; } catch { /* torn frame — keep accumulated totals */ }
+        if (chunk?.usage) {
+          totalInputTokens = chunk.usage.prompt_tokens ?? totalInputTokens;
+          totalOutputTokens = chunk.usage.completion_tokens ?? totalOutputTokens;
+          totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
+        }
+        const tailFinish = Array.isArray(chunk?.choices) ? chunk.choices[0]?.finish_reason : undefined;
+        if (tailFinish && finishStopReason === null) {
+          yield* closeOpenBlocks();
+          finishStopReason = translateFinish(tailFinish);
+        }
       }
+    }
+
+    // `[DONE]` without any `finish_reason`: a complete reply whose provider never names a stop
+    // reason. It ended on a tool call if one was opened, else as a turn.
+    if (finishStopReason === null && sawDone) {
+      yield* closeOpenBlocks();
+      finishStopReason = toolBlockMap.size > 0 ? 'tool_use' : 'end_turn';
     }
 
     // Terminal events, deferred until all chunks (incl. a trailing usage-only

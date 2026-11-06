@@ -64,7 +64,7 @@ function truncated(res: ServerResponse): void {
 }
 
 /** A reply that reaches its `message_delta` (stop reason and final usage) and then closes the response, before `message_stop`. */
-function truncatedAfterTurnEnd(res: ServerResponse): void {
+function closedAfterStopReason(res: ServerResponse): void {
   begin(res);
   sse(res, 'content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'full answer' } });
   sse(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
@@ -72,13 +72,17 @@ function truncatedAfterTurnEnd(res: ServerResponse): void {
   res.end();
 }
 
-/** An openai-compatible chat-completions stream: a text piece, and, if `complete`, its finish_reason, a usage chunk and `[DONE]`. */
-function openaiReply(res: ServerResponse, text: string, complete: boolean): void {
+/**
+ * An openai-compatible chat-completions stream with a text piece, ended by `shape`: `finish` (a
+ * finish_reason, a usage chunk, `[DONE]`), `done-only` (finish_reason null throughout, usage, then
+ * `[DONE]`, as some providers send), or `cut` (the response just closes).
+ */
+function openaiReply(res: ServerResponse, text: string, shape: 'finish' | 'done-only' | 'cut'): void {
   const data = (d: unknown): void => { res.write(`data: ${typeof d === 'string' ? d : JSON.stringify(d)}\n\n`); };
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   data({ id: 'r', choices: [{ index: 0, delta: { content: text }, finish_reason: null }] });
-  if (complete) {
-    data({ id: 'r', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+  if (shape !== 'cut') {
+    data({ id: 'r', choices: [{ index: 0, delta: {}, finish_reason: shape === 'finish' ? 'stop' : null }] });
     data({ id: 'r', choices: [], usage: { prompt_tokens: 50, completion_tokens: 5 } });
     data('[DONE]');
   }
@@ -264,19 +268,15 @@ describe('a provider error inside the stream', () => {
   }, 10_000);
 });
 
-// A response the provider closes cleanly before its `message_stop` is a reply cut off, not a
+// A response the provider closes cleanly before any stop reason is a reply cut off, not a
 // finished one: neither the Anthropic SDK's stream nor the openai-compatible adapter reports it,
 // so the stream processor does, and the attempt is retried and booked like one ended by an error.
-describe('a stream that ends without message_stop', () => {
+// Once a stop reason arrived the reply is complete, even if `message_stop` never follows.
+describe('a stream that ends without a stop reason', () => {
   const seam = Agent as unknown as { RETRY_BASE_MS: number };
   let saved = 0;
   beforeAll(() => { saved = seam.RETRY_BASE_MS; seam.RETRY_BASE_MS = 1; });
   afterAll(() => { seam.RETRY_BASE_MS = saved; });
-
-  const bound = (agent: Agent): ReturnType<typeof abortedCallCost> => {
-    const inside = agent as unknown as Inside;
-    return abortedCallCost({ model: inside.model, maxTokens: inside.maxTokens, request: '', partial: { usage: PROMPT_USAGE, content: [] } });
-  };
 
   it('cut off after a text piece: retried with a second request, the run gets the second reply, the first attempt is booked', async () => {
     const { agent, hits, result, err, retryReasons, retryAfterTurnEnd, before } = await runAgainst((hit, res) => {
@@ -300,30 +300,19 @@ describe('a stream that ends without message_stop', () => {
     expectBooked(agent, before, 4);
   }, 10_000);
 
-  it('cut off after its turn_end, with a consumer that counts it (Session): retried, the bound to the caps only, no estimate, no count', async () => {
-    const { agent, hits, result, retryReasons, retryAfterTurnEnd, turnEnds, before } = await runAgainst((hit, res) => {
-      if (hit === 1) truncatedAfterTurnEnd(res); else reply(res, 'recovered');
-    }, { turnEndUsageCounted: true });
-    expect(result).toBe('recovered');
-    expect(hits).toBe(2);
-    expect(retryReasons).toHaveLength(1);
-    expect(retryAfterTurnEnd).toEqual([true]);
-    expect(turnEnds).toEqual([5, 5]);
-    expect(agent.getHelperCostUsd()).toBe(0);
-    expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
-    const inside = agent as unknown as Inside;
-    expect(inside.costGuard.capOnlyUSD).toBeCloseTo(bound(agent).upperBoundUsd, 12);
-    expect(inside.sessionCounters.costUSD).toBeCloseTo(bound(agent).upperBoundUsd, 12);
-  }, 10_000);
-
-  it('cut off after its turn_end, with a consumer that drops it (a spawned child): the estimate and the count', async () => {
-    const { agent, result, turnEnds, before } = await runAgainst((hit, res) => {
-      if (hit === 1) truncatedAfterTurnEnd(res); else reply(res, 'recovered');
-    });
-    expect(result).toBe('recovered');
-    expect(turnEnds).toEqual([5, 5]);
-    expectBooked(agent, before, 1);
-  }, 10_000);
+  for (const counted of [true, false]) {
+    it(`closed after its message_delta named a stop reason (${counted ? 'Session' : 'spawned child'} consumer): complete, one request, nothing booked as ended`, async () => {
+      const { agent, hits, result, err, retryReasons, turnEnds, before } = await runAgainst((_hit, res) => { closedAfterStopReason(res); }, { turnEndUsageCounted: counted });
+      expect(err).toBeUndefined();
+      expect(result).toBe('full answer');
+      expect(hits).toBe(1);
+      expect(retryReasons).toHaveLength(0);
+      expect(turnEnds).toEqual([5]);
+      expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
+      expect((agent as unknown as Inside).costGuard.capOnlyUSD).toBe(0);
+      expect(agent.getHelperCostUsd()).toBe(0);
+    }, 10_000);
+  }
 
   it('control: a complete Anthropic stream is one request, no retry, nothing booked as ended', async () => {
     const { agent, hits, result, retryReasons, before } = await runAgainst((_hit, res) => { reply(res, 'whole answer'); });
@@ -336,7 +325,7 @@ describe('a stream that ends without message_stop', () => {
   }, 10_000);
 
   it('control: a complete openai-compatible stream (finish_reason, usage chunk, [DONE]) is one request, no retry, nothing booked as ended', async () => {
-    const { agent, hits, result, retryReasons, turnEnds, before } = await runAgainst((_hit, res) => { openaiReply(res, 'whole answer', true); }, { wire: 'openai' });
+    const { agent, hits, result, retryReasons, turnEnds, before } = await runAgainst((_hit, res) => { openaiReply(res, 'whole answer', 'finish'); }, { wire: 'openai' });
     expect(result).toBe('whole answer');
     expect(hits).toBe(1);
     expect(retryReasons).toHaveLength(0);
@@ -346,9 +335,21 @@ describe('a stream that ends without message_stop', () => {
     expect(agent.getHelperCostUsd()).toBe(0);
   }, 10_000);
 
-  it('an openai-compatible stream closed before its finish_reason: retried, the second reply wins, the first attempt is booked', async () => {
+  it('an openai-compatible stream with finish_reason null throughout, ended by [DONE]: complete, one request, nothing booked as ended', async () => {
+    const { agent, hits, result, err, retryReasons, turnEnds, before } = await runAgainst((_hit, res) => { openaiReply(res, 'whole answer', 'done-only'); }, { wire: 'openai' });
+    expect(err).toBeUndefined();
+    expect(result).toBe('whole answer');
+    expect(hits).toBe(1);
+    expect(retryReasons).toHaveLength(0);
+    expect(turnEnds).toEqual([5]);
+    expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
+    expect((agent as unknown as Inside).costGuard.capOnlyUSD).toBe(0);
+    expect(agent.getHelperCostUsd()).toBe(0);
+  }, 10_000);
+
+  it('an openai-compatible stream closed before any finish_reason or [DONE]: retried, the second reply wins, the first attempt is booked', async () => {
     const { agent, hits, result, retryReasons, before } = await runAgainst((hit, res) => {
-      openaiReply(res, hit === 1 ? 'partial answer ' : 'recovered', hit !== 1);
+      openaiReply(res, hit === 1 ? 'partial answer ' : 'recovered', hit === 1 ? 'cut' : 'finish');
     }, { wire: 'openai' });
     expect(result).toBe('recovered');
     expect(hits).toBe(2);

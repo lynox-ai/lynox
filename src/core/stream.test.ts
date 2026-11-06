@@ -75,13 +75,13 @@ describe('StreamProcessor', () => {
       });
     });
 
-    it('emits it on block stop even when the stream never reports a stop reason', async () => {
-      // No `message_delta`, so `stop_reason` falls back to its 'end_turn'
-      // default — the shape the openai-compat adapter produces when a provider
-      // ends a tool-calling stream without a `finish_reason`. The UI renders
-      // follow-up chips off this event, and the agent loop skips its recovery
-      // call for exactly this shape, so the two must not both depend on the
-      // stop reason: the event is a property of the BLOCK closing.
+    it('emits it on block stop, not on the stop reason the reply ends with', async () => {
+      // No `message_delta`, only `message_stop`, so `stop_reason` keeps its
+      // 'end_turn' default although the reply is a tool call. The UI renders
+      // follow-up chips off this event, and the agent loop reads the content,
+      // not only the stop reason, before its recovery call, so the two must not
+      // both depend on the stop reason: the event is a property of the BLOCK
+      // closing.
       const { proc, collected } = createProcessor();
 
       const result = await proc.process(mockStream([
@@ -328,11 +328,20 @@ describe('StreamProcessor on a stream that ends without message_stop', () => {
     expect(proc.partial().content[0]).toMatchObject({ type: 'text', text: 'Hello' });
   });
 
-  it('throws StreamIncompleteError after its message_delta too, with turn_end handed on', async () => {
+  it('after a message_delta that named a stop reason: returns the reply, with turn_end handed on', async () => {
     const { proc, collected } = createProcessor();
-    await expect(proc.process(cutStream([...text(), ...turnEnd]) as AsyncIterable<never>)).rejects.toBeInstanceOf(StreamIncompleteError);
+    const result = await proc.process(cutStream([...text(), ...turnEnd]) as AsyncIterable<never>);
+    expect(result.stop_reason).toBe('end_turn');
+    expect(result.content[0]).toMatchObject({ type: 'text', text: 'Hello' });
     expect(proc.turnEnded()).toBe(true);
     expect(collected.filter((e) => e.type === 'turn_end')).toHaveLength(1);
+  });
+
+  it('throws StreamIncompleteError after a message_delta without a stop reason', async () => {
+    const { proc } = createProcessor();
+    const noReason = { type: 'message_delta', delta: { stop_reason: null }, usage: { output_tokens: 5 } };
+    await expect(proc.process(cutStream([...text(), noReason]) as AsyncIterable<never>)).rejects.toBeInstanceOf(StreamIncompleteError);
+    expect(proc.turnEnded()).toBe(false);
   });
 
   it('control: the same stream with its message_stop returns the reply', async () => {

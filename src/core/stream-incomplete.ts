@@ -1,9 +1,9 @@
 /**
- * A reply stream that ended without its `message_stop`: the provider closed the response cleanly
- * after part of the reply, so what arrived is not the whole answer. Neither stream object reports
- * this on its own: the Anthropic SDK's `BetaMessageStream` ends normally on any stream that began
- * with `message_start`, and the openai-compatible adapter emits `message_stop` only after a
- * `finish_reason` arrived. Thrown by `StreamProcessor.process`, it is transient: the Agent retries
+ * A reply stream that ended without a stop reason (no `message_delta` naming one, no
+ * `message_stop`): the provider closed the response cleanly after part of the reply, so what
+ * arrived is not the whole answer. Neither stream object reports this on its own: the Anthropic
+ * SDK's `BetaMessageStream` ends normally on any stream that began with `message_start`, and the
+ * openai-compatible adapter emits its terminal events only after a `finish_reason` or `[DONE]`. Thrown by `StreamProcessor.process`, it is transient: the Agent retries
  * the call and books the ended attempt like one ended by an error inside the stream.
  *
  * Its own module, so that a test replacing the stream processor (`vi.mock('./stream.js')`) leaves
@@ -11,7 +11,7 @@
  */
 export class StreamIncompleteError extends Error {
   constructor() {
-    super('stream ended without message_stop: the reply is incomplete');
+    super('stream ended without a stop reason: the reply is incomplete');
     this.name = 'StreamIncompleteError';
   }
 }

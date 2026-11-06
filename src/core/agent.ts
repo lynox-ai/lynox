@@ -2895,10 +2895,11 @@ export class Agent implements IAgent {
       // points at the tool_result and the reply drops out of the estimate.
       const msgCountBeforeRecovery = this.messages.length;
       if (response.stop_reason === 'end_turn') {
-        // Read the CONTENT, not just the stop reason: the OpenAI-compat adapter
-        // defaults `stop_reason` to 'end_turn' when a stream ends without a
-        // `finish_reason`, so a turn that DID call the tool can otherwise pay for
-        // a second forced call and persist a duplicate chip pair.
+        // Read the CONTENT, not just the stop reason: the stop reason is the
+        // provider's own label (an openai-compatible one is translated from its
+        // `finish_reason`) and need not say `tool_use` when the tool was called,
+        // so a turn that DID call the tool could otherwise pay for a second
+        // forced call and persist a duplicate chip pair.
         if (response.content.some(
           (b) => b.type === 'tool_use' && b.name === FOLLOW_UP_TOOL_NAME,
         )) this._sawFollowUpCall = true;
@@ -3876,7 +3877,7 @@ export class Agent implements IAgent {
         }
         // Any other error after the provider answered (the stream delivered an event) ended a
         // reply it had begun: for example an `error` event inside the stream (an overloaded
-        // provider), a dropped connection, or a response closed before its `message_stop`. The provider bills the prompt and what it
+        // provider), a dropped connection, or a response closed before any stop reason. The provider bills the prompt and what it
         // generated until then (assumed, not confirmed by the provider), so the attempt is
         // booked like a stopped one: the bound to the run ceiling and the session cap, the
         // estimate to the run's cost line, one count for this site (only the bound once its
@@ -5690,7 +5691,7 @@ function apiErrorType(err: APIError): string | undefined {
 
 /** Exported for tests. */
 export function isRetryable(err: unknown): boolean {
-  // A reply the provider cut off by closing the stream before its `message_stop`, on either wire.
+  // A reply the provider cut off by closing the stream before any stop reason, on either wire.
   if (err instanceof StreamIncompleteError) return true;
   if (err instanceof APIError) {
     // HTTP status-based: 429 rate limit, 529 overloaded, 500+ server errors

@@ -6,6 +6,7 @@ import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessag
 import { modelCapability } from '../types/models.js';
 import { setDataDir } from './config.js';
 import { StreamProcessor } from './stream.js';
+import { StreamIncompleteError } from './stream-incomplete.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type {
   BetaRawMessageStreamEvent,
@@ -2120,11 +2121,11 @@ describe('OpenAIAdapter — a truncated stream must not assemble into a plausibl
     // `finalMessage()` returned partial content with `stop_reason: 'end_turn'` and usage 0/0 —
     // indistinguishable from a short, cheap, successful call. `process-capture.ts` debits from
     // that usage, so it recorded a real API call as costing nothing and accepted the truncated
-    // extraction as the answer.
+    // extraction as the answer. (A stream that ends with `[DONE]` is a complete reply even
+    // without a finish_reason: some providers never send one. This one sends neither.)
     const server = await createMockServer((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       res.write(sseChunk({ id: 't-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Half a th' }, finish_reason: null }] }));
-      res.write('data: [DONE]\n\n');
       res.end();
     });
     try {
@@ -2137,5 +2138,83 @@ describe('OpenAIAdapter — a truncated stream must not assemble into a plausibl
     } finally {
       server.close();
     }
+  });
+});
+
+// The adapter emits its terminal events (`message_delta` + `message_stop`) for a reply that
+// ended: one with a `finish_reason`, wherever it arrives, or one the provider closed with `[DONE]`
+// without ever naming a reason (seen via OpenRouter). A stream with neither was cut off and gets
+// none, which the stream processor reports as an incomplete reply.
+describe('OpenAIAdapter terminal events', () => {
+  async function eventsFor(write: (res: ServerResponse) => void): Promise<BetaRawMessageStreamEvent[]> {
+    const server = await createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      write(res);
+    });
+    try {
+      const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model' });
+      return await collectEvents(adapter.beta.messages.stream({ model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }] }));
+    } finally {
+      server.close();
+    }
+  }
+  const text = (content: string): string => sseChunk({ id: 't', choices: [{ index: 0, delta: { content }, finish_reason: null }] });
+  const stopOf = (events: BetaRawMessageStreamEvent[]): string | null | undefined =>
+    (events.find((e) => e.type === 'message_delta') as { delta: { stop_reason: string | null } } | undefined)?.delta.stop_reason;
+
+  it('finish_reason null on every chunk, then [DONE]: the text block is closed, end_turn with the usage, message_stop last', async () => {
+    const events = await eventsFor((res) => {
+      res.write(text('whole answer'));
+      res.write(sseChunk({ id: 't', choices: [{ index: 0, delta: {}, finish_reason: null }], usage: { prompt_tokens: 50, completion_tokens: 5 } }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    expect(events.map((e) => e.type)).toEqual(['message_start', 'content_block_start', 'content_block_delta', 'content_block_stop', 'message_delta', 'message_stop']);
+    expect(stopOf(events)).toBe('end_turn');
+    const usage = (events.find((e) => e.type === 'message_delta') as { usage: { input_tokens: number; output_tokens: number } }).usage;
+    expect(usage).toMatchObject({ input_tokens: 50, output_tokens: 5 });
+  });
+
+  it('a tool call with finish_reason null, then [DONE]: the tool block is closed and the reply ends on tool_use', async () => {
+    const events = await eventsFor((res) => {
+      res.write(sseChunk({ id: 't', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Bern"}' } }] }, finish_reason: null }] }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    const types = events.map((e) => e.type);
+    expect(types.slice(-3)).toEqual(['content_block_stop', 'message_delta', 'message_stop']);
+    expect(stopOf(events)).toBe('tool_use');
+  });
+
+  it('a final [DONE] frame with no trailing newline still ends the reply', async () => {
+    const events = await eventsFor((res) => {
+      res.write(text('whole answer'));
+      res.end('data: [DONE]');
+    });
+    expect(events.map((e) => e.type).slice(-2)).toEqual(['message_delta', 'message_stop']);
+    expect(stopOf(events)).toBe('end_turn');
+  });
+
+  it('a finish_reason in a final frame with no trailing newline ends the reply with that reason and its usage', async () => {
+    const events = await eventsFor((res) => {
+      res.write(text('whole answer'));
+      res.end(`data: ${JSON.stringify({ id: 't', choices: [{ index: 0, delta: {}, finish_reason: 'length' }], usage: { prompt_tokens: 11, completion_tokens: 3 } })}`);
+    });
+    expect(events.map((e) => e.type).slice(-3)).toEqual(['content_block_stop', 'message_delta', 'message_stop']);
+    expect(stopOf(events)).toBe('max_tokens');
+    const usage = (events.find((e) => e.type === 'message_delta') as { usage: { input_tokens: number; output_tokens: number } }).usage;
+    expect(usage).toMatchObject({ input_tokens: 11, output_tokens: 3 });
+  });
+
+  it('neither finish_reason nor [DONE]: no terminal events, and the stream processor reports the reply incomplete', async () => {
+    const events = await eventsFor((res) => {
+      res.write(text('partial answer'));
+      res.end();
+    });
+    const types = events.map((e) => e.type);
+    expect(types).not.toContain('message_delta');
+    expect(types).not.toContain('message_stop');
+    async function* replay(): AsyncGenerator<BetaRawMessageStreamEvent> { for (const e of events) yield e; }
+    await expect(new StreamProcessor(async () => { /* no-op */ }, 'test-agent').process(replay())).rejects.toBeInstanceOf(StreamIncompleteError);
   });
 });

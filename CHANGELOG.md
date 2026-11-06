@@ -4,6 +4,9 @@
 
 ### Upgrade notes
 
+- `StreamProcessor.process` now throws `StreamIncompleteError` when a stream ends
+  before any stop reason (no `message_delta` naming one, no `message_stop`), instead
+  of returning the partial reply as finished. The Agent retries such a call.
 - `IAgent` has a new required member, `chargeExternalCapOnlyCost(usd)`. It books a
   spawned sub-agent's upper bounds of ended calls against the delegating run's cost
   ceiling only. An `IAgent` implementation outside this repository has to add it.
