@@ -73,6 +73,35 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput(`Hier der Key:\n\n${hexKey(32)}`)).toBe('credential after a cue word');
   });
 
+  it('rule 3: a hex key whose characters spread less than a letters-and-digits key does', () => {
+    // Eight symbols, evenly: 3 bits, under the 3.3 a key of letters and digits needs.
+    const key = 'aabbccdd11223344'.repeat(2);
+    expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Passwort: ${key.slice(0, 16)}`)).toBe('password');
+    // Five symbols, evenly: 2.3 bits, too little spread even for hex.
+    expect(mandateCredentialInput(`Der Token lautet ${'aaaabbbb11112222cccc'}`)).toBeNull();
+    // The lower floor is for hex only: the same spread in letters beyond hex does not count.
+    expect(mandateCredentialInput(`Der Token lautet ${'gghhkkmm11223344'.repeat(2)}`)).toBeNull();
+  });
+
+  it('rule 3: a key of letters alone, with capitals side by side as in a random key', () => {
+    const key = ['XqLMpzRT', 'vbNcKDwf', 'HjSAyueG'].join('');
+    expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
+    // One case only: no key of letters alone.
+    expect(mandateCredentialInput(`Der Token lautet ${key.toUpperCase()}`)).toBeNull();
+    expect(mandateCredentialInput(`Der Token lautet ${key.toLowerCase()}`)).toBeNull();
+    // Capitals paired, but the case changes too rarely: a name ending in acronyms.
+    expect(mandateCredentialInput('Der Key steht in MailboxNotEnabledForRESTAPI')).toBeNull();
+    // Case changing and capitals paired, but a repeated pattern.
+    expect(mandateCredentialInput(`Der Token lautet ${'ABab'.repeat(5)}`)).toBeNull();
+  });
+
+  it('caught though not a key: a camel-case name with two acronyms after a cue word', () => {
+    expect(mandateCredentialInput('Der Key kommt aus getOpenAIModelMap')).toBe('credential after a cue word');
+    // With its capitals apart, a camel-case name passes.
+    expect(mandateCredentialInput('Der Key kommt aus loadVaultKeyFromDotEnv')).toBeNull();
+  });
+
   it('rule 3, password: plainly the value after a password cue', () => {
     expect(mandateCredentialInput('Das Passwort ist Sommer2026!Shop')).toBe('password');
     expect(mandateCredentialInput('Passwort lautet: Wald#Haus77')).toBe('password');
@@ -188,6 +217,9 @@ describe('mandateCredentialInput', () => {
     'Passwort-Hinweis: steht im Ordner',
     'Bitte Kennwort-Hinweis lesen',
     'Password-Manager: 1Password',
+    'Der Token kommt aus vaultKeyForAccount',
+    'Das Secret steht in isAdminOnlySecret',
+    'StrictHostKeyChecking ist aus, der Key liegt im Agent',
   ];
   it.each(ORDINARY)('passes an ordinary message: %s', (text) => {
     expect(mandateCredentialInput(text)).toBeNull();
@@ -203,9 +235,11 @@ describe('mandateCredentialInput', () => {
 describe('mandateCredentialInput — rate pinned', () => {
   const N = 4000;
   const SHAPES: Array<[string, number, string, number, number]> = [
-    ['32 hex', 32, HEX, 37, 104],
-    ['40 hex', 40, HEX, 0, 16],
-    ['24 alnum', 24, ALNUM, 34, 100],
+    // Measured: 0 of 100 000 for both hex shapes, 218 of 100 000 for 24 alnum (letters alone
+    // whose capitals do not pair). The band floor stays at 0 where the rate is that low.
+    ['32 hex', 32, HEX, 0, 0],
+    ['40 hex', 40, HEX, 0, 0],
+    ['24 alnum', 24, ALNUM, 0, 21],
   ];
   it.each(SHAPES)('a key of %s after a cue word: the count let through stays in its measured band', (name, n, alphabet, low, high) => {
     const draw = seeded(`mandate-key-rate:${name}`);
