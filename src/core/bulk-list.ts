@@ -24,7 +24,7 @@ import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { LIST_QUERY_MAX } from '../tools/permission-guard.js';
 import {
-  SHOPIFY_ALT_MAX_CHARS, SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS,
+  SHOPIFY_ALT_MAX_CHARS, SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS,
   isShopifyAltLength, isShopifyFilterValue, isShopifyFilterValues, isShopifyListFilters, isShopifyStoreHostName, shopifyFilterListRefusal, shopifyFilterRefusal,
   type ShopifyListFilterValue, type ShopifyWriteForm,
 } from './shopify-graphql.js';
@@ -281,11 +281,11 @@ function parseShopifyFilters(raw: unknown, scan: (text: string) => string | null
     // One value, or a list of them taken as written, in the planner's order: never folded to one
     // value, never deduplicated, never trimmed — a list the rule refuses is refused whole.
     if (Array.isArray(value)) {
-      if (value.length < 2 || value.length > SHOPIFY_LIST_FILTER_MAX_VALUES) throw new BulkSourceError(shopifyFilterListRefusal(key));
       for (const v of value) {
         if (!isShopifyFilterValue(v)) throw new BulkSourceError(shopifyFilterRefusal(key));
         if (scan(v) !== null) throw new BulkSourceError(`source_list.filters.${key} holds something that looks like a credential.`);
       }
+      // Its size and its duplicates: after each value, so a refused value is named as such.
       if (!isShopifyFilterValues(value)) throw new BulkSourceError(shopifyFilterListRefusal(key));
       filters[key] = [...(value as string[])];
       continue;
