@@ -126,6 +126,22 @@ describe('a provider call the engine retries', () => {
 		expect(msg?.content).not.toContain('Now mailing.');
 	});
 
+	it('a call that ends its turn with no content and then fails keeps the earlier call\'s text and chip', async () => {
+		const { send } = await startRun();
+		await send('text', { text: 'Looking it up.' });
+		await send('tool_call', { name: 'lookup_orders', input: {} });
+		await send('turn_end', { stop_reason: 'tool_use', usage: { input_tokens: 1, output_tokens: 1 } });
+		await send('tool_result', { name: 'lookup_orders', result: '3 orders' });
+		// The next call ends its turn without streaming anything, then fails.
+		await send('turn_end', { stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 0 } });
+		await send('retry', { ...retry, afterTurnEnd: true });
+		await send('text', { text: 'Found 3 orders.' });
+		const msg = reply();
+		expect(msg?.toolCalls?.map((c) => c.name)).toEqual(['lookup_orders']);
+		expect(msg?.content).toBe('Looking it up.\n\nFound 3 orders.');
+		expect(msg?.blocks?.map((b) => b.type)).toEqual(['text', 'tool_call', 'text']);
+	});
+
 	it('a second retry of the same call takes out only that attempt', async () => {
 		const { send } = await startRun();
 		await send('text', { text: 'first try' });

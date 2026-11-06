@@ -2310,6 +2310,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		case 'turn_end': {
 			retryStatus = null;
+			if (msg._callEnd) msg._callStart = msg._callEnd;
 			msg._callEnd = markCall(msg);
 			// Recovery for a dropped/late `tool_result` event: if the agent has
 			// finished its turn the engine MUST have received every tool's
