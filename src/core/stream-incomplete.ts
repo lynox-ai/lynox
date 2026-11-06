@@ -11,8 +11,11 @@
  * the Agent's retry decision able to recognise it.
  */
 export class StreamIncompleteError extends Error {
+  /** Stable code the run stream's terminal `error` event carries for this failure; the Web UI names it from the code, never from the message. */
+  static readonly CODE = 'stream_incomplete';
+
   constructor() {
-    super('stream ended without a stop reason: the reply is incomplete');
+    super('the AI service ended the reply before it was finished');
     this.name = 'StreamIncompleteError';
   }
 }
