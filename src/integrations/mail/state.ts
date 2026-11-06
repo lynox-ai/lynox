@@ -1083,7 +1083,7 @@ export class MailStateDb {
     this.db
       .prepare(
         `DELETE FROM mail_deferred WHERE account_id = ? AND EXISTS (SELECT 1 FROM mail_accounts WHERE id = ?
-           AND (address <> ? OR imap_host <> ? OR imap_port <> ? OR auth_type <> ?))`,
+           AND (lower(address) <> lower(?) OR imap_host <> ? OR imap_port <> ? OR auth_type <> ?))`,
       )
       .run(account.id, account.id, account.address, account.imap.host, account.imap.port, account.authType);
     this.db

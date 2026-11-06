@@ -1143,6 +1143,8 @@ describe('MailStateDb — deferred mails kept across a restart (v20)', () => {
     db.holdDeferredMail('gm-a', [env(1, '<1@x>')], 500);
     db.upsertAccount({ ...ACCOUNT, displayName: 'renamed' });
     expect(db.deferredMail('gm-a'), 'a new display name is the same mailbox').toHaveLength(1);
+    db.upsertAccount({ ...ACCOUNT, address: 'A@Example.org' });
+    expect(db.deferredMail('gm-a'), 'the address in other case is the same mailbox').toHaveLength(1);
     db.upsertAccount({ ...ACCOUNT, address: 'other@example.org' });
     expect(db.deferredMail('gm-a')).toEqual([]);
     for (const change of [{ imap: { host: 'h2', port: 0, secure: true } }, { imap: { host: '', port: 993, secure: true } }, { authType: 'imap' as const }]) {
