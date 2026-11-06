@@ -274,6 +274,8 @@ describe('a spawned child whose own call is ended mid-stream', { timeout: 60_000
     expect(usageLine?.costUsd).toBeCloseTo(own, 12);
     expect(usageLine?.spawnCostUsd).toBeCloseTo(estimate, 12);
     expect((usageLine?.costUsd ?? 0) + (usageLine?.spawnCostUsd ?? 0)).toBeCloseTo(own + estimate, 12);
+    // The status bar's daily cost sums the rows: parent own + child (own 0 here) + E, each once.
+    expect(engine.getRunHistory()!.getCostByDay(1)[0]?.cost_usd).toBeCloseTo(own + estimate, 12);
     expect(debits.filter((d) => d.runId === parent.id).map((d) => d.usd)).toEqual([own]);
     expect(debits.filter((d) => d.runId !== parent.id)).toEqual([]);
     expect(child.sessionCounters.costUSD).toBeCloseTo(reservation, 12);
@@ -331,6 +333,8 @@ describe('a spawned child whose own call is ended mid-stream', { timeout: 60_000
     expect(childRow.cost_usd).toBeCloseTo(own + estimate, 12);
     const parentOwn = parentOwnCost(parent.model_id, false);
     expect(parent.cost_usd).toBeCloseTo(parentOwn, 12);
+    // The status bar's daily cost sums the rows: each of parent own, child own and E once.
+    expect(engine.getRunHistory()!.getCostByDay(1)[0]?.cost_usd).toBeCloseTo(parentOwn + own + estimate, 12);
     // The debit: the parent's own call and the child's own finished call, no estimate.
     expect(debits.filter((d) => d.runId === parent.id).map((d) => d.usd)).toEqual([parentOwn]);
     const childDebits = debits.filter((d) => d.runId !== parent.id).map((d) => d.usd);
