@@ -1,10 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 import { StreamProcessor } from './stream.js';
 import { ToolCallImitationDetector } from './tool-call-imitation.js';
+import { StreamIncompleteError } from './stream-incomplete.js';
 import type { PartialReply } from './stream.js';
 import type { StreamEvent } from '../types/index.js';
 
+/** A complete stream: `events`, then the `message_stop` that ends every complete reply (added when missing). */
 async function* mockStream(events: Array<Record<string, unknown>>) {
+  yield* cutStream(events);
+  if (events.at(-1)?.['type'] !== 'message_stop') yield { type: 'message_stop' };
+}
+
+/** A stream of exactly `events`: one that ends without `message_stop` is a reply cut off. */
+async function* cutStream(events: Array<Record<string, unknown>>) {
   for (const e of events) {
     yield e;
   }
@@ -296,6 +304,42 @@ describe('StreamProcessor', () => {
 
       expect(result.content[0]).toMatchObject({ type: 'tool_use', input: {} });
     });
+  });
+});
+
+describe('StreamProcessor on a stream that ends without message_stop', () => {
+  const start = { type: 'message_start', message: { usage: { input_tokens: 10, output_tokens: 0, cache_creation: null, cache_creation_input_tokens: null, cache_read_input_tokens: null, inference_geo: null, iterations: null, server_tool_use: null, service_tier: null, speed: null } } };
+  // Built fresh per test: the processor appends to the streamed block object in place.
+  const text = (): Array<Record<string, unknown>> => [
+    start,
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } },
+  ];
+  const turnEnd = [
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } },
+  ];
+
+  it('throws StreamIncompleteError after a text piece, with the partial still readable and the stream answered', async () => {
+    const { proc } = createProcessor();
+    await expect(proc.process(cutStream(text()) as AsyncIterable<never>)).rejects.toBeInstanceOf(StreamIncompleteError);
+    expect(proc.answered()).toBe(true);
+    expect(proc.turnEnded()).toBe(false);
+    expect(proc.partial().content[0]).toMatchObject({ type: 'text', text: 'Hello' });
+  });
+
+  it('throws StreamIncompleteError after its message_delta too, with turn_end handed on', async () => {
+    const { proc, collected } = createProcessor();
+    await expect(proc.process(cutStream([...text(), ...turnEnd]) as AsyncIterable<never>)).rejects.toBeInstanceOf(StreamIncompleteError);
+    expect(proc.turnEnded()).toBe(true);
+    expect(collected.filter((e) => e.type === 'turn_end')).toHaveLength(1);
+  });
+
+  it('control: the same stream with its message_stop returns the reply', async () => {
+    const { proc } = createProcessor();
+    const result = await proc.process(cutStream([...text(), ...turnEnd, { type: 'message_stop' }]) as AsyncIterable<never>);
+    expect(result.content[0]).toMatchObject({ type: 'text', text: 'Hello' });
+    expect(result.stop_reason).toBe('end_turn');
   });
 });
 

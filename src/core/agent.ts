@@ -32,6 +32,7 @@ import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, g
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor, type PartialReply } from './stream.js';
+import { StreamIncompleteError } from './stream-incomplete.js';
 import { ToolCallImitationDetector, imitationToolsFrom } from './tool-call-imitation.js';
 import { CostGuard } from './cost-guard.js';
 import { classifyProviderFailure, type RunFailure } from './provider-failure.js';
@@ -3875,7 +3876,7 @@ export class Agent implements IAgent {
         }
         // Any other error after the provider answered (the stream delivered an event) ended a
         // reply it had begun: for example an `error` event inside the stream (an overloaded
-        // provider), or a dropped connection. The provider bills the prompt and what it
+        // provider), a dropped connection, or a response closed before its `message_stop`. The provider bills the prompt and what it
         // generated until then (assumed, not confirmed by the provider), so the attempt is
         // booked like a stopped one: the bound to the run ceiling and the session cap, the
         // estimate to the run's cost line, one count for this site (only the bound once its
@@ -5689,6 +5690,8 @@ function apiErrorType(err: APIError): string | undefined {
 
 /** Exported for tests. */
 export function isRetryable(err: unknown): boolean {
+  // A reply the provider cut off by closing the stream before its `message_stop`, on either wire.
+  if (err instanceof StreamIncompleteError) return true;
   if (err instanceof APIError) {
     // HTTP status-based: 429 rate limit, 529 overloaded, 500+ server errors
     if (err.status === 429 || err.status === 529 || (err.status !== undefined && err.status >= 500 && err.status < 600)) {
@@ -5697,14 +5700,15 @@ export function isRetryable(err: unknown): boolean {
     // An `error` event inside the stream arrives with status undefined. The SDK's stream parser
     // throws it as `new APIError(undefined, body, undefined, headers, body.error.type)`, where
     // `body` is the whole event: `{ type: 'error', error: { type: 'overloaded_error', … } }`.
-    // When the provider names a type, the type alone decides: the three transient types are
-    // retried like their HTTP twins (529, 429, 500), every other type is not. `err.message`
+    // When the provider names a type, the type alone decides: the four transient types are
+    // retried like their HTTP twins (529, 429, 500, 504), every other type is not. `err.message`
     // then carries the provider's own text (the whole event as JSON), which may contain any
     // word — "ECONNRESET", "ThrottlingException" — and must not turn a deterministic error
     // into a paid replay; so none of the text checks below read a typed error.
     const type = apiErrorType(err);
     if (type !== undefined) {
-      return type === 'overloaded_error' || type === 'rate_limit_error' || type === 'api_error';
+      // `timeout_error` is the in-stream twin of an HTTP 504 (SDK 0.98.0 `resources/shared.d.ts:19` lists it).
+      return type === 'overloaded_error' || type === 'rate_limit_error' || type === 'api_error' || type === 'timeout_error';
     }
     // From here: an APIError without a provider type — an HTTP error whose body is not the
     // provider's envelope (a gateway or proxy in front of it), or the SDK's connection error.
