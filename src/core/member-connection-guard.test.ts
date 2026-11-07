@@ -45,6 +45,9 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/http.ts|return { inputs: oauthRenewalInputs(profile, stores.secretStore.resolve(slot)), ms };': 'hashed into a hold key after a renewal that went through; not sent',
   // Existence and fingerprint compares: the value decides a boolean, it is not sent or shown.
   'tools/builtin/api-setup.ts|if (store.resolve(name) !== null) left.push(name);': 'existence after delete, before a save',
+  // Raw on purpose: any token in a slot, a member's included, keeps the "not connected" line out;
+  // read through the view, a member's connection would read as not connected to the owner.
+  'tools/builtin/api-setup.ts|if (slots.some((name) => store.resolve(name) !== null)) return \'\';': 'view: existence of a token decides whether "not connected" is said',
   'core/api-store.ts|return secretStore?.resolve(k) ?? null;': 'delete purge: fingerprint compare',
   'core/api-store.ts|value = secretStore?.resolve(w.name) ?? null;': 'delete refusal: fingerprint compare',
   'core/engine.ts|read: (name, hash) => fingerprintStore.fingerprint(name, hash),': 'boot grant backfill: a digest into the grant record',
