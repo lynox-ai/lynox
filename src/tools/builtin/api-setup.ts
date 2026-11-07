@@ -194,14 +194,14 @@ function presetApiVersionError(preset: ReturnType<typeof OAUTH_PRESETS.get>, bas
   if (preset === undefined || pinned === undefined) return null;
   let path: string;
   try {
-    path = new URL(baseUrl).pathname;
+    // Read as a server that joins slashes reads it: `/admin//api//2024-01` names 2024-01 too.
+    path = new URL(baseUrl).pathname.replace(/\/{2,}/g, '/');
   } catch {
     return null;
   }
   const versionsAt = `${preset.apiPathPrefix ?? '/'}api/`;
   if (!path.startsWith(versionsAt)) return null;
-  // The first non-empty segment: `/admin/api//2024-01` names 2024-01 to a server that joins slashes.
-  const named = path.slice(versionsAt.length).split('/').find((segment) => segment !== '') ?? '';
+  const named = path.slice(versionsAt.length).split('/')[0] ?? '';
   if (named === '' || named === pinned) return null;
   return `Invalid base_url: a profile on the built-in "${preset.id}" provider uses its API version ${pinned}, the one this engine's own requests name. End base_url in ${versionsAt}${pinned}.`;
 }

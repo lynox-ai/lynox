@@ -129,6 +129,7 @@ describe('api_setup: a store profile is saved on the API version its provider pi
     ['an old version with a path behind it', 'https://acme.myshopify.com/admin/api/2024-01/graphql.json'],
     ['a version name other than the pin', 'https://acme.myshopify.com/admin/api/unstable'],
     ['an old version behind a doubled slash', 'https://acme.myshopify.com/admin/api//2024-01'],
+    ['an old version behind doubled slashes before api/', 'https://acme.myshopify.com//admin//api/2024-01'],
   ])('refuses %s on create, asks nobody and stores nothing', async (_label, baseUrl) => {
     const store = new ApiStore();
     const { result, asked } = await save(store, 'create', storeProfile(baseUrl));
@@ -149,7 +150,9 @@ describe('api_setup: a store profile is saved on the API version its provider pi
   it.each([
     ['the pinned version', `https://acme.myshopify.com/admin/api/${PINNED}`],
     ['no version at all', 'https://acme.myshopify.com'],
+    ['the version path with no version in it', 'https://acme.myshopify.com/admin/api/'],
     ['a path under /admin/ that names no version', 'https://acme.myshopify.com/admin/products.json'],
+    ['the pinned version behind doubled slashes', `https://acme.myshopify.com/admin//api//${PINNED}/`],
   ])('saves a base on %s as written', async (_label, baseUrl) => {
     const store = new ApiStore();
     const { result } = await save(store, 'create', storeProfile(baseUrl));
