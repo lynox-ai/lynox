@@ -690,9 +690,8 @@ async function* translateStream(
           totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
         }
         const tailFinish = Array.isArray(chunk?.choices) ? chunk.choices[0]?.finish_reason : undefined;
-        if (tailFinish === FINISH_ERROR) {
-          sawError = true;
-        } else if (tailFinish && finishStopReason === null) {
+        // A tail `finish_reason: "error"` ends nothing: no terminal events follow, as for an error chunk.
+        if (tailFinish && tailFinish !== FINISH_ERROR && finishStopReason === null) {
           yield* closeOpenBlocks();
           finishStopReason = translateFinish(tailFinish);
         }
