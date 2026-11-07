@@ -148,6 +148,7 @@ describe('api_setup: a store profile is saved on the API version its provider pi
   it.each([
     ['the pinned version', `https://acme.myshopify.com/admin/api/${PINNED}`],
     ['no version at all', 'https://acme.myshopify.com'],
+    ['a path under /admin/ that names no version', 'https://acme.myshopify.com/admin/products.json'],
   ])('saves a base on %s as written', async (_label, baseUrl) => {
     const store = new ApiStore();
     const { result } = await save(store, 'create', storeProfile(baseUrl));
