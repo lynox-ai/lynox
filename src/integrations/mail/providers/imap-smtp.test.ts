@@ -444,8 +444,8 @@ describe('ImapSmtpProvider — fetch', () => {
   });
 
   // imapflow's fetchOne answers `undefined` when no mailbox is selected any more, and `false`
-  // when the FETCH found nothing, which is also what it answers when the mailbox went away while
-  // the command ran. After such a drop the message is not absent: the read failed.
+  // when the FETCH found nothing or was sent after the mailbox had been deselected. Then the
+  // message is not absent: the read failed.
   it('a connection that drops before the message is read is a failure, not an absent message', async () => {
     const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
     for (const [result, mailbox] of [[undefined, { path: 'INBOX' }], [false, false]] as const) {

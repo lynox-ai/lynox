@@ -764,9 +764,9 @@ export class ImapSmtpProvider implements MailProvider {
         { uid: true },
       ));
 
-      // `fetchOne` answers `undefined` when no mailbox is selected any more and `false` when the
-      // FETCH found nothing, and also when the mailbox went away while it ran. With no mailbox
-      // selected the connection dropped: that is not an absent message.
+      // `fetchOne` answers `undefined` when no mailbox is selected any more, and `false` when the
+      // FETCH found nothing or was sent after the mailbox had been deselected. With no mailbox
+      // selected the read never happened: that is not an absent message.
       if (!msg) {
         if (msg === undefined || client.mailbox === false) {
           throw new MailError('unknown', `IMAP fetch ${folder}: the connection dropped before message uid=${String(opts.uid)} was read`);
