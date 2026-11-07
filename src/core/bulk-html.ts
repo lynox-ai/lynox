@@ -22,6 +22,7 @@ import { parseFragment, serialize, defaultTreeAdapter, html as p5 } from 'parse5
 import type { DefaultTreeAdapterTypes } from 'parse5';
 import { HIDDEN_ALLOWED_MAX, hiddenCharIndexes } from './hidden-chars.js';
 import type { BulkListSourceForm } from './bulk-list.js';
+import { htmlEqual } from './html-tree.js';
 
 export type HtmlFragment = DefaultTreeAdapterTypes.DocumentFragment;
 type Node = DefaultTreeAdapterTypes.Node;
@@ -604,6 +605,38 @@ const OPEN_AT_END = new Set(['p', 'ul', 'ol', 'li', 'h2', 'h3', 'h4']);
  * So a mark is appended and must come out as the last node of the tree, below allowed blocks
  * only; and a form appended must come out as a form, which it does not while one is still open.
  */
+/** Elements below which a store shows whitespace as it is: there a line break or a second space is
+ *  part of what the page shows. `pre`, `textarea`, `listing`, `plaintext` and `xmp`. */
+const WHITESPACE_SHOWN = new Set(['pre', 'textarea', 'listing', 'plaintext', 'xmp']);
+
+/**
+ * Whether a value holds an element that shows its whitespace: one of {@link WHITESPACE_SHOWN}, or
+ * any element whose `style` names `white-space` or `display` (an inline `li` shows its
+ * line break as a space), or holds a backslash (a CSS escape the name test does not read), or a
+ * `style` element in the value itself, whose rules no name test reads.
+ */
+export function showsWhitespace(value: string): boolean {
+  for (const [c] of descendants(parseHtmlFragment(value), false)) {
+    if (!isElement(c)) continue;
+    if (c.tagName === 'style') return true;
+    if (c.namespaceURI === p5.NS.HTML && WHITESPACE_SHOWN.has(c.tagName)) return true;
+    if (c.attrs.some((a) => a.name === 'style' && (/white-space|display/i.test(a.value) || a.value.includes('\\')))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether two values of an HTML field are the same: under `htmlEqual`, except where either side ends open (`endsClosed`), holds a stretch the parser drops
+ * (`droppedTagsOf`), or shows its whitespace ({@link showsWhitespace}). Those compare byte for
+ * byte: the tree does not see what the page does with them.
+ */
+export function sameHtmlField(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (!endsClosed(a) || !endsClosed(b) || droppedTagsOf(a).length > 0 || droppedTagsOf(b).length > 0) return false;
+  if (showsWhitespace(a) || showsWhitespace(b)) return false;
+  return htmlEqual(a, b);
+}
+
 export function endsClosed(value: string): boolean {
   const count = (tree: HtmlFragment, name: string): number => {
     let n = 0;

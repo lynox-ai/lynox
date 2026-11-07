@@ -1347,6 +1347,64 @@ describe('applying a Shopify run', () => {
     expect(ledger.shopifyApplyOf(undo.status.id)!.writes).toEqual([]);
   });
 
+  /** An applied run on product 10 and its planned undo, whose description is the source's before-image `held`. */
+  const undoOf = async (held: string): Promise<{ id: string; undo: string }> => {
+    fill(1);
+    const id = await previewed();
+    ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(id);
+    const undo = ledger.planUndo(id);
+    if (!undo.ok) throw new Error(undo.reason);
+    const db = engineDb.getDb();
+    const src = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = 0').get(id) as { before: string };
+    const image = JSON.parse(engineDb.dec(src.before)) as { absent: false; value: Record<string, unknown> };
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = 0')
+      .run(engineDb.enc(JSON.stringify({ absent: false, value: { ...image.value, descriptionHtml: held } })), id);
+    plant(undo.status.id, gid(10), { descriptionHtml: held });
+    expect(ledger.shopifyApplyOf(undo.status.id)!.writes.map((w) => w.gid)).toEqual([gid(10)]);
+    return { id, undo: undo.status.id };
+  };
+
+  it('mints no undo whose description a write up the chain kept marked, when the ledger changed after planning', async () => {
+    const held = '<p>1</p><script>theirs()</script>';
+    const { id, undo } = await undoOf(held);
+    // The ledger after planning: the source now comes from a run whose write the store kept with
+    // that very value, marked. The before-image check alone passes it.
+    const db = engineDb.getDb();
+    db.prepare(`INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total, targets_applied)
+      VALUES ('marked-src', 'r', ?, 'restorable', 'done', 1, 1)`).run(`http:${HOST}`);
+    db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, applied_at, result, after_actual, shop_added_markup)
+      VALUES ('marked-src', 0, ?, 'update', '2026-11-01T00:00:00.000Z', ?, ?, 1)`)
+      .run(engineDb.enc(gid(10)), engineDb.enc('written'), engineDb.enc(JSON.stringify({ value: { descriptionHtml: held }, estimated: false })));
+    db.prepare(`UPDATE bulk_runs SET source_run_id = 'marked-src' WHERE id = ?`).run(id);
+    db.prepare('UPDATE bulk_targets SET source_seq = 0 WHERE run_id = ? AND seq = 0').run(id);
+    expect(ledger.shopifyApplyOf(undo)!.writes).toEqual([]);
+    // Its read stays granted: the apply reads it and halts on the refused request.
+    expect(ledger.shopifyApplyOf(undo)!.reads).toEqual([gid(10)]);
+  });
+
+  it('leaves out, without throwing, a write whose stored before-image or after-state does not parse', async () => {
+    const held = '<p>1</p>';
+    const { id, undo } = await undoOf(held);
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = 0').run(engineDb.enc('{broken'), id);
+    expect(() => ledger.shopifyApplyOf(undo)).not.toThrow();
+    expect(ledger.shopifyApplyOf(undo)!).toMatchObject({ writes: [], reads: [gid(10)] });
+  });
+
+  it('leaves out, without throwing, an apply\'s write whose before-image or after-state does not parse, and keeps the others', async () => {
+    fill(3);
+    const id = await previewed();
+    plant(id, gid(20), { descriptionHtml: '<p>y</p>' });
+    const seq = Object.fromEntries(ledger.getPreview(id).map((t) => [t.key, t.seq]));
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = ?').run(engineDb.enc('{broken'), id, seq[gid(20)]);
+    db.prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND seq = ?').run(engineDb.enc('[1'), id, seq[gid(10)]);
+    expect(() => ledger.shopifyApplyOf(id)).not.toThrow();
+    expect(ledger.shopifyApplyOf(id)!.writes.map((w) => w.gid)).toEqual([gid(30)]);
+    expect(ledger.shopifyApplyOf(id)!.reads).toEqual([gid(10), gid(20), gid(30)]);
+  });
+
   it('finds a description the store reformatted as planned when resuming, and sends nothing to it (§21.2 item 5)', async () => {
     fill(1);
     const id = await previewed();
@@ -1370,8 +1428,8 @@ describe('applying a Shopify run', () => {
     };
     await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => reader });
     expect(sent).toEqual([]);
-    // Found in the store's own form: counted like a read-back stored otherwise than sent.
-    expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0, hostRewrote: 1 });
+    // Found in the store's own form, which the comparison explains: no rewrite.
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0, hostRewrote: 0 });
   });
 
   it('resumes a description the store holds with a stretch the parser drops as a conflict, not as planned', async () => {

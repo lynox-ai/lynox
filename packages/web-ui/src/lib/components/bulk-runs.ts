@@ -19,6 +19,7 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
 	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
 	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note',
+	'bulk.invalid.before_has_shop_markup', 'bulk.invalid.before_has_shop_markup_undated',
 ]);
 
 /** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form, a key's
@@ -521,6 +522,9 @@ export interface BulkTarget {
 	shopAddedMarkup?: true | undefined;
 	/** Written, and the store kept the description otherwise than sent, without outside markup. */
 	hostRewrote?: true | undefined;
+	/** With `before_has_shop_markup`: when the earlier write that left this description marked was
+	 *  applied, or null where that run is no longer kept. */
+	shopMarkedAt?: string | null | undefined;
 	/** The fields behind a Shopify product page's SEO title and description whose text gains an `&`,
 	 *  which a theme may show as `&amp;`. A note; nothing is refused. */
 	seoEntityFields?: string[] | undefined;
@@ -890,9 +894,16 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
  *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
 export function bulkInvalidText(
 	reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n,
-	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's. */
-	context?: { field: string | undefined; host: string | null; dataStore: boolean },
+	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's.
+	 *  With `before_has_shop_markup`: the date of the earlier write, already formatted, or null. */
+	context?: { field: string | undefined; host: string | null; dataStore: boolean; markedDate?: string | null | undefined },
 ): string {
+	// The description an earlier run wrote and the store added markup to: named
+	// by that run's date, so the owner can find it; without the date where the run is gone.
+	if (reason === 'before_has_shop_markup') {
+		const date = context?.markedDate ?? null;
+		return date === null ? i18n.t('bulk.invalid.before_has_shop_markup_undated') : i18n.tf('bulk.invalid.before_has_shop_markup', { date });
+	}
 	// The field the judge only reads that held a credential, named so the owner knows which one to
 	// clean (U-140): on Shopify by its readable name, in the data store by the owner's column name,
 	// on any other list by the field's name as the list has it. The engine records the field with
