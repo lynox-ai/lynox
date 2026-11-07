@@ -77,3 +77,15 @@ describe('the declined-renewal diagnosis names the provider when that is the rea
     expect(oauthRenewalDeclinedDiagnosis(unknown, 'empty')).not.toContain('not-a-provider');
   });
 });
+
+describe('the catalog offers no way around a built-in provider', () => {
+  it('says bexio is connected only through its provider, and names no personal-token fallback', async () => {
+    // The save refuses a profile on a provider's API host that does not go through it, a pasted
+    // token included (`notThroughProvider`). A catalog that still offered the token as a fallback
+    // sent every model there after connect was refused (ux U-188).
+    const { SUGGESTED_API_CATALOG } = await import('../../core/suggested-apis.js');
+    const bexio = SUGGESTED_API_CATALOG.connect_when_user_asks.find((a) => a.id === 'bexio');
+    expect(bexio?.value_prop).toContain('There is no other way to connect it here: a personal token or another sign-in for bexio is refused.');
+    expect(bexio?.value_prop).not.toMatch(/fallback/i);
+  });
+});
