@@ -52,12 +52,13 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
 
 /**
  * Default voice — English, reads DE text with a light English accent. The owner
- * approved on the Phase 0 p300/p3000 DE samples. `de_*` are still NOT available:
- * re-checked 2026-10-11 against the live catalog (30 voices — 8 en_us, 16 en_gb,
- * 6 fr_fr; no German).
+ * approved on the Phase 0 p300/p3000 DE samples.
  *
- * A German voice, once the catalog has one, is found by the offset/limit fetch
- * (see VOICES_BASE_URL); nothing here needs to change for it.
+ * The catalogue has had a German voice since autumn 2026 (`voice_481`, measured
+ * 2026-11-07), and the language pick chooses it for German text. The pinned model
+ * above cannot speak it: Mistral answers 400, code `3051`, "voice is not supported
+ * for speech v1", for every `voice_*` id, while `voxtral-mini-tts-3-0` speaks them.
+ * Until the model moves, `postSpeech` reads such a request with this voice instead.
  */
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
@@ -437,6 +438,60 @@ function buildBody(text: string, opts: SpeakOpts, stream: boolean): { body: stri
   };
 }
 
+/** Mistral's error code for a voice the requested model cannot speak (measured 2026-11-07). */
+const VOICE_NOT_SUPPORTED_CODE = '3051';
+
+function isVoiceNotSupported(status: number, body: string): boolean {
+  if (status !== 400) return false;
+  try {
+    const parsed = JSON.parse(body) as { code?: unknown };
+    return parsed.code === VOICE_NOT_SUPPORTED_CODE;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * POSTs one synthesis request. When Mistral refuses the voice for the model, it asks
+ * once more with `DEFAULT_VOICE`: the language pick can choose a catalogue voice the
+ * pinned model cannot speak, and reading the text with another voice is better than
+ * not reading it. Returns the accepted response and the request that produced it, or
+ * null after logging the refusal.
+ */
+async function postSpeech(
+  text: string,
+  opts: SpeakOpts,
+  stream: boolean,
+  signal: AbortSignal,
+  apiKey: string,
+): Promise<{ res: Response; meta: RequestMeta } | null> {
+  const headers: Record<string, string> = {
+    'authorization': `Bearer ${apiKey}`,
+    'content-type': 'application/json',
+    ...(stream ? { 'accept': 'text/event-stream' } : {}),
+  };
+  let request = buildBody(text, opts, stream);
+  let res = await fetch(API_URL, { method: 'POST', headers, body: request.body, signal });
+  if (!res.ok && request.meta.voice !== DEFAULT_VOICE) {
+    const detail = await res.text().catch(() => '');
+    if (!isVoiceNotSupported(res.status, detail)) {
+      logError(res.status, res.statusText, detail, opts.tenantId);
+      return null;
+    }
+    process.stderr.write(
+      `[voxtral-tts] ${request.meta.model} cannot speak voice=${request.meta.voice}; ` +
+        `reading with voice=${DEFAULT_VOICE} instead${opts.tenantId ? ` (tenant=${opts.tenantId})` : ''}\n`,
+    );
+    request = buildBody(text, { ...opts, voice: DEFAULT_VOICE }, stream);
+    res = await fetch(API_URL, { method: 'POST', headers, body: request.body, signal });
+  }
+  if (!res.ok) {
+    logError(res.status, res.statusText, await res.text().catch(() => ''), opts.tenantId);
+    return null;
+  }
+  return { res, meta: request.meta };
+}
+
 function logRequest(meta: RequestMeta, latencyMs: number, mode: 'plain' | 'stream', tenantId: string | undefined): void {
   process.stderr.write(
     `[voxtral-tts] ${meta.model} ${mode} ${latencyMs}ms ${meta.characters}chars voice=${meta.voice}${tenantId ? ` tenant=${tenantId}` : ''}\n`,
@@ -459,26 +514,15 @@ export async function speakMistralVoxtral(text: string, opts: SpeakOpts = {}): P
   if (!apiKey) return null;
   if (!text.trim()) return null;
 
-  const { body, meta } = buildBody(text, opts, false);
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const started = Date.now();
 
   try {
-    const res = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'authorization': `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-      },
-      body,
-      signal: ctrl.signal,
-    });
-    if (!res.ok) {
-      logError(res.status, res.statusText, await res.text().catch(() => ''), opts.tenantId);
-      return null;
-    }
+    const posted = await postSpeech(text, opts, false, ctrl.signal, apiKey);
+    if (!posted) return null;
+    const { res, meta } = posted;
     const json = (await res.json()) as { audio_data?: unknown };
     if (typeof json.audio_data !== 'string') {
       process.stderr.write('[voxtral-tts] response missing "audio_data"\n');
@@ -518,7 +562,6 @@ export async function speakMistralVoxtralStream(
   if (!apiKey) return null;
   if (!text.trim()) return null;
 
-  const { body, meta } = buildBody(text, opts, true);
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -526,20 +569,9 @@ export async function speakMistralVoxtralStream(
   let ttfbMs = 0;
 
   try {
-    const res = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'authorization': `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-        'accept': 'text/event-stream',
-      },
-      body,
-      signal: ctrl.signal,
-    });
-    if (!res.ok) {
-      logError(res.status, res.statusText, await res.text().catch(() => ''), opts.tenantId);
-      return null;
-    }
+    const posted = await postSpeech(text, opts, true, ctrl.signal, apiKey);
+    if (!posted) return null;
+    const { res, meta } = posted;
     if (!res.body) {
       process.stderr.write('[voxtral-tts] stream response missing body\n');
       return null;
