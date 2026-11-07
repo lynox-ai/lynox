@@ -686,7 +686,7 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
 
     const result = await connect(agentWith(store));
 
-    expect(result).toBe(`Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Profile "${shopProfile().id}" goes through the built-in "example-shop" provider, whose tokens come only from a user's authorization at the provider, so neither fetch_token nor a key or token entered in this chat can stand in for connect. Without ORIGIN this profile cannot be connected. Tell the user that, and that whoever runs this engine has to set its public address (ORIGIN) first; offer no other way to connect it.`);
+    expect(result).toBe(`Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Profile "${shopProfile().id}" goes through the built-in "example-shop" provider, whose tokens come only from a user's authorization at the provider, so neither fetch_token nor a key or token entered in this chat can stand in for connect. Without ORIGIN this profile cannot be connected. Tell the user that, and that whoever runs this engine has to set its public address (ORIGIN) first. Do not offer another way to connect this profile; another kind of access the provider documents, such as a personal token, is a separate profile, and if you offer one, first say what its catalog entry says about it.`);
   });
 
   it('A1 own app · still points a profile of its own at fetch_token, which serves it', async () => {
@@ -926,7 +926,7 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain('/api/oauth/connect/');
     // fetch_token is no way around a built-in provider either: it sends the profile back here.
     expect(result).not.toContain('use action=fetch_token');
-    expect(result).toBe('Error: the built-in provider that profile "shop-api" uses is defined wrongly in this engine: one of its paths does not start with a slash, so it would merge into the host instead of following it. There is nothing to set on the profile, and neither fetch_token nor a key or token entered in this chat can stand in: this provider\'s tokens come only from a user\'s authorization. Tell the user that this profile cannot be connected because of an error in lynox itself, not in their settings, and offer no other way to connect it.');
+    expect(result).toBe('Error: the built-in provider that profile "shop-api" uses is defined wrongly in this engine: one of its paths does not start with a slash, so it would merge into the host instead of following it. There is nothing to set on the profile, and neither fetch_token nor a key or token entered in this chat can stand in: this provider\'s tokens come only from a user\'s authorization. Tell the user that this profile cannot be connected because of an error in lynox itself, not in their settings. Do not offer another way to connect this profile; another kind of access the provider documents, such as a personal token, is a separate profile, and if you offer one, first say what its catalog entry says about it.');
   });
 
   it('A9b · will not read a data-egress acceptance as agreement to be sent somewhere', async () => {

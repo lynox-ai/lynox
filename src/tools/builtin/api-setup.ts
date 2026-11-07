@@ -2559,7 +2559,7 @@ ${draftJson}
         // it back here, so advising it would send the model in a circle.
         const originPreset = builtInPresetOf(profile);
         if (originPreset !== undefined) {
-          return `Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Profile "${id}" goes through the built-in "${originPreset.id}" provider, whose tokens come only from a user's authorization at the provider, so neither fetch_token nor a key or token entered in this chat can stand in for connect. Without ORIGIN this profile cannot be connected. Tell the user that, and that whoever runs this engine has to set its public address (ORIGIN) first; offer no other way to connect it.`;
+          return `Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Profile "${id}" goes through the built-in "${originPreset.id}" provider, whose tokens come only from a user's authorization at the provider, so neither fetch_token nor a key or token entered in this chat can stand in for connect. Without ORIGIN this profile cannot be connected. Tell the user that, and that whoever runs this engine has to set its public address (ORIGIN) first. Do not offer another way to connect this profile; another kind of access the provider documents, such as a personal token, is a separate profile, and if you offer one, first say what its catalog entry says about it.`;
         }
         return 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
       }
@@ -2617,7 +2617,7 @@ ${draftJson}
           // fix it, so neither is told to try.
           // fetch_token is no way around it either: a built-in provider's profile gets no
           // app-level token there (`oauthGrantIsUserDelegated`), it is sent back to connect.
-          return `Error: the built-in provider that profile "${id}" uses is defined wrongly in this engine: ${endpoints.detail}. There is nothing to set on the profile, and neither fetch_token nor a key or token entered in this chat can stand in: this provider's tokens come only from a user's authorization. Tell the user that this profile cannot be connected because of an error in lynox itself, not in their settings, and offer no other way to connect it.`;
+          return `Error: the built-in provider that profile "${id}" uses is defined wrongly in this engine: ${endpoints.detail}. There is nothing to set on the profile, and neither fetch_token nor a key or token entered in this chat can stand in: this provider's tokens come only from a user's authorization. Tell the user that this profile cannot be connected because of an error in lynox itself, not in their settings. Do not offer another way to connect this profile; another kind of access the provider documents, such as a personal token, is a separate profile, and if you offer one, first say what its catalog entry says about it.`;
         }
         if (endpoints.kind === 'missing-param') {
           return `Error: profile "${id}" is missing what its provider needs: ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}). Ask the user for it and set it with api_setup update.`;
