@@ -1766,27 +1766,32 @@ export function adoptionNote(prior: ApiProfile, saved: ApiProfile): string {
 }
 
 /**
+ * The line `view` adds to a built-in provider's profile that holds no token yet. Without it the
+ * view said only "OAuth2 (managed refresh-token flow)", and a model asked to connect the profile
+ * wrote the connect call into its reply as a link instead of making it (1312). Whether a token is
+ * held is read from the vault, never from profile text; with no vault the line is left out. Either
+ * token held means the profile may be connected, so the line needs both slots empty (ux U-191).
+ * A run whose secret scope leaves either slot out gets no line.
+ */
+export function notConnectedNote(agent: Pick<IAgent, 'secretStore'>, profile: ApiProfile): string {
+  if (builtInPresetOf(profile) === undefined) return '';
+  const store = agent.secretStore;
+  if (!store) return '';
+  const slots = [accessTokenKey(profile.id), readersRefreshSlot(profile)];
+  // A scoped run cannot see these slots; asking would record them as denied and suggest widening
+  // the scope to OAuth tokens. It cannot tell, so it says nothing (as `emptyTokenSlots` does).
+  if (slots.some((name) => store.explainUnresolved?.(name) === 'out-of-scope')) return '';
+  if (slots.some((name) => store.resolve(name) !== null)) return '';
+  return `\n\nConnection: not connected yet. When the user wants it connected, call api_setup with action "connect" and id "${profile.id}"; that call returns the sign-in link for the user, or says why there is none. A link or a tool call written into your reply connects nothing.`;
+}
+
+/**
  * Whose consent a first exchange records (`OAuthGrantRecord.connected_by`). A renewal never asks:
  * a stamp already on the grant stays, whoever's turn renews it. A mandate counts only on a profile
  * it wrote itself; its turn reaching the owner's profile, through the attach's renewal, leaves
  * the owner's tokens the owner's. A mandate stamp without the mandate's id — a run started without
  * a session — is kept as it is, and such tokens are then not handed out (`connectionTokenAllowed`).
  */
-/**
- * The line `view` adds to a built-in provider's profile that holds no token yet. Without it the
- * view said only "OAuth2 (managed refresh-token flow)", and a model asked to connect the profile
- * wrote the connect call into its reply as a link instead of making it (1312). Whether a token is
- * held is read from the vault, never from profile text; with no vault the line is left out. Either
- * token held means the profile may be connected, so the line needs both slots empty (ux U-191).
- */
-export function notConnectedNote(agent: Pick<IAgent, 'secretStore'>, profile: ApiProfile): string {
-  if (builtInPresetOf(profile) === undefined) return '';
-  const store = agent.secretStore;
-  if (!store) return '';
-  if (store.resolve(accessTokenKey(profile.id)) !== null || store.resolve(readersRefreshSlot(profile)) !== null) return '';
-  return `\n\nConnection: not connected yet. When the user wants it connected, call api_setup with action "connect" and id "${profile.id}"; that call returns the sign-in link for the user, or says why there is none. A link or a tool call written into your reply connects nothing.`;
-}
-
 function consentOf(agent: IAgent, profile: ApiProfile): Pick<OAuthGrantRecord, 'connected_by' | 'connected_mandate_id'> {
   const p = agent.principal;
   if (p.kind !== 'mandate' || profile.created_by !== principalTag(p)) return { connected_by: 'owner' };

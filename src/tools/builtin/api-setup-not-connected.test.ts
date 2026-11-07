@@ -6,6 +6,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { apiSetupTool, notConnectedNote } from './api-setup.js';
 import { ApiStore, accessTokenKey, refreshTokenKey, type ApiProfile } from '../../core/api-store.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { scopeSecretStore } from '../../core/secret-scope.js';
 
 /**
  * `view` on a built-in provider's profile that holds no token says it is not connected and how
@@ -84,6 +85,20 @@ describe('view says a built-in provider\'s profile is not connected yet', () => 
   it('leaves it out for a static-credential profile that still carries a preset_id', () => {
     const bearer = { ...bexio(), base_url: 'https://api.example.com', auth: { type: 'bearer', oauth: { preset_id: 'bexio' } } } as ApiProfile;
     expect(notConnectedNote({ secretStore: vault() } as never, bearer)).toBe('');
+  });
+
+  it('says nothing to a run whose secret scope leaves the token slots out, and asks the vault nothing', () => {
+    // A scoped child cannot see the slots: "not connected" would be a guess, and reading them
+    // would record both as denied and suggest widening the child's scope to OAuth tokens.
+    const denied: string[] = [];
+    const scoped = scopeSecretStore(vault() as never, ['SOME_KEY'], (name) => denied.push(name));
+    expect(notConnectedNote({ secretStore: scoped } as never, bexio())).toBe('');
+    expect(denied).toEqual([]);
+  });
+
+  it('control: a scope that holds both slots still gets the line', () => {
+    const scoped = scopeSecretStore(vault() as never, [accessTokenKey('books'), refreshTokenKey('books')]);
+    expect(notConnectedNote({ secretStore: scoped } as never, bexio())).toBe(`\n\n${LINE}`);
   });
 
   it('leaves it out when there is no vault to ask', async () => {
