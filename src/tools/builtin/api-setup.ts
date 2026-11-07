@@ -23,7 +23,7 @@ import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { builtInPresetOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
@@ -174,14 +174,8 @@ const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
 const COST_RESPONSE_FIELD_RE = /^[A-Za-z0-9_]{1,64}(\.[A-Za-z0-9_]{1,64}){0,7}$/;
 const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
-/** The built-in preset an oauth2 profile names, when the engine knows it. */
 function isPlainRecord<T>(value: T): value is T & Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.get> {
-  const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
-  return typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
 }
 
 /**
@@ -2560,6 +2554,13 @@ ${draftJson}
       // route's own business, and W1b gives it a check of its own.
       const origin = process.env['ORIGIN'];
       if (!origin) {
+        // fetch_token is a way around this only for a profile of its own: for a built-in
+        // provider's profile it posts no app-level grant (`oauthGrantIsUserDelegated`) and sends
+        // it back here, so advising it would send the model in a circle.
+        const originPreset = builtInPresetOf(profile);
+        if (originPreset !== undefined) {
+          return `Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Profile "${id}" goes through the built-in "${originPreset.id}" provider, whose tokens come only from a user's authorization at the provider, so fetch_token cannot stand in for connect: without ORIGIN this profile cannot be connected. Setting ORIGIN is for whoever runs this engine.`;
+        }
         return 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
       }
       // Parsed, not merely found. The provider host below is parsed, compared for
@@ -2614,7 +2615,9 @@ ${draftJson}
         if (endpoints.kind === 'bad-preset') {
           // A defect in a compiled preset. Neither the model nor the user can
           // fix it, so neither is told to try.
-          return `Error: the built-in provider profile "${id}" names is defined wrongly in this engine — ${endpoints.detail}. There is nothing to set on the profile; collect the credentials with ask_secret and use action=fetch_token, and report the provider as broken.`;
+          // fetch_token is no way around it either: a built-in provider's profile gets no
+          // app-level token there (`oauthGrantIsUserDelegated`), it is sent back to connect.
+          return `Error: the built-in provider profile "${id}" names is defined wrongly in this engine — ${endpoints.detail}. There is nothing to set on the profile, and fetch_token cannot stand in: this provider's tokens come only from a user's authorization. The profile cannot be connected until the provider is fixed; report the provider as broken.`;
         }
         if (endpoints.kind === 'missing-param') {
           return `Error: profile "${id}" is missing what its provider needs: ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}). Ask the user for it and set it with api_setup update.`;

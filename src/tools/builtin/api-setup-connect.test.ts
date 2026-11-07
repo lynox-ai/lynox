@@ -65,6 +65,8 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
   }]);
   return {
     ...real,
+    // Its default register is bound inside the real module, so it is handed this one too.
+    builtInPresetOf: (profile: Parameters<typeof real.builtInPresetOf>[0]) => real.builtInPresetOf(profile, register),
     derivePresetEndpoints: (id: string, params: Readonly<Record<string, unknown>> | undefined) =>
       real.derivePresetEndpoints(id, params, register),
     presetIds: () => register.ids(),
@@ -675,6 +677,29 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain('https://tenant.lynox.example');
   });
 
+  it('A1 preset · tells a built-in provider\'s profile that fetch_token is no way around it', async () => {
+    // fetch_token posts no app-level grant for a built-in provider's profile and sends it back
+    // to connect, so the old advice "use action=fetch_token" sent the model in a circle.
+    delete process.env['ORIGIN'];
+    const store = new ApiStore();
+    store.register(shopProfile());
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toBe(`Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Profile "${shopProfile().id}" goes through the built-in "example-shop" provider, whose tokens come only from a user's authorization at the provider, so fetch_token cannot stand in for connect: without ORIGIN this profile cannot be connected. Setting ORIGIN is for whoever runs this engine.`);
+  });
+
+  it('A1 own app · still points a profile of its own at fetch_token, which serves it', async () => {
+    delete process.env['ORIGIN'];
+    const store = new ApiStore();
+    const p = shopProfile();
+    store.register({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: undefined } } });
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toBe('Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.');
+  });
+
   it('A2 · refuses an id it does not know', async () => {
     const result = await connect(agentWith(new ApiStore()), 'nope');
     expect(result).toContain('not found');
@@ -899,6 +924,9 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).toContain('defined wrongly in this engine');
     expect(result).not.toContain('preset_params.');
     expect(result).not.toContain('/api/oauth/connect/');
+    // fetch_token is no way around a built-in provider either: it sends the profile back here.
+    expect(result).not.toContain('use action=fetch_token');
+    expect(result).toContain('fetch_token cannot stand in: this provider\'s tokens come only from a user\'s authorization. The profile cannot be connected until the provider is fixed; report the provider as broken.');
   });
 
   it('A9b · will not read a data-egress acceptance as agreement to be sent somewhere', async () => {
