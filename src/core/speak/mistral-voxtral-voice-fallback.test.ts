@@ -129,6 +129,14 @@ describe('the voice in the fallback log line is a plain id or nothing', () => {
     expect(written()).toContain('cannot speak voice=<not an id>; reading with voice=en_paul_neutral');
     expect(written()).not.toContain('[fake] line');
   });
+
+  it('replaces such a voice in the success line too, when the model accepts it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ audio_data: MP3 }), { status: 200 })));
+    const { speakMistralVoxtral } = await load();
+    expect(await speakMistralVoxtral('Hello.', { voice: 'odd voice\n[fake] line' })).not.toBeNull();
+    expect(written()).toContain('chars voice=<not an id>');
+    expect(written()).not.toContain('[fake] line');
+  });
 });
 
 describe('every other refusal still fails, without a second request', () => {

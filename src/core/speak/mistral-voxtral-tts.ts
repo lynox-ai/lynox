@@ -58,7 +58,7 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
  * The live catalogue has a German voice (`voice_481`, seen 2026-11-07), and the
  * language pick chooses it for German text. The pinned model above cannot speak it:
  * Mistral answers 400, code `3051`, "voice is not supported for speech v1" (measured
- * 2026-11-07 on both endpoints, `voice_481` only), while `voxtral-mini-tts-3-0`
+ * 2026-11-07 on `api.eu.mistral.ai` and `api.mistral.ai`, `voice_481` only), while `voxtral-mini-tts-3-0`
  * speaks it. Until the model moves, `postSpeech` reads a voice the model refuses
  * with this one instead.
  */
@@ -504,7 +504,7 @@ async function postSpeech(
 
 function logRequest(meta: RequestMeta, latencyMs: number, mode: 'plain' | 'stream', tenantId: string | undefined): void {
   process.stderr.write(
-    `[voxtral-tts] ${meta.model} ${mode} ${latencyMs}ms ${meta.characters}chars voice=${meta.voice}${tenantId ? ` tenant=${tenantId}` : ''}\n`,
+    `[voxtral-tts] ${meta.model} ${mode} ${latencyMs}ms ${meta.characters}chars voice=${voiceForLog(meta.voice)}${tenantId ? ` tenant=${tenantId}` : ''}\n`,
   );
 }
 
