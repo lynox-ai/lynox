@@ -121,9 +121,21 @@ describe('a voice the pinned model cannot speak is read with the default voice',
   });
 });
 
+describe('the voice in the fallback log line is a plain id or nothing', () => {
+  it('replaces a voice with a newline instead of writing it', async () => {
+    vi.stubGlobal('fetch', stubSpeech());
+    const { speakMistralVoxtral } = await load();
+    await speakMistralVoxtral('Guten Tag.', { voice: 'voice_481\n[fake] line' });
+    expect(written()).toContain('cannot speak voice=<not an id>; reading with voice=en_paul_neutral');
+    expect(written()).not.toContain('[fake] line');
+  });
+});
+
 describe('every other refusal still fails, without a second request', () => {
   const cases: Array<[string, { status: number; body: string }]> = [
     ['a 400 with another code', { status: 400, body: JSON.stringify({ code: '3050', message: 'other' }) }],
+    // The refusal's own message with another code: the code decides, not the wording.
+    ['a 400 with the refusal message but another code', { status: 400, body: JSON.stringify({ code: '3050', message: 'voice is not supported for speech v1' }) }],
     ['a 401 that carries code 3051', { status: 401, body: REFUSAL }],
     ['a 400 whose body is not JSON', { status: 400, body: 'voice is not supported for speech v1' }],
   ];

@@ -28,12 +28,12 @@ Toggling the speaker off mid-stream stops current audio and clears the queue.
 | Hosting               | Mistral La Plateforme (hosted in the EU by default)       |
 | Model                 | `voxtral-mini-tts-2603` (pinned)        |
 | Default voice         | `en_paul_neutral` (English)             |
-| Languages             | 9 supported; the catalog has voices for more languages than the pinned model can speak |
+| Languages             | 9 supported; the catalog has voices the pinned model cannot use |
 | Streaming             | SSE; low-latency time-to-first-audio (varies by region/network) |
 | Pricing               | $0.016 / 1 000 characters (~$0.02/min spoken). See [Mistral pricing](https://docs.mistral.ai/getting-started/models/) for the current number. |
 | Training              | Customer text is not used to train models (per Mistral's terms) |
 
-German text is read with an English voice. The accent is light and acceptable for business replies — long inputs read with noticeably more prosodic nuance than very short ones (prosody is planned over the whole input). Mistral's catalog lists a German voice, but the pinned model cannot speak it; when the model refuses a voice, lynox reads the text with the default voice instead of failing.
+German text is read with an English voice. The accent is light and acceptable for business replies — long inputs read with noticeably more prosodic nuance than very short ones (prosody is planned over the whole input). Mistral's catalog lists a German voice, but the pinned model cannot speak it; when the model answers that it does not support the voice, lynox reads the text with the default voice instead of failing.
 
 ## Configuration
 

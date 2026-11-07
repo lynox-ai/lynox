@@ -16,7 +16,8 @@
  *
  * The catalog is NOT EN-only, which this comment claimed until 2026-08-02. All
  * 30 voices, enumerated via `offset`/`limit` (see VOICES_BASE_URL): 8 `en_us`,
- * 16 `en_gb`, **6 `fr_fr`** (`fr_marie_*`). Still no German voice.
+ * 16 `en_gb`, **6 `fr_fr`** (`fr_marie_*`). That was the state until autumn 2026;
+ * see `DEFAULT_VOICE` for the German voice the catalogue has now.
  *
  * "Multilingual" in Mistral's docs (English, French, Spanish, Portuguese,
  * Italian, Dutch, German, Hindi, Arabic) means cross-lingual voice cloning —
@@ -24,8 +25,8 @@
  * sentence (umlauts + a compound noun) synthesised with `en_paul_neutral` and
  * with `fr_marie_neutral`, then transcribed back, returned identical to the
  * source both times. What a German listener hears as an accent is SPEAKER
- * IDENTITY, not mispronunciation. Removing it needs a German voice in the
- * catalog — or a non-Voxtral path for non-English text.
+ * IDENTITY, not mispronunciation. Removing it needs a German voice the pinned
+ * model can speak — or a non-Voxtral path for non-English text.
  *
  * No usage or rate-limit headers are exposed. Character counting for per-tenant
  * cost attribution happens facade-side. Calls Mistral's EU regional endpoint (api.eu.mistral.ai).
@@ -54,11 +55,12 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
  * Default voice — English, reads DE text with a light English accent. The owner
  * approved on the Phase 0 p300/p3000 DE samples.
  *
- * The catalogue has had a German voice since autumn 2026 (`voice_481`, measured
- * 2026-11-07), and the language pick chooses it for German text. The pinned model
- * above cannot speak it: Mistral answers 400, code `3051`, "voice is not supported
- * for speech v1", for every `voice_*` id, while `voxtral-mini-tts-3-0` speaks them.
- * Until the model moves, `postSpeech` reads such a request with this voice instead.
+ * The live catalogue has a German voice (`voice_481`, seen 2026-11-07), and the
+ * language pick chooses it for German text. The pinned model above cannot speak it:
+ * Mistral answers 400, code `3051`, "voice is not supported for speech v1" (measured
+ * 2026-11-07 on both endpoints, `voice_481` only), while `voxtral-mini-tts-3-0`
+ * speaks it. Until the model moves, `postSpeech` reads a voice the model refuses
+ * with this one instead.
  */
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
@@ -79,8 +81,8 @@ const VOICES_PAGE_LIMIT = 100;
  * Fallback voice catalog for the Settings picker when the live `/v1/audio/voices`
  * call is unreachable. A representative EN subset; safe to stay out-of-date
  * because the live fetch overwrites this in the UI the moment Mistral is
- * reachable. Still do not add hardcoded DE entries — there is no German voice to
- * add (live catalog 2026-10-11: 8 en_us, 16 en_gb, 6 fr_fr).
+ * reachable. Do not add the German catalogue voice here: the pinned model cannot
+ * speak it (see `DEFAULT_VOICE`).
  *
  * The list is English-only; the live catalog also has six `fr_marie_*` voices.
  */
@@ -441,6 +443,14 @@ function buildBody(text: string, opts: SpeakOpts, stream: boolean): { body: stri
 /** Mistral's error code for a voice the requested model cannot speak (measured 2026-11-07). */
 const VOICE_NOT_SUPPORTED_CODE = '3051';
 
+/**
+ * The voice id as it may appear in a log line. It can come from a request body
+ * unchecked, so anything that is not a plain id is replaced rather than written.
+ */
+function voiceForLog(voice: string): string {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(voice) ? voice : '<not an id>';
+}
+
 function isVoiceNotSupported(status: number, body: string): boolean {
   if (status !== 400) return false;
   try {
@@ -479,7 +489,7 @@ async function postSpeech(
       return null;
     }
     process.stderr.write(
-      `[voxtral-tts] ${request.meta.model} cannot speak voice=${request.meta.voice}; ` +
+      `[voxtral-tts] ${request.meta.model} cannot speak voice=${voiceForLog(request.meta.voice)}; ` +
         `reading with voice=${DEFAULT_VOICE} instead${opts.tenantId ? ` (tenant=${opts.tenantId})` : ''}\n`,
     );
     request = buildBody(text, { ...opts, voice: DEFAULT_VOICE }, stream);
