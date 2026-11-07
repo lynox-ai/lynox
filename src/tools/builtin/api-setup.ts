@@ -185,6 +185,28 @@ function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.g
 }
 
 /**
+ * The refusal for a `base_url` that names another API version than the one its built-in provider
+ * pins (`adminApiVersion`, read under `<apiPathPrefix>api/<version>`), else `null`. A base without
+ * a version in its path passes: it names none, so it names no other one.
+ */
+function presetApiVersionError(preset: ReturnType<typeof OAUTH_PRESETS.get>, baseUrl: string): string | null {
+  const pinned = preset?.adminApiVersion;
+  if (preset === undefined || pinned === undefined) return null;
+  let path: string;
+  try {
+    // Read as a server that joins slashes reads it: `/admin//api//2024-01` names 2024-01 too.
+    path = new URL(baseUrl).pathname.replace(/\/{2,}/g, '/');
+  } catch {
+    return null;
+  }
+  const versionsAt = `${preset.apiPathPrefix ?? '/'}api/`;
+  if (!path.startsWith(versionsAt)) return null;
+  const named = path.slice(versionsAt.length).split('/')[0] ?? '';
+  if (named === '' || named === pinned) return null;
+  return `Invalid base_url: a profile on the built-in "${preset.id}" provider uses its API version ${pinned}, the one this engine's own requests name. Save it again with base_url ending in ${versionsAt}${pinned}; you do not need to ask the user which version to use.`;
+}
+
+/**
  * The names a built-in provider's app lives under belong to the profiles on that provider: only
  * their connection form writes them, and the free secret write refuses the secret. Any other
  * profile that reads one would wait for a value nothing can store, so it picks a name of its own.
@@ -2106,6 +2128,15 @@ ${draftJson}
       if (error) {
         return `Validation error: ${error}`;
       }
+      // A provider that pins its API version in the path is saved on that version. Shopify answers
+      // an old version with the oldest one it still supports, so a profile on another
+      // version would read a different API than the engine's own requests (`adminApiVersion`).
+      // Checked here and not in `validateProfile`, so a stored profile on another version can
+      // still be refined. The version the model wrote is not repeated.
+      const versionError = presetApiVersionError(namedPreset, profile.base_url);
+      if (versionError) {
+        return `Validation error: ${versionError}`;
+      }
       // A value the provider reads without regard to case is stored in lower case: "My-Store" is
       // the store my-store, not a refusal. After the check, so the check reads what was written
       // (a vault reference is refused by its upper-case name).
@@ -2264,9 +2295,11 @@ ${draftJson}
             .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
             .filter((h): h is string => h !== null),
         ));
+        // One paragraph per host, not per URL: a store preset puts its base, token and authorize
+        // URLs on one host, and the same paragraph three times reads as three destinations.
         const disclosureParts = [
           nonVetted.length > 0
-            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${nonVetted.map((u) => describeDisclosure(u)).join('\n\n')}`
+            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n')}`
             : undefined,
           redirectHostNames.length > 0
             ? `You will be sent to ${redirectHostNames.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`
