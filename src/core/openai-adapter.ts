@@ -380,11 +380,16 @@ function extractDeltaText(content: unknown): string {
   return '';
 }
 
-/** Whether a stream chunk carries a provider error (`{"error": …}`) instead of, or next to, choices. */
+/** Whether a stream chunk carries a provider error (`{"error": …}`) instead of, or next to, choices.
+ *  An empty or false `error` (`""`, `false`, `0`) on an otherwise normal chunk names no error. */
 function hasErrorField(chunk: unknown): boolean {
   const err = (chunk as { error?: unknown } | undefined)?.error;
-  return err !== undefined && err !== null;
+  return Boolean(err);
 }
+
+/** `finish_reason: "error"` (OpenRouter, when the upstream model fails mid-stream) ends a reply
+ *  that was broken off, not one that is finished. */
+const FINISH_ERROR = 'error';
 
 async function* translateStream(
   response: Response,
@@ -444,8 +449,9 @@ async function* translateStream(
   // with `[DONE]` only (seen via OpenRouter); that is a complete reply. A stream with neither
   // `[DONE]` nor a `finish_reason` was cut off and gets no terminal events.
   let sawDone = false;
-  // Whether the provider sent an error chunk (`{"error": …}`, e.g. vLLM before its `[DONE]`). The
-  // reply it broke off is not complete, so a later `[DONE]` does not end it as one.
+  // Whether the provider sent an error chunk (`{"error": …}`, e.g. vLLM before its `[DONE]`) or a
+  // `finish_reason: "error"`. The reply it broke off is not complete, so a later `[DONE]` does not
+  // end it as one.
   let sawError = false;
 
   // Close the open blocks (text, reasoning, every tool call) at the end of the reply.
@@ -655,7 +661,9 @@ async function* translateStream(
         }
 
         // Finish
-        if (choice.finish_reason) {
+        if (choice.finish_reason === FINISH_ERROR) {
+          sawError = true;
+        } else if (choice.finish_reason) {
           yield* closeOpenBlocks();
           finishStopReason = translateFinish(choice.finish_reason);
         }
@@ -682,7 +690,9 @@ async function* translateStream(
           totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
         }
         const tailFinish = Array.isArray(chunk?.choices) ? chunk.choices[0]?.finish_reason : undefined;
-        if (tailFinish && finishStopReason === null) {
+        if (tailFinish === FINISH_ERROR) {
+          sawError = true;
+        } else if (tailFinish && finishStopReason === null) {
           yield* closeOpenBlocks();
           finishStopReason = translateFinish(tailFinish);
         }

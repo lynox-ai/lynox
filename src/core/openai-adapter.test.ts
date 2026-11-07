@@ -2287,3 +2287,84 @@ describe('OpenAIAdapter error chunk before [DONE]', () => {
     expect((await run(clean, 'create')).err).toBeUndefined();
   });
 });
+
+// `finish_reason: "error"` (OpenRouter, when the upstream model fails mid-stream) breaks the reply
+// off: what arrived is not taken as the answer, on either path. An `error` field that is empty or
+// false on an otherwise normal chunk names no error, so it does not break off a complete reply.
+describe('OpenAIAdapter finish_reason "error" and empty error fields', () => {
+  async function run(write: (res: ServerResponse) => void, path: 'process' | 'create'): Promise<{ err: unknown; text: string }> {
+    const server = await createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      write(res);
+    });
+    try {
+      const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model' });
+      const params = { model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }] };
+      try {
+        if (path === 'create') {
+          const msg = await adapter.messages.create(params);
+          return { err: undefined, text: msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('') };
+        }
+        const out = await new StreamProcessor(async () => { /* no-op */ }, 'test-agent').process(adapter.beta.messages.stream(params));
+        return { err: undefined, text: out.content.map((b) => (b.type === 'text' ? b.text : '')).join('') };
+      } catch (err) {
+        return { err, text: '' };
+      }
+    } finally {
+      server.close();
+    }
+  }
+  const finishError = (end: (res: ServerResponse) => void) => (res: ServerResponse): void => {
+    res.write(sseChunk({ id: 'e', choices: [{ index: 0, delta: { content: 'partial answer' }, finish_reason: null }] }));
+    res.write(sseChunk({ id: 'e', choices: [{ index: 0, delta: {}, finish_reason: 'error' }] }));
+    end(res);
+  };
+
+  it('text, finish_reason "error", [DONE]: the stream processor reports the reply incomplete', async () => {
+    expect((await run(finishError((res) => { res.write('data: [DONE]\n\n'); res.end(); }), 'process')).err).toBeInstanceOf(StreamIncompleteError);
+  });
+
+  it('text, finish_reason "error", no [DONE]: messages.create throws instead of returning the partial reply', async () => {
+    expect(String((await run(finishError((res) => res.end()), 'create')).err)).toMatch(/incomplete/);
+  });
+
+  it('finish_reason "error" in a final frame with no trailing newline: still incomplete', async () => {
+    expect((await run((res) => {
+      res.write(sseChunk({ id: 'e', choices: [{ index: 0, delta: { content: 'partial answer' }, finish_reason: null }] }));
+      res.end(`data: ${JSON.stringify({ id: 'e', choices: [{ index: 0, delta: {}, finish_reason: 'error' }] })}`);
+    }, 'process')).err).toBeInstanceOf(StreamIncompleteError);
+  });
+
+  for (const empty of [false, '', 0, null]) {
+    it(`error: ${JSON.stringify(empty)} on normal chunks, then [DONE]: a complete reply on both paths`, async () => {
+      const write = (res: ServerResponse): void => {
+        res.write(sseChunk({ id: 'e', error: empty, choices: [{ index: 0, delta: { content: 'whole answer' }, finish_reason: null }] }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      };
+      for (const path of ['process', 'create'] as const) {
+        const { err, text } = await run(write, path);
+        expect(err).toBeUndefined();
+        expect(text).toBe('whole answer');
+      }
+    });
+  }
+
+  it('control: finish_reason "stop" ends the same reply as a complete one', async () => {
+    const { err, text } = await run((res) => {
+      res.write(sseChunk({ id: 'e', choices: [{ index: 0, delta: { content: 'whole answer' }, finish_reason: null }] }));
+      res.write(sseChunk({ id: 'e', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
+      res.end();
+    }, 'process');
+    expect(err).toBeUndefined();
+    expect(text).toBe('whole answer');
+  });
+
+  it('control: a non-empty error string on a chunk still breaks the reply off', async () => {
+    expect((await run((res) => {
+      res.write(sseChunk({ id: 'e', error: 'upstream failed', choices: [{ index: 0, delta: { content: 'partial answer' }, finish_reason: null }] }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }, 'process')).err).toBeInstanceOf(StreamIncompleteError);
+  });
+});
