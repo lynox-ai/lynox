@@ -258,7 +258,9 @@ export interface BulkRunStatus {
    *  to them again. Counted from the halt that left them so, not only once a later pass has
    *  recorded them `sent_unknown`. */
   sentUnknown: number;
-  /** Applied targets taken back since — by an undo run, or an atomic run's rollback. */
+  /** Targets taken back since — by an undo run, or an atomic run's rollback. Applied ones, and
+   *  for a run that is not atomic also one an external undo took back after a send that was
+   *  never recorded. Not one an atomic rollback found unrecorded and settled. */
   undone: number;
   kind: BulkRunKind;
   atomic: boolean;
@@ -3363,11 +3365,6 @@ export class BulkLedger {
   }
 
   /**
-   * Mark a target written by this run as taken back (an atomic run's rollback). For an
-   * undo run the rollback restores what the source wrote, so the source target stands
-   * again: its `undone_at` is cleared in the same transaction.
-   */
-  /**
    * Mark a target the run sent to but never recorded ({@link listSentUnrecordedDesc}) as settled
    * by the rollback: written back, or found as before the run, so nothing of the run is left on
    * it. One left `undone_at` NULL is what the owner's view marks ({@link getPreview} `written`).
@@ -3378,6 +3375,11 @@ export class BulkLedger {
       .run(new Date(now).toISOString(), runId, seq);
   }
 
+  /**
+   * Mark a target written by this run as taken back (an atomic run's rollback). For an
+   * undo run the rollback restores what the source wrote, so the source target stands
+   * again: its `undone_at` is cleared in the same transaction.
+   */
   recordRolledBack(run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, now: number = Date.now()): void {
     const db = this.engineDb.getDb();
     db.transaction(() => {
@@ -3406,12 +3408,13 @@ export class BulkLedger {
 
   /** Targets this run sent its write to but never recorded as written, newest first: a loop
    *  marked the send and died before {@link recordApplied}, or the write failed after it may
-   *  have landed. Whether it holds on the target only a read can tell. For an atomic run's
-   *  rollback, beside {@link listAppliedDesc}. */
+   *  have landed. Whether it holds on the target only a read can tell. Not one a rollback
+   *  settled already ({@link recordUnrecordedSettled}). For an atomic run's rollback, beside
+   *  {@link listAppliedDesc}. */
   listSentUnrecordedDesc(runId: string): ApplyTarget[] {
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
-       WHERE run_id = ? AND write_sent = 1 AND applied_at IS NULL AND ${WRITING_SQL}
+       WHERE run_id = ? AND write_sent = 1 AND applied_at IS NULL AND undone_at IS NULL AND ${WRITING_SQL}
        ORDER BY seq DESC`,
     ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
     return rows.map((r) => this.toApplyTarget(r));

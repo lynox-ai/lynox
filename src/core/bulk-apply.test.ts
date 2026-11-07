@@ -1383,6 +1383,7 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     // Settled, so not one the owner's view marks; counted as neither applied nor undone.
     expect(ledger.getPreview(runId).find((t) => t.key === 'k003')).toMatchObject({ written: false, undone: true });
     expect(ledger.getStatus(runId)!.undone).toBe(2);
+    expect(ledger.getStatus(runId)!.applied).toBe(2);
   });
 
   it('a target a dead loop sent to whose write never landed needs no taking back', async () => {
@@ -1472,7 +1473,8 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     ).run(runId, runId);
     expect(forced.changes).toBe(1);
     const marked = ledger.getPreview(runId).filter((t) => t.written && !t.undone).map((t) => t.key).sort();
-    expect(marked).toEqual(ledger.listAppliedDesc(runId).map((t) => t.key).sort());
+    const rollbackSet = [...ledger.listAppliedDesc(runId), ...ledger.listSentUnrecordedDesc(runId)];
+    expect(marked).toEqual(rollbackSet.map((t) => t.key).sort());
     expect(marked).toEqual([]);
   });
 
