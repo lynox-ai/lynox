@@ -32,6 +32,8 @@ describe('SecretStore.holds', () => {
   it('control: true where resolve hands a value out, and no event falls for the answer', () => {
     const store = stored();
     expect(store.resolve('BOOKS_ACCESS_TOKEN')).toBe('token-value-1234');
+    // The instrument sees an event when one falls, so the empty list below means none fell.
+    expect(published()).toEqual([{ name: 'BOOKS_ACCESS_TOKEN', action: 'resolve' }]);
     vi.clearAllMocks();
     expect(store.holds('BOOKS_ACCESS_TOKEN')).toBe(true);
     expect(published()).toEqual([]);
@@ -65,6 +67,7 @@ describe('SecretStore.holds', () => {
     expect(store.resolve('BOOKS_ACCESS_TOKEN')).toBeNull();
     expect(store.holds('BOOKS_ACCESS_TOKEN')).toBe(false);
     store.setResolveGuard(() => { throw new Error('no profiles'); });
+    expect(store.resolve('BOOKS_ACCESS_TOKEN')).toBeNull();
     expect(store.holds('BOOKS_ACCESS_TOKEN')).toBe(false);
   });
 });
@@ -78,8 +81,16 @@ describe('a scoped store answers holds without telling what lies outside the sco
     expect(published()).toEqual([]);
   });
 
-  it('control: a name inside the scope is answered by the full vault', () => {
-    const scoped = scopeSecretStore(stored(), ['BOOKS_ACCESS_TOKEN']);
+  it('control: a name inside the scope is answered by the full vault, and a refused read is recorded', () => {
+    const denied: string[] = [];
+    const scoped = scopeSecretStore(stored(), ['BOOKS_ACCESS_TOKEN'], (name) => denied.push(name));
     expect(scoped.holds?.('BOOKS_ACCESS_TOKEN')).toBe(true);
+    expect(scoped.resolve('OTHER_KEY')).toBeNull();
+    expect(denied).toEqual(['OTHER_KEY']);
+  });
+
+  it('over a store that cannot answer, the scoped store cannot either', () => {
+    const cannotAnswer = { resolve: () => null, extractSecretNames: () => [], resolveSecretRefs: (i: unknown) => i } as unknown as Parameters<typeof scopeSecretStore>[0];
+    expect(scopeSecretStore(cannotAnswer, ['BOOKS_ACCESS_TOKEN']).holds).toBeUndefined();
   });
 });

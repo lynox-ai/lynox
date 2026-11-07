@@ -25,17 +25,19 @@ const BYPASS: readonly RegExp[] = [
   /getSecretStore\(\)\??\.resolve\(/,
   // Gives nothing readable, but whether another member's or the owner's token exists is information too.
   /\b(secretStore|store|vault|secrets|inner|target)\??!?\.holds[?!]?\.?\(/,
+  /\b(inner|target)\??\.holds\??\.bind\(/,
+  /getSecretStore\(\)\??\.holds\??\.?\(/,
 ];
 
 /** `file|line text` → why it may stand. Keyed by text, not line number, so an edit elsewhere in the file keeps it. */
 const PINNED: Readonly<Record<string, string>> = {
   // The view itself and the stores it wraps.
   'core/profile-secret-view.ts|return (name: string): string | null => (hidden(name) ? null : target.resolve(name));': 'the view: resolves only what hiddenFromProfile lets through',
-  'core/profile-secret-view.ts|return (name: string): boolean => (hidden(name) ? false : target.holds?.(name) ?? false);': 'the view: answers holds only for what hiddenFromProfile lets through',
+  'core/profile-secret-view.ts|const holds = target.holds?.bind(target);': 'the view: answers holds only for what hiddenFromProfile lets through',
   'core/secret-scope.ts|return { resolve: (name) => (slots.has(name) ? inner.resolve(name) : null) };': 'a scope over a store: narrows, never widens',
   "core/secret-scope.ts|resolve: (name) => (permits(name, 'resolve') ? inner.resolve(name) : null),": 'a scope over a store: narrows, never widens',
   "core/secret-scope.ts|getMasked: (name) => (permits(name, 'getMasked') ? inner.getMasked(name) : null),": 'a scope over a store: narrows, never widens',
-  "core/secret-scope.ts|holds: (name) => (allowed.has(name) || isInfraSecret(name) ? inner.holds?.(name) ?? false : false),": 'a scope over a store: narrows, never widens',
+  'core/secret-scope.ts|const innerHolds = inner.holds?.bind(inner);': 'a scope over a store: narrows, never widens',
   'core/secret-store.ts|getMasked(name: string): string | null {': 'the definition',
   'types/security.ts|getMasked(name: string): string | null;': 'the declaration',
   // Reads through the view: `secretStore` here is `secretsForProfile(...)` (http.ts attach).

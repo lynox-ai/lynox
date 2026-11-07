@@ -76,9 +76,12 @@ describe('secretsForProfile', () => {
     expect(view.holds?.('SHOP_API_ACCESS_TOKEN')).toBe(false);
   });
 
-  it('control: the view answers holds for a name the profile may read, and false for a store that cannot answer', () => {
+  it('control: the view answers holds for a name the profile may read', () => {
     expect(secretsForProfile(store({ holds: (n: string) => VALUES[n] !== undefined }), own(M), apiStore, releasedFor(own(M), 'SETUP_KEY')).holds?.('SETUP_KEY')).toBe(true);
-    expect(secretsForProfile(store(), own(M), apiStore, releasedFor(own(M), 'SETUP_KEY')).holds?.('SETUP_KEY')).toBe(false);
+  });
+
+  it('over a store that cannot answer, the view cannot either', () => {
+    expect(secretsForProfile(store(), own(M), apiStore, releasedFor(own(M), 'SETUP_KEY')).holds).toBeUndefined();
   });
 
   it('a profile a mandate wrote does not get a name of the owner\'s it was not released', () => {
