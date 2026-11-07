@@ -1380,6 +1380,9 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
     // Newest first, the unrecorded target in its place among the recorded ones.
     expect(order).toEqual(['k003', 'k001', 'k000']);
+    // Settled, so not one the owner's view marks; counted as neither applied nor undone.
+    expect(ledger.getPreview(runId).find((t) => t.key === 'k003')).toMatchObject({ written: false, undone: true });
+    expect(ledger.getStatus(runId)!.undone).toBe(2);
   });
 
   it('a target a dead loop sent to whose write never landed needs no taking back', async () => {
@@ -1418,6 +1421,9 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
     expect(state.get('k003')).toBe('someone else');
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRollbackIncomplete);
+    // The page has the one it left to mark: the incomplete rollback names a target to check.
+    const view = ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone]);
+    expect(view).toEqual([['k000', true, true], ['k001', true, true], ['k002', false, true], ['k003', true, false]]);
   });
 
   it('a conflict also rolls an atomic run back', async () => {
@@ -1447,9 +1453,10 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRollbackIncomplete);
     expect(state.get('k000')).toBe('touched');
     // The owner's view names the one target the rollback left: written by the run, not taken
-    // back. The ones it took back are undone, and the one that failed was never written.
+    // back. The ones it took back are undone, and the one that failed was never written: its
+    // send was read back as before the run, which settles it.
     const view = ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone]);
-    expect(view).toEqual([['k000', true, false], ['k001', true, true], ['k002', true, true], ['k003', false, false]]);
+    expect(view).toEqual([['k000', true, false], ['k001', true, true], ['k002', true, true], ['k003', false, true]]);
   });
 
   // The page marks what the rollback would still take back, no more: the same set. The row below
@@ -1474,7 +1481,8 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     approve(runId);
     const { writer } = memory({ ...initial, k000: 'w0' }, new Set(['k002']));
     await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
-    expect(ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone])).toEqual([['k000', false, false], ['k001', true, true], ['k002', false, false]]);
+    // k002 failed: sent, read back as before the run, settled by the rollback.
+    expect(ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone])).toEqual([['k000', false, false], ['k001', true, true], ['k002', false, true]]);
   });
 
   it('an atomic run cannot be approved with a cap below its size', () => {

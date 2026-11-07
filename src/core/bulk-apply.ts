@@ -512,11 +512,15 @@ async function rollBack(
       // Local only (an external run is never atomic), so there are no fields to project on.
       const cur = await writer.read(t.key, null);
       // Still as before the run: the unrecorded send never landed, and there is nothing to take back.
-      if (!recorded && cur !== 'path_changed' && cur !== 'foreign' && sameImage(cur, t.expected)) continue;
+      if (!recorded && cur !== 'path_changed' && cur !== 'foreign' && sameImage(cur, t.expected)) {
+        ledger.recordUnrecordedSettled(run.id, t.seq, now());
+        continue;
+      }
+      // Left as it is, and unmarked: the owner's view marks it as one to check by hand.
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
       await writer.write(t.key, t.expected);
-      // Marks a recorded target only: an unrecorded one was never counted as written.
-      ledger.recordRolledBack(run, t.seq, now());
+      if (recorded) ledger.recordRolledBack(run, t.seq, now());
+      else ledger.recordUnrecordedSettled(run.id, t.seq, now());
     } catch {
       complete = false;
     }
