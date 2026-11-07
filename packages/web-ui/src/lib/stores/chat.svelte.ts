@@ -979,8 +979,14 @@ function isKeyInputRefusal(status: number, detail: string | null): boolean {
 	try { return (JSON.parse(detail) as { code?: unknown } | null)?.code === 'mandate_key_input'; } catch { return false; }
 }
 
+/** The code the run stream's terminal `error` event carries when the AI service cut the reply off
+ *  on every attempt (the engine's `StreamIncompleteError.CODE`). */
+const STREAM_INCOMPLETE_CODE = 'stream_incomplete';
+
 /** Map HTTP status + error detail to a user-friendly i18n message. */
-function mapApiError(status: number, detail: string): string {
+function mapApiError(status: number, detail: string, code?: string): string {
+	// A stable code from the engine decides before any text does.
+	if (code === STREAM_INCOMPLETE_CODE) return t('chat.error_incomplete');
 	const lower = detail.toLowerCase();
 	if (status === 409) return t('chat.error_busy');
 	if (status === 401 || lower.includes('authentication') || lower.includes('invalid_api_key') || lower.includes('invalid x-api-key')) {
@@ -2577,8 +2583,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// once the SSE stream is open — without explicit UI surfacing the user
 			// previously saw their own bubble and then nothing (silent fail).
 			const rawErr = String(data['error'] ?? data['message'] ?? 'Unknown error');
+			const errCode = typeof data['code'] === 'string' ? data['code'] : undefined;
 			chatErrorDetail = rawErr;
-			chatError = mapApiError(0, rawErr);
+			chatError = mapApiError(0, rawErr, errCode);
 			// Stop the spinner so a stale `streamingActivity` indicator doesn't
 			// keep ticking after the engine has already emitted the failure event.
 			// The outer finally block also clears these once the SSE stream closes,
@@ -2593,8 +2600,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// scrolled the chat error banner off-screen (mobile + long threads).
 			// Truncate the raw upstream string so a paragraph-long stack from a
 			// noisy provider doesn't blow up the toast layout.
+			// A failure the engine names by code is worded in the banner; the toast then only
+			// says that the reply failed, and the raw text stays in the detail.
 			const detailSnippet = rawErr.length > 140 ? `${rawErr.slice(0, 140)}…` : rawErr;
-			addToast(`${t('chat.error_toast_prefix')}: ${detailSnippet}`, 'error', 8000);
+			addToast(errCode === STREAM_INCOMPLETE_CODE
+				? `${t('chat.error_toast_prefix')}.`
+				: `${t('chat.error_toast_prefix')}: ${detailSnippet}`, 'error', 8000);
 			// Remove empty assistant message and mark user message as failed —
 			// UNLESS the caller owns that decision. The engine emits `error` both
 			// for a dead turn and for an incident it recovers from (see the

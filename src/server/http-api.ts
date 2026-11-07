@@ -74,6 +74,7 @@ import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import type { Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
+import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { isOnboardingFlag } from '../core/onboarding-flag-store.js';
@@ -5489,7 +5490,10 @@ export class LynoxHTTPApi {
           // reading `fatal` would see `undefined` here — falsy, i.e. "keep
           // waiting" — and the fix for the ambiguous channel would have created
           // a worse bug than the one it closes.
-          res.write(`event: error\ndata: ${JSON.stringify({ error: msg, fatal: true })}\n\n`);
+          // `code` names a failure the client words itself (the text above stays the detail): a
+          // reply the provider cut off on every attempt.
+          const code = err instanceof StreamIncompleteError ? StreamIncompleteError.CODE : undefined;
+          res.write(`event: error\ndata: ${JSON.stringify({ error: msg, fatal: true, ...(code !== undefined ? { code } : {}) })}\n\n`);
           res.end();
         }
       } finally {

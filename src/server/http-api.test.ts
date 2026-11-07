@@ -40,6 +40,7 @@ import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { WorkflowStore } from '../core/workflow-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
+import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { ChangesetManager } from '../core/changeset.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { currentRunGroup } from '../core/run-group.js';
@@ -2802,6 +2803,27 @@ describe('LynoxHTTPApi', () => {
       const text = await res.text();
       expect(text).toContain('event: error');
       expect(text).toContain('"fatal":true');
+    });
+
+    /** The JSON payload of the run stream's `event: error` frame. */
+    const errorFrame = (text: string): Record<string, unknown> => {
+      const frame = text.split('\n\n').find((f) => f.startsWith('event: error\n'));
+      if (frame === undefined) throw new Error('no error frame');
+      return JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice(6)) as Record<string, unknown>;
+    };
+
+    it('a reply the AI service cut off on every attempt: the terminal error carries the stable code', async () => {
+      repayRateWindow();
+      mockSessionRun.mockImplementationOnce(async () => { throw new StreamIncompleteError(); });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'boom' }) });
+      expect(errorFrame(await res.text())).toEqual({ error: 'the AI service ended the reply before it was finished', fatal: true, code: 'stream_incomplete' });
+    });
+
+    it('control: another terminal error carries no code', async () => {
+      repayRateWindow();
+      mockSessionRun.mockImplementationOnce(async () => { throw new Error('provider exploded'); });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'boom' }) });
+      expect(errorFrame(await res.text())).toEqual({ error: 'provider exploded', fatal: true });
     });
 
     it('a run that ended needing input ends with done and its reason — no fatal error, no red toast', async () => {

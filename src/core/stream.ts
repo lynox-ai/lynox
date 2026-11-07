@@ -14,6 +14,7 @@ import type {
   BetaUsage,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import type { ImitationHit, ToolCallImitationDetector } from './tool-call-imitation.js';
+import { StreamIncompleteError } from './stream-incomplete.js';
 
 /** A reply cut off mid-stream, as far as it came: the usage the provider reported
  *  (`message_start`, any `message_delta`) and the content blocks streamed so far. */
@@ -86,6 +87,8 @@ export class StreamProcessor {
     const rawInputs = new Map<number, string>();
     let stopReason = 'end_turn';
     let usage: BetaUsage | undefined;
+    // Whether the stream ended the reply: a `message_delta` with its stop reason, or `message_stop`.
+    let ended = false;
 
     for await (const event of stream) {
       this._events++;
@@ -107,6 +110,7 @@ export class StreamProcessor {
             const next = await this._handleMessageDelta(event, usage);
             if (next.stopReason !== undefined) {
               stopReason = next.stopReason;
+              ended = true;
             }
           }
           break;
@@ -117,9 +121,15 @@ export class StreamProcessor {
           break;
 
         case 'message_stop':
+          ended = true;
           break;
       }
     }
+
+    // A response closed cleanly before any stop reason is a cut-off reply: returned, it would pass
+    // for a finished answer. After its stop reason the reply and its usage are known, so a close
+    // before `message_stop` still counts as complete.
+    if (!ended) throw new StreamIncompleteError();
 
     if (!usage) {
       usage = {

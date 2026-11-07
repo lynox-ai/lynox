@@ -13,6 +13,7 @@ import { Agent } from './agent.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { abortedCallCost, abortedCallCounts } from './aborted-call.js';
+import { StreamIncompleteError } from './stream-incomplete.js';
 import type { LynoxConfig } from '../types/index.js';
 
 const SITE = 'agent.stream_error';
@@ -55,6 +56,39 @@ function errorAfterTurnEnd(res: ServerResponse): void {
   res.end();
 }
 
+/** A reply that streams a piece and then closes the response, before its `message_delta` and `message_stop`. */
+function truncated(res: ServerResponse): void {
+  begin(res);
+  sse(res, 'content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial answer ' } });
+  res.end();
+}
+
+/** A reply that reaches its `message_delta` (stop reason and final usage) and then closes the response, before `message_stop`. */
+function closedAfterStopReason(res: ServerResponse): void {
+  begin(res);
+  sse(res, 'content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'full answer' } });
+  sse(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
+  sse(res, 'message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } });
+  res.end();
+}
+
+/**
+ * An openai-compatible chat-completions stream with a text piece, ended by `shape`: `finish` (a
+ * finish_reason, a usage chunk, `[DONE]`), `done-only` (finish_reason null throughout, usage, then
+ * `[DONE]`, as some providers send), or `cut` (the response just closes).
+ */
+function openaiReply(res: ServerResponse, text: string, shape: 'finish' | 'done-only' | 'cut'): void {
+  const data = (d: unknown): void => { res.write(`data: ${typeof d === 'string' ? d : JSON.stringify(d)}\n\n`); };
+  res.writeHead(200, { 'content-type': 'text/event-stream' });
+  data({ id: 'r', choices: [{ index: 0, delta: { content: text }, finish_reason: null }] });
+  if (shape !== 'cut') {
+    data({ id: 'r', choices: [{ index: 0, delta: {}, finish_reason: shape === 'finish' ? 'stop' : null }] });
+    data({ id: 'r', choices: [], usage: { prompt_tokens: 50, completion_tokens: 5 } });
+    data('[DONE]');
+  }
+  res.end();
+}
+
 /** The request itself refused: HTTP 529. The SDK retries this inside the call before the Agent sees it. */
 function overloadedStatus(res: ServerResponse): void {
   res.writeHead(529, { 'content-type': 'application/json', 'retry-after-ms': '1' });
@@ -76,7 +110,7 @@ async function provider(respond: (hit: number, res: ServerResponse) => void): Pr
 type Inside = { costGuard: { capOnlyUSD: number }; sessionCounters: { costUSD: number }; maxTokens: number; model: string };
 
 /** How the agent's stream consumer treats `turn_end`: counted like Session's, or dropped like a spawned child's. */
-type Consumer = { turnEndUsageCounted?: boolean; throwOnTurnEnd?: boolean };
+type Consumer = { turnEndUsageCounted?: boolean; throwOnTurnEnd?: boolean; wire?: 'anthropic' | 'openai' };
 
 async function runAgainst(respond: (hit: number, res: ServerResponse) => void, consumer: Consumer = {}): Promise<{
   agent: Agent; hits: number; result: string | undefined; err: unknown; retryReasons: string[]; turnEnds: number[]; retryAfterTurnEnd: Array<boolean | undefined>; before: ReturnType<typeof abortedCallCounts>;
@@ -87,7 +121,10 @@ async function runAgainst(respond: (hit: number, res: ServerResponse) => void, c
     const turnEnds: number[] = [];
     const retryAfterTurnEnd: Array<boolean | undefined> = [];
     const agent = new Agent({
-      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', apiBaseURL: p.url, apiKey: 'not-a-key',
+      name: 'test',
+      ...(consumer.wire === 'openai'
+        ? { model: 'm', provider: 'openai' as const, apiBaseURL: `${p.url}/v1`, openaiModelId: 'm', apiKey: 'k' }
+        : { model: 'claude-sonnet-4-6', provider: 'anthropic' as const, apiBaseURL: p.url, apiKey: 'not-a-key' }),
       costGuard: { maxBudgetUSD: 100 },
       sessionCounters: { costUSD: 0, spawnCount: 0, spawnCostUSD: 0 } as unknown as import('../types/agent.js').SessionCounters,
       ...(consumer.turnEndUsageCounted === true ? { turnEndUsageCounted: true } : {}),
@@ -129,7 +166,7 @@ describe('a provider error inside the stream', () => {
   beforeAll(() => { saved = seam.RETRY_BASE_MS; seam.RETRY_BASE_MS = 1; });
   afterAll(() => { seam.RETRY_BASE_MS = saved; });
 
-  for (const type of ['overloaded_error', 'api_error', 'rate_limit_error'] as const) {
+  for (const type of ['overloaded_error', 'api_error', 'rate_limit_error', 'timeout_error'] as const) {
     it(`${type}: is retried with a second request, the run succeeds, the failed attempt is booked`, async () => {
       const { agent, hits, result, err, retryReasons, before } = await runAgainst((hit, res) => {
         if (hit === 1) errorMidStream(res, type); else reply(res, 'recovered');
@@ -228,6 +265,100 @@ describe('a provider error inside the stream', () => {
     expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
     expect(inside.costGuard.capOnlyUSD).toBe(0);
     expect(agent.getHelperCostUsd()).toBe(0);
+  }, 10_000);
+});
+
+// A response the provider closes cleanly before any stop reason is a reply cut off, not a
+// finished one: neither the Anthropic SDK's stream nor the openai-compatible adapter reports it,
+// so the stream processor does, and the attempt is retried and booked like one ended by an error.
+// Once a stop reason arrived the reply is complete, even if `message_stop` never follows.
+describe('a stream that ends without a stop reason', () => {
+  const seam = Agent as unknown as { RETRY_BASE_MS: number };
+  let saved = 0;
+  beforeAll(() => { saved = seam.RETRY_BASE_MS; seam.RETRY_BASE_MS = 1; });
+  afterAll(() => { seam.RETRY_BASE_MS = saved; });
+
+  it('cut off after a text piece: retried with a second request, the run gets the second reply, the first attempt is booked', async () => {
+    const { agent, hits, result, err, retryReasons, retryAfterTurnEnd, before } = await runAgainst((hit, res) => {
+      if (hit === 1) truncated(res); else reply(res, 'recovered');
+    });
+    expect(err).toBeUndefined();
+    expect(result).toBe('recovered');
+    expect(hits).toBe(2);
+    expect(retryReasons).toHaveLength(1);
+    expect(retryReasons[0]).toMatch(/^StreamIncompleteError: /);
+    expect(retryAfterTurnEnd).toEqual([false]);
+    expectBooked(agent, before, 1);
+  }, 10_000);
+
+  it('cut off on every attempt: the retry count holds, the run fails with the error, every attempt is booked once', async () => {
+    const { agent, hits, result, err, retryReasons, before } = await runAgainst((_hit, res) => { truncated(res); });
+    expect(result).toBeUndefined();
+    expect(err).toBeInstanceOf(StreamIncompleteError);
+    expect(hits).toBe(4);
+    expect(retryReasons).toHaveLength(3);
+    expectBooked(agent, before, 4);
+  }, 10_000);
+
+  for (const counted of [true, false]) {
+    it(`closed after its message_delta named a stop reason (${counted ? 'Session' : 'spawned child'} consumer): complete, one request, nothing booked as ended`, async () => {
+      const { agent, hits, result, err, retryReasons, turnEnds, before } = await runAgainst((_hit, res) => { closedAfterStopReason(res); }, { turnEndUsageCounted: counted });
+      expect(err).toBeUndefined();
+      expect(result).toBe('full answer');
+      expect(hits).toBe(1);
+      expect(retryReasons).toHaveLength(0);
+      expect(turnEnds).toEqual([5]);
+      expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
+      expect((agent as unknown as Inside).costGuard.capOnlyUSD).toBe(0);
+      expect(agent.getHelperCostUsd()).toBe(0);
+    }, 10_000);
+  }
+
+  it('control: a complete Anthropic stream is one request, no retry, nothing booked as ended', async () => {
+    const { agent, hits, result, retryReasons, before } = await runAgainst((_hit, res) => { reply(res, 'whole answer'); });
+    expect(result).toBe('whole answer');
+    expect(hits).toBe(1);
+    expect(retryReasons).toHaveLength(0);
+    expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
+    expect((agent as unknown as Inside).costGuard.capOnlyUSD).toBe(0);
+    expect(agent.getHelperCostUsd()).toBe(0);
+  }, 10_000);
+
+  it('control: a complete openai-compatible stream (finish_reason, usage chunk, [DONE]) is one request, no retry, nothing booked as ended', async () => {
+    const { agent, hits, result, retryReasons, turnEnds, before } = await runAgainst((_hit, res) => { openaiReply(res, 'whole answer', 'finish'); }, { wire: 'openai' });
+    expect(result).toBe('whole answer');
+    expect(hits).toBe(1);
+    expect(retryReasons).toHaveLength(0);
+    expect(turnEnds).toEqual([5]);
+    expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
+    expect((agent as unknown as Inside).costGuard.capOnlyUSD).toBe(0);
+    expect(agent.getHelperCostUsd()).toBe(0);
+  }, 10_000);
+
+  it('an openai-compatible stream with finish_reason null throughout, ended by [DONE]: complete, one request, nothing booked as ended', async () => {
+    const { agent, hits, result, err, retryReasons, turnEnds, before } = await runAgainst((_hit, res) => { openaiReply(res, 'whole answer', 'done-only'); }, { wire: 'openai' });
+    expect(err).toBeUndefined();
+    expect(result).toBe('whole answer');
+    expect(hits).toBe(1);
+    expect(retryReasons).toHaveLength(0);
+    expect(turnEnds).toEqual([5]);
+    expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe(before.notBilled[SITE] ?? 0);
+    expect((agent as unknown as Inside).costGuard.capOnlyUSD).toBe(0);
+    expect(agent.getHelperCostUsd()).toBe(0);
+  }, 10_000);
+
+  it('an openai-compatible stream closed before any finish_reason or [DONE]: retried, the second reply wins, the first attempt is booked', async () => {
+    const { agent, hits, result, retryReasons, before } = await runAgainst((hit, res) => {
+      openaiReply(res, hit === 1 ? 'partial answer ' : 'recovered', hit === 1 ? 'cut' : 'finish');
+    }, { wire: 'openai' });
+    expect(result).toBe('recovered');
+    expect(hits).toBe(2);
+    expect(retryReasons).toHaveLength(1);
+    expect(retryReasons[0]).toMatch(/^StreamIncompleteError: /);
+    expect(abortedCallCounts().notBilled[SITE] ?? 0).toBe((before.notBilled[SITE] ?? 0) + 1);
+    const inside = agent as unknown as Inside;
+    expect(inside.costGuard.capOnlyUSD).toBeGreaterThan(0);
+    expect(agent.getHelperCostUsd()).toBeGreaterThan(0);
   }, 10_000);
 });
 
