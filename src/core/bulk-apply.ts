@@ -501,12 +501,21 @@ async function rollBack(
   cause: 'failed' | 'stopped' | 'time' = 'failed',
 ): Promise<BulkEffectOutcome> {
   let complete = true;
-  for (const t of ledger.listAppliedDesc(run.id)) {
+  // A target a dead loop sent to and never recorded is taken back too: its write may hold there,
+  // and a rollback that skipped it would call itself complete over a target the run changed.
+  const targets = [
+    ...ledger.listAppliedDesc(run.id).map((t) => ({ t, recorded: true })),
+    ...ledger.listSentUnrecordedDesc(run.id).map((t) => ({ t, recorded: false })),
+  ].sort((a, b) => b.t.seq - a.t.seq);
+  for (const { t, recorded } of targets) {
     try {
       // Local only (an external run is never atomic), so there are no fields to project on.
       const cur = await writer.read(t.key, null);
+      // Still as before the run: the unrecorded send never landed, and there is nothing to take back.
+      if (!recorded && cur !== 'path_changed' && cur !== 'foreign' && sameImage(cur, t.expected)) continue;
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
       await writer.write(t.key, t.expected);
+      // Marks a recorded target only: an unrecorded one was never counted as written.
       ledger.recordRolledBack(run, t.seq, now());
     } catch {
       complete = false;

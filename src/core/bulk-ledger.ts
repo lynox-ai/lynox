@@ -3386,6 +3386,19 @@ export class BulkLedger {
     return rows.map((r) => this.toApplyTarget(r));
   }
 
+  /** Targets this run sent its write to but never recorded as written, newest first: a loop
+   *  marked the send and died before {@link recordApplied}, or the write failed after it may
+   *  have landed. Whether it holds on the target only a read can tell. For an atomic run's
+   *  rollback, beside {@link listAppliedDesc}. */
+  listSentUnrecordedDesc(runId: string): ApplyTarget[] {
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
+       WHERE run_id = ? AND write_sent = 1 AND applied_at IS NULL AND undone_at IS NULL AND ${WRITING_SQL}
+       ORDER BY seq DESC`,
+    ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
+    return rows.map((r) => this.toApplyTarget(r));
+  }
+
   /** Move the run's phase, only from one of `from`. */
   setPhase(runId: string, from: readonly BulkPhase[], to: BulkPhase, haltReason: BulkHaltReason | null = null): boolean {
     return this.engineDb.getDb().prepare(

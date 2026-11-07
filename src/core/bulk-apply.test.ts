@@ -1356,6 +1356,63 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect([...state.values()]).toEqual(['v0', 'w1', 'v2', 'v3']);
   });
 
+  // A loop that marked a send and wrote, then died before recording it: the target holds the
+  // run's write but is not among the applied ones. The next pass fails before reaching it.
+  function sentUnrecorded(runId: string, seq: number): void {
+    ledger.markSent(runId, seq);
+    const row = engineDb.getDb().prepare('SELECT write_sent, applied_at FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq);
+    expect(row).toEqual({ write_sent: 1, applied_at: null });
+  }
+
+  it('a rollback takes back a target a dead loop sent to and never recorded', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    sentUnrecorded(runId, 3);
+    // k003 holds the dead loop's write; k002 fails and rolls the run back before k003 is read.
+    const { writer, state } = memory({ ...initial, k003: 'w3' }, new Set(['k002']));
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
+  });
+
+  it('a target a dead loop sent to whose write never landed needs no taking back', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    sentUnrecorded(runId, 3);
+    const { writer, state } = memory(initial, new Set(['k002']));
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
+  });
+
+  it('a rollback takes back a failed target whose write landed before it failed', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    const landsThenFails: TargetWriter = {
+      read: (k) => writer.read(k),
+      write: async (k, a) => {
+        const r = await writer.write(k, a);
+        // The run's own write only; the rollback's write back succeeds.
+        if (k === 'k002' && !a.absent && a.value === 'w2') throw new Error(`boom after landing ${MARK}`);
+        return r;
+      },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(landsThenFails))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
+  });
+
+  it('a target a dead loop sent to that someone changed since makes the rollback incomplete', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    sentUnrecorded(runId, 3);
+    const { writer, state } = memory({ ...initial, k003: 'someone else' }, new Set(['k002']));
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
+    expect(state.get('k003')).toBe('someone else');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRollbackIncomplete);
+  });
+
   it('a conflict also rolls an atomic run back', async () => {
     const { runId, initial } = recordMemoryRun(4, { atomic: true });
     approve(runId);
