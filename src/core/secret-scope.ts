@@ -224,6 +224,9 @@ export function scopeSecretStore(
     [SCOPE_MARKER]: [...scope],
 
     resolve: (name) => (permits(name, 'resolve') ? inner.resolve(name) : null),
+    // An existence question is not a refused read: a name outside the scope answers false without
+    // `deny`, so the answer does not tell whether it exists in the full vault either.
+    holds: (name) => (allowed.has(name) || isInfraSecret(name) ? inner.holds?.(name) ?? false : false),
     getMasked: (name) => (permits(name, 'getMasked') ? inner.getMasked(name) : null),
 
     // Infra names pass here for the reason `permits` lets them pass a read: this is the

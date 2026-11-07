@@ -874,7 +874,12 @@ export class SecretStore implements SecretStoreLike {
     return secret === undefined || secret.value === '' ? '' : hash(secret.value);
   }
 
-  resolve(name: string): string | null {
+  /**
+   * The value {@link resolve} would hand out for `name`, or `null`: stored, not expired, consented
+   * to, and let through by the resolve guard. The one place these four questions are asked, so
+   * {@link resolve} and {@link holds} cannot drift apart.
+   */
+  private usableValue(name: string): string | null {
     const secret = this.secrets.get(name);
     if (!secret) return null;
     if (this.isExpired(name)) return null;
@@ -886,9 +891,23 @@ export class SecretStore implements SecretStoreLike {
         return null;
       }
     }
-
-    channels.secretAccess.publish({ name, action: 'resolve' });
     return secret.value;
+  }
+
+  resolve(name: string): string | null {
+    const value = this.usableValue(name);
+    if (value === null) return null;
+    channels.secretAccess.publish({ name, action: 'resolve' });
+    return value;
+  }
+
+  /**
+   * Whether {@link resolve} would hand out a value for `name`, without reading it out: nothing is
+   * returned and no `secretAccess` event is published, so a check that only asks "is it there?"
+   * does not read in the audit trail as a credential read.
+   */
+  holds(name: string): boolean {
+    return this.usableValue(name) !== null;
   }
 
   listNames(): string[] {

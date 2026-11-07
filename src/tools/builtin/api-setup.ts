@@ -1769,7 +1769,8 @@ export function adoptionNote(prior: ApiProfile, saved: ApiProfile): string {
  * The line `view` adds to a built-in provider's profile that holds no token yet. Without it the
  * view said only "OAuth2 (managed refresh-token flow)", and a model asked to connect the profile
  * wrote the connect call into its reply as a link instead of making it (1312). Whether a token is
- * held is read from the vault, never from profile text; with no vault the line is left out. Either
+ * held is asked of the vault (`holds`: no value read out, no audit event), never of profile text;
+ * with no vault, or one that cannot answer, the line is left out. Either
  * token held means the profile may be connected, so the line needs both slots empty (ux U-191).
  * A run whose secret scope leaves either slot out gets no line.
  */
@@ -1781,7 +1782,10 @@ export function notConnectedNote(agent: Pick<IAgent, 'secretStore'>, profile: Ap
   // A scoped run cannot see these slots; asking would record them as denied and suggest widening
   // the scope to OAuth tokens. It cannot tell, so it says nothing (as `emptyTokenSlots` does).
   if (slots.some((name) => store.explainUnresolved?.(name) === 'out-of-scope')) return '';
-  if (slots.some((name) => store.resolve(name) !== null)) return '';
+  // A store that cannot say whether a token is there gets no line: falling back to `resolve` would
+  // read the token out and log it as a read only to compare it with nothing.
+  if (store.holds === undefined) return '';
+  if (slots.some((name) => store.holds!(name))) return '';
   return `\n\nConnection: not connected yet. When the user wants it connected, call api_setup with action "connect" and id "${profile.id}"; that call returns the sign-in link for the user, or says why there is none. A link or a tool call written into your reply connects nothing.`;
 }
 
