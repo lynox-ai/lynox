@@ -690,7 +690,7 @@ async function* translateStream(
           totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
         }
         const tailFinish = Array.isArray(chunk?.choices) ? chunk.choices[0]?.finish_reason : undefined;
-        // A tail `finish_reason: "error"` ends nothing: no terminal events follow, as for an error chunk.
+        // A tail `finish_reason: "error"` ends nothing: no terminal events follow, so the reply is incomplete.
         if (tailFinish && tailFinish !== FINISH_ERROR && finishStopReason === null) {
           yield* closeOpenBlocks();
           finishStopReason = translateFinish(tailFinish);
@@ -870,8 +870,8 @@ export class OpenAIAdapter {
               }
             }
 
-            // `message_delta` is emitted only once the reply ended — a finish_reason, or `[DONE]`
-            // with no error chunk before it — and it carries the token totals (0/0 when the
+            // `message_delta` is emitted only once the reply ended — a finish_reason other than
+            // `"error"`, or `[DONE]` with no error before it — and it carries the token totals (0/0 when the
             // provider sent no usage). A stream that ends without one is a TRUNCATED response — but it
             // assembles into a message that looks entirely ordinary: partial content,
             // `stop_reason: 'end_turn'`, and usage 0/0. `process-capture.ts` then debits zero
@@ -879,7 +879,7 @@ export class OpenAIAdapter {
             // wrong here: a caller that retries costs one request, a caller that believes a
             // truncated answer costs a wrong result and an unbilled call.
             if (!sawTerminal) {
-              throw new Error('upstream stream ended without a finish_reason — response is incomplete');
+              throw new Error('upstream stream ended before its reply was finished — response is incomplete');
             }
             return { content, stop_reason: stopReason, usage: { input_tokens: inputTokens, output_tokens: outputTokens, cache_read_input_tokens: cacheReadTokens } };
           },
