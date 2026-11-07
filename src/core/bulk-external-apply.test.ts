@@ -3022,8 +3022,10 @@ describe('a send without a clear answer is not sent again', () => {
         expect((await run(undo.status.id, c, 'bulk_undo')).status).toBe('done');
         expect(patches(s).includes('/products/0')).toBe(landed);
         expect(s.items.get('/products/0')!['price']).toBe('12.00');
-        // Taken back either way, so the run no longer counts it unclear.
+        // Taken back either way, so the run no longer counts it unclear, and counts it undone
+        // although it was never recorded as applied: an external undo sent to it.
         expect(ledger.getStatus(runId)!.sentUnknown).toBe(0);
+        expect(ledger.getStatus(runId)!.undone).toBe(5);
       } finally {
         restore();
       }

@@ -817,7 +817,7 @@ export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>):
 }
 
 /** Whether the page marks this target: the run's rollback did not complete, and this is a
- *  target it wrote and did not take back. */
+ *  target it wrote, or sent to without recording it, and did not take back. */
 export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
