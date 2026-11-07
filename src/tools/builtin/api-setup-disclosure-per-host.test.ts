@@ -127,7 +127,8 @@ describe('api_setup: a store profile is saved on the API version its provider pi
   it.each([
     ['an old version', 'https://acme.myshopify.com/admin/api/2024-01'],
     ['an old version with a path behind it', 'https://acme.myshopify.com/admin/api/2024-01/graphql.json'],
-    ['a name that is no version', 'https://acme.myshopify.com/admin/api/unstable'],
+    ['a version name other than the pin', 'https://acme.myshopify.com/admin/api/unstable'],
+    ['an old version behind a doubled slash', 'https://acme.myshopify.com/admin/api//2024-01'],
   ])('refuses %s on create, asks nobody and stores nothing', async (_label, baseUrl) => {
     const store = new ApiStore();
     const { result, asked } = await save(store, 'create', storeProfile(baseUrl));

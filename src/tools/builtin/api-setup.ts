@@ -200,7 +200,8 @@ function presetApiVersionError(preset: ReturnType<typeof OAUTH_PRESETS.get>, bas
   }
   const versionsAt = `${preset.apiPathPrefix ?? '/'}api/`;
   if (!path.startsWith(versionsAt)) return null;
-  const named = path.slice(versionsAt.length).split('/')[0] ?? '';
+  // The first non-empty segment: `/admin/api//2024-01` names 2024-01 to a server that joins slashes.
+  const named = path.slice(versionsAt.length).split('/').find((segment) => segment !== '') ?? '';
   if (named === '' || named === pinned) return null;
   return `Invalid base_url: a profile on the built-in "${preset.id}" provider uses its API version ${pinned}, the one this engine's own requests name. End base_url in ${versionsAt}${pinned}.`;
 }
@@ -2128,7 +2129,7 @@ ${draftJson}
         return `Validation error: ${error}`;
       }
       // A provider that pins its API version in the path is saved on that version. Shopify answers
-      // an old or unknown version with the oldest one it still supports, so a profile on another
+      // an old version with the oldest one it still supports, so a profile on another
       // version would read a different API than the engine's own requests (`adminApiVersion`).
       // Checked here and not in `validateProfile`, so a stored profile on another version can
       // still be refined. The version the model wrote is not repeated.
