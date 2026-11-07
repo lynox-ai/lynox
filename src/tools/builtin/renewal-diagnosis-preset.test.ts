@@ -85,7 +85,7 @@ describe('the catalog offers no way around a built-in provider', () => {
     // sent every model there after connect was refused (ux U-188).
     const { SUGGESTED_API_CATALOG } = await import('../../core/suggested-apis.js');
     const bexio = SUGGESTED_API_CATALOG.connect_when_user_asks.find((a) => a.id === 'bexio');
-    expect(bexio?.value_prop).toContain('There is no other way to connect it here: a personal token or another sign-in for bexio is refused.');
+    expect(bexio?.value_prop).toContain('There is no other way to connect it here: a profile with a personal token or another sign-in for bexio is refused.');
     expect(bexio?.value_prop).not.toMatch(/fallback/i);
   });
 });
