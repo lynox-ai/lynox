@@ -143,6 +143,7 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { EXAMPLE_
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
     secretStore: {
+      resolve: (name: string): string | null => secrets[name] ?? null,
       extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)].map((m) => m[1]!),
       resolveSecretRefs: (input: unknown): unknown => {
         const text = JSON.stringify(input);
