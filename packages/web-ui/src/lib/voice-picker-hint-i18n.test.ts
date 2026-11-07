@@ -39,9 +39,15 @@ describe('the hint under the voice picker says what happens to a voice the model
 
 describe('the picker renders that key', () => {
   it('VoiceSettings shows voice.tts_voice_hint under the voice select', () => {
-    const select = picker.indexOf("t('voice.default')");
-    const hint = picker.indexOf("t('voice.tts_voice_hint')");
+    // Anchored on the voice select's own binding, not on a label key the script also
+    // uses: the hint has to sit after that select and inside the same <label>.
+    const select = picker.indexOf('bind:value={config.tts_voice}');
     expect(select).toBeGreaterThan(-1);
-    expect(hint).toBeGreaterThan(select);
+    const selectEnd = picker.indexOf('</select>', select);
+    const labelEnd = picker.indexOf('</label>', select);
+    const hint = picker.indexOf("t('voice.tts_voice_hint')");
+    expect(selectEnd).toBeGreaterThan(select);
+    expect(hint).toBeGreaterThan(selectEnd);
+    expect(hint).toBeLessThan(labelEnd);
   });
 });
