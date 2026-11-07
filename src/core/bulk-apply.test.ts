@@ -1371,8 +1371,9 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     // k003 holds the dead loop's write; k002 fails and rolls the run back before k003 is read.
     const { writer, state } = memory({ ...initial, k003: 'w3' }, new Set(['k002']));
     const order: string[] = [];
+    const reads = new Map<string, number>();
     const logged: TargetWriter = {
-      read: (k) => writer.read(k),
+      read: (k) => { reads.set(k, (reads.get(k) ?? 0) + 1); return writer.read(k); },
       write: async (k, a) => { if (!a.absent && String(a.value).startsWith('v')) order.push(k); return writer.write(k, a); },
     };
     expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(logged))).status).toBe('aborted');
@@ -1380,6 +1381,9 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
     // Newest first, the unrecorded target in its place among the recorded ones.
     expect(order).toEqual(['k003', 'k001', 'k000']);
+    // Each target read once by the pass that reached it and once by the rollback: a recorded one
+    // is not also read as an unrecorded one.
+    expect(Object.fromEntries(reads)).toEqual({ k000: 2, k001: 2, k002: 2, k003: 1 });
     // Settled, so not one the owner's view marks; counted as neither applied nor undone.
     expect(ledger.getPreview(runId).find((t) => t.key === 'k003')).toMatchObject({ written: false, undone: true });
     expect(ledger.getStatus(runId)!.undone).toBe(2);
