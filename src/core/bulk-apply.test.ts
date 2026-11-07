@@ -1370,9 +1370,16 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     sentUnrecorded(runId, 3);
     // k003 holds the dead loop's write; k002 fails and rolls the run back before k003 is read.
     const { writer, state } = memory({ ...initial, k003: 'w3' }, new Set(['k002']));
-    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
+    const order: string[] = [];
+    const logged: TargetWriter = {
+      read: (k) => writer.read(k),
+      write: async (k, a) => { if (!a.absent && String(a.value).startsWith('v')) order.push(k); return writer.write(k, a); },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(logged))).status).toBe('aborted');
     expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
+    // Newest first, the unrecorded target in its place among the recorded ones.
+    expect(order).toEqual(['k003', 'k001', 'k000']);
   });
 
   it('a target a dead loop sent to whose write never landed needs no taking back', async () => {
@@ -1419,6 +1426,9 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     const { writer, state } = memory({ ...initial, k002: 'someone else' });
     expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
     expect([...state.values()]).toEqual(['v0', 'v1', 'someone else', 'v3']);
+    // The conflicting target was never sent to: it is not the run's to take back, and the
+    // rollback of what the run wrote is complete.
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
   });
 
   it('a rollback that finds a target changed says so', async () => {
