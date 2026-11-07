@@ -442,6 +442,56 @@ describe('ImapSmtpProvider — fetch', () => {
     expect(err).toBeInstanceOf(MailError);
     expect(err.code).toBe('not_found');
   });
+
+  // imapflow's fetchOne answers `undefined` when no mailbox is selected any more, and `false`
+  // when the FETCH found nothing, which is also what it answers when the mailbox went away while
+  // the command ran. After such a drop the message is not absent: the read failed.
+  it('a connection that drops before the message is read is a failure, not an absent message', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    for (const [result, mailbox] of [[undefined, { path: 'INBOX' }], [false, false]] as const) {
+      probe.fetchOne.mockResolvedValue(result);
+      probe.mailbox = mailbox;
+      const err = await provider.fetch({ uid: 999 }).then(() => null, (e: unknown) => e);
+      expect(err, `fetchOne → ${String(result)}`).toBeInstanceOf(MailError);
+      expect((err as MailError).code).toBe('unknown');
+      expect((err as MailError).message).toContain('the connection dropped before message uid=999 was read');
+    }
+  });
+
+  it('control: fetchOne false with the mailbox still selected is an absent message', async () => {
+    probe.fetchOne.mockResolvedValue(false);
+    probe.mailbox = { path: 'INBOX' };
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.fetch({ uid: 999 }).then(() => null, (e: unknown) => e);
+    expect((err as MailError).code).toBe('not_found');
+  });
+
+  it('a connection that drops before the body part is read is a failure, not an empty mail', async () => {
+    // The part fetch is a generator that ends without yielding when no mailbox is selected.
+    probe.fetchOne.mockResolvedValue(makeFetchMessage({ uid: 42 }));
+    probe.fetch.mockImplementation(() => asyncIterFrom([]));
+    probe.mailbox = false;
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.fetch({ uid: 42 }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(MailError);
+    expect((err as MailError).code).toBe('unknown');
+    expect((err as MailError).message).toContain('the connection dropped before part 1 was read');
+  });
+
+  it('control: a part fetch that answers nothing with the mailbox selected, or an empty part, reads empty', async () => {
+    probe.fetchOne.mockResolvedValue(makeFetchMessage({ uid: 42 }));
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+
+    probe.fetch.mockImplementation(() => asyncIterFrom([]));
+    probe.mailbox = { path: 'INBOX' };
+    expect((await provider.fetch({ uid: 42 })).text).toBe('');
+
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      { ...makeFetchMessage({ uid: 42 }), bodyParts: new Map([['1', Buffer.alloc(0)]]) } as FetchMessageObject,
+    ]));
+    probe.mailbox = false;
+    expect((await provider.fetch({ uid: 42 })).text).toBe('');
+  });
 });
 
 describe('ImapSmtpProvider — Content-Transfer-Encoding decoding', () => {
@@ -1152,6 +1202,41 @@ describe('ImapSmtpProvider — sent-copy append (seen in our own use, 2026-08-14
       const result = await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
       expect(result.accepted).toEqual(['bob@example.com']);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('sent-copy append failed'), expect.anything());
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('an append that resolves without storing the copy is reported, and the Sent folder stays resolved', async () => {
+    // imapflow resolves `append` to `false` instead of rejecting when the session is no longer
+    // signed in. The mail is delivered; the missing copy must not be silent.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+      for (const result of [false, undefined]) {
+        probe.append.mockResolvedValueOnce(result);
+        const sent = await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+        expect(sent.accepted).toEqual(['bob@example.com']);
+      }
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      for (const call of warnSpy.mock.calls) {
+        expect(call[0]).toContain('sent-copy append failed');
+        expect(String(call[1])).toContain('the session was no longer signed in, the Sent copy was not stored');
+      }
+      // The folder is not in doubt: the second send did not list the folders again.
+      expect(probe.list).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('control: an append that stores the copy warns nothing', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+      await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+      expect(probe.append).toHaveBeenCalledTimes(1);
+      expect(warnSpy).not.toHaveBeenCalled();
     } finally {
       warnSpy.mockRestore();
     }
