@@ -31,6 +31,7 @@ const BYPASS: readonly RegExp[] = [
 const PINNED: Readonly<Record<string, string>> = {
   // The view itself and the stores it wraps.
   'core/profile-secret-view.ts|return (name: string): string | null => (hidden(name) ? null : target.resolve(name));': 'the view: resolves only what hiddenFromProfile lets through',
+  'core/profile-secret-view.ts|return (name: string): boolean => (hidden(name) ? false : target.holds?.(name) ?? false);': 'the view: answers holds only for what hiddenFromProfile lets through',
   'core/secret-scope.ts|return { resolve: (name) => (slots.has(name) ? inner.resolve(name) : null) };': 'a scope over a store: narrows, never widens',
   "core/secret-scope.ts|resolve: (name) => (permits(name, 'resolve') ? inner.resolve(name) : null),": 'a scope over a store: narrows, never widens',
   "core/secret-scope.ts|getMasked: (name) => (permits(name, 'getMasked') ? inner.getMasked(name) : null),": 'a scope over a store: narrows, never widens',

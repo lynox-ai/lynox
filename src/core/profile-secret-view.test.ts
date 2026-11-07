@@ -70,6 +70,17 @@ describe('secretsForProfile', () => {
     expect(view.resolveSecretRefs({ a: 'secret:SETUP_KEY', b: 'secret:SHOP_API_ACCESS_TOKEN' })).toEqual({ a: 'secret:SETUP_KEY', b: 'secret:SHOP_API_ACCESS_TOKEN' });
   });
 
+  it('a profile a mandate wrote is not told whether a name it may not read exists', () => {
+    const view = secretsForProfile(store({ holds: (n: string) => VALUES[n] !== undefined }), own(M), apiStore, NO_RELEASES);
+    expect(view.holds?.('SETUP_KEY')).toBe(false);
+    expect(view.holds?.('SHOP_API_ACCESS_TOKEN')).toBe(false);
+  });
+
+  it('control: the view answers holds for a name the profile may read, and false for a store that cannot answer', () => {
+    expect(secretsForProfile(store({ holds: (n: string) => VALUES[n] !== undefined }), own(M), apiStore, releasedFor(own(M), 'SETUP_KEY')).holds?.('SETUP_KEY')).toBe(true);
+    expect(secretsForProfile(store(), own(M), apiStore, releasedFor(own(M), 'SETUP_KEY')).holds?.('SETUP_KEY')).toBe(false);
+  });
+
   it('a profile a mandate wrote does not get a name of the owner\'s it was not released', () => {
     const view = secretsForProfile(store(), own(M), apiStore, NO_RELEASES);
     expect(view.resolve('SETUP_KEY')).toBeNull();

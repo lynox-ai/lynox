@@ -1391,6 +1391,10 @@ export function secretsForProfile(
       if (prop === 'resolve') {
         return (name: string): string | null => (hidden(name) ? null : target.resolve(name));
       }
+      if (prop === 'holds') {
+        // Whether a name is there is information about it too: a hidden name answers false.
+        return (name: string): boolean => (hidden(name) ? false : target.holds?.(name) ?? false);
+      }
       if (prop === 'resolveSecretRefs') {
         // Nothing is resolved when any name is hidden: the callers probe one name at a time,
         // and a partly resolved input is not one any of them expects.
