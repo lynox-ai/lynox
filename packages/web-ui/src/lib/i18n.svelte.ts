@@ -219,7 +219,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'voice.tts_heading':   { de: 'Ausgabe (Text-to-Speech)',                                         en: 'Output (Text-to-Speech)' },
 	'voice.tts_privacy':   { de: 'Text geht an Mistral (EU-Endpunkt) zur Synthese: kein Training, 30 rollende Tage zur Missbrauchsüberwachung.', en: 'Text goes to Mistral (EU endpoint) for synthesis: no training, kept 30 rolling days to monitor abuse.' },
 	'voice.tts_voice':     { de: 'Stimme',                                                           en: 'Voice' },
-	'voice.tts_voice_hint': { de: 'Die gewählte Stimme wird für jede Sprache verwendet.',             en: 'The chosen voice is used for every language.' },
+	'voice.tts_voice_hint': { de: 'Die gewählte Stimme gilt für jede Sprache. Kann das eingesetzte Modell sie nicht sprechen, liest lynox stattdessen mit der Standardstimme en_paul_neutral (Englisch) vor.', en: 'The chosen voice applies to every language. If the model in use cannot speak it, lynox reads with the default voice, en_paul_neutral (English), instead.' },
 	'voice.default':       { de: 'Standard',                                                         en: 'Default' },
 	'voice.provider_mistral': { de: 'Mistral Voxtral (EU-Endpunkt)', en: 'Mistral Voxtral (EU endpoint)' },
 	'voice.unavailable':   { de: 'nicht verfügbar',                                                  en: 'unavailable' },
