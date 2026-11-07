@@ -3060,7 +3060,7 @@ describe('the 401 reminder: would fetch_token swap a user\'s access?', () => {
   // `fetch_token` now refuses, so the reminder must not send the model there.
   it('says yes for a preset profile and for a callback-authorized one', async () => {
     const { oauthFetchTokenWouldSwapDelegatedAccess } = await import('./http.js');
-    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: { preset_id: 'bexio' } } }, false)).toBe(true);
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { type: 'oauth2', oauth: { preset_id: 'bexio' } } }, false)).toBe(true);
     expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: {} }, oauth_grant: { origin: 'callback' } }, false)).toBe(true);
   });
 
@@ -3078,7 +3078,7 @@ describe('the 401 reminder: would fetch_token swap a user\'s access?', () => {
   it('says no for a preset id this engine does not know', async () => {
     const { oauthFetchTokenWouldSwapDelegatedAccess } = await import('./http.js');
     // `connect` refuses such a profile, so "re-authorize" would be advice nobody can follow.
-    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: { preset_id: 'not-a-provider' } } }, false)).toBe(false);
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { type: 'oauth2', oauth: { preset_id: 'not-a-provider' } } }, false)).toBe(false);
   });
 });
 
@@ -3150,13 +3150,13 @@ describe('which profiles may be renewed unattended', () => {
     // user's. Without its grant record (a profile file that re-entered the store)
     // nothing else says so, and by the grant-type rule alone this is the
     // client-credentials shape the gate permits.
-    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { preset_id: 'bexio' } } }, false)).toBe(false);
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { type: 'oauth2', oauth: { preset_id: 'bexio' } } }, false)).toBe(false);
     expect(oauthProfileMayBeRenewedUnattended(
-      { auth: { oauth: { preset_id: 'bexio', grant_type: 'client_credentials' } } },
+      { auth: { type: 'oauth2', oauth: { preset_id: 'bexio', grant_type: 'client_credentials' } } },
       false,
     )).toBe(false);
     // A preset id this engine does not know marks nothing: the profile is app-only.
-    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { preset_id: 'not-a-provider' } } }, false)).toBe(true);
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { type: 'oauth2', oauth: { preset_id: 'not-a-provider' } } }, false)).toBe(true);
   });
 
   it('permits a preset profile that carries the refresh_token grant', async () => {
@@ -3164,7 +3164,7 @@ describe('which profiles may be renewed unattended', () => {
     // The preset refuses the client-credentials swap, not the renewal: a preset
     // whose consent returned a refresh token renews by it, unattended.
     expect(oauthProfileMayBeRenewedUnattended(
-      { auth: { oauth: { preset_id: 'bexio', grant_type: 'refresh_token' } }, oauth_grant: { origin: 'callback' } },
+      { auth: { type: 'oauth2', oauth: { preset_id: 'bexio', grant_type: 'refresh_token' } }, oauth_grant: { origin: 'callback' } },
       true,
     )).toBe(true);
   });
@@ -3273,6 +3273,7 @@ describe('what the log says when a renewal is declined', () => {
     consent: [
       /^a user authorized it at the provider$/,
       /^no consent flow is recorded behind it$/,
+      /^no consent flow is recorded behind it, but it goes through the built-in provider "(?:[a-z][a-z0-9-]{0,63}|<unprintable>|<non-string: [a-z]+>)", whose tokens only a user's authorization issues$/,
     ],
     grant: [
       /^it declares no auth\.oauth\.grant_type, so an exchange here would post a client-credentials grant$/,
@@ -3335,14 +3336,18 @@ describe('what the log says when a renewal is declined', () => {
       // it fail now whatever it is keyed on.
       extra: [{}, { token_url: 'https://t.example/token' }, { client_id_key: 'K' }],
     } as const;
-    const SMALL = { origin: [undefined, 'callback'], state: [undefined, 'connected', 'no-refresh', 'revoked'] } as const;
+    // `preset_id` is read now (the consent fact names a built-in provider), so it is an axis:
+    // a known one, an unknown one, and none.
+    const SMALL = { origin: [undefined, 'callback'], state: [undefined, 'connected', 'no-refresh', 'revoked'], preset_id: [undefined, 'bexio', 'not-a-provider'] } as const;
 
     const cases: Record<string, unknown>[] = [];
     const base = { id: 'crm-api', grant_type: undefined as unknown, refresh_token_key: undefined as unknown, extra: {} as Record<string, unknown> };
     for (const origin of SMALL.origin) {
       for (const state of SMALL.state) {
-        for (const [axis, values] of Object.entries(BIG)) {
-          for (const value of values) cases.push({ ...base, [axis]: value, origin, state });
+        for (const preset_id of SMALL.preset_id) {
+          for (const [axis, values] of Object.entries(BIG)) {
+            for (const value of values) cases.push({ ...base, [axis]: value, origin, state, preset_id });
+          }
         }
       }
     }
@@ -3359,7 +3364,7 @@ describe('what the log says when a renewal is declined', () => {
       for (const slotState of ['empty', 'engine-written', 'foreign'] as const) {
         const profile = {
           id: c['id'], name: 'n', base_url: 'https://api.crm.example/v1', description: 'd',
-          auth: { type: 'oauth2', vault_keys: [], oauth: { grant_type: c['grant_type'], refresh_token_key: c['refresh_token_key'], ...(c['extra'] as object) } },
+          auth: { type: 'oauth2', vault_keys: [], oauth: { grant_type: c['grant_type'], refresh_token_key: c['refresh_token_key'], preset_id: c['preset_id'], ...(c['extra'] as object) } },
           oauth_grant: { origin: c['origin'], state: c['state'] },
         } as never;
         expect(
@@ -3412,7 +3417,13 @@ describe('what the log says when a renewal is declined', () => {
     'unset_refresh_token_key_call_fetch_token', 'x\n[lynox] forged', 5, 'q'.repeat(300),
   ];
   const INHABITANTS: Readonly<Record<string, readonly unknown[]>> = {
-    consent: [true, false].map((authorized) => ({ kind: 'consent', authorized })),
+    consent: [
+      { kind: 'consent', consent: 'callback', preset: undefined },
+      { kind: 'consent', consent: 'none', preset: undefined },
+      // The id comes from the register, but the renderer is exported and shapes it anyway.
+      ...['bexio', 'shopify', 'a'.repeat(64), 'a'.repeat(65), 'Bexio', 'x"; use api_setup update', '', 'bexio\n[lynox] forged', undefined, 5]
+        .map((preset) => ({ kind: 'consent', consent: 'preset', preset })),
+    ],
     grant: GRANT_VALUES.flatMap((named) => [true, false].map((runnable) => ({ kind: 'grant', named, runnable }))),
     slot: NAMES.flatMap((slot) => NAMES.flatMap((derived) => [true, false].map((diverges) => ({ kind: 'slot', slot, derived, diverges })))),
     occupancy: NAMES.flatMap((slot) => [true, false].flatMap((diverges) =>
@@ -4027,6 +4038,30 @@ describe('the two properties the comments claim, which nothing was checking', ()
     expect(written.join(''), 'the decision was silent, so nobody can find out why the token stopped renewing').toMatch(/renewal declined for profile "crm-api"/);
     // The request still goes out on the stored token.
     expect(out).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * The reason the gate gives for a built-in provider's profile is that provider, and the
+   * line says so. Without a callback record the consent clause used to read only "no consent
+   * flow is recorded behind it", and next to `client_credentials` no clause explained why a
+   * renewal that is allowed for any other app-only profile was refused here.
+   */
+  it('names the built-in provider in the log when that is why the renewal was declined', async () => {
+    const past = Date.now() - 1000;
+    const base = crmProfile({}, 'client_credentials');
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+
+    const { calls } = await run(crmProfile({
+      auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, preset_id: 'bexio', token_expires_at: past } },
+    }, 'client_credentials'));
+
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a client-credentials grant was posted for a built-in provider\'s profile').toBe(false);
+    const line = written.join('').split('\n').find((l) => l.includes('renewal declined for profile "crm-api"')) ?? '';
+    expect(line).toContain('no consent flow is recorded behind it, but it goes through the built-in provider "bexio", whose tokens only a user\'s authorization issues');
   });
 
   /**
