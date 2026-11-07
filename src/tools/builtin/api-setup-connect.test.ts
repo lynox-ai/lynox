@@ -686,7 +686,7 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
 
     const result = await connect(agentWith(store));
 
-    expect(result).toBe(`Error: profile "${shopProfile().id}" cannot be authorized now: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to after they authorize lynox at Example Shop. There is no other way to connect Example Shop here: this engine reaches Example Shop's API only through its built-in provider, so a personal or API token, or a profile with another kind of sign-in, is refused; do not offer one. fetch_token cannot do that authorization either; it only renews a profile that was authorized before and still holds its refresh token. Tell the user that this profile cannot be connected until whoever runs this engine sets its public address (ORIGIN).`);
+    expect(result).toBe(`Error: profile "${shopProfile().id}" cannot be authorized now: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to after they authorize lynox at Example Shop. There is no other way to connect Example Shop here: this engine connects Example Shop only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. fetch_token cannot do that authorization either; it only renews a profile that was authorized before and still holds its refresh token. Tell the user that this profile cannot be connected until whoever runs this engine sets its public address (ORIGIN).`);
   });
 
   it('A1 own app · still points a profile of its own at fetch_token, which serves it', async () => {
@@ -926,7 +926,7 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain('/api/oauth/connect/');
     // fetch_token is no way around a built-in provider either: it sends the profile back here.
     expect(result).not.toContain('use action=fetch_token');
-    expect(result).toBe('Error: profile "shop-api" cannot be authorized: the built-in provider it uses is defined wrongly in this engine (one of its paths does not start with a slash, so it would merge into the host instead of following it). There is no other way to connect Broken Path here: this engine reaches Broken Path\'s API only through its built-in provider, so a personal or API token, or a profile with another kind of sign-in, is refused; do not offer one. There is nothing to set on the profile, and fetch_token cannot do the authorization this provider\'s tokens come from. Tell the user that this profile cannot be connected because of an error in lynox itself, not in their settings.');
+    expect(result).toBe('Error: profile "shop-api" cannot be authorized: the built-in provider it uses is defined wrongly in this engine (one of its paths does not start with a slash, so it would merge into the host instead of following it). There is no other way to connect Broken Path here: this engine connects Broken Path only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. There is nothing to set on the profile, and fetch_token cannot do the authorization this provider\'s tokens come from. Tell the user that this profile cannot be connected because of an error in lynox itself, not in their settings.');
   });
 
   it('A9b · will not read a data-egress acceptance as agreement to be sent somewhere', async () => {
