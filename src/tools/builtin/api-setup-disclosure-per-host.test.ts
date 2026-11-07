@@ -118,7 +118,7 @@ describe('api_setup: a store profile is saved on the API version its provider pi
   beforeEach(() => { lynoxDir = mkdtempSync(join(tmpdir(), 'lynox-api-version-')); });
   afterEach(() => { rmSync(lynoxDir, { recursive: true, force: true }); });
 
-  const refusal = `Validation error: Invalid base_url: a profile on the built-in "shopify" provider uses its API version ${PINNED}, the one this engine's own requests name. End base_url in /admin/api/${PINNED}.`;
+  const refusal = `Validation error: Invalid base_url: a profile on the built-in "shopify" provider uses its API version ${PINNED}, the one this engine's own requests name. Save it again with base_url ending in /admin/api/${PINNED}; you do not need to ask the user which version to use.`;
 
   it('pins a version, so the refusal below names one', () => {
     expect(PINNED).toMatch(/^\d{4}-\d{2}$/);

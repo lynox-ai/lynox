@@ -203,7 +203,7 @@ function presetApiVersionError(preset: ReturnType<typeof OAUTH_PRESETS.get>, bas
   if (!path.startsWith(versionsAt)) return null;
   const named = path.slice(versionsAt.length).split('/')[0] ?? '';
   if (named === '' || named === pinned) return null;
-  return `Invalid base_url: a profile on the built-in "${preset.id}" provider uses its API version ${pinned}, the one this engine's own requests name. End base_url in ${versionsAt}${pinned}.`;
+  return `Invalid base_url: a profile on the built-in "${preset.id}" provider uses its API version ${pinned}, the one this engine's own requests name. Save it again with base_url ending in ${versionsAt}${pinned}; you do not need to ask the user which version to use.`;
 }
 
 /**
