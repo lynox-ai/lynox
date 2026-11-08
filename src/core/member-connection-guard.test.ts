@@ -15,14 +15,15 @@ import { join, relative } from 'node:path';
 const SRC = join(__dirname, '..');
 
 const BYPASS: readonly RegExp[] = [
-  /\b(secretStore|store|vault|secrets|inner|target)\??!?\.resolve\(/,
-  /getMasked\(/,
-  /\.fingerprint\(/,
-  /\bvault\??\.get\(/,
+  // Each call also in its optional form (`?.resolve?.(`), which the first version of this list missed.
+  /\b(secretStore|store|vault|secrets|inner|target)\??!?\.resolve\??\.?\(/,
+  /getMasked\??\.?\(/,
+  /\.fingerprint\??\.?\(/,
+  /\bvault\??\.get\??\.?\(/,
   /principal: OWNER_PRINCIPAL/,
-  /resolveSecretRefs\(/,
-  /\.getAll\(\)/,
-  /getSecretStore\(\)\??\.resolve\(/,
+  /resolveSecretRefs\??\.?\(/,
+  /\.getAll\??\.?\(\)/,
+  /getSecretStore\(\)\??\.resolve\??\.?\(/,
   // Gives nothing readable, but whether another member's or the owner's token exists is information too.
   /\b(secretStore|store|vault|secrets|inner|target)\??!?\.holds[?!]?\.?\(/,
   /\b(inner|target)\??\.holds\??\.bind\(/,
@@ -45,6 +46,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/http.ts|const stored = secretStore.resolve(refreshSlot);': 'view; renewal input',
   'tools/builtin/http.ts|const resolved = secretStore.resolve(tokenKey);': 'view; the attach, behind the member refusal',
   'tools/builtin/http.ts|if (store?.holds !== undefined) return store.holds(mpSlot);': '401 reminder: whether a refresh token is there picks a fixed sentence',
+  'tools/builtin/http.ts|return (store?.resolve?.(mpSlot) ?? null) !== null;': 'fallback for a store without holds; existence only, value compared with null',
   'tools/builtin/http.ts|const user = secretStore.resolve(userKey);': 'view; basic auth, no token slot',
   'tools/builtin/http.ts|const pass = secretStore.resolve(passKey);': 'view; basic auth, no token slot',
   'tools/builtin/http.ts|const token = secretStore.resolve(tokenKey);': 'view; a profile\'s own key',
@@ -155,6 +157,12 @@ describe('bypasses of the member-connection view', () => {
   it('mutant: a raw read of a token slot added to the worker is caught', () => {
     const mutated = new Map(files);
     mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\nconst leaked = secretStore.resolve(accessTokenKey(profile.id));\n`);
+    expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
+  });
+
+  it('mutant: a raw read in its optional-call form is caught', () => {
+    const mutated = new Map(files);
+    mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\nconst leaked = agent.secretStore?.resolve?.(refreshSlot);\n`);
     expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
   });
 
