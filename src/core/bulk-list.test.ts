@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  BULK_LIST_PAGE_BYTES, isOfferedListSource, isSameListItem, isUnderList, listItemId, listItemKey, listPageCap, listPageElements,
+  BULK_LIST_PAGE_BYTES, hasListPageUrl, isOfferedListSource, isSameListItem, isUnderList, listItemId, listItemKey, listPageCap, listPageElements,
   listFieldsValue, listPageUrl, listQueryParams, maxListPages, parseListSource, type BulkListSource,
 } from './bulk-list.js';
 import { BULK_MAX_SOURCE_BYTES } from './bulk-plan.js';
@@ -116,6 +116,14 @@ describe('a stored WooCommerce list source', () => {
     // A filter the form does not document, and a value outside the parse's alphabet.
     expect(isOfferedListSource({ ...s, filters: { vendor: 'Acme' } })).toBe(false);
     expect(isOfferedListSource({ ...s, filters: { category: '12&x=1' } })).toBe(false);
+  });
+
+  it('has a page address while its form has a spec and each filter one value, offered or not', () => {
+    const s = parse({ ...base, filters: { category: '12' } });
+    expect(hasListPageUrl(s)).toBe(true);
+    expect(hasListPageUrl({ ...s, path: '/wp-json/wc/v3/orders' })).toBe(true);
+    expect(hasListPageUrl({ ...s, filters: { category: ['12'] } })).toBe(false);
+    expect(hasListPageUrl({ ...s, form: 'gone' as BulkListSource['form'] })).toBe(false);
   });
 });
 

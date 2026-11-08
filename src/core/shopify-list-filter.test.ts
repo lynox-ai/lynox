@@ -386,6 +386,7 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-list.ts | if (source.form === SHOPIFY_LIST_FORM) return source.path ==',
     'core/bulk-list.ts | return form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTER',
     'core/bulk-list.ts | return isListForm(source.form) && BULK_LIST_FORMS[source.for',
+    'core/bulk-list.ts | return isListForm(source.form) && Object.values(source.filte',
     'core/bulk-list.ts | return isShopifyListForm(source.form);',
     'core/bulk-list.ts | return list !== null && list.source.form === SHOPIFY_FILTERE',
     'core/bulk-preview.ts | BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_L',
@@ -400,7 +401,7 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-judge-rule.ts | if (form === \'shopify\' || form === \'shopify_filtered\') retur',
     'core/bulk-judge-rule.ts | if (form === \'shopify_media\') return [];',
     'core/bulk-ledger.ts | if (this.shopifyFormOfRun(run) === \'shopify_product\') for (c',
-    'server/http-api.ts | import { BULK_LIST_NOTE, isOfferedListSource, isShopifyListS',
+    'server/http-api.ts | import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource',
     'server/http-api.ts | listFirstPage: listRun ? (isShopifyListSource(listRun.source',
     // The image list: every other stored form, filtered or not, is read and written as products.
     'core/bulk-ledger.ts | import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type ',

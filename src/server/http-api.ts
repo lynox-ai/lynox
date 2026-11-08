@@ -128,7 +128,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
-import { BULK_LIST_NOTE, isOfferedListSource, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
+import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
@@ -9596,9 +9596,10 @@ export class LynoxHTTPApi {
         ...withBinding(status),
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
-        // the engine's own documents. It stands here so the owner sees where the read goes. A source
-        // no longer offered has no address to build; its host stands in, as for a Shopify list.
-        listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : isOfferedListSource(listRun.source) ? listPageUrl(listRun.host, listRun.source, 1) : listRun.host) : null,
+        // the engine's own documents. It stands here so the owner sees where the read goes. A stored
+        // source with no address to build (a form without a spec, a filter holding a list) shows its
+        // host instead, as a Shopify list does; one whose path was withdrawn still shows its address.
+        listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : hasListPageUrl(listRun.source) ? listPageUrl(listRun.host, listRun.source, 1) : listRun.host) : null,
         listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
         listNote: status.list ? BULK_LIST_NOTE : null,
         // A Shopify list narrowed to one product type and/or vendor: shown wherever the run is started
