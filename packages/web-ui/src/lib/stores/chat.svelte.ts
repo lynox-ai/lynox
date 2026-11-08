@@ -1493,7 +1493,7 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 	// comes with the attached stream, so the sentence names no card and no X; for an approval it
 	// says "question", as main did, rather than fetch the card and race a second probe.
 	if (live.status === 'awaiting_input') addToast(t('chat.question_waiting_plain'), 'info', QUESTION_TOAST_MS);
-	else addToast(t('chat.still_running'), 'info', 6000);
+	else addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
@@ -1516,6 +1516,9 @@ function sayQuestionWaiting(card: PendingCard, held = false): void {
 /** The longest of these sentences runs to about 200 characters; 6 s was too short to read it. */
 const QUESTION_TOAST_MS = 10_000;
 
+/** `chat.still_running` runs to about 120 characters: 8 s, by the same measure (6 s was short). */
+const STILL_RUNNING_TOAST_MS = 8_000;
+
 /** The sentence for `card` (for a held message when `held`), or null when no card came back. */
 export function questionWaitingKey(card: PendingCard, held = false): string | null {
 	// A held message was never sent, so its sentence does not say "not sent again".
@@ -1529,7 +1532,7 @@ export function questionWaitingKey(card: PendingCard, held = false): string | nu
 /** The tap on a failed message: asks first, then sends `text` again. Never rejects. */
 export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<void> {
 	if (isStreaming) {
-		addToast(t('chat.still_running'), 'info', 6000);
+		addToast(t('chat.still_running'), 'info', STILL_RUNNING_TOAST_MS);
 		return;
 	}
 	if (sendBlockedByReview()) return;

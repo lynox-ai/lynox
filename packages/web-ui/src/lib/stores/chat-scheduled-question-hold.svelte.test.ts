@@ -36,6 +36,8 @@ let activeFails: boolean;
 let holdDelete: Promise<void> | null;
 let threadMessages: unknown;
 let stopPoll: (() => void) | null = null;
+let openRun = false;
+let finishRun: (() => void) | null = null;
 
 function serve(): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -54,8 +56,11 @@ function serve(): void {
 		}
 		if (url.endsWith('/run')) {
 			const enc = new TextEncoder();
+			const open = openRun;
 			const body = new ReadableStream<Uint8Array>({
 				start(c) {
+					// An open run streams until the test finishes it.
+					if (open) { finishRun = () => { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); }; return; }
 					c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`));
 					c.close();
 				},
@@ -103,6 +108,8 @@ beforeEach(async () => {
 	activeFails = false;
 	holdDelete = null;
 	threadMessages = { messages: [], activeRun: null };
+	openRun = false;
+	finishRun = null;
 	serve();
 });
 afterEach(() => { stopPoll?.(); stopPoll = null; vi.unstubAllGlobals(); });
@@ -166,6 +173,29 @@ describe('the tap on a failed message', () => {
 		await settle();
 		expect(runPosts()).toBe(1);
 		expect(toastKeys()).toEqual(['chat.question_waiting_plain']);
+	});
+
+	it('while this chat’s own turn streams: the running sentence, at least 8 s', async () => {
+		await questionWaits(QUESTION);
+		active = NOTHING;
+		openRun = true;
+		void store.sendMessage('working');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: a turn streams').toBe(true);
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		await store.retryFailedTurn(store.getMessages().find((m) => m.content === 'again')!, 'again');
+		expect(toasts.map((x) => [x.message, x.ms])).toEqual([[i18n.t('chat.still_running'), 8000]]);
+		finishRun?.();
+		await settle();
+	});
+
+	it('with the chat’s own run working: the running sentence, long enough to read (at least 8 s)', async () => {
+		await questionWaits(QUESTION);
+		active = { runs: [{ runId: 'own', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] };
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		await store.retryFailedTurn(store.getMessages().at(-1)!, 'again');
+		await settle();
+		expect(toasts.map((x) => [x.message, x.ms])).toEqual([[i18n.t('chat.still_running'), 8000]]);
 	});
 
 	it('with a prompt whose card cannot be shown: not sent, and nothing is said', async () => {
@@ -594,16 +624,16 @@ describe('the sentences, word for word (reviewed wording)', () => {
 			en: 'A question in this chat is waiting for your answer. Answer it first; your message was not sent again.',
 		},
 		'chat.question_waiting_held': {
-			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst oder brich sie mit dem X auf der Karte ab; dann geht der Lauf ohne Antwort weiter. Deine Nachricht wurde nicht gesendet und bleibt im Chat stehen; tipp sie danach an, um sie zu senden.',
-			en: 'A question in this chat is waiting for your answer. Answer it first, or cancel it with the X on the card; the run then goes on without an answer. Your message was not sent and stays in the chat; tap it afterwards to send it.',
+			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst oder brich sie mit dem X auf der Karte ab; dann geht der Lauf ohne Antwort weiter. Deine Nachricht wurde nicht gesendet und bleibt hier im Chat stehen; tipp sie danach an, um sie zu senden.',
+			en: 'A question in this chat is waiting for your answer. Answer it first, or cancel it with the X on the card; the run then goes on without an answer. Your message was not sent and stays here in the chat; tap it afterwards to send it.',
 		},
 		'chat.question_waiting_decision_held': {
-			de: 'In diesem Chat wartet eine Entscheidung auf dich. Triff sie zuerst auf der Karte. Deine Nachricht wurde nicht gesendet und bleibt im Chat stehen; tipp sie danach an, um sie zu senden.',
-			en: 'A decision in this chat is waiting for you. Make it on the card first. Your message was not sent and stays in the chat; tap it afterwards to send it.',
+			de: 'In diesem Chat wartet eine Entscheidung auf dich. Triff sie zuerst auf der Karte. Deine Nachricht wurde nicht gesendet und bleibt hier im Chat stehen; tipp sie danach an, um sie zu senden.',
+			en: 'A decision in this chat is waiting for you. Make it on the card first. Your message was not sent and stays here in the chat; tap it afterwards to send it.',
 		},
 		'chat.question_waiting_plain_held': {
-			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst. Deine Nachricht wurde nicht gesendet und bleibt im Chat stehen; tipp sie danach an, um sie zu senden.',
-			en: 'A question in this chat is waiting for your answer. Answer it first. Your message was not sent and stays in the chat; tap it afterwards to send it.',
+			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst. Deine Nachricht wurde nicht gesendet und bleibt hier im Chat stehen; tipp sie danach an, um sie zu senden.',
+			en: 'A question in this chat is waiting for your answer. Answer it first. Your message was not sent and stays here in the chat; tap it afterwards to send it.',
 		},
 		'chat.send_held': { de: 'Noch nicht gesendet — tippen zum Senden', en: 'Not sent yet — tap to send' },
 	};
