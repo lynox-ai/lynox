@@ -250,6 +250,72 @@ describe('the reconnect after a turn failed offline', () => {
 		expect(failedOne('ja').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
 	});
 
+	it('with a question waiting and this message in the transcript: no longer failed (no tap to send it again), nothing sent', async () => {
+		await questionWaits(DECISION);
+		// It reached the server while the client was blind: one user row more, with its words.
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' },
+			{ role: 'assistant', content: 'ok' },
+			{ role: 'user', content: '[Now: 2026-11-05T15:00:00.000Z; user local 2026-11-05 16:00:00 Europe/Zurich]\n\nja' },
+			{ role: 'assistant', content: 'done' },
+		], activeRun: null };
+		store.getMessages().push({ role: 'user', content: 'ja', failed: true, failedOffline: true });
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(store.getMessages().filter((m) => m.role === 'user' && m.failed === true)).toEqual([]);
+		// The question still waits: its card is back and said, as when the message is held.
+		expect(store.getPendingPermission()?.question).toBe('⚠ mail_send needs your OK');
+		expect(toastKeys()).toEqual(['chat.question_waiting_decision']);
+	});
+
+	it('with a question waiting and an earlier message with the same words: held, the counts are equal', async () => {
+		await questionWaits(DECISION);
+		store.getMessages().push({ role: 'user', content: 'ja' }, { role: 'assistant', content: 'ok' });
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' },
+			{ role: 'assistant', content: 'ok' },
+			{ role: 'user', content: '[Now: 2026-11-05T15:00:00.000Z]\n\nja' },
+			{ role: 'assistant', content: 'ok' },
+		], activeRun: null };
+		store.getMessages().push({ role: 'user', content: 'ja', failed: true, failedOffline: true });
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(store.getMessages().filter((m) => m.role === 'user' && m.failed === true).map((m) => [m.content, m.failedOffline])).toEqual([['ja', true]]);
+	});
+
+	it('with a question waiting and a message from elsewhere in the transcript: held', async () => {
+		await questionWaits(DECISION);
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' },
+			{ role: 'assistant', content: 'ok' },
+			{ role: 'user', content: 'from the phone' },
+		], activeRun: null };
+		store.getMessages().push({ role: 'user', content: 'offline turn', failed: true, failedOffline: true });
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(failedOne('offline turn').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
+	});
+
+	it('with a question waiting and a second failed message in the list: held, the count says nothing', async () => {
+		await questionWaits(DECISION);
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' },
+			{ role: 'assistant', content: 'ok' },
+			{ role: 'user', content: 'offline turn' },
+		], activeRun: null };
+		store.getMessages().push({ role: 'user', content: 'earlier', failed: true });
+		store.getMessages().push({ role: 'user', content: 'offline turn', failed: true, failedOffline: true });
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(failedOne('offline turn').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
+	});
+
 	it('with nothing waiting and the same transcript: cleared as answered, as before', async () => {
 		await questionWaits(DECISION);
 		active = NOTHING;

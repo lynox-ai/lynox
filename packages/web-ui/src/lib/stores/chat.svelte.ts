@@ -32,7 +32,7 @@ import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, isC
 import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
+import { selectReattachTarget, scheduledQuestionWaits, offlineTurnArrived, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 import { containedTextKeys, readContainedUnknown, type ContainedUnknown } from './contained-text.js';
 
@@ -712,6 +712,7 @@ if (typeof window !== 'undefined') {
 						let lastRole: string | undefined;
 						let activeRun: boolean | undefined;
 						let scheduledQuestion = false;
+						let transcript: unknown = null;
 						if (!probeSid) return;
 						try {
 							const ar = await fetch(`${getApiBase()}/runs/active`);
@@ -731,17 +732,29 @@ if (typeof window !== 'undefined') {
 								if (Array.isArray(md.messages)) {
 									reached = true;
 									lastRole = md.messages.at(-1)?.role;
+									transcript = md;
 								}
 							}
 						} catch { /* still blind — shouldRefireOfflineTurn declines */ }
 						if (sessionId !== probeSid) return; // thread switched mid-probe
 						// A scheduled run's question waits here. A transcript ending on it reads as
 						// "answered", which cleared the failed message and lost it. It stays failed and marked
-						// offline, is not sent past the question, and the card comes back. Whether it arrived
-						// meanwhile is not decided here: text equality cannot tell it from an earlier message
-						// with the same words. Once the question is answered, the user decides by tapping;
-						// if it had arrived after all, that tap sends it a second time.
+						// offline, is not sent past the question, and the card comes back. A message the
+						// server holds after all is no longer failed, so a tap after the answer does not send
+						// it a second time: the server holds one user row more than this client counts, and
+						// that row carries its words (`offlineTurnArrived`). Equal words alone would not say
+						// it: an earlier message with the same words is a row the client counts already. With
+						// another failed message in the list the count says nothing, so it stays held.
 						if (scheduledQuestion) {
+							const counted = messages.filter((m) => m.role === 'user' && !m.queued && !m.failed && m.content.trim().length > 0).length;
+							const onlyFailed = messages.filter((m) => m.role === 'user' && m.failed).length === 1;
+							if (onlyFailed && offlineTurnArrived(transcript, counted, lastFailed.content)) {
+								lastFailed.failed = false;
+								lastFailed.failedOffline = false;
+								chatError = null;
+								await reconcileThread();
+								if (sessionId !== probeSid) return;
+							}
 							sayQuestionWaiting(await checkPendingPrompt());
 							return;
 						}
