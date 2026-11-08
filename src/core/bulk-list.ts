@@ -171,7 +171,12 @@ export function isOfferedListSource(source: BulkListSource): boolean {
   if (source.form === SHOPIFY_FILTERED_LIST_FORM) return source.path === '' && source.method === null && isShopifyListFilters(source.filters);
   // A media list reads every image: one stored with filters would be read past them.
   if (source.form === SHOPIFY_MEDIA_LIST_FORM) return source.path === '' && source.method === null && Object.keys(source.filters).length === 0;
-  return isListForm(source.form) && BULK_LIST_FORMS[source.form].path.test(source.path);
+  if (!isListForm(source.form)) return false;
+  const spec: BulkListFormSpec = BULK_LIST_FORMS[source.form];
+  // The filters by the rule `parseListSource` holds them to: a stored source cannot have been
+  // planned with anything else, so one that carries more was changed after it was planned.
+  return spec.path.test(source.path) && Object.entries(source.filters).every(
+    ([name, value]) => spec.filters.includes(name) && typeof value === 'string' && TOKEN_RE.test(value));
 }
 
 /**
