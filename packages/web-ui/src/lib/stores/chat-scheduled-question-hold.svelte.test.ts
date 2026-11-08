@@ -37,6 +37,8 @@ let holdDelete: Promise<void> | null;
 let threadMessages: unknown;
 let stopPoll: (() => void) | null = null;
 let openRun = false;
+let gateEach = false;
+let gates: Array<() => void> = [];
 let finishRun: (() => void) | null = null;
 
 function serve(): void {
@@ -46,8 +48,10 @@ function serve(): void {
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
 		if (init?.method === 'DELETE' && holdDelete) await holdDelete;
 		if (url.endsWith('/runs/active')) {
-			if (activeFails) throw new TypeError('fetch failed');
+			if (gateEach) await new Promise<void>((r) => { gates.push(r); });
 			if (holdActive) await holdActive;
+			// Read after the wait, so a test can let an ask fail that started fine.
+			if (activeFails) throw new TypeError('fetch failed');
 			return json(active);
 		}
 		if (url.endsWith('/pending-prompt')) {
@@ -110,6 +114,8 @@ beforeEach(async () => {
 	threadMessages = { messages: [], activeRun: null };
 	openRun = false;
 	finishRun = null;
+	gateEach = false;
+	gates = [];
 	serve();
 });
 afterEach(() => { stopPoll?.(); stopPoll = null; vi.unstubAllGlobals(); });
@@ -584,6 +590,105 @@ describe('a new message', () => {
 		await store.sendMessage('hello');
 		await settle();
 		expect(heldOnes()).toEqual([]);
+	});
+
+	it('never goes into a chat opened while the server was asked, even when the ask fails', async () => {
+		await questionWaits(QUESTION);
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		activeFails = false;
+		const send = store.sendMessage('hello');
+		await settle();
+		store.newChat();
+		activeFails = true;
+		release();
+		await send;
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(store.getMessages().some((m) => m.content === 'hello')).toBe(false);
+	});
+
+	it('Retry on an interrupted run sends the interrupted turn, not a held message', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		expect(heldOnes().map((m) => m.content), 'positive control: held').toEqual(['hello']);
+		threadMessages = {
+			messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'half' }],
+			activeRun: { runId: 'r-int', status: 'interrupted', lastPersistedSeq: 0 },
+		};
+		await store.reconcileThread();
+		active = NOTHING;
+		await store.retryInterruptedRun();
+		await settle();
+		const body = JSON.parse(String((vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run')).at(-1)![1] as RequestInit).body)) as { task?: string };
+		expect(body.task).toContain('first');
+		expect(body.task).not.toContain('hello');
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+	});
+
+	it('keeps its effort and thinking for the tap', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('the full prompt', 'the label', undefined, { effort: 'low', thinking: 'disabled' });
+		await settle();
+		active = NOTHING;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		const body = JSON.parse(String((vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run')).at(-1)![1] as RequestInit).body)) as { effort?: string; thinking?: string };
+		expect([body.effort, body.thinking]).toEqual(['low', 'disabled']);
+	});
+
+	it('two messages sent while the server is asked keep their order', async () => {
+		await questionWaits(QUESTION);
+		// The poll still shows the chat waiting; the question is gone.
+		active = NOTHING;
+		gateEach = true;
+		const a = store.sendMessage('A');
+		const b = store.sendMessage('B');
+		await settle();
+		// The ask for B answers first.
+		gates.at(-1)!();
+		await settle();
+		gateEach = false;
+		for (const g of gates) g();
+		await settle();
+		await settle();
+		const users = store.getMessages().filter((m) => m.role === 'user').map((m) => m.content);
+		expect(users.indexOf('A')).toBeLessThan(users.indexOf('B'));
+		const firstRun = JSON.parse(String((vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run'))[1]![1] as RequestInit).body)) as { task?: string };
+		expect(firstRun.task).toContain('A');
+		void a; void b;
+	});
+
+	it('a tap while a send is being asked about waits for it, and is not dropped', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const other = store.sendMessage('other');
+		await settle();
+		const tap = store.sendHeldMessage(heldOnes()[0]!);
+		holdActive = null;
+		release();
+		await other;
+		await tap;
+		await settle();
+		expect(heldOnes()).toEqual([]);
+		expect(store.getMessages().filter((m) => m.role === 'user' && m.content === 'hello')).toHaveLength(1);
+	});
+
+	it('a tap once the question is gone asks the server once, not twice', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		const before = calls.filter((u) => u.endsWith('/runs/active')).length;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(calls.filter((u) => u.endsWith('/runs/active')).length - before).toBe(1);
+		expect(runPosts()).toBe(2);
 	});
 
 	it('with files: sent as before, since a reload keeps no files', async () => {

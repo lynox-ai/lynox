@@ -130,6 +130,8 @@ export interface ChatMessage {
 	held?: boolean;
 	/** What a held message sends when it is not its shown text (a chip's prompt). */
 	heldTask?: string;
+	/** The run options a held message is sent with (effort, thinking, typed). */
+	heldOptions?: RunOptions;
 	/** Agent-generated follow-up suggestions (parsed from <follow_ups> block) */
 	followUps?: FollowUpSuggestion[];
 	/** DK-UX: durable-knowledge writes made during this turn, surfaced as inline chips
@@ -941,69 +943,84 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 	// A scheduled run's question waits in this chat: the message is held, not sent past it.
 	// Asked only when the chat may be waiting, so an ordinary send starts in this same tick.
 	if (mayHold(files)) {
-		if (await holdAtScheduledQuestion(task, displayText, runOptions)) return;
-		// A turn started while the server was asked: this message waits behind it, as above.
-		if (isStreaming) { await sendMessage(task, displayText, files, runOptions); return; }
+		const sid = sessionId!;
+		const held = await inHoldOrder(() => holdAtScheduledQuestion(sid, task, displayText, runOptions));
+		if (held) return;
 	}
+	await sendNow(task, displayText, files, runOptions);
+}
 
+/** The send after any hold: behind a running turn it waits in the queue, else it starts. */
+async function sendNow(task: string, displayText: string | undefined, files: FileAttachment[] | undefined, runOptions: RunOptions | undefined): Promise<void> {
+	// A turn started while the server was asked: this message waits behind it.
+	if (isStreaming) { await sendMessage(task, displayText, files, runOptions); return; }
 	// The reason for a refused chat or run is about what came before: the reader's own message
 	// starts what follows, so it goes (register 1112).
 	threadReadRefusal = null;
 	await _executeRun(task, files, displayText, runOptions);
 }
 
-let _holdProbes = 0;
-
-/**
- * Whether a new message is held because a scheduled run's question waits in this chat, and if
- * so holds it: an unsent bubble marked `held` (or `existing`, the held bubble a tap sends), and
- * the question's card is brought back with the sentence for it. Only when the server says so: a
- * new chat, a message with files, or a server that cannot be asked sends as before. The server
- * is asked only when the nav's poll of the live runs already shows this chat waiting for input,
- * so an ordinary send starts at once, as before; a question that came up since the last poll
- * (4 s) is not seen, and that message is sent as before. A tap on a held message always asks. Files are
- * not held because a held message must outlive a reload, and the saved chat keeps no files.
- * When the thread changed while the server was asked, the message goes into its own thread's
- * saved copy, held, rather than into the chat now on screen. Never rejects.
- */
 /** Whether a new message may be held: a chat the nav's poll shows waiting for input, online,
- *  with no files. Synchronous, so a send that cannot be held is not delayed by a tick. */
+ *  with no files. Synchronous, so a send that cannot be held is not delayed by a tick. Files are
+ *  not held because a held message must outlive a reload, and the saved chat keeps no files. A
+ *  question that came up since the last poll (4 s) is not seen; that message is sent as before. */
 function mayHold(files: FileAttachment[] | undefined): boolean {
 	if (!sessionId || (files !== undefined && files.length > 0)) return false;
 	if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
 	return getRunStatus(sessionId) === 'awaiting_input';
 }
 
-async function holdAtScheduledQuestion(task: string, displayText: string | undefined, runOptions: RunOptions | undefined, existing?: ChatMessage): Promise<boolean> {
-	const sid = sessionId;
-	// Files are ruled out by `mayHold` before a new message gets here; a tap carries none.
-	if (!sid) return false;
-	// Offline the server cannot be asked; the send below reports that as before.
-	if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
-	let waits: boolean;
-	_holdProbes++;
-	try {
-		const res = await fetch(`${getApiBase()}/runs/active`);
-		if (!res.ok) return false;
-		const body: unknown = await res.json();
-		waits = selectReattachTarget(body, sid) === null && scheduledQuestionWaits(body, sid);
-	} catch {
-		return false;
-	} finally {
-		_holdProbes--;
+/** The asks before a hold run one after another, so two messages sent while the server is asked
+ *  keep their order, and a tap waits for a send's ask instead of being dropped. */
+let _holdOrder: Promise<unknown> = Promise.resolve();
+function inHoldOrder<T>(step: () => Promise<T>): Promise<T> {
+	const run = _holdOrder.then(step, step);
+	_holdOrder = run.catch(() => undefined);
+	return run;
+}
+
+/** What a held message keeps of its run options: those a reload can save. A context opens a new
+ *  chat first, so a message carrying one is never held. */
+function heldOptions(runOptions: RunOptions | undefined): RunOptions | undefined {
+	if (!runOptions) return undefined;
+	const { effort, thinking, typed } = runOptions;
+	const kept: RunOptions = { ...(effort ? { effort } : {}), ...(thinking ? { thinking } : {}), ...(typed === true ? { typed: true } : {}) };
+	return Object.keys(kept).length > 0 ? kept : undefined;
+}
+
+/**
+ * Asks the server whether a scheduled run's question waits in thread `sid`, and if so holds the
+ * message: an unsent bubble marked `held` (or `existing`, the held bubble a tap sends), and the
+ * question's card is brought back with the sentence for it. A server that cannot be asked sends
+ * as before. When the thread changed while the server was asked, the message goes into its own
+ * thread's saved copy, held, whatever the answer: it is never sent into the chat now on screen.
+ * Never rejects.
+ */
+async function holdAtScheduledQuestion(sid: string, task: string, displayText: string | undefined, runOptions: RunOptions | undefined, existing?: ChatMessage): Promise<boolean> {
+	let waits: boolean | null = null;
+	if (sessionId === sid && (typeof navigator === 'undefined' || navigator.onLine)) {
+		try {
+			const res = await fetch(`${getApiBase()}/runs/active`);
+			if (res.ok) {
+				const body: unknown = await res.json();
+				waits = selectReattachTarget(body, sid) === null && scheduledQuestionWaits(body, sid);
+			}
+		} catch { /* not asked: sent as before */ }
 	}
 	const shown = displayText ?? task;
+	const options = heldOptions(runOptions);
 	const held: ChatMessage = existing ?? {
 		role: 'user', content: shown, held: true,
 		...(task !== shown ? { heldTask: task } : {}),
-		...(runOptions?.typed === true ? { typed: true } : {}),
+		...(options ? { heldOptions: options } : {}),
+		...(options?.typed === true ? { typed: true } : {}),
 		createdAt: new Date().toISOString(),
 	};
 	if (sessionId !== sid) {
 		if (!existing) holdInSavedThread(sid, held);
 		return true;
 	}
-	if (!waits) return false;
+	if (waits !== true) return false;
 	if (!existing) messages.push(held);
 	persistChatNow();
 	const card = await checkPendingPrompt();
@@ -1011,9 +1028,10 @@ async function holdAtScheduledQuestion(task: string, displayText: string | undef
 	return true;
 }
 
-/** Put a held message into a thread's saved copy, for a thread no longer on screen. */
+/** Put a held message into a thread's saved copy, for a thread no longer on screen. A thread
+ *  archived or deleted meanwhile stays gone, as for a failed turn. */
 function holdInSavedThread(threadId: string, msg: ChatMessage): void {
-	if (_droppedThreads.has(threadId)) return;
+	if (_droppedThreads.has(threadId) || _deletedOnServer.has(threadId)) return;
 	const root = readPersistedRoot();
 	const list = root.threads[threadId] ?? [];
 	list.push({ ...msg });
@@ -1023,21 +1041,28 @@ function holdInSavedThread(threadId: string, msg: ChatMessage): void {
 
 /**
  * The tap on a held message. Asks the server first: while the question still waits, the message
- * stays held and the card comes back; once it is gone, the message is sent, without asking the
- * user again (the text in the bubble is the check). Never rejects.
+ * stays held and the card comes back; once it is gone, the message is sent at once, without
+ * asking the user again (the text in the bubble is the check) and without asking the server a
+ * second time, so it is never off screen unsaved. Never rejects.
  */
 export async function sendHeldMessage(msg: ChatMessage): Promise<void> {
-	if (!msg.held || _holdProbes > 0) return;
+	if (!msg.held || !sessionId) return;
 	if (sendBlockedByReview()) return;
+	const sid = sessionId;
 	const task = msg.heldTask ?? msg.content;
 	const display = msg.heldTask !== undefined ? msg.content : undefined;
-	const runOptions = msg.typed === true ? { typed: true } : undefined;
-	if (!isStreaming && await holdAtScheduledQuestion(task, display, runOptions, msg)) return;
-	const i = messages.indexOf(msg);
-	if (i < 0 || !msg.held) return;
-	messages.splice(i, 1);
-	persistChatNow();
-	await sendMessage(task, display, undefined, runOptions);
+	const runOptions = msg.heldOptions ?? (msg.typed === true ? { typed: true } : undefined);
+	const send = await inHoldOrder(async () => {
+		// A second tap on the same bubble finds it sent already.
+		if (!msg.held || sessionId !== sid || !messages.includes(msg)) return false;
+		if (await holdAtScheduledQuestion(sid, task, display, runOptions, msg)) return false;
+		const i = messages.indexOf(msg);
+		if (i < 0 || !msg.held) return false;
+		messages.splice(i, 1);
+		return true;
+	});
+	if (!send) return;
+	await sendNow(task, display, undefined, runOptions);
 }
 
 /** The X on a held message: it goes, unsent. */
@@ -3975,7 +4000,8 @@ export async function retryInterruptedRun(): Promise<void> {
 	let lastUserText = '';
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
-		if (m && m.role === 'user' && m.content) { lastUserText = m.content; break; }
+		// A held message was never sent: it is not the interrupted turn, and its tap sends it.
+		if (m && m.role === 'user' && m.content && m.held !== true) { lastUserText = m.content; break; }
 	}
 	// Asked before the dismiss: a waiting question (or a live run, or no answer from the server)
 	// keeps the banner and its Retry, and nothing is sent. The chat is checked after each await,
