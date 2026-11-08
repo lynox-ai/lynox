@@ -26,14 +26,14 @@ Toggling the speaker off mid-stream stops current audio and clears the queue.
 | Property              | Mistral Voxtral TTS                     |
 |-----------------------|-----------------------------------------|
 | Hosting               | Mistral La Plateforme (hosted in the EU by default)       |
-| Model                 | `voxtral-mini-tts-2603` (pinned)        |
+| Model                 | `voxtral-mini-tts-3-0` (Voxtral TTS 3, pinned; Mistral lists it as Public Preview) |
 | Default voice         | `en_paul_neutral` (English)             |
-| Languages             | 9 supported; the catalog has voices the pinned model cannot use |
+| Languages             | 35+ per Mistral; the voice catalog has voices for many of them |
 | Streaming             | SSE; low-latency time-to-first-audio (varies by region/network) |
-| Pricing               | $0.016 / 1 000 characters (~$0.02/min spoken). See [Mistral pricing](https://docs.mistral.ai/getting-started/models/) for the current number. |
+| Pricing               | $13 / 1 000 000 characters. See [Mistral pricing](https://docs.mistral.ai/inference/pricing) for the current number. |
 | Training              | Customer text is not used to train models (per Mistral's terms) |
 
-German text is read with an English voice. The accent is light and acceptable for business replies — long inputs read with noticeably more prosodic nuance than very short ones (prosody is planned over the whole input). Mistral's catalog lists a German voice, but the pinned model cannot speak it; when the model answers that it does not support the chosen voice, lynox reads the text with the default voice instead of failing, also when that voice was chosen in the settings.
+When no voice is chosen, lynox picks one from Mistral's catalog for the language of the interface, so German text is read with the catalog's German voice. A chosen voice is used for every language. Long inputs read with noticeably more prosodic nuance than very short ones (prosody is planned over the whole input). Should the model answer that it does not support a voice, lynox reads the text with the default voice instead of failing, also when that voice was chosen in the settings.
 
 ## Configuration
 
@@ -78,11 +78,11 @@ Assistant replies are Markdown. Reading them verbatim would produce "asterisk-as
 
 ## Cost
 
-At $0.016 per 1 000 characters, typical use is well inside existing tier budgets. A user listening to 30 replies of ~300 characters per month pays about 15 cents. Heavy use (500 replies, 500 characters each) still lands at roughly $4 / month. Managed tenants gate voice on their credit balance — synthesis draws from the same included-AI budget as other usage — and per-tenant character counts are logged for review.
+At $13 per million characters, typical use is well inside existing tier budgets. A user listening to 30 replies of ~300 characters per month pays about 12 cents. Heavy use (500 replies, 500 characters each) still lands at roughly $3.25 / month. Managed tenants gate voice on their credit balance — synthesis draws from the same included-AI budget as other usage — and per-tenant character counts are logged for review.
 
 ## Troubleshooting
 
 - **No speaker icon appears next to replies** — the TTS provider reports unavailable. Check that `MISTRAL_API_KEY` is set on the server; the icon is deliberately hidden (not disabled) to keep unavailable controls out of the UI.
 - **"Could not play audio" toast** — network error or the browser blocked playback. Reload and try again; autoplay policies require a user gesture to start audio, which the button press satisfies.
 - **Audio starts but cuts off early** — the network stream was interrupted. The next click re-synthesizes from the beginning.
-- **German pronunciation sounds off** — the default voice is English. Long replies sound noticeably better than very short ones because prosody is planned over the full input; the German voice in Mistral's catalog cannot be used with the pinned model yet (see above).
+- **German text is read with an English voice** — a voice chosen in the settings is used for every language; clear it to let lynox pick the German one. Long replies sound noticeably better than very short ones because prosody is planned over the full input.

@@ -538,8 +538,11 @@ function resolveRunWallClockMs(): number {
 }
 /** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
 const SPEAK_MAX_TEXT_CHARS = 10_000;
-/** Mistral Voxtral TTS rate (2026-04): $0.016 per 1 000 characters. No usage headers exposed — billed client-side. */
-const SPEAK_USD_PER_CHAR = 0.016 / 1000;
+/**
+ * Mistral's list price for Voxtral TTS 3 (`voxtral-mini-tts-3-0`): $13 per million characters,
+ * docs.mistral.ai/inference/pricing, read 2026-11-08. No usage headers exposed — billed client-side.
+ */
+const SPEAK_USD_PER_CHAR = 13 / 1_000_000;
 /** Usage Dashboard summary cache: 30 s per (period, windowStart). Long enough to dedupe tab re-opens, short enough to feel live. */
 const USAGE_SUMMARY_TTL_MS = 30_000;
 /**
@@ -10764,8 +10767,8 @@ export class LynoxHTTPApi {
       if (meta) {
         // Bill the post-prep character count to RunHistory so the Usage
         // Dashboard line-items voice TTS separately from chat runs. Mistral
-        // doesn't surface usage headers — $0.016/1 000 chars is the
-        // documented rate, applied after text-prep has stripped Markdown
+        // doesn't surface usage headers — the documented rate per character
+        // (`SPEAK_USD_PER_CHAR`) is applied after text-prep has stripped Markdown
         // noise. (TTS no longer increments the in-memory session-cost
         // counter — it isn't tied to a chat Session, and the dashboard's
         // daily/monthly caps still pick the cost up via RunHistory.)

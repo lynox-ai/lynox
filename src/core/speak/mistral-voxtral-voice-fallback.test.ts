@@ -2,10 +2,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 /**
  * Measured 2026-11-07 on staging and against the API: Mistral's catalogue has a German
- * voice (`voice_481`), the language pick chooses it for German text, and the pinned
- * model refuses it with 400 / code `3051`, "voice is not supported for speech v1".
- * Every German reader got silence. The stub answers exactly that body for any voice
- * outside `SPOKEN`, so the tests drive the measured shape, not an invented one.
+ * voice (`voice_481`), the language pick chooses it for German text, and the model then
+ * pinned, `voxtral-mini-tts-2603`, refuses it with 400 / code `3051`, "voice is not
+ * supported for speech v1". Every German reader got silence. `voxtral-mini-tts-3-0`
+ * speaks it (and every other catalogue voice, measured 2026-11-08).
+ *
+ * The stub answers exactly that body for a voice outside what the requested model
+ * speaks, so the tests drive the measured shape, not an invented one. The fallback
+ * tests ask for the old model explicitly; the pinned model's own case is below them.
  */
 
 const REFUSAL = JSON.stringify({
@@ -17,7 +21,12 @@ const REFUSAL = JSON.stringify({
   raw_status_code: 400,
 });
 
-const SPOKEN = new Set(['en_paul_neutral', 'fr_marie_neutral']);
+const OLD_MODEL = 'voxtral-mini-tts-2603';
+const SPOKEN_BY: Record<string, ReadonlySet<string>> = {
+  [OLD_MODEL]: new Set(['en_paul_neutral', 'fr_marie_neutral']),
+  'voxtral-mini-tts-3-0': new Set(['en_paul_neutral', 'fr_marie_neutral', 'voice_481']),
+};
+const spoken = (model: string, voice: string): boolean => SPOKEN_BY[model]?.has(voice) ?? false;
 const MP3 = Buffer.from('ID3-fake-mp3').toString('base64');
 
 interface Sent { readonly voice: string; readonly model: string; readonly stream: boolean; readonly accept: string | null }
@@ -28,7 +37,7 @@ function stubSpeech(opts: { refusal?: { status: number; body: string } } = {}) {
     const body = JSON.parse(String(init.body)) as { voice: string; model: string; stream: boolean };
     const headers = init.headers as Record<string, string>;
     sent.push({ voice: body.voice, model: body.model, stream: body.stream, accept: headers['accept'] ?? null });
-    if (!SPOKEN.has(body.voice)) {
+    if (!spoken(body.model, body.voice)) {
       const r = opts.refusal ?? { status: 400, body: REFUSAL };
       return new Response(r.body, { status: r.status, statusText: 'Bad Request' });
     }
@@ -63,15 +72,51 @@ function written(): string {
   return stderr.mock.calls.map((c) => String(c[0])).join('');
 }
 
-describe('a voice the pinned model cannot speak is read with the default voice', () => {
+// The catalogue as it answered on 2026-11-08: the German voice carries `de`, no region.
+const CATALOGUE = JSON.stringify({
+  items: [
+    { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'], id: 'u1' },
+    { slug: 'voice_481', name: 'Heidi', languages: ['de'], id: 'u2' },
+  ],
+  total: 2,
+});
+
+function withCatalogue(speech: ReturnType<typeof stubSpeech>) {
+  return vi.fn(async (url: string, init: RequestInit) =>
+    url.includes('/v1/audio/voices') ? new Response(CATALOGUE, { status: 200 }) : speech(url, init));
+}
+
+describe('the pinned model speaks the German catalogue voice', () => {
+  it('reads German text without a chosen voice with voice_481, in one request', async () => {
+    // The path that was silent, then fell back: `speakStream` → `resolveVoice` →
+    // catalogue → `voice_481` → the pinned model. Now one request, no refusal.
+    vi.stubGlobal('fetch', withCatalogue(stubSpeech()));
+    vi.resetModules();
+    const { speakStream, VOXTRAL_TTS_MODEL } = await import('./index.js');
+    const meta = await speakStream('Guten Tag, das ist ein Test.', () => {}, { voiceLanguage: 'de' });
+    expect(sent.map((s) => [s.model, s.voice])).toEqual([[VOXTRAL_TTS_MODEL, 'voice_481']]);
+    expect(meta?.voice).toBe('voice_481');
+    expect(written()).not.toContain('cannot speak');
+  });
+
+  it('reads a one-shot request for voice_481 with that voice, in one request', async () => {
+    vi.stubGlobal('fetch', stubSpeech());
+    const { speakMistralVoxtral } = await load();
+    const result = await speakMistralVoxtral('Guten Tag.', { voice: 'voice_481' });
+    expect(result?.voice).toBe('voice_481');
+    expect(sent.map((s) => s.voice)).toEqual(['voice_481']);
+  });
+});
+
+describe('a voice the model cannot speak is read with the default voice', () => {
   it('reads a one-shot request for voice_481 with en_paul_neutral, asking twice', async () => {
     vi.stubGlobal('fetch', stubSpeech());
-    const { speakMistralVoxtral, VOXTRAL_TTS_MODEL } = await load();
-    const result = await speakMistralVoxtral('Guten Tag.', { voice: 'voice_481' });
+    const { speakMistralVoxtral } = await load();
+    const result = await speakMistralVoxtral('Guten Tag.', { voice: 'voice_481', model: OLD_MODEL });
     expect(result).not.toBeNull();
     expect(result?.voice).toBe('en_paul_neutral');
     expect(sent.map((s) => s.voice)).toEqual(['voice_481', 'en_paul_neutral']);
-    expect(sent.every((s) => s.model === VOXTRAL_TTS_MODEL && !s.stream)).toBe(true);
+    expect(sent.every((s) => s.model === OLD_MODEL && !s.stream)).toBe(true);
     expect(written()).toContain('cannot speak voice=voice_481; reading with voice=en_paul_neutral');
   });
 
@@ -79,7 +124,7 @@ describe('a voice the pinned model cannot speak is read with the default voice',
     vi.stubGlobal('fetch', stubSpeech());
     const { speakMistralVoxtralStream } = await load();
     const chunks: Uint8Array[] = [];
-    const meta = await speakMistralVoxtralStream('Guten Tag.', (c) => { chunks.push(c); }, { voice: 'voice_481' });
+    const meta = await speakMistralVoxtralStream('Guten Tag.', (c) => { chunks.push(c); }, { voice: 'voice_481', model: OLD_MODEL });
     expect(meta?.voice).toBe('en_paul_neutral');
     expect(chunks.length).toBe(1);
     expect(sent.map((s) => [s.voice, s.stream, s.accept])).toEqual([
@@ -89,25 +134,12 @@ describe('a voice the pinned model cannot speak is read with the default voice',
   });
 
   it('reads German text without a chosen voice: the language pick takes voice_481, the read falls back', async () => {
-    // The whole measured path: `speakStream` → `resolveVoice` → catalogue → `voice_481`
-    // → refusal → default voice. The catalogue stub returns the German voice the live
-    // catalogue has.
-    const speech = stubSpeech();
-    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
-      if (url.includes('/v1/audio/voices')) {
-        return new Response(JSON.stringify({
-          items: [
-            { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'], id: 'u1' },
-            { slug: 'voice_481', name: 'Heidi', languages: ['de_de'], id: 'u2' },
-          ],
-          total: 2,
-        }), { status: 200 });
-      }
-      return speech(url, init);
-    }));
+    // The whole measured path of 2026-11-07: `speakStream` → `resolveVoice` → catalogue
+    // → `voice_481` → refusal → default voice.
+    vi.stubGlobal('fetch', withCatalogue(stubSpeech()));
     vi.resetModules();
     const { speakStream } = await import('./index.js');
-    const meta = await speakStream('Guten Tag, das ist ein Test.', () => {}, { voiceLanguage: 'de' });
+    const meta = await speakStream('Guten Tag, das ist ein Test.', () => {}, { voiceLanguage: 'de', model: OLD_MODEL });
     expect(sent.map((s) => s.voice)).toEqual(['voice_481', 'en_paul_neutral']);
     expect(meta?.voice).toBe('en_paul_neutral');
   });
@@ -125,7 +157,7 @@ describe('the voice in the fallback log line is a plain id or nothing', () => {
   it('replaces a voice with a newline instead of writing it', async () => {
     vi.stubGlobal('fetch', stubSpeech());
     const { speakMistralVoxtral } = await load();
-    await speakMistralVoxtral('Guten Tag.', { voice: 'voice_481\n[fake] line' });
+    await speakMistralVoxtral('Guten Tag.', { voice: 'voice_481\n[fake] line', model: OLD_MODEL });
     expect(written()).toContain('cannot speak voice=<not an id>; reading with voice=en_paul_neutral');
     expect(written()).not.toContain('[fake] line');
   });
@@ -151,7 +183,7 @@ describe('every other refusal still fails, without a second request', () => {
     it(`${name}: returns null and asks once`, async () => {
       vi.stubGlobal('fetch', stubSpeech({ refusal }));
       const { speakMistralVoxtral } = await load();
-      expect(await speakMistralVoxtral('Guten Tag.', { voice: 'voice_481' })).toBeNull();
+      expect(await speakMistralVoxtral('Guten Tag.', { voice: 'voice_481', model: OLD_MODEL })).toBeNull();
       expect(sent.map((s) => s.voice)).toEqual(['voice_481']);
       expect(written()).not.toContain('reading with voice=');
     });

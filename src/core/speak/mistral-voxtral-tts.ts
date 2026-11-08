@@ -11,8 +11,8 @@
  *   data: {"type":"speech.audio.delta","audio_data":"<base64_chunk>"}
  *
  * Endpoint rejects `language` outright (422 extra_forbidden) — re-verified
- * 2026-08-02 against the live API, still true on the pinned v26.03 model. Do
- * not attempt to pass `language`.
+ * 2026-08-02 against the live API on the v26.03 model. Do not attempt to pass
+ * `language`; the voice carries the language.
  *
  * The catalog is NOT EN-only, which this comment claimed until 2026-08-02. All
  * 30 voices, enumerated via `offset`/`limit` (see VOICES_BASE_URL): 8 `en_us`,
@@ -25,8 +25,8 @@
  * sentence (umlauts + a compound noun) synthesised with `en_paul_neutral` and
  * with `fr_marie_neutral`, then transcribed back, returned identical to the
  * source both times. What a German listener hears as an accent is SPEAKER
- * IDENTITY, not mispronunciation. Removing it needs a German voice the pinned
- * model can speak — or a non-Voxtral path for non-English text.
+ * IDENTITY, not mispronunciation. The pinned model below speaks the catalogue's
+ * German voice, so German text no longer needs the English one.
  *
  * No usage or rate-limit headers are exposed. Character counting for per-tenant
  * cost attribution happens facade-side. Calls Mistral's EU regional endpoint (api.eu.mistral.ai).
@@ -44,23 +44,27 @@ import type {
 } from './types.js';
 
 /**
- * Pinned model version. Was `voxtral-mini-tts-latest`; pinned to the concrete
- * v26.03 tag 2026-07-26 — `-latest` aliases violate our no-floating-tag rule
- * (rate-limit surprises on a silent server-side bump), and v26.03 is the newest
- * documented release (better cross-lingual pronunciation of DE text than v26.02).
+ * Pinned model version, never a `-latest` alias (no-floating-tag rule: a silent
+ * server-side bump brings its own rate limits).
+ *
+ * Voxtral TTS 3, v3.0, since 2026-11. The previous pin, `voxtral-mini-tts-2603`, is
+ * deprecated since 2026-10-31 and cannot speak the catalogue's `voice_*` voices,
+ * among them the only German one: Mistral answers 400, code `3051`. This model
+ * spoke all 66 voices of the live catalogue (2026-11-08, `api.eu.mistral.ai`, one
+ * request each). Mistral lists it as a Public Preview.
  */
-export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
+export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-3-0';
 
 /**
  * Default voice — English, reads DE text with a light English accent. The owner
  * approved on the Phase 0 p300/p3000 DE samples.
  *
- * The live catalogue has a German voice (`voice_481`, seen 2026-11-07), and the
- * language pick chooses it for German text. The pinned model above cannot speak it:
- * Mistral answers 400, code `3051`, "voice is not supported for speech v1" (measured
- * 2026-11-07 on `api.eu.mistral.ai` and `api.mistral.ai`, `voice_481` only), while `voxtral-mini-tts-3-0`
- * speaks it. Until the model moves, `postSpeech` reads a voice the model refuses
- * with this one instead.
+ * It reads when no voice was chosen and the language pick found none, and it is
+ * what `postSpeech` falls back to when Mistral refuses a voice for the model with
+ * 400, code `3051`, "voice is not supported for speech v1". That refusal was the
+ * normal case for German under the previous pin (measured 2026-11-07); the pinned
+ * model speaks every catalogue voice today, so the fallback is a net for a model
+ * passed in by the caller and for voices the catalogue adds later.
  */
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
@@ -81,8 +85,7 @@ const VOICES_PAGE_LIMIT = 100;
  * Fallback voice catalog for the Settings picker when the live `/v1/audio/voices`
  * call is unreachable. A representative EN subset; safe to stay out-of-date
  * because the live fetch overwrites this in the UI the moment Mistral is
- * reachable. Do not add the German catalogue voice here: the pinned model cannot
- * speak it (see `DEFAULT_VOICE`).
+ * reachable.
  *
  * The list is English-only; the live catalog also has six `fr_marie_*` voices.
  */
@@ -464,8 +467,8 @@ function isVoiceNotSupported(status: number, body: string): boolean {
 /**
  * POSTs one synthesis request. When Mistral refuses the voice for the model, it asks
  * once more with `DEFAULT_VOICE`: the language pick can choose a catalogue voice the
- * pinned model cannot speak, and reading the text with another voice is better than
- * not reading it. Returns the accepted response and the request that produced it, or
+ * model cannot speak, and reading the text with another voice is better than not
+ * reading it. Returns the accepted response and the request that produced it, or
  * null after logging the refusal.
  */
 async function postSpeech(

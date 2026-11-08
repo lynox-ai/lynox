@@ -17579,7 +17579,7 @@ describe('metered audio routes: managed credit gate + debit', () => {
       const onBeforeRun = vi.fn();
       const onAfterRun = vi.fn();
       mockEngineHooks = [{ onBeforeRun, onAfterRun }];
-      // 100 chars × ($0.016 / 1 000) = $0.0016.
+      // 100 chars × ($13 / 1 000 000) = $0.0013.
       mockSpeakStream.mockResolvedValue({ characters: 100, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
       const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello world' }) });
       expect(res.status).toBe(200);
@@ -17590,7 +17590,7 @@ describe('metered audio routes: managed credit gate + debit', () => {
       const [runIdArg, costArg] = onAfterRun.mock.calls[0]!;
       // Same run id the gate produced (CP dedups debits on it).
       expect(runIdArg).toBe(onBeforeRun.mock.calls[0]![0]);
-      expect(costArg).toBeCloseTo(0.0016, 6);
+      expect(costArg).toBeCloseTo(0.0013, 6);
     });
 
     it('does not debit when synthesis fails (meta null) — no money for no audio', async () => {
