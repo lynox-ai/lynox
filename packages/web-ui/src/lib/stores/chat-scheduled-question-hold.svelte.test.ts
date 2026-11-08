@@ -492,6 +492,24 @@ describe('a new message', () => {
 		expect(heldToasts()).toEqual(['chat.question_waiting_held']);
 	});
 
+	it('a tap asks the server even when the nav’s poll no longer shows the chat waiting', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		// The poll last saw nothing (between two polls the question came back, or the poll lags).
+		const threads = await import('./threads.svelte.js');
+		stopPoll?.();
+		active = NOTHING;
+		stopPoll = threads.startActiveRunsPoll(600_000);
+		await settle();
+		expect(threads.getRunStatus('t1'), 'positive control: the poll shows nothing waiting').toBeUndefined();
+		active = SCHEDULED;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+	});
+
 	it('a tap once the question is gone: sent once, at once, no longer held', async () => {
 		await questionWaits(QUESTION);
 		await store.sendMessage('hello');

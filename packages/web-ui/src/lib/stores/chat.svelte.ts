@@ -4359,7 +4359,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// is a proxy over a copy of `localMessages`, so those marks are not in `localMessages`.
 			const shown = messages === _hydratedLocal ? messages : localMessages;
 			const hasUnpersistedLocal = shown.some((m) =>
-				m.failed || m.queued || m.held || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
+				m.failed || m.queued || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
 			// The shorter-transcript adoption must NOT fire while a turn is streaming: the
 			// fetch above awaited a round-trip, and a turn sent in that window is in local
 			// `messages` but not yet on the server (activeRun null, not failed/queued), so
@@ -4539,7 +4539,7 @@ export async function reconcileThread(): Promise<void> {
 		// too, so a thread cached with the old fragmented shape picks up the #4
 		// merged projection instead of staying stale forever.
 		const hasUnpersistedLocal = messages.some((m) =>
-			m.failed || m.queued || m.held || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
+			m.failed || m.queued || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
 		let adopted = false;
 		// RE-CHECK isStreaming HERE, not just at entry: the fetch above awaited a full
 		// round-trip, during which the user may have sent a turn (tapped a follow-up pill
