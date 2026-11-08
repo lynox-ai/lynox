@@ -1391,6 +1391,13 @@ export function secretsForProfile(
       if (prop === 'resolve') {
         return (name: string): string | null => (hidden(name) ? null : target.resolve(name));
       }
+      if (prop === 'holds') {
+        // Whether a name is there is information about it too: a hidden name answers false. A store
+        // that cannot answer stays one that cannot: no function, so the caller assumes nothing.
+        const holds = target.holds?.bind(target);
+        if (holds === undefined) return undefined;
+        return (name: string): boolean => (hidden(name) ? false : holds(name));
+      }
       if (prop === 'resolveSecretRefs') {
         // Nothing is resolved when any name is hidden: the callers probe one name at a time,
         // and a partly resolved input is not one any of them expects.

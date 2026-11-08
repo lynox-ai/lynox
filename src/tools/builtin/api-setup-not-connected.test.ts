@@ -32,10 +32,11 @@ function bexio(over: Partial<NonNullable<NonNullable<ApiProfile['auth']>['oauth'
   };
 }
 
-/** A vault that holds exactly `held`. */
-function vault(held: Record<string, string> = {}): { resolve: (name: string) => string | null; extractSecretNames: () => string[]; resolveSecretRefs: (input: unknown) => unknown } {
+/** A vault that holds exactly `held`. `resolve` throws: the line asks `holds`, never for a value. */
+function vault(held: Record<string, string> = {}): { holds: (name: string) => boolean; resolve: (name: string) => string | null; extractSecretNames: () => string[]; resolveSecretRefs: (input: unknown) => unknown } {
   return {
-    resolve: (name: string) => held[name] ?? null,
+    holds: (name: string) => held[name] !== undefined,
+    resolve: () => { throw new Error('the not-connected line read a value'); },
     extractSecretNames: () => [],
     resolveSecretRefs: (input: unknown) => input,
   };
@@ -99,6 +100,11 @@ describe('view says a built-in provider\'s profile is not connected yet', () => 
   it('control: a scope that holds both slots still gets the line', () => {
     const scoped = scopeSecretStore(vault() as never, [accessTokenKey('books'), refreshTokenKey('books')]);
     expect(notConnectedNote({ secretStore: scoped } as never, bexio())).toBe(`\n\n${LINE}`);
+  });
+
+  it('leaves it out for a vault that cannot say whether a token is there, and reads no value instead', () => {
+    const { holds: _unused, ...cannotAnswer } = vault();
+    expect(notConnectedNote({ secretStore: cannotAnswer } as never, bexio())).toBe('');
   });
 
   it('leaves it out when there is no vault to ask', async () => {
