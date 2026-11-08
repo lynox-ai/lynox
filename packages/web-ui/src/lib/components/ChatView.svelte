@@ -2,6 +2,8 @@
 	import {
 		sendMessage,
 		retryFailedTurn,
+		sendHeldMessage,
+		removeHeldMessage,
 		abortRun,
 		replyPermission,
 		replyPermissionTabs,
@@ -2827,6 +2829,16 @@
 							{@const ts = formatMessageTime(msg.createdAt)}
 							{#if ts}<span class="mr-auto mt-2.5 shrink-0 text-[10px] text-text-subtle/50 select-none tabular-nums">{ts}</span>{/if}
 						{/if}
+						{#if msg.held}
+							<button
+								onclick={() => removeHeldMessage(msg)}
+								aria-label={t('chat.remove_held')}
+								title={t('chat.remove_held')}
+								class="mt-1 shrink-0 rounded-full p-1 text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+							</button>
+						{/if}
 						{#if msg.queued}
 							<button
 								onclick={() => removeQueuedMessage(msg)}
@@ -2838,8 +2850,8 @@
 							</button>
 						{/if}
 						<button
-							onclick={() => { if (msg.failed) void retryFailedTurn(msg, userText); /* never rejects; asks the server before sending again */ else void copyWithToast(userText); }}
-							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
+							onclick={() => { if (msg.held) void sendHeldMessage(msg); /* never rejects; asks the server before sending */ else if (msg.failed) void retryFailedTurn(msg, userText); /* never rejects; asks the server before sending again */ else void copyWithToast(userText); }}
+							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.held || msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
 							{#if hasVoicePrefix(userText)}
 								<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3.5 w-3.5 mr-1.5 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(userText)}
@@ -2848,6 +2860,8 @@
 							{/if}
 							{#if msg.failed}
 								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-danger/70 mt-1">{t('chat.send_failed')}</span>
+							{:else if msg.held}
+								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-text-subtle mt-1">{t('chat.send_held')}</span>
 							{:else if msg.queued}
 								<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle ml-2">{t('chat.queued')}</span>
 							{/if}

@@ -35,6 +35,7 @@ let holdActive: Promise<void> | null;
 let activeFails: boolean;
 let holdDelete: Promise<void> | null;
 let threadMessages: unknown;
+let stopPoll: (() => void) | null = null;
 
 function serve(): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -77,6 +78,11 @@ async function questionWaits(card: unknown): Promise<void> {
 	expect(runPosts(), 'positive control: a message is sent while nothing waits').toBe(1);
 	active = SCHEDULED;
 	pending = card;
+	// The nav's poll sees the question, as in the app (AppShell starts it).
+	const threads = await import('./threads.svelte.js');
+	stopPoll = threads.startActiveRunsPoll(600_000);
+	await settle();
+	expect(threads.getRunStatus('t1'), 'positive control: the poll sees the question').toBe('awaiting_input');
 }
 
 beforeEach(async () => {
@@ -99,7 +105,7 @@ beforeEach(async () => {
 	threadMessages = { messages: [], activeRun: null };
 	serve();
 });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { stopPoll?.(); stopPoll = null; vi.unstubAllGlobals(); });
 
 describe('the tap on a failed message', () => {
 	it('with a question waiting: not sent again, the card back, the question sentence', async () => {
@@ -393,11 +399,151 @@ describe('Retry on an interrupted run', () => {
 });
 
 describe('a new message', () => {
-	it('is not held by this change: it is sent as before', async () => {
+	const heldOnes = () => store.getMessages().filter((m) => m.held === true);
+	const HELD_KEYS = ['chat.question_waiting_held', 'chat.question_waiting_decision_held', 'chat.question_waiting_plain_held'];
+	const heldToasts = (): string[] => toasts.map((x) => [...HELD_KEYS, ...KEYS].find((k) => i18n.t(k) === x.message) ?? x.message);
+
+	it('with a question waiting: not sent, held in the chat, the card back, the held sentence', async () => {
 		await questionWaits(QUESTION);
 		await store.sendMessage('hello');
 		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldOnes().map((m) => [m.content, m.failed ?? false])).toEqual([['hello', false]]);
+		expect(store.getPendingPermission()?.question).toBe('Which list, A or B?');
+		expect(heldToasts()).toEqual(['chat.question_waiting_held']);
+		expect(toasts[0]!.ms).toBeGreaterThanOrEqual(8000);
+	});
+
+	it('with a decision waiting: the decision’s held sentence', async () => {
+		await questionWaits(DECISION);
+		await store.sendMessage('hello');
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldToasts()).toEqual(['chat.question_waiting_decision_held']);
+	});
+
+	it('a chip’s prompt is what a held message sends, its label what it shows', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('the full prompt', 'the label');
+		await settle();
+		expect(heldOnes().map((m) => [m.content, m.heldTask])).toEqual([['the label', 'the full prompt']]);
+		active = NOTHING;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
 		expect(runPosts()).toBe(2);
+		const body = JSON.parse(String((vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run')).at(-1)![1] as RequestInit).body)) as { task?: string };
+		expect(body.task).toContain('the full prompt');
+	});
+
+	it('is not sent by the reconnect, nor once the question is gone', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		pending = { pending: false };
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+	});
+
+	it('outlives the server’s transcript, equal or longer, after the question is answered', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' }, { role: 'assistant', content: 'ok' },
+			{ role: 'assistant', content: 'the scheduled run went on' },
+		], activeRun: null };
+		await store.reconcileThread();
+		expect(store.getMessages().at(-1)).toMatchObject({ role: 'user', content: 'hello', held: true });
+		expect(store.getMessages().some((m) => m.content === 'the scheduled run went on'), 'positive control: the transcript was adopted').toBe(true);
+	});
+
+	it('outlives a reload of the page', async () => {
+		const saved = new Map<string, string>();
+		vi.stubGlobal('localStorage', {
+			getItem: (k: string) => saved.get(k) ?? null,
+			setItem: (k: string, v: string) => { saved.set(k, v); },
+			removeItem: (k: string) => { saved.delete(k); },
+		});
+		vi.resetModules();
+		store = await import('./chat.svelte.js');
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		expect(heldOnes().map((m) => m.content), 'positive control: held before the reload').toEqual(['hello']);
+		vi.resetModules();
+		store = await import('./chat.svelte.js');
+		expect(store.getMessages().filter((m) => m.held === true).map((m) => m.content)).toEqual(['hello']);
+	});
+
+	it('a tap while the question still waits: still held, the held sentence, never "not sent again"', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		toasts.length = 0;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+		expect(heldToasts()).toEqual(['chat.question_waiting_held']);
+	});
+
+	it('a tap once the question is gone: sent once, at once, no longer held', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(runPosts()).toBe(2);
+		expect(heldOnes()).toEqual([]);
+		expect(store.getMessages().filter((m) => m.role === 'user' && m.content === 'hello')).toHaveLength(1);
+	});
+
+	it('the X discards it, unsent', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		store.removeHeldMessage(heldOnes()[0]!);
+		expect(store.getMessages().some((m) => m.content === 'hello')).toBe(false);
+		expect(runPosts()).toBe(1);
+	});
+
+	it('when the server cannot be asked: sent as before', async () => {
+		await questionWaits(QUESTION);
+		activeFails = true;
+		await store.sendMessage('hello');
+		await settle();
+		expect(runPosts()).toBe(2);
+		expect(heldOnes()).toEqual([]);
+	});
+
+	it('with nothing waiting: sent as before', async () => {
+		await questionWaits(QUESTION);
+		active = NOTHING;
+		await store.sendMessage('hello');
+		await settle();
+		expect(runPosts()).toBe(2);
+	});
+
+	it('with the chat’s own run waiting on a question: not held (that card answers it)', async () => {
+		await questionWaits(QUESTION);
+		active = { runs: [{ runId: 'own', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }, ...SCHEDULED.runs] };
+		await store.sendMessage('hello');
+		await settle();
+		expect(heldOnes()).toEqual([]);
+	});
+
+	it('with files: sent as before, since a reload keeps no files', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello', [{ name: 'a.txt', type: 'text/plain', data: 'YQ==' }]);
+		await settle();
+		expect(runPosts()).toBe(2);
+		expect(heldOnes()).toEqual([]);
 	});
 });
 
@@ -429,7 +575,28 @@ describe('the sentences, word for word (reviewed wording)', () => {
 			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst; deine Nachricht wurde nicht noch einmal gesendet.',
 			en: 'A question in this chat is waiting for your answer. Answer it first; your message was not sent again.',
 		},
+		'chat.question_waiting_held': {
+			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst oder brich sie mit dem X auf der Karte ab; dann geht der Lauf ohne Antwort weiter. Deine Nachricht wurde nicht gesendet und bleibt im Chat stehen; tipp sie danach an, um sie zu senden.',
+			en: 'A question in this chat is waiting for your answer. Answer it first, or cancel it with the X on the card; the run then goes on without an answer. Your message was not sent and stays in the chat; tap it afterwards to send it.',
+		},
+		'chat.question_waiting_decision_held': {
+			de: 'In diesem Chat wartet eine Entscheidung auf dich. Triff sie zuerst auf der Karte. Deine Nachricht wurde nicht gesendet und bleibt im Chat stehen; tipp sie danach an, um sie zu senden.',
+			en: 'A decision in this chat is waiting for you. Make it on the card first. Your message was not sent and stays in the chat; tap it afterwards to send it.',
+		},
+		'chat.question_waiting_plain_held': {
+			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst. Deine Nachricht wurde nicht gesendet und bleibt im Chat stehen; tipp sie danach an, um sie zu senden.',
+			en: 'A question in this chat is waiting for your answer. Answer it first. Your message was not sent and stays in the chat; tap it afterwards to send it.',
+		},
+		'chat.send_held': { de: 'Noch nicht gesendet — tippen zum Senden', en: 'Not sent yet — tap to send' },
 	};
+	it('a held message’s sentence follows the card too, and never says "not sent again"', () => {
+		expect(store.questionWaitingKey('decision', true)).toBe('chat.question_waiting_decision_held');
+		expect(store.questionWaitingKey('question', true)).toBe('chat.question_waiting_held');
+		expect(store.questionWaitingKey('other', true)).toBe('chat.question_waiting_plain_held');
+		expect(store.questionWaitingKey(null, true)).toBeNull();
+		i18n.setLocale('de');
+		for (const k of ['chat.question_waiting_held', 'chat.question_waiting_decision_held', 'chat.question_waiting_plain_held']) expect(i18n.t(k)).not.toContain('noch einmal');
+	});
 	for (const key of Object.keys(TEXT)) {
 		it(key, () => {
 			i18n.setLocale('de');
