@@ -42,8 +42,9 @@ export const SHOPIFY_READ_DOCUMENTS: Readonly<Record<ShopifyReadForm, string>> =
   shopify_media_read: 'query($id: ID!) { node(id: $id) { ... on MediaImage { id alt } } }',
 });
 
-/** A store host as the preset derives it: one subdomain label of `myshopify.com`, nothing else. */
-const STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+/** A store host as the preset derives it: one subdomain label of `myshopify.com`, nothing else.
+ *  A DNS label holds at most 63 characters; a longer one names no store. */
+const STORE_HOST = /^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$/;
 
 /** Whether `host` is exactly a store host — a bare name, no port, path, query or trailing dot. */
 export function isShopifyStoreHostName(host: string): boolean {

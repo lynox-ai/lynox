@@ -619,8 +619,9 @@ export function bulkHostOf(targetSystem: string): string | null {
 	return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
 }
 
-/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`). */
-const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`):
+ *  one label of at most 63 characters. */
+const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$/;
 
 /** Whether an external run writes to a Shopify store. */
 export function bulkIsShopifyHost(host: string | null): boolean {
