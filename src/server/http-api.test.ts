@@ -4582,6 +4582,38 @@ describe('LynoxHTTPApi', () => {
         });
       });
 
+      it('reads a chat run working beside a scheduled run\'s earlier question as running, and lists the question', async () => {
+        repayRateWindow();
+        await withQuestions(async (reg, store, db) => {
+          const id = store.insertAskUser('shared-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          // Asked a minute before the chat run started: not the run's own question.
+          db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
+          reg.start('shared-thread', 'chat-run');
+          const here = (await activeRuns()).filter((r) => r.threadId === 'shared-thread');
+          expect(here.map((r) => [r.runId, r.status, r.attachable])).toEqual([['chat-run', 'running', true], [id, 'awaiting_input', false]]);
+        });
+      });
+
+      it('reads it as running in a thread\'s transcript too, and its own question as waiting', async () => {
+        repayRateWindow();
+        await withQuestions(async (reg, store, db) => {
+          const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+          const orig = engineRef.getThreadStore;
+          engineRef.getThreadStore = (): unknown => ({ getThread: () => ({ id: 'shared-thread' }), getMessages: () => [] });
+          try {
+            const activeRun = async (): Promise<{ status: string } | null> =>
+              (await (await jsonFetch('/api/threads/shared-thread/messages')).json() as { activeRun: { status: string } | null }).activeRun;
+            const id = store.insertAskUser('shared-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+            db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
+            reg.start('shared-thread', 'chat-run');
+            expect((await activeRun())?.status).toBe('running');
+            // The run's own question, asked after it started.
+            db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '+1 minute') WHERE id = ?`).run(id);
+            expect((await activeRun())?.status).toBe('awaiting_input');
+          } finally { engineRef.getThreadStore = orig; }
+        });
+      });
+
       it('marks a question in a thread whose earlier chat run was interrupted', async () => {
         await withQuestions(async (reg, store) => {
           reg.start('mixed-thread', 'old-chat-run');

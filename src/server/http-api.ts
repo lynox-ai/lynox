@@ -124,6 +124,7 @@ import type {
 import { readMandateRevocation, MANDATE_REVOCATION_MAX } from '../contract/http.js';
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
+import { awaitsOwnQuestion } from './own-question.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
@@ -5529,7 +5530,8 @@ export class LynoxHTTPApi {
       if (!registry) { jsonResponse(res, 200, { runs: [] }); return; }
       const promptStoreForRuns = this.engine?.getPromptStore();
       const runs = registry.getActive().map((r) => {
-        const awaiting = r.status === 'running' && !!promptStoreForRuns?.getPending(r.thread_id);
+        // Only the run's own question: a scheduled run's, asked before it started, is not.
+        const awaiting = awaitsOwnQuestion(r, promptStoreForRuns?.getPending(r.thread_id));
         return {
           runId: r.run_id,
           threadId: r.thread_id,
@@ -5551,10 +5553,12 @@ export class LynoxHTTPApi {
       // listed after it, and the nav marks the thread with the question. The run id is the question's id, and
       // there is no stream behind it: `attachable: false` tells the client not to re-attach.
       // A workflow's question is closed at boot, so its mark goes with it rather than turning
-      // into an `interrupted` banner.
-      const live = new Set(runs.filter((r) => r.status !== 'interrupted').map((r) => r.threadId));
+      // into an `interrupted` banner. A live chat run whose own question it is lists it already
+      // (as `awaiting_input`); one that is working beside a scheduled run's question does not,
+      // so the question is listed too.
+      const owned = new Set(runs.filter((r) => r.status === 'awaiting_input').map((r) => r.threadId));
       for (const p of promptStoreForRuns?.listPendingSessions() ?? []) {
-        if (live.has(p.session_id)) continue;
+        if (owned.has(p.session_id)) continue;
         runs.push({
           runId: p.id,
           threadId: p.session_id,
@@ -6314,7 +6318,7 @@ export class LynoxHTTPApi {
       if (registry) {
         const row = registry.getActive().find((r) => r.thread_id === params['id']);
         if (row) {
-          const awaiting = row.status === 'running' && !!this.engine?.getPromptStore()?.getPending(row.thread_id);
+          const awaiting = awaitsOwnQuestion(row, this.engine?.getPromptStore()?.getPending(row.thread_id));
           activeRun = {
             runId: row.run_id,
             status: awaiting ? 'awaiting_input' : row.status,
