@@ -744,26 +744,6 @@ describe('a new message', () => {
 		expect(runPosts()).toBe(3);
 	}, 15_000);
 
-	it('a message with files sent while an earlier one is asked about does not overtake it', async () => {
-		await questionWaits(QUESTION);
-		active = NOTHING;
-		let release!: () => void;
-		holdActive = new Promise((r) => { release = r; });
-		const a = store.sendMessage('A');
-		await settle();
-		const b = store.sendMessage('B', [{ name: 'a.txt', type: 'text/plain', data: 'YQ==' }]);
-		await settle();
-		holdActive = null;
-		release();
-		await Promise.all([a, b]);
-		// B waited in the queue behind A's turn; the queue sends it once that turn ends.
-		await new Promise((r) => setTimeout(r, 700));
-		await settle();
-		const tasks = vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run')).slice(1)
-			.map(([, init]) => (JSON.parse(String((init as RequestInit).body)) as { task?: string }).task ?? '');
-		expect(tasks.map((t) => (t.includes('A') && !t.includes('B') ? 'A' : t.includes('B') ? 'B' : t))).toEqual(['A', 'B']);
-	});
-
 	it('with files: sent as before, since a reload keeps no files', async () => {
 		await questionWaits(QUESTION);
 		await store.sendMessage('hello', [{ name: 'a.txt', type: 'text/plain', data: 'YQ==' }]);

@@ -946,10 +946,6 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const sid = sessionId!;
 		const held = await inHoldOrder(() => holdAtScheduledQuestion(sid, task, displayText, runOptions));
 		if (held) return;
-	} else if (_holdAsks > 0) {
-		// A message sent while an earlier one is being asked about waits its turn, so it does not
-		// overtake it.
-		await inHoldOrder(async () => undefined);
 	}
 	await sendNow(task, displayText, files, runOptions);
 }
@@ -977,11 +973,9 @@ function mayHold(files: FileAttachment[] | undefined): boolean {
 /** The asks before a hold run one after another, so two messages sent while the server is asked
  *  keep their order, and a tap waits for a send's ask instead of being dropped. */
 let _holdOrder: Promise<unknown> = Promise.resolve();
-let _holdAsks = 0;
 function inHoldOrder<T>(step: () => Promise<T>): Promise<T> {
-	_holdAsks++;
 	const run = _holdOrder.then(step, step);
-	_holdOrder = run.catch(() => undefined).finally(() => { _holdAsks--; });
+	_holdOrder = run.catch(() => undefined);
 	return run;
 }
 
