@@ -11744,6 +11744,17 @@ describe('LynoxHTTPApi', () => {
       expect(shown['writeFormNote']).toBeNull();
     });
 
+    it('shows a list whose stored filters were changed past what a parse takes by its host, without failing', async () => {
+      const host = 'shop.example.com';
+      const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, filters: { category: ['12', '13'] } })), planned.status.id);
+      const res = await jsonFetch(`/api/bulk/runs/${planned.status.id}`);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as Record<string, unknown>)['listFirstPage']).toBe(host);
+    });
+
     it('starts a list read only with the checksum of the list it shows the owner', async () => {
       const host = 'shop.example.com';
       const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
