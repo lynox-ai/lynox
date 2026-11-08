@@ -2421,6 +2421,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'secret_prompt':
+			// The same prompt again (a re-attach replays the run's events): the card stays as it is,
+			// with what the user has typed into it.
+			if (sameOpenPrompt(pendingSecretPrompt?.promptId, data['promptId'])) break;
 			if (!pendingSecretPrompt) runPromptCount++;
 			pendingSecretPrompt = {
 				name: String(data['name'] ?? ''),
@@ -2433,6 +2436,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			secretPromptGeneration++;
 			break;
 		case 'mail_connect_prompt':
+			if (sameOpenPrompt(pendingMailConnect?.promptId, data['promptId'])) break;
 			if (!pendingMailConnect) runPromptCount++;
 			pendingMailConnect = {
 				promptId: data['promptId'] as string | undefined,
@@ -3139,6 +3143,12 @@ export function getMailConnectGeneration() {
  */
 export type PendingCard = 'question' | 'decision' | 'other' | null;
 
+/** Whether `incoming` names the prompt whose card is open already. A prompt without an id is
+ *  never the same one, so it is set as before. */
+function sameOpenPrompt(open: string | undefined, incoming: unknown): boolean {
+	return typeof open === 'string' && open.length > 0 && incoming === open;
+}
+
 /**
  * Check the server for a pending prompt that survived a disconnect/refresh.
  * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
@@ -3199,6 +3209,9 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 			};
 			card = isConsentCard(pendingPermission.options) ? 'decision' : 'question';
 		} else if (promptType === 'ask_secret') {
+			// The card already open for this prompt stays, with what the user has typed into it: a
+			// reconnect asks again, and setting it anew would clear the field.
+			if (sameOpenPrompt(pendingSecretPrompt?.promptId, data['promptId'])) return 'other';
 			pendingSecretPrompt = {
 				name: String(data['secretName'] ?? ''),
 				prompt: String(data['question'] ?? ''),
@@ -3209,6 +3222,7 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 			secretPromptGeneration++;
 			card = 'other';
 		} else if (promptType === 'connect_mail' && data['mailConnect']) {
+			if (sameOpenPrompt(pendingMailConnect?.promptId, data['promptId'])) return 'other';
 			const mc = data['mailConnect'] as Record<string, unknown>;
 			pendingMailConnect = {
 				promptId: data['promptId'] as string | undefined,
