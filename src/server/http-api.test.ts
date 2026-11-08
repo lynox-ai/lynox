@@ -4582,7 +4582,7 @@ describe('LynoxHTTPApi', () => {
         });
       });
 
-      it('reads a chat run working beside a scheduled run\'s earlier question as running, and lists the question', async () => {
+      it('reads a chat run working beside a scheduled run\'s earlier question as running, listed once', async () => {
         repayRateWindow();
         await withQuestions(async (reg, store, db) => {
           const id = store.insertAskUser('shared-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
@@ -4590,11 +4590,11 @@ describe('LynoxHTTPApi', () => {
           db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
           reg.start('shared-thread', 'chat-run');
           const here = (await activeRuns()).filter((r) => r.threadId === 'shared-thread');
-          expect(here.map((r) => [r.runId, r.status, r.attachable])).toEqual([['chat-run', 'running', true], [id, 'awaiting_input', false]]);
+          expect(here.map((r) => [r.runId, r.status, r.attachable])).toEqual([['chat-run', 'running', true]]);
         });
       });
 
-      it('reads it as running in a thread\'s transcript too, and its own question as waiting', async () => {
+      it('reads it as running in a thread\'s transcript too, and as waiting for a question asked after it started', async () => {
         repayRateWindow();
         await withQuestions(async (reg, store, db) => {
           const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
@@ -4607,7 +4607,7 @@ describe('LynoxHTTPApi', () => {
             db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
             reg.start('shared-thread', 'chat-run');
             expect((await activeRun())?.status).toBe('running');
-            // The run's own question, asked after it started.
+            // Asked after the run started: read as the run's own question.
             db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '+1 minute') WHERE id = ?`).run(id);
             expect((await activeRun())?.status).toBe('awaiting_input');
           } finally { engineRef.getThreadStore = orig; }

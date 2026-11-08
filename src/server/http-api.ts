@@ -5553,12 +5553,12 @@ export class LynoxHTTPApi {
       // listed after it, and the nav marks the thread with the question. The run id is the question's id, and
       // there is no stream behind it: `attachable: false` tells the client not to re-attach.
       // A workflow's question is closed at boot, so its mark goes with it rather than turning
-      // into an `interrupted` banner. A live chat run whose own question it is lists it already
-      // (as `awaiting_input`); one that is working beside a scheduled run's question does not,
-      // so the question is listed too.
-      const owned = new Set(runs.filter((r) => r.status === 'awaiting_input').map((r) => r.threadId));
+      // into an `interrupted` banner. A thread with a live chat run lists that run only, also
+      // when the question is a scheduled run's: the client reads a thread with both as having a
+      // question, and would then hold back a turn that is running.
+      const live = new Set(runs.filter((r) => r.status !== 'interrupted').map((r) => r.threadId));
       for (const p of promptStoreForRuns?.listPendingSessions() ?? []) {
-        if (owned.has(p.session_id)) continue;
+        if (live.has(p.session_id)) continue;
         runs.push({
           runId: p.id,
           threadId: p.session_id,
