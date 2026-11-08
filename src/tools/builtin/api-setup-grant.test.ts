@@ -5148,12 +5148,29 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
     removeFirst: 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.',
     connect: 'Call api_setup with action "connect" for this profile and show the user the link.',
   };
+  /** What the 401 reminder alone adds after a way that ends in connect (ux U-193). */
+  const AFTER_CONNECT = ' If connect answers that this profile is already connected, that is the token this API just refused: show the user the link from that answer. Do not offer to renew the token instead; fetch_token refuses for this profile.';
   const BEXIO_KEYS = presetClientKeys('bexio');
   /** A bexio profile as a connect leaves it: no token_url, no grant type. */
   const bexio = (id: string, oauth: Record<string, unknown> = {}): ApiProfile => ({
     id, name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'bexio',
     auth: { type: 'oauth2', vault_keys: [BEXIO_KEYS.id], oauth: { preset_id: 'bexio', client_id_key: BEXIO_KEYS.id, client_secret_key: BEXIO_KEYS.secret, ...oauth } } as never,
     custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], accepted_at: '2026-11-08T00:00:00.000Z' } as never,
+  });
+
+  it('the reminder says what to make of "already connected" after a way that ends in connect, and only there', async () => {
+    const { presetDelegatedReminder } = await import('./http.js');
+    const { OAUTH_PRESETS } = await import('../../core/oauth-presets.js');
+    const { refreshTokenKey } = await import('../../core/api-store.js');
+    const preset = OAUTH_PRESETS.get('bexio')!;
+    const none = { knownProfiles: () => [] };
+    expect(presetDelegatedReminder(bexio('books'), preset, none)).toContain(`${WAYS.connect}${AFTER_CONNECT} The engine`);
+    expect(presetDelegatedReminder(bexio('books', { refresh_token_key: 'BOOKS_OWN_REFRESH' }), preset, none)).toContain(`${WAYS.removeFirst}${AFTER_CONNECT} The engine`);
+    const owner = bexio('books');
+    const member = bexio('books-2', { refresh_token_key: refreshTokenKey('books') });
+    const shared = presetDelegatedReminder(member, preset, { knownProfiles: () => [owner, member] });
+    expect(shared).toContain(`${WAYS.shares} The engine`);
+    expect(shared).not.toContain('just refused');
   });
 
   it('names one way per shape', async () => {
@@ -5173,8 +5190,9 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
   });
 
   // Two profiles that share a connection both sit on the provider's API host, so the host maps to
-  // neither and no 401 reminder is written for them: fetch_token alone names the sharing way.
-  it('a profile that shares another profile\'s connection: fetch_token names the sharing way, and its host maps to no one profile', async () => {
+  // neither, a request there is not sent, and no 401 reminder can follow: fetch_token alone names
+  // the sharing way.
+  it('a profile that shares another profile\'s connection: fetch_token names the sharing way, and no request reaches a 401', async () => {
     const { accessTokenKey, refreshTokenKey } = await import('../../core/api-store.js');
     const store = new ApiStore();
     expect(store.register(bexio('books'))).toBe(true);
@@ -5184,13 +5202,17 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
     const fetched = await (apiSetupTool.handler({ action: 'fetch_token', id: 'books-2' }, agent) as Promise<string>);
     expect(fetched, fetched).toContain(WAYS.shares);
     expect(store.getByHostname('api.bexio.com')).toBeUndefined();
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }));
+    let sent = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => { sent++; return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }); });
     let reply: string;
     try {
       reply = await (httpRequestTool.handler({ url: 'https://api.bexio.com/3.0/contact' }, agent) as Promise<string>);
     } catch (err) {
       reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
     }
+    // No 401 can come back: a host two profiles map to carries no credential, and nothing is sent.
+    expect(sent).toBe(0);
+    expect(reply).toContain('more than one api_profile maps to api.bexio.com');
     expect(reply).not.toContain('Agent reminder: OAuth2 401');
   });
 
@@ -5205,6 +5227,8 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
 
     const fetched = await (apiSetupTool.handler({ action: 'fetch_token', id: 'books' }, agent) as Promise<string>);
     expect(fetched, fetched).toMatch(new RegExp(` ${way.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+    // fetch_token can be called with no 401 before it: "just refused" is the reminder's alone.
+    expect(fetched).not.toContain('just refused');
 
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }));
     let reply: string;
@@ -5216,7 +5240,7 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
     const head = '**[Agent reminder: OAuth2 401, and fetch_token is the wrong move here]**';
     expect(reply).toContain(head);
     expect(reply.slice(reply.indexOf(head))).toBe(
-      `${head}\nThis URL maps to api_profile "books". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do not call api_setup fetch_token for it as the profile stands, and change nothing on the profile beyond the step below. ${way} The engine has written the details to its log.`
+      `${head}\nThis URL maps to api_profile "books". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do not call api_setup fetch_token for it as the profile stands, and change nothing on the profile beyond the step below. ${way}${AFTER_CONNECT} The engine has written the details to its log.`
       + '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.',
     );
   });
@@ -5234,15 +5258,107 @@ describe('the 401 reminders keep their own profiles', () => {
       auth: { type: 'oauth2', vault_keys: [keys.id], oauth: { preset_id: 'bexio', grant_type: 'refresh_token', client_id_key: keys.id, client_secret_key: keys.secret } } as never,
       custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], accepted_at: '2026-11-08T00:00:00.000Z' } as never,
     })).toBe(true);
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }));
+    let sent = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => { sent++; return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }); });
     let reply: string;
     try {
       reply = await (httpRequestTool.handler({ url: 'https://api.bexio.com/2.0/contact' }, makeAgent(store, makeVault({ [accessTokenKey('books')]: 'expired-token' }))) as Promise<string>);
     } catch (err) {
       reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
     }
+    expect(sent).toBe(1);
     expect(reply).toContain('401');
     expect(reply).not.toContain('Agent reminder');
+  });
+});
+
+// sec-core on 1314: the 401 reminder now reaches a built-in provider's profile without a token_url.
+// Held in each direction: what newly gets it, what still does not, and what stays as it was.
+describe('which profiles a 401 reminder reaches', () => {
+  const MANAGED = '**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**';
+  const PRESET_DELEGATED = '**[Agent reminder: OAuth2 401, and fetch_token is the wrong move here]**';
+  const ackFor = (hosts: string[]): never => ({ accepted: true, hosts, accepted_at: '2026-11-08T00:00:00.000Z' }) as never;
+  async function on401(profile: ApiProfile, vault: MockVault): Promise<{ reply: string; sent: number }> {
+    const store = new ApiStore();
+    expect(store.register(profile)).toBe(true);
+    let sent = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => { sent++; return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }); });
+    let reply: string;
+    try {
+      reply = await (httpRequestTool.handler({ url: `${profile.base_url}/contact` }, makeAgent(store, vault)) as Promise<string>);
+    } catch (err) {
+      reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
+    }
+    return { reply, sent };
+  }
+  const keys = presetClientKeys('bexio');
+  const bexio = (oauth: Record<string, unknown>): ApiProfile => ({
+    id: 'books', name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'bexio',
+    auth: { type: 'oauth2', vault_keys: [keys.id], oauth: { preset_id: 'bexio', client_id_key: keys.id, client_secret_key: keys.secret, ...oauth } } as never,
+    custom_endpoint_ack: ackFor(['api.bexio.com', 'auth.bexio.com']),
+  });
+  const TOKEN = { BOOKS_ACCESS_TOKEN: 'expired-token' };
+
+  it('newly: a built-in provider\'s profile without a token_url gets the delegated reminder, not the managed one', async () => {
+    const { reply, sent } = await on401(bexio({}), makeVault(TOKEN));
+    expect(sent).toBe(1);
+    expect(reply).toContain(PRESET_DELEGATED);
+    expect(reply).not.toContain(MANAGED);
+  });
+
+  it('still not: an oauth2 profile with no built-in provider and no token_url gets no reminder', async () => {
+    const p = crmProfile({ base_url: 'https://api.crm.example/v1' });
+    const oauth = { ...p.auth!.oauth! };
+    delete oauth.token_url;
+    const { reply, sent } = await on401({ ...p, auth: { ...p.auth!, oauth } }, makeVault({ CRM_API_ACCESS_TOKEN: 'expired-token' }));
+    expect(sent).toBe(1);
+    expect(reply).toContain('401');
+    expect(reply).not.toContain('Agent reminder');
+  });
+
+  it('still not: a bearer profile that carries a stray preset_id gets no reminder', async () => {
+    const { reply, sent } = await on401({
+      id: 'books', name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'bexio',
+      auth: { type: 'bearer', vault_keys: ['BOOKS_KEY'], oauth: { preset_id: 'bexio' } } as never,
+      custom_endpoint_ack: ackFor(['api.bexio.com']),
+    }, makeVault({ BOOKS_KEY: 'k' }));
+    expect(sent).toBe(1);
+    expect(reply).not.toContain('Agent reminder');
+  });
+
+  it('as before: a built-in provider\'s profile with a token_url that renews by its refresh token gets the managed reminder', async () => {
+    const { reply, sent } = await on401(bexio({ token_url: 'https://auth.bexio.com/token', grant_type: 'refresh_token' }), makeVault(TOKEN));
+    expect(sent).toBe(1);
+    expect(reply).toContain(MANAGED);
+    expect(reply).not.toContain(PRESET_DELEGATED);
+  });
+
+  // Whether a refresh token is stored decides which reminder a hand-configured profile gets; it is
+  // asked without reading the token out where the store can, and as before where it cannot.
+  const handConfigured = (): ApiProfile => {
+    const p = crmProfile();
+    const oauth = { ...p.auth!.oauth! };
+    delete oauth.grant_type;
+    return { ...p, auth: { ...p.auth!, oauth } };
+  };
+  it.each([
+    ['a store that answers holds: the slot is not read out', true],
+    ['control: a store without holds is asked as before', false],
+  ])('a stored refresh token turns the reminder to the delegated one: %s', async (_label, withHolds) => {
+    const read: string[] = [];
+    const vault = makeVault({ CRM_API_ACCESS_TOKEN: 'expired-token', [REFRESH]: 'rt-1' }, { reads: read });
+    const asked = withHolds ? { ...vault, holds: (name: string) => vault.peek(name) !== undefined } : vault;
+    const { reply, sent } = await on401(handConfigured(), asked as MockVault);
+    expect(sent).toBe(1);
+    expect(reply).toContain('fetch_token is the WRONG move here');
+    if (withHolds) expect(read).not.toContain(REFRESH);
+    else expect(read).toContain(REFRESH);
+  });
+
+  it('control: with no refresh token stored the same profile gets the managed reminder', async () => {
+    const vault = makeVault({ CRM_API_ACCESS_TOKEN: 'expired-token' });
+    const { reply } = await on401(handConfigured(), { ...vault, holds: (name: string) => vault.peek(name) !== undefined } as MockVault);
+    expect(reply).toContain(MANAGED);
   });
 });
 

@@ -1416,6 +1416,17 @@ describe('connect asks whether the client pair is there without reading it', () 
     expect(read.filter((n) => KEYS.includes(n))).toEqual([]);
   });
 
+  it('an infrastructure secret never counts as the profile\'s client secret, held or not', async () => {
+    const store = new ApiStore();
+    const base = scoped();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, client_secret_key: 'LYNOX_SHOP_SECRET' } } });
+    const read: string[] = [];
+    const result = await connect(withStore(store, holding([...KEYS, 'LYNOX_SHOP_SECRET'], read)));
+    // Counted as missing, so the reply is the one for a profile whose app is not where it reads it.
+    expect(result).not.toContain('/api/oauth/connect/shop-api');
+    expect(result).toContain('reads its app from names of its own');
+  });
+
   it('a run whose scope leaves the secret out is not sent to enter it again, and nothing is recorded as denied', async () => {
     const { scopeSecretStore } = await import('../../core/secret-scope.js');
     const store = new ApiStore();

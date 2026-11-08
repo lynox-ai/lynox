@@ -35,7 +35,7 @@ import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
 import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
@@ -1549,7 +1549,8 @@ function vaultHolds(agent: IAgent, name: string): boolean {
   if (!store) return false;
   // Asked without reading the value out, so the check is not recorded as a credential read. A
   // store that cannot answer that way is asked as before: the answer decides what the user is told.
-  if (store.holds !== undefined) return store.holds(name);
+  // An infrastructure secret is never resolved into tool input, so it never fills a profile's slot.
+  if (store.holds !== undefined) return !isInfraSecret(name) && store.holds(name);
   const probe = { _: `secret:${name}` };
   const probed = store.resolveSecretRefs(probe) as { _: string };
   return probed._ !== `secret:${name}`;

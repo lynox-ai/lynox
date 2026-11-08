@@ -44,6 +44,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/http.ts|const current = secretStore.resolve(refreshKey);': 'view; revoked-grant compare, not sent',
   'tools/builtin/http.ts|const stored = secretStore.resolve(refreshSlot);': 'view; renewal input',
   'tools/builtin/http.ts|const resolved = secretStore.resolve(tokenKey);': 'view; the attach, behind the member refusal',
+  'tools/builtin/http.ts|if (store?.holds !== undefined) return store.holds(mpSlot);': '401 reminder: whether a refresh token is there picks a fixed sentence',
   'tools/builtin/http.ts|const user = secretStore.resolve(userKey);': 'view; basic auth, no token slot',
   'tools/builtin/http.ts|const pass = secretStore.resolve(passKey);': 'view; basic auth, no token slot',
   'tools/builtin/http.ts|const token = secretStore.resolve(tokenKey);': 'view; a profile\'s own key',
@@ -51,7 +52,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/http.ts|return { inputs: oauthRenewalInputs(profile, stores.secretStore.resolve(slot)), ms };': 'hashed into a hold key after a renewal that went through; not sent',
   // Existence and fingerprint compares: the value decides a boolean, it is not sent or shown.
   'tools/builtin/api-setup.ts|if (store.holds !== undefined ? store.holds(name) : store.resolve(name) !== null) left.push(name);': 'existence after delete, before a save',
-  'tools/builtin/api-setup.ts|if (store.holds !== undefined) return store.holds(name);': 'existence probe, boolean only',
+  'tools/builtin/api-setup.ts|if (store.holds !== undefined) return !isInfraSecret(name) && store.holds(name);': 'existence probe, boolean only',
   // Raw on purpose: any token in a slot, a member's included, keeps the "not connected" line out;
   // read through the view, a member's connection would read as not connected to the owner.
   'tools/builtin/api-setup.ts|if (slots.some((name) => store.holds!(name))) return \'\';': 'view: existence of a token decides whether "not connected" is said',
