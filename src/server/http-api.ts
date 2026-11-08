@@ -10669,7 +10669,7 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
-      const { hasSpeakProvider, speakStream, isVoiceLanguageTag } = await import('../core/speak.js');
+      const { hasSpeakProvider, speakStream, isVoiceLanguageTag, VOXTRAL_TTS_MODEL } = await import('../core/speak.js');
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -10719,6 +10719,12 @@ export class LynoxHTTPApi {
         langHead === 'de' || langHead === 'en' ? langHead : langRaw?.toLowerCase() === 'auto' ? 'auto' : undefined;
       const voiceLanguage = tag;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
+      // The rate below is the pinned model's, so no other model may be asked for: one billed at
+      // this rate could cost Mistral more than it debits. No client of ours sends `model`.
+      if (model !== undefined && model !== VOXTRAL_TTS_MODEL) {
+        errorResponse(res, 400, `model must be ${VOXTRAL_TTS_MODEL} or left out`);
+        return;
+      }
       // Hard ceiling on one request to bound Mistral cost + latency. Phase 0
       // tested up to 2 687 chars; 10 k gives headroom for long replies without
       // a single call burning through a tenant's budget.

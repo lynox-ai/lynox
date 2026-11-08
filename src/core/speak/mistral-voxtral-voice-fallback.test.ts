@@ -72,25 +72,26 @@ function written(): string {
   return stderr.mock.calls.map((c) => String(c[0])).join('');
 }
 
-// The catalogue as it answered on 2026-11-08: the German voice carries `de`, no region.
-const CATALOGUE = JSON.stringify({
+// The catalogue as it answered on 2026-11-08 gives the German voice `de`; on 2026-11-07
+// it was `de_de`. The pick must find it either way.
+const catalogue = (germanTag: string): string => JSON.stringify({
   items: [
     { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'], id: 'u1' },
-    { slug: 'voice_481', name: 'Heidi', languages: ['de'], id: 'u2' },
+    { slug: 'voice_481', name: 'Heidi', languages: [germanTag], id: 'u2' },
   ],
   total: 2,
 });
 
-function withCatalogue(speech: ReturnType<typeof stubSpeech>) {
+function withCatalogue(speech: ReturnType<typeof stubSpeech>, germanTag = 'de') {
   return vi.fn(async (url: string, init: RequestInit) =>
-    url.includes('/v1/audio/voices') ? new Response(CATALOGUE, { status: 200 }) : speech(url, init));
+    url.includes('/v1/audio/voices') ? new Response(catalogue(germanTag), { status: 200 }) : speech(url, init));
 }
 
 describe('the pinned model speaks the German catalogue voice', () => {
-  it('reads German text without a chosen voice with voice_481, in one request', async () => {
+  it.each(['de', 'de_de'])('reads German text without a chosen voice with voice_481, in one request (catalogue tag %s)', async (germanTag) => {
     // The path that was silent, then fell back: `speakStream` → `resolveVoice` →
     // catalogue → `voice_481` → the pinned model. Now one request, no refusal.
-    vi.stubGlobal('fetch', withCatalogue(stubSpeech()));
+    vi.stubGlobal('fetch', withCatalogue(stubSpeech(), germanTag));
     vi.resetModules();
     const { speakStream, VOXTRAL_TTS_MODEL } = await import('./index.js');
     const meta = await speakStream('Guten Tag, das ist ein Test.', () => {}, { voiceLanguage: 'de' });

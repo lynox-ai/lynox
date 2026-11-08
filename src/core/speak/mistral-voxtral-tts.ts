@@ -11,16 +11,17 @@
  *   data: {"type":"speech.audio.delta","audio_data":"<base64_chunk>"}
  *
  * Endpoint rejects `language` outright (422 extra_forbidden) — re-verified
- * 2026-08-02 against the live API on the v26.03 model. Do not attempt to pass
- * `language`; the voice carries the language.
+ * 2026-08-02 on v26.03 and 2026-11-08 on v3.0, where the default response is
+ * still MP3 (`ID3`), plain and streamed. Do not attempt to pass `language`; the
+ * voice carries the language.
  *
  * The catalog is NOT EN-only, which this comment claimed until 2026-08-02. All
  * 30 voices, enumerated via `offset`/`limit` (see VOICES_BASE_URL): 8 `en_us`,
  * 16 `en_gb`, **6 `fr_fr`** (`fr_marie_*`). That was the state until autumn 2026;
  * see `DEFAULT_VOICE` for the German voice the catalogue has now.
  *
- * "Multilingual" in Mistral's docs (English, French, Spanish, Portuguese,
- * Italian, Dutch, German, Hindi, Arabic) means cross-lingual voice cloning —
+ * "Multilingual" in Mistral's docs for v26.03 (English, French, Spanish, Portuguese,
+ * Italian, Dutch, German, Hindi, Arabic; v3.0 lists 35+) means cross-lingual voice cloning —
  * and the model really does articulate German correctly: the same German
  * sentence (umlauts + a compound noun) synthesised with `en_paul_neutral` and
  * with `fr_marie_neutral`, then transcribed back, returned identical to the
