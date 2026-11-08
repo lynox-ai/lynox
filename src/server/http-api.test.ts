@@ -17594,24 +17594,23 @@ describe('metered audio routes: managed credit gate + debit', () => {
     });
 
     it('takes only the pinned model, whose rate the debit uses', async () => {
+      repayRateWindow();
       const { VOXTRAL_TTS_MODEL } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
-      // This file shares ONE per-IP rate window: the requests below are paid back after.
-      const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
-      const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
-      try {
-        mockSpeakStream.mockClear();
-        mockSpeakStream.mockResolvedValue({ characters: 5, model: VOXTRAL_TTS_MODEL, voice: 'v', latencyMs: 1, ttfbMs: 1 });
-        const refused = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello', model: 'voxtral-mini-tts-2603' }) });
-        expect(refused.status).toBe(400);
-        expect(((await refused.json()) as { error: string }).error).toContain(VOXTRAL_TTS_MODEL);
-        expect(mockSpeakStream).not.toHaveBeenCalled();
-        const pinned = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello', model: VOXTRAL_TTS_MODEL }) });
-        expect(pinned.status).toBe(200);
-        await readSse(pinned);
-        expect((mockSpeakStream.mock.calls[0]?.[2] as Record<string, unknown>)['model']).toBe(VOXTRAL_TTS_MODEL);
-      } finally {
-        for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
-      }
+      const onBeforeRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun }];
+      mockSpeakStream.mockClear();
+      mockSpeakStream.mockResolvedValue({ characters: 5, model: VOXTRAL_TTS_MODEL, voice: 'v', latencyMs: 1, ttfbMs: 1 });
+      const refused = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello', model: 'voxtral-mini-tts-2603' }) });
+      expect(refused.status).toBe(400);
+      expect(((await refused.json()) as { error: string }).error).toContain(VOXTRAL_TTS_MODEL);
+      // Refused before the budget gate and before synthesis: nothing reserved, nothing spoken.
+      expect(onBeforeRun).not.toHaveBeenCalled();
+      expect(mockSpeakStream).not.toHaveBeenCalled();
+      const pinned = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello', model: VOXTRAL_TTS_MODEL }) });
+      expect(pinned.status).toBe(200);
+      await readSse(pinned);
+      expect(onBeforeRun).toHaveBeenCalledOnce();
+      expect((mockSpeakStream.mock.calls[0]?.[2] as Record<string, unknown>)['model']).toBe(VOXTRAL_TTS_MODEL);
     });
 
     it('does not debit when synthesis fails (meta null) — no money for no audio', async () => {
