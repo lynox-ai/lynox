@@ -5172,6 +5172,28 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
     expect(delegatedRenewalWay(member, preset, undefined)).toBe(WAYS.removeFirst);
   });
 
+  // Two profiles that share a connection both sit on the provider's API host, so the host maps to
+  // neither and no 401 reminder is written for them: fetch_token alone names the sharing way.
+  it('a profile that shares another profile\'s connection: fetch_token names the sharing way, and its host maps to no one profile', async () => {
+    const { accessTokenKey, refreshTokenKey } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    expect(store.register(bexio('books'))).toBe(true);
+    expect(store.register({ ...bexio('books-2', { refresh_token_key: refreshTokenKey('books') }), base_url: 'https://api.bexio.com/3.0' })).toBe(true);
+    const vault = makeVault({ [accessTokenKey('books-2')]: 'expired-token', [refreshTokenKey('books')]: 'rt-1' });
+    const agent = makeAgent(store, vault);
+    const fetched = await (apiSetupTool.handler({ action: 'fetch_token', id: 'books-2' }, agent) as Promise<string>);
+    expect(fetched, fetched).toContain(WAYS.shares);
+    expect(store.getByHostname('api.bexio.com')).toBeUndefined();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }));
+    let reply: string;
+    try {
+      reply = await (httpRequestTool.handler({ url: 'https://api.bexio.com/3.0/contact' }, agent) as Promise<string>);
+    } catch (err) {
+      reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
+    }
+    expect(reply).not.toContain('Agent reminder: OAuth2 401');
+  });
+
   it.each([
     ['connected, nothing of its own', {}, WAYS.connect],
     ['reading a refresh slot of its own', { refresh_token_key: 'BOOKS_OWN_REFRESH' }, WAYS.removeFirst],
