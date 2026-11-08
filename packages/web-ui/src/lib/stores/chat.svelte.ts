@@ -946,6 +946,10 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const sid = sessionId!;
 		const held = await inHoldOrder(() => holdAtScheduledQuestion(sid, task, displayText, runOptions));
 		if (held) return;
+	} else if (_holdAsks > 0) {
+		// A message sent while an earlier one is being asked about waits its turn, so it does not
+		// overtake it.
+		await inHoldOrder(async () => undefined);
 	}
 	await sendNow(task, displayText, files, runOptions);
 }
@@ -973,11 +977,17 @@ function mayHold(files: FileAttachment[] | undefined): boolean {
 /** The asks before a hold run one after another, so two messages sent while the server is asked
  *  keep their order, and a tap waits for a send's ask instead of being dropped. */
 let _holdOrder: Promise<unknown> = Promise.resolve();
+let _holdAsks = 0;
 function inHoldOrder<T>(step: () => Promise<T>): Promise<T> {
+	_holdAsks++;
 	const run = _holdOrder.then(step, step);
-	_holdOrder = run.catch(() => undefined);
+	_holdOrder = run.catch(() => undefined).finally(() => { _holdAsks--; });
 	return run;
 }
+
+/** How long a hold waits for the server's answer; then the message is sent as before. Every ask
+ *  waits behind the one before it, so one that never answers must not hold up the rest. */
+const HOLD_ASK_MS = 5_000;
 
 /** What a held message keeps of its run options: those a reload can save. A context opens a new
  *  chat first, so a message carrying one is never held. */
@@ -1000,7 +1010,7 @@ async function holdAtScheduledQuestion(sid: string, task: string, displayText: s
 	let waits: boolean | null = null;
 	if (sessionId === sid && (typeof navigator === 'undefined' || navigator.onLine)) {
 		try {
-			const res = await fetch(`${getApiBase()}/runs/active`);
+			const res = await fetch(`${getApiBase()}/runs/active`, { signal: AbortSignal.timeout(HOLD_ASK_MS) });
 			if (res.ok) {
 				const body: unknown = await res.json();
 				waits = selectReattachTarget(body, sid) === null && scheduledQuestionWaits(body, sid);
@@ -1023,8 +1033,9 @@ async function holdAtScheduledQuestion(sid: string, task: string, displayText: s
 	if (waits !== true) return false;
 	if (!existing) messages.push(held);
 	persistChatNow();
-	const card = await checkPendingPrompt();
-	if (sessionId === sid) sayQuestionWaiting(card, true);
+	// The card is fetched outside the order: the message is held already, and the next ask need
+	// not wait for it.
+	void checkPendingPrompt().then((card) => { if (sessionId === sid) sayQuestionWaiting(card, true); });
 	return true;
 }
 
@@ -1056,6 +1067,8 @@ export async function sendHeldMessage(msg: ChatMessage): Promise<void> {
 		// A second tap on the same bubble finds it sent already.
 		if (!msg.held || sessionId !== sid || !messages.includes(msg)) return false;
 		if (await holdAtScheduledQuestion(sid, task, display, runOptions, msg)) return false;
+		// A review that opened while the server was asked holds the send, and the message stays.
+		if (sendBlockedByReview()) return false;
 		const i = messages.indexOf(msg);
 		if (i < 0 || !msg.held) return false;
 		messages.splice(i, 1);

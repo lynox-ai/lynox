@@ -40,6 +40,7 @@ let openRun = false;
 let gateEach = false;
 let gates: Array<() => void> = [];
 let finishRun: (() => void) | null = null;
+let emitRun: ((event: string, data: unknown) => void) | null = null;
 
 function serve(): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -49,11 +50,20 @@ function serve(): void {
 		if (init?.method === 'DELETE' && holdDelete) await holdDelete;
 		if (url.endsWith('/runs/active')) {
 			if (gateEach) await new Promise<void>((r) => { gates.push(r); });
-			if (holdActive) await holdActive;
+			if (holdActive) {
+				const gate = holdActive;
+				const signal = init?.signal;
+				// A held answer gives way to the store's own time limit, as a real fetch does.
+				await new Promise<void>((resolve, reject) => {
+					void gate.then(resolve);
+					signal?.addEventListener('abort', () => reject(new DOMException('timed out', 'TimeoutError')));
+				});
+			}
 			// Read after the wait, so a test can let an ask fail that started fine.
 			if (activeFails) throw new TypeError('fetch failed');
 			return json(active);
 		}
+		if (url.endsWith('/changeset')) return json({ hasChanges: true, runId: 'run-x', files: [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }] });
 		if (url.endsWith('/pending-prompt')) {
 			if (holdPending) await holdPending;
 			return json(pending);
@@ -64,7 +74,7 @@ function serve(): void {
 			const body = new ReadableStream<Uint8Array>({
 				start(c) {
 					// An open run streams until the test finishes it.
-					if (open) { finishRun = () => { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); }; return; }
+					if (open) { emitRun = (event: string, data: unknown) => { c.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)); }; finishRun = () => { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); }; return; }
 					c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`));
 					c.close();
 				},
@@ -114,6 +124,7 @@ beforeEach(async () => {
 	threadMessages = { messages: [], activeRun: null };
 	openRun = false;
 	finishRun = null;
+	emitRun = null;
 	gateEach = false;
 	gates = [];
 	serve();
@@ -689,6 +700,68 @@ describe('a new message', () => {
 		await settle();
 		expect(calls.filter((u) => u.endsWith('/runs/active')).length - before).toBe(1);
 		expect(runPosts()).toBe(2);
+	});
+
+	it('a review that opens while a tap is asked about keeps the message held, unsent', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		openRun = true;
+		void store.sendMessage('working');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: a turn streams').toBe(true);
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const tap = store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		emitRun!('changeset_ready', { fileCount: 1 });
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: the review is open').not.toBeNull();
+		holdActive = null;
+		release();
+		await tap;
+		await settle();
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+		expect(store.getMessages().filter((m) => m.content === 'hello' && m.queued === true)).toEqual([]);
+		finishRun?.();
+		await settle();
+		expect(runPosts()).toBe(2);
+	});
+
+	it('an ask that never answers gives way after its time limit: the message is sent, the next one too', async () => {
+		await questionWaits(QUESTION);
+		active = NOTHING;
+		holdActive = new Promise(() => { /* never answers */ });
+		const a = store.sendMessage('A');
+		await settle();
+		const b = store.sendMessage('B');
+		await new Promise((r) => setTimeout(r, 5_600));
+		holdActive = null;
+		await settle();
+		await Promise.all([a, b]);
+		await settle();
+		expect(runPosts()).toBe(3);
+	}, 15_000);
+
+	it('a message with files sent while an earlier one is asked about does not overtake it', async () => {
+		await questionWaits(QUESTION);
+		active = NOTHING;
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const a = store.sendMessage('A');
+		await settle();
+		const b = store.sendMessage('B', [{ name: 'a.txt', type: 'text/plain', data: 'YQ==' }]);
+		await settle();
+		holdActive = null;
+		release();
+		await Promise.all([a, b]);
+		// B waited in the queue behind A's turn; the queue sends it once that turn ends.
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		const tasks = vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run')).slice(1)
+			.map(([, init]) => (JSON.parse(String((init as RequestInit).body)) as { task?: string }).task ?? '');
+		expect(tasks.map((t) => (t.includes('A') && !t.includes('B') ? 'A' : t.includes('B') ? 'B' : t))).toEqual(['A', 'B']);
 	});
 
 	it('with files: sent as before, since a reload keeps no files', async () => {
