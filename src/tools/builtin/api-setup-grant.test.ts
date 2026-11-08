@@ -5306,10 +5306,13 @@ describe('which profiles a 401 reminder reaches', () => {
     expect(reply).not.toContain(MANAGED);
   });
 
-  it('still not: an oauth2 profile with no built-in provider and no token_url gets no reminder', async () => {
-    const p = crmProfile({ base_url: 'https://api.crm.example/v1' });
+  it('still not: an oauth2 profile with no built-in provider and no token_url gets no reminder, a user\'s grant included', async () => {
+    // A user authorized it and it declares no grant type: the delegated reminder would fit its
+    // grant, so only the built-in provider can be what lets a profile without a token_url in.
+    const p = crmProfile({ base_url: 'https://api.crm.example/v1', oauth_grant: { origin: 'callback', state: 'no-refresh' } });
     const oauth = { ...p.auth!.oauth! };
     delete oauth.token_url;
+    delete oauth.grant_type;
     const { reply, sent } = await on401({ ...p, auth: { ...p.auth!, oauth } }, makeVault({ CRM_API_ACCESS_TOKEN: 'expired-token' }));
     expect(sent).toBe(1);
     expect(reply).toContain('401');
