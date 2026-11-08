@@ -50,7 +50,8 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/http.ts|: a.secretStore.resolve(key)': 'view; existence answer for a model-owned key',
   'tools/builtin/http.ts|return { inputs: oauthRenewalInputs(profile, stores.secretStore.resolve(slot)), ms };': 'hashed into a hold key after a renewal that went through; not sent',
   // Existence and fingerprint compares: the value decides a boolean, it is not sent or shown.
-  'tools/builtin/api-setup.ts|if (store.resolve(name) !== null) left.push(name);': 'existence after delete, before a save',
+  'tools/builtin/api-setup.ts|if (store.holds !== undefined ? store.holds(name) : store.resolve(name) !== null) left.push(name);': 'existence after delete, before a save',
+  'tools/builtin/api-setup.ts|if (store.holds !== undefined) return store.holds(name);': 'existence probe, boolean only',
   // Raw on purpose: any token in a slot, a member's included, keeps the "not connected" line out;
   // read through the view, a member's connection would read as not connected to the owner.
   'tools/builtin/api-setup.ts|if (slots.some((name) => store.holds!(name))) return \'\';': 'view: existence of a token decides whether "not connected" is said',

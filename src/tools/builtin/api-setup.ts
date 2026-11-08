@@ -26,7 +26,7 @@ import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, H
 import { builtInPresetOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
-import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
+import { delegatedRenewalWay, fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, ExtractionStoppedError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
 import { recordSessionCost } from '../../core/session-budget.js';
@@ -41,7 +41,7 @@ import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../cor
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -1523,7 +1523,8 @@ function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: reado
         continue;
       }
       store.deleteSecret(name);
-      if (store.resolve(name) !== null) left.push(name);
+      // Whether a value is still there, asked without reading it out where the store can.
+      if (store.holds !== undefined ? store.holds(name) : store.resolve(name) !== null) left.push(name);
     } catch {
       left.push(name);
     }
@@ -1546,6 +1547,9 @@ function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecre
 function vaultHolds(agent: IAgent, name: string): boolean {
   const store = agent.secretStore;
   if (!store) return false;
+  // Asked without reading the value out, so the check is not recorded as a credential read. A
+  // store that cannot answer that way is asked as before: the answer decides what the user is told.
+  if (store.holds !== undefined) return store.holds(name);
   const probe = { _: `secret:${name}` };
   const probed = store.resolveSecretRefs(probe) as { _: string };
   return probed._ !== `secret:${name}`;
@@ -2692,6 +2696,12 @@ ${draftJson}
           }
           return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
         }
+        // A name this run's secret scope leaves out may well be stored: the run cannot tell, so it
+        // does not send the user to enter it again.
+        const outOfScope = unfilled.filter((k) => agent.secretStore?.explainUnresolved?.(k) === 'out-of-scope');
+        if (outOfScope.length > 0) {
+          return `Error: profile "${id}" cannot authorize in this run: ${outOfScope.join(' and ')} ${outOfScope.length === 1 ? 'is' : 'are'} outside the secrets this run may see, so it cannot tell whether ${outOfScope.length === 1 ? 'it is' : 'they are'} stored. Nothing was sent. Do not ask the user to enter ${outOfScope.length === 1 ? 'it' : 'them'} again; connect from a run that may see ${outOfScope.length === 1 ? 'it' : 'them'}.`;
+        }
         const withheld = agent.secretStore ? withheldFrom(agent.secretStore, profile, apiStore, unfilled, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${id}" cannot authorize yet. ${withheldText(withheld)}`;
         // A profile that still reads its app from names of its own works while those hold the
@@ -2946,21 +2956,8 @@ ${draftJson}
         const subject = profile.oauth_grant?.origin === 'callback' || tokenPreset === undefined
           ? `was authorized by a user${tokenPreset !== undefined ? ` through the "${tokenPreset.id}" provider` : ''}, and it declares no refresh_token grant to renew that authorization with. Nothing was sent: requesting an app-level token instead would replace the user's authorization with a different one.`
           : `connects through the "${tokenPreset.id}" provider, which issues its tokens only through a user's authorization, and it declares no refresh_token grant. Nothing was sent: fetch_token does not request an app-level token for it.`;
-        // A preset profile that reads its refresh token from a name of its own: a connect stores the
-        // token under the derived name and, since this profile does not read that one, leaves it
-        // without a grant type again (`readersRefreshSlot`, the OAuth callback). Sending it to
-        // connect alone would bring it back here; the field has to go first. Unless the slot is
-        // another profile's grant this one shares through the same provider: that sharing is on
-        // purpose, and what it lacks is the grant type, not a connection of its own.
-        const ownReadSlot = readersRefreshSlot(profile) !== refreshTokenKey(input.id);
-        const next = tokenPreset === undefined
-          ? 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.'
-          : ownReadSlot && apiStore !== undefined && sharesAnotherGrant(apiStore, profile)
-            ? 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.'
-          : ownReadSlot
-            ? 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.'
-            : 'Call api_setup with action "connect" for this profile and show the user the link.';
-        return `Error: profile "${input.id}" ${subject} ${next}`;
+        // The same sentence the 401 reminder of a built-in provider's profile ends with.
+        return `Error: profile "${input.id}" ${subject} ${delegatedRenewalWay(profile, tokenPreset, apiStore)}`;
       }
       // A preset's token endpoint takes the body its provider documents, whatever the profile says.
       const bodyFormat = tokenPreset ? presetTokenBodyFormat(tokenPreset, oauth.body_format) : oauth.body_format ?? 'form';

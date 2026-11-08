@@ -14,6 +14,7 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
+import { presetClientKeys } from '../../core/oauth-presets.js';
 import { apiSetupTool, exchangedTokenExpiryFor, providerBodySummary, sentCredentials } from './api-setup.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import { isDangerous } from '../permission-guard.js';
@@ -5135,5 +5136,134 @@ describe('fetch_token — only a revocation verdict writes a provider record (T2
     const result = await fetchToken(makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_OWN_REFRESH: 'rt-1' })));
     expect(result).toContain('Nothing was recorded');
     expect(records()).toHaveLength(0);
+  });
+});
+
+// ux U-193: fetch_token and the 401 reminder of a built-in provider's profile name the same way
+// forward, from one function, so the two cannot drift apart again.
+describe('the way forward: fetch_token and the 401 reminder say the same', () => {
+  const WAYS = {
+    owner: 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.',
+    shares: 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.',
+    removeFirst: 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.',
+    connect: 'Call api_setup with action "connect" for this profile and show the user the link.',
+  };
+  const BEXIO_KEYS = presetClientKeys('bexio');
+  /** A bexio profile as a connect leaves it: no token_url, no grant type. */
+  const bexio = (id: string, oauth: Record<string, unknown> = {}): ApiProfile => ({
+    id, name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'bexio',
+    auth: { type: 'oauth2', vault_keys: [BEXIO_KEYS.id], oauth: { preset_id: 'bexio', client_id_key: BEXIO_KEYS.id, client_secret_key: BEXIO_KEYS.secret, ...oauth } } as never,
+    custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], accepted_at: '2026-11-08T00:00:00.000Z' } as never,
+  });
+
+  it('names one way per shape', async () => {
+    const { delegatedRenewalWay } = await import('./http.js');
+    const { OAUTH_PRESETS } = await import('../../core/oauth-presets.js');
+    const { refreshTokenKey } = await import('../../core/api-store.js');
+    const preset = OAUTH_PRESETS.get('bexio')!;
+    const none = { knownProfiles: () => [] };
+    expect(delegatedRenewalWay(bexio('books'), undefined, none)).toBe(WAYS.owner);
+    expect(delegatedRenewalWay(bexio('books'), preset, none)).toBe(WAYS.connect);
+    expect(delegatedRenewalWay(bexio('books', { refresh_token_key: 'BOOKS_OWN_REFRESH' }), preset, none)).toBe(WAYS.removeFirst);
+    const owner = bexio('books');
+    const member = bexio('books-2', { refresh_token_key: refreshTokenKey('books') });
+    expect(delegatedRenewalWay(member, preset, { knownProfiles: () => [owner, member] })).toBe(WAYS.shares);
+    // Without the store the sharing cannot be seen: the profile's own slot decides.
+    expect(delegatedRenewalWay(member, preset, undefined)).toBe(WAYS.removeFirst);
+  });
+
+  it.each([
+    ['connected, nothing of its own', {}, WAYS.connect],
+    ['reading a refresh slot of its own', { refresh_token_key: 'BOOKS_OWN_REFRESH' }, WAYS.removeFirst],
+  ])('a built-in provider\'s profile %s: both name the same way, byte for byte', async (_label, oauth, way) => {
+    const { accessTokenKey } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    expect(store.register(bexio('books', oauth))).toBe(true);
+    const agent = makeAgent(store, makeVault({ [accessTokenKey('books')]: 'expired-token' }));
+
+    const fetched = await (apiSetupTool.handler({ action: 'fetch_token', id: 'books' }, agent) as Promise<string>);
+    expect(fetched, fetched).toMatch(new RegExp(` ${way.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }));
+    let reply: string;
+    try {
+      reply = await (httpRequestTool.handler({ url: 'https://api.bexio.com/2.0/contact' }, agent) as Promise<string>);
+    } catch (err) {
+      reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
+    }
+    const head = '**[Agent reminder: OAuth2 401, and fetch_token is the wrong move here]**';
+    expect(reply).toContain(head);
+    expect(reply.slice(reply.indexOf(head))).toBe(
+      `${head}\nThis URL maps to api_profile "books". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do not call api_setup fetch_token for it as the profile stands, and change nothing on the profile beyond the step below. ${way} The engine has written the details to its log.`
+      + '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.',
+    );
+  });
+});
+
+// register 1314: the refusal path of a renewal with a preset id the engine does not know was pinned
+// in 637; the success path too must never repeat that model-authored id.
+describe('the 401 reminders keep their own profiles', () => {
+  it('a built-in provider\'s profile that renews by its refresh token and names no token_url gets neither reminder', async () => {
+    const { accessTokenKey } = await import('../../core/api-store.js');
+    const keys = presetClientKeys('bexio');
+    const store = new ApiStore();
+    expect(store.register({
+      id: 'books', name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'bexio',
+      auth: { type: 'oauth2', vault_keys: [keys.id], oauth: { preset_id: 'bexio', grant_type: 'refresh_token', client_id_key: keys.id, client_secret_key: keys.secret } } as never,
+      custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], accepted_at: '2026-11-08T00:00:00.000Z' } as never,
+    })).toBe(true);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }));
+    let reply: string;
+    try {
+      reply = await (httpRequestTool.handler({ url: 'https://api.bexio.com/2.0/contact' }, makeAgent(store, makeVault({ [accessTokenKey('books')]: 'expired-token' }))) as Promise<string>);
+    } catch (err) {
+      reply = (err as { agentVisibleResult?: string }).agentVisibleResult ?? String(err);
+    }
+    expect(reply).toContain('401');
+    expect(reply).not.toContain('Agent reminder');
+  });
+});
+
+describe('a renewal that goes through does not repeat a preset id the engine does not know', () => {
+  const STRAY = 'not-a-provider';
+  const SEED = { CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH' };
+  const stray = (oauth: Record<string, unknown> = {}): ApiProfile => {
+    const p = crmProfile();
+    return { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: STRAY, ...oauth } } };
+  };
+
+  it('fetch_token: the success reply names no such id', async () => {
+    const store = new ApiStore();
+    expect(store.register(stray())).toBe(true);
+    const vault = makeVault(SEED);
+    tokenEndpoint(200, JSON.stringify({ access_token: 'new-token', refresh_token: 'NEW_REFRESH', expires_in: 3600 }));
+    const result = await fetchToken(makeAgent(store, vault));
+    expect(result).toContain('Token exchange OK');
+    expect(vault.peek(ACCESS)).toBe('new-token');
+    expect(result).not.toContain(STRAY);
+  });
+
+  it('unattended, before a request: neither the reply nor the log names it', async () => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(stray({ token_expires_at: Date.now() - 1000 }));
+    const vault = makeVault(SEED);
+    const seen: { authorization?: string } = {};
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) return new Response(JSON.stringify({ access_token: 'NEW_TOKEN', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      seen.authorization = new Headers(init?.headers).get('authorization') ?? undefined;
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const logged: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown) => { logged.push(String(chunk)); return true; }) as never);
+
+    const out = await httpRequestTool.handler({ url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never, makeAgent(apiStore, vault));
+
+    // The renewal went through: the new token was attached, so the success path is what ran.
+    expect(seen.authorization).toBe('Bearer NEW_TOKEN');
+    expect(String(out)).not.toContain(STRAY);
+    expect(logged.join('')).not.toContain(STRAY);
   });
 });

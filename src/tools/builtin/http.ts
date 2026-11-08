@@ -4,7 +4,7 @@ import { urlScanForms } from '../../core/url-scan-forms.js';
 import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
-import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
+import { accessTokenKey, hasRevokedGrant, readersRefreshSlot, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
 // Not from `types/index.js`: `ApiProfile` is one of the exported types that
 // does not live in the barrel, which `CLAUDE.md` says to look for rather than
 // assume. The barrel import typechecks as a namespace and fails on the member.
@@ -15,7 +15,7 @@ import { OAUTH_PRESETS, PRESET_ID_PATTERN, builtInPresetOf, isPresetClientSecret
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { clientlessSlot, requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
+import { clientlessSlot, requestMatchesBase, secretsForProfile, sharesAnotherGrant, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
 import { outsideMemberNotes, refuseMemberConnection } from '../../core/member-connection-notes.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -1214,6 +1214,32 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  * The one place this question is answered: the unattended gate, the 401 reminder and
  * `fetch_token` itself (`api-setup.ts`) all ask it here.
  */
+/**
+ * The way forward for a profile whose renewal would swap a user's authorization for an app token,
+ * as one sentence: `fetch_token` ends with it, and so does the 401 reminder of a built-in
+ * provider's profile, so the two never name different ways for the same profile (ux U-193).
+ * `preset` is the profile's built-in provider, or undefined.
+ */
+export function delegatedRenewalWay(profile: ApiProfile, preset: OAuthPreset | undefined, apiStore: Parameters<typeof sharesAnotherGrant>[0] | undefined): string {
+  if (preset === undefined) {
+    return 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.';
+  }
+  // A preset profile that reads its refresh token from a name of its own: a connect stores the
+  // token under the derived name and, since this profile does not read that one, leaves it
+  // without a grant type again (`readersRefreshSlot`, the OAuth callback). Sending it to
+  // connect alone would bring it back here; the field has to go first. Unless the slot is
+  // another profile's grant this one shares through the same provider: that sharing is on
+  // purpose, and what it lacks is the grant type, not a connection of its own.
+  const ownReadSlot = readersRefreshSlot(profile) !== refreshTokenKey(profile.id);
+  if (ownReadSlot && apiStore !== undefined && sharesAnotherGrant(apiStore, profile)) {
+    return 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.';
+  }
+  if (ownReadSlot) {
+    return 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.';
+  }
+  return 'Call api_setup with action "connect" for this profile and show the user the link.';
+}
+
 export function oauthGrantIsUserDelegated(profile: {
   auth?: { type?: string | undefined; oauth?: { preset_id?: string | undefined } | undefined } | undefined;
   oauth_grant?: { origin?: 'callback' | undefined } | undefined;
@@ -2858,6 +2884,8 @@ function slotReachRefusal(profileId: string, name: string, hostname: string, cli
  * path is not repeated; the model wrote it and knows it.
  */
 function storePathRefusal(profile: ApiProfile, url: string): string | null {
+  // Deliberately keyed on preset_id alone, not on `builtInPresetOf`: it refuses also where auth is
+  // not oauth2. The sole caller sits inside the oauth2 branch; a new caller errs toward refusing.
   const preset = OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '');
   const prefix = preset?.apiPathPrefix;
   if (preset === undefined || prefix === undefined) return null;
@@ -4160,7 +4188,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         try {
           const reqHostname = new URL(input.url).hostname;
           const matchedProfile = toolContext.apiStore.getByHostname(reqHostname);
-          if (matchedProfile?.auth?.type === 'oauth2' && matchedProfile.auth.oauth?.token_url) {
+          // A built-in provider's profile counts without a token_url: it derives its endpoint from
+          // the provider and usually stores none, and it is exactly the profile the delegated
+          // reminder below is for. The managed reminder stays with a configured token_url.
+          if (matchedProfile?.auth?.type === 'oauth2' && (matchedProfile.auth.oauth?.token_url || builtInPresetOf(matchedProfile) !== undefined)) {
             // Which of two reminders, and the split is load-bearing. The text
             // below the `else` has been here since the 2026-05-18 Shopify
             // failure and is right for an app-only profile. For a profile a USER
@@ -4175,7 +4206,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // it: a hand-configured profile holding an undeclared refresh token
             // is the second shape whose access token `fetch_token` would
             // overwrite, and nothing on this path knew that before.
-            const mpSlot = typeof matchedProfile.auth.oauth.refresh_token_key === 'string'
+            const mpSlot = typeof matchedProfile.auth.oauth?.refresh_token_key === 'string'
               ? matchedProfile.auth.oauth.refresh_token_key
               : refreshTokenKey(matchedProfile.id);
             const mpStored = (() => {
@@ -4206,8 +4237,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // went out as Bearer) to pick a second fixed sentence each. That is a
             // choice between constants, not an interpolation: no part of the
             // field's value reaches the text. Keep it that way.
+            const swapPreset = builtInPresetOf(matchedProfile);
             wrapped += oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpStored !== null)
-              ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`
+              ? (swapPreset !== undefined
+                // A built-in provider's profile is told the way fetch_token would name, so the two
+                // never disagree; the profile may need the update that way names (ux U-193).
+                ? `\n\n**[Agent reminder: OAuth2 401, and fetch_token is the wrong move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do not call api_setup fetch_token for it as the profile stands, and change nothing on the profile beyond the step below. ${delegatedRenewalWay(matchedProfile, swapPreset, toolContext.apiStore)} The engine has written the details to its log.`
+                : `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.`)
+                + `${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`
+              : !matchedProfile.auth.oauth?.token_url ? ''
               : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (TikTok and others) don't expose long-lived tokens there anymore.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Check the API\'s docs and set `auth.header_name` on this profile.' : ''}`;
           }
         } catch {
