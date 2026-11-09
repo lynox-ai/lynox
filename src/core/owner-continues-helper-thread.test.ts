@@ -224,8 +224,13 @@ describe('setUpByOther: whose plan an escalation is about', () => {
 describe('shownMandate: the address an escalation title may name (ux U-202)', () => {
   it('a mandate\'s plain address, the last editor first', async () => {
     const { shownMandate } = await import('./worker-loop.js');
-    expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example' })).toBe('eva@kanzlei.example');
-    expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example', mandate_editor: 'mandate:tom@kanzlei.example' })).toBe('tom@kanzlei.example');
+    expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example' })).toEqual({ address: 'eva@kanzlei.example', changed: false });
+    // The same mandate changing its own plan still set it up.
+    expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example', mandate_editor: 'mandate:eva@kanzlei.example' })).toEqual({ address: 'eva@kanzlei.example', changed: false });
+    expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example', mandate_editor: 'mandate:tom@kanzlei.example' })).toEqual({ address: 'tom@kanzlei.example', changed: true });
+    // The owner's plan a mandate changed: "changed by", never "set up by".
+    expect(shownMandate({ created_by: 'owner', mandate_editor: 'mandate:tom@kanzlei.example' })).toEqual({ address: 'tom@kanzlei.example', changed: true });
+    expect(shownMandate({ mandate_editor: 'mandate:tom@kanzlei.example' })).toEqual({ address: 'tom@kanzlei.example', changed: true });
   });
 
   it('no address for the owner, an unknown tag, or an address of another shape', async () => {
@@ -240,7 +245,10 @@ describe('shownMandate: the address an escalation title may name (ux U-202)', ()
   it('the title without an address says "someone you let in"', async () => {
     const { WORKER_NOTICES } = await import('./worker-notices.js');
     expect(WORKER_NOTICES.en.helperPlanFailedTitle(undefined)).toBe('✗ A plan someone you let in set up did not complete');
-    expect(WORKER_NOTICES.de.helperPlanFailedTitle('eva@kanzlei.example')).toBe('✗ Ein Plan von eva@kanzlei.example ist nicht fertig geworden');
+    expect(WORKER_NOTICES.de.helperPlanFailedTitle({ address: 'eva@kanzlei.example', changed: false })).toBe('✗ Ein Plan von eva@kanzlei.example ist nicht fertig geworden');
+    expect(WORKER_NOTICES.de.helperPlanFailedTitle({ address: 'tom@kanzlei.example', changed: true })).toBe('✗ Ein Plan, den tom@kanzlei.example geändert hat, ist nicht fertig geworden');
+    expect(WORKER_NOTICES.en.helperWatchTitle({ address: 'tom@kanzlei.example', changed: true })).toBe('🔍 A watch changed by tom@kanzlei.example reports a changed page');
+    expect(WORKER_NOTICES.de.helperWatchTitle({ address: 'tom@kanzlei.example', changed: true })).toBe('🔍 Eine Beobachtung, die tom@kanzlei.example geändert hat, meldet eine Änderung');
   });
 });
 

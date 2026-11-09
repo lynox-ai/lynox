@@ -217,7 +217,7 @@ describe('a failed scheduled workflow records whether its escalation reached any
       expect(text).not.toContain('Nightly export');
       expect(text).not.toContain('boom');
     }
-    expect(h.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle('helper@example.com'));
+    expect(h.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle({ address: 'helper@example.com', changed: false }));
     // The ids stay, so the agent can read the run with the owner.
     expect(h.body).toContain('run run-1');
     // Control: the owner's own plan names its title and its step's error.
@@ -227,7 +227,8 @@ describe('a failed scheduled workflow records whether its escalation reached any
 
   it('a helper\'s change to the owner\'s plan counts the same, even after the owner\'s stamp', async () => {
     const edited = await failOnce(['delivered'], true, undefined, 'mandate:helper@example.com');
-    expect(edited.seen[0]!.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle('helper@example.com'));
+    // The owner's plan: the helper changed it, it did not set it up.
+    expect(edited.seen[0]!.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle({ address: 'helper@example.com', changed: true }));
     expect(edited.seen[0]!.body).not.toContain('boom');
   });
 });
