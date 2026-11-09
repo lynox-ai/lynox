@@ -501,8 +501,11 @@ function wordsAfter(text: string, from: number): string[] {
  * Returns a fixed label, never any part of the text.
  */
 export function mandateCredentialInput(text: string): string | null {
-  return mandateCredentialIn(text) ?? mandateCredentialIn(stripUntrustedSeparators(text));
+  return mandateCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? mandateCredentialIn(stripUntrustedSeparators(text)) : null);
 }
+
+/** A character `stripUntrustedSeparators` replaces: the second reading is needed only when one is there. */
+const HAS_UNTRUSTED_SEPARATOR = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/;
 
 /**
  * Both credential checks read a text twice: as it came, and as the engine stores and sends it on —
@@ -547,7 +550,7 @@ function mandateCredentialIn(text: string): string | null {
  * covered. Returns a fixed label, never any part of the text.
  */
 export function mandateDocumentCredential(text: string): string | null {
-  return documentCredentialIn(text) ?? documentCredentialIn(stripUntrustedSeparators(text));
+  return documentCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? documentCredentialIn(stripUntrustedSeparators(text)) : null);
 }
 
 function documentCredentialIn(text: string): string | null {

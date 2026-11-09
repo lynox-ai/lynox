@@ -202,6 +202,14 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     expect(dataDirHolds(token.slice(-8))).toBe(false);
   }, 60_000);
 
+  it('a key on its own with a control character inside is refused (one word as typed, two once stored)', async () => {
+    const sid = await helperSession();
+    const run = spyRun();
+    const res = await call('POST', `/api/sessions/${sid}/run`, { task: `${KEY.slice(0, 16)}\u0001${KEY.slice(16)}` });
+    expect(res.status).toBe(422);
+    expect(run).not.toHaveBeenCalled();
+  }, 60_000);
+
   it('a key is refused before a busy conversation could answer instead (409 keeps the message resendable)', async () => {
     const sid = await helperSession();
     const running = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
@@ -414,6 +422,32 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       expect(res.status).toBe(422);
       expect(run).not.toHaveBeenCalled();
       expect(JSON.stringify(engine().getThreadStore()!.getMessages(sid))).not.toContain(b64(`SHOPIFY=${VENDOR_KEY}`).slice(0, 16));
+    }, 60_000);
+
+    it('a key sent as an image\'s data string is refused', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data: VENDOR_KEY }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+      expect(dataDirHolds(VENDOR_KEY.slice(-8))).toBe(false);
+    }, 60_000);
+
+    it('a key appended to a real image\'s data string is refused', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data: `${png}${VENDOR_KEY}` }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+    }, 60_000);
+
+    it('a password in a URL broken by a control character is refused (as it came, before it is stored)', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'db.txt', type: 'text/plain', data: b64(`postgres://shop:${randomKey(6)}\u0001${randomKey(6)}@db.example.org/shop\n`) }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
     }, 60_000);
 
     it('control: a real image is not refused', async () => {

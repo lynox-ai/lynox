@@ -1340,6 +1340,19 @@ export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
  * fixed sentence). Every string in `value` is read, nested ones and object keys included; a value
  * nested deeper than four levels is refused unread. The owner is not checked.
  */
+/** Whether `buf` begins with the signature of the image format `type` names (PNG, JPEG, GIF, WebP). */
+function startsAsImage(buf: Buffer, type: string): boolean {
+  const at = (offset: number, bytes: readonly number[]): boolean => bytes.every((b, i) => buf[offset + i] === b);
+  const ascii = (s: string): number[] => [...s].map((c) => c.charCodeAt(0));
+  switch (type) {
+    case 'image/png': return at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    case 'image/jpeg': return at(0, [0xff, 0xd8, 0xff]);
+    case 'image/gif': return at(0, ascii('GIF87a')) || at(0, ascii('GIF89a'));
+    case 'image/webp': return at(0, ascii('RIFF')) && at(8, ascii('WEBP'));
+    default: return false;
+  }
+}
+
 function refusedMandateKeyIn(principal: RequestPrincipal, res: ServerResponse, value: unknown): boolean {
   if (isOwnerPrincipal(principal)) return false;
   const texts: string[] = [];
@@ -4791,9 +4804,10 @@ export class LynoxHTTPApi {
         // file is read BEFORE the loop below writes any of them to the file area, so a refused upload
         // leaves nothing behind. The name gets the check a typed message gets; the content only the
         // credential forms (`mandateDocumentCredential`), read both as text and, for a PDF or Word
-        // file, as what the extraction below gives. A file declared as an image is read as text too: the type is
-        // the sender's word, and an image block is stored and sent as it came. An image's pixels are
-        // not read.
+        // file, as what the extraction below gives. An image block is stored and sent as the `data`
+        // string came, so for a file declared as an image that string is read; and when its bytes do
+        // not begin as the declared format does, they are read as text too (the type is the sender's
+        // word). A real image's pixels are not read.
         if (!isOwnerPrincipal(this._principalOf(req))) {
           for (const file of files) {
             const rawName = typeof file.name === 'string' ? file.name : 'unknown';
@@ -4803,8 +4817,12 @@ export class LynoxHTTPApi {
             const rawType = typeof file.type === 'string' ? file.type : '';
             if (typeof file.data !== 'string' || file.data.length > MAX_FILE_B64_BYTES) continue;
             const buf = Buffer.from(file.data, 'base64');
-            const readings = [buf.toString('utf-8')];
-            if (!rawType.startsWith('image/')) {
+            const readings: string[] = [];
+            if (rawType.startsWith('image/')) {
+              readings.push(file.data);
+              if (!startsAsImage(buf, rawType)) readings.push(buf.toString('utf-8'));
+            } else {
+              readings.push(buf.toString('utf-8'));
               try {
                 const extracted = await extractDocumentText(buf, sanitizeUploadFilename(rawName));
                 if (extracted) readings.push(extracted.text);
