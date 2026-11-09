@@ -232,6 +232,13 @@ export interface RunOptions {
  * a store (its history failed to open, `engine.ts`), can hold a helper's turns only from a run in
  * this live session, which `Session._foreignRunHere` covers. Counting them foreign would send the
  * owner's writes to review wherever the row write failed, and protect nothing more.
+ *
+ * Row and history go together, so "no row" also means "no helper's turns on disk": a restore brings
+ * back `threads` and `thread_messages` as one file (both in `history.db`, run-history.ts:718, :735);
+ * `ThreadStore.deleteThread` (thread-store.ts:323) removes the row and its messages with it
+ * (`ON DELETE CASCADE`, `foreign_keys = ON` at run-history.ts:1804); and a resume loads messages
+ * only for a thread that has a row (session-store.ts:126). A session opened before a delete keeps
+ * the history in memory: it read the row as it opened (the constructor) and keeps the mark.
  */
 export function threadHoldsForeignTurns(
   store: Pick<import('./thread-store.js').ThreadStore, 'getThread'> | null,
