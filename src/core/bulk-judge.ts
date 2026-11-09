@@ -7,9 +7,11 @@
  *
  * The first effect that spends money without minting a Run, so it does what a Run would do, per
  * call: the spend limit of the run and the daily and monthly limits are checked before the gate;
- * `fireBeforeRunGate` before the call; and every answered call is booked — into the run's
- * `cost_usd`, to the control plane under the gate's run id, and into history.db — whatever its
- * verdict turns out to be. A call is paid the moment it is answered (PRD bulk-loop §3.1).
+ * `fireBeforeRunGate` before the call; each call booked at its worst case into the run's
+ * `cost_usd` and into history.db before it is made; and every answered call settled at what it
+ * cost there and reported to the control plane under the gate's run id, whatever its verdict turns
+ * out to be. A call is paid the moment it is answered; one that never answers keeps
+ * its worst case.
  *
  * Nothing of a target reaches a model of the session, a notification or the error tracker: the
  * summaries are counts, the invalid reasons a fixed vocabulary, and an error is reported by its
@@ -18,6 +20,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { providerStatus } from './error-egress.js';
+import { reportAbortedCall } from './aborted-call.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, callForStructuredJson, extractionSpendOf,
@@ -71,8 +74,11 @@ export interface BulkJudgeDeps {
   gate: (tier: ModelTier) => Promise<MeteredGateResult>;
   /** The managed debit, per answered call, under its gate's run id (`reportMeteredCost`). */
   report: (gateRunId: string, costUsd: number, tier: ModelTier) => void;
-  /** The day's spend in history.db (`RunHistory.recordBulkJudgeCost`). */
-  bookSpend: (entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }) => void;
+  /** The day's spend in history.db (`RunHistory.recordBulkJudgeCost`): a call's provisional row,
+   *  booked before the call; returns the row, undefined without history.db. */
+  bookSpend: (entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }) => number | undefined;
+  /** That row replaced by what the call cost (`RunHistory.settleBulkJudgeCost`). */
+  settleSpend: (row: number, entry: { tokensIn: number; tokensOut: number; costUsd: number }) => void;
   /** Whether the daily and monthly limits allow another call (`checkPersistentBudget`). */
   budgetAllows: () => boolean;
   /** The egress secret scan (`detectSecretInContent`). */
@@ -700,17 +706,42 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       ledger.releaseJudgeClaim(runId, seq, token);
       return halt(BULK_HALT_REASONS.creditRefused);
     }
-    // Three bookings of one paid call, each on its own: a failure of one (a busy database) must
-    // not take the others with it. The control plane first — its report never throws. A booking
-    // that failed stops the run before its next paid call: what is not booked is not counted.
-    // That call stays uncounted for good — if the owner starts the run again, its limit and the
-    // daily limit see one call less than was paid, at most one per failed booking.
+    // The call is booked at its worst case before it is made, into the run's `cost_usd` and the
+    // day's spend, and that provisional booking is replaced by what the call cost once it is known.
+    // A call that never answers — the process dies with it in flight, it times out, the connection
+    // drops after the request went out — keeps its worst case: the provider may have billed it, and
+    // the run's limit and the daily limit count it as at most that. `cost_usd` is the run's limit
+    // and the cost the owner sees in one, so for such a call it shows the bound, not a cost. The
+    // control plane is not told of such a call (the tenant is debited only for what was answered).
+    // A provisional booking that cannot be written stops the run before the call is made. A worst
+    // case that is no finite amount books nothing provisionally, so the settlement still adds what
+    // the call cost — a guard only: pricing drops a malformed override when it loads.
+    const provisional = Number.isFinite(worst) && worst > 0 ? worst : 0;
+    let spendRow: number | undefined;
+    let added = false;
+    try {
+      ledger.addJudgeCost(runId, provisional);
+      added = true;
+      spendRow = deps.bookSpend({ runId, modelId: model.modelId, tokensIn: 0, tokensOut: 0, costUsd: provisional });
+    } catch (err: unknown) {
+      // Only what was added is taken back: a failed `addJudgeCost` added nothing.
+      if (added) try { ledger.settleJudgeCost(runId, provisional, 0); } catch { /* the worst case stays counted */ }
+      try { ledger.releaseJudgeClaim(runId, seq, token); } catch { /* the claim goes stale */ }
+      deps.captureError?.(judgeErrorForTracker(err, 'bulk_judge booking'));
+      return halt(BULK_HALT_REASONS.unavailable);
+    }
+    // The settlement of one call: the control plane's report for what was paid, then both
+    // provisional bookings replaced, each on its own — a failure of one (a busy database) must not
+    // take the others with it. The report never throws. A settlement that failed leaves that
+    // booking at the call's worst case, which counts the call as more than it cost, never less;
+    // after an answer it stops this pass before its next paid call. `costUsd` 0 takes the bookings
+    // back: a call never sent, or refused with a 429 or 529.
     const book = (costUsd: number, tokensIn: number, tokensOut: number): void => {
-      if (!(costUsd > 0)) return;
-      deps.report(gate.runId, costUsd, model.tier);
+      const paid = costUsd > 0 ? costUsd : 0;
+      if (paid > 0) deps.report(gate.runId, paid, model.tier);
       for (const write of [
-        () => { ledger.addJudgeCost(runId, costUsd); },
-        () => { deps.bookSpend({ runId, modelId: model.modelId, tokensIn, tokensOut, costUsd }); },
+        () => { ledger.settleJudgeCost(runId, provisional, paid); },
+        () => { if (spendRow !== undefined) deps.settleSpend(spendRow, { tokensIn, tokensOut, costUsd: paid }); },
       ]) {
         try {
           write();
@@ -747,8 +778,20 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       verdict = res.data;
     } catch (err: unknown) {
       const spent = extractionSpendOf(err);
-      if (spent) book(spent.costUsd, spent.inputTokens ?? 0, spent.outputTokens ?? 0);
       const failure = classifyCallFailure(err, deps.signal?.aborted === true);
+      // A reply that came back is booked at what it cost (every `invalid` answer carries its
+      // spend). Without one, only a call that cannot have been processed is taken back: one the
+      // helper refused before sending it (its pre-flight, `invalid` without spend), and a 429 or
+      // 529, which the provider refuses before it processes the request — kept, each retry a
+      // minute later would add another worst case for as long as the provider is overloaded.
+      // Every other call without a reply — a timeout, a dropped connection, another 5xx, a 4xx —
+      // keeps its worst case: whether the provider billed it is not visible here. It is counted
+      // under its own site; a call lost with the process is not, but its day row stays with no
+      // tokens and its worst case, which is where such calls can be counted from.
+      const status = providerStatus(err);
+      if (spent) book(spent.costUsd, spent.inputTokens ?? 0, spent.outputTokens ?? 0);
+      else if (failure.kind === 'invalid' || status === 429 || status === 529) book(0, 0, 0);
+      else reportAbortedCall('bulk_judge.unanswered', model.modelId, { upperBoundUsd: provisional, estimateUsd: provisional, fromSnapshot: false });
       if (failure.kind === 'invalid') {
         if (!afterPaid(() => { record({ invalid: failure.reason }); })) return halt(BULK_HALT_REASONS.unavailable);
         continue;

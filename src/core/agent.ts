@@ -31,7 +31,9 @@ import { headlessRefusalNote } from './write-notes.js';
 import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS, MISTRAL_EU_HOST, MISTRAL_GLOBAL_HOST } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
-import { StreamProcessor } from './stream.js';
+import { StreamProcessor, type PartialReply } from './stream.js';
+import { StreamIncompleteError } from './stream-incomplete.js';
+import { ToolCallImitationDetector, imitationToolsFrom } from './tool-call-imitation.js';
 import { CostGuard } from './cost-guard.js';
 import { classifyProviderFailure, type RunFailure } from './provider-failure.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.js';
@@ -400,6 +402,24 @@ export class ThinkingOnlyLoopError extends ContinuationLoopError {
   }
 }
 
+/**
+ * The reply wrote the same tool call out as text, again and again, instead of calling the
+ * tool (stream.ts, tool-call-imitation.ts). Nothing of it ran. The call is ended upstream so
+ * the provider stops generating, and the run stops instead of retrying the same request.
+ */
+export class ToolCallImitationError extends RunAbortedError {
+  /** The tool the repeated text names or whose input it carries, when known; for logs. */
+  readonly toolName: string | undefined;
+  /** The stopped reply as far as it came; the provider bills it, so the call is booked from it. */
+  readonly partial: PartialReply | undefined;
+  constructor(toolName?: string | undefined, partial?: PartialReply | undefined) {
+    super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+    this.name = 'ToolCallImitationError';
+    this.toolName = toolName;
+    this.partial = partial;
+  }
+}
+
 /** What the model reads for a tool call the run stopped waiting for. Deliberately not
  *  "failed": the call keeps running and may still complete (a mail, an HTTP write). */
 export const TOOL_ABANDONED_MESSAGE = 'The run was stopped while this tool was still running; it stopped waiting for the result. The tool may still complete.';
@@ -577,6 +597,8 @@ export class Agent implements IAgent {
   conversationGrants?: ConversationGrants | undefined;
   /** See `AgentConfig.conversationRoot`. */
   readonly conversationRoot: boolean;
+  /** See `AgentConfig.turnEndUsageCounted`. */
+  private readonly turnEndUsageCounted: boolean;
   readonly spawnDepth: number;
 
   /**
@@ -786,6 +808,8 @@ export class Agent implements IAgent {
   private static readonly MAX_RETRIES = 3;
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
   private static RETRY_BASE_MS = 2000;
+  /** How long one main-model call may stream before it is ended. Not readonly: tests shorten it. */
+  private static STREAM_TIMEOUT_MS = 600_000;
 
   /** Default max chars for a single tool result before truncation. Configurable via `max_tool_result_chars`. */
   private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = DEFAULT_MAX_TOOL_RESULT_CHARS;
@@ -1292,6 +1316,28 @@ export class Agent implements IAgent {
   }
 
   /**
+   * Charge the upper bounds of a spawned child's ended calls against this run's cost ceiling
+   * ONLY — the counterpart of {@link chargeExternalCost} for the dollars the child's own
+   * ceiling counted but its snapshot leaves out ({@link getCapOnlyCostUsd}).
+   *
+   * Booked as cap-only, not as spend: this run's snapshot (what its cost warning shows) and
+   * every debit stay without the bound, the same split the child's own guard keeps.
+   */
+  chargeExternalCapOnlyCost(usd: number): void {
+    this.costGuard?.recordCapOnlyCost(usd);
+  }
+
+  /**
+   * The upper bounds this run's ceiling counts for calls that were ended (a stop, the guard,
+   * the stream timeout) or helper calls that were aborted, and that its cost snapshot leaves
+   * out. 0 without a ceiling. Read by `spawn.ts` when a child settles, to hand the delegating
+   * run's ceiling the child's whole ceiling figure: snapshot spend plus these bounds.
+   */
+  getCapOnlyCostUsd(): number {
+    return this.costGuard?.capOnlyCostUSD() ?? 0;
+  }
+
+  /**
    * Dollars left under THIS run's cost ceiling, or `null` when it has none.
    *
    * ⚠ `null` means NO CEILING — self-host or BYOK with no configured budget. It does
@@ -1518,6 +1564,7 @@ export class Agent implements IAgent {
     this.recordToolCall = config.recordToolCall;
     this.conversationGrants = config.conversationGrants;
     this.conversationRoot = config.conversationRoot === true;
+    this.turnEndUsageCounted = config.turnEndUsageCounted === true;
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;
     this.briefingOwnBlocks = config.briefingOwnBlocks;
@@ -2549,6 +2596,10 @@ export class Agent implements IAgent {
    * one, on roughly every turn that needs the recovery. Accumulated here rather than folded
    * into `usage`, because these tokens are priced on the FAST model and adding them to a run's
    * own token counts would misprice them at the run's `pricePerM`.
+   *
+   * It also carries the estimate of aborted calls — helpers (`_bookAbortedHelper`) and the
+   * run's own model calls ended by the guard, by a stop of the run, by the stream timeout or by
+   * an error, after the provider answered (`_bookStoppedCall`) — which are never debited.
    */
   private _helperCostUsd = 0;
 
@@ -2578,6 +2629,17 @@ export class Agent implements IAgent {
   /** {@link _helperCostUsd} for the run that just finished; reset at the start of each `send`. */
   getHelperCostUsd(): number { return this._helperCostUsd; }
 
+  /**
+   * Upper bounds that {@link _bookStoppedCall} added to the session counter (`sessionCounters.costUSD`,
+   * the session cap) in the current run; reset at the start of each `send`. Read by `spawn.ts`
+   * only: a spawned child's session-cap share is the spawn's reservation, so once the child has
+   * settled the spawn takes these bounds back off the shared counter.
+   */
+  private _stoppedCallSessionUsd = 0;
+
+  /** {@link _stoppedCallSessionUsd} for the run that just finished. */
+  getStoppedCallSessionCostUsd(): number { return this._stoppedCallSessionUsd; }
+
   async send(
     userMessage: string | unknown[],
     opts?: {
@@ -2596,6 +2658,7 @@ export class Agent implements IAgent {
   ): Promise<string> {
     // Per RUN, not per session: `Session` reads it once after this returns.
     this._helperCostUsd = 0;
+    this._stoppedCallSessionUsd = 0;
     this._askedNobodyInRun = undefined;
     // F5: everything already in the buffer is a PREVIOUS turn — replace the
     // bodies of successfully saved artifacts with a reference (next-turn
@@ -2755,6 +2818,12 @@ export class Agent implements IAgent {
         && this._keepCompletedPrefix(userTurn, { code: 'continuation_loop', detail: continuationLoopDetail(err.loopPrefix) })) {
         throw err;
       }
+      // And for a tool call written out as text: nothing of the reply ran, so the reply itself is
+      // dropped, while the question and the completed tool pairs before it stay.
+      if (err instanceof ToolCallImitationError
+        && this._keepCompletedPrefix(userTurn, { code: 'tool_call_imitation' })) {
+        throw err;
+      }
       this.messages.length = Math.min(snapshot, this.messages.length);
       this._persistedMark = Math.min(this._persistedMark, this.messages.length);
       throw err;
@@ -2826,10 +2895,11 @@ export class Agent implements IAgent {
       // points at the tool_result and the reply drops out of the estimate.
       const msgCountBeforeRecovery = this.messages.length;
       if (response.stop_reason === 'end_turn') {
-        // Read the CONTENT, not just the stop reason: the OpenAI-compat adapter
-        // defaults `stop_reason` to 'end_turn' when a stream ends without a
-        // `finish_reason`, so a turn that DID call the tool can otherwise pay for
-        // a second forced call and persist a duplicate chip pair.
+        // Read the CONTENT, not just the stop reason: the stop reason is the
+        // provider's own label (an openai-compatible one is translated from its
+        // `finish_reason`) and need not say `tool_use` when the tool was called,
+        // so a turn that DID call the tool could otherwise pay for a second
+        // forced call and persist a duplicate chip pair.
         if (response.content.some(
           (b) => b.type === 'tool_use' && b.name === FOLLOW_UP_TOOL_NAME,
         )) this._sawFollowUpCall = true;
@@ -3683,7 +3753,26 @@ export class Agent implements IAgent {
       }
     }
 
+    const imitationTools = toolsDef.length > 0 ? imitationToolsFrom(toolsDef) : [];
     for (let attempt = 0; attempt <= Agent.MAX_RETRIES; attempt++) {
+      // Each call gets its own controller, linked to the run's: a run abort still ends the
+      // call, and the guard below can end the call alone. Leaving the stream's iteration does
+      // not end the request on every wire (the openai-compat adapter only releases its reader),
+      // so the provider would keep generating, and billing, a reply nobody reads.
+      const callController = new AbortController();
+      const onRunAbort = (): void => { callController.abort(signal?.reason); };
+      if (signal) {
+        if (signal.aborted) callController.abort(signal.reason);
+        // run-group-starter: removed in this attempt's `finally`, or fired once; it only aborts this call and reports no spend.
+        else signal.addEventListener('abort', onRunAbort, { once: true });
+      }
+      // Whether this attempt's request went out, and what of its reply came back: a user stop
+      // books a call that was sent (see the catch below), and only that one.
+      let issued = false;
+      let processor: StreamProcessor | undefined;
+      // This attempt's stream timeout: the timer, and the error it ended the call with.
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+      let timeoutError: Error | undefined;
       try {
         const stream = this.client.beta.messages.stream({
           model: this.model,
@@ -3710,29 +3799,102 @@ export class Agent implements IAgent {
             ? ({ prompt_cache_key: buildPromptCacheKey(this.currentThreadId, this.name) } as object)
             : {} ),
           tools: toolsDef,
-        }, { signal });
+        }, { signal: callController.signal });
+        // Neither wire sends a request whose signal is already stopped (a run stopped between
+        // two calls): such a call costs nothing. The converse does not hold: a live signal here
+        // means the request MAY have gone out, not that it did (see the catch below).
+        issued = !callController.signal.aborted;
 
         const handler = this.onStream ?? (() => {});
-        const processor = new StreamProcessor(handler, this.name);
+        // The call is ended while the stream is still being read, so the wire's own abort
+        // listener is still in place when it fires.
+        processor = new StreamProcessor(handler, this.name, imitationTools.length > 0
+          ? {
+            detector: new ToolCallImitationDetector(imitationTools),
+            stop: (hit, partial) => {
+              callController.abort();
+              return new ToolCallImitationError(hit.toolName, partial);
+            },
+          }
+          : undefined);
 
-        // Per-stream timeout: 10 minutes max for a single API call
-        const streamTimeout = 600_000;
+        // Per-stream timeout: 10 minutes max for a single API call. Cleared in `finally`, so a
+        // finished call leaves no timer behind.
         const result = await Promise.race([
           processor.process(stream),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('Stream timeout: API response exceeded 10 minutes')), streamTimeout),
-          ),
+          new Promise<never>((_, reject) => {
+            // run-group-starter: cleared in this attempt's `finally`; it only rejects this call and reports no spend.
+            timeoutTimer = setTimeout(() => {
+              timeoutError = new Error('Stream timeout: API response exceeded 10 minutes');
+              reject(timeoutError);
+            }, Agent.STREAM_TIMEOUT_MS);
+          }),
         ]);
         return result;
       } catch (err: unknown) {
-        if (signal?.aborted) throw err;
+        const request = { system: systemBlocks, messages: outboundMessages, tools: toolsDef };
+        // The reply was stopped on purpose; the same request would write the same text again.
+        // What it used is booked as an aborted call before the run ends. Checked before the
+        // run's own stop: when both coincide the call is booked once, under the guard, whose
+        // partial is the reply at the moment it was ended.
+        if (err instanceof ToolCallImitationError) {
+          this._bookStoppedCall('agent.tool_call_imitation', err.partial, request, { estimate: true });
+          throw err;
+        }
+        // The stream timeout ended the call; `finally` below cancels the request. The provider
+        // bills what it generated until then, as for a stop, so it is booked the same way: the
+        // bound to the run ceiling and the session cap; and, if the provider answered (the
+        // stream delivered an event), the estimate to the run's cost line and one count for
+        // this site. The partial is the reply at the moment the timeout fired. Booked once per
+        // timed-out attempt, here and nowhere else, before the error goes on unchanged to the
+        // retry decision below (which does not retry it today) or out of the call; a retried
+        // attempt would be a new request with its own timer and its own booking. When the run
+        // is stopped in the same instant, the timeout ended the call: it is booked here, under
+        // the timeout, and the stop's booking below is skipped.
+        const timedOut = err !== undefined && err === timeoutError;
+        if (timedOut && issued) {
+          this._bookEndedCall('agent.stream_timeout', processor, request);
+        }
+        // The run was stopped while this call was out — for example by the person, the
+        // wall-clock backstop, a takeover of the run, an ended mandate, a workflow step's
+        // timeout, or a spawned child's deadline. What is booked depends on what is known:
+        // - The provider answered (the stream delivered an event): it bills the prompt and what
+        //   it generated until the stop. On the openai-compatible wire the adapter emits its
+        //   first event once the provider accepted the request (HTTP 200), before any body. Booked as an aborted call: the bound to the caps, the
+        //   estimate to the run's cost line, and counted per site.
+        // - No answer yet: the request may or may not have reached the provider. The SDK
+        //   retries 429/529/5xx and connection errors inside the call, so a live signal at
+        //   `stream()` does not mean the request was sent, let alone accepted; and whether a
+        //   provider bills a sent request it never answered is not observable here. Only the
+        //   caps take it (overstating a cap is the safe direction); no estimate, no count.
+        // - Never sent (the signal was already stopped): nothing. An abort during the retry
+        //   wait below never reaches this catch, as no request of the next attempt was sent.
+        if (signal?.aborted) {
+          if (issued && !timedOut) {
+            this._bookEndedCall('agent.user_abort', processor, request);
+          }
+          throw err;
+        }
+        // Any other error after the provider answered (the stream delivered an event) ended a
+        // reply it had begun: for example an `error` event inside the stream (an overloaded
+        // provider), a dropped connection, or a response closed before any stop reason. The provider bills the prompt and what it
+        // generated until then (assumed, not confirmed by the provider), so the attempt is
+        // booked like a stopped one: the bound to the run ceiling and the session cap, the
+        // estimate to the run's cost line, one count for this site (only the bound once its
+        // `turn_end` was handed on; see `_bookEndedCall`). Booked once per attempt, whether the decision below retries it (the next
+        // attempt is a new request with its own booking) or gives up. An error before any event
+        // (an HTTP 529, a refused connection) books nothing: no reply was generated. An answered
+        // stream was sent, and a timed-out attempt was booked above.
+        if (!timedOut) this._bookEndedCall('agent.stream_error', processor, request, { onlyIfAnswered: true });
         if (attempt < Agent.MAX_RETRIES && isRetryable(err)) {
           const delay = Agent.RETRY_BASE_MS * Math.pow(2, attempt);
           if (this.onStream) {
             const reason = err instanceof APIError
-              ? `${err.status ?? (err.error as { type?: string } | undefined)?.type ?? 'unknown'}: ${err.message}`
+              ? `${err.status ?? apiErrorType(err) ?? 'unknown'}: ${err.message}`
               : String(err);
-            await this.onStream({ type: 'retry', attempt: attempt + 1, maxAttempts: Agent.MAX_RETRIES + 1, delayMs: delay, reason, agent: this.name });
+            let afterTurnEnd = false;
+            try { afterTurnEnd = processor?.turnEnded() === true; } catch { /* reported as not ended */ }
+            await this.onStream({ type: 'retry', attempt: attempt + 1, maxAttempts: Agent.MAX_RETRIES + 1, delayMs: delay, reason, agent: this.name, afterTurnEnd });
           }
           await sleep(delay, signal);
           continue;
@@ -3745,11 +3907,86 @@ export class Agent implements IAgent {
         // everything that is not a billing stop.
         this._lastProviderFailure = classifyProviderFailure(err, this._providerHost());
         throw err;
+      } finally {
+        clearTimeout(timeoutTimer);
+        // The run's signal lives across calls; one listener per call would pile up.
+        signal?.removeEventListener('abort', onRunAbort);
+        // A stream that lost the race above is still being read and generated; this ends it.
+        // After a finished call it does nothing.
+        callController.abort();
       }
     }
 
     // Unreachable, but satisfies TypeScript
     throw new Error('Exhausted retries');
+  }
+
+  /**
+   * Book a main-model call ended by its stream timeout, a stop of the run, or an error, from
+   * what its stream processor saw. One rule for the three:
+   * - Not answered (no event yet): the bound to the caps only; with `onlyIfAnswered`, nothing.
+   * - Answered, `turn_end` not handed on yet: the bound to the caps, the estimate to the run's
+   *   cost line, one count for the site.
+   * - Answered, `turn_end` handed on, and this agent's stream consumer counts its usage
+   *   (`turnEndUsageCounted`, set by Session): the bound to the caps only. The consumer has
+   *   already counted that turn's usage into the run's own, which the cost line and the tenant
+   *   debit are priced from, so an estimate would count the reply twice, and the call is no
+   *   longer one the tenant is not billed for. The caps take the bound alone: the run
+   *   ceiling's regular booking (`recordTurn`) runs only after a call returns, and the session
+   *   cap gets no turn usage. A consumer that does not count it (a spawned child's stream
+   *   drops `turn_end`) gets the estimate and the count, as before `turn_end`.
+   * Reading the processor cannot fail the call's own error: if it throws, the bound alone
+   * still goes to the caps.
+   */
+  private _bookEndedCall(
+    site: 'agent.user_abort' | 'agent.stream_timeout' | 'agent.stream_error',
+    processor: StreamProcessor | undefined,
+    request: unknown,
+    opts: { onlyIfAnswered?: boolean } = {},
+  ): void {
+    let partial: PartialReply | undefined;
+    let estimate: boolean;
+    try {
+      const answered = processor?.answered() === true;
+      if (opts.onlyIfAnswered === true && !answered) return;
+      estimate = answered && !(this.turnEndUsageCounted && processor?.turnEnded() === true);
+      partial = processor?.partial();
+    } catch {
+      partial = undefined;
+      estimate = false;
+    }
+    this._bookStoppedCall(site, partial, request, { estimate });
+  }
+
+  /**
+   * Book a main-model call that was ended mid-stream — by the guard on a tool call written out
+   * as text, by a stop of the run, by the per-call stream timeout, or by an error after the
+   * provider answered — as an aborted call
+   * (aborted-call.ts): the run ceiling and the session cap get the upper bound, and the tenant
+   * debit gets nothing. With
+   * `estimate` (the provider answered), the run's cost line also gets the estimate and the
+   * call is counted per site; without it only the caps take the call. The prompt is the
+   * provider's count when it sent one (the Anthropic wire's `message_start`), else the
+   * request's size (the openai-compatible wire reports none before its last chunk).
+   */
+  private _bookStoppedCall(
+    site: 'agent.tool_call_imitation' | 'agent.user_abort' | 'agent.stream_timeout' | 'agent.stream_error',
+    partial: PartialReply | undefined,
+    request: unknown,
+    opts: { estimate: boolean },
+  ): void {
+    try {
+      const cost = abortedCallCost({ model: this.model, maxTokens: this.maxTokens, request, partial });
+      this.costGuard?.recordCapOnlyCost(cost.upperBoundUsd);
+      recordSessionCost(this.sessionCounters, cost.upperBoundUsd);
+      // The same amount `recordSessionCost` just added (it adds only a finite figure above 0).
+      if (Number.isFinite(cost.upperBoundUsd) && cost.upperBoundUsd > 0) this._stoppedCallSessionUsd += cost.upperBoundUsd;
+      if (!opts.estimate) return;
+      this._helperCostUsd += cost.estimateUsd;
+      reportAbortedCall(site, this.model, cost);
+    } catch {
+      // Booking must not replace the stop it books.
+    }
   }
 
   private _buildSystemPrompt(): Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> {
@@ -5441,22 +5678,47 @@ export function safeToolNames(names: readonly string[]): string[] {
   return out;
 }
 
+/**
+ * The provider's error type of an SDK APIError: `err.type`, which the SDK sets from the body's
+ * `error.type`; else the body itself, `err.error.error.type` (the `{ type: 'error', error: {…} }`
+ * envelope), for an APIError built without the type argument.
+ */
+function apiErrorType(err: APIError): string | undefined {
+  if (typeof err.type === 'string') return err.type;
+  const inner = (err.error as { error?: { type?: unknown } } | undefined)?.error?.type;
+  return typeof inner === 'string' ? inner : undefined;
+}
+
 /** Exported for tests. */
 export function isRetryable(err: unknown): boolean {
+  // A reply the provider cut off by closing the stream before any stop reason, on either wire.
+  if (err instanceof StreamIncompleteError) return true;
   if (err instanceof APIError) {
     // HTTP status-based: 429 rate limit, 529 overloaded, 500+ server errors
     if (err.status === 429 || err.status === 529 || (err.status !== undefined && err.status >= 500 && err.status < 600)) {
       return true;
     }
-    // SSE stream error events arrive with status=undefined — check the error body
-    // Shape: { type: "overloaded_error" | "rate_limit_error" | "api_error", message: string }
-    const body = err.error as { type?: string } | undefined;
-    if (body?.type === 'overloaded_error' || body?.type === 'rate_limit_error' || body?.type === 'api_error') {
-      return true;
+    // An `error` event inside the stream arrives with status undefined. The SDK's stream parser
+    // throws it as `new APIError(undefined, body, undefined, headers, body.error.type)`, where
+    // `body` is the whole event: `{ type: 'error', error: { type: 'overloaded_error', … } }`.
+    // When the provider names a type, the type alone decides: the four transient types are
+    // retried like their HTTP twins (529, 429, 500, 504), every other type is not. `err.message`
+    // then carries the provider's own text (the whole event as JSON), which may contain any
+    // word — "ECONNRESET", "ThrottlingException" — and must not turn a deterministic error
+    // into a paid replay; so none of the text checks below read a typed error.
+    const type = apiErrorType(err);
+    if (type !== undefined) {
+      // `timeout_error` is the in-stream twin of an HTTP 504 (SDK 0.98.0 `resources/shared.d.ts:19` lists it).
+      return type === 'overloaded_error' || type === 'rate_limit_error' || type === 'api_error' || type === 'timeout_error';
     }
-    // Legacy AWS-style transient error names — kept as defense-in-depth for
-    // OpenAI-compatible adapters that may proxy AWS-backed models. lynox
-    // itself uses Anthropic + Mistral (EU); no direct Bedrock integration.
+    // From here: an APIError without a provider type — an HTTP error whose body is not the
+    // provider's envelope (a gateway or proxy in front of it), or the SDK's connection error.
+    // Legacy AWS-style transient error names in its message — kept as defense-in-depth for
+    // gateways that may proxy AWS-backed models, but only for a gateway whose body carries no
+    // `error.type` at all (one that names any type is decided above; throttling from a gateway
+    // usually arrives as 429/5xx and is caught by the status check). lynox itself uses Anthropic + Mistral (EU);
+    // no direct Bedrock integration. (The OpenAI-compat adapter throws plain Errors, which
+    // never reach this check.)
     const msg = err.message ?? '';
     if (msg.includes('ThrottlingException') || msg.includes('TooManyRequestsException')
       || msg.includes('ServiceUnavailableException') || msg.includes('ModelTimeoutException')
@@ -5469,6 +5731,9 @@ export function isRetryable(err: unknown): boolean {
   // surfaces NOT as an APIError but as a `TransformError` or a 'terminated' TypeError from the
   // fetch/undici stream, so the status/body checks above miss it. Without this the Agent would
   // fail the whole turn instead of retrying the transient drop.
+  // Reached by plain Errors (the OpenAI-compat adapter, undici) and by untyped APIErrors (the
+  // SDK's connection error carries the transport failure in its `.cause` chain); a typed
+  // APIError returned above.
   if (err instanceof Error) {
     return isTransportError(err, 0);
   }

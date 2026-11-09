@@ -21,7 +21,7 @@ const IMAGE_WRITING_STORE = {
   getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
 };
 const FLAG = 'LYNOX_FEATURE_SHOPIFY_BULK_READ';
-const PRODUCT_RULES = 'Form shopify plans the products of target_host (<store>.myshopify.com), all of them or those of one product type and/or vendor: no path, id_field or write_method; source_list.filters may name product_type, vendor or both, each the value as the store shows it (letter case of A-Z aside, nothing else), which may hold letters, digits, single spaces and _ . & \' / + ; every word starts with a letter or digit, - stands only between two letters or digits, no run of letters and digits is OR, AND or NOT in any letter case (so Forget-Me-Not and Salt and Pepper are refused), and at most 255 characters (a value that does not fit is refused, never changed); source_list.after sets only title, seo_title, seo_description, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.';
+const PRODUCT_RULES = 'Form shopify plans the products of target_host (<store>.myshopify.com), all of them or those of some product types and/or vendors: no path, id_field or write_method; source_list.filters may name product_type, vendor or both, each one value as text or several (2 to 50) as a list, of which a product matches any one — one run for several groups, not a run per group; each value as the store shows it (letter case of A-Z aside, nothing else), which may hold letters, digits, single spaces and _ . & \' / + ; every word starts with a letter or digit, - stands only between two letters or digits, no run of letters and digits is OR, AND or NOT in any letter case (so Forget-Me-Not and Salt and Pepper are refused), and at most 255 characters (a value that does not fit is refused, never changed); source_list.after sets only title, seo_title, seo_description, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.';
 const IMAGE_RULES = 'Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only alt, as text of at most 512 characters or null. For product fields, use form shopify.';
 
 // The placeholder refusals word for word: they are prompt surface, and the measured switch to a
@@ -81,6 +81,15 @@ describe('a refused bulk_plan in a Shopify form', () => {
     expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
     // The filter a rule names is one the form takes.
     expect(await plan({ source_list: { form: 'shopify', filters: { product_type: 'Tee', vendor: 'Acme&Co' }, after: { title: 'x' } } })).toMatch(/^List dry run recorded/);
+  });
+
+  it('in form shopify, refused for a list of one value, says the list rule and then every rule of the form', async () => {
+    const answer = await plan({ source_list: { form: 'shopify', filters: { product_type: ['Tee'] }, after: { title: 'x' } } });
+    expect(answer.startsWith('Error: source_list.filters.product_type as a list holds 2 to 50 values, no two the same up to letter case; for one value give it as text.'), answer).toBe(true);
+    expect(answer.endsWith(` ${PRODUCT_RULES}`), answer).toBe(true);
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+    // A list the rule takes is recorded.
+    expect(await plan({ source_list: { form: 'shopify', filters: { product_type: ['Tee', 'Kaffee'], vendor: 'Acme' }, after: { title: 'x' } } })).toMatch(/^List dry run recorded/);
   });
 
   // The stored form of a filtered list is no planner form: it has no rules to say, and the refusal

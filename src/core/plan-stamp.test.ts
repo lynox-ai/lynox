@@ -41,6 +41,8 @@ describe('stampExpect', () => {
   it('is the same for a watch whose run moved only its baseline, and differs when what it watches changes', () => {
     const W = { ...T, watch_config: JSON.stringify({ url: 'https://a.example', last_hash: 'h1' }) } as TriggerRecord;
     expect(stampExpect({ ...W, watch_config: JSON.stringify({ url: 'https://a.example', last_hash: 'h2' }) }, null, ENTRIES)).toBe(stampExpect(W, null, ENTRIES));
+    // The summary a changed page left is baseline too: a run between the preview and the confirm would otherwise make the confirm refuse.
+    expect(stampExpect({ ...W, watch_config: JSON.stringify({ url: 'https://a.example', last_hash: 'h2', last_summary: 'Price is 12.' }) }, null, ENTRIES)).toBe(stampExpect(W, null, ENTRIES));
     expect(stampExpect({ ...W, watch_config: JSON.stringify({ url: 'https://b.example', last_hash: 'h1' }) }, null, ENTRIES)).not.toBe(stampExpect(W, null, ENTRIES));
     expect(stampExpect({ ...W, watch_config: JSON.stringify({ url: 'https://a.example', selector: '#price', last_hash: 'h1' }) }, null, ENTRIES)).not.toBe(stampExpect(W, null, ENTRIES));
     expect(stampExpect({ ...W, watch_config: JSON.stringify({ url: 'https://a.example', interval_minutes: 5, last_hash: 'h1' }) }, null, ENTRIES)).not.toBe(stampExpect(W, null, ENTRIES));

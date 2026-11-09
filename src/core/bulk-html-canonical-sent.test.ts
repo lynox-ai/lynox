@@ -220,7 +220,7 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
       ledger, call,
       resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as never }),
       gate: async () => ({ runId: 'g', blockedReason: null }),
-      report: () => {}, bookSpend: () => {}, budgetAllows: () => true,
+      report: () => {}, bookSpend: () => undefined, settleSpend: () => {}, budgetAllows: () => true,
       scanSecret: (t) => (t.includes('sk-live-') ? 'api_key' : null), maskVault: (t) => t,
       ...over,
     });

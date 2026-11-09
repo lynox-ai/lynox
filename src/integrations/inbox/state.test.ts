@@ -1026,6 +1026,11 @@ describe('getUidByMessageId (uid bridge for the chat reply context)', () => {
     expect(inbox.getUidByMessageId(TEST_ACCOUNT.id, '')).toBeNull();
     expect(inbox.getUidByMessageId('other-acct', '<known@x>')).toBeNull();
   });
+
+  it('reads uid 0 as no uid: a mail kept across a restart while deferred comes back without one', () => {
+    seedProcessed(TEST_ACCOUNT.id, '<kept@x>', 0, 'INBOX');
+    expect(inbox.getUidByMessageId(TEST_ACCOUNT.id, '<kept@x>')).toBeNull();
+  });
 });
 
 describe('findItemByMessageId (outbound-reply reconcile lookup)', () => {
@@ -1043,7 +1048,7 @@ describe('findItemByMessageId (outbound-reply reconcile lookup)', () => {
   });
 });
 
-describe('InboxStateDb — the rule withheld on an item (v21)', () => {
+describe('InboxStateDb — the rule withheld on an item (v22)', () => {
   const withheld = { id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' as const };
 
   it('stores the withheld rule with the item and reads it back; an item without one reads null', () => {

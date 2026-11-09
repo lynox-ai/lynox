@@ -11,7 +11,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, PRESET_ID_PATTERN, builtInPresetOf, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -1196,7 +1196,7 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  *
  * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
  * writes it; an incoming value is discarded on create and update) and a BUILT-IN preset
- * (`auth.oauth.preset_id` that `OAUTH_PRESETS` knows): the built-in presets are
+ * (`builtInPresetOf`: an oauth2 profile whose `auth.oauth.preset_id` the register knows): the built-in presets are
  * authorization-code flows, and the preset also marks a profile that re-entered the store
  * without its grant record (a JSON in the apis directory). A preset whose provider issues
  * app tokens would be refused here too, so adding one means revisiting this.
@@ -1215,12 +1215,11 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  * `fetch_token` itself (`api-setup.ts`) all ask it here.
  */
 export function oauthGrantIsUserDelegated(profile: {
-  auth?: { oauth?: { preset_id?: string | undefined } | undefined } | undefined;
+  auth?: { type?: string | undefined; oauth?: { preset_id?: string | undefined } | undefined } | undefined;
   oauth_grant?: { origin?: 'callback' | undefined } | undefined;
 }): boolean {
   if (profile.oauth_grant?.origin === 'callback') return true;
-  const presetId = profile.auth?.oauth?.preset_id;
-  return typeof presetId === 'string' && OAUTH_PRESETS.get(presetId) !== undefined;
+  return builtInPresetOf(profile) !== undefined;
 }
 
 /**
@@ -1230,8 +1229,9 @@ export function oauthGrantIsUserDelegated(profile: {
  *
  * One thing is being protected, in two shapes: a token a USER consented to must
  * never be swapped, unattended, for an app-level one. `fetch_token` posts a
- * client-credentials grant for every `grant_type` but `refresh_token`, absent
- * ones included — so wherever the stored token came from a human at a consent
+ * client-credentials grant for an absent `grant_type` and for an explicit
+ * `client_credentials` (any other value but `refresh_token` is posted unchanged
+ * and rejected) — so wherever the stored token came from a human at a consent
  * screen, that default is the swap.
  *
  * Allowed, because neither can be that swap:
@@ -1245,8 +1245,10 @@ export function oauthGrantIsUserDelegated(profile: {
  * Refused:
  *   · anything `oauthGrantIsUserDelegated` marks (a callback, or a built-in
  *     preset) that is not a refresh-token grant;
- *   · a stored refresh token with no explicit `grant_type` — the older,
- *     hand-configured version of the same ambiguity.
+ *   · a stored refresh token with a `grant_type` that is neither
+ *     `refresh_token` nor `client_credentials`, an absent one included — the
+ *     older, hand-configured version of the same ambiguity, and for any other
+ *     named value an exchange no renewal here can run.
  *
  * ⚠ The second refusal used to be the only one, and the first version of this
  * comment argued that it sufficed: a profile with no refresh token "can only
@@ -1261,12 +1263,12 @@ export function oauthGrantIsUserDelegated(profile: {
  * A model calling `fetch_token` by hand could do all of this until `fetch_token`
  * asked `oauthGrantIsUserDelegated` itself: a client-credentials exchange for a
  * user-delegated grant is now refused there too, by hand or not. What stays open by
- * hand is the hand-configured shape below (a stored refresh token, no grant type),
+ * hand is the hand-configured shape above (a stored refresh token, no grant type),
  * which only the 401 reminder discourages.
  */
 export function oauthProfileMayBeRenewedUnattended(
   profile: {
-    auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined; preset_id?: string | undefined } | undefined } | undefined;
+    auth?: { type?: string | undefined; oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined; preset_id?: string | undefined } | undefined } | undefined;
     oauth_grant?: { origin?: 'callback' | undefined } | undefined;
   },
   hasStoredRefreshToken: boolean,
@@ -1329,7 +1331,7 @@ export function oauthProfileMayBeRenewedUnattended(
  */
 export function oauthFetchTokenWouldSwapDelegatedAccess(
   profile: {
-    auth?: { oauth?: { grant_type?: string | undefined; preset_id?: string | undefined } | undefined } | undefined;
+    auth?: { type?: string | undefined; oauth?: { grant_type?: string | undefined; preset_id?: string | undefined } | undefined } | undefined;
     oauth_grant?: { origin?: 'callback' | undefined } | undefined;
   },
   hasStoredRefreshToken: boolean,
@@ -1478,7 +1480,16 @@ export const DECLINED_DIAGNOSIS_TAIL = 'Renewing it unattended is refused. Do NO
  * that has to be unlucky enough to fire inside somebody's fixture list.
  */
 export type DeclinedFact =
-  | { readonly kind: 'consent'; readonly authorized: boolean }
+  | {
+      readonly kind: 'consent';
+      /** `callback`: a user authorized it at the provider (the engine-written `oauth_grant.origin`).
+       *  `preset`: no such record, but it goes through a built-in provider, whose tokens only a
+       *  user's authorization issues — the reason the gate refuses it (`oauthGrantIsUserDelegated`).
+       *  `none`: neither. */
+      readonly consent: 'callback' | 'preset' | 'none';
+      /** The built-in provider's id, set only with `preset`; it is one of the register's own ids. */
+      readonly preset: string | undefined;
+    }
   | { readonly kind: 'grant'; readonly named: string | undefined; readonly runnable: boolean }
   | { readonly kind: 'slot'; readonly slot: string; readonly derived: string; readonly diverges: boolean }
   | {
@@ -1500,8 +1511,13 @@ export function declinedFacts(
   const rawSlot: unknown = profile.auth?.oauth?.refresh_token_key;
   const slot = typeof rawSlot === 'string' ? rawSlot : derived;
   const state = profile.oauth_grant?.state;
+  const preset = builtInPresetOf(profile);
   return [
-    { kind: 'consent', authorized: profile.oauth_grant?.origin === 'callback' },
+    profile.oauth_grant?.origin === 'callback'
+      ? { kind: 'consent', consent: 'callback', preset: undefined }
+      : preset !== undefined
+        ? { kind: 'consent', consent: 'preset', preset: preset.id }
+        : { kind: 'consent', consent: 'none', preset: undefined },
     { kind: 'grant', named, runnable: named === undefined || named === 'refresh_token' || named === 'client_credentials' },
     { kind: 'slot', slot, derived, diverges: slot !== derived },
     {
@@ -1530,9 +1546,11 @@ export function declinedFacts(
 export function renderDeclinedFact(fact: DeclinedFact): string {
   switch (fact.kind) {
     case 'consent':
-      return fact.authorized
-        ? 'a user authorized it at the provider'
-        : 'no consent flow is recorded behind it';
+      if (fact.consent === 'callback') return 'a user authorized it at the provider';
+      if (fact.consent === 'preset') {
+        return `no consent flow is recorded behind it, but it goes through the built-in provider "${shapedForLog(fact.preset, PRESET_ID_PATTERN, 64)}", whose tokens only a user's authorization issues`;
+      }
+      return 'no consent flow is recorded behind it';
     case 'grant':
       if (fact.named === undefined) {
         return 'it declares no auth.oauth.grant_type, so an exchange here would post a client-credentials grant';

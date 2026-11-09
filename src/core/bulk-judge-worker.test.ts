@@ -99,7 +99,7 @@ async function tick(runId: string, hooks: unknown[] = [], language?: string): Pr
     .mockImplementation(async () => () => null);
   const engine = {
     getTaskManager: () => manager,
-    getRunHistory: () => ({ getTrigger: () => task, updateTrigger: () => { /* none */ }, recordBulkJudgeCost: () => { /* none */ } }),
+    getRunHistory: () => ({ getTrigger: () => task, updateTrigger: () => { /* none */ }, recordBulkJudgeCost: () => undefined, settleBulkJudgeCost: () => { /* none */ } }),
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,

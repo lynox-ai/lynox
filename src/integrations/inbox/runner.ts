@@ -14,7 +14,7 @@
 // surfaces to the user as a `requires_user` item — a missed customer mail
 // is unrepairable; an extra Needs-You item is a one-click archive.
 
-import { ClassifierQueue, DrainedForRestoreError, DrainedForShutdownError, type ClassifierQueueOptions } from './classifier/queue.js';
+import { ClassifierQueue, DrainedForRestoreError, DrainedForShutdownError, HandedOverError, type ClassifierQueueOptions } from './classifier/queue.js';
 import {
   CLASSIFIER_VERSION,
   classifyMail,
@@ -272,7 +272,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           reasonDe: result.reasonDe,
           classifiedAt: new Date(),
           classifierVersion: result.classifierVersion,
-          // A rule either filed the item or was withheld on it; the item says which (v20, v21).
+          // A rule either filed the item or was withheld on it; the item says which (v21, v22).
           ...(rule !== undefined && rule.withheld === false ? { matchedRuleId: rule.id } : {}),
           ...(rule !== undefined && rule.withheld !== false
             ? { ruleWithheld: { id: rule.id, name: rule.name, reason: rule.withheld } }
@@ -327,6 +327,9 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       }
     },
     onDeadLetter: (payload, error) => {
+      // Left by a runtime being replaced: the replacing runtime classifies it. Only when that one
+      // does not take it does it fall through to a failed classification below.
+      if (error instanceof HandedOverError && error.handOver(payload)) return;
       // PRD fail-closed default: surface to Needs You so the user sees it.
       const envelopeFields = payload.envelope ?? {};
       if (error instanceof DrainedForRestoreError || error instanceof DrainedForShutdownError) {

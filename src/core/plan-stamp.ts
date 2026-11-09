@@ -70,14 +70,15 @@ export function stampExpect(trigger: TriggerRecord, wf: string | null, entries: 
   return createHash('sha256').update(JSON.stringify([subject, entries])).digest('hex');
 }
 
-/** A watch's config without `last_hash`, the baseline every run of the watch moves: what the
- *  watch looks at, not what it last saw. Unreadable config is taken as it stands. */
+/** A watch's config without its baseline (`last_hash`, `last_summary`), which every run of the
+ *  watch moves: what the watch looks at, not what it last saw. Unreadable config is taken as it
+ *  stands. */
 function watchWithoutBaseline(raw: string | undefined): string | null {
   if (raw === undefined) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return raw;
-    const { last_hash: _baseline, ...rest } = parsed as Record<string, unknown>;
+    const { last_hash: _baseline, last_summary: _seen, ...rest } = parsed as Record<string, unknown>;
     return JSON.stringify(rest);
   } catch {
     return raw;

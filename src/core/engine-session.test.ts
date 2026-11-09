@@ -96,6 +96,12 @@ vi.mock('./agent.js', () => {
     ToolLoopBreakError: MockToolLoopBreakError,
     ContinuationLoopError: MockContinuationLoopError,
     ThinkingOnlyLoopError: class MockThinkingOnlyLoopError extends MockContinuationLoopError {},
+    ToolCallImitationError: class MockToolCallImitationError extends MockRunAbortedError {
+      constructor() {
+        super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+        this.name = 'ToolCallImitationError';
+      }
+    },
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;
@@ -863,8 +869,9 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     it('a run a loop guard stopped is recorded aborted with the guard as the reason and its message; a stop has neither', async () => {
-      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } = await import('./agent.js');
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } = await import('./agent.js');
       const cases: Array<[Error, string | undefined]> = [
+        [new ToolCallImitationError('http_request'), 'tool_call_imitation'],
         [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
         [new ContinuationLoopError('prefix'), 'continuation_loop'],
         [new (ThinkingOnlyLoopError as unknown as new (p: string) => Error)(''), 'thinking_loop'],
