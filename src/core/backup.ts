@@ -7,7 +7,7 @@
  * All operations are designed to be safe during concurrent lynox operation.
  */
 
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -54,6 +54,45 @@ function unrestorableEntry(files: unknown): string | null {
 }
 
 /**
+ * Why an entry of the backup must not be read, or null. Every component below the backup folder is
+ * asked with `lstat`: a link there would lead the read, and the verify pass that reports sizes, to
+ * a file outside the backup. The backup folder itself may be a link (a backups dir moved elsewhere).
+ * A missing component is not this check's to report: the verify pass names it.
+ */
+export function backupSourceProblem(backupPath: string, entry: Pick<BackupFileEntry, 'path' | 'type'>): string | null {
+  const parts = entry.path.split('/');
+  let at = backupPath;
+  for (let i = 0; i < parts.length; i++) {
+    at = join(at, parts[i] as string);
+    let st;
+    try {
+      st = lstatSync(at);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+    const shown = parts.slice(0, i + 1).join('/');
+    if (st.isSymbolicLink()) return `${shown} is a link inside the backup`;
+    const last = i === parts.length - 1;
+    if (!last || entry.type === 'directory') {
+      if (!st.isDirectory()) return `${shown} is not a folder inside the backup`;
+    } else if (!st.isFile()) {
+      return `${shown} is not a plain file inside the backup`;
+    }
+  }
+  return null;
+}
+
+/** The first entry `backupSourceProblem` refuses, as its reason, or null. */
+function backupSourceRefusal(backupPath: string, files: readonly BackupFileEntry[]): string | null {
+  for (const entry of files) {
+    const problem = backupSourceProblem(backupPath, entry);
+    if (problem !== null) return problem;
+  }
+  return null;
+}
+
+/**
  * Read a backup file once and check THOSE bytes against its entry. The restore verifies the
  * archive first and stages it later, with the safety backup in between; a file swapped in that
  * window would be copied unchecked if it were read again by name. In an encrypted backup every
@@ -62,7 +101,16 @@ function unrestorableEntry(files: unknown): string | null {
 function readEntryBytes(srcFile: string, entry: BackupFileEntry, encrypted: boolean): Buffer {
   let raw: Buffer;
   try {
-    raw = readFileSync(srcFile);
+    // Not following a link set after `backupSourceProblem` ran: a link here fails the open (ELOOP).
+    // Non-blocking, so a FIFO set there instead opens at once and the type check refuses it,
+    // where a blocking open would wait for a writer and hold the restore.
+    const fd = openSync(srcFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error('not a plain file');
+      raw = readFileSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     // The verify pass found it; gone now means changed, not "skip it and report success".
     throw new Error(`Backup file changed after it was verified — refusing to restore: ${entry.path}`);
@@ -875,6 +923,13 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path outside the backup — refusing to restore: ${unrestorable}` };
     }
 
+    // Before anything reads an entry (the verify pass, the key probe, staging): no link inside the
+    // backup may lead a read to a file of this machine.
+    const linked = backupSourceRefusal(backupPath, manifest.files);
+    if (linked !== null) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Refusing to restore: ${linked}. Nothing was replaced.` };
+    }
+
     // Written only where `isBackedUpEntryPath` allows. The rest is named in the result, not refused: a
     // backup holding a name the inventory has since renamed must stay restorable.
     const isWritten = (entry: BackupFileEntry): boolean => entry.type !== 'directory' && isBackedUpEntryPath(entry.path);
@@ -1231,6 +1286,8 @@ export class BackupManager {
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
       const unrestorable = unrestorableEntry(manifest.files);
       if (unrestorable !== null) return { valid: false, errors: [`Path outside the backup: ${unrestorable}`], files_checked: 0 };
+      const linked = backupSourceRefusal(backupPath, manifest.files);
+      if (linked !== null) return { valid: false, errors: [linked], files_checked: 0 };
       const verifiableFiles = manifest.files.filter(f => f.type !== 'directory');
       // The sqlite→file relabel, which this method used to omit while `createBackup` step 9 and
       // `restoreBackup` both carried it. One question asked in several places, and the one that
