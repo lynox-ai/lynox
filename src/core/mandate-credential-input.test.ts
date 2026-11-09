@@ -8,7 +8,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
-import { MANDATE_KEY_INPUT_REFUSAL, mandateCredentialInput, maskCredentialInput } from './secret-store.js';
+import { MANDATE_KEY_INPUT_REFUSAL, mandateCredentialInput, maskCredentialInput, separatorsAsSpaces } from './secret-store.js';
+import { stripUntrustedSeparators } from './sanitize.js';
 
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const HEX = '0123456789abcdef';
@@ -258,3 +259,13 @@ describe('mandateCredentialInput — rate pinned', () => {
     expect(through).toBeLessThanOrEqual(high);
   });
 });
+
+describe('the second reading of a text', () => {
+  it('replaces exactly what stripUntrustedSeparators replaces, over every code point of the basic plane', () => {
+    let all = '';
+    for (let cp = 0; cp <= 0xffff; cp++) if (cp < 0xd800 || cp > 0xdfff) all += String.fromCodePoint(cp);
+    expect(separatorsAsSpaces(all)).toBe(stripUntrustedSeparators(all));
+    expect(separatorsAsSpaces('a\u0001b\u2028c')).toBe('a b c');
+  });
+});
+

@@ -6,7 +6,6 @@ import type { SecretVault } from './secret-vault.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { isPresetClientSecretName } from './oauth-presets.js';
 import { ENV_REGISTRY } from '../contract/env-registry.js';
-import { stripUntrustedSeparators } from './sanitize.js';
 
 export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 
@@ -501,11 +500,19 @@ function wordsAfter(text: string, from: number): string[] {
  * Returns a fixed label, never any part of the text.
  */
 export function mandateCredentialInput(text: string): string | null {
-  return mandateCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? mandateCredentialIn(stripUntrustedSeparators(text)) : null);
+  return mandateCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? mandateCredentialIn(separatorsAsSpaces(text)) : null);
 }
 
-/** A character `stripUntrustedSeparators` replaces: the second reading is needed only when one is there. */
-const HAS_UNTRUSTED_SEPARATOR = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/;
+/** The characters `stripUntrustedSeparators` (sanitize.ts) replaces with a space; the second reading is
+ *  needed only when one is there. `separatorsAsSpaces` is that function as one native replace — the
+ *  character loop cost over a second on a document of a few megabytes. Pinned equal to it over every
+ *  code point by `mandate-credential-input.test.ts`. */
+const UNTRUSTED_SEPARATOR = '[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f\\u2028\\u2029]';
+const HAS_UNTRUSTED_SEPARATOR = new RegExp(UNTRUSTED_SEPARATOR);
+const UNTRUSTED_SEPARATORS = new RegExp(UNTRUSTED_SEPARATOR, 'g');
+export function separatorsAsSpaces(text: string): string {
+  return text.replace(UNTRUSTED_SEPARATORS, ' ');
+}
 
 /**
  * Both credential checks read a text twice: as it came, and as the engine stores and sends it on —
@@ -550,7 +557,7 @@ function mandateCredentialIn(text: string): string | null {
  * covered. Returns a fixed label, never any part of the text.
  */
 export function mandateDocumentCredential(text: string): string | null {
-  return documentCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? documentCredentialIn(stripUntrustedSeparators(text)) : null);
+  return documentCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? documentCredentialIn(separatorsAsSpaces(text)) : null);
 }
 
 function documentCredentialIn(text: string): string | null {

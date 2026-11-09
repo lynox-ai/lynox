@@ -424,22 +424,16 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       expect(JSON.stringify(engine().getThreadStore()!.getMessages(sid))).not.toContain(b64(`SHOPIFY=${VENDOR_KEY}`).slice(0, 16));
     }, 60_000);
 
-    it('a key sent as an image\'s data string is refused', async () => {
+    it('a key sent as an image\'s data string is refused (a key made of base64 characters only)', async () => {
       const sid = await helperSession();
       const run = spyRun();
-      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data: VENDOR_KEY }] });
+      const AZ09 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      const aws = `${'AK'}IA${[...randomBytes(16)].map((b) => AZ09[b % AZ09.length]).join('')}`;
+      expect(/^[A-Za-z0-9+/]*={0,2}$/.test(aws), 'control: the data string is plain base64').toBe(true);
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data: aws }] });
       expect(res.status).toBe(422);
       expect(run).not.toHaveBeenCalled();
-      expect(dataDirHolds(VENDOR_KEY.slice(-8))).toBe(false);
-    }, 60_000);
-
-    it('a key appended to a real image\'s data string is refused', async () => {
-      const sid = await helperSession();
-      const run = spyRun();
-      const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
-      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data: `${png}${VENDOR_KEY}` }] });
-      expect(res.status).toBe(422);
-      expect(run).not.toHaveBeenCalled();
+      expect(dataDirHolds(aws.slice(-8))).toBe(false);
     }, 60_000);
 
     it('a password in a URL broken by a control character is refused (as it came, before it is stored)', async () => {
@@ -448,6 +442,28 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'db.txt', type: 'text/plain', data: b64(`postgres://shop:${randomKey(6)}\u0001${randomKey(6)}@db.example.org/shop\n`) }] });
       expect(res.status).toBe(422);
       expect(run).not.toHaveBeenCalled();
+    }, 60_000);
+
+    it('a key after a valid image header is refused (the bytes past the header are stored too)', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const header = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const data = Buffer.concat([header, Buffer.from(`SHOPIFY=${VENDOR_KEY}`, 'utf8')]).toString('base64');
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+      expect(dataDirHolds(data.slice(-16))).toBe(false);
+    }, 60_000);
+
+    it('an image whose data is not plain base64 is refused, and nothing of it is stored', async () => {
+      // A decoder stops at a `=` inside the string; what follows would be stored unread.
+      const sid = await helperSession();
+      const run = spyRun();
+      const tail = b64(`SHOPIFY=${VENDOR_KEY}`);
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data: `QQ==${tail}` }] });
+      expect(res.status).toBe(400);
+      expect(run).not.toHaveBeenCalled();
+      expect(dataDirHolds(tail.slice(-16))).toBe(false);
     }, 60_000);
 
     it('control: a real image is not refused', async () => {

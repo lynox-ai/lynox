@@ -1340,19 +1340,6 @@ export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
  * fixed sentence). Every string in `value` is read, nested ones and object keys included; a value
  * nested deeper than four levels is refused unread. The owner is not checked.
  */
-/** Whether `buf` begins with the signature of the image format `type` names (PNG, JPEG, GIF, WebP). */
-function startsAsImage(buf: Buffer, type: string): boolean {
-  const at = (offset: number, bytes: readonly number[]): boolean => bytes.every((b, i) => buf[offset + i] === b);
-  const ascii = (s: string): number[] => [...s].map((c) => c.charCodeAt(0));
-  switch (type) {
-    case 'image/png': return at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    case 'image/jpeg': return at(0, [0xff, 0xd8, 0xff]);
-    case 'image/gif': return at(0, ascii('GIF87a')) || at(0, ascii('GIF89a'));
-    case 'image/webp': return at(0, ascii('RIFF')) && at(8, ascii('WEBP'));
-    default: return false;
-  }
-}
-
 function refusedMandateKeyIn(principal: RequestPrincipal, res: ServerResponse, value: unknown): boolean {
   if (isOwnerPrincipal(principal)) return false;
   const texts: string[] = [];
@@ -4805,9 +4792,10 @@ export class LynoxHTTPApi {
         // leaves nothing behind. The name gets the check a typed message gets; the content only the
         // credential forms (`mandateDocumentCredential`), read both as text and, for a PDF or Word
         // file, as what the extraction below gives. An image block is stored and sent as the `data`
-        // string came, so for a file declared as an image that string is read; and when its bytes do
-        // not begin as the declared format does, they are read as text too (the type is the sender's
-        // word). A real image's pixels are not read.
+        // string came, so for a file declared as an image that string is read, and its bytes as text
+        // too (the type is the sender's word, and bytes after a valid header are still stored). The
+        // string must be plain base64: a decoder stops at a `=` inside it, and what follows would be
+        // stored unread. A real image's pixels are not read.
         if (!isOwnerPrincipal(this._principalOf(req))) {
           for (const file of files) {
             const rawName = typeof file.name === 'string' ? file.name : 'unknown';
@@ -4819,8 +4807,10 @@ export class LynoxHTTPApi {
             const buf = Buffer.from(file.data, 'base64');
             const readings: string[] = [];
             if (rawType.startsWith('image/')) {
-              readings.push(file.data);
-              if (!startsAsImage(buf, rawType)) readings.push(buf.toString('utf-8'));
+              if (!/^[A-Za-z0-9+/]*={0,2}$/.test(file.data)) {
+                errorResponse(res, 400, `Invalid file: ${sanitizeUploadFilename(rawName)}`); return;
+              }
+              readings.push(file.data, buf.toString('utf-8'));
             } else {
               readings.push(buf.toString('utf-8'));
               try {
