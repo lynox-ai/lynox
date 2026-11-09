@@ -170,23 +170,22 @@ describe('the owner continues a thread a mandate\'s turns are in (B6)', { timeou
 describe('threadHoldsForeignTurns: what counts as the owner\'s thread', () => {
   const store = (row: { created_by: string | null } | undefined) => ({ getThread: () => row as never });
 
-  it('the owner\'s tag or no tag (a row from before tags) after an owner run: not foreign', async () => {
+  it('the owner\'s tag or no tag (a row from before tags): not foreign', async () => {
     const { threadHoldsForeignTurns } = await import('./session.js');
-    expect(threadHoldsForeignTurns(OWNER, store({ created_by: 'owner' }), 't')).toBe(false);
-    expect(threadHoldsForeignTurns(OWNER, store({ created_by: null }), 't')).toBe(false);
+    expect(threadHoldsForeignTurns(store({ created_by: 'owner' }), 't')).toBe(false);
+    expect(threadHoldsForeignTurns(store({ created_by: null }), 't')).toBe(false);
   });
 
-  it('a mandate before this run, or a mandate\'s thread: foreign', async () => {
+  it('a mandate\'s thread: foreign', async () => {
     const { threadHoldsForeignTurns } = await import('./session.js');
-    expect(threadHoldsForeignTurns(HELPER, store({ created_by: 'owner' }), 't')).toBe(true);
-    expect(threadHoldsForeignTurns(OWNER, store({ created_by: 'mandate:helper@example.com' }), 't')).toBe(true);
+    expect(threadHoldsForeignTurns(store({ created_by: 'mandate:helper@example.com' }), 't')).toBe(true);
   });
 
   it('fail-closed: no store, no row, a store that throws, an unknown tag — all foreign', async () => {
     const { threadHoldsForeignTurns } = await import('./session.js');
-    expect(threadHoldsForeignTurns(OWNER, null, 't')).toBe(true);
-    expect(threadHoldsForeignTurns(OWNER, store(undefined), 't')).toBe(true);
-    expect(threadHoldsForeignTurns(OWNER, { getThread: () => { throw new Error('db gone'); } }, 't')).toBe(true);
-    expect(threadHoldsForeignTurns(OWNER, store({ created_by: 'cp-admin' }), 't')).toBe(true);
+    expect(threadHoldsForeignTurns(null, 't')).toBe(true);
+    expect(threadHoldsForeignTurns(store(undefined), 't')).toBe(true);
+    expect(threadHoldsForeignTurns({ getThread: () => { throw new Error('db gone'); } }, 't')).toBe(true);
+    expect(threadHoldsForeignTurns(store({ created_by: 'cp-admin' }), 't')).toBe(true);
   });
 });
