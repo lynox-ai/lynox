@@ -14,7 +14,7 @@
 // surfaces to the user as a `requires_user` item — a missed customer mail
 // is unrepairable; an extra Needs-You item is a one-click archive.
 
-import { ClassifierQueue, DrainedForRestoreError, DrainedForShutdownError, type ClassifierQueueOptions } from './classifier/queue.js';
+import { ClassifierQueue, DrainedForRestoreError, DrainedForShutdownError, HandedOverError, type ClassifierQueueOptions } from './classifier/queue.js';
 import {
   CLASSIFIER_VERSION,
   classifyMail,
@@ -323,6 +323,9 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       }
     },
     onDeadLetter: (payload, error) => {
+      // Left by a runtime being replaced: the replacing runtime classifies it. Only when that one
+      // does not take it does it fall through to a failed classification below.
+      if (error instanceof HandedOverError && error.handOver(payload)) return;
       // PRD fail-closed default: surface to Needs You so the user sees it.
       const envelopeFields = payload.envelope ?? {};
       if (error instanceof DrainedForRestoreError || error instanceof DrainedForShutdownError) {

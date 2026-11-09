@@ -238,7 +238,7 @@ describe('the workflow’s side', () => {
     ended(b, 'h@x.ch');
     pause(b, 'p', 'h@x.ch');
     const p = takeoverPreview(deps(b), 'p');
-    expect(p.kind === 'preview' && [p.preview.runsAs, p.preview.workflow]).toEqual(['owner', { id: 'w', name: 'W', takenOver: true }]);
+    expect(p.kind === 'preview' && [p.preview.runsAs, p.preview.workflow]).toEqual(['owner', { id: 'w', name: 'W', takenOver: true, from: { name: 'h@x.ch', role: 'workflow-created' } }]);
     take(b, 'p');
     expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))).toBeUndefined();
   });
@@ -299,8 +299,57 @@ describe('the workflow’s side', () => {
     plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
     ended(b, 'h@x.ch');
     writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-edited'], closedPrompt: false }]);
+    // The workflow now names h's grant as its creator only: the pause's change stays, the creation is added.
     const p = takeoverPreview(deps(b), 'p');
-    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-edited']]]);
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-edited', 'workflow-created']]]);
+  });
+
+  it('only workflow roles are read for a pause: its roles on the plan stay as the pause knew them', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'triggers', 'p', 'h@x.ch');
+    ended(b, 'h@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-created'], closedPrompt: false }]);
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-created']]]);
+  });
+
+  it('says whose mark on the workflow the takeover reads: the editor’s before the creator’s', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'c@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'workflows', 'w', 'h@x.ch');
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.workflow?.from).toEqual({ name: 'h@x.ch', role: 'workflow-edited' });
+  });
+
+  it('says the creator’s mark where the editor’s is covered, as `planMandate` reads it (cover set in the table)', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'c@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    editor(b, 'workflows', 'w', 'h@x.ch');
+    // A takeover covers both marks at once; the editor's alone is set here to read the order.
+    b.db.prepare('UPDATE workflows SET covered_edited_by = mandate_editor, covered_edited_id = mandate_editor_id, covered_edited_at = mandate_edited_at WHERE id = ?').run('w');
+    ended(b, 'c@x.ch');
+    pause(b, 'p', 'c@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.workflow?.from).toEqual({ name: 'c@x.ch', role: 'workflow-created' });
+  });
+
+  it('a pause that knew the workflow’s creation gains the change the same grant made to it, renewed', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-created'], closedPrompt: false }]);
+    renewed(b, 'h@x.ch');
+    editor(b, 'workflows', 'w', 'h@x.ch', 'g-h@x.ch', null);
+    b.db.prepare("UPDATE workflows SET mandate_edited_at = datetime('now', '+1 minute') WHERE id = 'w'").run();
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-created', 'workflow-edited']]]);
   });
 
   it('a renewal: the member the plan was paused for is live again and is still covered', () => {

@@ -20,6 +20,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
+import { markCall, trimToMark, type CallMark } from './stream-attempt.js';
 import { turnEndSettlesTools, promptCreatedAtMs, lostPromptRecheckVerdict, shouldArmRecheck } from './prompt-liveness.js';
 import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, anchorKnowledgeChips, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
@@ -149,6 +150,10 @@ export interface ChatMessage {
 	createdAt?: string;
 	/** @internal — tracks whether a tool call happened between text segments */
 	_toolSinceText?: boolean;
+	/** @internal — where the provider call now streaming began (see `stream-attempt.ts`). */
+	_callStart?: CallMark;
+	/** @internal — where the last call ended (`turn_end`); the next call's start once it streams. */
+	_callEnd?: CallMark;
 }
 
 export type { ToolCallInfo, SpawnProgress, SubAgentActivity } from './chat-attribution.js';
@@ -706,10 +711,15 @@ if (typeof window !== 'undefined') {
 						let reached = false;
 						let lastRole: string | undefined;
 						let activeRun: boolean | undefined;
+						let scheduledQuestion = false;
 						if (!probeSid) return;
 						try {
 							const ar = await fetch(`${getApiBase()}/runs/active`);
-							if (ar.ok) activeRun = selectReattachTarget(await ar.json(), probeSid) !== null;
+							if (ar.ok) {
+								const body: unknown = await ar.json();
+								activeRun = selectReattachTarget(body, probeSid) !== null;
+								scheduledQuestion = scheduledQuestionWaits(body, probeSid);
+							}
 						} catch { /* leave undefined — treated as blind, not as "no run" */ }
 						try {
 							const enc = encodeURIComponent(probeSid);
@@ -725,6 +735,16 @@ if (typeof window !== 'undefined') {
 							}
 						} catch { /* still blind — shouldRefireOfflineTurn declines */ }
 						if (sessionId !== probeSid) return; // thread switched mid-probe
+						// A scheduled run's question waits here. A transcript ending on it reads as
+						// "answered", which cleared the failed message and lost it. It stays failed and marked
+						// offline, is not sent past the question, and the card comes back. Whether it arrived
+						// meanwhile is not decided here: text equality cannot tell it from an earlier message
+						// with the same words. Once the question is answered, the user decides by tapping;
+						// if it had arrived after all, that tap sends it a second time.
+						if (scheduledQuestion) {
+							sayQuestionWaiting(await checkPendingPrompt());
+							return;
+						}
 						if (!shouldRefireOfflineTurn({ reached, lastRole, activeRun })) {
 							// Answered, still running, or still unverifiable. Either way this
 							// turn does not get sent again by itself; the failed bubble keeps
@@ -747,7 +767,10 @@ if (typeof window !== 'undefined') {
 				})();
 				return;
 			}
-			refireFailedTurn(lastFailed);
+			// Asked first too: a message held at a scheduled run's question stays failed, and the
+			// reconnect must not send it past the question the tap stopped at. When the
+			// server cannot be asked yet, it is sent again as before.
+			void askBeforeResend({ unreachableSends: true }).then((resend) => { if (resend) refireFailedTurn(lastFailed); });
 		}
 	});
 	// Flush pending persist on tab close to prevent data loss
@@ -956,8 +979,14 @@ function isKeyInputRefusal(status: number, detail: string | null): boolean {
 	try { return (JSON.parse(detail) as { code?: unknown } | null)?.code === 'mandate_key_input'; } catch { return false; }
 }
 
+/** The code the run stream's terminal `error` event carries when the AI service cut the reply off
+ *  on every attempt (the engine's `StreamIncompleteError.CODE`). */
+const STREAM_INCOMPLETE_CODE = 'stream_incomplete';
+
 /** Map HTTP status + error detail to a user-friendly i18n message. */
-function mapApiError(status: number, detail: string): string {
+function mapApiError(status: number, detail: string, code?: string): string {
+	// A stable code from the engine decides before any text does.
+	if (code === STREAM_INCOMPLETE_CODE) return t('chat.error_incomplete');
 	const lower = detail.toLowerCase();
 	if (status === 409) return t('chat.error_busy');
 	if (status === 401 || lower.includes('authentication') || lower.includes('invalid_api_key') || lower.includes('invalid x-api-key')) {
@@ -1296,7 +1325,7 @@ let _resendProbeInFlight = false;
  * attached. A scheduled run's question waiting there holds it back too: the user is told and
  * the question's card is brought back. Resolves whether to send; never rejects.
  */
-async function askBeforeResend(): Promise<boolean> {
+async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
 	const sid = sessionId;
 	// No session yet: the failed turn never reached one, so nothing can be running.
@@ -1311,6 +1340,10 @@ async function askBeforeResend(): Promise<boolean> {
 		live = selectReattachTarget(body, sid);
 		scheduledQuestion = scheduledQuestionWaits(body, sid);
 	} catch {
+		// The reconnect's automatic re-send went ahead before it asked first, and still does when
+		// the question cannot be asked, silently: right after `online` the network often is not
+		// back yet, and the re-send waits for it.
+		if (opts.unreachableSends === true) return sessionId === sid;
 		// Not "nothing is running": the question could not be asked, so nothing is sent.
 		if (sessionId === sid) addToast(t('chat.error_connection'), 'error', 6000);
 		return false;
@@ -1322,19 +1355,43 @@ async function askBeforeResend(): Promise<boolean> {
 	if (live === null && scheduledQuestion) {
 		// A scheduled run's question has no stream to attach: the way on is to answer it, so
 		// its card is brought back rather than a turn sent past it.
-		addToast(t('chat.question_waiting'), 'info', 6000);
-		void checkPendingPrompt();
+		sayQuestionWaiting(await checkPendingPrompt());
 		return false;
 	}
 	if (live === null) return true;
-	// A run that waits for the user's answer is not working: the way on is to answer it.
-	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting' : 'chat.still_running'), 'info', 6000);
+	// A run that waits for the user's answer is not working: the way on is to answer it. Its card
+	// comes with the attached stream, so the sentence names no card and no X; for an approval it
+	// says "question", as main did, rather than fetch the card and race a second probe.
+	if (live.status === 'awaiting_input') addToast(t('chat.question_waiting_plain'), 'info', QUESTION_TOAST_MS);
+	else addToast(t('chat.still_running'), 'info', 6000);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
 	// own failures (an unreachable stream leaves the thread as it is).
 	void reattachToActiveRun(sid, -1);
 	return false;
+}
+
+/**
+ * Says that a scheduled run's question holds a message back, by the card that came back.
+ * A decision card (approval, deep consent) has no X to cancel it, so its sentence names none, nor
+ * does another kind of card that came back (several questions, a secret, a mail connection). With
+ * no card restored, nothing is said: a sentence about one could be false.
+ */
+function sayQuestionWaiting(card: PendingCard): void {
+	const key = questionWaitingKey(card);
+	if (key !== null) addToast(t(key), 'info', QUESTION_TOAST_MS);
+}
+
+/** The longest of these sentences runs to about 200 characters; 6 s was too short to read it. */
+const QUESTION_TOAST_MS = 10_000;
+
+/** The sentence for `card`, or null when no card came back. */
+export function questionWaitingKey(card: PendingCard): string | null {
+	if (card === 'decision') return 'chat.question_waiting_decision';
+	if (card === 'question') return 'chat.question_waiting';
+	if (card === 'other') return 'chat.question_waiting_plain';
+	return null;
 }
 
 /** The tap on a failed message: asks first, then sends `text` again. Never rejects. */
@@ -1983,6 +2040,18 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		void loadThreads();
 	}
 
+	// The main agent's call streams content: the first content of a run marks where its call
+	// began, and the first after a `turn_end` makes that end the start of the next call. A
+	// child's tool calls are not the main agent's call.
+	if (type === 'text' || type === 'thinking' || (type === 'tool_call' && !isChildEvent(data['subAgentId'], data['subAgent']))) {
+		if (msg._callEnd) {
+			msg._callStart = msg._callEnd;
+			msg._callEnd = undefined;
+		} else if (!msg._callStart) {
+			msg._callStart = markCall(msg);
+		}
+	}
+
 	switch (type) {
 		case 'text': {
 			const text = String(data['text'] ?? '');
@@ -2247,6 +2316,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		case 'turn_end': {
 			retryStatus = null;
+			if (msg._callEnd) msg._callStart = msg._callEnd;
+			msg._callEnd = markCall(msg);
 			// Recovery for a dropped/late `tool_result` event: if the agent has
 			// finished its turn the engine MUST have received every tool's
 			// result server-side (otherwise the model couldn't have produced
@@ -2487,6 +2558,15 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const attempt = data['attempt'] as number;
 			const maxAttempts = data['maxAttempts'] as number;
 			retryStatus = { attempt, maxAttempts };
+			// The call that failed is sent again: what it streamed is taken back out, so the
+			// answer does not show twice. The engine says whether the failed call had sent its
+			// own `turn_end` (`afterTurnEnd`): then the last end seen is that call's, and its
+			// start is `_callStart`. Otherwise a `turn_end` not yet followed by content was the
+			// previous call's, and the failed call, which streamed nothing, began there.
+			const start = data['afterTurnEnd'] === true ? msg._callStart : (msg._callEnd ?? msg._callStart);
+			if (start) trimToMark(msg, start);
+			msg._callStart = start ?? markCall(msg);
+			msg._callEnd = undefined;
 			break;
 		}
 		case 'error': {
@@ -2503,8 +2583,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// once the SSE stream is open — without explicit UI surfacing the user
 			// previously saw their own bubble and then nothing (silent fail).
 			const rawErr = String(data['error'] ?? data['message'] ?? 'Unknown error');
+			const errCode = typeof data['code'] === 'string' ? data['code'] : undefined;
 			chatErrorDetail = rawErr;
-			chatError = mapApiError(0, rawErr);
+			chatError = mapApiError(0, rawErr, errCode);
 			// Stop the spinner so a stale `streamingActivity` indicator doesn't
 			// keep ticking after the engine has already emitted the failure event.
 			// The outer finally block also clears these once the SSE stream closes,
@@ -2519,8 +2600,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// scrolled the chat error banner off-screen (mobile + long threads).
 			// Truncate the raw upstream string so a paragraph-long stack from a
 			// noisy provider doesn't blow up the toast layout.
+			// A failure the engine names by code is worded in the banner; the toast then only
+			// says that the reply failed, and the raw text stays in the detail.
 			const detailSnippet = rawErr.length > 140 ? `${rawErr.slice(0, 140)}…` : rawErr;
-			addToast(`${t('chat.error_toast_prefix')}: ${detailSnippet}`, 'error', 8000);
+			addToast(errCode === STREAM_INCOMPLETE_CODE
+				? `${t('chat.error_toast_prefix')}.`
+				: `${t('chat.error_toast_prefix')}: ${detailSnippet}`, 'error', 8000);
 			// Remove empty assistant message and mark user message as failed —
 			// UNLESS the caller owns that decision. The engine emits `error` both
 			// for a dead turn and for an incident it recovers from (see the
@@ -2914,16 +2999,28 @@ export function getMailConnectGeneration() {
 }
 
 /**
- * Check the server for a pending prompt that survived a disconnect/refresh.
- * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it.
+ * The card `checkPendingPrompt` brought back: a question (its card has the X that cancels it), a
+ * decision (an approval or a deep-consent card, which have no X), another kind of prompt, or none.
  */
-export async function checkPendingPrompt(): Promise<void> {
-	if (!sessionId) return;
+export type PendingCard = 'question' | 'decision' | 'other' | null;
+
+/**
+ * Check the server for a pending prompt that survived a disconnect/refresh.
+ * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
+ */
+export async function checkPendingPrompt(): Promise<PendingCard> {
+	const sid = sessionId;
+	if (!sid) return null;
+	let card: PendingCard = null;
 	try {
+		// `sessionId` is `sid` here (no await between); the polled-routes list names this spelling.
 		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/pending-prompt`);
-		if (!res.ok) return;
+		if (!res.ok) return null;
 		const data = (await res.json()) as Record<string, unknown>;
-		if (!data['pending']) return;
+		// The chat may have changed while the request ran: the card belongs to the chat it was
+		// asked for, and set now it would show in another one.
+		if (sessionId !== sid) return null;
+		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;
 		const kind = data['kind'] as string | undefined;
@@ -2951,6 +3048,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				receivedAt: createdAt,
 				origin,
 			};
+			card = 'other';
 		} else if (promptType === 'ask_user') {
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
@@ -2964,6 +3062,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				multiSelect: data['multiSelect'] === true,
 				origin,
 			};
+			card = isConsentCard(pendingPermission.options) ? 'decision' : 'question';
 		} else if (promptType === 'ask_secret') {
 			pendingSecretPrompt = {
 				name: String(data['secretName'] ?? ''),
@@ -2973,6 +3072,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				origin,
 			};
 			secretPromptGeneration++;
+			card = 'other';
 		} else if (promptType === 'connect_mail' && data['mailConnect']) {
 			const mc = data['mailConnect'] as Record<string, unknown>;
 			pendingMailConnect = {
@@ -2989,10 +3089,12 @@ export async function checkPendingPrompt(): Promise<void> {
 				origin,
 			};
 			mailConnectGeneration++;
+			card = 'other';
 		}
 	} catch {
 		// Non-critical — prompt check failed, user can still interact normally
 	}
+	return card;
 }
 
 /** Stop the current run. Resolves false when the stop request could not be sent (it may still
@@ -3410,11 +3512,28 @@ function runEnded(answer: ChatMessage | null): void {
 	void refreshThreadContained({ afterRun: true, answer });
 }
 
+/**
+ * Window event sent when a run of the open chat stopped streaming in this tab: done, a stop, an
+ * error, a dropped stream. Not every run end: runs in other tabs, a run in a chat the user left,
+ * and a stop from a tab without the stream send none. The status bar reads today's cost again on it, instead of waiting for its next
+ * poll. Several may come for one run (a stop sends one when the server confirms the stop and one
+ * when the stream closes); a listener coalesces them. Only the one at the stream's close is sure
+ * to come after the server stored the run: the stop's confirmation arrives while the run may
+ * still be winding down.
+ */
+export const RUN_ENDED_EVENT = 'lynox:run-ended';
+
+function signalRunEnded(): void {
+	// Only a notice: a page without window events (a test's stand-in) does not stop a run's end.
+	if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') window.dispatchEvent(new Event(RUN_ENDED_EVENT));
+}
+
 /** The stream of the open chat's run stopped: no longer streaming, and {@link runEnded}. The only
  *  way to clear `isStreaming` but for the resets of a new or reopened chat. */
 function endStreaming(answer: ChatMessage | null = null): void {
 	isStreaming = false;
 	runEnded(answer);
+	signalRunEnded();
 }
 
 async function refreshThreadContained(opts: { afterRun?: boolean; answer?: ChatMessage | null } = {}): Promise<void> {
@@ -3709,7 +3828,13 @@ export async function retryInterruptedRun(): Promise<void> {
 		const m = messages[i];
 		if (m && m.role === 'user' && m.content) { lastUserText = m.content; break; }
 	}
+	// Asked before the dismiss: a waiting question (or a live run, or no answer from the server)
+	// keeps the banner and its Retry, and nothing is sent. The chat is checked after each await,
+	// so the retry never goes into a chat opened meanwhile.
+	const sid = sessionId;
+	if (lastUserText && !await askBeforeResend()) return;
 	await dismissInterruptedRun();
+	if (sessionId !== sid) return;
 	if (lastUserText) await sendMessage(lastUserText);
 }
 
@@ -3751,7 +3876,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
-	if (!res.ok || !res.body) { runEnded(null); return; }
+	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); return; }
 	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return; }
 
 	const myEpoch = ++streamEpoch;

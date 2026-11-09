@@ -65,6 +65,8 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
   }]);
   return {
     ...real,
+    // Its default register is bound inside the real module, so it is handed this one too.
+    builtInPresetOf: (profile: Parameters<typeof real.builtInPresetOf>[0]) => real.builtInPresetOf(profile, register),
     derivePresetEndpoints: (id: string, params: Readonly<Record<string, unknown>> | undefined) =>
       real.derivePresetEndpoints(id, params, register),
     presetIds: () => register.ids(),
@@ -141,6 +143,7 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { EXAMPLE_
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
     secretStore: {
+      resolve: (name: string): string | null => secrets[name] ?? null,
       extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)].map((m) => m[1]!),
       resolveSecretRefs: (input: unknown): unknown => {
         const text = JSON.stringify(input);
@@ -675,6 +678,29 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain('https://tenant.lynox.example');
   });
 
+  it('A1 preset · tells a built-in provider\'s profile that fetch_token is no way around it', async () => {
+    // fetch_token posts no app-level grant for a built-in provider's profile and sends it back
+    // to connect, so the old advice "use action=fetch_token" sent the model in a circle.
+    delete process.env['ORIGIN'];
+    const store = new ApiStore();
+    store.register(shopProfile());
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toBe(`Error: profile "${shopProfile().id}" cannot be authorized now: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to after they authorize lynox at Example Shop. There is no other way to connect Example Shop here: this engine connects Example Shop only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. fetch_token cannot do that authorization either; it only renews a profile that was authorized before and still holds its refresh token. Tell the user that this profile cannot be connected until whoever runs this engine sets its public address (ORIGIN).`);
+  });
+
+  it('A1 own app · still points a profile of its own at fetch_token, which serves it', async () => {
+    delete process.env['ORIGIN'];
+    const store = new ApiStore();
+    const p = shopProfile();
+    store.register({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: undefined } } });
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toBe('Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.');
+  });
+
   it('A2 · refuses an id it does not know', async () => {
     const result = await connect(agentWith(new ApiStore()), 'nope');
     expect(result).toContain('not found');
@@ -899,6 +925,9 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).toContain('defined wrongly in this engine');
     expect(result).not.toContain('preset_params.');
     expect(result).not.toContain('/api/oauth/connect/');
+    // fetch_token is no way around a built-in provider either: it sends the profile back here.
+    expect(result).not.toContain('use action=fetch_token');
+    expect(result).toBe('Error: profile "shop-api" cannot be authorized: the built-in provider it uses is defined wrongly in this engine (one of its paths does not start with a slash, so it would merge into the host instead of following it). There is no other way to connect Broken Path here: this engine connects Broken Path only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. There is nothing to set on the profile, and fetch_token cannot do the authorization this provider\'s tokens come from. Tell the user that this profile cannot be connected because of an error in lynox itself, not in their settings.');
   });
 
   it('A9b · will not read a data-egress acceptance as agreement to be sent somewhere', async () => {

@@ -49,6 +49,9 @@ export interface SecretStoreLike {
    * ask_secret" is the wrong instruction for a key that is already stored.
    */
   explainUnresolved?(name: string): 'out-of-scope' | undefined;
+  /** Whether `resolve` would hand out a value for `name`, without reading it out and without an
+   *  audit event. Optional: a store without it cannot answer, and a caller then assumes nothing. */
+  holds?(name: string): boolean;
   /** Whether the value under `name` came from the process environment (`LYNOX_SECRET_*` or a
    *  well-known variable) rather than the vault. A mandate's turn is refused these (PRD
    *  customer-granted-operator-access D1): they are the engine's, not something the setup

@@ -106,7 +106,7 @@ vi.mock('../integrations/inbox/bootstrap.js', () => ({
   bootstrapInbox: (opts: unknown) => mockBootstrapInbox(opts),
 }));
 
-import { Engine, RESTORE_INBOX_BOUND_MS, SHUTDOWN_INBOX_CLASSIFY_MS, SHUTDOWN_INBOX_CUTOFF_MS } from './engine.js';
+import { Engine, REBOOTSTRAP_INBOX_DRAIN_MS, REBOOTSTRAP_INBOX_HANDOVER_MS, RESTORE_INBOX_BOUND_MS, SHUTDOWN_INBOX_CLASSIFY_MS, SHUTDOWN_INBOX_CUTOFF_MS } from './engine.js';
 import type { LynoxConfig, LynoxUserConfig } from '../types/index.js';
 import { InboundMailDeferred } from '../integrations/mail/inbound-deferred.js';
 
@@ -115,6 +115,7 @@ interface MockRuntime {
   hook: ReturnType<typeof vi.fn>;
   onAccountAdded: ReturnType<typeof vi.fn>;
   shutdown: ReturnType<typeof vi.fn>;
+  queue: { enqueue: ReturnType<typeof vi.fn> };
 }
 
 function makeRuntime(sentinel: string): MockRuntime {
@@ -123,6 +124,7 @@ function makeRuntime(sentinel: string): MockRuntime {
     hook: vi.fn().mockResolvedValue(undefined),
     onAccountAdded: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
+    queue: { enqueue: vi.fn(() => true) },
   };
 }
 
@@ -684,6 +686,190 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       releaseDrain();
     }
     expect((engine as unknown as { _inboxIntakeClosed: boolean })._inboxIntakeClosed).toBe(false);
+  });
+
+  // The old runtime's drain is bounded. A drain that hangs no longer holds new mail back
+  // until a restart: after the bound the new runtime is wired, and what the old one still holds
+  // goes to it.
+  async function engineWithHangingDrain(bootstrapFails = false): Promise<{ engine: Engine; usRuntime: MockRuntime; inflight: () => Promise<void> | null; handover: { within?: { classifyUntil: number; cutOffAt: number }; handOver?: (p: unknown) => boolean; finish?: () => void } }> {
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
+    const engine = new Engine({ model: 'balanced' });
+    const usRuntime = makeRuntime('us-runtime');
+    const handle = engine as unknown as {
+      _inboxRuntime: MockRuntime | null; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
+      _inboxRebootstrapInflight: Promise<void> | null;
+    };
+    handle._inboxRuntime = usRuntime;
+    handle._mailStateDb = { __sentinel: 'mail-db' };
+    handle._inboxLlmRegion = 'us';
+    const handover: { within?: { classifyUntil: number; cutOffAt: number }; handOver?: (p: unknown) => boolean; finish?: () => void } = {};
+    usRuntime.shutdown.mockImplementation((opts?: { within?: { classifyUntil: number; cutOffAt: number }; handOver?: (p: unknown) => boolean }) => {
+      // The plain drain never settles; a shutdown's bounded drain settles at once; the handover
+      // settles once the test says so.
+      if (opts?.within && !opts.handOver) return Promise.resolve();
+      if (opts?.handOver) {
+        handover.within = opts.within; handover.handOver = opts.handOver;
+        return new Promise<void>((resolve) => { handover.finish = resolve; });
+      }
+      return new Promise<void>(() => { /* hangs */ });
+    });
+    if (bootstrapFails) mockBootstrapInbox.mockImplementationOnce(() => { throw new Error('bootstrap failed'); });
+    else mockBootstrapInbox.mockReturnValueOnce(makeRuntime('eu-runtime'));
+    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.eu.mistral.ai/v1', openai_model_id: 'mistral-large-2512' } satisfies LynoxUserConfig);
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
+    return { engine, usRuntime, inflight: () => handle._inboxRebootstrapInflight, handover };
+  }
+
+  it('a hanging drain: after the bound the new runtime is wired and takes what the old one held', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { engine, inflight, handover } = await engineWithHangingDrain();
+      await engine.reloadCredentials();
+      const running = inflight();
+      expect(running, 'fixture: rebootstrap in flight').not.toBeNull();
+      const handle = engine as unknown as { _inboxRuntime: MockRuntime | null; _inboxClassifierSuspended: boolean; _inboxRetiringRuntime: unknown };
+      await vi.advanceTimersByTimeAsync(REBOOTSTRAP_INBOX_DRAIN_MS - 1);
+      expect(handle._inboxClassifierSuspended, 'still within the bound').toBe(true);
+      const before = Date.now();
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(handover.finish, 'handover started').toBeDefined());
+      const euRuntime = mockBootstrapInbox.mock.results[0]?.value as MockRuntime;
+      // While the old runtime hands over, new mail already goes to the new one.
+      expect(handle._inboxRuntime).toBe(euRuntime);
+      expect(handle._inboxClassifierSuspended).toBe(false);
+      expect(handle._inboxRetiringRuntime, 'still retiring during the handover').not.toBeNull();
+      handover.finish!();
+      await running;
+      expect(handle._inboxRetiringRuntime).toBeNull();
+      // The old runtime's waiting jobs go over at once, its running ones after the handover window.
+      expect(handover.within?.classifyUntil).toBeGreaterThanOrEqual(before);
+      expect(handover.within!.cutOffAt - handover.within!.classifyUntil).toBe(REBOOTSTRAP_INBOX_HANDOVER_MS);
+      const payload = { threadKey: 'imap:t1' };
+      expect(handover.handOver?.(payload)).toBe(true);
+      expect(euRuntime.queue.enqueue).toHaveBeenCalledWith(payload);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a hanging drain whose replacement fails to bootstrap still ends within the bound', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => { /* expected */ });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { engine, inflight, handover } = await engineWithHangingDrain(true);
+      const mailContext: { hooks: { onInboundMail?: InboundHook } } = { hooks: {} };
+      (engine as unknown as { _mailContext: unknown })._mailContext = mailContext;
+      await engine.reloadCredentials();
+      const running = inflight();
+      await vi.advanceTimersByTimeAsync(REBOOTSTRAP_INBOX_DRAIN_MS);
+      await vi.waitFor(() => expect(handover.finish, 'handover started').toBeDefined());
+      handover.finish!();
+      await running;
+      const handle = engine as unknown as { _inboxClassifierSuspended: boolean; _inboxRetiringRuntime: unknown };
+      expect(handle._inboxClassifierSuspended).toBe(false);
+      expect(handle._inboxRetiringRuntime).toBeNull();
+      // Nothing to hand over to: the old runtime's jobs are surfaced as failed classifications.
+      expect(handover.handOver?.({ threadKey: 'imap:t1' })).toBe(false);
+      // No deferring stand-in is left behind: it would hold every mail back until a restart.
+      expect(mailContext.hooks.onInboundMail).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      errSpy.mockRestore();
+    }
+  });
+
+  it('a second switch during the handover waits for the first, then switches again', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { engine, inflight, handover } = await engineWithHangingDrain();
+      const handle = engine as unknown as { _inboxRuntime: MockRuntime | null; _inboxClassifierSuspended: boolean; _inboxRebootstrapInflight: Promise<void> | null };
+      await engine.reloadCredentials();
+      const first = inflight();
+      await vi.advanceTimersByTimeAsync(REBOOTSTRAP_INBOX_DRAIN_MS);
+      await vi.waitFor(() => expect(handover.finish, 'handover started').toBeDefined());
+      const euRuntime = mockBootstrapInbox.mock.results[0]?.value as MockRuntime;
+      expect(handle._inboxRuntime, 'fixture: the new runtime is live during the handover').toBe(euRuntime);
+
+      // Back to the first region while the old runtime still hands over.
+      const usAgain = makeRuntime('us-again');
+      mockBootstrapInbox.mockReturnValueOnce(usAgain);
+      mockLoadConfig.mockReturnValueOnce({ api_key: 'sk-ant-old', provider: 'anthropic' } satisfies LynoxUserConfig);
+      mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-old');
+      await engine.reloadCredentials();
+      const second = handle._inboxRebootstrapInflight;
+      expect(second, 'the second switch is tracked').not.toBeNull();
+      expect(second).not.toBe(first);
+      expect(euRuntime.shutdown, 'the second has not started while the first hands over').not.toHaveBeenCalled();
+      // Meanwhile new mail is held back: the live runtime classifies in the region being left.
+      const hookOf = (engine as unknown as { _inboundMailHook: (r: MockRuntime) => InboundHook })._inboundMailHook(euRuntime);
+      await expect(hookOf('acct-1', { messageId: 'm-wait' } as unknown as import('../integrations/mail/context.js').MailEnvelope)).rejects.toBeInstanceOf(InboundMailDeferred);
+      expect(euRuntime.hook).not.toHaveBeenCalled();
+
+      handover.finish!();
+      await first;
+      // The first one settling leaves the second tracked; it is the one that switches now.
+      expect(handle._inboxRebootstrapInflight).toBe(second);
+      await second;
+      expect(handle._inboxRebootstrapInflight).toBeNull();
+      expect(euRuntime.shutdown).toHaveBeenCalled();
+      expect(handle._inboxRuntime).toBe(usAgain);
+      expect(handle._inboxClassifierSuspended).toBe(false);
+      expect(mockBootstrapInbox).toHaveBeenCalledTimes(2);
+      expect((engine as unknown as { _inboxSwitchesWaiting: number })._inboxSwitchesWaiting).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a second switch during the drain, before any runtime is live, is not lost', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { engine, inflight, handover } = await engineWithHangingDrain();
+      const handle = engine as unknown as { _inboxRuntime: MockRuntime | null; _inboxRebootstrapInflight: Promise<void> | null };
+      await engine.reloadCredentials();
+      const first = inflight();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(handle._inboxRuntime, 'fixture: no runtime is live during the drain').toBeNull();
+
+      const usAgain = makeRuntime('us-again');
+      mockBootstrapInbox.mockReturnValueOnce(usAgain);
+      mockLoadConfig.mockReturnValueOnce({ api_key: 'sk-ant-old', provider: 'anthropic' } satisfies LynoxUserConfig);
+      mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-old');
+      await engine.reloadCredentials();
+      const second = handle._inboxRebootstrapInflight;
+      expect(second).not.toBe(first);
+
+      await vi.advanceTimersByTimeAsync(REBOOTSTRAP_INBOX_DRAIN_MS);
+      await vi.waitFor(() => expect(handover.finish).toBeDefined());
+      handover.finish!();
+      await second;
+      expect(handle._inboxRuntime).toBe(usAgain);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a switch waiting when a shutdown begins bootstraps nothing after it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { engine, handover } = await engineWithHangingDrain();
+      await engine.reloadCredentials();
+      await vi.advanceTimersByTimeAsync(1_000);
+      mockBootstrapInbox.mockReturnValueOnce(makeRuntime('us-again'));
+      mockLoadConfig.mockReturnValueOnce({ api_key: 'sk-ant-old', provider: 'anthropic' } satisfies LynoxUserConfig);
+      mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-old');
+      await engine.reloadCredentials();
+
+      const done = engine.shutdown({ inboxBacklog: 'bounded' });
+      await vi.advanceTimersByTimeAsync(REBOOTSTRAP_INBOX_DRAIN_MS);
+      await vi.waitFor(() => expect(handover.finish).toBeDefined());
+      handover.finish!();
+      await done;
+      // The first rebootstrap finished its switch; the waiting one started no runtime after the shutdown.
+      expect(mockBootstrapInbox).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a rebootstrap whose bootstrap fails leaves no hook behind, as a cold boot whose inbox failed', async () => {

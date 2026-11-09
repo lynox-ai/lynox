@@ -36,10 +36,15 @@ interface MockedAgentShape {
   getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
   getRecordedToolCallCount: () => number;
   getLastStop: () => import('../../core/agent.js').SendStop | null;
+  getHelperCostUsd: () => number;
+  getStoppedCallSessionCostUsd: () => number;
+  getCapOnlyCostUsd: () => number;
 }
 
 /** How many tool calls each constructed child reports having recorded. */
 let mockRecordedToolCalls = 0;
+/** The estimate of ended calls each constructed child reports (`getHelperCostUsd`). */
+let mockHelperCostUsd = 0;
 /** Why each constructed child says its `send()` ended (null = clean end_turn). */
 let mockLastStop: import('../../core/agent.js').SendStop | null = null;
 
@@ -96,6 +101,12 @@ vi.mock('../../core/agent.js', () => ({
     // `mockRecordedToolCalls` and then asserts the value REACHED updateRun.
     this.getRecordedToolCallCount = () => mockRecordedToolCalls;
     this.getLastStop = () => mockLastStop;
+    // By default no ended calls in a mocked child: nothing on its cost line beyond the
+    // snapshot, nothing to take back off the session cap, and no bound for the parent's ceiling. The real booking is pinned in
+    // `spawn-stopped-call-cost.test.ts`, against a real child agent.
+    this.getHelperCostUsd = () => mockHelperCostUsd;
+    this.getStoppedCallSessionCostUsd = () => 0;
+    this.getCapOnlyCostUsd = () => 0;
   }),
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
   // factory mock replaces the whole module, so this export must exist or the
@@ -116,6 +127,13 @@ vi.mock('../../core/agent.js', () => ({
     constructor() {
       super('Run stopped: two truncated turns in a row held only thinking');
       this.name = 'ThinkingOnlyLoopError';
+    }
+  },
+  // As in agent.ts: a run-abort subclass, thrown by the guard on the reply's text.
+  ToolCallImitationError: class ToolCallImitationError extends MockRunAbortedError {
+    constructor() {
+      super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+      this.name = 'ToolCallImitationError';
     }
   },
 }));
@@ -280,6 +298,7 @@ describe('spawn_agent tool', () => {
     mockCostSnapshot = null;
     mockCostSnapshotQueue = null;
     mockRecordedToolCalls = 0;
+    mockHelperCostUsd = 0;
     mockLastStop = null;
     testCounters = {
       httpRequests: 0,
@@ -698,6 +717,13 @@ describe('spawn_agent tool', () => {
         opts?.disposableDeadline?.addEventListener('abort', () => reject(new ThinkingOnlyLoopError()), { once: true });
       })), 30);
       expect(guarded).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'thinking_loop' }));
+
+      // The same for the guard on a tool call written out as text.
+      const { ToolCallImitationError } = await import('../../core/agent.js');
+      const imitated = await rowsFor(() => mockSend.mockImplementationOnce((_t: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_r, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new ToolCallImitationError()), { once: true });
+      })), 30);
+      expect(imitated).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'tool_call_imitation' }));
     }, 3000);
 
     it('a loop break that lands after the limit fired is still a loop break, not a timeout', async () => {
@@ -4972,6 +4998,17 @@ describe('spawn_agent tool', () => {
         expect(charged, 'the delegating ceiling sees the whole').toEqual([0.5]);
       });
 
+      it('when it succeeds with an ended call on its cost line: the row adds the estimate, the debit does not', async () => {
+        delegated();
+        mockHelperCostUsd = 0.07;
+        const charged: number[] = [];
+        const { agent, onAfterRun, updateRun } = parent(charged);
+        await spawnAgentTool.handler({ agents: [{ name: 'delegator', task: 'x' }] }, agent);
+        expect((updateRun.mock.calls[0]![1] as { status: string }).status).toBe('completed');
+        expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'own spend plus the estimate').toBeCloseTo(0.27, 12);
+        expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited its own spend only').toEqual([0.2]);
+      });
+
       it('when it fails', async () => {
         delegated();
         mockSend.mockRejectedValueOnce(new Error('child exploded after delegating'));
@@ -5461,8 +5498,9 @@ describe('spawn_agent tool', () => {
     });
 
     it('a child a loop guard stopped is recorded aborted with the guard as the reason and its message as the error', async () => {
-      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } = await import('../../core/agent.js');
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } = await import('../../core/agent.js');
       const cases: Array<[Error, string]> = [
+        [new ToolCallImitationError(), 'tool_call_imitation'],
         [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
         [new ContinuationLoopError('prefix'), 'continuation_loop'],
         [new ThinkingOnlyLoopError(), 'thinking_loop'],
