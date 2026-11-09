@@ -3880,6 +3880,113 @@ describe('LynoxHTTPApi', () => {
       }, { signalled: true });
     });
 
+    // A chat run that works on while a scheduled run's question waits in the same thread. The
+    // thread holds one open question, and it is not the run's: the run must not be taken over as
+    // if it were parked on it, and the question must not lapse with the run.
+    async function withRunBesideQuestion(
+      sid: string,
+      body: (ctx: {
+        prompts: { getById: (id: string) => { status: string; closed_reason: string | null } | undefined };
+        slots: Map<string, unknown>;
+        finishWork: () => void;
+        /** The scheduled run's question. */
+        questionId: string;
+      }) => Promise<void>,
+    ): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        segments_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        answer_error TEXT,
+        multi_select INTEGER,
+        payload_json TEXT,
+        origin_json TEXT,
+        trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        closed_reason TEXT, expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      try {
+        const questionId = realPromptStore.insertAskUser(sid, 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+        let finishWork!: () => void;
+        const work = new Promise<void>((r) => { finishWork = r; });
+        // The chat run works, without a question of its own, until the test lets it finish.
+        mockSessionRun.mockImplementationOnce(async () => { await work; return 'done'; });
+        // Not awaited: a run that writes nothing yet sends no headers either.
+        const runRes = jsonFetch(`/api/sessions/${sid}/run`, {
+          method: 'POST',
+          body: JSON.stringify({ task: 'sort the invoices', protocol: 1 }),
+        }).then((r) => r.text()).catch(() => undefined);
+        for (let i = 0; i < 200 && !slots.has(sid); i++) await new Promise<void>((r) => setTimeout(r, 5));
+        expect(slots.has(sid), 'positive control: the run holds its slot').toBe(true);
+        try {
+          await body({ prompts: realPromptStore, slots, finishWork, questionId });
+        } finally {
+          finishWork();
+          await runRes;
+          await expectSlotReclaimed(slots, sid);
+        }
+      } finally {
+        engineRef.getPromptStore = originalGetPromptStore;
+        db.close();
+      }
+    }
+
+    // The stream is marked dead by hand, as in the takeover test above: the server does not see
+    // the connection close on this route today, so no test can drop it for real.
+    it('a second message does not take over a run working beside a scheduled question', async () => {
+      repayRateWindow();
+      await withRunBesideQuestion('second-beside-1', async ({ prompts, slots, questionId }) => {
+        (slots.get('second-beside-1') as { streamAlive: boolean }).streamAlive = false;
+        const next = await jsonFetch('/api/sessions/second-beside-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'something else', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(slots.has('second-beside-1')).toBe(true);
+        expect(prompts.getById(questionId)?.status).toBe('pending');
+      });
+    });
+
+    it('stopping a run working beside a scheduled question frees it and leaves the question open', async () => {
+      repayRateWindow();
+      await withRunBesideQuestion('abort-beside-1', async ({ prompts, slots, finishWork, questionId }) => {
+        // The working run stops on `session.abort()`, as the real agent loop does.
+        mockSessionAbort.mockImplementationOnce(() => { finishWork(); });
+        const abortRes = await jsonFetch('/api/sessions/abort-beside-1/abort', { method: 'POST' });
+        expect(abortRes.status).toBe(200);
+        await expectSlotReclaimed(slots, 'abort-beside-1');
+        expect(prompts.getById(questionId)?.status).toBe('pending');
+      });
+    });
+
     it('POST /abort reclaims a parked run even when the Session is already gone', async () => {
       await withParkedRun('abort-parked-2', async ({ prompts, slots }) => {
         mockSessionGet.mockReturnValueOnce(undefined);

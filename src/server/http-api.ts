@@ -1852,7 +1852,11 @@ export class LynoxHTTPApi {
   // Per-session run tracking. `streamAlive=false` after the SSE connection
   // closes; if a pending prompt is then blocking the previous run, a fresh
   // /run can take it over instead of 409-looping forever (Bug 3).
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number }>();
+  /** `parked` says whether the run waits on a question it asked itself. The thread's one open
+   *  question can be a scheduled run's instead, asked beside a working chat run; reading it by
+   *  thread alone took that run over and let the scheduled run's question lapse. A slot without
+   *  `parked` is read by the thread's question, as before. */
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean }>();
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -4554,7 +4558,9 @@ export class LynoxHTTPApi {
       const promptStoreEarly = this.engine?.getPromptStore();
       const existingSlot = this.runningSessions.get(sessionId);
       if (existingSlot && !existingSlot.streamAlive) {
-        const hasPrompt = !!promptStoreEarly?.getPending(sessionId);
+        // Only a run parked on its OWN question: a scheduled run's question in this thread does
+        // not make a working run stuck.
+        const hasPrompt = (existingSlot.parked?.() ?? true) && !!promptStoreEarly?.getPending(sessionId);
         const stale = Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
         if (hasPrompt || stale) {
           // Taking over ends the parked run and lets its question lapse: only that run's
@@ -5389,7 +5395,9 @@ export class LynoxHTTPApi {
         // streamTimeout.
         setTimeout(() => {
           const liveSlot = this.runningSessions.get(sessionId);
-          if (liveSlot && !liveSlot.streamAlive && promptStore?.getPending(sessionId)) {
+          // Parked on its own question: a scheduled run's question beside a run that works on
+          // headless is not this run's, and taking the run over would let it lapse too.
+          if (liveSlot && !liveSlot.streamAlive && (liveSlot.parked?.() ?? true) && promptStore?.getPending(sessionId)) {
             liveSlot.takeover('run_stopped');
           }
         }, ORPHAN_PROMPT_WATCHDOG_MS);
@@ -5425,10 +5433,14 @@ export class LynoxHTTPApi {
         endedBy = reason;
         sessionAbortController.abort();
         session.abort();
+        // Only the run's own question lapses with it. The thread holds one open question, so
+        // while this run waits on its own, the thread's question is that one; otherwise it is a
+        // scheduled run's, which waits on for its own answer.
+        if (!hasActivePendingPrompt) return;
         const pending = promptStore?.getPending(sessionId);
         if (pending) promptStore?.expirePrompt(pending.id, reason);
       };
-      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt });
       try {
         // Reserve a concurrency slot + register the abort handle so the run can
         // be aborted by id from any connection (DELETE /api/runs/:runId) —
