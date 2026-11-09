@@ -11,7 +11,7 @@ import { extractDocumentText } from '../core/document-extract.js';
 import { buildDocx } from '../../tests/fixtures/minimal-documents.js';
 import { channels } from '../core/observability.js';
 import { Session } from '../core/session.js';
-import { MANDATE_KEY_INPUT_REFUSAL, mandateDocumentCredential } from '../core/secret-store.js';
+import { MANDATE_KEY_INPUT_REFUSAL, mandateCredentialInput, mandateDocumentCredential } from '../core/secret-store.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import type { ThreadStore } from '../core/thread-store.js';
 import type { PromptStore } from '../core/prompt-store.js';
@@ -371,6 +371,14 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       expect(run).not.toHaveBeenCalled();
     }, 60_000);
 
+    it('a file with a bearer header is refused', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'curl.txt', type: 'text/plain', data: b64(`curl -H "Authorization: ${'Bear'}er ${randomKey(32)}" https://api.example.org/v1/orders\n`) }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+    }, 60_000);
+
     it('a file named with a key is refused', async () => {
       const sid = await helperSession();
       const run = spyRun();
@@ -383,7 +391,10 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     it('control: a document that says "Schlüssel" and carries long reference numbers is not refused', async () => {
       const sid = await helperSession();
       const run = spyRun();
-      const doc = `Der Schlüssel für das Lager liegt bei Frau Meier.\nReferenz: ${KEY}\nToken-Nummer der Lieferung: 4711\n`;
+      // A cue word right before a key-shaped value: a typed message with this line is refused
+      // (`mandateCredentialInput`), a document is read by the credential forms alone.
+      const doc = `Der Schlüssel für das Lager liegt bei Frau Meier.\nTracking-Token der Lieferung: ${KEY}\n`;
+      expect(mandateCredentialInput(doc), 'control: as a typed message it would be refused').not.toBeNull();
       const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ablegen.', files: [{ name: 'notiz.txt', type: 'text/plain', data: b64(doc) }] });
       expect(res.status, res.text).toBe(200);
       expect(run).toHaveBeenCalledTimes(1);
