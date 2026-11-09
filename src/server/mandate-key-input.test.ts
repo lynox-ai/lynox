@@ -475,6 +475,25 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       expect(dataDirHolds(tail.slice(-16))).toBe(false);
     }, 60_000);
 
+    it('a file with a key is refused before it could take over the helper\'s parked run', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const running = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      const takeover = vi.fn();
+      // A run whose stream has closed and that has been silent past the takeover threshold.
+      running.set(sid, { streamAlive: false, lastEventAt: 0, takeover });
+      try {
+        const control = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'notiz.txt', type: 'text/plain', data: b64('Hallo') }] });
+        expect(takeover, `control: an ordinary upload takes the stale run over (${String(control.status)})`).toHaveBeenCalledTimes(1);
+        takeover.mockClear();
+        running.set(sid, { streamAlive: false, lastEventAt: 0, takeover });
+        const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'zugang.txt', type: 'text/plain', data: b64(`SHOPIFY=${VENDOR_KEY}\n`) }] });
+        expect(res.status).toBe(422);
+        expect(takeover).not.toHaveBeenCalled();
+      } finally { running.delete(sid); }
+      void run;
+    }, 60_000);
+
     it('control: a real image is not refused', async () => {
       const sid = await helperSession();
       const run = spyRun();
