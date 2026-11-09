@@ -3888,7 +3888,6 @@ describe('LynoxHTTPApi', () => {
       body: (ctx: {
         prompts: { getById: (id: string) => { status: string; closed_reason: string | null } | undefined };
         slots: Map<string, unknown>;
-        finishWork: () => void;
         /** The scheduled run's question. */
         questionId: string;
       }) => Promise<void>,
@@ -3936,8 +3935,10 @@ describe('LynoxHTTPApi', () => {
         const questionId = realPromptStore.insertAskUser(sid, 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
         let finishWork!: () => void;
         const work = new Promise<void>((r) => { finishWork = r; });
-        // The chat run works, without a question of its own, until the test lets it finish.
+        // The chat run works, without a question of its own, until the test lets it finish or
+        // `session.abort()` stops it, as the real agent loop does: a takeover then frees the slot.
         mockSessionRun.mockImplementationOnce(async () => { await work; return 'done'; });
+        mockSessionAbort.mockImplementation(() => { finishWork(); });
         // Not awaited: a run that writes nothing yet sends no headers either.
         const runRes = jsonFetch(`/api/sessions/${sid}/run`, {
           method: 'POST',
@@ -3946,13 +3947,14 @@ describe('LynoxHTTPApi', () => {
         for (let i = 0; i < 200 && !slots.has(sid); i++) await new Promise<void>((r) => setTimeout(r, 5));
         expect(slots.has(sid), 'positive control: the run holds its slot').toBe(true);
         try {
-          await body({ prompts: realPromptStore, slots, finishWork, questionId });
+          await body({ prompts: realPromptStore, slots, questionId });
         } finally {
           finishWork();
           await runRes;
           await expectSlotReclaimed(slots, sid);
         }
       } finally {
+        mockSessionAbort.mockImplementation(() => undefined);
         engineRef.getPromptStore = originalGetPromptStore;
         db.close();
       }
@@ -3970,6 +3972,7 @@ describe('LynoxHTTPApi', () => {
         });
         expect(next.status).toBe(409);
         await next.text();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
         expect(slots.has('second-beside-1')).toBe(true);
         expect(prompts.getById(questionId)?.status).toBe('pending');
       });
@@ -3977,9 +3980,7 @@ describe('LynoxHTTPApi', () => {
 
     it('stopping a run working beside a scheduled question frees it and leaves the question open', async () => {
       repayRateWindow();
-      await withRunBesideQuestion('abort-beside-1', async ({ prompts, slots, finishWork, questionId }) => {
-        // The working run stops on `session.abort()`, as the real agent loop does.
-        mockSessionAbort.mockImplementationOnce(() => { finishWork(); });
+      await withRunBesideQuestion('abort-beside-1', async ({ prompts, slots, questionId }) => {
         const abortRes = await jsonFetch('/api/sessions/abort-beside-1/abort', { method: 'POST' });
         expect(abortRes.status).toBe(200);
         await expectSlotReclaimed(slots, 'abort-beside-1');
