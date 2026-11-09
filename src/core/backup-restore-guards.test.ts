@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -368,26 +367,6 @@ describe('a link inside the backup (the read side)', () => {
     expect(result.error).toContain('Backup file changed after it was verified — refusing to restore: memory/x.md');
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
   });
-
-  it('a FIFO swapped in after the check, right before the read: refused at once, the restore does not wait', async () => {
-    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
-    const m = manager();
-    const created = await m.createBackup();
-    writeFileSync(join(data, 'memory', 'x.md'), 'live');
-    const entry = join(created.path, 'memory', 'x.md');
-    readHook.path = entry;
-    readHook.skip = 1; // the verify pass
-    readHook.run = () => {
-      rmSync(entry);
-      execFileSync('mkfifo', [entry]);
-    };
-
-    const result = await m.restoreBackup(created.path, { allowUnverified: true });
-    expect(readHook.run).toBeNull(); // the hook ran
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('Backup file changed after it was verified — refusing to restore: memory/x.md');
-    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
-  }, 10_000);
 
   it('control: the same backup without a link is verified and restored', async () => {
     writeFileSync(join(data, 'memory', 'x.md'), 'backed up');

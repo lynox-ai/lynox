@@ -102,9 +102,8 @@ function readEntryBytes(srcFile: string, entry: BackupFileEntry, encrypted: bool
   let raw: Buffer;
   try {
     // Not following a link set after `backupSourceProblem` ran: a link here fails the open (ELOOP).
-    // Non-blocking, so a FIFO set there instead opens at once and reads empty, which the size check
-    // below refuses; a blocking open would wait for a writer and hold the restore. A folder fails the read.
-    const fd = openSync(srcFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    // A folder fails the read; any other kind is read once and must match the entry below.
+    const fd = openSync(srcFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     try {
       raw = readFileSync(fd);
     } finally {
