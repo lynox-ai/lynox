@@ -59,6 +59,21 @@ export function showsWatchTarget(trigger: {
 }
 
 /**
+ * The address a CONFIRMED watch fetches, shown on its row (PRD customer-granted-operator-access
+ * B6, ux U-202): the escalation of a watch someone the owner let in set up leaves the address out
+ * and points to this page, so the page must name it. A waiting watch shows it in its consent
+ * block instead (`showsWatchTarget`), never twice; an unreadable config shows nothing.
+ */
+export function showsWatchAddress(trigger: {
+	effect?: string | undefined;
+	source?: string | undefined;
+	confirmed_at?: string | null | undefined;
+	watch_config?: string | undefined;
+}): boolean {
+	return trigger.source === 'watch' && !awaitsConfirmation(trigger) && watchOf(trigger) !== undefined;
+}
+
+/**
  * Whether the block may offer the button at all — ONE gate, so the button
  * cannot outlive the thing it consents to. Each side has its own display and
  * its own test; this is where they meet.
