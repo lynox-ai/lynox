@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -298,7 +298,7 @@ describe('a link inside the backup (the read side)', () => {
     return at;
   };
 
-  it('a file entry that is a link: refused before any read, word for word, nothing replaced', async () => {
+  it('a file entry that is a link: refused, word for word, nothing replaced', async () => {
     writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
     const m = manager();
     const created = await m.createBackup();
@@ -365,6 +365,57 @@ describe('a link inside the backup (the read side)', () => {
     expect(readHook.run).toBeNull(); // the hook ran
     expect(result.success).toBe(false);
     expect(result.error).toContain('Backup file changed after it was verified — refusing to restore: memory/x.md');
+    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
+  });
+
+  it('a workspace entry that is a link: refused, word for word, the workspace file not replaced', async () => {
+    writeFileSync(ws('http-api/f.txt'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    expect(created.manifest.files.map(f => f.path)).toContain('workspace/http-api/f.txt');
+    writeFileSync(ws('http-api/f.txt'), 'live');
+    const entry = join(created.path, 'workspace', 'http-api', 'f.txt');
+    rmSync(entry);
+    symlinkSync(hostFile('backed up'), entry);
+
+    const result = await m.restoreBackup(created.path, { allowUnverified: true });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Refusing to restore: workspace/http-api/f.txt is a link inside the backup. Nothing was replaced.');
+    expect(readFileSync(ws('http-api/f.txt'), 'utf8')).toBe('live');
+  });
+
+  it('a manifest.json that is a link: refused by restore and verify, word for word', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    writeFileSync(join(data, 'memory', 'x.md'), 'live');
+    const manifest = join(created.path, 'manifest.json');
+    const elsewhere = join(outside, 'manifest.json');
+    renameSync(manifest, elsewhere);
+    symlinkSync(elsewhere, manifest);
+
+    const result = await m.restoreBackup(created.path, { allowUnverified: true });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Refusing to restore: manifest.json is a link inside the backup. Nothing was replaced.');
+    expect(m.verifyBackup(created.path)).toEqual({ valid: false, errors: ['manifest.json is a link inside the backup'], files_checked: 0 });
+    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
+  });
+
+  it.skipIf(process.getuid?.() === 0)('a component that cannot be asked: refused with its code, not thrown', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    writeFileSync(join(data, 'memory', 'x.md'), 'live');
+    const folder = join(created.path, 'memory');
+    chmodSync(folder, 0o000);
+    try {
+      const result = await m.restoreBackup(created.path, { allowUnverified: true });
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Refusing to restore: memory/x.md could not be checked inside the backup (EACCES). Nothing was replaced.');
+      expect(m.verifyBackup(created.path).errors).toEqual(['memory/x.md could not be checked inside the backup (EACCES)']);
+    } finally {
+      chmodSync(folder, 0o700);
+    }
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
   });
 

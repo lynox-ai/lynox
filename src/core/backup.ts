@@ -57,21 +57,23 @@ function unrestorableEntry(files: unknown): string | null {
  * Why an entry of the backup must not be read, or null. Every component below the backup folder is
  * asked with `lstat`: a link there would lead the read, and the verify pass that reports sizes, to
  * a file outside the backup. The backup folder itself may be a link (a backups dir moved elsewhere).
- * A missing component is not this check's to report: the verify pass names it.
+ * A missing component is not this check's to report: the verify pass names it. Any other failure
+ * to ask refuses: what cannot be checked is not read.
  */
 export function backupSourceProblem(backupPath: string, entry: Pick<BackupFileEntry, 'path' | 'type'>): string | null {
   const parts = entry.path.split('/');
   let at = backupPath;
   for (let i = 0; i < parts.length; i++) {
     at = join(at, parts[i] as string);
+    const shown = parts.slice(0, i + 1).join('/');
     let st;
     try {
       st = lstatSync(at);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return null;
+      return `${shown} could not be checked inside the backup (${typeof code === 'string' ? code : 'unknown error'})`;
     }
-    const shown = parts.slice(0, i + 1).join('/');
     if (st.isSymbolicLink()) return `${shown} is a link inside the backup`;
     const last = i === parts.length - 1;
     if (!last || entry.type === 'directory') {
@@ -81,6 +83,11 @@ export function backupSourceProblem(backupPath: string, entry: Pick<BackupFileEn
     }
   }
   return null;
+}
+
+/** Whether the backup's `manifest.json` is a link: it is read before any entry, and a link would lead that read out. */
+function manifestIsLink(manifestPath: string): boolean {
+  try { return lstatSync(manifestPath).isSymbolicLink(); } catch { return false; }
 }
 
 /** The first entry `backupSourceProblem` refuses, as its reason, or null. */
@@ -903,6 +910,10 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Missing manifest.json' };
     }
 
+    if (manifestIsLink(manifestPath)) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Refusing to restore: manifest.json is a link inside the backup. Nothing was replaced.' };
+    }
+
     let manifest: BackupManifest;
     try {
       manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
@@ -1280,6 +1291,7 @@ export class BackupManager {
     if (!existsSync(manifestPath)) {
       return { valid: false, errors: ['Missing manifest.json'], files_checked: 0 };
     }
+    if (manifestIsLink(manifestPath)) return { valid: false, errors: ['manifest.json is a link inside the backup'], files_checked: 0 };
     try {
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
       const unrestorable = unrestorableEntry(manifest.files);
