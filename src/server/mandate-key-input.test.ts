@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -111,6 +111,19 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     return { text: () => lines.join('\n'), stop: () => { for (const { ch, fn } of subs) ch.unsubscribe(fn); } };
   }
 
+  /** Whether any file under the data directory holds `needle`, byte for byte: every SQLite store with
+   *  its WAL (threads, run history, prompts, memory, the trail), and any file a capture or a log wrote. */
+  function dataDirHolds(needle: string): boolean {
+    const want = Buffer.from(needle, 'utf8');
+    const walk = (d: string): boolean => readdirSync(d, { withFileTypes: true }).some((e) => {
+      const p = join(d, e.name);
+      if (e.isDirectory()) return walk(p);
+      if (!e.isFile()) return false;
+      return readFileSync(p).includes(want);
+    });
+    return walk(dir!);
+  }
+
   /** The instance trail's rows, as stored. */
   function trailRows(): string {
     const db = (engine().getAuditLog() as unknown as { db: { prepare(sql: string): { all(): unknown[] } } }).db;
@@ -144,6 +157,7 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
   it('a message with a key is refused with the fixed sentence, and the key reaches no sink', async () => {
     const sid = await helperSession();
     const run = spyRun();
+    const titleBefore = engine().getThreadStore()!.getThread(sid)?.title;
     const sinks = captureSinks();
     let res: { status: number; text: string };
     try {
@@ -161,6 +175,13 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       expect(sink).not.toContain(KEY);
       expect(sink).not.toContain(KEY.slice(-8));
     }
+    // Every store on disk: run history, prompts, memory, the thread's title, a capture. The scan finds
+    // what a store did write (control first), so its "not found" is a reading, not a blind spot.
+    const marker = `m-${randomBytes(12).toString('hex')}`;
+    engine().getThreadStore()!.createThread(`probe-${marker}`, { title: marker });
+    expect(dataDirHolds(marker), 'control: the scan finds a value a store wrote').toBe(true);
+    expect(dataDirHolds(KEY.slice(-8))).toBe(false);
+    expect(engine().getThreadStore()!.getThread(sid)?.title).toBe(titleBefore);
   }, 60_000);
 
   it('a key is refused before a busy conversation could answer instead (409 keeps the message resendable)', async () => {
