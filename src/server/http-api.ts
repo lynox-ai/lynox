@@ -4803,7 +4803,8 @@ export class LynoxHTTPApi {
               errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
             }
             const rawType = typeof file.type === 'string' ? file.type : '';
-            if (typeof file.data !== 'string' || file.data.length > MAX_FILE_B64_BYTES) continue;
+            // Past its size limit the loop below refuses the file (413) before anything is stored.
+            if (typeof file.data !== 'string' || file.data.length > (rawType.startsWith('image/') ? MAX_IMAGE_B64_BYTES : MAX_FILE_B64_BYTES)) continue;
             const buf = Buffer.from(file.data, 'base64');
             const readings: string[] = [];
             if (rawType.startsWith('image/')) {

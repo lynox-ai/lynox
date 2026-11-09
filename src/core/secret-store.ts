@@ -373,6 +373,24 @@ const CONTEXT_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: 
   .filter((s) => s.kind === 'contextual')
   .map((s) => ({ label: s.label, pattern: s.pattern as RegExp }));
 
+/**
+ * The label of the first of `shapes` found in `text`. A shape that cannot match without `://` is
+ * skipped when the text holds none: unanchored, the credential-in-URL rule looks back up to 32
+ * characters from every position, which cost most of a second on a few megabytes of base64 — a
+ * text that has no `://` at all, so the skip changes no answer.
+ */
+function firstShapeIn(text: string, shapes: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }>): string | null {
+  const hasScheme = text.includes('://');
+  for (const { label, pattern } of shapes) {
+    if (!hasScheme && pattern.source.includes(':\\/\\/')) continue;
+    if (pattern.test(text)) return label;
+  }
+  return null;
+}
+
+/** A private key's BEGIN line, as `SECRET_SHAPES` reads it (no global flag, so `test` keeps no state). */
+const KEY_BLOCK_HEAD = /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/;
+
 /** A word a person writes before a credential's value, German or English. */
 const CREDENTIAL_CUE = /(?<![\p{L}\p{N}])(?:api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret|secret|token|key|schlüssel|passwor[dt]|kennwort|zugangsdaten|credentials?)(?![\p{L}\p{N}])/giu;
 const PASSWORD_CUE = /^(?:passwor[dt]|kennwort)$/i;
@@ -522,7 +540,8 @@ export function separatorsAsSpaces(text: string): string {
 function mandateCredentialIn(text: string): string | null {
   const shaped = maskCredentialInput(text).labels[0];
   if (shaped !== undefined) return shaped;
-  for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
+  const formed = firstShapeIn(text, [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]);
+  if (formed !== null) return formed;
   for (const cue of text.matchAll(CREDENTIAL_CUE)) {
     const end = (cue.index ?? 0) + cue[0].length;
     const words = wordsAfter(text, end);
@@ -557,13 +576,25 @@ function mandateCredentialIn(text: string): string | null {
  * covered. Returns a fixed label, never any part of the text.
  */
 export function mandateDocumentCredential(text: string): string | null {
-  return documentCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? documentCredentialIn(separatorsAsSpaces(text)) : null);
+  return documentCredentialIn(text) ?? (HAS_UNTRUSTED_SEPARATOR.test(text) ? joinedBySpaceIn(separatorsAsSpaces(text)) : null);
+}
+
+/**
+ * What only the second reading of a document can find: the forms with a space inside them (a bearer
+ * header, a private key's BEGIN line), which a control character in place of the space hid from the
+ * first. A vendor's key, a JWT or a helper's key form has no space in it, so a space the second
+ * reading puts in can split one, never join one.
+ */
+function joinedBySpaceIn(text: string): string | null {
+  if (KEY_BLOCK_HEAD.test(text)) return 'private key';
+  return firstShapeIn(text, CONTEXT_SHAPES);
 }
 
 function documentCredentialIn(text: string): string | null {
   const shaped = maskCredentialInput(text).labels[0];
   if (shaped !== undefined) return shaped;
-  for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
+  const formed = firstShapeIn(text, [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]);
+  if (formed !== null) return formed;
   return null;
 }
 

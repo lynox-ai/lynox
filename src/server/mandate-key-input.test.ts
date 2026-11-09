@@ -405,6 +405,15 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       expect(run).not.toHaveBeenCalled();
     }, 60_000);
 
+    it('a private key whose BEGIN line has a control character for a space is refused', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const block = `-----${'BEG'}IN\u0001PRIVATE KEY-----\n${randomBytes(48).toString('base64')}\n-----END PRIVATE KEY-----\n`;
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'key.txt', type: 'text/plain', data: b64(block) }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+    }, 60_000);
+
     it('a file with a key of a form only a helper is likely to paste is refused', async () => {
       const sid = await helperSession();
       const run = spyRun();
