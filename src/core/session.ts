@@ -413,7 +413,8 @@ export class Session {
    * library's default; the engine's own places name theirs (principal-sites.test.ts).
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
-  /** A run of someone other than the owner happened in this session (PRD B6, see `_run`). */
+  /** A run of someone other than the owner happened in this session, or its thread's row named
+   *  another creator when it opened (PRD B6, see `_run`). Never reset. */
   private _foreignRunHere = false;
 
   /** Who ran here last — the run in flight, or the one before it (PRD
@@ -712,6 +713,10 @@ export class Session {
           ...(opts?.principal ? { created_by: principalTag(opts.principal) } : {}),
         });
       } catch { /* best-effort */ }
+      // Who the thread is by, read once as the session opens with its history (PRD B6): a row
+      // deleted later (`ThreadStore.deleteThread`, thread-store.ts:323) takes its tag along while a
+      // session opened before keeps the helper's turns in memory, and `_run` would find no row.
+      if (threadHoldsForeignTurns(threadStore, this.sessionId)) this._foreignRunHere = true;
     }
 
     if (opts?.messages) {
