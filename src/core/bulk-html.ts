@@ -545,7 +545,7 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     const tree = checkTrees(parseHtmlFragment(canonicalHtml(before)), parseHtmlFragment(canonical), input);
     if (!tree.ok) return tree;
     // A link inside a shortcode is text to the trees above, but the shop's server turns it into an
-    // embed, a button or a frame: held to the same domains as an HTML link (1222). Before
+    // embed, a button or a frame: held to the same domains as an HTML link. Before
     // `shortcode_changed`, so a value offered to copy never carries one.
     const shortcodeLinks = checkShortcodeLinks(input);
     if (!shortcodeLinks.ok) return shortcodeLinks;
@@ -829,7 +829,7 @@ function hostAsWritten(value: string): string | undefined {
   return host.replace(/:\d*$/, '');
 }
 
-// --- Links inside shortcodes (1222).
+// --- Links inside shortcodes.
 
 /** WordPress's own reading of a shortcode's attributes (`get_shortcode_atts_regex`): a named value
  *  in double, single or no quotes, or a positional one. */

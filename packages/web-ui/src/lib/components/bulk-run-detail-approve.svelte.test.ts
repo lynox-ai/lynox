@@ -173,17 +173,17 @@ describe('approving a preview', () => {
 	});
 
 	for (const judged of [true, false]) {
-		it(`words a new link domain under the product for a run ${judged ? 'with' : 'without'} a judge, naming no field for allowed domains (1222)`, async () => {
+		it(`words a new link domain under the product for a run ${judged ? 'with' : 'without'} a judge, naming no field for allowed domains`, async () => {
 			if (judged) run = makeRun({ judgeRuleHash: 'h1' });
 			targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'new_link_domain' } : x));
 			await render();
 			expect(target.textContent).toContain(t('bulk.invalid.new_link_domain').split('{where}')[0]!);
-			// No page mounts the field for allowed link domains yet, so no sentence names it (U-148).
+			// No page mounts the field for allowed link domains yet, so no sentence names it.
 			expect(target.textContent).not.toContain(t('bulk.start_domains.label'));
 		});
 	}
 
-	it('shows a refused backslash as one backslash in the sentence the owner reads (U-148)', async () => {
+	it('shows a refused backslash as one backslash in the sentence the owner reads', async () => {
 		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'url_control_char' } : x));
 		await render();
 		const text = target.textContent ?? '';

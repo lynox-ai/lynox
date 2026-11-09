@@ -549,11 +549,16 @@ describe('a write sends what the ledger stored, and never raw HTML (1130)', () =
   });
 });
 
-// 1222: to the HTML trees a shortcode is text, but the shop's server prints its attributes and what
+// To the HTML trees a shortcode is text, but the shop's server prints its attributes and what
 // it encloses into embeds, buttons and frames. Its links are held to the same domains as an HTML link.
-describe('a link inside a shortcode is held to the run\'s domains (1222)', () => {
-  const check = (after: string, before: string | null = null, startDomains: string[] = []) =>
-    checkMarkup({ before, after, storeHost: HOST, startDomains });
+describe('a link inside a shortcode is held to the run\'s domains', () => {
+  // The host as written (`hostWritten`) has its own tests; these hold the domain a link is read as.
+  const check = (after: string, before: string | null = null, startDomains: string[] = []) => {
+    const result = checkMarkup({ before, after, storeHost: HOST, startDomains });
+    if (!('hostWritten' in result)) return result;
+    const { hostWritten: _written, ...rest } = result;
+    return rest;
+  };
   const foreign = { ok: false, reason: 'new_link_domain', detail: 'evil.example' };
 
   it('refuses a foreign domain in every form WordPress reads an attribute', () => {
@@ -693,7 +698,7 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     expect(check('<p>Neu</p><p>https://evil.example/x</p>', '<p>https://evil.example/x</p>')).toEqual({ ok: true });
   });
 
-  it('takes no domain from a URL the before-image only names among words (1236)', () => {
+  it('takes no domain from a URL the before-image only names among words', () => {
     const before = '<p>Mehr beim Hersteller unter https://evil.example/ und im Fachhandel.</p>';
     expect(check(`${before}[video src="https://evil.example/a.mp4"]`, before)).toEqual(foreign);
     // Twin: a link or an embed of the before-image does lend its domain.

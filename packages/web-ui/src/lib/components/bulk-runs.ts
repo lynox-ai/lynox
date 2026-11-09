@@ -873,8 +873,8 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
 };
 /** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
- *  of tags the page reads, whose way out differs from planning again (U-103), and of links, in a
- *  shortcode as much as in HTML (U-148). */
+ *  of tags the page reads, whose way out differs from planning again, and of links, in a
+ *  shortcode as much as in HTML. */
 const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
 	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
 	shortcode_changed: 'shortcode_changed',
@@ -910,7 +910,7 @@ export function bulkInvalidText(
 	const anyForm = BULK_INVALID_ANY_FORM[reason];
 	if (anyForm !== undefined) {
 		// One sentence for a judged run too: the field for allowed link domains is mounted on no page
-		// yet, so no run is told to add one there (U-148).
+		// yet, so no run is told to add one there.
 		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
 	}
 	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
