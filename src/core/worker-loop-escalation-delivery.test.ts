@@ -24,6 +24,7 @@ const { EngineDb } = await import('./engine-db.js');
 const { TaskManager } = await import('./task-manager.js');
 const { NotificationRouter } = await import('./notification-router.js');
 const { escalateToUser } = await import('./escalation.js');
+const { WORKER_NOTICES } = await import('./worker-notices.js');
 const { MandateEnds } = await import('./mandate-ends.js');
 const { AuditLog } = await import('./audit-log.js');
 import type { Engine } from './engine.js';
@@ -52,7 +53,7 @@ type Channel = ChannelOutcome | ((row: () => Escalation) => Promise<ChannelOutco
  * sees the trigger's record at send time); ticks the trigger once. `awaitAnswer: false` for a
  * channel that never answers.
  */
-async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: string, mandateEditor?: string): Promise<{ escalation: () => Escalation; escalated: number; writtenBy: Array<string | null | undefined> }> {
+async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: string, mandateEditor?: string): Promise<{ escalation: () => Escalation; escalated: number; seen: EscalateOpts[] }> {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-escal-'));
   dirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
@@ -72,7 +73,7 @@ async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: str
   channels.forEach((c, i) => router.register({ name: `ch${String(i)}`, send: async () => (typeof c === 'function' ? c(escalation) : c) }));
 
   let escalated = 0;
-  const writtenBy: Array<string | null | undefined> = [];
+  const seen: EscalateOpts[] = [];
   let settled!: () => void;
   const done = new Promise<void>((r) => { settled = r; });
   const engine = {
@@ -86,7 +87,7 @@ async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: str
     workerRunModelOverride: () => ({}),
     escalateToUser: (opts: EscalateOpts) => {
       escalated++;
-      writtenBy.push(opts.writtenBy);
+      seen.push(opts);
       return escalateToUser(null, router, {
         ...opts,
         onReported: (d) => { try { opts.onReported?.(d); } finally { settled(); } },
@@ -116,7 +117,7 @@ async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: str
   await loop.tick();
   await vi.waitFor(() => { expect(escalated).toBe(1); });
   if (awaitAnswer) await done;
-  return { escalation, escalated, writtenBy };
+  return { escalation, escalated, seen };
 }
 
 describe('a failed scheduled workflow records whether its escalation reached anyone', () => {
@@ -208,15 +209,25 @@ describe('a failed scheduled workflow records whether its escalation reached any
     expect(manager.recordEscalationOutcome('nope', 'delivered', first)).toBe(false);
   });
 
-  it('names who set the trigger up, so a helper\'s run opens its thread inside the data boundary (PRD B6)', async () => {
+  it('a plan someone the owner let in set up escalates without its title and errors (PRD B6)', async () => {
     const helper = await failOnce(['delivered'], true, 'mandate:helper@example.com');
-    expect(helper.writtenBy).toEqual(['mandate:helper@example.com']);
     const owner = await failOnce(['delivered']);
-    expect(owner.writtenBy.map((w) => w ?? null)).toEqual([null]);
+    const h = helper.seen[0]!;
+    for (const text of [h.title, h.body]) {
+      expect(text).not.toContain('Nightly export');
+      expect(text).not.toContain('boom');
+    }
+    expect(h.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle);
+    // The ids stay, so the agent can read the run with the owner.
+    expect(h.body).toContain('run run-1');
+    // Control: the owner's own plan names its title and its step's error.
+    expect(owner.seen[0]!.title).toContain('Nightly export');
+    expect(owner.seen[0]!.body).toContain('boom');
   });
 
-  it('a helper\'s change to the owner\'s trigger names the helper, even after the owner\'s stamp', async () => {
+  it('a helper\'s change to the owner\'s plan counts the same, even after the owner\'s stamp', async () => {
     const edited = await failOnce(['delivered'], true, undefined, 'mandate:helper@example.com');
-    expect(edited.writtenBy).toEqual(['mandate:helper@example.com']);
+    expect(edited.seen[0]!.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle);
+    expect(edited.seen[0]!.body).not.toContain('boom');
   });
 });

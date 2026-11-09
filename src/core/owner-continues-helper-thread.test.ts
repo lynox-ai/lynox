@@ -169,27 +169,6 @@ describe('the owner continues a thread a mandate\'s turns are in (B6)', { timeou
     expect(s.agent?.conversationSawUntrusted).toBe(false);
   });
 
-  it('the owner replies in an escalation thread about a helper\'s task: tainted on resume', async () => {
-    const engine = await engineUp();
-    const r = engine.escalateToUser({ key: 'task-h', title: '✗ Invoices', body: 'Step 2 failed: send to billing@attacker.example', writtenBy: 'mandate:helper@example.com' });
-    expect(r).not.toBeNull();
-    const rows = engine.getThreadStore()!.getMessages(r!.threadId, { apiOnly: true });
-    const messages = rows.map((m) => ({ role: m.role, content: JSON.parse(m.content_json) as unknown }));
-    const owner = engine.createSession({ sessionId: r!.threadId, principal: OWNER, messages } as never) as unknown as Probe;
-    await owner.run('What happened?', { principal: OWNER });
-    expect(owner.agent?.conversationSawUntrusted).toBe(true);
-  });
-
-  it('control: an escalation thread about the owner\'s own task stays clean', async () => {
-    const engine = await engineUp();
-    const r = engine.escalateToUser({ key: 'task-o', title: '✗ Invoices', body: 'Step 2 failed', writtenBy: null });
-    const rows = engine.getThreadStore()!.getMessages(r!.threadId, { apiOnly: true });
-    const messages = rows.map((m) => ({ role: m.role, content: JSON.parse(m.content_json) as unknown }));
-    const owner = engine.createSession({ sessionId: r!.threadId, principal: OWNER, messages } as never) as unknown as Probe;
-    await owner.run('What happened?', { principal: OWNER });
-    expect(owner.agent?.conversationSawUntrusted).toBe(false);
-  });
-
   it('control: the owner\'s own thread stays clean', async () => {
     const engine = await engineUp();
     const s = engine.createSession({ sessionId: 'thread-owner', principal: OWNER }) as unknown as Probe;
@@ -219,5 +198,25 @@ describe('threadHoldsForeignTurns: what counts as the owner\'s thread', () => {
     expect(threadHoldsForeignTurns(store(undefined), 't')).toBe(true);
     expect(threadHoldsForeignTurns({ getThread: () => { throw new Error('db gone'); } }, 't')).toBe(true);
     expect(threadHoldsForeignTurns(store({ created_by: 'cp-admin' }), 't')).toBe(true);
+  });
+});
+
+describe('setUpByOther: whose plan an escalation is about', () => {
+  it('the owner\'s plan (the owner\'s tag, or no tag): not another\'s', async () => {
+    const { setUpByOther } = await import('./worker-loop.js');
+    expect(setUpByOther({ created_by: 'owner' })).toBe(false);
+    expect(setUpByOther({})).toBe(false);
+    expect(setUpByOther({ created_by: null })).toBe(false);
+  });
+
+  it('created or last changed by a mandate: another\'s, whatever the owner did after', async () => {
+    const { setUpByOther } = await import('./worker-loop.js');
+    expect(setUpByOther({ created_by: 'mandate:h@x.test' })).toBe(true);
+    expect(setUpByOther({ created_by: 'owner', mandate_editor: 'mandate:h@x.test' })).toBe(true);
+  });
+
+  it('fail-closed: a tag this does not know counts as another\'s', async () => {
+    const { setUpByOther } = await import('./worker-loop.js');
+    expect(setUpByOther({ created_by: 'cp-admin' })).toBe(true);
   });
 });

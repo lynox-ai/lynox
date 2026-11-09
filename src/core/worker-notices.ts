@@ -121,6 +121,17 @@ export interface WorkerNotices {
   readonly containedQuestionInquiry: string;
   /** The first sentence of a scheduled workflow that did not complete. */
   workflowIncomplete(title: string, status: string | undefined): string;
+  /**
+   * The escalation of a plan someone the owner let in set up or changed (PRD
+   * customer-granted-operator-access B6): its title, errors, address and analysis are that
+   * person's or a page's text, and the thread they land in reads as lynox's own words to the owner.
+   * So lynox says what happened in its own words and leaves them out; the ids stay, so the agent
+   * can read the run with the owner (`diagnose_workflow_run`, an external-content read).
+   */
+  readonly helperPlanFailedTitle: string;
+  helperWorkflowIncomplete(status: string | undefined): string;
+  readonly helperWatchTitle: string;
+  readonly helperWatchChanged: string;
   readonly errorLabel: string;
   readonly failedStepsLabel: string;
   readonly writesLabel: string;
@@ -202,6 +213,11 @@ const EN: WorkerNotices = Object.freeze({
   containedQuestionInquiry: 'A question is waiting in the chat.',
   workflowIncomplete: (title: string, status: string | undefined) =>
     `Your scheduled workflow "${title}" didn't complete${status !== undefined && NAMED_WORKFLOW_STATUS.has(status) ? ` (status: ${status})` : ''}.`,
+  helperPlanFailedTitle: '✗ A plan someone you let in set up did not complete',
+  helperWorkflowIncomplete: (status: string | undefined) =>
+    `A scheduled workflow that someone you let in set up or changed didn't complete${status !== undefined && NAMED_WORKFLOW_STATUS.has(status) ? ` (status: ${status})` : ''}. Its name and its errors are left out here because that person wrote them.`,
+  helperWatchTitle: '🔍 A page someone you let in watches has changed',
+  helperWatchChanged: 'A page that someone you let in set a watch on has changed. Its address and the summary are left out here because that person chose the page. Ask me in this chat to show the watch.',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
   budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
@@ -298,6 +314,13 @@ const DE: WorkerNotices = Object.freeze({
     const named = status !== undefined ? DE_WORKFLOW_STATUS[status] : undefined;
     return `Dein geplanter Workflow „${title}“ ist nicht fertig geworden${named !== undefined ? ` (Status: ${named})` : ''}.`;
   },
+  helperPlanFailedTitle: '✗ Ein Plan einer Person, der du Zugang gegeben hast, ist nicht fertig geworden',
+  helperWorkflowIncomplete: (status: string | undefined) => {
+    const named = status !== undefined ? DE_WORKFLOW_STATUS[status] : undefined;
+    return `Ein geplanter Workflow, den jemand mit Zugang zu deiner Instanz eingerichtet oder geändert hat, ist nicht fertig geworden${named !== undefined ? ` (Status: ${named})` : ''}. Name und Fehler stehen hier nicht, weil diese Person sie geschrieben hat.`;
+  },
+  helperWatchTitle: '🔍 Eine Seite, die jemand mit Zugang beobachtet, hat sich geändert',
+  helperWatchChanged: 'Eine Seite, die jemand mit Zugang zu deiner Instanz beobachten lässt, hat sich geändert. Adresse und Zusammenfassung stehen hier nicht, weil diese Person die Seite gewählt hat. Bitte mich in diesem Chat, dir die Beobachtung zu zeigen.',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `${kind === 'cost' ? `Gestoppt an der Kostengrenze (${value})` : `Gestoppt am Rundenlimit (${value})`}, obwohl noch Arbeit offen war.`,
   budgetCutWayOut: 'Ein Neustart kann wieder an derselben Stelle stoppen. Bitte lynox im Chat, die Aufgabe in kleinere Pläne aufzuteilen.',

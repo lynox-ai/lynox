@@ -671,6 +671,18 @@ export { mandateNeedsOwnerStamp };
  * let a mandate run what someone else wrote — the owner's own unstamped agent action least
  * of all, whose consent stamp the door would otherwise step over.
  */
+/**
+ * Whether a plan was set up or last changed by someone other than the owner: the last mandate
+ * that changed it, else its creator. The owner's stamp and the owner's later edit leave
+ * `mandate_editor` as it is, and so the text as written (PRD customer-granted-operator-access B6).
+ * Fail-closed: any tag but the owner's (or none: a row from before tags, or the owner's agent)
+ * counts.
+ */
+export function setUpByOther(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): boolean {
+  const tag = t.mandate_editor ?? t.created_by;
+  return !(tag === undefined || tag === null || tag === principalTag(OWNER_PRINCIPAL));
+}
+
 export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: string | undefined; edited_by?: string | undefined }): boolean {
   if (grant === null) return false;
   const lastParty = t.edited_by ?? t.created_by;
@@ -3605,13 +3617,15 @@ export class WorkerLoop {
     // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
     const notices = this.#notices();
     const ref = notices.workflowRef(result.runId, task.pipeline_id ?? undefined);
+    // A plan someone the owner let in set up or changed: its title and errors stay out of the
+    // thread, where they would read as lynox's own words (PRD B6). The ids stay for the diagnosis.
+    const othersPlan = setUpByOther(task);
     this.engine.escalateToUser({
       key: task.id,
-      // The last mandate that changed it, else its creator: the owner's stamp leaves the text as written.
-      writtenBy: task.mandate_editor ?? task.created_by,
-      title: `✗ ${task.title}`,
-      body:
-        `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
+      title: othersPlan ? notices.helperPlanFailedTitle : `✗ ${task.title}`,
+      body: othersPlan
+        ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
+        : `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
         (result.error ? `${notices.errorLabel} ${result.error}\n\n` : '') +
         (stepDetail ? `${notices.failedStepsLabel}\n${stepDetail}\n\n` : '') +
         (grantLines.length > 0 ? `${notices.writesLabel}\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
@@ -3940,14 +3954,15 @@ export class WorkerLoop {
     // in chat. Not on the first run (baseline only). escalateToUser fires its own
     // push-as-wakeup (pointing at the thread).
     if (!isFirstRun) {
+      // A watch someone the owner let in set up: the address and the analysis stay out (PRD B6).
+      const othersWatch = setUpByOther(task);
+      const notices = this.#notices();
       this.engine.escalateToUser({
         key: task.id,
-        // The last mandate that changed it, else its creator: the owner's stamp leaves the text as written.
-        writtenBy: task.mandate_editor ?? task.created_by,
-        title: `\uD83D\uDD0D ${task.title}`,
+        title: othersWatch ? notices.helperWatchTitle : `\uD83D\uDD0D ${task.title}`,
         // The thread's seed is model context and stays English (ux Rest-P E15); the push is the owner's.
-        body: `${config.url} changed.\n\n${truncatedAnalysis}`,
-        pushBody: this.#notices().watchChanged(config.url, truncatedAnalysis),
+        body: othersWatch ? WORKER_NOTICES.en.helperWatchChanged : `${config.url} changed.\n\n${truncatedAnalysis}`,
+        pushBody: othersWatch ? notices.helperWatchChanged : notices.watchChanged(config.url, truncatedAnalysis),
         data: { taskId: task.id },
         onReported: this.#recordEscalation(task.id),
       });
