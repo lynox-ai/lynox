@@ -401,6 +401,24 @@ describe('a link inside the backup (the read side)', () => {
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
   });
 
+  it('a manifest.json that is a link: the list does not show the file it points to', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    const id = created.path.split('/').pop() as string;
+    expect(m.listBackups().map(b => b.backup_id)).toContain(id);
+    // A JSON file of this machine, shaped enough to pass as a manifest.
+    const hostJson = join(outside, 'host.json');
+    writeFileSync(hostJson, JSON.stringify({ host_secret: 'HOST-ONLY', created_at: '2099-01-01T00:00:00.000Z', files: [] }));
+    const manifest = join(created.path, 'manifest.json');
+    rmSync(manifest);
+    symlinkSync(hostJson, manifest);
+
+    const listed = m.listBackups();
+    expect(listed.map(b => b.backup_id)).not.toContain(id);
+    expect(JSON.stringify(listed)).not.toContain('HOST-ONLY');
+  });
+
   it.skipIf(process.getuid?.() === 0)('a component that cannot be asked: refused with its code, not thrown', async () => {
     writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
     const m = manager();

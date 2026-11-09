@@ -85,9 +85,26 @@ export function backupSourceProblem(backupPath: string, entry: Pick<BackupFileEn
   return null;
 }
 
-/** Whether the backup's `manifest.json` is a link: it is read before any entry, and a link would lead that read out. */
-function manifestIsLink(manifestPath: string): boolean {
-  try { return lstatSync(manifestPath).isSymbolicLink(); } catch { return false; }
+/**
+ * A backup's `manifest.json`, read without following a link: it is read before any entry, and by
+ * the list, whose answer carries its fields — a link would lead that read to a file of this machine.
+ */
+type ManifestRead = { ok: true; raw: Buffer } | { ok: false; why: 'missing' | 'link' | 'unreadable' };
+function readManifestFile(manifestPath: string): ManifestRead {
+  let fd: number;
+  try {
+    fd = openSync(manifestPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return { ok: false, why: code === 'ENOENT' ? 'missing' : code === 'ELOOP' ? 'link' : 'unreadable' };
+  }
+  try {
+    return { ok: true, raw: readFileSync(fd) };
+  } catch {
+    return { ok: false, why: 'unreadable' };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** The first entry `backupSourceProblem` refuses, as its reason, or null. */
@@ -910,13 +927,15 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Missing manifest.json' };
     }
 
-    if (manifestIsLink(manifestPath)) {
+    const read = readManifestFile(manifestPath);
+    if (!read.ok && read.why === 'link') {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Refusing to restore: manifest.json is a link inside the backup. Nothing was replaced.' };
     }
 
     let manifest: BackupManifest;
     try {
-      manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+      if (!read.ok) throw new Error(read.why);
+      manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
     } catch {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
     }
@@ -1213,7 +1232,9 @@ export class BackupManager {
       const manifestPath = join(this.backupDir, entry.name, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const raw = readFileSync(manifestPath);
+        const read = readManifestFile(manifestPath);
+        if (!read.ok) continue;
+        const raw = read.raw;
         const manifest = JSON.parse(raw.toString('utf-8')) as BackupManifest;
         seen.add(entry.name);
         // Without a vault key there is no MAC to check (`no-key`), so nothing to keep or to hash.
@@ -1260,7 +1281,9 @@ export class BackupManager {
       const manifestPath = join(this.backupDir, entry.name, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+        const read = readManifestFile(manifestPath);
+        if (!read.ok) continue;
+        const manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
         backups.push({ name: entry.name, createdAt: new Date(manifest.created_at) });
       } catch {
         continue;
@@ -1291,9 +1314,10 @@ export class BackupManager {
     if (!existsSync(manifestPath)) {
       return { valid: false, errors: ['Missing manifest.json'], files_checked: 0 };
     }
-    if (manifestIsLink(manifestPath)) return { valid: false, errors: ['manifest.json is a link inside the backup'], files_checked: 0 };
+    const read = readManifestFile(manifestPath);
+    if (!read.ok) return { valid: false, errors: [read.why === 'link' ? 'manifest.json is a link inside the backup' : 'Invalid manifest.json'], files_checked: 0 };
     try {
-      const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+      const manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
       const unrestorable = unrestorableEntry(manifest.files);
       if (unrestorable !== null) return { valid: false, errors: [`Path outside the backup: ${unrestorable}`], files_checked: 0 };
       const linked = backupSourceRefusal(backupPath, manifest.files);
