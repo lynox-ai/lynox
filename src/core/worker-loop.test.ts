@@ -593,6 +593,8 @@ describe('WorkerLoop', () => {
       getMandateEnds: () => null,
       // The helper's read is recorded first (PRD §3.9); a log that takes it.
       getAuditLog: () => ({ record: vi.fn() }),
+      // A German owner: the helper's thread bubble is lynox's own words, so in German (ux U-202).
+      config: { language: 'de' },
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -608,9 +610,9 @@ describe('WorkerLoop', () => {
       expect(text).not.toContain('pay invoice');
       expect(text).not.toContain('Helper watch');
     }
-    expect(helper!.title).toBe(WORKER_NOTICES.en.helperWatchTitle({ address: 'h@x.test', changed: false }));
-    expect(helper!.body).toBe(WORKER_NOTICES.en.helperWatchChanged);
-    expect(helper!.pushBody).toBe(WORKER_NOTICES.en.helperWatchChangedPush);
+    expect(helper!.title).toBe(WORKER_NOTICES.de.helperWatchTitle({ address: 'h@x.test', changed: false }));
+    expect(helper!.body).toBe(WORKER_NOTICES.de.helperWatchChanged);
+    expect(helper!.pushBody).toBe(WORKER_NOTICES.de.helperWatchChangedPush);
     expect(owner!.body).toContain('helper-chose.test');
     expect(owner!.title).toContain('Owner watch');
   });

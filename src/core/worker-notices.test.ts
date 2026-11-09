@@ -467,7 +467,6 @@ const STILL_ENGLISH: readonly string[] = [
   'src/core/worker-loop.ts: `${config.url} changed.\\n\\n${truncatedAnalysis}`',
   // The same seed for a watch someone the owner let in set up (PRD B6, ux U-202): English model
   // context too; its push is `helperWatchChangedPush`, from the table.
-  'src/core/worker-loop.ts: : WORKER_NOTICES.en.helperWatchChanged,',
 ];
 
 describe('the fixed-notice detector', () => {

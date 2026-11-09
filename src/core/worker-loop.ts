@@ -666,12 +666,6 @@ export function reservationEstimate(task: TriggerRecord): number {
 export { mandateNeedsOwnerStamp };
 
 /**
- * Whether a hand-run grant covers this trigger: only the proposal of the person who holds
- * it. The door lets the person who set up or last changed a proposal test it; it does not
- * let a mandate run what someone else wrote — the owner's own unstamped agent action least
- * of all, whose consent stamp the door would otherwise step over.
- */
-/**
  * Whether a plan was set up or last changed by someone other than the owner: the last mandate
  * that changed it, else its creator. The owner's stamp and the owner's later edit leave
  * `mandate_editor` as it is, and so the text as written (PRD customer-granted-operator-access B6).
@@ -701,6 +695,12 @@ export function shownMandate(t: { created_by?: string | null | undefined; mandat
   return address.length <= 254 && SHOWN_ADDRESS.test(address) ? { address, changed } : undefined;
 }
 
+/**
+ * Whether a hand-run grant covers this trigger: only the proposal of the person who holds
+ * it. The door lets the person who set up or last changed a proposal test it; it does not
+ * let a mandate run what someone else wrote — the owner's own unstamped agent action least
+ * of all, whose consent stamp the door would otherwise step over.
+ */
 export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: string | undefined; edited_by?: string | undefined }): boolean {
   if (grant === null) return false;
   const lastParty = t.edited_by ?? t.created_by;
@@ -3637,10 +3637,15 @@ export class WorkerLoop {
     const ref = notices.workflowRef(result.runId, task.pipeline_id ?? undefined);
     // A plan someone the owner let in set up or changed: its title and errors stay out of the
     // thread, where they would read as lynox's own words (PRD B6). The ids stay for the diagnosis.
-    const othersPlan = setUpByOther(task);
+    // The plan is the trigger and, for `run_workflow`, its workflow: an owner's schedule of a
+    // workflow a mandate wrote runs that mandate's steps, read at dispatch (`planOf`).
+    const othersTrigger = setUpByOther(task);
+    // (A mandate's test run by hand has no `planOf`, but covers only its own proposal: `othersTrigger`.)
+    const planOf = this.#runSlotOf(task.id)?.planOf;
+    const othersPlan = othersTrigger || (planOf !== undefined && !isOwnerPrincipal(planOf));
     this.engine.escalateToUser({
       key: task.id,
-      title: othersPlan ? notices.helperPlanFailedTitle(shownMandate(task)) : `✗ ${task.title}`,
+      title: othersPlan ? notices.helperPlanFailedTitle(othersTrigger ? shownMandate(task) : undefined) : `✗ ${task.title}`,
       body: othersPlan
         ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
         : `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
@@ -3978,9 +3983,8 @@ export class WorkerLoop {
       this.engine.escalateToUser({
         key: task.id,
         title: othersWatch ? notices.helperWatchTitle(shownMandate(task)) : `\uD83D\uDD0D ${task.title}`,
-        // The thread's seed is model context and stays English (ux Rest-P E15); the push is the owner's.
-        body: !othersWatch ? `${config.url} changed.\n\n${truncatedAnalysis}`
-          : WORKER_NOTICES.en.helperWatchChanged,
+        // The helper's case is lynox's own bubble to the owner, so in the owner's language (ux U-202).
+        body: othersWatch ? notices.helperWatchChanged : `${config.url} changed.\n\n${truncatedAnalysis}`,
         pushBody: othersWatch ? notices.helperWatchChangedPush : notices.watchChanged(config.url, truncatedAnalysis),
         data: { taskId: task.id },
         onReported: this.#recordEscalation(task.id),

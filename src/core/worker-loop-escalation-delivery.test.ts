@@ -53,7 +53,7 @@ type Channel = ChannelOutcome | ((row: () => Escalation) => Promise<ChannelOutco
  * sees the trigger's record at send time); ticks the trigger once. `awaitAnswer: false` for a
  * channel that never answers.
  */
-async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: string, mandateEditor?: string): Promise<{ escalation: () => Escalation; escalated: number; seen: EscalateOpts[] }> {
+async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: string, mandateEditor?: string, workflowBy?: string): Promise<{ escalation: () => Escalation; escalated: number; seen: EscalateOpts[] }> {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-escal-'));
   dirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
@@ -107,6 +107,9 @@ async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: str
     // A mandate's trigger runs only with the owner's stamp (PRD B5).
     ...(createdBy !== undefined ? { createdBy, createdMandateId: 'M-1', confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner' } : {}),
   });
+  if (workflowBy !== undefined) {
+    engineDb.getDb().prepare('UPDATE workflows SET created_by = ?, created_mandate_id = ? WHERE id = ?').run(workflowBy, 'M-1', 'wf-1');
+  }
   if (mandateEditor !== undefined) {
     engineDb.getDb().prepare('UPDATE triggers SET mandate_editor = ?, mandate_editor_id = ? WHERE id = ?').run(mandateEditor, 'M-1', 'trg-1');
   }
@@ -230,5 +233,18 @@ describe('a failed scheduled workflow records whether its escalation reached any
     // The owner's plan: the helper changed it, it did not set it up.
     expect(edited.seen[0]!.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle({ address: 'helper@example.com', changed: true }));
     expect(edited.seen[0]!.body).not.toContain('boom');
+  });
+
+  it('the owner\'s schedule of a workflow a helper wrote escalates without its errors', async () => {
+    // The trigger is the owner's; the steps that failed are the helper's (`planMembers` at dispatch).
+    const wf = await failOnce(['delivered'], true, undefined, undefined, 'mandate:helper@example.com');
+    const w = wf.seen[0]!;
+    for (const text of [w.title, w.body]) {
+      expect(text).not.toContain('boom');
+      expect(text).not.toContain('Nightly export');
+    }
+    // The trigger names no mandate, so the title does not either.
+    expect(w.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle(undefined));
+    expect(w.body).toContain('run run-1');
   });
 });
