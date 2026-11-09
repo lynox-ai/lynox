@@ -7,7 +7,7 @@
  * All operations are designed to be safe during concurrent lynox operation.
  */
 
-import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -102,11 +102,10 @@ function readEntryBytes(srcFile: string, entry: BackupFileEntry, encrypted: bool
   let raw: Buffer;
   try {
     // Not following a link set after `backupSourceProblem` ran: a link here fails the open (ELOOP).
-    // Non-blocking, so a FIFO set there instead opens at once and the type check refuses it,
-    // where a blocking open would wait for a writer and hold the restore.
+    // Non-blocking, so a FIFO set there instead opens at once and reads empty, which the size check
+    // below refuses; a blocking open would wait for a writer and hold the restore. A folder fails the read.
     const fd = openSync(srcFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
     try {
-      if (!fstatSync(fd).isFile()) throw new Error('not a plain file');
       raw = readFileSync(fd);
     } finally {
       closeSync(fd);
