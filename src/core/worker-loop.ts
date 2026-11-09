@@ -26,7 +26,7 @@ import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
@@ -681,6 +681,21 @@ export { mandateNeedsOwnerStamp };
 export function setUpByOther(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): boolean {
   const tag = t.mandate_editor ?? t.created_by;
   return !(tag === undefined || tag === null || tag === principalTag(OWNER_PRINCIPAL));
+}
+
+/** A plain address: what an owner types when letting someone in. Anything else is not shown. */
+const SHOWN_ADDRESS = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$/;
+
+/**
+ * The address of the mandate a plan is by, for its escalation's title (ux U-202): the engine sets
+ * the tag from the grant, so it is not the helper's text. `undefined` for a tag that is not a
+ * mandate's or an address of another shape; the title then says "someone you let in".
+ */
+export function shownMandate(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): string | undefined {
+  const tag = t.mandate_editor ?? t.created_by;
+  if (tag === undefined || tag === null || !isMandateTag(tag)) return undefined;
+  const address = tag.slice(MANDATE_TAG_PREFIX.length);
+  return address.length <= 254 && SHOWN_ADDRESS.test(address) ? address : undefined;
 }
 
 export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: string | undefined; edited_by?: string | undefined }): boolean {
@@ -3622,7 +3637,7 @@ export class WorkerLoop {
     const othersPlan = setUpByOther(task);
     this.engine.escalateToUser({
       key: task.id,
-      title: othersPlan ? notices.helperPlanFailedTitle : `✗ ${task.title}`,
+      title: othersPlan ? notices.helperPlanFailedTitle(shownMandate(task)) : `✗ ${task.title}`,
       body: othersPlan
         ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
         : `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
@@ -3959,10 +3974,11 @@ export class WorkerLoop {
       const notices = this.#notices();
       this.engine.escalateToUser({
         key: task.id,
-        title: othersWatch ? notices.helperWatchTitle : `\uD83D\uDD0D ${task.title}`,
+        title: othersWatch ? notices.helperWatchTitle(shownMandate(task)) : `\uD83D\uDD0D ${task.title}`,
         // The thread's seed is model context and stays English (ux Rest-P E15); the push is the owner's.
-        body: othersWatch ? WORKER_NOTICES.en.helperWatchChanged : `${config.url} changed.\n\n${truncatedAnalysis}`,
-        pushBody: othersWatch ? notices.helperWatchChanged : notices.watchChanged(config.url, truncatedAnalysis),
+        body: !othersWatch ? `${config.url} changed.\n\n${truncatedAnalysis}`
+          : WORKER_NOTICES.en.helperWatchChanged,
+        pushBody: othersWatch ? notices.helperWatchChangedPush : notices.watchChanged(config.url, truncatedAnalysis),
         data: { taskId: task.id },
         onReported: this.#recordEscalation(task.id),
       });

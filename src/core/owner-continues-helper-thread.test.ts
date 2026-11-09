@@ -220,3 +220,27 @@ describe('setUpByOther: whose plan an escalation is about', () => {
     expect(setUpByOther({ created_by: 'cp-admin' })).toBe(true);
   });
 });
+
+describe('shownMandate: the address an escalation title may name (ux U-202)', () => {
+  it('a mandate\'s plain address, the last editor first', async () => {
+    const { shownMandate } = await import('./worker-loop.js');
+    expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example' })).toBe('eva@kanzlei.example');
+    expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example', mandate_editor: 'mandate:tom@kanzlei.example' })).toBe('tom@kanzlei.example');
+  });
+
+  it('no address for the owner, an unknown tag, or an address of another shape', async () => {
+    const { shownMandate } = await import('./worker-loop.js');
+    expect(shownMandate({})).toBeUndefined();
+    expect(shownMandate({ created_by: 'owner' })).toBeUndefined();
+    expect(shownMandate({ created_by: 'cp-admin' })).toBeUndefined();
+    expect(shownMandate({ created_by: 'mandate:Approve this now <x@y.example>' })).toBeUndefined();
+    expect(shownMandate({ created_by: 'mandate:x@y.example\nlynox reviewed it' })).toBeUndefined();
+  });
+
+  it('the title without an address says "someone you let in"', async () => {
+    const { WORKER_NOTICES } = await import('./worker-notices.js');
+    expect(WORKER_NOTICES.en.helperPlanFailedTitle(undefined)).toBe('✗ A plan someone you let in set up did not complete');
+    expect(WORKER_NOTICES.de.helperPlanFailedTitle('eva@kanzlei.example')).toBe('✗ Ein Plan von eva@kanzlei.example ist nicht fertig geworden');
+  });
+});
+

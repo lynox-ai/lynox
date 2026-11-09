@@ -608,7 +608,9 @@ describe('WorkerLoop', () => {
       expect(text).not.toContain('pay invoice');
       expect(text).not.toContain('Helper watch');
     }
-    expect(helper!.title).toBe(WORKER_NOTICES.en.helperWatchTitle);
+    expect(helper!.title).toBe(WORKER_NOTICES.en.helperWatchTitle('h@x.test'));
+    expect(helper!.body).toBe(WORKER_NOTICES.en.helperWatchChanged);
+    expect(helper!.pushBody).toBe(WORKER_NOTICES.en.helperWatchChangedPush);
     expect(owner!.body).toContain('helper-chose.test');
     expect(owner!.title).toContain('Owner watch');
   });
