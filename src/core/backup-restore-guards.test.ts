@@ -419,6 +419,29 @@ describe('a link inside the backup (the read side)', () => {
     expect(JSON.stringify(listed)).not.toContain('HOST-ONLY');
   });
 
+  it('a manifest.json that is a link: prune does not take it for the newest backup and keeps the real one', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const dated = async (createdAt: string): Promise<string> => {
+      const made = await m.createBackup();
+      const at = join(made.path, 'manifest.json');
+      writeFileSync(at, JSON.stringify({ ...JSON.parse(readFileSync(at, 'utf8')), created_at: createdAt }));
+      return made.path;
+    };
+    const older = await dated('2020-01-01T00:00:00.000Z');
+    const newest = await dated('2021-01-01T00:00:00.000Z');
+    const linked = await dated('2019-01-01T00:00:00.000Z');
+    const hostJson = join(outside, 'host.json');
+    writeFileSync(hostJson, JSON.stringify({ created_at: '2099-01-01T00:00:00.000Z', files: [] }));
+    rmSync(join(linked, 'manifest.json'));
+    symlinkSync(hostJson, join(linked, 'manifest.json'));
+
+    expect(m.pruneBackups(30)).toBe(1);
+    expect(existsSync(older)).toBe(false);
+    expect(existsSync(newest)).toBe(true);
+    expect(existsSync(linked)).toBe(true);
+  });
+
   it.skipIf(process.getuid?.() === 0)('a component that cannot be asked: refused with its code, not thrown', async () => {
     writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
     const m = manager();
