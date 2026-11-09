@@ -15,6 +15,7 @@ import { externalClient, graphqlAnswer, type ExternalClient } from './bulk-exter
 import { createToolContext } from './tool-context.js';
 import { withShopifyApply, withShopifyRead } from '../tools/permission-guard.js';
 import { shopifyProductReadBody, type ShopifyRead } from './shopify-graphql.js';
+import { TARGET_MAX, httpTarget } from './audit-log.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
 const HOST = 'acme.myshopify.com';
@@ -107,6 +108,31 @@ describe('graphqlRead — the request', () => {
     ]);
     expect((await client({ recordRead: () => false }).graphqlRead(ENDPOINT, R1)).kind).toBe('unrecorded');
     expect(sent).toHaveLength(3);
+  });
+
+  it('records a list search too long for its row as the sent text cut at a value, the row as full as the trail\'s bound allows', async () => {
+    // Values of many lengths, so the room the row has is met at every distance from a value's end.
+    for (let L = 12; L <= 44; L++) {
+      const values = Array.from({ length: 50 }, (_, i) => `G${String(i).padStart(2, '0')}${'x'.repeat(L - 3)}`);
+      const filters = { product_type: values, vendor: 'Acme' };
+      const rows: string[] = [];
+      const listing = withShopifyRead(base, HOST, { phase: 'list', afterId: 7, filters });
+      await client({ contract: listing, recordRead: (url, detail) => { rows.push(`${httpTarget('POST', url)} ${detail!}`); return true; } })
+        .graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7, filters });
+      const row = rows[0]!;
+      // The row fits what the trail keeps, so the trail's own cut never reaches it.
+      expect(row.length, `L=${String(L)}`).toBeLessThanOrEqual(TARGET_MAX);
+      const m = /^(.* shopify_products_list (.*)) … \[cut here: (\d+) of 51 values left out\]$/.exec(row)!;
+      const sentQuery = `id:>7 AND (${values.map((v) => `product_type:"${v}"`).join(' OR ')}) AND vendor:"Acme"`;
+      expect(sentQuery.startsWith(m[2]!)).toBe(true);
+      expect(m[2]!.endsWith('"')).toBe(true);
+      const kept = [...m[2]!.matchAll(/product_type:"/g)].length;
+      expect(Number(m[3])).toBe(51 - kept);
+      // As full as the bound allows: one more value would not fit.
+      expect(`${m[1]!} OR product_type:"${values[kept]!}" … [cut here: ${String(50 - kept)} of 51 values left out]`.length, `L=${String(L)}`)
+        .toBeGreaterThan(TARGET_MAX);
+    }
+    expect(sent).toHaveLength(33);
   });
 
   it('caps the answer like a GET', async () => {

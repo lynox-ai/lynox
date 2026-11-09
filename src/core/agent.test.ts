@@ -22,11 +22,14 @@ vi.mock('@anthropic-ai/sdk', () => {
     status: number;
     error: unknown;
     headers: unknown;
-    constructor(status: number, error: unknown, message: string | undefined, headers: unknown) {
+    type: string | null;
+    // The real SDK's signature, `type` included: the SDK sets it from the body's `error.type`.
+    constructor(status: number, error: unknown, message: string | undefined, headers: unknown, type?: string | null) {
       super(message ?? String(error));
       this.status = status;
       this.error = error;
       this.headers = headers;
+      this.type = type ?? null;
       this.name = 'APIError';
     }
   }
@@ -36,8 +39,12 @@ vi.mock('@anthropic-ai/sdk', () => {
 const mockProcess = vi.fn();
 
 vi.mock('./stream.js', () => ({
-  StreamProcessor: vi.fn().mockImplementation(function (this: { process: typeof mockProcess }) {
+  StreamProcessor: vi.fn().mockImplementation(function (this: { process: typeof mockProcess; answered: () => boolean; turnEnded: () => boolean; partial: () => unknown }) {
     this.process = mockProcess;
+    // The mock delivers no events of its own: a failure it raises came before any answer.
+    this.answered = () => false;
+    this.turnEnded = () => false;
+    this.partial = () => ({ usage: undefined, content: [] });
   }),
 }));
 
@@ -2070,15 +2077,41 @@ describe('Agent', () => {
       const { APIError: MockAPIError } = await import('@anthropic-ai/sdk');
       (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 1;
 
-      // SSE stream errors arrive with status=undefined and error body
+      // The shape the SDK's stream parser throws for an `error` event: status undefined, the
+      // whole event as the body, and its error type as `type`. A body of the flat form
+      // `{ type: 'overloaded_error' }` is not one the SDK produces.
       mockProcess
-        .mockRejectedValueOnce(new MockAPIError(undefined as unknown as number, { type: 'overloaded_error', message: 'Overloaded' }, undefined, undefined))
+        .mockRejectedValueOnce(new MockAPIError(
+          undefined as unknown as number,
+          { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+          undefined, undefined, 'overloaded_error',
+        ))
         .mockResolvedValueOnce(endTurnResponse('Recovered'));
 
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
       const result = await agent.send('Hello');
       expect(result).toBe('Recovered');
       expect(mockProcess).toHaveBeenCalledTimes(2);
+      (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 2000;
+    });
+
+    it('a stream processor that fails to say what it saw still leaves the bound on the caps, and the call error still reaches the retry decision', async () => {
+      const { StreamProcessor } = await import('./stream.js');
+      (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 1;
+      vi.mocked(StreamProcessor).mockImplementationOnce(function (this: { process: typeof mockProcess; answered: () => boolean; turnEnded: () => boolean; partial: () => unknown }) {
+        this.process = mockProcess;
+        this.answered = () => { throw new Error('reader failed'); };
+        this.turnEnded = () => false;
+        this.partial = () => ({ usage: undefined, content: [] });
+      } as never);
+      mockProcess
+        .mockRejectedValueOnce(Object.assign(new Error('x'), { name: 'TransformError' }))
+        .mockResolvedValueOnce(endTurnResponse('Recovered'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', costGuard: { maxBudgetUSD: 100 } });
+      expect(await agent.send('Hello')).toBe('Recovered');
+      expect(mockProcess).toHaveBeenCalledTimes(2);
+      expect((agent as unknown as { costGuard: { capOnlyUSD: number } }).costGuard.capOnlyUSD).toBeGreaterThan(0);
+      expect(agent.getHelperCostUsd()).toBe(0);
       (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 2000;
     });
 

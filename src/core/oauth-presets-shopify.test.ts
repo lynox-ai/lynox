@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { OAUTH_PRESETS, consentFrameProblems, derivePresetEndpoints, presetNotFollowed, presetRegisterOf, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
 import { decideConnect, isRefusal } from '../server/oauth-connect-decision.js';
-import { SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS } from './shopify-graphql.js';
+import { SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 
 const shopify = OAUTH_PRESETS.get('shopify')!;
 
@@ -21,6 +21,18 @@ describe('the Shopify preset', () => {
 
   it.each(['My-Store', '-store', 'my_store', 'my.store', 'evil.com#', 'a/b', 'store.myshopify.com'])('refuses the shop value %j', (shop) => {
     expect(derivePresetEndpoints('shopify', { shop })).toMatchObject({ kind: 'bad-param' });
+  });
+
+  it('names a host with a store label of 63 characters a store host, and not one of 64', () => {
+    expect(isShopifyStoreHostName(`${'a'.repeat(63)}.myshopify.com`)).toBe(true);
+    expect(shopifyGraphqlEndpoint(`${'a'.repeat(63)}.myshopify.com`)).not.toBeNull();
+    expect(isShopifyStoreHostName(`${'a'.repeat(64)}.myshopify.com`)).toBe(false);
+    expect(shopifyGraphqlEndpoint(`${'a'.repeat(64)}.myshopify.com`)).toBeNull();
+  });
+
+  it('takes a shop of 63 characters, one DNS label, and refuses one of 64', () => {
+    expect(derivePresetEndpoints('shopify', { shop: 'a'.repeat(63) })).toMatchObject({ host: `${'a'.repeat(63)}.myshopify.com` });
+    expect(derivePresetEndpoints('shopify', { shop: 'a'.repeat(64) })).toMatchObject({ kind: 'bad-param' });
   });
 
   it('allows the read scopes and write_products, and asks for nothing it does not name', () => {

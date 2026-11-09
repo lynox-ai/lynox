@@ -23,7 +23,7 @@ import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { builtInPresetOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
@@ -41,7 +41,7 @@ import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../cor
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -174,14 +174,30 @@ const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
 const COST_RESPONSE_FIELD_RE = /^[A-Za-z0-9_]{1,64}(\.[A-Za-z0-9_]{1,64}){0,7}$/;
 const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
-/** The built-in preset an oauth2 profile names, when the engine knows it. */
 function isPlainRecord<T>(value: T): value is T & Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.get> {
-  const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
-  return typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
+/**
+ * The refusal for a `base_url` that names another API version than the one its built-in provider
+ * pins (`adminApiVersion`, read under `<apiPathPrefix>api/<version>`), else `null`. A base without
+ * a version in its path passes: it names none, so it names no other one.
+ */
+function presetApiVersionError(preset: ReturnType<typeof OAUTH_PRESETS.get>, baseUrl: string): string | null {
+  const pinned = preset?.adminApiVersion;
+  if (preset === undefined || pinned === undefined) return null;
+  let path: string;
+  try {
+    // Read as a server that joins slashes reads it: `/admin//api//2024-01` names 2024-01 too.
+    path = new URL(baseUrl).pathname.replace(/\/{2,}/g, '/');
+  } catch {
+    return null;
+  }
+  const versionsAt = `${preset.apiPathPrefix ?? '/'}api/`;
+  if (!path.startsWith(versionsAt)) return null;
+  const named = path.slice(versionsAt.length).split('/')[0] ?? '';
+  if (named === '' || named === pinned) return null;
+  return `Invalid base_url: a profile on the built-in "${preset.id}" provider uses its API version ${pinned}, the one this engine's own requests name. Save it again with base_url ending in ${versionsAt}${pinned}; you do not need to ask the user which version to use.`;
 }
 
 /**
@@ -1750,6 +1766,30 @@ export function adoptionNote(prior: ApiProfile, saved: ApiProfile): string {
 }
 
 /**
+ * The line `view` adds to a built-in provider's profile that holds no token yet. Without it the
+ * view said only "OAuth2 (managed refresh-token flow)", and a model asked to connect the profile
+ * wrote the connect call into its reply as a link instead of making it (1312). Whether a token is
+ * held is asked of the vault (`holds`: no value read out, no audit event), never of profile text;
+ * with no vault, or one that cannot answer, the line is left out. Either
+ * token held means the profile may be connected, so the line needs both slots empty (ux U-191).
+ * A run whose secret scope leaves either slot out gets no line.
+ */
+export function notConnectedNote(agent: Pick<IAgent, 'secretStore'>, profile: ApiProfile): string {
+  if (builtInPresetOf(profile) === undefined) return '';
+  const store = agent.secretStore;
+  if (!store) return '';
+  const slots = [accessTokenKey(profile.id), readersRefreshSlot(profile)];
+  // A scoped run cannot see these slots; asking would record them as denied and suggest widening
+  // the scope to OAuth tokens. It cannot tell, so it says nothing (as `emptyTokenSlots` does).
+  if (slots.some((name) => store.explainUnresolved?.(name) === 'out-of-scope')) return '';
+  // A store that cannot say whether a token is there gets no line: falling back to `resolve` would
+  // read the token out and log it as a read only to compare it with nothing.
+  if (store.holds === undefined) return '';
+  if (slots.some((name) => store.holds!(name))) return '';
+  return `\n\nConnection: not connected yet. When the user wants it connected, call api_setup with action "connect" and id "${profile.id}"; that call returns the sign-in link for the user, or says why there is none. A link or a tool call written into your reply connects nothing.`;
+}
+
+/**
  * Whose consent a first exchange records (`OAuthGrantRecord.connected_by`). A renewal never asks:
  * a stamp already on the grant stays, whoever's turn renews it. A mandate counts only on a profile
  * it wrote itself; its turn reaching the owner's profile, through the attach's renewal, leaves
@@ -1902,7 +1942,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
       if (!profile) {
         return `API profile "${input.id}" not found. Use action "list" to see available profiles.`;
       }
-      return apiStore.formatProfile(profile);
+      return apiStore.formatProfile(profile) + notConnectedNote(agent, profile);
     }
 
     if (input.action === 'bootstrap') {
@@ -2106,6 +2146,15 @@ ${draftJson}
       if (error) {
         return `Validation error: ${error}`;
       }
+      // A provider that pins its API version in the path is saved on that version. Shopify answers
+      // an old version with the oldest one it still supports, so a profile on another
+      // version would read a different API than the engine's own requests (`adminApiVersion`).
+      // Checked here and not in `validateProfile`, so a stored profile on another version can
+      // still be refined. The version the model wrote is not repeated.
+      const versionError = presetApiVersionError(namedPreset, profile.base_url);
+      if (versionError) {
+        return `Validation error: ${versionError}`;
+      }
       // A value the provider reads without regard to case is stored in lower case: "My-Store" is
       // the store my-store, not a refusal. After the check, so the check reads what was written
       // (a vault reference is refused by its upper-case name).
@@ -2264,9 +2313,11 @@ ${draftJson}
             .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
             .filter((h): h is string => h !== null),
         ));
+        // One paragraph per host, not per URL: a store preset puts its base, token and authorize
+        // URLs on one host, and the same paragraph three times reads as three destinations.
         const disclosureParts = [
           nonVetted.length > 0
-            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${nonVetted.map((u) => describeDisclosure(u)).join('\n\n')}`
+            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n')}`
             : undefined,
           redirectHostNames.length > 0
             ? `You will be sent to ${redirectHostNames.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`
@@ -2527,6 +2578,13 @@ ${draftJson}
       // route's own business, and W1b gives it a check of its own.
       const origin = process.env['ORIGIN'];
       if (!origin) {
+        // fetch_token is no way around this for a built-in provider's profile: it posts no
+        // app-level grant for one (`oauthGrantIsUserDelegated`) and renews only a refresh token the
+        // profile already holds, so it cannot do a first authorization (ux U-188).
+        const originPreset = builtInPresetOf(profile);
+        if (originPreset !== undefined) {
+          return `Error: profile "${id}" cannot be authorized now: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to after they authorize lynox at ${originPreset.label}. There is no other way to connect ${originPreset.label} here: this engine connects ${originPreset.label} only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. fetch_token cannot do that authorization either; it only renews a profile that was authorized before and still holds its refresh token. Tell the user that this profile cannot be connected until whoever runs this engine sets its public address (ORIGIN).`;
+        }
         return 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
       }
       // Parsed, not merely found. The provider host below is parsed, compared for
@@ -2581,7 +2639,10 @@ ${draftJson}
         if (endpoints.kind === 'bad-preset') {
           // A defect in a compiled preset. Neither the model nor the user can
           // fix it, so neither is told to try.
-          return `Error: the built-in provider profile "${id}" names is defined wrongly in this engine — ${endpoints.detail}. There is nothing to set on the profile; collect the credentials with ask_secret and use action=fetch_token, and report the provider as broken.`;
+          // fetch_token is no way around it either: a built-in provider's profile gets no
+          // app-level token there (`oauthGrantIsUserDelegated`), and no authorization (ux U-188).
+          const brokenLabel = builtInPresetOf(profile)?.label ?? 'this provider';
+          return `Error: profile "${id}" cannot be authorized: the built-in provider it uses is defined wrongly in this engine (${endpoints.detail}). There is no other way to connect ${brokenLabel} here: this engine connects ${brokenLabel} only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. There is nothing to set on the profile, and fetch_token cannot do the authorization this provider's tokens come from. Tell the user that this profile cannot be connected because of an error in lynox itself, not in their settings.`;
         }
         if (endpoints.kind === 'missing-param') {
           return `Error: profile "${id}" is missing what its provider needs: ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}). Ask the user for it and set it with api_setup update.`;
@@ -2887,9 +2948,20 @@ ${draftJson}
         const subject = profile.oauth_grant?.origin === 'callback' || tokenPreset === undefined
           ? `was authorized by a user${tokenPreset !== undefined ? ` through the "${tokenPreset.id}" provider` : ''}, and it declares no refresh_token grant to renew that authorization with. Nothing was sent: requesting an app-level token instead would replace the user's authorization with a different one.`
           : `connects through the "${tokenPreset.id}" provider, which issues its tokens only through a user's authorization, and it declares no refresh_token grant. Nothing was sent: fetch_token does not request an app-level token for it.`;
-        const next = tokenPreset !== undefined
-          ? 'Call api_setup with action "connect" for this profile and show the user the link.'
-          : 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.';
+        // A preset profile that reads its refresh token from a name of its own: a connect stores the
+        // token under the derived name and, since this profile does not read that one, leaves it
+        // without a grant type again (`readersRefreshSlot`, the OAuth callback). Sending it to
+        // connect alone would bring it back here; the field has to go first. Unless the slot is
+        // another profile's grant this one shares through the same provider: that sharing is on
+        // purpose, and what it lacks is the grant type, not a connection of its own.
+        const ownReadSlot = readersRefreshSlot(profile) !== refreshTokenKey(input.id);
+        const next = tokenPreset === undefined
+          ? 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.'
+          : ownReadSlot && apiStore !== undefined && sharesAnotherGrant(apiStore, profile)
+            ? 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.'
+          : ownReadSlot
+            ? 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.'
+            : 'Call api_setup with action "connect" for this profile and show the user the link.';
         return `Error: profile "${input.id}" ${subject} ${next}`;
       }
       // A preset's token endpoint takes the body its provider documents, whatever the profile says.

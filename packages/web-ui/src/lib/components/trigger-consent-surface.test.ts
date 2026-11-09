@@ -146,7 +146,8 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// expected text in place and puts the date back on a waiting trigger.
 		expect(next.cond).toBe('trigger.next_run_at && trigger.enabled !== 0 && !awaitsConfirmation(trigger) && trigger.paused !== true');
 		const run = ifBlockAround('runNow(trigger)');
-		expect(run.cond).toBe('!awaitsConfirmation(trigger)');
+		// Nor at a completed plan that keeps its pause (ux U-179): the refusal names no way out there.
+		expect(run.cond).toBe('!awaitsConfirmation(trigger) && !pausedDone(trigger)');
 		expect(run.body.trim().startsWith('<button onclick={() => runNow(trigger)}')).toBe(true);
 	});
 

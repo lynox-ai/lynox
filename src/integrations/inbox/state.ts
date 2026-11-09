@@ -514,6 +514,8 @@ export class InboxStateDb {
    * bridge an inbox item (message-id) to the uid the mail tools key on without
    * a live IMAP round-trip. Null when the message isn't in the dedup table
    * (pre-classify-window or moved folder) → the caller falls back to mail_search.
+   * Null as well for uid 0: a mail kept across a restart while deferred comes back without a uid
+   * (`MailStateDb.deferredMail`), and no provider gives out 0.
    */
   getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null {
     if (!messageId) return null;
@@ -522,7 +524,7 @@ export class InboxStateDb {
         'SELECT uid, folder FROM processed_mail_messages WHERE account_id = ? AND message_id = ? LIMIT 1',
       )
       .get(accountId, messageId);
-    return row ? { uid: row.uid, folder: row.folder } : null;
+    return row && row.uid > 0 ? { uid: row.uid, folder: row.folder } : null;
   }
 
   /**

@@ -210,6 +210,15 @@ export class CostGuard {
     return this.isExceeded();
   }
 
+  /**
+   * The aborted-call bounds on their own ({@link capOnlyUSD}). Read-only. Read by `spawn.ts`,
+   * which books a settled child's bounds onto the delegating run's ceiling: the child's
+   * `snapshot()` leaves them out, and the delegating run's ceiling must still count them.
+   */
+  capOnlyCostUSD(): number {
+    return this.capOnlyUSD;
+  }
+
   /** What the ceiling is measured against: the spend plus the aborted-call bounds. */
   private capCost(): number {
     return this.estimateCost() + this.capOnlyUSD;

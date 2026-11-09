@@ -5,7 +5,7 @@
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
-	import { getAuthError } from '../stores/chat.svelte.js';
+	import { getAuthError, RUN_ENDED_EVENT } from '../stores/chat.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled, toggleAutoSpeak } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from '../stores/voice-autosend.svelte.js';
@@ -95,7 +95,14 @@
 		return t('status.api_unknown');
 	}
 
+	// Polls overlap (a run's end polls between two timed ones), and the five requests of one can
+	// take longer than those of the next. Only the latest poll writes, so an older answer that
+	// arrives last cannot put back a value from before the run. Checked after every await.
+	let pollSeq = 0;
+
 	async function poll() {
+		const seq = ++pollSeq;
+		const stale = (): boolean => seq !== pollSeq;
 		try {
 			const [healthRes, tasksRes, dailyRes, providersRes, runsRes] = await Promise.all([
 				fetch(`${getApiBase()}/health`).catch(() => null),
@@ -104,11 +111,13 @@
 				fetch(`${getApiBase()}/providers/status`).catch(() => null),
 				fetch(`${getApiBase()}/runs/active`).catch(() => null),
 			]);
+			if (stale()) return;
 
 			engineOk = healthRes?.ok ?? false;
 			if (healthRes?.ok) {
 				try {
 					const data = (await healthRes.json()) as { version?: unknown; build_sha?: unknown };
+					if (stale()) return;
 					if (typeof data.version === 'string' && data.version.length > 0) {
 						engineVersion = data.version;
 						const sha = typeof data.build_sha === 'string' ? data.build_sha : '';
@@ -119,6 +128,7 @@
 
 			if (providersRes?.ok) {
 				const data = (await providersRes.json()) as { providers: ProviderEntry[]; vault_key?: unknown };
+				if (stale()) return;
 				providers = Array.isArray(data.providers) ? data.providers : [];
 				vaultKey = data.vault_key === 'missing_over_encrypted_data' || data.vault_key === 'unknown' ? data.vault_key : null;
 				const primary = providers[0];
@@ -181,13 +191,16 @@
 
 			if (tasksRes?.ok) {
 				const data = (await tasksRes.json()) as { tasks: unknown[] };
+				if (stale()) return;
 				activeTasks = data.tasks.length;
 			}
 
 			if (runsRes?.ok) {
 				// Shared parser with the nav dot (utils/active-runs): counts `running` only;
 				// awaiting_input and interrupted show per thread in the nav.
-				liveRuns = countLiveRuns(parseActiveRuns(await runsRes.json()));
+				const runs: unknown = await runsRes.json();
+				if (stale()) return;
+				liveRuns = countLiveRuns(parseActiveRuns(runs));
 			} else {
 				// Unreachable engine (null), 5xx, or 404 (older engine) → clear, so
 				// the pulsing live-run pill never lingers during an outage.
@@ -196,6 +209,7 @@
 
 			if (dailyRes?.ok) {
 				const rows = (await dailyRes.json()) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
+				if (stale()) return;
 				// Match the LOCAL calendar day (the endpoint now buckets by local
 				// day via tzOffsetMin) — not UTC. toISOString() is UTC and would
 				// pick the wrong/empty bucket near the day boundary (the owner's
@@ -304,6 +318,24 @@
 		function onProviderChanged() { void poll(); }
 		window.addEventListener('lynox:provider-changed', onProviderChanged);
 		return () => window.removeEventListener('lynox:provider-changed', onProviderChanged);
+	});
+
+	// Read today's cost again when a chat run ends, as far as this tab's stream sees it, instead
+	// of showing the value from before the run for up to 30s. Runs in other tabs, a run in a chat
+	// the user left, and a stop from a tab without the stream still wait for the timed poll. The signals one run sends close together (a stop sends one when the
+	// server confirms it and one when the stream closes) make one poll; a later one makes another.
+	const RUN_END_POLL_DELAY_MS = 300;
+	$effect(() => {
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		function onRunEnded() {
+			if (timer !== null) clearTimeout(timer);
+			timer = setTimeout(() => { timer = null; void poll(); }, RUN_END_POLL_DELAY_MS);
+		}
+		window.addEventListener(RUN_ENDED_EVENT, onRunEnded);
+		return () => {
+			window.removeEventListener(RUN_ENDED_EVENT, onRunEnded);
+			if (timer !== null) clearTimeout(timer);
+		};
 	});
 
 	$effect(() => {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  BULK_LIST_PAGE_BYTES, isSameListItem, isUnderList, listItemId, listItemKey, listPageCap, listPageElements,
+  BULK_LIST_PAGE_BYTES, hasListPageUrl, isOfferedListSource, isSameListItem, isUnderList, listItemId, listItemKey, listPageCap, listPageElements,
   listFieldsValue, listPageUrl, listQueryParams, maxListPages, parseListSource, type BulkListSource,
 } from './bulk-list.js';
 import { BULK_MAX_SOURCE_BYTES } from './bulk-plan.js';
@@ -99,6 +99,31 @@ describe('parseListSource', () => {
   it('refuses an unknown form and a write method outside the three', () => {
     expect(() => parse({ ...base, form: 'magento' })).toThrow(/form must be one of: woocommerce, shopify, shopify_media\./);
     expect(() => parseListSource(HOST, base, 'DELETE' as 'PUT', noSecret)).toThrow(/write_method/);
+  });
+});
+
+describe('a stored WooCommerce list source', () => {
+  it('is offered as parsed, and not once its filters were changed past what a parse takes', () => {
+    const s = parse({ ...base, filters: { category: '12' } });
+    expect(isOfferedListSource(s)).toBe(true);
+    // A list of values: only a Shopify list takes one. Its address would throw; the check does not.
+    const listed: BulkListSource = { ...s, filters: { category: ['12', '13'] } };
+    expect(() => listPageUrl(HOST, listed, 1)).toThrow(RangeError);
+    expect(() => isOfferedListSource(listed)).not.toThrow();
+    expect(isOfferedListSource(listed)).toBe(false);
+    // A list of one reads as its value to a pattern, so the check asks for a string first.
+    expect(isOfferedListSource({ ...s, filters: { category: ['12'] } })).toBe(false);
+    // A filter the form does not document, and a value outside the parse's alphabet.
+    expect(isOfferedListSource({ ...s, filters: { vendor: 'Acme' } })).toBe(false);
+    expect(isOfferedListSource({ ...s, filters: { category: '12&x=1' } })).toBe(false);
+  });
+
+  it('has a page address while its form has a spec and each filter one value, offered or not', () => {
+    const s = parse({ ...base, filters: { category: '12' } });
+    expect(hasListPageUrl(s)).toBe(true);
+    expect(hasListPageUrl({ ...s, path: '/wp-json/wc/v3/orders' })).toBe(true);
+    expect(hasListPageUrl({ ...s, filters: { category: ['12'] } })).toBe(false);
+    expect(hasListPageUrl({ ...s, form: 'gone' as BulkListSource['form'] })).toBe(false);
   });
 });
 

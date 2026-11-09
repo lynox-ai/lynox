@@ -21,10 +21,21 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note',
 ]);
 
-/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form. */
+/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form, a key's
+ *  singular (`_one`, {@link bulkOne}) in its `_mandate_one` form. */
 export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
-	const key = (k: string): string => (BULK_MANDATE_KEYS.has(k) ? `${k}_mandate` : k);
+	const key = (k: string): string => {
+		if (BULK_MANDATE_KEYS.has(k)) return `${k}_mandate`;
+		const base = k.endsWith('_one') ? k.slice(0, -'_one'.length) : null;
+		return base !== null && BULK_MANDATE_KEYS.has(base) ? `${base}_mandate_one` : k;
+	};
 	return { t: (k) => i18n.t(key(k)), tf: (k, vars) => i18n.tf(key(k), vars) };
+}
+
+/** A count's sentence at one: the key's `_one` form, which says "1 product", not "1 products".
+ *  Only for the keys that have a worded singular. */
+export function bulkOne(key: string, n: number): string {
+	return n === 1 ? `${key}_one` : key;
 }
 
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
@@ -86,12 +97,15 @@ export interface BulkRunDetailData extends BulkRun {
 	/** The target the run waits on as its probe. `found`: lynox sent to it without a clear answer
 	 *  and then found it as planned, so it cannot say it wrote it; absent reads as written. */
 	probe: { key: string; fields: string[]; found?: boolean } | null;
+	/** Whether this run confirmed a probe of its own: it stays a step the run went through once
+	 *  the probe holds. Absent reads as false. */
+	probeOwn?: boolean;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
 	listFirstPage: string | null;
 	/** A Shopify list narrowed to a product type and/or vendor: the values as the planner gave them (supplied text). */
-	listFilters: Readonly<Record<string, string>> | null;
+	listFilters: Readonly<Record<string, string | readonly string[]>> | null;
 	listStartChecksum: string | null;
 	/** The engine's note on a list read page by page (English). */
 	listNote: string | null;
@@ -434,15 +448,37 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
+/** A list of more values than this is folded until the owner shows it all (ux U-175). */
+export const BULK_LIST_FILTER_UNFOLDED_MAX = 5;
+/** How many values a folded list shows before the count of the rest. */
+const BULK_LIST_FILTER_FOLDED_SHOWN = 3;
+
+/** How many values the folded filter line leaves out a click would show: every value of each
+ *  list longer than {@link BULK_LIST_FILTER_UNFOLDED_MAX}, together. 0 when nothing folds. */
+export function bulkListFilterFolded(filters: Readonly<Record<string, string | readonly string[]>> | null): number {
+	if (filters === null) return 0;
+	return Object.values(filters).reduce((n, v) => (typeof v !== 'string' && v.length > BULK_LIST_FILTER_UNFOLDED_MAX ? n + v.length : n), 0);
+}
+
 /** The line naming a filtered Shopify list's group, where the run is started and approved. The
- *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter. */
-export function bulkListFilterText(filters: Readonly<Record<string, string>> | null, i18n: BulkI18n): string | null {
+ *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter.
+ *  `folded` shows each list of more than {@link BULK_LIST_FILTER_UNFOLDED_MAX} values folded. */
+export function bulkListFilterText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n, folded = false): string | null {
 	if (filters === null) return null;
+	// Every value in its own quotes: they are the scope the owner approves. Folded, a long list
+	// shows its first values and the count of the rest, so the line stays true (ux U-175).
+	const values = (v: string | readonly string[]): string => {
+		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
+		if (folded && quoted.length > BULK_LIST_FILTER_UNFOLDED_MAX) {
+			return `${quoted.slice(0, BULK_LIST_FILTER_FOLDED_SHOWN).join(', ')} ${i18n.tf('bulk.list.more', { n: String(quoted.length - BULK_LIST_FILTER_FOLDED_SHOWN) })}`;
+		}
+		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
+	};
 	const type = filters['product_type'];
 	const vendor = filters['vendor'];
-	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: bulkVisibleText(type), vendor: bulkVisibleText(vendor) });
-	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: bulkVisibleText(type) });
-	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: bulkVisibleText(vendor) });
+	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: values(type), vendor: values(vendor) });
+	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: values(type) });
+	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: values(vendor) });
 	return null;
 }
 
@@ -583,8 +619,9 @@ export function bulkHostOf(targetSystem: string): string | null {
 	return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
 }
 
-/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`). */
-const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`):
+ *  one label of at most 63 characters. */
+const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$/;
 
 /** Whether an external run writes to a Shopify store. */
 export function bulkIsShopifyHost(host: string | null): boolean {
@@ -781,7 +818,7 @@ export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>):
 }
 
 /** Whether the page marks this target: the run's rollback did not complete, and this is a
- *  target it wrote and did not take back. */
+ *  target it wrote, or sent to without recording it, and did not take back. */
 export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
@@ -793,14 +830,32 @@ export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntity
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
+export type BulkStepName = (typeof BULK_STEPS)[number];
 
-/** Which of {@link BULK_STEPS} the run is at. */
-export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase'>): number {
-	if (run.phase === 'planned') return 0;
-	if (run.phase === 'previewed') return 2;
-	if (bulkAtProbe(run)) return 3;
-	if (run.phase === 'approved' || run.phase === 'writing') return 4;
-	return 5;
+type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>;
+
+/** Whether the run has a probe step: two or more targets to write (counted as the write counts
+ *  them), and its probe does not hold yet or it confirmed one of its own. A run at its probe is
+ *  the first: the server names a probe only for an external run whose probe does not hold.
+ *  With one target the one write is the whole run, also where the engine files it as a probe. */
+export function bulkHasProbeStep(run: BulkStepRun): boolean {
+	if (bulkWriting(run) < 2) return false;
+	return (bulkHostOf(run.targetSystem) !== null && !run.probeConfirmed) || run.probeOwn === true;
+}
+
+/** The steps the run shows: {@link BULK_STEPS}, without the probe where it has none. */
+export function bulkSteps(run: BulkStepRun): readonly BulkStepName[] {
+	return bulkHasProbeStep(run) ? BULK_STEPS : BULK_STEPS.filter((s) => s !== 'probe');
+}
+
+/** Which of {@link BULK_STEPS} the run is at. A run without a probe step writes its one target
+ *  under "run", though the engine may hold it there as at a probe. */
+export function bulkStep(run: BulkStepRun): BulkStepName {
+	if (run.phase === 'planned') return 'planned';
+	if (run.phase === 'previewed') return 'approval';
+	if (bulkAtProbe(run) && bulkHasProbeStep(run)) return 'probe';
+	if (run.phase === 'approved' || run.phase === 'writing') return 'run';
+	return 'done';
 }
 
 /** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),
@@ -875,11 +930,11 @@ export function bulkSkippedHead(
 	const judged = n > 0 && run.judge !== null ? ` ${i18n.t(shopify ? 'bulk.skipped.judged' : 'bulk.skipped.judged_targets')}` : '';
 	if (bulkWriting(run) === 0) {
 		// "All" holds only where every target is one lynox leaves out.
-		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(`bulk.nothing.all_skipped_${noun}`, { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
+		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(bulkOne(`bulk.nothing.all_skipped_${noun}`, n), { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
 		return { text: text + judged, nothing: true };
 	}
-	if (n > 0 && m > 0) return { text: i18n.tf(`bulk.skipped.both_${noun}`, { n: String(n), m: String(m) }) + judged, nothing: false };
-	if (n > 0) return { text: i18n.tf(`bulk.skipped.${noun}`, { n: String(n) }) + judged, nothing: false };
+	if (n > 0 && m > 0) return { text: i18n.tf(bulkOne(`bulk.skipped.both_${noun}`, n), { n: String(n), m: String(m) }) + judged, nothing: false };
+	if (n > 0) return { text: i18n.tf(bulkOne(`bulk.skipped.${noun}`, n), { n: String(n) }) + judged, nothing: false };
 	if (m > 0) return { text: i18n.tf('bulk.skipped.taken_out', { m: String(m) }), nothing: false };
 	return { text: null, nothing: false };
 }

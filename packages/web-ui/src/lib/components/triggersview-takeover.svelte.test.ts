@@ -141,6 +141,41 @@ describe('a completed plan that keeps its pause', () => {
 	});
 });
 
+describe('Run now at a paused plan (ux U-179)', () => {
+	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
+	it('is not offered at a completed plan that keeps its pause', async () => {
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		// The row is there, so the button is missing at it, not with an empty list.
+		expect(target.textContent).toContain('Wochenreport');
+		expect(runNow()).toBeNull();
+	});
+	it('is not offered to a helper there either, who is told the pause without the names', async () => {
+		viewer = 'mandate';
+		const row = { id: 'p1', title: 'Wochenreport', effect: 'run_agent', source: 'cron', confirmed_at: '2026-10-01T00:00:00.000Z', paused: true };
+		rows = [{ ...row, status: 'completed' }];
+		await render();
+		expect(target.textContent).toContain('Wochenreport');
+		expect(runNow()).toBeNull();
+		// The same row, open: the helper has the button, so its absence above is the pause's.
+		unmount(component!);
+		component = undefined;
+		rows = [{ ...row, status: 'open' }];
+		await render();
+		expect(runNow()).not.toBeNull();
+	});
+	it('stays at an open paused plan, where the refusal names the takeover the row offers', async () => {
+		await render();
+		expect(runNow()?.textContent).toContain('Jetzt ausführen');
+		expect(button()).not.toBeNull();
+	});
+	it('stays at a completed plan that is not paused', async () => {
+		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await render();
+		expect(runNow()).not.toBeNull();
+	});
+});
+
 describe('the notice of an ended access', () => {
 	it('says the full address, which the push shortens, and that there was no advance notice', async () => {
 		await render();

@@ -74,6 +74,7 @@ import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import type { Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
+import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { isOnboardingFlag } from '../core/onboarding-flag-store.js';
@@ -127,9 +128,9 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
-import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
+import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
-import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { WorkflowStore, type WorkflowAuthorship } from '../core/workflow-store.js';
 import { ConnectionStore } from '../core/connection-store.js';
@@ -5489,7 +5490,10 @@ export class LynoxHTTPApi {
           // reading `fatal` would see `undefined` here — falsy, i.e. "keep
           // waiting" — and the fix for the ambiguous channel would have created
           // a worse bug than the one it closes.
-          res.write(`event: error\ndata: ${JSON.stringify({ error: msg, fatal: true })}\n\n`);
+          // `code` names a failure the client words itself (the text above stays the detail): a
+          // reply the provider cut off on every attempt.
+          const code = err instanceof StreamIncompleteError ? StreamIncompleteError.CODE : undefined;
+          res.write(`event: error\ndata: ${JSON.stringify({ error: msg, fatal: true, ...(code !== undefined ? { code } : {}) })}\n\n`);
           res.end();
         }
       } finally {
@@ -9592,8 +9596,10 @@ export class LynoxHTTPApi {
         ...withBinding(status),
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
-        // the engine's own documents. It stands here so the owner sees where the read goes.
-        listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : listPageUrl(listRun.host, listRun.source, 1)) : null,
+        // the engine's own documents. It stands here so the owner sees where the read goes. A stored
+        // source with no address to build (a form without a spec, a filter holding a list) shows its
+        // host instead, as a Shopify list does; one whose path was withdrawn still shows its address.
+        listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : hasListPageUrl(listRun.source) ? listPageUrl(listRun.host, listRun.source, 1) : listRun.host) : null,
         listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
         listNote: status.list ? BULK_LIST_NOTE : null,
         // A Shopify list narrowed to one product type and/or vendor: shown wherever the run is started
@@ -9602,8 +9608,13 @@ export class LynoxHTTPApi {
         // An unmeasured apply run writes one target first and is approved only with this
         // confirmation. An undo is neither: it restores what its source wrote, under the
         // source's confirmation, so the note's promise of one target first would not hold.
-        writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_NOTE : null,
+        // With one target to write (counted as the write counts them), that write is the whole run:
+        // the note keeps only its first two sentences.
+        writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply'
+          ? (ledger.countWriting(params['id']!) === 1 ? BULK_UNMEASURED_NOTE_ONE : BULK_UNMEASURED_NOTE) : null,
         writeFormConfirmation: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_CONFIRMATION : null,
+        // A probe this run confirmed stays a step it went through, after it holds.
+        probeOwn: ledger.probeOwn(params['id']!),
         // The context C goes to the judge's provider with the record (PRD shopify-preset §20.2 item 7):
         // the owner sees it before the start the hash binds, never only the fields it decides.
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier, ...(judgeRule.context !== undefined ? { context: judgeRule.context } : {}) } : null,
@@ -11480,7 +11491,10 @@ export class LynoxHTTPApi {
       }
 
       if (this.erasureInProgress) {
-        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+        // Refused before the control plane is asked: the nonce is unspent there, and `claim_kept`
+        // lets the page park it again. The refusal after the control plane answered (below) does
+        // not carry it: that nonce is spent.
+        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress', claim_kept: true });
         return;
       }
       // Counted as a pending grant for as long as the claim is out: one that started

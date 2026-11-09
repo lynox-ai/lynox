@@ -258,7 +258,9 @@ export interface BulkRunStatus {
    *  to them again. Counted from the halt that left them so, not only once a later pass has
    *  recorded them `sent_unknown`. */
   sentUnknown: number;
-  /** Applied targets taken back since — by an undo run, or an atomic run's rollback. */
+  /** Targets taken back since — by an undo run, or an atomic run's rollback. Applied ones, and
+   *  for a run that is not atomic also one an external undo took back after a send that was
+   *  never recorded. Not one an atomic rollback found unrecorded and settled. */
   undone: number;
   kind: BulkRunKind;
   atomic: boolean;
@@ -304,7 +306,7 @@ export interface BulkRunStatus {
 export interface BulkListStatus {
   state: ListState;
   path: string;
-  filters: Record<string, string>;
+  filters: BulkListSource['filters'];
   idField: string;
   /** Null for a Shopify list, which only reads. */
   method: string | null;
@@ -636,7 +638,8 @@ export interface PreviewTarget {
   contextField?: string | undefined;
   /** The owner took this target out of the write before approving (`deselectTarget`). */
   deselected: boolean;
-  /** This run wrote the target: recorded as applied, and not found already as planned. */
+  /** This run wrote the target: recorded as applied, and not found already as planned. Or it may
+   *  have: sent to and never recorded, and not settled by a rollback since. */
   written: boolean;
   /** A rollback or an undo took this run's write back (`undone_at`). After a rollback that did
    *  not complete, a target that is `written` and not `undone` is one lynox left as it was. */
@@ -1589,9 +1592,12 @@ export class BulkLedger {
    */
   getPreview(runId: string, opts: { offset?: number | undefined; limit?: number | undefined } = {}): PreviewTarget[] {
     const rows = this.engineDb.getDb().prepare(
-      // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test.
+      // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test, and
+      // a target sent to and never recorded (`listSentUnrecordedDesc`) while the rollback has not
+      // settled it: the run may have changed it, and a rollback that left it must mark it.
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
-         (applied_at IS NOT NULL AND found_unsent = 0 AND ${WRITING_SQL}) AS written, undone_at IS NOT NULL AS undone,
+         (((applied_at IS NOT NULL AND found_unsent = 0) OR (applied_at IS NULL AND write_sent = 1 AND undone_at IS NULL)) AND ${WRITING_SQL}) AS written,
+         undone_at IS NOT NULL AS undone,
          shop_added_markup, host_rewrote, context_secret_field, link_domain
        FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
@@ -1673,11 +1679,14 @@ export class BulkLedger {
       `SELECT error, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change = 'invalid' GROUP BY error`,
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
-      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone, SUM(found_unsent = 1 AND write_sent = 0) AS foundAsPlanned,
+      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL AND (applied_at IS NOT NULL OR ? = 0)) AS undone, SUM(found_unsent = 1 AND write_sent = 0) AS foundAsPlanned,
          SUM(change != 'invalid' AND before IS NULL) AS unread, SUM(shop_added_markup) AS shopAddedMarkup, SUM(host_rewrote) AS hostRewrote,
          SUM(${UNCLEAR_SQL}) AS sentUnknown
        FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
+    // An atomic run's rollback also settles targets it sent to and never recorded
+    // (`recordUnrecordedSettled`); they were never counted as applied, so not as undone either.
+    // An external undo takes such a target back for real, and it counts.
+    ).get(row.atomic, row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent,
@@ -2106,6 +2115,13 @@ export class BulkLedger {
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
     ).run(host, method, kind, runId, params.confirmedBy ?? null, new Date(params.now ?? Date.now()).toISOString());
     return { ok: true };
+  }
+
+  /** Whether this run confirmed a probe of its own ({@link confirmProbe} files it under its id).
+   *  A measured kind's row is shared by host, verb and kind: a later run that confirms the same
+   *  kind takes it over, and this run then reads false. */
+  probeOwn(runId: string): boolean {
+    return this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE run_id = ? LIMIT 1').get(runId) !== undefined;
   }
 
   /** The target {@link confirmProbe} would accept as this run's probe, with its host and
@@ -3050,6 +3066,13 @@ export class BulkLedger {
     this.engineDb.getDb().prepare('UPDATE bulk_runs SET cost_usd = cost_usd + ? WHERE id = ?').run(usd, runId);
   }
 
+  /** Replace a call's provisional booking (its worst case, booked with `addJudgeCost` before the
+   *  call) by what it cost: `usd` 0 takes it back. Never below zero. */
+  settleJudgeCost(runId: string, provisionalUsd: number, usd: number): void {
+    if (!Number.isFinite(provisionalUsd) || !Number.isFinite(usd) || provisionalUsd < 0 || usd < 0) return;
+    this.engineDb.getDb().prepare('UPDATE bulk_runs SET cost_usd = MAX(0, cost_usd - ? + ?) WHERE id = ?').run(provisionalUsd, usd, runId);
+  }
+
   /**
    * Record one target's verdict — its after-state and the change that follows — or why it has
    * none. Only under the claim's own token (compare-and-set), only while the target has no
@@ -3342,6 +3365,17 @@ export class BulkLedger {
   }
 
   /**
+   * Mark a target the run sent to but never recorded ({@link listSentUnrecordedDesc}) as settled
+   * by the rollback: written back, or found as before the run, so nothing of the run is left on
+   * it. One left `undone_at` NULL is what the owner's view marks ({@link getPreview} `written`).
+   * Not counted as undone: it was never counted as applied either.
+   */
+  recordUnrecordedSettled(runId: string, seq: number, now: number = Date.now()): void {
+    this.engineDb.getDb().prepare('UPDATE bulk_targets SET undone_at = ? WHERE run_id = ? AND seq = ? AND applied_at IS NULL AND write_sent = 1')
+      .run(new Date(now).toISOString(), runId, seq);
+  }
+
+  /**
    * Mark a target written by this run as taken back (an atomic run's rollback). For an
    * undo run the rollback restores what the source wrote, so the source target stands
    * again: its `undone_at` is cleared in the same transaction.
@@ -3367,6 +3401,20 @@ export class BulkLedger {
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
        WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 AND undone_at IS NULL AND ${WRITING_SQL}
+       ORDER BY seq DESC`,
+    ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
+    return rows.map((r) => this.toApplyTarget(r));
+  }
+
+  /** Targets this run sent its write to but never recorded as written, newest first: a loop
+   *  marked the send and died before {@link recordApplied}, or the write failed after it may
+   *  have landed. Whether it holds on the target only a read can tell. Not one a rollback
+   *  settled already ({@link recordUnrecordedSettled}). For an atomic run's rollback, beside
+   *  {@link listAppliedDesc}. */
+  listSentUnrecordedDesc(runId: string): ApplyTarget[] {
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
+       WHERE run_id = ? AND write_sent = 1 AND applied_at IS NULL AND undone_at IS NULL AND ${WRITING_SQL}
        ORDER BY seq DESC`,
     ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
     return rows.map((r) => this.toApplyTarget(r));

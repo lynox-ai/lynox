@@ -462,6 +462,21 @@ export function lapsedSlot(apiStore: Pick<ApiStore, 'knownProfiles'>, name: stri
   }
 }
 
+/**
+ * Whether `profile` reads the refresh slot of another profile's grant as a member of it: the two
+ * share the grant through a built-in provider ({@link SlotGrant} `owned`, another owner, `profile`
+ * among the members). Such a profile renews through the owner's grant on purpose; its own refresh
+ * slot is not missing. Anything that throws answers false.
+ */
+export function sharesAnotherGrant(apiStore: Pick<ApiStore, 'knownProfiles'>, profile: ApiProfile): boolean {
+  try {
+    const grant = slotGrant(apiStore.knownProfiles(), readersRefreshSlot(profile));
+    return grant.kind === 'owned' && grant.owner.id !== profile.id && grant.members.some((m) => m.id === profile.id);
+  } catch {
+    return false;
+  }
+}
+
 /** Whether `name` is a refresh slot of `p`: the one its id derives, or the one it configures. */
 function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
   return p.auth?.type === 'oauth2' && (refreshTokenKey(p.id) === name || p.auth.oauth?.refresh_token_key === name);
@@ -1375,6 +1390,13 @@ export function secretsForProfile(
     get(target, prop, receiver) {
       if (prop === 'resolve') {
         return (name: string): string | null => (hidden(name) ? null : target.resolve(name));
+      }
+      if (prop === 'holds') {
+        // Whether a name is there is information about it too: a hidden name answers false. A store
+        // that cannot answer stays one that cannot: no function, so the caller assumes nothing.
+        const holds = target.holds?.bind(target);
+        if (holds === undefined) return undefined;
+        return (name: string): boolean => (hidden(name) ? false : holds(name));
       }
       if (prop === 'resolveSecretRefs') {
         // Nothing is resolved when any name is hidden: the callers probe one name at a time,
