@@ -219,6 +219,31 @@ export interface RunOptions {
   runGroupId?: string | undefined;
 }
 
+/**
+ * Whether a thread may hold turns of someone other than the owner, for the owner's taint (PRD
+ * customer-granted-operator-access B6). True when the run before was not the owner's (this live
+ * session), or when the thread's row names a creator other than the owner: a mandate reaches only
+ * threads it created, so a thread a mandate created is where its turns are. Fail-closed: no store,
+ * no row, a store that throws, or a tag this does not know all count as foreign. Only `null` (a
+ * row from before tags) and the owner's tag are the owner's.
+ */
+export function threadHoldsForeignTurns(
+  previous: RequestPrincipal,
+  store: Pick<import('./thread-store.js').ThreadStore, 'getThread'> | null,
+  threadId: string,
+): boolean {
+  if (previous.kind !== 'owner') return true;
+  if (store === null) return true;
+  let row: { readonly created_by: string | null } | undefined;
+  try {
+    row = store.getThread(threadId);
+  } catch {
+    return true;
+  }
+  if (row === undefined) return true;
+  return !(row.created_by === null || row.created_by === principalTag(OWNER_PRINCIPAL));
+}
+
 export interface SessionOptions {
   sessionId?: string | undefined;
   model?: ModelTier | undefined;
@@ -812,6 +837,8 @@ export class Session {
 
   private async _run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
     if (!this.agent) throw new Error('Session not initialized — agent missing');
+    // Who ran here before this run: read before it is replaced, for the owner's taint below.
+    const previousPrincipal = this._principal;
     // Before anything that could rebuild the agent below, so every rebuild of this run is
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
     if (runOptions?.principal !== undefined) this._principal = runOptions.principal;
@@ -1266,6 +1293,16 @@ export class Session {
         // Fire-and-forget — eager-persist still covers the happy path; never
         // block the run on a persistence hiccup.
       }
+    }
+
+    // PRD customer-granted-operator-access B6: the owner's turn in a thread a mandate's turns are
+    // in is tainted before the model hears it. The helper's messages are user turns there with no
+    // mark, so the history scan finds nothing; without this, a helper's text the model follows
+    // would be written as the owner's trusted memory. Here, after every rebuild of this run's
+    // prologue: later rebuilds and compactions carry the latch on (`restoreConversationTaint`).
+    // Only the owner's turn: a mandate's own turns are bounded by its tool lock, not by this.
+    if (this._principal.kind === 'owner' && threadHoldsForeignTurns(previousPrincipal, threadStore, this.sessionId)) {
+      this.agent.restoreConversationTaint();
     }
 
     // ⛔ CAPTURED BEFORE THE SEND, and the stop is read off THIS object rather than
