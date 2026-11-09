@@ -4791,20 +4791,25 @@ export class LynoxHTTPApi {
         // file is read BEFORE the loop below writes any of them to the file area, so a refused upload
         // leaves nothing behind. The name gets the check a typed message gets; the content only the
         // credential forms (`mandateDocumentCredential`), read both as text and, for a PDF or Word
-        // file, as what the extraction below gives. An image's pixels are not read.
+        // file, as what the extraction below gives. A file declared as an image is read as text too: the type is
+        // the sender's word, and an image block is stored and sent as it came. An image's pixels are
+        // not read.
         if (!isOwnerPrincipal(this._principalOf(req))) {
           for (const file of files) {
-            if (typeof file.name === 'string' && mandateCredentialInput(file.name) !== null) {
+            const rawName = typeof file.name === 'string' ? file.name : 'unknown';
+            if (mandateCredentialInput(rawName) !== null) {
               errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
             }
             const rawType = typeof file.type === 'string' ? file.type : '';
-            if (typeof file.data !== 'string' || rawType.startsWith('image/') || file.data.length > MAX_FILE_B64_BYTES) continue;
+            if (typeof file.data !== 'string' || file.data.length > MAX_FILE_B64_BYTES) continue;
             const buf = Buffer.from(file.data, 'base64');
             const readings = [buf.toString('utf-8')];
-            try {
-              const extracted = await extractDocumentText(buf, sanitizeUploadFilename(typeof file.name === 'string' ? file.name : 'unknown'));
-              if (extracted) readings.push(extracted.text);
-            } catch { /* the loop below answers an unreadable document */ }
+            if (!rawType.startsWith('image/')) {
+              try {
+                const extracted = await extractDocumentText(buf, sanitizeUploadFilename(rawName));
+                if (extracted) readings.push(extracted.text);
+              } catch { /* the loop below answers an unreadable document */ }
+            }
             if (readings.some((t) => mandateDocumentCredential(t) !== null)) {
               errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
             }

@@ -192,6 +192,16 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     expect(engine().getThreadStore()!.getThread(sid)?.title).toBe(titleBefore);
   }, 60_000);
 
+  it('a bearer token whose space is a control character is refused (the engine would store it as a space)', async () => {
+    const sid = await helperSession();
+    const run = spyRun();
+    const token = randomKey(32);
+    const res = await call('POST', `/api/sessions/${sid}/run`, { task: `curl -H Authorization: ${'Bear'}er\u0001${token}` });
+    expect(res.status).toBe(422);
+    expect(run).not.toHaveBeenCalled();
+    expect(dataDirHolds(token.slice(-8))).toBe(false);
+  }, 60_000);
+
   it('a key is refused before a busy conversation could answer instead (409 keeps the message resendable)', async () => {
     const sid = await helperSession();
     const running = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
@@ -377,6 +387,43 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'curl.txt', type: 'text/plain', data: b64(`curl -H "Authorization: ${'Bear'}er ${randomKey(32)}" https://api.example.org/v1/orders\n`) }] });
       expect(res.status).toBe(422);
       expect(run).not.toHaveBeenCalled();
+    }, 60_000);
+
+    it('a file with a bearer header whose space is a control character is refused', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'curl.txt', type: 'text/plain', data: b64(`Authorization: ${'Bear'}er\u0085${randomKey(32)}\n`) }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+    }, 60_000);
+
+    it('a file with a key of a form only a helper is likely to paste is refused', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const hex = (n: number): string => randomBytes(n).toString('hex');
+      const hubspot = `${'pa'}t-eu1-${hex(4)}-${hex(2)}-${hex(2)}-${hex(2)}-${hex(6)}`;
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'crm.txt', type: 'text/plain', data: b64(`HUBSPOT=${hubspot}\n`) }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+    }, 60_000);
+
+    it('a text file declared as an image is read as text, and refused for its key', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data: b64(`SHOPIFY=${VENDOR_KEY}\n`) }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+      expect(JSON.stringify(engine().getThreadStore()!.getMessages(sid))).not.toContain(b64(`SHOPIFY=${VENDOR_KEY}`).slice(0, 16));
+    }, 60_000);
+
+    it('control: a real image is not refused', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      // A 1×1 PNG.
+      const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data: png }] });
+      expect(res.status, res.text).toBe(200);
+      expect(run).toHaveBeenCalledTimes(1);
     }, 60_000);
 
     it('a file named with a key is refused', async () => {

@@ -6,6 +6,7 @@ import type { SecretVault } from './secret-vault.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { isPresetClientSecretName } from './oauth-presets.js';
 import { ENV_REGISTRY } from '../contract/env-registry.js';
+import { stripUntrustedSeparators } from './sanitize.js';
 
 export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 
@@ -500,6 +501,15 @@ function wordsAfter(text: string, from: number): string[] {
  * Returns a fixed label, never any part of the text.
  */
 export function mandateCredentialInput(text: string): string | null {
+  return mandateCredentialIn(text) ?? mandateCredentialIn(stripUntrustedSeparators(text));
+}
+
+/**
+ * Both credential checks read a text twice: as it came, and as the engine stores and sends it on —
+ * `stripUntrustedSeparators` turns a control character or an exotic line separator into a space,
+ * and that can complete a form the raw text broke (`Bearer\u0001<token>` becomes `Bearer <token>`).
+ */
+function mandateCredentialIn(text: string): string | null {
   const shaped = maskCredentialInput(text).labels[0];
   if (shaped !== undefined) return shaped;
   for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
@@ -537,6 +547,10 @@ export function mandateCredentialInput(text: string): string | null {
  * covered. Returns a fixed label, never any part of the text.
  */
 export function mandateDocumentCredential(text: string): string | null {
+  return documentCredentialIn(text) ?? documentCredentialIn(stripUntrustedSeparators(text));
+}
+
+function documentCredentialIn(text: string): string | null {
   const shaped = maskCredentialInput(text).labels[0];
   if (shaped !== undefined) return shaped;
   for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
