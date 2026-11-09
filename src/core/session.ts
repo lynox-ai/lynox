@@ -407,6 +407,8 @@ export class Session {
    * library's default; the engine's own places name theirs (principal-sites.test.ts).
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
+  /** A run of someone other than the owner happened in this session (PRD B6, see `_run`). */
+  private _foreignRunHere = false;
 
   /** Who ran here last — the run in flight, or the one before it (PRD
    *  customer-granted-operator-access §3.13 E7). Stopping, reviewing or compacting a session
@@ -838,6 +840,9 @@ export class Session {
     // Before anything that could rebuild the agent below, so every rebuild of this run is
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
     if (runOptions?.principal !== undefined) this._principal = runOptions.principal;
+    // Sticky for this session: someone other than the owner has run here (B6 below). Not left to
+    // the thread row alone, which depends on the route refusing a mandate on another's thread.
+    if (this._principal.kind !== 'owner') this._foreignRunHere = true;
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
     // Before anything that could rebuild the agent below, like the principal: every rebuild
     // of this run marks its agent by what this run's client said, never by an earlier run.
@@ -1297,7 +1302,7 @@ export class Session {
     // would be written as the owner's trusted memory. Here, after every rebuild of this run's
     // prologue: later rebuilds and compactions carry the latch on (`restoreConversationTaint`).
     // Only the owner's turn: a mandate's own turns are bounded by its tool lock, not by this.
-    if (this._principal.kind === 'owner' && threadHoldsForeignTurns(threadStore, this.sessionId)) {
+    if (this._principal.kind === 'owner' && (this._foreignRunHere || threadHoldsForeignTurns(threadStore, this.sessionId))) {
       this.agent.restoreConversationTaint();
     }
 
