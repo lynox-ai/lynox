@@ -157,9 +157,11 @@ export const WEB_SEARCH_FALLBACK_PROMPT_SUFFIX = `
  * do not have.
  */
 function networkSettingsOwner(provisioned: boolean): string {
+  // Short sentences, no semicolon: a model quoting the reason stopped at the semicolon and dropped
+  // the way out.
   return provisioned
-    ? '; on this hosted instance lynox sets them, and the owner of this instance can ask lynox support about it at support@lynox.ai'
-    : '; only the owner of this instance can change them';
+    ? ' lynox sets them for this hosted instance. The owner of this instance can ask lynox support about them at support@lynox.ai.'
+    : ' Only the owner of this instance can change them.';
 }
 
 /**
@@ -177,7 +179,7 @@ export function policyBlocksSearchPromptSuffix(provisioned: boolean): string {
 **HARD RULES:**
 - **Never fabricate web search results.** Do not invent paper ids, headlines, prices, citations, URLs or any external fact you did not retrieve.
 - **Name the cause.** Whenever you cannot look something up on the web, say so with this reason, in the user's language:
-  > "Web search is blocked by the network settings of this instance${networkSettingsOwner(provisioned)}."
+  > "Web search is blocked by the network settings of this instance.${networkSettingsOwner(provisioned)}"
   Then offer to answer from what you already know, and say that this may be out of date.
 - Fetch a URL the user names with \`http_request\` only when the network settings allow its host. A result that starts with "Blocked:" means they do not; do not retry it.
 - Do not suggest SearXNG, \`docker compose\` or \`SEARXNG_URL\`: they do not change this setting.`;
@@ -197,13 +199,15 @@ const SEARXNG_REFUSED_RULE: Readonly<Record<string, string>> = {
  */
 export function webSearchFallbackSearxngRefusedPromptSuffix(code: string, provisioned: boolean): string {
   const rule = SEARXNG_REFUSED_RULE[code] ?? 'they do not allow the SearXNG address';
-  // On a hosted instance lynox sets the network settings and the page shows no setting for them.
+  // On a hosted instance lynox sets the network settings and the integrations page shows no
+  // setting for them, so the owner is pointed at support, in short sentences the model can quote
+  // whole (it stopped quoting at a semicolon). Self-hosted, the model paraphrases the way.
   const way = provisioned
-    ? 'that on this hosted instance lynox sets these settings; the owner of this instance can ask lynox support about it at support@lynox.ai'
-    : 'that the owner of this instance can allow SearXNG in the network settings; the integrations page shows where that setting is';
+    ? 'add: "lynox sets the network settings for this hosted instance. The owner of this instance can ask lynox support about them at support@lynox.ai."'
+    : 'that the owner of this instance can allow SearXNG in the network settings; the integrations page shows where that setting is.';
   return WEB_SEARCH_FALLBACK_PROMPT_SUFFIX.replace(
     WEB_SEARCH_FALLBACK_IMPROVEMENT,
-    `- SearXNG is set up for this instance, but its network settings do not allow it: ${rule}, so searches run on the fallback. If the user asks why results are few or how search could be better, tell them this, and ${way}. Do not suggest \`docker compose\` or \`SEARXNG_URL\`.\n`,
+    `- SearXNG is set up for this instance, but its network settings do not allow it: ${rule}, so searches run on the fallback. If the user asks why results are few or how search could be better, tell them this, and ${way} Do not suggest \`docker compose\` or \`SEARXNG_URL\`.\n`,
   );
 }
 
