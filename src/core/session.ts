@@ -223,22 +223,28 @@ export interface RunOptions {
  * Whether a thread may hold turns of someone other than the owner, for the owner's taint (PRD
  * customer-granted-operator-access B6): its row names a creator other than the owner. A mandate
  * reaches only threads it created (`ownedBy`), so a thread a mandate's turns are in carries its
- * tag — the live session and a resume read the same row. Fail-closed: no store, no row, a store
- * that throws, or a tag this does not know all count as foreign. Only `null` (a row from before
- * tags) and the owner's tag are the owner's.
+ * tag — the live session and a resume read the same row. Fail-closed where the row cannot be
+ * read: a store that throws, or a tag this does not know, count as foreign. Only `null` (a row
+ * from before tags) and the owner's tag are the owner's.
+ *
+ * No store, and no row, are NOT foreign. A route admits a mandate only to a row that records it
+ * (`ownedBy`: a missing row belongs to no mandate), so a thread without a row, or an engine without
+ * a store (its history failed to open, `engine.ts`), can hold a helper's turns only from a run in
+ * this live session, which `Session._foreignRunHere` covers. Counting them foreign would send the
+ * owner's writes to review wherever the row write failed, and protect nothing more.
  */
 export function threadHoldsForeignTurns(
   store: Pick<import('./thread-store.js').ThreadStore, 'getThread'> | null,
   threadId: string,
 ): boolean {
-  if (store === null) return true;
+  if (store === null) return false;
   let row: { readonly created_by: string | null } | undefined;
   try {
     row = store.getThread(threadId);
   } catch {
     return true;
   }
-  if (row === undefined) return true;
+  if (row === undefined) return false;
   return !(row.created_by === null || row.created_by === principalTag(OWNER_PRINCIPAL));
 }
 

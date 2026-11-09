@@ -62,11 +62,20 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// behaviour tests. A copy in the component would be a second rule with no
 		// test, and the source assertions here cannot see what a copy does.
 		expect(SCRIPT).toContain(
-			"import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
+			"import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
 		);
-		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'offersConfirmation', 'showsInstruction', 'showsWatchTarget', 'watchOf']) {
+		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'offersConfirmation', 'showsInstruction', 'showsWatchAddress', 'showsWatchTarget', 'watchOf']) {
 			expect(SCRIPT, name).not.toMatch(new RegExp(`function\\s+${name}|${name}\\s*=`));
 		}
+	});
+
+	it('a confirmed watch names its page on its row (PRD B6, ux U-202)', () => {
+		// The escalation of a watch someone the owner let in set up leaves the address out and points
+		// here, so the row must show it once the watch is confirmed.
+		const { cond, body } = ifBlockAround('data-trigger-watch');
+		expect(cond).toBe('showsWatchAddress(trigger)');
+		expect(body).toContain("{watchOf(trigger)?.host ?? ''}");
+		expect(body).toContain("{watchOf(trigger)?.rest ?? ''}");
 	});
 
 	it('a waiting trigger carries its own badge, whole', () => {

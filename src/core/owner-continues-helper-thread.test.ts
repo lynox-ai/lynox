@@ -192,10 +192,14 @@ describe('threadHoldsForeignTurns: what counts as the owner\'s thread', () => {
     expect(threadHoldsForeignTurns(store({ created_by: 'mandate:helper@example.com' }), 't')).toBe(true);
   });
 
-  it('fail-closed: no store, no row, a store that throws, an unknown tag — all foreign', async () => {
+  it('no store, or no row, is not foreign: no route admits a mandate there, the live session covers it', async () => {
     const { threadHoldsForeignTurns } = await import('./session.js');
-    expect(threadHoldsForeignTurns(null, 't')).toBe(true);
-    expect(threadHoldsForeignTurns(store(undefined), 't')).toBe(true);
+    expect(threadHoldsForeignTurns(null, 't')).toBe(false);
+    expect(threadHoldsForeignTurns(store(undefined), 't')).toBe(false);
+  });
+
+  it('fail-closed where the row cannot be read: a store that throws, an unknown tag — foreign', async () => {
+    const { threadHoldsForeignTurns } = await import('./session.js');
     expect(threadHoldsForeignTurns({ getThread: () => { throw new Error('db gone'); } }, 't')).toBe(true);
     expect(threadHoldsForeignTurns(store({ created_by: 'cp-admin' }), 't')).toBe(true);
   });
