@@ -1,6 +1,7 @@
 import type { ThreadStore } from './thread-store.js';
 import { isMandateTag } from './request-principal.js';
 import { stripHidden } from './hidden-text.js';
+import { wrapUntrustedData } from './data-boundary.js';
 import { summarizeDelivery, type DeliverySummary, type NotificationMessage, type NotificationRouter } from './notification-router.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
@@ -23,6 +24,19 @@ export interface EscalateOpts {
    * and dropped, because the escalation itself has already happened.
    */
   onReported?: ((delivery: DeliverySummary) => void) | undefined;
+  /**
+   * Who set up what the escalation is about (a task's `created_by`). Anything but the owner
+   * (`null`/absent or `'owner'`) puts the seed inside the data boundary: a helper's task title and
+   * its run's errors would otherwise sit in a thread that reads as the owner's, and the owner's
+   * reply there would take them as the owner's own context (PRD customer-granted-operator-access
+   * B6). The marker also re-arms the conversation latch when the thread is resumed.
+   */
+  writtenBy?: string | null | undefined;
+}
+
+/** Whether a seed's text came from someone other than the owner (see `EscalateOpts.writtenBy`). */
+export function escalationIsForeign(writtenBy: string | null | undefined): boolean {
+  return !(writtenBy === undefined || writtenBy === null || writtenBy === 'owner');
 }
 
 /** Sends the wakeup and hands its delivery to `onReported`. Never rejects. */
@@ -101,11 +115,15 @@ export function escalateToUser(
   const currentCount = threadStore.getThread(threadId)?.message_count ?? 0;
   // The turns the model reads when the owner replies, without the characters that render as
   // nothing (`hidden-text.ts`): a plan's title and a run's error can carry text someone else wrote.
+  const foreign = escalationIsForeign(opts.writtenBy);
+  const seedText = (text: string): string => foreign
+    ? wrapUntrustedData(stripHidden(text), 'a task a helper set up in this instance')
+    : stripHidden(text);
   const seeds: BetaMessageParam[] = [];
   if (lastRole === null || lastRole === 'assistant') {
-    seeds.push({ role: 'user', content: [{ type: 'text', text: stripHidden(opts.title) }] });
+    seeds.push({ role: 'user', content: [{ type: 'text', text: seedText(opts.title) }] });
   }
-  seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(opts.body) }] });
+  seeds.push({ role: 'assistant', content: [{ type: 'text', text: seedText(opts.body) }] });
   threadStore.appendMessages(threadId, seeds, startSeq, { message_count: currentCount + seeds.length });
   // Re-mark unread + bump updated_at → floats to the top of the thread list.
   threadStore.updateThread(threadId, { is_unread: true });

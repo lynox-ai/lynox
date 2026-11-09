@@ -3607,6 +3607,8 @@ export class WorkerLoop {
     const ref = notices.workflowRef(result.runId, task.pipeline_id ?? undefined);
     this.engine.escalateToUser({
       key: task.id,
+      // The last mandate that changed it, else its creator: the owner's stamp leaves the text as written.
+      writtenBy: task.mandate_editor ?? task.created_by,
       title: `✗ ${task.title}`,
       body:
         `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
@@ -3940,6 +3942,8 @@ export class WorkerLoop {
     if (!isFirstRun) {
       this.engine.escalateToUser({
         key: task.id,
+        // The last mandate that changed it, else its creator: the owner's stamp leaves the text as written.
+        writtenBy: task.mandate_editor ?? task.created_by,
         title: `\uD83D\uDD0D ${task.title}`,
         // The thread's seed is model context and stays English (ux Rest-P E15); the push is the owner's.
         body: `${config.url} changed.\n\n${truncatedAnalysis}`,
