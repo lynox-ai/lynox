@@ -83,7 +83,7 @@ import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onb
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
-import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
+import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
@@ -4787,6 +4787,29 @@ export class LynoxHTTPApi {
         // resize path produces. Anything else here is either client tampering
         // or an unsupported format that we should reject before forwarding.
         const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+        // A mandate's helper takes no key in this chat, and an attached file is no way around it: every
+        // file is read BEFORE the loop below writes any of them to the file area, so a refused upload
+        // leaves nothing behind. The name gets the check a typed message gets; the content only the
+        // credential forms (`mandateDocumentCredential`), read both as text and, for a PDF or Word
+        // file, as what the extraction below gives. An image's pixels are not read.
+        if (!isOwnerPrincipal(this._principalOf(req))) {
+          for (const file of files) {
+            if (typeof file.name === 'string' && mandateCredentialInput(file.name) !== null) {
+              errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
+            }
+            const rawType = typeof file.type === 'string' ? file.type : '';
+            if (typeof file.data !== 'string' || rawType.startsWith('image/') || file.data.length > MAX_FILE_B64_BYTES) continue;
+            const buf = Buffer.from(file.data, 'base64');
+            const readings = [buf.toString('utf-8')];
+            try {
+              const extracted = await extractDocumentText(buf, sanitizeUploadFilename(typeof file.name === 'string' ? file.name : 'unknown'));
+              if (extracted) readings.push(extracted.text);
+            } catch { /* the loop below answers an unreadable document */ }
+            if (readings.some((t) => mandateDocumentCredential(t) !== null)) {
+              errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
+            }
+          }
+        }
         for (const file of files) {
           if (typeof file.data !== 'string') {
             errorResponse(res, 400, `Invalid file: ${typeof file.name === 'string' ? file.name : 'unknown'}`); return;

@@ -529,6 +529,21 @@ export function mandateCredentialInput(text: string): string | null {
 }
 
 /**
+ * Whether a document a mandate's helper uploads holds a credential, read by its form alone: a vendor's
+ * key, a JWT or a private key block (`maskCredentialInput`), a key of the forms only a helper is
+ * likely to paste (`MANDATE_EXTRA_SHAPES`), a bearer header or user:pass in a URL. Not the cue words
+ * and not the one-word rule of `mandateCredentialInput`: a document says "Schlüssel" or "Key" and
+ * carries long reference numbers as a matter of course, and a key with no prefix in one is not
+ * covered. Returns a fixed label, never any part of the text.
+ */
+export function mandateDocumentCredential(text: string): string | null {
+  const shaped = maskCredentialInput(text).labels[0];
+  if (shaped !== undefined) return shaped;
+  for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
+  return null;
+}
+
+/**
  * Mask known SHAPES and known VALUES in one pass, over the ORIGINAL text.
  *
  * Running the two maskers in sequence is unsafe in BOTH orders, and that is

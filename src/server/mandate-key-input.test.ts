@@ -6,9 +6,12 @@ import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { LynoxHTTPApi, MANDATE_KEY_INPUT_CODE } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
+import { getFileAreaDir, _resetCache as resetWorkspaceCache } from '../core/workspace.js';
+import { extractDocumentText } from '../core/document-extract.js';
+import { buildDocx } from '../../tests/fixtures/minimal-documents.js';
 import { channels } from '../core/observability.js';
 import { Session } from '../core/session.js';
-import { MANDATE_KEY_INPUT_REFUSAL } from '../core/secret-store.js';
+import { MANDATE_KEY_INPUT_REFUSAL, mandateDocumentCredential } from '../core/secret-store.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import type { ThreadStore } from '../core/thread-store.js';
 import type { PromptStore } from '../core/prompt-store.js';
@@ -33,7 +36,7 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
   /** No vendor prefix: the run route's mask for every principal does not know it. */
   const KEY = `Xq7${randomKey(29)}`;
   const TYPED = `Hier ist der Token: ${KEY}`;
-  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'ANTHROPIC_API_KEY'];
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'ANTHROPIC_API_KEY', 'LYNOX_WORKSPACE', 'LYNOX_WORKSPACE_ROOT'];
   const saved: Record<string, string | undefined> = {};
   let api: LynoxHTTPApi | undefined;
   let baseUrl: string;
@@ -61,6 +64,10 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-mandate-key-input-'));
     for (const k of ENV) saved[k] = process.env[k];
     process.env['LYNOX_DATA_DIR'] = dir;
+    // The file area an upload is saved to: the default one, under this test's data directory.
+    delete process.env['LYNOX_WORKSPACE'];
+    delete process.env['LYNOX_WORKSPACE_ROOT'];
+    resetWorkspaceCache();
     process.env['LYNOX_HTTP_SECRET'] = SECRET;
     process.env['LYNOX_ALLOW_PLAIN_HTTP'] = 'true';
     process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
@@ -91,6 +98,7 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       }
       if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
       reloadConfig();
+      resetWorkspaceCache();
     }
   });
 
@@ -293,4 +301,102 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     expect(row.status).toBe('pending');
     expect(JSON.stringify(row)).not.toContain(KEY.slice(-8));
   }, 60_000);
+  describe('a file the helper attaches', () => {
+    /** A vendor-shaped key, built at runtime (this repo is public and scanned for key-shaped literals). */
+    const VENDOR_KEY = `${'shp'}at_${randomBytes(16).toString('hex')}`;
+    const b64 = (t: string): string => Buffer.from(t, 'utf8').toString('base64');
+    /** Longer than the inline limit, so an accepted upload is saved to the file area, not inlined. */
+    const big = (marker: string, extra = ''): string => `${marker}\n${'Artikel;Menge;Lager\n'.repeat(1500)}${extra}\n`;
+
+    it('the file area the uploads go to is this test\'s own', () => {
+      expect(getFileAreaDir().startsWith(dir!)).toBe(true);
+    });
+
+    it('control: an ordinary large file is saved to the file area and the run goes on', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const marker = `m-${randomBytes(12).toString('hex')}`;
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte zusammenfassen.', files: [{ name: 'lager.csv', type: 'text/csv', data: b64(big(marker)) }] });
+      expect(res.status, res.text).toBe(200);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(dataDirHolds(marker), 'control: the saved upload is found on disk').toBe(true);
+    }, 60_000);
+
+    it('a large file with a key is refused before any of it is saved, and the run does not start', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const marker = `m-${randomBytes(12).toString('hex')}`;
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte zusammenfassen.', files: [{ name: 'lager.csv', type: 'text/csv', data: b64(big(marker, `Zugang ${VENDOR_KEY}`)) }] });
+      expect(res.status).toBe(422);
+      expect((JSON.parse(res.text) as { code?: string }).code).toBe(MANDATE_KEY_INPUT_CODE);
+      expect(run).not.toHaveBeenCalled();
+      expect(dataDirHolds(marker)).toBe(false);
+      expect(dataDirHolds(VENDOR_KEY.slice(-8))).toBe(false);
+    }, 60_000);
+
+    it('an ordinary first file is not saved when a second one holds a key', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const marker = `m-${randomBytes(12).toString('hex')}`;
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte zusammenfassen.', files: [
+        { name: 'lager.csv', type: 'text/csv', data: b64(big(marker)) },
+        { name: 'zugang.txt', type: 'text/plain', data: b64(`SHOPIFY=${VENDOR_KEY}\n`) },
+      ] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+      expect(dataDirHolds(marker)).toBe(false);
+    }, 60_000);
+
+    it('a small file with a key is refused, and neither the thread nor the model gets it', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte verbinden.', files: [{ name: 'zugang.txt', type: 'text/plain', data: b64(`SHOPIFY=${VENDOR_KEY}\n`) }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+      expect(JSON.stringify(engine().getThreadStore()!.getMessages(sid))).not.toContain(VENDOR_KEY.slice(-8));
+      expect(dataDirHolds(VENDOR_KEY.slice(-8))).toBe(false);
+    }, 60_000);
+
+    it('a Word file whose key shows only in its extracted text is refused', async () => {
+      // The key split across two runs of the document's XML: its bytes do not hold the key, the text
+      // the extraction gives does. So this file is refused only for what the extraction reads.
+      const docx = buildDocx(`Zugang ${VENDOR_KEY.slice(0, 12)}</w:t></w:r><w:r><w:t xml:space="preserve">${VENDOR_KEY.slice(12)}`);
+      expect(mandateDocumentCredential(docx.toString('utf-8')), 'control: the raw bytes hold no key').toBeNull();
+      const extracted = await extractDocumentText(docx, 'zugang.docx');
+      expect(mandateDocumentCredential(extracted?.text ?? ''), 'control: the extracted text does').not.toBeNull();
+      const sid = await helperSession();
+      const run = spyRun();
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ablegen.', files: [{ name: 'zugang.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', data: docx.toString('base64') }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+    }, 60_000);
+
+    it('a file named with a key is refused', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: `Token ${KEY}.txt`, type: 'text/plain', data: b64('Hallo') }] });
+      expect(res.status).toBe(422);
+      expect(run).not.toHaveBeenCalled();
+      expect(dataDirHolds(KEY.slice(-8))).toBe(false);
+    }, 60_000);
+
+    it('control: a document that says "Schlüssel" and carries long reference numbers is not refused', async () => {
+      const sid = await helperSession();
+      const run = spyRun();
+      const doc = `Der Schlüssel für das Lager liegt bei Frau Meier.\nReferenz: ${KEY}\nToken-Nummer der Lieferung: 4711\n`;
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ablegen.', files: [{ name: 'notiz.txt', type: 'text/plain', data: b64(doc) }] });
+      expect(res.status, res.text).toBe(200);
+      expect(run).toHaveBeenCalledTimes(1);
+    }, 60_000);
+
+    it('the owner\'s file with the same key is not refused (the owner stores keys)', async () => {
+      const run = spyRun();
+      as(OWNER_PRINCIPAL);
+      const created = await call('POST', '/api/sessions', {});
+      const { sessionId } = JSON.parse(created.text) as { sessionId: string };
+      const res = await call('POST', `/api/sessions/${sessionId}/run`, { task: 'Bitte verbinden.', files: [{ name: 'zugang.txt', type: 'text/plain', data: b64(`SHOPIFY=${VENDOR_KEY}\n`) }] });
+      expect(res.status, res.text).toBe(200);
+      expect(run).toHaveBeenCalledTimes(1);
+    }, 60_000);
+  });
 });
