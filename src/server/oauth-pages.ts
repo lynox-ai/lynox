@@ -44,7 +44,16 @@ export const OAUTH_PAGE_STYLE_HASH = `'sha256-${createHash('sha256').update(OAUT
  * widening (the consent form posts back to the same address, which `default-src 'none'` does not
  * govern).
  */
-export const OAUTH_PAGE_CSP = `default-src 'none'; style-src ${OAUTH_PAGE_STYLE_HASH}`;
+/**
+ * The policy of a result page: nothing but the frame's stylesheet. `frame-ancestors`, `base-uri`
+ * and `form-action` are not covered by `default-src`, so they are named too — the page stays
+ * unframeable and without a base or a form target even outside the `/api/` branch that sets
+ * `X-Frame-Options` (sec-core, 1340).
+ */
+export const OAUTH_PAGE_CSP = `default-src 'none'; style-src ${OAUTH_PAGE_STYLE_HASH}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+
+/** The consent page's policy: the same, except that its one form may post back to this origin. */
+export const OAUTH_CONSENT_CSP = `default-src 'none'; style-src ${OAUTH_PAGE_STYLE_HASH}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`;
 
 /** HTML-escape, for text and attribute values alike. */
 export function escapeOAuthHtml(v: string): string {
@@ -198,8 +207,8 @@ export const OAUTH_RESULT_TEXTS = {
     de: 'Die Anmeldung ist angekommen, aber lynox konnte die neue Verbindung nicht festhalten. Das Profil gilt deshalb weiter als widerrufen, und eine dafür angekündigte Löschung bleibt bestehen. Verbinde das Profil noch einmal.',
   },
   connected: {
-    en: 'Connected. You can close this tab and go back to the conversation.',
-    de: 'Verbunden. Du kannst diesen Tab schliessen und zum Gespräch zurückkehren.',
+    en: 'You can close this tab and go back to the conversation.',
+    de: 'Du kannst diesen Tab schliessen und zum Gespräch zurückkehren.',
   },
 } as const satisfies Record<string, OAuthText>;
 
@@ -213,8 +222,8 @@ export function connectedWithMoreText(grantedBeyond: readonly string[]): OAuthTe
   const en = shown + (rest > 0 ? `, and ${String(rest)} more` : '');
   const de = shown + (rest > 0 ? ` und ${String(rest)} weitere` : '');
   return {
-    en: `Connected. The provider granted more access than this connection asks for: ${en}. The token the provider issued holds all of it. If that is not what you want, narrow the app's permissions at the provider and connect again. You can close this tab and go back to the conversation.`,
-    de: `Verbunden. Der Anbieter hat mehr Rechte erteilt, als diese Verbindung verlangt: ${de}. Das ausgestellte Token enthält alle davon. Willst du das nicht, schränke die Rechte der App beim Anbieter ein und verbinde neu.`,
+    en: `The provider granted more access than this connection asks for: ${en}. The token the provider issued holds all of it. If that is not what you want, narrow the app's permissions at the provider and connect again. You can close this tab and go back to the conversation.`,
+    de: `Der Anbieter hat mehr Rechte erteilt, als diese Verbindung verlangt: ${de}. Das ausgestellte Token enthält alle davon. Willst du das nicht, schränke die Rechte der App beim Anbieter ein und verbinde neu.`,
   };
 }
 

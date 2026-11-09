@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
-  OAUTH_PAGE_CSP, OAUTH_PAGE_CSS, OAUTH_PAGE_STYLE_HASH, OAUTH_RESULT_TEXTS,
+  OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_PAGE_CSS, OAUTH_PAGE_STYLE_HASH, OAUTH_RESULT_TEXTS,
   connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml,
 } from './oauth-pages.js';
 
@@ -12,11 +12,20 @@ describe('the OAuth page frame', () => {
     expect(style).toBe(OAUTH_PAGE_CSS);
     const hash = `'sha256-${createHash('sha256').update(style ?? '', 'utf8').digest('base64')}'`;
     expect(OAUTH_PAGE_STYLE_HASH).toBe(hash);
-    expect(OAUTH_PAGE_CSP).toBe(`default-src 'none'; style-src ${hash}`);
+    expect(OAUTH_PAGE_CSP).toBe(`default-src 'none'; style-src ${hash}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
+    expect(OAUTH_CONSENT_CSP).toBe(`default-src 'none'; style-src ${hash}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
   });
 
   it('opens nothing but that stylesheet: no script, no unsafe-inline, no other source', () => {
-    expect(OAUTH_PAGE_CSP).not.toMatch(/unsafe|script-src|img-src|connect-src|font-src|\*/);
+    for (const csp of [OAUTH_PAGE_CSP, OAUTH_CONSENT_CSP]) {
+      expect(csp).not.toMatch(/unsafe|script-src|img-src|connect-src|font-src|\*/);
+      // The three directives default-src does not cover, each closed.
+      expect(csp).toContain("frame-ancestors 'none'");
+      expect(csp).toContain("base-uri 'none'");
+    }
+    // Only the consent page has a form, and it posts back to this origin only.
+    expect(OAUTH_PAGE_CSP).toContain("form-action 'none'");
+    expect(OAUTH_CONSENT_CSP).toContain("form-action 'self'");
     const page = oauthPageHtml('de', 'T', '');
     expect(page).not.toMatch(/<script|<link|<img|url\(|@import|\son[a-z]+=/i);
   });
@@ -82,5 +91,16 @@ describe('the result page', () => {
     expect(many.en).toContain('s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, and 2 more.');
     expect(many.de).toContain('s0, s1, s2, s3, s4, s5, s6, s7, s8, s9 und 2 weitere.');
     expect(many.en).not.toContain('s10');
+  });
+});
+
+describe('the 200 texts under their title', () => {
+  it('do not repeat the title as their first word (ux, U-206)', () => {
+    for (const t of [OAUTH_RESULT_TEXTS.connected, connectedWithMoreText(['write_orders'])]) {
+      expect(t.en).not.toMatch(/^Connected\b/);
+      expect(t.de).not.toMatch(/^Verbunden\b/);
+    }
+    expect(OAUTH_RESULT_TEXTS.connected.de).toBe('Du kannst diesen Tab schliessen und zum Gespräch zurückkehren.');
+    expect(connectedWithMoreText(['write_orders']).de).toMatch(/^Der Anbieter hat mehr Rechte erteilt/);
   });
 });

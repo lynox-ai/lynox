@@ -21,7 +21,7 @@ import { buildPdf, buildDocx } from '../../tests/fixtures/minimal-documents.js';
 import { MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun, writesMandateTrail, consentPageHtml } from './http-api.js';
-import { OAUTH_PAGE_CSP, oauthPageHtml } from './oauth-pages.js';
+import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, oauthPageHtml } from './oauth-pages.js';
 import { EngineDb } from '../core/engine-db.js';
 import { ApprovalStore, type ApprovalFiling } from '../core/approval-store.js';
 import { MandateEnds } from '../core/mandate-ends.js';
@@ -5887,7 +5887,7 @@ describe('LynoxHTTPApi', () => {
     async function open(
       scope: string,
       req: { method?: string; query?: string; site?: string; contentType?: string; body?: string; origin?: string } = {},
-    ): Promise<{ status: number; text: string; state: string | null; location: string; csp: string }> {
+    ): Promise<{ status: number; text: string; state: string | null; location: string; csp: string; xfo: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
       store.register({
@@ -5914,7 +5914,7 @@ describe('LynoxHTTPApi', () => {
           ...(req.body === undefined ? {} : { body: req.body }),
         });
         const set = res.headers.getSetCookie().find((c) => c.startsWith('lynox_profile_oauth_state='));
-        return { status: res.status, text: await res.text(), state: set ?? null, location: res.headers.get('location') ?? '', csp: res.headers.get('content-security-policy') ?? '' };
+        return { status: res.status, text: await res.text(), state: set ?? null, location: res.headers.get('location') ?? '', csp: res.headers.get('content-security-policy') ?? '', xfo: res.headers.get('x-frame-options') ?? '' };
       } finally {
         mockDerivePresetEndpoints.mockReset();
         if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
@@ -6004,7 +6004,10 @@ describe('LynoxHTTPApi', () => {
         + `<form method="post" action="${SHOWN}"><button type="submit">${APPROVED_FRAME.button}</button></form>`
         + `<p class="small">${APPROVED_FRAME.afterButton}</p>`));
       // Sent with the frame's one stylesheet admitted, and nothing else.
-      expect(r.csp).toBe(OAUTH_PAGE_CSP);
+      expect(r.csp).toBe(OAUTH_CONSENT_CSP);
+      // Unframeable twice over: the older header the /api/ branch sets, and the policy itself.
+      expect(r.xfo).toBe('DENY');
+      expect(r.csp).toContain("frame-ancestors 'none'");
       expect(r.state).toBeNull();
       expect(r.location).toBe('');
     });
@@ -19429,6 +19432,8 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       const res = await call(signed(good()), cookie);
       expect(res.status).toBe(502);
       expect(res.headers.get('content-security-policy')).toBe(OAUTH_PAGE_CSP);
+      expect(res.headers.get('x-frame-options')).toBe('DENY');
+      expect(OAUTH_PAGE_CSP).toContain("frame-ancestors 'none'");
       expect(await res.text()).toBe(oauthPageHtml('de', 'Verbindung nicht abgeschlossen',
         '<h1>Verbindung nicht abgeschlossen</h1>'
         + '<p>Die Anmeldung beim Anbieter liess sich nicht abschliessen. Es wurde nichts gespeichert. Du kannst die Verbindung neu starten.</p>'
@@ -19529,7 +19534,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     const res = await call(signed(good()), cookie);
     expect(res.status).toBe(200);
     const page = await res.text();
-    expect(page).toContain('Connected. You can close this tab');
+    expect(page).toContain('<h1>Connected</h1><p>You can close this tab and go back to the conversation.</p>');
     expect(page).not.toContain('more access');
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products']);
   });

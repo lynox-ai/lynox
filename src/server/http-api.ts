@@ -39,7 +39,7 @@ import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
-import { OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthLang, type OAuthText } from './oauth-pages.js';
+import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
@@ -1691,7 +1691,7 @@ function oauthPageLang(): OAuthLang {
  * the pages above.
  */
 function sendConsentPage(res: ServerResponse, consent: ConsentNotice, scopes: readonly string[]): void {
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': OAUTH_PAGE_CSP });
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': OAUTH_CONSENT_CSP });
   res.end(consentPageHtml(consent, scopes));
 }
 
