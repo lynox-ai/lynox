@@ -1935,6 +1935,9 @@ describe('an unmeasured write form', () => {
       engineDb.getDb().prepare('UPDATE bulk_targets SET target_key = ? WHERE run_id = ? AND applied_at IS NOT NULL').run('not a url', runId);
       expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'own_missing' }], step: null });
       expect(ledger.probeKey(runId)).toBeNull();
+      // A direct confirmation answers as for any target that is not a probe, and files nothing.
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_host_probes').get()).toEqual({ n: 0 });
     } finally {
       restore();
     }
