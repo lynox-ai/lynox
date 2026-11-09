@@ -42,6 +42,8 @@ export interface ConnectRefusal {
   readonly status: number;
   /** Shown to the person who clicked, so it says what to do, not what failed. */
   readonly message: string;
+  /** `message` in German, for the page of an instance whose language is German (ux, U-206). */
+  readonly de: string;
 }
 
 export interface ConnectFacts {
@@ -105,6 +107,7 @@ export function decideConnect(
       kind: 'no-session',
       status: 401,
       message: 'Sign in to this instance first, then open the link again.',
+      de: 'Melde dich zuerst bei dieser Instanz an und öffne dann den Link noch einmal.',
     };
   }
   if (facts.fetchSite === undefined || facts.fetchDest === undefined) {
@@ -112,6 +115,7 @@ export function decideConnect(
       kind: 'no-fetch-metadata',
       status: 403,
       message: 'This link has to be opened in a browser, by clicking it. Open the page this link came from and click it there.',
+      de: 'Dieser Link muss im Browser geöffnet werden, durch einen Klick. Öffne die Seite, von der der Link kommt, und klick ihn dort an.',
     };
   }
   if (facts.fetchSite !== 'same-origin' && facts.fetchSite !== 'none') {
@@ -119,6 +123,7 @@ export function decideConnect(
       kind: 'cross-site',
       status: 403,
       message: 'This link was opened from another site. Open it from this instance — from the chat where it was offered, or by pasting it into the address bar.',
+      de: 'Dieser Link wurde von einer anderen Website aus geöffnet. Öffne ihn aus dieser Instanz: aus dem Chat, in dem er angeboten wurde, oder indem du ihn in die Adresszeile einfügst.',
     };
   }
   if (facts.fetchDest !== 'document') {
@@ -126,18 +131,25 @@ export function decideConnect(
       kind: 'not-a-document',
       status: 403,
       message: 'This link has to be opened as a page, not fetched in the background.',
+      de: 'Dieser Link muss als Seite geöffnet werden, nicht im Hintergrund abgerufen.',
     };
   }
 
   const profile = facts.profile;
   if (!profile) {
-    return { kind: 'unknown-profile', status: 404, message: 'There is no API profile with that id on this instance.' };
+    return {
+      kind: 'unknown-profile',
+      status: 404,
+      message: 'There is no API profile with that id on this instance.',
+      de: 'In dieser Instanz gibt es kein API-Profil mit dieser ID.',
+    };
   }
   if (profile.auth?.type !== 'oauth2') {
     return {
       kind: 'not-oauth2',
       status: 400,
       message: 'This profile does not connect through a provider — it carries a credential that was set directly.',
+      de: 'Dieses Profil verbindet sich nicht über einen Anbieter: Es trägt Zugangsdaten, die direkt gesetzt wurden.',
     };
   }
 
@@ -153,8 +165,11 @@ export function decideConnect(
         kind: 'no-preset',
         status: 400,
         message: known.length > 0
-          ? `This profile does not name a provider this engine knows. It knows: ${known.join(', ')}.`
-          : 'This engine has no built-in providers yet, so there is nothing to connect to.',
+          ? `This profile does not name a provider lynox knows. It knows: ${known.join(', ')}.`
+          : 'lynox has no built-in providers yet, so there is nothing to connect to.',
+        de: known.length > 0
+          ? `Dieses Profil nennt keinen Anbieter, den lynox kennt. Bekannt sind: ${known.join(', ')}.`
+          : 'lynox hat noch keine eingebauten Anbieter, mit denen sich verbinden liesse.',
       };
     }
     if (endpoints.kind === 'bad-preset') {
@@ -164,13 +179,17 @@ export function decideConnect(
       return {
         kind: 'broken-preset',
         status: 500,
-        message: 'The built-in provider this profile names is defined wrongly in this engine, so there is no page to send you to. Nothing you can change on the profile fixes it.',
+        message: 'The built-in provider this profile names is defined wrongly in lynox, so there is no page to send you to. Nothing you can change on the profile fixes it.',
+        de: 'Der eingebaute Anbieter, den dieses Profil nennt, ist in lynox falsch definiert, deshalb gibt es keine Seite, auf die du weitergeleitet werden kannst. Am Profil lässt sich das nicht beheben.',
       };
     }
     return {
       kind: 'bad-preset-param',
       status: 400,
       message: `This profile is missing what its provider needs: ${endpoints.param.describe}.`,
+      // Without the preset's EN description: one per preset in German is not worth it for an
+      // error page, so the sentence names the way instead (ux, U-206).
+      de: 'Diesem Profil fehlt eine Angabe, die sein Anbieter braucht. Bitte lynox im Chat, das Profil zu ergänzen, und öffne dann einen neuen Link.',
     };
   }
 
@@ -180,7 +199,16 @@ export function decideConnect(
   // compile here until it is a kind the route can answer with.
   const redirect = checkRedirectTarget(endpoints, profile.custom_endpoint_ack);
   if (redirect) {
-    return { kind: redirect.kind, status: 403, message: redirect.message };
+    // The English text is the guard's own, which the model reads through `api_setup connect`
+    // too, so it is not reworded here; only the page gets a German one (ux, U-206).
+    return {
+      kind: redirect.kind,
+      status: 403,
+      message: redirect.message,
+      de: redirect.kind === 'inside-network'
+        ? 'Dieses Profil würde dich zur Anmeldung auf eine Seite im eigenen Netz dieser Instanz schicken. Das ist nicht der Anbieter, und niemand kann das für dich bestätigen: Das Profil muss einen Anbieter nennen, den lynox kennt.'
+        : `Niemand hat zugestimmt, dass du zur Anmeldung für dieses Profil zu ${endpoints.host} geschickt wirst. Speichere das Profil noch einmal, stimm zu, wenn gefragt wird, wohin du geschickt wirst, und öffne dann diesen Link noch einmal.`,
+    };
   }
 
   // `derivePresetEndpoints` succeeded, so the preset exists in this register.
@@ -191,6 +219,7 @@ export function decideConnect(
       kind: 'scope-not-allowed',
       status: 400,
       message: `This profile asks for access the provider preset does not allow: ${scope.refused.join(', ')}. Remove it from the profile, then ask for a new link.`,
+      de: `Dieses Profil verlangt Rechte, die sein Anbieter hier nicht erlaubt: ${scope.refused.join(', ')}. Entferne sie aus dem Profil und fordere dann einen neuen Link an.`,
     };
   }
 
@@ -198,7 +227,8 @@ export function decideConnect(
     return {
       kind: 'no-http-secret',
       status: 500,
-      message: 'This engine cannot sign the state cookie the return trip needs. LYNOX_HTTP_SECRET must be set.',
+      message: 'lynox cannot sign the cookie the return trip from the provider needs. The operator of this instance must set LYNOX_HTTP_SECRET.',
+      de: 'lynox kann das Cookie nicht signieren, das für die Rückkehr vom Anbieter nötig ist. Der Betreiber dieser Instanz muss LYNOX_HTTP_SECRET setzen.',
     };
   }
 

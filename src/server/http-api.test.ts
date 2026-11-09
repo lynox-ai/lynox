@@ -21,6 +21,7 @@ import { buildPdf, buildDocx } from '../../tests/fixtures/minimal-documents.js';
 import { MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun, writesMandateTrail, consentPageHtml } from './http-api.js';
+import { OAUTH_PAGE_CSP, oauthPageHtml } from './oauth-pages.js';
 import { EngineDb } from '../core/engine-db.js';
 import { ApprovalStore, type ApprovalFiling } from '../core/approval-store.js';
 import { MandateEnds } from '../core/mandate-ends.js';
@@ -5886,7 +5887,7 @@ describe('LynoxHTTPApi', () => {
     async function open(
       scope: string,
       req: { method?: string; query?: string; site?: string; contentType?: string; body?: string; origin?: string } = {},
-    ): Promise<{ status: number; text: string; state: string | null; location: string }> {
+    ): Promise<{ status: number; text: string; state: string | null; location: string; csp: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
       store.register({
@@ -5913,7 +5914,7 @@ describe('LynoxHTTPApi', () => {
           ...(req.body === undefined ? {} : { body: req.body }),
         });
         const set = res.headers.getSetCookie().find((c) => c.startsWith('lynox_profile_oauth_state='));
-        return { status: res.status, text: await res.text(), state: set ?? null, location: res.headers.get('location') ?? '' };
+        return { status: res.status, text: await res.text(), state: set ?? null, location: res.headers.get('location') ?? '', csp: res.headers.get('content-security-policy') ?? '' };
       } finally {
         mockDerivePresetEndpoints.mockReset();
         if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
@@ -5942,27 +5943,31 @@ describe('LynoxHTTPApi', () => {
       const NAMES = { kb_invoice_edit: 'Rechnungen: Schreibzugriff', note_edit: 'Notizen: Schreibzugriff' };
       const SCOPES = ['openid', 'kb_invoice_edit', 'note_edit'];
 
-      it('without one, is the English page as it was, byte for byte', () => {
-        expect(consentPageHtml(TEXT, SCOPES)).toBe(
-          '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorization</title></head><body>'
+      it('without one, is a plain frame in the text\'s language: German for a German text', () => {
+        expect(consentPageHtml(TEXT, SCOPES)).toBe(oauthPageHtml('de', 'Verbindung bestätigen',
+          '<h1>Verbindung bestätigen</h1>'
           + '<div lang="de"><p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p></div>'
+          + '<p>Schreibrechte, die diese Verbindung verlangt: kb_invoice_edit, note_edit</p>'
+          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Weiter</button></form>'));
+      });
+
+      it('without one, is the English plain frame for a text in any other language', () => {
+        expect(consentPageHtml({ ...TEXT, lang: 'fr' }, SCOPES)).toBe(oauthPageHtml('en', 'Authorization',
+          '<h1>Authorization</h1>'
+          + '<div lang="fr"><p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p></div>'
           + '<p>Write access this connection asks for: kb_invoice_edit, note_edit</p>'
-          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Continue</button></form>'
-          + '</body></html>',
-        );
+          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Continue</button></form>'));
       });
 
       it('with one, is wholly in the text\'s language and names each write access in the order asked', () => {
-        expect(consentPageHtml({ ...TEXT, frame: FRAME, scopeNames: NAMES }, SCOPES)).toBe(
-          '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Titel</title></head><body>'
+        expect(consentPageHtml({ ...TEXT, frame: FRAME, scopeNames: NAMES }, SCOPES)).toBe(oauthPageHtml('de', 'Titel',
+          '<h1>Titel</h1>'
           + '<p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p>'
           + '<p>Vor der Liste:</p>'
           + '<ul><li>Rechnungen: Schreibzugriff</li><li>Notizen: Schreibzugriff</li></ul>'
-          + '<p>Nach der Liste.</p>'
+          + '<p class="small">Nach der Liste.</p>'
           + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Zustimmen</button></form>'
-          + '<p>Nach dem Knopf.</p>'
-          + '</body></html>',
-        );
+          + '<p class="small">Nach dem Knopf.</p>'));
       });
 
       it('with one, takes a name only from the names given, not from what every object inherits', () => {
@@ -5978,10 +5983,11 @@ describe('LynoxHTTPApi', () => {
           scopeNames: { ...NAMES, note_edit: '<x>' },
         }, SCOPES);
         expect(html).toContain('<title>&lt;t&gt;</title>');
+        expect(html).toContain('<h1>&lt;t&gt;</h1>');
         expect(html).toContain('<p>&quot;i&quot;</p>');
         expect(html).toContain('<li>&lt;x&gt;</li>');
-        expect(html).toContain('<p>n &amp; m</p>');
-        expect(html).toContain('<button type="submit">&lt;b&gt;</button></form></body></html>');
+        expect(html).toContain('<p class="small">n &amp; m</p>');
+        expect(html).toContain('<button type="submit">&lt;b&gt;</button></form></main></body></html>');
       });
     });
 
@@ -5989,17 +5995,16 @@ describe('LynoxHTTPApi', () => {
       const r = await open(WRITING);
       expect(r.status).toBe(200);
       // The whole page in German, the approved words in place, the names in the order asked.
-      expect(r.text).toBe(
-        '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        + `<title>${APPROVED_FRAME.title}</title></head><body>`
+      expect(r.text).toBe(oauthPageHtml('de', APPROVED_FRAME.title,
+        `<h1>${APPROVED_FRAME.title}</h1>`
         + APPROVED.map((p) => `<p>${p}</p>`).join('')
         + `<p>${APPROVED_FRAME.scopesIntro}</p>`
         + `<ul><li>${APPROVED_NAMES.kb_invoice_edit}</li><li>${APPROVED_NAMES.note_edit}</li></ul>`
-        + `<p>${APPROVED_FRAME.scopesNote}</p>`
+        + `<p class="small">${APPROVED_FRAME.scopesNote}</p>`
         + `<form method="post" action="${SHOWN}"><button type="submit">${APPROVED_FRAME.button}</button></form>`
-        + `<p>${APPROVED_FRAME.afterButton}</p>`
-        + '</body></html>',
-      );
+        + `<p class="small">${APPROVED_FRAME.afterButton}</p>`));
+      // Sent with the frame's one stylesheet admitted, and nothing else.
+      expect(r.csp).toBe(OAUTH_PAGE_CSP);
       expect(r.state).toBeNull();
       expect(r.location).toBe('');
     });
@@ -19411,6 +19416,26 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(page).toContain('You can start the connection again.');
     expect(page).not.toMatch(/possibly landed|Do not repeat|same write again/);
     expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('shows the result page in the instance\'s language, in the frame, under the policy that admits only its stylesheet', async () => {
+    repayRateWindow();
+    const { cookie } = await arrange();
+    mockExchangeToken.mockResolvedValue({ ok: false, message: 'token exchange failed: 401.' });
+    // The language is the instance's configured one (`config.language`), read at the page.
+    const config = loadConfig as unknown as { mockReturnValue: (v: unknown) => void };
+    config.mockReturnValue({ default_tier: 'deep', language: 'de' });
+    try {
+      const res = await call(signed(good()), cookie);
+      expect(res.status).toBe(502);
+      expect(res.headers.get('content-security-policy')).toBe(OAUTH_PAGE_CSP);
+      expect(await res.text()).toBe(oauthPageHtml('de', 'Verbindung nicht abgeschlossen',
+        '<h1>Verbindung nicht abgeschlossen</h1>'
+        + '<p>Die Anmeldung beim Anbieter liess sich nicht abschliessen. Es wurde nichts gespeichert. Du kannst die Verbindung neu starten.</p>'
+        + '<p class="close">Du kannst diesen Tab schliessen.</p>'));
+    } finally {
+      config.mockReturnValue({ default_tier: 'deep' });
+    }
   });
 
   it('when no exchange pass is minted (here: the switch is off), the callback hands the exchange none', async () => {
