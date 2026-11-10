@@ -30,6 +30,7 @@ import {
 import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
+import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
@@ -1690,9 +1691,9 @@ function oauthPageLang(): OAuthLang {
  * scopes by the time it arrives (`shown_scopes`). Not cached, for the same reason as
  * the pages above.
  */
-function sendConsentPage(res: ServerResponse, consent: ConsentNotice, scopes: readonly string[]): void {
+function sendConsentPage(res: ServerResponse, consent: ConsentNotice | undefined, scopes: readonly string[], note?: ConnectNote): void {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': OAUTH_CONSENT_CSP });
-  res.end(consentPageHtml(consent, scopes));
+  res.end(consentPageHtml(consent, scopes, note));
 }
 
 /** A scope's readable name, or its id; own names only, so `toString` is not a name. */
@@ -1703,21 +1704,36 @@ function scopeNameOf(consent: ConsentNotice, scope: string): string {
 
 /**
  * The consent page itself. With the preset's `frame`, the whole page is in the text's language
- * and lists each write access by its readable name; without one, it keeps the English frame
- * and the raw ids, byte for byte as before the frame existed.
+ * and lists each write access by its readable name; without one, it gets a plain frame in the
+ * text's language and lists the raw ids. A provider's note, when there is one, stands right
+ * before the button, word for word, in the page's language.
  */
-export function consentPageHtml(consent: ConsentNotice, scopes: readonly string[]): string {
-  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}`;
+export function consentPageHtml(consent: ConsentNotice | undefined, scopes: readonly string[], note?: ConnectNote): string {
+  // The note's version travels with the confirmation, so a confirmation is refused when the
+  // provider's note is another one by the time it arrives (`shown_note`).
+  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}${note ? `&shown_note=${note.version}` : ''}`;
+  const noteIn = (lang: NoteLang): string =>
+    note ? `<p data-connect-note="${note.version}">${escapeHtml(noteText(note.version, lang, note.provider))}</p>` : '';
+  if (!consent) {
+    // Only a mandate's session reaches here: a connect without customer text has no page otherwise.
+    if (!note) return oauthPageHtml('en', 'Authorization', '');
+    const title = noteTitle(note.lang, note.provider);
+    return oauthPageHtml(note.lang, title,
+      `<h1>${escapeHtml(title)}</h1>`
+      + noteIn(note.lang)
+      + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${escapeHtml(noteButton(note.lang, note.provider))}</button></form>`);
+  }
   const frame = consent.frame;
   if (!frame) {
     // A text without its own frame gets a plain one: German for a German text,
     // English otherwise, with the text marked in its own language.
     const de = oauthLangOf(consent.lang) === 'de';
-    const title = de ? 'Verbindung bestätigen' : 'Authorization';
+    const title = note ? noteTitle(de ? 'de' : 'en', note.provider) : de ? 'Verbindung bestätigen' : 'Authorization';
     return oauthPageHtml(de ? 'de' : 'en', title,
       `<h1>${escapeHtml(title)}</h1>`
       + `<div lang="${escapeHtml(consent.lang)}">${consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')}</div>`
       + `<p>${de ? 'Schreibrechte, die diese Verbindung verlangt:' : 'Write access this connection asks for:'} ${escapeHtml(consent.writeScopes.join(', '))}</p>`
+      + noteIn(de ? 'de' : 'en')
       + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${de ? 'Weiter' : 'Continue'}</button></form>`);
   }
   return oauthPageHtml(consent.lang, frame.title,
@@ -1726,6 +1742,8 @@ export function consentPageHtml(consent: ConsentNotice, scopes: readonly string[
     + `<p>${escapeHtml(frame.scopesIntro)}</p>`
     + `<ul>${consent.writeScopes.map((s) => `<li>${escapeHtml(scopeNameOf(consent, s))}</li>`).join('')}</ul>`
     + `<p class="small">${escapeHtml(frame.scopesNote)}</p>`
+    // The customer text is in its own language; the note follows it, so the page reads in one.
+    + noteIn(consent.lang === 'de' ? 'de' : 'en')
     + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${escapeHtml(frame.button)}</button></form>`
     + (frame.afterButton ? `<p class="small">${escapeHtml(frame.afterButton)}</p>` : ''));
 }
@@ -11714,7 +11732,9 @@ export class LynoxHTTPApi {
     // error to say so. Neither belongs here; only the first is an exploit.
     //
     // A link that asks for a write scope of a preset with a customer text (`consentNotice`) is
-    // answered with a page first: the text, the write access asked for, and a button. Only the
+    // answered with a page first: the text, the write access asked for, and a button. So is
+    // every link a mandate's session opens, with the note on what the owner sees
+    // (`connect-note.ts`). Only the
     // button's POST mints the state cookie and sends the person on. A GET never does, whatever
     // the link carries, because the model hands out the link and could add to it; a form POST
     // comes from this page in the person's browser, and one from another site is refused.
@@ -11833,9 +11853,24 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // A mandate's session reads, before every connect, that the owner sees this connection
+      // (`connect-note.ts`). The owner's session never gets the note. `decideConnect` has
+      // established the preset, so a mandate's connect without one does not reach here.
+      const notePreset = principal.kind === 'mandate' ? OAUTH_PRESETS.get(profile?.auth?.oauth?.preset_id ?? '') : undefined;
+      const note = notePreset ? connectNoteFor(notePreset, noteLang(singleHeader(req.headers['accept-language']))) : undefined;
+      if (principal.kind === 'mandate' && !note) {
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.noteProviderUnknown, 'apis');
+        return;
+      }
       // Last, so the page appears only for a connect that would otherwise go ahead.
-      if (decision.consent && !confirmed) {
-        sendConsentPage(res, decision.consent, decision.scopes);
+      if ((decision.consent || note) && !confirmed) {
+        sendConsentPage(res, decision.consent, decision.scopes, note);
+        return;
+      }
+      // The confirmation holds for the note the page showed: a profile moved to another provider
+      // in between would otherwise send the person on under a note that no longer applies.
+      if (note && new URL(req.url ?? '', 'http://x').searchParams.get('shown_note') !== note.version) {
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.noteChanged, 'apis');
         return;
       }
       // The confirmation holds for the scopes the page showed. A profile changed in between
@@ -12391,7 +12426,7 @@ export class LynoxHTTPApi {
       } finally {
         this.profileGrantsPending--;
       }
-    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by GET /api/oauth/connect/:id, where a mandate connects only a profile it set up'));
+    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by /api/oauth/connect/:id (for a mandate only by the POST from the note page), where a mandate connects only a profile it set up'));
 
     // ── Knowledge Graph ──────────────────────────────────────────
 

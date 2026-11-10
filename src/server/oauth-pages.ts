@@ -208,6 +208,14 @@ export const OAUTH_RESULT_TEXTS = {
     en: 'The authorization arrived, but lynox could not record the new connection, so the profile still counts as revoked and a deletion announced for it still stands. Reconnect again from the profile.',
     de: 'Die Anmeldung ist angekommen, aber lynox konnte die neue Verbindung nicht festhalten. Das Profil gilt deshalb weiter als widerrufen, und eine dafür angekündigte Löschung bleibt bestehen. Verbinde das Profil noch einmal.',
   },
+  noteProviderUnknown: {
+    en: 'This connection has no provider this instance knows, so it cannot show what the owner sees of it. Nothing was sent to the provider.',
+    de: 'Diese Verbindung hat keinen Anbieter, den diese Instanz kennt. Deshalb kann sie nicht zeigen, was der Inhaber davon sieht. An den Anbieter wurde nichts gesendet.',
+  },
+  noteChanged: {
+    en: 'This connection now shows another note than the page you confirmed. Open the link again and read the page. Nothing was sent to the provider.',
+    de: 'Diese Verbindung zeigt jetzt einen anderen Hinweis als die Seite, die du bestätigt hast. Öffne den Link noch einmal und lies die Seite. An den Anbieter wurde nichts gesendet.',
+  },
 } as const satisfies Record<string, OAuthText>;
 
 /** The 200 page's text: which provider is now connected. */

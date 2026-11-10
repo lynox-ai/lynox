@@ -188,3 +188,16 @@ describe('the bexio API is reached only through the provider', () => {
     expect(store.get('bexio-pat')).toBeDefined();
   });
 });
+
+describe('what a helper walks into after the connect link', () => {
+  it('names the instance page and its button, on a read-only link too, and not what it says', async () => {
+    const { connectOpensLine } = await import('./api-setup.js');
+    expect(connectOpensLine('auth.bexio.com', [], true)).toBe('It first opens a page on this instance with a button that continues to auth.bexio.com');
+    expect(connectOpensLine('auth.bexio.com', ['kb_invoice_edit'], true)).toBe('It first opens a page on this instance with what lynox may do there and the write access this link asks for (kb_invoice_edit), and a button that continues to auth.bexio.com');
+  });
+  it('control: the owner\'s lines stay as they were', async () => {
+    const { connectOpensLine } = await import('./api-setup.js');
+    expect(connectOpensLine('auth.bexio.com', [], false)).toBe('It opens auth.bexio.com');
+    expect(connectOpensLine('auth.bexio.com', ['kb_invoice_edit'], false)).toBe('It first shows a page on this instance with what lynox may do there and the write access this link asks for (kb_invoice_edit); they read it and continue to auth.bexio.com');
+  });
+});
