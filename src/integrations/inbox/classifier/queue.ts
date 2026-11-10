@@ -15,6 +15,7 @@
 
 import type { ClassifyResult } from './index.js';
 import { runOutsideGroup } from '../../../core/run-group.js';
+import { processErrorText } from '../../../core/error-egress.js';
 
 export const DEFAULT_MAX_CONCURRENCY = 2;
 export const DEFAULT_PER_JOB_TIMEOUT_MS = 30_000;
@@ -280,7 +281,7 @@ export class ClassifierQueue<T> {
       await fn();
     } catch (err) {
       // Surface to stderr so the host operator sees something — never throw.
-      console.error(`[ClassifierQueue] ${label} callback threw:`, err);
+      console.error(`[ClassifierQueue] ${label} callback threw:`, processErrorText(err));
     }
   }
 }

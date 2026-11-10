@@ -31,8 +31,7 @@
  * cost attribution happens facade-side. Calls Mistral's EU regional endpoint (api.eu.mistral.ai).
  */
 
-import { getErrorMessage } from '../utils.js';
-import { isErrorTextReducedForProcess } from '../error-egress.js';
+import { isErrorTextReducedForProcess, processErrorText } from '../error-egress.js';
 import type {
   AudioChunkCallback,
   SpeakOpts,
@@ -496,7 +495,7 @@ export async function speakMistralVoxtral(text: string, opts: SpeakOpts = {}): P
       latencyMs,
     };
   } catch (err: unknown) {
-    process.stderr.write(`[voxtral-tts] request failed: ${getErrorMessage(err)}\n`);
+    process.stderr.write(`[voxtral-tts] request failed: ${processErrorText(err)}\n`);
     return null;
   } finally {
     clearTimeout(timer);
@@ -563,7 +562,7 @@ export async function speakMistralVoxtralStream(
       ttfbMs,
     };
   } catch (err: unknown) {
-    process.stderr.write(`[voxtral-tts] stream failed: ${getErrorMessage(err)}\n`);
+    process.stderr.write(`[voxtral-tts] stream failed: ${processErrorText(err)}\n`);
     return null;
   } finally {
     clearTimeout(timer);
