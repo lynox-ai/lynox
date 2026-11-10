@@ -39,7 +39,7 @@ import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
-import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthLang, type OAuthText } from './oauth-pages.js';
+import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
@@ -1665,9 +1665,9 @@ function escapeHtml(v: string): string {
  * `no-store` because these pages are reached with a code or an error in the
  * query string, and a cached one would replay it from history.
  */
-function sendOAuthHtml(res: ServerResponse, status: number, text: OAuthText): void {
+function sendOAuthHtml(res: ServerResponse, status: number, text: OAuthText, back: OAuthBack): void {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': OAUTH_PAGE_CSP });
-  res.end(oauthResultHtml(oauthPageLang(), status, text));
+  res.end(oauthResultHtml(oauthPageLang(), status, text, back));
 }
 
 /**
@@ -11722,7 +11722,7 @@ export class LynoxHTTPApi {
       const id = params['id'] ?? '';
       const httpSecret = process.env['LYNOX_HTTP_SECRET'] ?? '';
       if (confirmed && singleHeader(req.headers['sec-fetch-site']) !== 'same-origin') {
-        sendOAuthHtml(res, 403, OAUTH_RESULT_TEXTS.confirmFromOwnPage);
+        sendOAuthHtml(res, 403, OAUTH_RESULT_TEXTS.confirmFromOwnPage, 'app');
         return;
       }
 
@@ -11744,7 +11744,7 @@ export class LynoxHTTPApi {
       const principal = this._principalOf(req);
       const profile = engine.getApiStore()?.get(id);
       if (!mayStartConnect(principal, profile)) {
-        sendOAuthHtml(res, 403, OAUTH_RESULT_TEXTS.ownProfileOnly);
+        sendOAuthHtml(res, 403, OAUTH_RESULT_TEXTS.ownProfileOnly, 'app');
         return;
       }
 
@@ -11761,7 +11761,7 @@ export class LynoxHTTPApi {
         // person standing in a browser, and none of the eleven kinds echoes a
         // value back — a profile id or a host in an error page is a disclosure
         // to whoever is looking at that screen.
-        sendOAuthHtml(res, decision.status, { en: decision.message, de: decision.de });
+        sendOAuthHtml(res, decision.status, { en: decision.message, de: decision.de }, 'apis');
         return;
       }
 
@@ -11772,7 +11772,7 @@ export class LynoxHTTPApi {
       const slotApis = engine.getApiStore();
       if (principal.kind === 'mandate' && profile && slotApis
         && (!slotStore || !mandateMayConnect(slotStore, slotApis, principalTag(principal), profile, { principal, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() }))) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.tokenSlotNotOwn);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.tokenSlotNotOwn, 'apis');
         return;
       }
 
@@ -11793,7 +11793,7 @@ export class LynoxHTTPApi {
         // that its encoding exceeds what the reader accepts. Refused before the
         // user is sent anywhere, and never asserted, because this is the one place
         // where a wrong value would mint a cookie that verifies as a DIFFERENT one.
-        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.startFailed);
+        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.startFailed, 'apis');
         return;
       }
 
@@ -11801,7 +11801,7 @@ export class LynoxHTTPApi {
       // The client id travels in the link, to the browser and on to the provider. A name some
       // profile reads as a credential would put that credential there instead.
       if (clientIdKey && slotApis && !mayServeAsClientId(slotApis, clientIdKey)) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.clientIdBesideCredential);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.clientIdBesideCredential, 'apis');
         return;
       }
       // Through the profile's view of the vault, as every other read for a profile: one a
@@ -11825,7 +11825,7 @@ export class LynoxHTTPApi {
           && withheldFrom(rawStore, profile, connectApis, [clientIdKey], { principal, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() }).length > 0);
         sendOAuthHtml(res, 409, withheld
           ? OAUTH_RESULT_TEXTS.clientIdWithheld
-          : OAUTH_RESULT_TEXTS.clientIdMissing);
+          : OAUTH_RESULT_TEXTS.clientIdMissing, 'apis');
         return;
       }
 
@@ -11838,7 +11838,7 @@ export class LynoxHTTPApi {
       // (an update that adds a write scope) would otherwise send the person to a grant the
       // page never named.
       if (decision.consent && new URL(req.url ?? '', 'http://x').searchParams.get('shown_scopes') !== decision.scopes.join(' ')) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.scopesChanged);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.scopesChanged, 'apis');
         return;
       }
 
@@ -11885,7 +11885,7 @@ export class LynoxHTTPApi {
       // A consent finished while the erasure runs must not store its tokens.
       if (this.erasureInProgress) {
         LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.erasing);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.erasing, 'app');
         return;
       }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -11895,7 +11895,7 @@ export class LynoxHTTPApi {
         // interrupted one — leaving the cookie would let the next top-level
         // navigation to this path retry a flow the person just refused.
         LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
-        sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.providerDeclined);
+        sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.providerDeclined, 'app');
         return;
       }
 
@@ -11925,7 +11925,7 @@ export class LynoxHTTPApi {
         && timingSafeEqual(queryBuf, stateBuf);
       if (!signed || !code || !statesMatch) {
         LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
-        sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.linkExpired);
+        sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.linkExpired, 'app');
         return;
       }
 
@@ -11935,7 +11935,7 @@ export class LynoxHTTPApi {
       // of the provider, with the same page as every other invalid round-trip.
       LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
       if (!spendProfileOAuthState(signed.state, Math.floor(Date.now() / 1000))) {
-        sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.linkExpired);
+        sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.linkExpired, 'app');
         return;
       }
 
@@ -11943,7 +11943,7 @@ export class LynoxHTTPApi {
       const profile = apiStore?.get(signed.profileId);
       const oauth = profile?.auth?.type === 'oauth2' ? profile.auth.oauth : undefined;
       if (!apiStore || !profile || !oauth) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.connectionGone);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.connectionGone, 'app');
         return;
       }
       // A mandate's consent lands only where the start allowed it: on a profile the mandate
@@ -11969,24 +11969,24 @@ export class LynoxHTTPApi {
           && mandateMayConnect(store, apiStore, by.tag, current, readCtx);
       };
       if (!mayStillConnect(profile)) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.otherSessionChanged);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.otherSessionChanged, 'apis');
         return;
       }
 
       const endpoints = derivePresetEndpoints(oauth.preset_id ?? '', oauth.preset_params);
       if ('kind' in endpoints) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.notCompletableChanged);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.notCompletableChanged, 'apis');
         return;
       }
       const vetting = vetTokenEndpoint(endpoints.tokenUrl, profile.custom_endpoint_ack);
       if (isTokenEndpointRefused(vetting)) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialTargetRefused);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialTargetRefused, 'apis');
         return;
       }
 
       // A token is never a client id or secret: asked on the names, before either is read.
       if ([oauth.client_id_key, oauth.client_secret_key].some((n) => typeof n === 'string' && !slotMayReach(apiStore, n, 'client', endpoints.tokenUrl, profile))) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.tokenAsClientCredential);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.tokenAsClientCredential, 'apis');
         return;
       }
       // The client secret goes to this token endpoint only where it is bound to go, for a profile
@@ -11996,7 +11996,7 @@ export class LynoxHTTPApi {
       const bindCtx = { bindings: engine.getVaultNameBindings(), store: vaultNow, read: readCtx };
       const clientNames = [oauth.client_id_key, oauth.client_secret_key].filter((n): n is string => typeof n === 'string' && (vaultNow === null || withheldFrom(vaultNow, profile, apiStore, [n], readCtx).length === 0));
       if (unboundName(apiStore, clientNames, profile, endpoints.tokenUrl, 'client', bindCtx) !== undefined) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.keyNotAllowedThere);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.keyNotAllowedThere, 'apis');
         return;
       }
 
@@ -12009,10 +12009,10 @@ export class LynoxHTTPApi {
       if (!secretStore || !clientId || !clientSecret) {
         const pair = [oauth.client_id_key, oauth.client_secret_key].filter((k): k is string => typeof k === 'string');
         if (secretStore && withheldFrom(secretStore, profile, apiStore, pair, readCtx).length > 0) {
-          sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialsWithheld);
+          sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialsWithheld, 'apis');
           return;
         }
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialsMissing);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialsMissing, 'apis');
         return;
       }
 
@@ -12023,7 +12023,7 @@ export class LynoxHTTPApi {
       // A provider on the host it derives mints a token for the store the profile's base names
       // and no other: a base on another store would carry this store's token there.
       if (preset?.apiOnDerivedHost === true && presetStoreHost(profile) === null) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.storeMismatch);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.storeMismatch, 'apis');
         return;
       }
       // The scopes the provider granted beyond what this connection asks for, said on the page.
@@ -12043,7 +12043,7 @@ export class LynoxHTTPApi {
         if (!bound.ok) {
           // The page stays the same for every reason; which one it was goes to the log.
           process.stderr.write(shopifyCallbackRefusalLine(bound.reason, profile.id, rawQuery));
-          sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.signatureRefused);
+          sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.signatureRefused, 'apis');
           return;
         }
         exchangeCode = bound.code;
@@ -12055,7 +12055,7 @@ export class LynoxHTTPApi {
       // code is not spent unrecorded. This route answers before dispatch, so it opens its trail
       // itself; the caller closes it.
       if (by.tag !== 'owner' && !this._openTrail(req, reader, `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, `profile:${signed.profileId}`)) {
-        sendOAuthHtml(res, 503, OAUTH_RESULT_TEXTS.logUnavailable);
+        sendOAuthHtml(res, 503, OAUTH_RESULT_TEXTS.logUnavailable, 'apis');
         return;
       }
 
@@ -12086,7 +12086,7 @@ export class LynoxHTTPApi {
         // error body is the one place a client secret has been seen echoed back.
         // Nor is the exchange's own message: a redirect the loop refused says "Write possibly
         // landed" for the model, and here nothing landed that the person would have to check.
-        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.exchangeFailed);
+        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.exchangeFailed, 'apis');
         return;
       }
 
@@ -12094,12 +12094,12 @@ export class LynoxHTTPApi {
       try {
         parsed = JSON.parse(exchanged.text) as typeof parsed;
       } catch {
-        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.unreadableAnswer);
+        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.unreadableAnswer, 'apis');
         return;
       }
       const accessToken = parsed.access_token;
       if (typeof accessToken !== 'string' || accessToken === '') {
-        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.noAccessToken);
+        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.noAccessToken, 'apis');
         return;
       }
 
@@ -12108,7 +12108,7 @@ export class LynoxHTTPApi {
       const { getLynoxDir } = await import('../core/config.js');
       const current = apiStore.get(signed.profileId);
       if (by.tag !== 'owner' && (current === undefined || !mayStillConnect(current))) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.otherSessionStored);
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.otherSessionStored, 'apis');
         return;
       }
       // The profile can be re-pointed while the exchange runs: a token minted for one store is
@@ -12116,7 +12116,7 @@ export class LynoxHTTPApi {
       // (A profile with no store host gives `https://null`, which no signed shop is.)
       if (storeCallback !== undefined) {
         if (current === undefined || `https://${presetStoreHost(current)}` !== storeCallback.origin) {
-          sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.addressChanged);
+          sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.addressChanged, 'apis');
           return;
         }
       }
@@ -12360,22 +12360,25 @@ export class LynoxHTTPApi {
           );
         }
       } catch {
-        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.storeIncomplete);
+        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.storeIncomplete, 'apis');
         return;
       }
       if (storeBindingFailed) {
-        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.bindFailed);
+        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.bindFailed, 'apis');
         return;
       }
       if (revokedNotRecorded) {
-        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.recordFailed);
+        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.recordFailed, 'apis');
         return;
       }
       if (grantedBeyond.length > 0) {
-        sendOAuthHtml(res, 200, connectedWithMoreText(grantedBeyond));
+        sendOAuthHtml(res, 200, connectedWithMoreText(grantedBeyond), 'apis');
         return;
       }
-      sendOAuthHtml(res, 200, OAUTH_RESULT_TEXTS.connected);
+      // The preset's own name (Shopify, bexio), else the profile's, which its owner chose.
+      const presetId: unknown = oauth.preset_id;
+      const providerLabel = (typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? profile.name;
+      sendOAuthHtml(res, 200, connectedText(providerLabel), 'apis');
     };
     this.addStatic('user', `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, async (req, res, params, body) => {
       this.profileGrantsPending++;

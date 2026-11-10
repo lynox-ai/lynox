@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
-  OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_PAGE_CSS, OAUTH_PAGE_STYLE_HASH, OAUTH_RESULT_TEXTS,
-  connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml,
+  OAUTH_BACK_PATHS, OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_PAGE_CSS, OAUTH_PAGE_STYLE_HASH, OAUTH_RESULT_TEXTS,
+  connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack,
 } from './oauth-pages.js';
 
 describe('the OAuth page frame', () => {
@@ -63,17 +63,45 @@ describe('the page language', () => {
 describe('the result page', () => {
   const T = { en: 'Something <happened>.', de: 'Etwas <geschah>.' };
 
-  it('is titled "connected" on a 200 and leaves out the close line its text already carries', () => {
-    expect(oauthResultHtml('de', 200, T)).toBe(oauthPageHtml('de', 'Verbunden', '<h1>Verbunden</h1><p>Etwas &lt;geschah&gt;.</p>'));
-    expect(oauthResultHtml('en', 200, T)).toBe(oauthPageHtml('en', 'Connected', '<h1>Connected</h1><p>Something &lt;happened&gt;.</p>'));
+  const goDe = (path: string): string => `<a class="go" href="${path}">Zu lynox</a>`;
+  const goEn = (path: string): string => `<a class="go" href="${path}">Go to lynox</a>`;
+
+  it('is titled "connected" on a 200, with one button back into lynox', () => {
+    expect(oauthResultHtml('de', 200, T, 'apis')).toBe(oauthPageHtml('de', 'Verbunden',
+      `<h1>Verbunden</h1><p>Etwas &lt;geschah&gt;.</p>${goDe('/app/settings/apis')}`));
+    expect(oauthResultHtml('en', 200, T, 'apis')).toBe(oauthPageHtml('en', 'Connected',
+      `<h1>Connected</h1><p>Something &lt;happened&gt;.</p>${goEn('/app/settings/apis')}`));
   });
 
-  it('is titled "not completed" on anything else, with the close line', () => {
+  it('is titled "not completed" on anything else, with the same button', () => {
     for (const status of [400, 403, 409, 500, 502, 503]) {
-      expect(oauthResultHtml('de', status, T)).toBe(oauthPageHtml('de', 'Verbindung nicht abgeschlossen',
-        '<h1>Verbindung nicht abgeschlossen</h1><p>Etwas &lt;geschah&gt;.</p><p class="close">Du kannst diesen Tab schliessen.</p>'));
-      expect(oauthResultHtml('en', status, T)).toBe(oauthPageHtml('en', 'Connection not completed',
-        '<h1>Connection not completed</h1><p>Something &lt;happened&gt;.</p><p class="close">You can close this tab.</p>'));
+      expect(oauthResultHtml('de', status, T, 'app')).toBe(oauthPageHtml('de', 'Verbindung nicht abgeschlossen',
+        `<h1>Verbindung nicht abgeschlossen</h1><p>Etwas &lt;geschah&gt;.</p>${goDe('/app')}`));
+      expect(oauthResultHtml('en', status, T, 'apis')).toBe(oauthPageHtml('en', 'Connection not completed',
+        `<h1>Connection not completed</h1><p>Something &lt;happened&gt;.</p>${goEn('/app/settings/apis')}`));
+    }
+  });
+
+  it('leads the button only to /app or to Settings → APIs (ux, U-213)', () => {
+    expect(Object.values(OAUTH_BACK_PATHS).sort()).toEqual(['/app', '/app/settings/apis']);
+    for (const back of Object.keys(OAUTH_BACK_PATHS) as OAuthBack[]) {
+      for (const lang of ['de', 'en'] as const) {
+        const hrefs = [...oauthResultHtml(lang, 409, T, back).matchAll(/href="([^"]*)"/g)].map((m) => m[1]);
+        expect(hrefs).toEqual([OAUTH_BACK_PATHS[back]]);
+      }
+    }
+  });
+
+  it('never tells anyone to close the tab, on any page, in either language (ux, U-213)', () => {
+    const texts = [...Object.values(OAUTH_RESULT_TEXTS), connectedText('Shopify'), connectedWithMoreText(['write_files'])];
+    for (const t of texts) {
+      for (const back of ['apis', 'app'] as const) {
+        for (const status of [200, 400, 409, 500]) {
+          for (const lang of ['de', 'en'] as const) {
+            expect(oauthResultHtml(lang, status, t, back)).not.toMatch(/close this tab|Tab schliessen/i);
+          }
+        }
+      }
     }
   });
 
@@ -99,11 +127,14 @@ describe('the result page', () => {
 
 describe('the 200 texts under their title', () => {
   it('do not repeat the title as their first word (ux, U-206)', () => {
-    for (const t of [OAUTH_RESULT_TEXTS.connected, connectedWithMoreText(['write_orders'])]) {
+    for (const t of [connectedText('Shopify'), connectedWithMoreText(['write_orders'])]) {
       expect(t.en).not.toMatch(/^Connected\b/);
       expect(t.de).not.toMatch(/^Verbunden\b/);
     }
-    expect(OAUTH_RESULT_TEXTS.connected.de).toBe('Du kannst diesen Tab schliessen und zum Gespräch zurückkehren.');
     expect(connectedWithMoreText(['write_orders']).de).toMatch(/^Der Anbieter hat mehr Rechte erteilt/);
+  });
+
+  it('name the provider that is now connected (ux, U-213 delta on #32)', () => {
+    expect(connectedText('Shopify')).toEqual({ de: 'Shopify ist mit lynox verbunden.', en: 'Shopify is connected to lynox.' });
   });
 });

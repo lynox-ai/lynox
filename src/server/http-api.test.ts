@@ -19552,7 +19552,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       expect(await res.text()).toBe(oauthPageHtml('de', 'Verbindung nicht abgeschlossen',
         '<h1>Verbindung nicht abgeschlossen</h1>'
         + '<p>Die Anmeldung beim Anbieter liess sich nicht abschliessen. Es wurde nichts gespeichert. Du kannst die Verbindung neu starten.</p>'
-        + '<p class="close">Du kannst diesen Tab schliessen.</p>'));
+        + '<a class="go" href="/app/settings/apis">Zu lynox</a>'));
     } finally {
       config.mockReturnValue({ default_tier: 'deep' });
     }
@@ -19649,9 +19649,32 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     const res = await call(signed(good()), cookie);
     expect(res.status).toBe(200);
     const page = await res.text();
-    expect(page).toContain('<h1>Connected</h1><p>You can close this tab and go back to the conversation.</p>');
+    expect(page).toContain('<h1>Connected</h1><p>Shopify is connected to lynox.</p><a class="go" href="/app/settings/apis">Go to lynox</a>');
     expect(page).not.toContain('more access');
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products']);
+  });
+
+  it('leads back into lynox from every page, to a fixed path that nothing in the request can choose (ux, U-213)', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const hrefs = (page: string): string[] => [...page.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
+    const foreign = { return_to: 'https://evil.example/x', next: '//evil.example', redirect: '/app/settings/../../evil' };
+    // Before the round-trip is known to be this profile's: to /app.
+    const { cookie } = await arrange();
+    const declined = await call(`?${new URLSearchParams({ error: 'access_denied', ...foreign }).toString()}`, cookie);
+    expect(declined.status).toBe(400);
+    const declinedPage = await declined.text();
+    expect(hrefs(declinedPage)).toEqual(['/app']);
+    expect(declinedPage).not.toMatch(/close this tab|Tab schliessen/i);
+    const expired = await call(signed(good({ state: 'not-the-state', ...foreign })), cookie);
+    expect(expired.status).toBe(400);
+    expect(hrefs(await expired.text())).toEqual(['/app']);
+    // Once it is: to Settings → APIs, where the connection's state shows.
+    const { cookie: cookie2 } = await arrange();
+    const ok = await call(signed(good(foreign)), cookie2);
+    expect(ok.status).toBe(200);
+    const okPage = await ok.text();
+    expect(hrefs(okPage)).toEqual(['/app/settings/apis']);
+    expect(okPage).not.toMatch(/close this tab|Tab schliessen|evil/i);
   });
 
   it('records no granted scope when the answer names none', async () => {

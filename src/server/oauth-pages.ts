@@ -32,7 +32,9 @@ export const OAUTH_PAGE_CSS = [
   'button:focus-visible{outline:3px solid var(--text);outline-offset:2px}',
   '@media (min-width:600px){button{display:inline-block;width:auto}}',
   '.small{font-size:14px;color:var(--muted)}',
-  '.close{margin-top:20px;padding-top:16px;border-top:1px solid var(--line);font-size:14px;color:var(--muted)}',
+  '.go{display:block;margin-top:20px;padding:12px 20px;border-radius:10px;background:var(--accent);color:var(--accent-text);font-weight:600;text-align:center;text-decoration:none}',
+  '.go:focus-visible{outline:3px solid var(--text);outline-offset:2px}',
+  '@media (min-width:600px){.go{display:inline-block}}',
 ].join('');
 
 /** `'sha256-…'` of {@link OAUTH_PAGE_CSS}, as `style-src` names it. */
@@ -206,11 +208,12 @@ export const OAUTH_RESULT_TEXTS = {
     en: 'The authorization arrived, but lynox could not record the new connection, so the profile still counts as revoked and a deletion announced for it still stands. Reconnect again from the profile.',
     de: 'Die Anmeldung ist angekommen, aber lynox konnte die neue Verbindung nicht festhalten. Das Profil gilt deshalb weiter als widerrufen, und eine dafür angekündigte Löschung bleibt bestehen. Verbinde das Profil noch einmal.',
   },
-  connected: {
-    en: 'You can close this tab and go back to the conversation.',
-    de: 'Du kannst diesen Tab schliessen und zum Gespräch zurückkehren.',
-  },
 } as const satisfies Record<string, OAuthText>;
+
+/** The 200 page's text: which provider is now connected (ux, U-213 delta on U-206 #32). */
+export function connectedText(provider: string): OAuthText {
+  return { en: `${provider} is connected to lynox.`, de: `${provider} ist mit lynox verbunden.` };
+}
 
 /**
  * The 200 page when the provider granted more than was asked: the first ten extra scopes by id,
@@ -222,22 +225,32 @@ export function connectedWithMoreText(grantedBeyond: readonly string[]): OAuthTe
   const en = shown + (rest > 0 ? `, and ${String(rest)} more` : '');
   const de = shown + (rest > 0 ? ` und ${String(rest)} weitere` : '');
   return {
-    en: `The provider granted more access than this connection asks for: ${en}. The token the provider issued holds all of it. If that is not what you want, narrow the app's permissions at the provider and connect again. You can close this tab and go back to the conversation.`,
+    en: `The provider granted more access than this connection asks for: ${en}. The token the provider issued holds all of it. If that is not what you want, narrow the app's permissions at the provider and connect again.`,
     de: `Der Anbieter hat mehr Rechte erteilt, als diese Verbindung verlangt: ${de}. Das ausgestellte Token enthält alle davon. Willst du das nicht, schränke die Rechte der App beim Anbieter ein und verbinde neu.`,
   };
 }
 
-/** The result page, in `lang`: a title by outcome, the text, and — except on a 200, whose text
- *  already says so — the line that the tab can be closed. */
-export function oauthResultHtml(lang: OAuthLang, status: number, text: OAuthText): string {
-  const connected = status === 200;
-  const title = connected
+/**
+ * Where a result page's one button leads (ux, U-213 delta). `apis` once the page knows the
+ * profile — Settings → APIs shows the connection's state; `app` where it does not. The paths are
+ * fixed here and a caller names only the kind, so no request value can become the target.
+ */
+export type OAuthBack = 'apis' | 'app';
+export const OAUTH_BACK_PATHS: Readonly<Record<OAuthBack, string>> = Object.freeze({
+  apis: '/app/settings/apis',
+  app: '/app',
+});
+
+/** The result page, in `lang`: a title by outcome, the text, and one button back into lynox —
+ *  never "close this tab" as the only way on (ux, U-213). */
+export function oauthResultHtml(lang: OAuthLang, status: number, text: OAuthText, back: OAuthBack): string {
+  const title = status === 200
     ? (lang === 'de' ? 'Verbunden' : 'Connected')
     : (lang === 'de' ? 'Verbindung nicht abgeschlossen' : 'Connection not completed');
-  const close = lang === 'de' ? 'Du kannst diesen Tab schliessen.' : 'You can close this tab.';
+  const go = lang === 'de' ? 'Zu lynox' : 'Go to lynox';
   return oauthPageHtml(lang, title,
     `<h1>${escapeOAuthHtml(title)}</h1><p>${escapeOAuthHtml(text[lang])}</p>`
-    + (connected ? '' : `<p class="close">${escapeOAuthHtml(close)}</p>`));
+    + `<a class="go" href="${OAUTH_BACK_PATHS[back]}">${escapeOAuthHtml(go)}</a>`);
 }
 
 /**
