@@ -44,7 +44,7 @@ export const OAUTH_PAGE_STYLE_HASH = `'sha256-${createHash('sha256').update(OAUT
  * The policy of a result page: nothing but the frame's stylesheet — no `script-src`, no `img-src`,
  * no `connect-src`. `frame-ancestors`, `base-uri` and `form-action` are not covered by
  * `default-src`, so they are named too — the page stays unframeable and without a base or a form
- * target even outside the `/api/` branch that sets `X-Frame-Options` (sec-core, 1340).
+ * target even outside the `/api/` branch that sets `X-Frame-Options`.
  */
 export const OAUTH_PAGE_CSP = `default-src 'none'; style-src ${OAUTH_PAGE_STYLE_HASH}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
 
@@ -76,7 +76,7 @@ export interface OAuthText {
 /**
  * The page language from the instance's configured language (`config.language`,
  * `LYNOX_LANGUAGE`): German for any `de` tag (`de`, `de-CH`, …), English for everything else,
- * unset included (ux, U-206).
+ * unset included.
  */
 export function oauthLangOf(language: string | undefined): OAuthLang {
   return typeof language === 'string' && /^de(?:$|[-_])/i.test(language.trim()) ? 'de' : 'en';
@@ -84,7 +84,7 @@ export function oauthLangOf(language: string | undefined): OAuthLang {
 
 /**
  * Every fixed text of the result page, by the place that sends it. German wording by ux
- * (U-206, `ux/u206-oauth-texte-de.md`); the English one names lynox or this instance where it
+ * the English one names lynox or this instance where it
  * used to say "this engine", a word a customer does not know.
  */
 export const OAUTH_RESULT_TEXTS = {
@@ -129,8 +129,8 @@ export const OAUTH_RESULT_TEXTS = {
     de: 'Der Anbieter hat die Anmeldung nicht abgeschlossen. Es wurde nichts gespeichert. Du kannst die Verbindung neu starten.',
   },
   linkExpired: {
-    en: 'This authorization link is no longer valid. Ask for a new one and try again.',
-    de: 'Dieser Anmelde-Link ist nicht mehr gültig. Fordere einen neuen an und versuch es noch einmal.',
+    en: 'This sign-in link is no longer valid. Start the connection again in lynox.',
+    de: 'Dieser Anmelde-Link ist nicht mehr gültig. Starte die Verbindung in lynox neu.',
   },
   connectionGone: {
     en: 'That connection no longer exists on this instance. Nothing was changed.',
@@ -210,7 +210,7 @@ export const OAUTH_RESULT_TEXTS = {
   },
 } as const satisfies Record<string, OAuthText>;
 
-/** The 200 page's text: which provider is now connected (ux, U-213 delta on U-206 #32). */
+/** The 200 page's text: which provider is now connected. */
 export function connectedText(provider: string): OAuthText {
   return { en: `${provider} is connected to lynox.`, de: `${provider} ist mit lynox verbunden.` };
 }
@@ -231,7 +231,7 @@ export function connectedWithMoreText(grantedBeyond: readonly string[]): OAuthTe
 }
 
 /**
- * Where a result page's one button leads (ux, U-213 delta). `apis` once the page knows the
+ * Where a result page's one button leads. `apis` once the page knows the
  * profile — Settings → APIs shows the connection's state; `app` where it does not. The paths are
  * fixed here and a caller names only the kind, so no request value can become the target.
  */
@@ -242,7 +242,7 @@ export const OAUTH_BACK_PATHS: Readonly<Record<OAuthBack, string>> = Object.free
 });
 
 /** The result page, in `lang`: a title by outcome, the text, and one button back into lynox —
- *  never "close this tab" as the only way on (ux, U-213). */
+ *  never "close this tab" as the only way on. */
 export function oauthResultHtml(lang: OAuthLang, status: number, text: OAuthText, back: OAuthBack): string {
   const title = status === 200
     ? (lang === 'de' ? 'Verbunden' : 'Connected')

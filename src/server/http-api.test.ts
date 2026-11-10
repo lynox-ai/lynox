@@ -5852,6 +5852,36 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  describe('GET /api/oauth/connect/:id leads a refusal back into lynox', () => {
+    const hrefs = (page: string): string[] => [...page.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
+    it.each([
+      ['an id no profile has, to /app', 'nope', { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document' }, 404, '/app'],
+      ['a request from another site, to /app', 'books', { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'document' }, 403, '/app'],
+      ['a profile that is not OAuth, to Settings → APIs', 'plain', { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document' }, 400, '/app/settings/apis'],
+    ])('%s', async (_label, id, headers, status, href) => {
+      repayRateWindow();
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'books', name: 'Books', base_url: 'https://api.bexio.com/3.0', description: 'd',
+        auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: 'BOOKS_CLIENT_ID', client_secret_key: 'BOOKS_CLIENT_SECRET', scope: 'openid offline_access' } },
+      });
+      store.register({ id: 'plain', name: 'Plain', base_url: 'https://api.example.com', description: 'd' });
+      mockGetApiStore.mockReturnValue(store);
+      const priorSecret = process.env['LYNOX_HTTP_SECRET'];
+      process.env['LYNOX_HTTP_SECRET'] = TEST_SECRET;
+      try {
+        const res = await fetch(`${baseUrl}/api/oauth/connect/${id}`, { redirect: 'manual', headers: { ...authHeaders(), ...headers } });
+        expect(res.status).toBe(status);
+        expect(hrefs(await res.text())).toEqual([href]);
+      } finally {
+        if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
+        else process.env['LYNOX_HTTP_SECRET'] = priorSecret;
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+  });
+
   // A link that asks bexio for a write scope shows the approved customer text first, and only the
   // page's own button sends the person on.
   describe('/api/oauth/connect/:id shows the customer text before a write scope', () => {
@@ -5942,6 +5972,27 @@ describe('LynoxHTTPApi', () => {
       };
       const NAMES = { kb_invoice_edit: 'Rechnungen: Schreibzugriff', note_edit: 'Notizen: Schreibzugriff' };
       const SCOPES = ['openid', 'kb_invoice_edit', 'note_edit'];
+
+      // The page is sent without `form-action` (the provider's own redirects would trip it), so
+      // this is the net instead: whatever a caller can put on the page, it holds one form, whose
+      // action is this server's, and no value arrives as markup.
+      it('holds exactly one form, posting back here, whatever hostile values it is given', () => {
+        const H = '"><form action="https://evil.example/x"><x-evil a=\'1\'>';
+        const hostile = {
+          lang: H, writeScopes: [H, 'note_edit'], paragraphs: [H, `a ${H} b`],
+          scopeNames: { [H]: H, note_edit: H },
+        };
+        const frame = { title: H, scopesIntro: H, scopesNote: H, button: H, afterButton: H };
+        for (const consent of [hostile, { ...hostile, lang: 'de' }, { ...hostile, frame }]) {
+          const page = consentPageHtml(consent, [H, 'openid']);
+          expect(page.match(/<form\b/g)).toHaveLength(1);
+          const action = /<form method="post" action="([^"]*)">/.exec(page)?.[1];
+          expect(action?.startsWith('?shown_scopes=')).toBe(true);
+          expect(action).not.toMatch(/["<>]/);
+          expect(page).not.toContain(H);
+          expect(page).not.toMatch(/<x-evil|action="https:/);
+        }
+      });
 
       it('without one, is a plain frame in the text\'s language: German for a German text', () => {
         expect(consentPageHtml(TEXT, SCOPES)).toBe(oauthPageHtml('de', 'Verbindung bestätigen',
@@ -19493,7 +19544,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     // Whoever kept the cookie's value and the URL replays both: refused like any invalid round-trip.
     const replay = await call(query, cookie);
     expect(replay.status).toBe(400);
-    expect(await replay.text()).toContain('This authorization link is no longer valid.');
+    expect(await replay.text()).toContain('This sign-in link is no longer valid. Start the connection again in lynox.');
     expect([mockExchangeToken.mock.calls.length, exchangePassFor.calls.length]).toEqual([1, 1]);
   });
 
@@ -19654,7 +19705,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products']);
   });
 
-  it('leads back into lynox from every page, to a fixed path that nothing in the request can choose (ux, U-213)', async () => {
+  it('leads back into lynox from every page, to a fixed path that nothing in the request can choose', async () => {
     repayRateWindow(); // this file shares one per-IP rate window
     const hrefs = (page: string): string[] => [...page.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
     const foreign = { return_to: 'https://evil.example/x', next: '//evil.example', redirect: '/app/settings/../../evil' };

@@ -42,7 +42,7 @@ export interface ConnectRefusal {
   readonly status: number;
   /** Shown to the person who clicked, so it says what to do, not what failed. */
   readonly message: string;
-  /** `message` in German, for the page of an instance whose language is German (ux, U-206). */
+  /** `message` in German, for the page of an instance whose language is German. */
   readonly de: string;
 }
 
@@ -188,7 +188,7 @@ export function decideConnect(
       status: 400,
       message: `This profile is missing what its provider needs: ${endpoints.param.describe}.`,
       // Without the preset's EN description: one per preset in German is not worth it for an
-      // error page, so the sentence names the way instead (ux, U-206).
+      // error page, so the sentence names the way instead.
       de: 'Diesem Profil fehlt eine Angabe, die sein Anbieter braucht. Bitte lynox im Chat, das Profil zu ergänzen, und öffne dann einen neuen Link.',
     };
   }
@@ -200,7 +200,7 @@ export function decideConnect(
   const redirect = checkRedirectTarget(endpoints, profile.custom_endpoint_ack);
   if (redirect) {
     // The English text is the guard's own, which the model reads through `api_setup connect`
-    // too, so it is not reworded here; only the page gets a German one (ux, U-206).
+    // too, so it is not reworded here; only the page gets a German one.
     return {
       kind: redirect.kind,
       status: 403,

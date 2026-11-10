@@ -82,7 +82,7 @@ describe('the result page', () => {
     }
   });
 
-  it('leads the button only to /app or to Settings → APIs (ux, U-213)', () => {
+  it('leads the button only to /app or to Settings → APIs', () => {
     expect(Object.values(OAUTH_BACK_PATHS).sort()).toEqual(['/app', '/app/settings/apis']);
     for (const back of Object.keys(OAUTH_BACK_PATHS) as OAuthBack[]) {
       for (const lang of ['de', 'en'] as const) {
@@ -92,7 +92,7 @@ describe('the result page', () => {
     }
   });
 
-  it('never tells anyone to close the tab, on any page, in either language (ux, U-213)', () => {
+  it('never tells anyone to close the tab, on any page, in either language', () => {
     const texts = [...Object.values(OAUTH_RESULT_TEXTS), connectedText('Shopify'), connectedWithMoreText(['write_files'])];
     for (const t of texts) {
       for (const back of ['apis', 'app'] as const) {
@@ -126,7 +126,7 @@ describe('the result page', () => {
 });
 
 describe('the 200 texts under their title', () => {
-  it('do not repeat the title as their first word (ux, U-206)', () => {
+  it('do not repeat the title as their first word', () => {
     for (const t of [connectedText('Shopify'), connectedWithMoreText(['write_orders'])]) {
       expect(t.en).not.toMatch(/^Connected\b/);
       expect(t.de).not.toMatch(/^Verbunden\b/);
@@ -134,7 +134,7 @@ describe('the 200 texts under their title', () => {
     expect(connectedWithMoreText(['write_orders']).de).toMatch(/^Der Anbieter hat mehr Rechte erteilt/);
   });
 
-  it('name the provider that is now connected (ux, U-213 delta on #32)', () => {
+  it('name the provider that is now connected', () => {
     expect(connectedText('Shopify')).toEqual({ de: 'Shopify ist mit lynox verbunden.', en: 'Shopify is connected to lynox.' });
   });
 });

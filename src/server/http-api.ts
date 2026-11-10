@@ -1671,7 +1671,7 @@ function sendOAuthHtml(res: ServerResponse, status: number, text: OAuthText, bac
 }
 
 /**
- * The language of the result pages: the instance's configured one (ux, U-206). A config that
+ * The language of the result pages: the instance's configured one. A config that
  * cannot be read is no reason to fail the page, so it falls back to English.
  */
 function oauthPageLang(): OAuthLang {
@@ -1710,7 +1710,7 @@ export function consentPageHtml(consent: ConsentNotice, scopes: readonly string[
   const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}`;
   const frame = consent.frame;
   if (!frame) {
-    // A text without its own frame gets a plain one: German for a German text (ux, U-206),
+    // A text without its own frame gets a plain one: German for a German text,
     // English otherwise, with the text marked in its own language.
     const de = oauthLangOf(consent.lang) === 'de';
     const title = de ? 'Verbindung bestätigen' : 'Authorization';
@@ -11761,7 +11761,11 @@ export class LynoxHTTPApi {
         // person standing in a browser, and none of the eleven kinds echoes a
         // value back — a profile id or a host in an error page is a disclosure
         // to whoever is looking at that screen.
-        sendOAuthHtml(res, decision.status, { en: decision.message, de: decision.de }, 'apis');
+        // Back to the profile list only once the request is known to be this person's own, for a
+        // profile that exists; the refusals before that lead to /app.
+        const beforeProfile = decision.kind === 'no-session' || decision.kind === 'no-fetch-metadata'
+          || decision.kind === 'cross-site' || decision.kind === 'not-a-document' || decision.kind === 'unknown-profile';
+        sendOAuthHtml(res, decision.status, { en: decision.message, de: decision.de }, beforeProfile ? 'app' : 'apis');
         return;
       }
 
