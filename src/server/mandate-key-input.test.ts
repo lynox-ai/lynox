@@ -306,6 +306,40 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     expect(ps.getById(promptId)!.status).toBe('answered');
   }, 60_000);
 
+  // A child agent and a workflow step ask through the session's own prompter, with their origin in
+  // the meta (spawn.test.ts and runtime-adapter.test.ts hold that forwarding). The check reads who
+  // answers, so the origin opens no way around it.
+  for (const [asker, meta] of [
+    ['a child agent', { subagent: true, subagentName: 'helper-child', subagentTask: 'collect the token' }],
+    ['a workflow step', { stepId: 's1', stepTask: 'collect the token', workflowName: 'wf' }],
+  ] as const) {
+    it(`an answer with a key to a question ${asker} asks is refused, and the question takes an ordinary answer`, async () => {
+      const sid = await helperSession();
+      const ps = engine().getPromptStore()!;
+      let asked: Promise<string> | undefined;
+      vi.spyOn(Session.prototype, 'run').mockImplementation(async function (this: Session) {
+        asked = this.promptUser!('Wie lautet der Token?', undefined, meta);
+        return 'ok';
+      });
+      const run = await call('POST', `/api/sessions/${sid}/run`, { task: 'weiter' });
+      expect(run.status, run.text).toBeLessThan(300);
+      await vi.waitFor(() => { expect(ps.getPending(sid)).toBeTruthy(); });
+      const promptId = ps.getPending(sid)!.id;
+      const sinks = captureSinks();
+      let res: { status: number; text: string };
+      try {
+        res = await call('POST', `/api/sessions/${sid}/reply`, { promptId, answer: KEY });
+      } finally { sinks.stop(); }
+      expect(res.status).toBe(422);
+      expect((JSON.parse(res.text) as { code?: string }).code).toBe(MANDATE_KEY_INPUT_CODE);
+      expect(ps.getById(promptId)!.status).toBe('pending');
+      for (const sink of [JSON.stringify(ps.getById(promptId)), trailRows(), sinks.text()]) expect(sink).not.toContain(KEY.slice(-8));
+      const ok = await call('POST', `/api/sessions/${sid}/reply`, { promptId, answer: 'Den hat der Inhaber.' });
+      expect(ok.status, ok.text).toBe(200);
+      await expect(asked!).resolves.toBe('Den hat der Inhaber.');
+    }, 60_000);
+  }
+
   it('a tabs answer and a tabs progress with a key are refused and not stored', async () => {
     const sid = await helperSession();
     const ps = engine().getPromptStore()!;
