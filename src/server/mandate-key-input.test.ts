@@ -570,3 +570,28 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     }, 60_000);
   });
 });
+
+// `WorkerLoop.resolveTaskInput` answers a question as the owner, so the answer check never reads
+// it. It has no caller today. A caller that a helper can reach would answer around the check, so
+// the first one has to bring the check with it: this fails until it does.
+describe('the owner-only way to answer a question stays without a caller', () => {
+  const root = join(import.meta.dirname, '..');
+  const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) return files(full);
+    return /\.ts$/.test(e.name) && !/\.test\.ts$/.test(e.name) && !e.name.endsWith('.d.ts') ? [full] : [];
+  });
+  it('finds the definition and no reference to it elsewhere', () => {
+    const refs: string[] = [];
+    let definitions = 0;
+    for (const file of files(root)) {
+      readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+        if (/^\s*resolveTaskInput\(taskId: string/.test(line)) { definitions++; return; }
+        if (/\.resolveTaskInput\b|\[['"`]resolveTaskInput['"`]\]|\bresolveTaskInput\s*\(/.test(line)) refs.push(`${file}:${String(i + 1)}`);
+      });
+    }
+    // Control: the walk reaches worker-loop.ts, or the empty list below would mean nothing.
+    expect(definitions).toBe(1);
+    expect(refs).toEqual([]);
+  });
+});
