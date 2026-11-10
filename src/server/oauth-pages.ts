@@ -39,21 +39,21 @@ export const OAUTH_PAGE_CSS = [
 export const OAUTH_PAGE_STYLE_HASH = `'sha256-${createHash('sha256').update(OAUTH_PAGE_CSS, 'utf8').digest('base64')}'`;
 
 /**
- * The policy these pages are sent with: the API's `default-src 'none'`, plus the one stylesheet.
- * Nothing else is opened — no `script-src`, no `img-src`, no `connect-src`, no `form-action`
- * widening (the consent form posts back to the same address, which `default-src 'none'` does not
- * govern).
- */
-/**
- * The policy of a result page: nothing but the frame's stylesheet. `frame-ancestors`, `base-uri`
- * and `form-action` are not covered by `default-src`, so they are named too — the page stays
- * unframeable and without a base or a form target even outside the `/api/` branch that sets
- * `X-Frame-Options` (sec-core, 1340).
+ * The policy of a result page: nothing but the frame's stylesheet — no `script-src`, no `img-src`,
+ * no `connect-src`. `frame-ancestors`, `base-uri` and `form-action` are not covered by
+ * `default-src`, so they are named too — the page stays unframeable and without a base or a form
+ * target even outside the `/api/` branch that sets `X-Frame-Options` (sec-core, 1340).
  */
 export const OAUTH_PAGE_CSP = `default-src 'none'; style-src ${OAUTH_PAGE_STYLE_HASH}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
 
-/** The consent page's policy: the same, except that its one form may post back to this origin. */
-export const OAUTH_CONSENT_CSP = `default-src 'none'; style-src ${OAUTH_PAGE_STYLE_HASH}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`;
+/**
+ * The consent page's policy: the same, without `form-action`. Its form posts back to this origin,
+ * and that POST answers with a 302 to the provider's authorize endpoint on another origin. Browsers
+ * check `form-action` against every redirect of a form submission, so `form-action 'self'` blocks
+ * that 302 and the connect never reaches the provider (measured in Chrome, 10.11.2026). The page
+ * holds one form whose action this server writes; no script can add another.
+ */
+export const OAUTH_CONSENT_CSP = `default-src 'none'; style-src ${OAUTH_PAGE_STYLE_HASH}; frame-ancestors 'none'; base-uri 'none'`;
 
 /** HTML-escape, for text and attribute values alike. */
 export function escapeOAuthHtml(v: string): string {

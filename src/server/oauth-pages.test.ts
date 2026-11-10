@@ -13,7 +13,7 @@ describe('the OAuth page frame', () => {
     const hash = `'sha256-${createHash('sha256').update(style ?? '', 'utf8').digest('base64')}'`;
     expect(OAUTH_PAGE_STYLE_HASH).toBe(hash);
     expect(OAUTH_PAGE_CSP).toBe(`default-src 'none'; style-src ${hash}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
-    expect(OAUTH_CONSENT_CSP).toBe(`default-src 'none'; style-src ${hash}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
+    expect(OAUTH_CONSENT_CSP).toBe(`default-src 'none'; style-src ${hash}; frame-ancestors 'none'; base-uri 'none'`);
   });
 
   it('opens nothing but that stylesheet: no script, no unsafe-inline, no other source', () => {
@@ -23,9 +23,12 @@ describe('the OAuth page frame', () => {
       expect(csp).toContain("frame-ancestors 'none'");
       expect(csp).toContain("base-uri 'none'");
     }
-    // Only the consent page has a form, and it posts back to this origin only.
+    // A result page has no form, so none may be sent from it.
     expect(OAUTH_PAGE_CSP).toContain("form-action 'none'");
-    expect(OAUTH_CONSENT_CSP).toContain("form-action 'self'");
+    // The consent page's form posts here, and the answer is a 302 to the provider's origin.
+    // Browsers check form-action against every redirect of the submission, so any form-action
+    // short of that origin strands the connect on this page (Chrome, 10.11.2026).
+    expect(OAUTH_CONSENT_CSP).not.toContain('form-action');
     const page = oauthPageHtml('de', 'T', '');
     expect(page).not.toMatch(/<script|<link|<img|url\(|@import|\son[a-z]+=/i);
   });
