@@ -318,6 +318,11 @@ export interface PauseSweepDeps {
   /** Only plans with this mandate as a member (the login listener). */
   readonly onlyMandate?: string | undefined;
   /**
+   * The address of `onlyMandate`, as the login names it: what a plan paused for it in the login
+   * without proof of membership (its workflow could not be read) is paused for.
+   */
+  readonly onlyMandateEmail?: string | undefined;
+  /**
    * Ends the open question of a paused plan (`PromptStore.expirePendingForTrigger`), called for
    * every paused plan after the pauses are written — the pause holds when it fails, and the next
    * sweep tries again for as long as the plan is paused. Not inside the login's transaction.
@@ -337,7 +342,8 @@ export interface PauseSweepDeps {
  * In the login (`onlyMandate`) there is no next sweep: once the extension commits the end is no
  * longer proven, and the plan would run as the helper again. So there a plan that cannot be
  * written throws, and the login fails with it, as when its transaction fails; the next login tries
- * again. A plan whose workflow cannot be read is decided there on the schedule's own marks.
+ * again. A plan whose workflow cannot be read is paused there for the mandate of the login,
+ * whether or not it is a member: fail-closed, lifted only by the owner's takeover.
  */
 export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
   const paused: string[] = [];
@@ -365,12 +371,17 @@ export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
         continue;
       }
       // The login has no next sweep, and refusing it for one row would lock every helper out. The
-      // schedule's own marks are read without the workflow, so a plan this mandate set up or
-      // changed still pauses before the extension commits; only a member it has through the
-      // workflow alone is not seen. Such a plan does not run while its workflow cannot be read
-      // (the gate refuses it before dispatch), and the owner sees it unreadable at the takeover.
-      membership = rowPlanMembers(row, () => undefined);
-      process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, paused on the schedule's own marks only: ${processErrorText(err)}\n`);
+      // gate refusing the run holds only while the read keeps failing: once it reads again, the
+      // plan would run as this mandate, its end no longer proven, and no sweep pauses it. So the
+      // plan is paused for the mandate of the login, a member or not (it may be another mandate's
+      // workflow: a pause the owner then takes over without need). Its roles are what the
+      // schedule's own marks give; without the login's address it cannot be paused, so the login
+      // is refused instead.
+      if (deps.onlyMandateEmail === undefined) throw new Error(`plan ${row.id}: who set up its workflow could not be read, and the login names no address to pause it for: ${processErrorText(err)}`);
+      const own = rowPlanMembers(row, () => undefined);
+      const login: Extract<RequestPrincipal, { kind: 'mandate' }> = { kind: 'mandate', email: deps.onlyMandateEmail, mandateId: deps.onlyMandate };
+      membership = own.members.some((m) => m.kind === 'mandate' && m.mandateId === deps.onlyMandate) ? own : { members: [...own.members, login], roles: own.roles };
+      process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, paused for the mandate of this login: ${processErrorText(err)}\n`);
     }
     const members = deps.onlyMandate === undefined
       ? membership.members

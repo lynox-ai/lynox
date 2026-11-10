@@ -20,6 +20,16 @@ import {
   brokerStartPayload,
   parseBrokerStartToken,
   formatBrokerStartToken,
+  BROKER_START_VERSION_V2,
+  BROKER_START_PROVIDERS,
+  BROKER_START_GOLDEN_V2,
+  isBrokerStartProvider,
+  brokerStartPayloadV2,
+  parseBrokerStartTokenV2,
+  formatBrokerStartTokenV2,
+  parseAnyBrokerStartToken,
+  brokerStartAcceptsVersion,
+  BROKER_START_GOLDEN,
 } from '../src/contract/broker-start.js';
 
 const NONCE = 'a'.repeat(BROKER_START_NONCE_BYTES * 2);
@@ -112,5 +122,95 @@ describe('the constants are the contract, so they are pinned as literals', () =>
 
   it('keeps the skew well under the TTL — otherwise the window is not what it says', () => {
     expect(BROKER_START_SKEW_SEC * 2).toBeLessThan(BROKER_START_TTL_SEC);
+  });
+});
+
+describe('v2 — the provider inside the signed payload (row 1224)', () => {
+  it('is the golden string, provider first after the version', () => {
+    expect(brokerStartPayloadV2({ provider: 'google', instanceId: 'inst_TEST', ts: 1700000000, nonce: NONCE }))
+      .toBe(`v2.google.inst_TEST.1700000000.${NONCE}`);
+    expect(brokerStartPayloadV2({ provider: 'microsoft', instanceId: 'inst_TEST', ts: 1700000000, nonce: NONCE }))
+      .toBe(`v2.microsoft.inst_TEST.1700000000.${NONCE}`);
+  });
+
+  it('BINDS the provider: the same instance, time and nonce sign different bytes per provider', () => {
+    const g = brokerStartPayloadV2({ provider: 'google', instanceId: 'inst_A', ts: 1700000000, nonce: NONCE });
+    const m = brokerStartPayloadV2({ provider: 'microsoft', instanceId: 'inst_A', ts: 1700000000, nonce: NONCE });
+    expect(g).not.toBe(m);
+  });
+
+  it('never shares bytes with a v1 payload', () => {
+    const v1 = brokerStartPayload({ instanceId: 'google.inst_A', ts: 1700000000, nonce: NONCE });
+    const v2 = brokerStartPayloadV2({ provider: 'google', instanceId: 'inst_A', ts: 1700000000, nonce: NONCE });
+    expect(v1).not.toBe(v2);
+  });
+
+  it('refuses a provider outside the set, and a non-integer ts', () => {
+    expect(() => brokerStartPayloadV2({ provider: 'slack' as never, instanceId: 't', ts: 1, nonce: NONCE })).toThrow(/provider/);
+    expect(() => brokerStartPayloadV2({ provider: 'google', instanceId: 't', ts: 5.3, nonce: NONCE })).toThrow(/non-negative integer/);
+  });
+
+  it('the provider set is closed and pinned', () => {
+    expect([...BROKER_START_PROVIDERS]).toEqual(['google', 'microsoft']);
+    for (const p of BROKER_START_PROVIDERS) expect(isBrokerStartProvider(p)).toBe(true);
+    for (const other of ['Google', 'm365', '', 'google.x', undefined, null, 1]) expect(isBrokerStartProvider(other)).toBe(false);
+  });
+
+  it('frames and parses as v2, and the two parsers do not accept each other', () => {
+    const token = formatBrokerStartTokenV2({ ts: 1700000000, nonce: NONCE, sig: SIG });
+    expect(token).toBe(`v2.1700000000.${NONCE}.${SIG}`);
+    expect(parseBrokerStartTokenV2(token)).toEqual({ ts: 1700000000, nonce: NONCE, sig: SIG });
+    expect(parseBrokerStartToken(token)).toBeNull();
+    expect(parseBrokerStartTokenV2(formatBrokerStartToken({ ts: 1700000000, nonce: NONCE, sig: SIG }))).toBeNull();
+  });
+
+  it.each([
+    ['wrong part count', `v2.1700000000.${NONCE}`],
+    ['non-numeric ts', `v2.x.${NONCE}.${SIG}`],
+    ['nonce not hex', `v2.1700000000.${'z'.repeat(32)}.${SIG}`],
+    ['signature truncated', `v2.1700000000.${NONCE}.${'b'.repeat(63)}`],
+    ['provider in the framing', `v2.google.1700000000.${NONCE}.${SIG}`],
+  ])('parseBrokerStartTokenV2 returns null on %s', (_l, token) => {
+    expect(parseBrokerStartTokenV2(token)).toBeNull();
+  });
+
+  it('the golden pair carries its payloads, and the version is pinned', () => {
+    expect(BROKER_START_VERSION_V2).toBe('v2');
+    for (const p of BROKER_START_PROVIDERS) {
+      expect(BROKER_START_GOLDEN_V2[p].payload).toBe(brokerStartPayloadV2({
+        provider: p, instanceId: BROKER_START_GOLDEN_V2.instanceId, ts: BROKER_START_GOLDEN_V2.ts, nonce: BROKER_START_GOLDEN_V2.nonce,
+      }));
+      expect(parseBrokerStartTokenV2(BROKER_START_GOLDEN_V2[p].token)).not.toBeNull();
+    }
+  });
+});
+
+describe('v2 hardening and the rollout rule (row 1224, security review)', () => {
+  it('the v2 payload refuses a nonce that is not fixed-length hex, and an unsafe ts', () => {
+    expect(() => brokerStartPayloadV2({ provider: 'google', instanceId: 'a', ts: 1, nonce: '2.n' })).toThrow(/nonce/);
+    expect(() => brokerStartPayloadV2({ provider: 'google', instanceId: 'a', ts: 1, nonce: NONCE.toUpperCase() })).toThrow(/nonce/);
+    expect(() => brokerStartPayloadV2({ provider: 'google', instanceId: 'a', ts: 1e21, nonce: NONCE })).toThrow(/non-negative integer/);
+  });
+
+  it('the v2 parser refuses leading zeros, so one signature has one token string', () => {
+    expect(parseBrokerStartTokenV2(`v2.01700000000.${NONCE}.${SIG}`)).toBeNull();
+    expect(parseBrokerStartTokenV2(`v2.0.${NONCE}.${SIG}`)).not.toBeNull();
+    expect(parseBrokerStartTokenV2(`v2.99999999999999999999.${NONCE}.${SIG}`)).toBeNull();
+  });
+
+  it('parseAnyBrokerStartToken says which version parsed', () => {
+    expect(parseAnyBrokerStartToken(BROKER_START_GOLDEN.token)?.version).toBe('v1');
+    expect(parseAnyBrokerStartToken(BROKER_START_GOLDEN_V2.google.token)?.version).toBe('v2');
+    expect(parseAnyBrokerStartToken(`v3.1700000000.${NONCE}.${SIG}`)).toBeNull();
+    expect(parseAnyBrokerStartToken('')).toBeNull();
+  });
+
+  it('accepts v2 at every route and v1 only at the Google start', () => {
+    expect(brokerStartAcceptsVersion('google', 'v2')).toBe(true);
+    expect(brokerStartAcceptsVersion('microsoft', 'v2')).toBe(true);
+    expect(brokerStartAcceptsVersion('google', 'v1')).toBe(true);
+    expect(brokerStartAcceptsVersion('microsoft', 'v1')).toBe(false);
+    // An unchecked string from a caller fails closed, at any route.
+    expect(brokerStartAcceptsVersion('google', 'v3' as never)).toBe(false);
   });
 });

@@ -26,14 +26,14 @@ Toggling the speaker off mid-stream stops current audio and clears the queue.
 | Property              | Mistral Voxtral TTS                     |
 |-----------------------|-----------------------------------------|
 | Hosting               | Mistral La Plateforme (hosted in the EU by default)       |
-| Model                 | `voxtral-mini-tts-latest`               |
+| Model                 | `voxtral-mini-tts-2603` (pinned)        |
 | Default voice         | `en_paul_neutral` (English)             |
-| Languages             | 9 supported; voice catalog currently EN-only |
+| Languages             | 9 supported; the catalog has voices the pinned model cannot use |
 | Streaming             | SSE; low-latency time-to-first-audio (varies by region/network) |
 | Pricing               | $0.016 / 1 000 characters (~$0.02/min spoken). See [Mistral pricing](https://docs.mistral.ai/getting-started/models/) for the current number. |
 | Training              | Customer text is not used to train models (per Mistral's terms) |
 
-German text is read with an English voice. The accent is light and acceptable for business replies — long inputs read with noticeably more prosodic nuance than very short ones (prosody is planned over the whole input). A dedicated German voice will become the default once Mistral ships one.
+German text is read with an English voice. The accent is light and acceptable for business replies — long inputs read with noticeably more prosodic nuance than very short ones (prosody is planned over the whole input). Mistral's catalog lists a German voice, but the pinned model cannot speak it; when the model answers that it does not support the chosen voice, lynox reads the text with the default voice instead of failing, also when that voice was chosen in the settings.
 
 ## Configuration
 
@@ -85,4 +85,4 @@ At $0.016 per 1 000 characters, typical use is well inside existing tier budgets
 - **No speaker icon appears next to replies** — the TTS provider reports unavailable. Check that `MISTRAL_API_KEY` is set on the server; the icon is deliberately hidden (not disabled) to keep unavailable controls out of the UI.
 - **"Could not play audio" toast** — network error or the browser blocked playback. Reload and try again; autoplay policies require a user gesture to start audio, which the button press satisfies.
 - **Audio starts but cuts off early** — the network stream was interrupted. The next click re-synthesizes from the beginning.
-- **German pronunciation sounds off** — the default voice is English. Long replies sound noticeably better than very short ones because prosody is planned over the full input; a German voice will replace the current default as soon as Mistral ships one.
+- **German pronunciation sounds off** — the default voice is English. Long replies sound noticeably better than very short ones because prosody is planned over the full input; the German voice in Mistral's catalog cannot be used with the pinned model yet (see above).

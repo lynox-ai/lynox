@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_MAX_PREVIEWED_RUNS, canonicalJson, delegatedPlannerOf, type PlannedTarget } from './bulk-ledger.js';
+import { BULK_NOTICES } from './bulk-notices.js';
 import {
   BULK_RETRY_AFTER_CAP_MS, BulkHostBudget, beforeOverFields, canonicalHost, externalClient, externalTargetKey,
   mintBulkContract, parseBulkContract, planExternal, retryAfterMs, type ExternalClient, type ExternalRead,
@@ -1043,6 +1044,23 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
     }
   });
 
+  it('a throw before the read begins, told to a German owner: the halt in German, the stored reason as it is (ux Rest-P E11)', async () => {
+    const s = shop();
+    const restore = serve(s);
+    const read = vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error('boom'); });
+    try {
+      const runId = planRun([{ target: url(0), after: { price: '1' } }]);
+      const w = workerFor({ language: 'de' });
+      await w.tick();
+      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Vorschau angehalten: Zielsystem nicht erreichbar oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.');
+      expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId))
+        .toEqual({ halt_reason: BULK_HALT_REASONS.unavailable });
+    } finally {
+      read.mockRestore();
+      restore();
+    }
+  });
+
   it('a read that pauses is not halted between recording the pause and re-arming for it', async () => {
     const s = shop();
     const restore = serve(s);
@@ -1177,6 +1195,26 @@ describe('a preview never renews an OAuth token', () => {
       expect(ledger.getStatus(out.status.id)!.phase).toBe('previewed');
     } finally {
       exchange.mockRestore();
+      restore();
+    }
+  });
+});
+
+// ux Rest-P B1, B14, B15: a reading refusal told to a German owner, lead and counts in German.
+describe('a reading refusal told to a German owner', () => {
+  it('names a halted run, a run with no external targets and one that does not exist, in German', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const de = (): BulkPreviewDeps => previewDeps(client(), { notices: BULK_NOTICES.de });
+      const runId = planRun([{ target: url(0), after: { price: '1' } }]);
+      ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
+      expect((await runBulkPreview(runId, de())).summary).toMatch(/^Massenlauf nicht bereit zum Lesen und angehalten; nichts gelesen\. Gelesen 0, /);
+      const local = ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w', targets: [] as PlannedTarget[] });
+      expect((await runBulkPreview(local.id, de())).summary).toBe('Der Massenlauf hat keine externen Ziele zum Lesen.');
+      expect((await runBulkPreview('nope', de())).summary).toBe('Diesen Massenlauf gibt es nicht.');
+      expect(s.requests).toHaveLength(0);
+    } finally {
       restore();
     }
   });

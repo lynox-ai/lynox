@@ -8,6 +8,8 @@ import {
 	formatUsageMetaParts,
 	formatApiCalls,
 	shortModelLabel,
+	footerStatParts,
+	footerChipSeparator,
 	type UsageInfo,
 } from './chat-usage.js';
 
@@ -407,3 +409,72 @@ describe('formatApiCalls — the run\'s API calls in the footer', () => {
 	});
 });
 
+
+/**
+ * The stats line shows a segment only when its value is known. A turn stopped before any token
+ * was counted used to read `Σ 0 tokens · -` — two segments, neither saying anything.
+ */
+describe('footerStatParts', () => {
+	const zero: UsageInfo = { tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
+	/** The line as the user reads it from `sm` up: separator, then text, for every segment. */
+	const wide = (u: UsageInfo, includeCost = true): string =>
+		footerStatParts(u, includeCost).map((p) => (p.sep === 'none' ? '' : ' · ') + p.text).join('');
+	/** The same row on a narrow screen: own-line parts and `wide` separators are not in it. */
+	const narrow = (u: UsageInfo, includeCost = true): string =>
+		footerStatParts(u, includeCost).filter((p) => !p.ownLineWhenNarrow)
+			.map((p) => (p.sep === 'always' ? ' · ' : '') + p.text).join('');
+
+	it('a stopped turn without usage numbers has no stats line at all', () => {
+		expect(footerStatParts(zero, true)).toEqual([]);
+		expect(footerStatParts({ ...zero, ttfbMs: 900 }, true)).toEqual([]);
+		expect(footerStatParts(zero, false)).toEqual([]);
+		expect(footerChipSeparator(footerStatParts(zero, true))).toBe('none');
+	});
+
+	it('no tokens but an amount: the amount alone, without the Σ segment and without a leading separator', () => {
+		const u = { ...zero, costUsd: 0.0042 };
+		expect(footerStatParts(u, true)).toEqual([{ text: '$0.0042', sep: 'none' }]);
+		expect(footerChipSeparator(footerStatParts(u, true))).toBe('always');
+	});
+
+	it('a normal answer is unchanged: the token total, then exactly the meta parts', () => {
+		const u: UsageInfo = { tokensIn: 42365, tokensOut: 1280, cacheRead: 38000, cacheWrite: 1500, costUsd: 0.043, model: 'mistral-large-2512' };
+		const parts = footerStatParts(u, true);
+		expect(parts[0]).toEqual({ text: formatTurnTokens(u), tokens: true, sep: 'none' });
+		expect(parts.slice(1).map(({ sep, ...p }) => { expect(sep).toBe('always'); return p; })).toEqual(formatUsageMetaParts(u, true));
+		expect(wide(u)).toBe(`${formatTurnTokens(u)} · ${formatUsageMeta(u, true)}`);
+		expect(wide(u)).toBe(`Σ ${(43645).toLocaleString()} tokens · $0.04 · 90% cache · mistral-large-2512`);
+	});
+
+	it('tokens counted but no price: the `-` stays, as it always did', () => {
+		expect(wide({ ...zero, tokensIn: 10, tokensOut: 3 })).toBe('Σ 13 tokens · -');
+	});
+
+	it('without tokens the model id is a known value and stands alone', () => {
+		expect(wide({ ...zero, model: 'fake-model' })).toBe('fake-model');
+		expect(wide({ ...zero, costUsd: 0.0042, model: 'fake-model' })).toBe('$0.0042 · fake-model');
+		expect(wide({ ...zero, model: 'fake-model' }, false)).toBe('fake-model');
+	});
+
+	it('sub-agent spend is an amount even when the main run counted no tokens', () => {
+		expect(wide({ ...zero, spawnCostUsd: 0.2 })).toBe('$0.20');
+	});
+
+	it('API calls without tokens: no separator leads the row on either width', () => {
+		const u: UsageInfo = { ...zero, apiCalls: 2, apiCostUsd: 0.09, model: 'fake-model' };
+		expect(wide(u)).toBe('2 API calls · $0.09 · fake-model');
+		// On a narrow screen the API part has its own line, so the model leads the row.
+		expect(narrow(u)).toBe('fake-model');
+		expect(footerStatParts(u, true).map((p) => p.sep)).toEqual(['none', 'wide']);
+		expect(footerChipSeparator(footerStatParts(u, true))).toBe('always');
+		const apiOnly: UsageInfo = { ...zero, apiCalls: 2, apiCostUsd: 0.09 };
+		expect(narrow(apiOnly)).toBe('');
+		expect(footerChipSeparator(footerStatParts(apiOnly, true))).toBe('wide');
+	});
+
+	it('with tokens every later segment keeps its separator on every width', () => {
+		const u: UsageInfo = { tokensIn: 100, tokensOut: 50, cacheRead: 0, cacheWrite: 0, costUsd: 0.01, apiCalls: 1, apiCostUsd: 0.09, model: 'm' };
+		expect(footerStatParts(u, true).map((p) => p.sep)).toEqual(['none', 'always', 'always', 'always']);
+		expect(narrow(u)).toBe('Σ 150 tokens · $0.01 · m');
+	});
+});

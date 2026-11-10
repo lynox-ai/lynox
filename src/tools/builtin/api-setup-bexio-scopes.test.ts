@@ -42,7 +42,7 @@ function agentWith(store: ApiStore): never {
   return {
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
-    secretStore: { extractSecretNames: (): string[] => [], resolveSecretRefs: (input: unknown): unknown => input },
+    secretStore: { resolve: (): string | null => null, extractSecretNames: (): string[] => [], resolveSecretRefs: (input: unknown): unknown => input },
     toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
   } as never;
 }

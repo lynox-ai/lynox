@@ -33,11 +33,13 @@ import {
 import type { StampEntry } from './plan-run-context.js';
 import { stampExpect, stampFromRow } from './plan-stamp.js';
 import {
-  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag,
+  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, editorCovered, isMandateTag, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag,
   type PlanMandate, type RequestPrincipal,
 } from './request-principal.js';
 import type { TriggerStore } from './trigger-store.js';
 import type { TriggerRecord } from '../types/index.js';
+
+const isWorkflowRole = (r: PauseRole): boolean => r === 'workflow-created' || r === 'workflow-edited';
 
 /** The digest's own domain, so a stamp digest (`stampExpect`) never passes for a takeover's. */
 export const TAKEOVER_DIGEST_PREFIX = 'lynox:plan-takeover:v1';
@@ -90,7 +92,11 @@ export interface TakeoverPreview {
   readonly members: readonly TakeoverMember[];
   /** `owner`, or the tag of the workflow's member, which stays. */
   readonly runsAs: string;
-  readonly workflow: { readonly id: string; readonly name: string; readonly takenOver: boolean } | null;
+  /** `from`: whose mark on the workflow the takeover reads (`planMandate`), by address, and as which role: F2 names that member. */
+  readonly workflow: {
+    readonly id: string; readonly name: string; readonly takenOver: boolean;
+    readonly from: { readonly name: string; readonly role: 'workflow-edited' | 'workflow-created' } | null;
+  } | null;
   readonly memberChanges: readonly TakeoverMemberChange[];
   readonly alsoReleased: ReadonlyArray<{ readonly id: string; readonly title: string }>;
   readonly connections: readonly StampEntry[];
@@ -242,9 +248,22 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
 
   // Everyone the owner is shown: who the plan was paused for, as they are now (a renewed grant is
   // live again), every other mandate whose mark the takeover covers, and the member that stays.
+  // One entry per access, not per address: the same person under an ended grant and under a live
+  // one are two members with their own roles (a role is read per grant, `rolesOn`), so neither
+  // takes the other's lines, and the one that stays is the live one.
+  const grantKey = (email: string, mandateId: string | undefined): string => `${email}\u0000${mandateId ?? ''}`;
+  const seen = new Set<string>();
   const members: TakeoverMember[] = pausedForOf(trigger.paused_for).entries.map((e) => {
-    const ended = principalHasEnded({ kind: 'mandate', email: e.email, mandateId: e.mandateId }, isLive);
-    return { name: e.email, roles: e.roles, ended, reason: ended ? e.reason : null };
+    seen.add(grantKey(e.email, e.mandateId));
+    const principal = { kind: 'mandate' as const, email: e.email, mandateId: e.mandateId };
+    const ended = principalHasEnded(principal, isLive);
+    // A login whose workflow read failed pauses for its mandate knowing only its roles on the plan
+    // itself (`pauseEndedPlans`), and a pause that knew a workflow role knew it as of the pause.
+    // The workflow roles are read here, where the workflow reads — on the same grant only — and
+    // added to the pause's, which stay: so F2 says the workflow moves, and a member who changed it
+    // after a pause that knew only its creation is said to have changed it.
+    const added = roles(principal).filter((r) => isWorkflowRole(r) && !e.roles.includes(r));
+    return { name: e.email, roles: [...e.roles, ...added], ended, reason: ended ? e.reason : null };
   });
   const coveredMarks: Array<{ tag: string | undefined; id: string | undefined }> = [
     { tag: trigger.created_by, id: trigger.created_mandate_id }, { tag: trigger.mandate_editor, id: trigger.mandate_editor_id },
@@ -253,14 +272,30 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
       : []),
   ];
   const named = (p: Extract<RequestPrincipal, { kind: 'mandate' }>): void => {
-    if (members.some((m) => m.name === p.email)) return;
+    const key = grantKey(p.email, p.mandateId);
+    if (seen.has(key)) return;
+    // A mark without a grant id (written before marks carried one) names the person, not an
+    // access: it adds nobody the list already has under that address, and its roles (read for the
+    // id-less mark only, `rolesOn`) go to that member instead of being lost.
+    // To the live member under that address when there is one, as the web-ui's T-5 reads it.
+    const live = members.findIndex((m) => m.name === p.email && !m.ended);
+    const same = p.mandateId === undefined ? (live >= 0 ? live : members.findIndex((m) => m.name === p.email)) : -1;
+    if (same >= 0) {
+      const had = members[same]!;
+      members[same] = { ...had, roles: [...had.roles, ...roles(p).filter((r) => !had.roles.includes(r))] };
+      return;
+    }
+    seen.add(key);
     members.push({ name: p.email, roles: roles(p), ended: principalHasEnded(p, isLive), reason: null });
   };
+  const candidates: Array<Extract<RequestPrincipal, { kind: 'mandate' }>> = [];
   for (const m of coveredMarks) {
     if (!isMandateTag(m.tag)) continue;
-    named({ kind: 'mandate', email: m.tag!.slice(MANDATE_TAG_PREFIX.length), ...(m.id ? { mandateId: m.id } : {}) });
+    candidates.push({ kind: 'mandate', email: m.tag!.slice(MANDATE_TAG_PREFIX.length), ...(m.id ? { mandateId: m.id } : {}) });
   }
-  if (runsAs.kind === 'mandate') named(runsAs);
+  if (runsAs.kind === 'mandate') candidates.push(runsAs);
+  // Marks with a grant id first, so the rule for one without holds in either order of the columns.
+  for (const p of [...candidates.filter((c) => c.mandateId !== undefined), ...candidates.filter((c) => c.mandateId === undefined)]) named(p);
 
   // The grant ids the audit row names: every mark the takeover covers, no address.
   const coveredMandates = new Set<string>();
@@ -350,6 +385,18 @@ export function workflowsCoveredByTakeover(deps: TakeoverDeps): Map<string, numb
   return covered;
 }
 
+/** The preview's workflow: null without one, or when no mandate's mark on it is left to take over. */
+function workflowOfPreview(wf: WorkflowRow | undefined, coverWorkflow: boolean): TakeoverPreview['workflow'] {
+  if (wf === undefined) return null;
+  const a = planAuthorshipOf(wf);
+  const mark = planMandate(a);
+  if (mark === undefined) return null;
+  // `planMandate` reads the editor's mark first, when it is not covered; else the creator's.
+  const role = isMandateTag(a.mandate_editor) && !editorCovered(a) ? 'workflow-edited' : 'workflow-created';
+  const from = mark.principal.kind === 'mandate' ? { name: mark.principal.email, role } as const : null;
+  return { id: wf.id, name: wf.name, takenOver: coverWorkflow, from };
+}
+
 /** What the owner is shown before taking the plan over: one read, no await. */
 export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreviewResult {
   if (!planPauseOn()) return { kind: 'refused', refusal: 'not_available' };
@@ -362,8 +409,7 @@ export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreview
       expect: plan.expect,
       members: plan.members,
       runsAs: principalTag(plan.runsAs),
-      workflow: plan.wf === undefined || planMandate(planAuthorshipOf(plan.wf)) === undefined
-        ? null : { id: plan.wf.id, name: plan.wf.name, takenOver: plan.coverWorkflow },
+      workflow: workflowOfPreview(plan.wf, plan.coverWorkflow),
       memberChanges: plan.memberChanges,
       alsoReleased: plan.released.map((r) => ({ id: r.id, title: r.title })),
       connections: plan.connections,

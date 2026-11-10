@@ -2,6 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { ArtifactFileRefusedError, ArtifactPlaceholderError, ArtifactVersionRefusedError, isArtifactId } from '../../core/artifact-store.js';
 import { artifactRefusal } from './fs.js';
+import { chatThreadOf } from './private-thread.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface ArtifactSaveInput {
@@ -97,6 +98,7 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
 };
 
 function saveArtifact(input: ArtifactSaveInput, agent: IAgent, store: NonNullable<IAgent['toolContext']['artifactStore']>): string {
+    const threadId = chatThreadOf(agent);
     return withInstanceWrite(agent, {
       site: 'artifact_save#save', kind: () => (isArtifactId(input.id) ? 'save' : 'create'), store: 'artifacts',
       target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]],
@@ -108,6 +110,10 @@ function saveArtifact(input: ArtifactSaveInput, agent: IAgent, store: NonNullabl
         ...(input.type ? { type: input.type } : {}),
         ...(input.description ? { description: input.description } : {}),
         ...(input.id ? { id: input.id } : {}),
+        // The chat that made it, so the gallery and the API can link back: the agent's own thread,
+        // or for a spawn_agent child or a workflow step the chat it runs for. The store keeps it on
+        // later saves: an edit from another chat does not move where the artifact came from.
+        ...(threadId ? { threadId } : {}),
       }), ifReturned);
       // Only an id the store chose: one passed in is the model's.
       if (!input.id && !artifact.overwrite) w.created('save', artifact.id);

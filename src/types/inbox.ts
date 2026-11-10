@@ -33,6 +33,7 @@ export type InboxAuditAction =
   | 'snoozed'
   | 'undo'
   | 'unsnoozed_on_reply'
+  | 'reopened_on_reply'
   | 'rule_applied'
   | 'generation_requested';
 

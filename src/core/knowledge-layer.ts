@@ -17,6 +17,7 @@ import type {
   EntityType,
 } from '../types/index.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
+import { processErrorText } from './error-egress.js';
 import type { MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
 import type { EmbeddingProvider } from './embedding.js';
 import { embedToBlob } from './embedding.js';
@@ -857,7 +858,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       if (this._oracleFailWarned) return;
       this._oracleFailWarned = true;
       process.stderr.write(
-        `[lynox:subject-reap] ${probe} probe failed — subjects are KEPT while it fails: ${err instanceof Error ? err.message : String(err)}\n`,
+        // The record probe reads model-named collections: its SQLite error can name a collection or column,
+        // and a malformed stored schema fails a JSON.parse that quotes it.
+        `[lynox:subject-reap] ${probe} probe failed — subjects are KEPT while it fails: ${processErrorText(err)}\n`,
       );
     });
   }

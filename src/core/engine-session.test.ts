@@ -96,6 +96,12 @@ vi.mock('./agent.js', () => {
     ToolLoopBreakError: MockToolLoopBreakError,
     ContinuationLoopError: MockContinuationLoopError,
     ThinkingOnlyLoopError: class MockThinkingOnlyLoopError extends MockContinuationLoopError {},
+    ToolCallImitationError: class MockToolCallImitationError extends MockRunAbortedError {
+      constructor() {
+        super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+        this.name = 'ToolCallImitationError';
+      }
+    },
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;
@@ -481,6 +487,8 @@ import { setTierSetResolver, resolveTierModel, snapshotForSlot } from './tier-re
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver, getBetasForProvider } from '../types/index.js';
 import { InputRequiredError } from './input-required.js';
 import { reportMeteredCost } from './metered-request.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from './chat-context.js';
+import { approvalChatTitle } from './approval-chat-title.js';
 import { ChangesetManager } from './changeset.js';
 import { setTenantWorkspace } from './workspace.js';
 import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace } from 'node:fs';
@@ -861,8 +869,9 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     it('a run a loop guard stopped is recorded aborted with the guard as the reason and its message; a stop has neither', async () => {
-      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } = await import('./agent.js');
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } = await import('./agent.js');
       const cases: Array<[Error, string | undefined]> = [
+        [new ToolCallImitationError('http_request'), 'tool_call_imitation'],
         [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
         [new ContinuationLoopError('prefix'), 'continuation_loop'],
         [new (ThinkingOnlyLoopError as unknown as new (p: string) => Error)(''), 'thinking_loop'],
@@ -1550,6 +1559,21 @@ describe('Engine + Session (Orchestrator)', () => {
       await session.run('first task');
       const agent = session.getAgent() as unknown as { setSecretsBriefing: ReturnType<typeof vi.fn> };
       expect(agent.setSecretsBriefing).toHaveBeenCalledWith(undefined);
+    });
+
+    // The session bounds a long listing; the wire capture redacts it only inside a whole frame.
+    it('hands the agent a long listing cut on an entry, with its closing tag', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const entries = Array.from({ length: 400 }, (_, i) => `secret:CUSTOMER_KEY_${String(i).padStart(4, '0')} (***wxyz)`);
+      vi.spyOn(engine, 'getSecretsBriefing').mockReturnValue(`<secrets>\n${entries.join(', ')}\n</secrets>`);
+      vi.mocked(Agent).mockClear();
+      engine.createSession();
+      const config = vi.mocked(Agent).mock.calls.at(-1)![0] as { secretsBriefing?: string };
+      expect(config.secretsBriefing!.length).toBeLessThanOrEqual(8000);
+      expect(config.secretsBriefing!.endsWith('\n[...truncated]\n</secrets>')).toBe(true);
+      // The last entry kept is whole.
+      expect(config.secretsBriefing!.slice(0, -'\n[...truncated]\n</secrets>'.length).endsWith(' (***wxyz)')).toBe(true);
     });
 
     it('keeps the main agent on the configured tier — no per-turn auto-downgrade', async () => {
@@ -3743,6 +3767,46 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(llmTitle).toHaveBeenCalledTimes(1);
       expect(llmTitle.mock.calls[0]?.[0]).toBe('Plan the Q3 budget');
       llmTitle.mockRestore();
+    });
+
+    // The run titles a chat on a loaded approval draft through `firstThreadTitle`: the engine's
+    // phrase in the configured language, never the draft, and no LLM upgrade. What that title
+    // does in other chats' dictation is tested in `transcribe/session-context.test.ts`.
+    it('a chat on a loaded approval draft is titled by the engine, without an LLM upgrade (control: a draft that did not load keeps its first line)', async () => {
+      const { engine } = await createEngineAndSession({ language: 'de' });
+      const llmTitle = vi.spyOn(Object.getPrototypeOf(engine.createSession()) as { _generateLLMTitle: () => Promise<void> }, '_generateLLMTitle')
+        .mockResolvedValue(undefined);
+      const updates = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      const titleOf = (id: string): unknown => updates.mock.calls.find(([t, u]) => t === id && 'title' in (u as object))?.[1]?.title;
+      const MARK = 'Quittenmarmelade';
+      const firstLine = 'Ich möchte diesen Entwurf ändern, bevor er rausgeht.';
+      const draft = closeLoadedContext(
+        '[Loaded draft moved from the approval queue — entry: e1 · mail_send · from a task run]\n'
+        + `<untrusted_data source="approval:e1">\nSubject: ${MARK}\n</untrusted_data>`,
+      );
+      try {
+        const chat = engine.createSession();
+        // UTC+14 all year: no engine's own zone gives the same wall clock, so the user's zone
+        // is shown to reach the title. Read before and after, for a minute that turns mid-run.
+        chat.userTimezone = 'Pacific/Kiritimati';
+        mockSend.mockResolvedValueOnce('ok');
+        const before = approvalChatTitle('de', new Date(), 'Pacific/Kiritimati');
+        await chat.run(`${draft}${firstLine}`);
+        const after = approvalChatTitle('de', new Date(), 'Pacific/Kiritimati');
+        expect([before, after]).toContain(titleOf(chat.sessionId));
+        expect(titleOf(chat.sessionId)).toMatch(/^Entwurf überarbeiten · \d{1,2}\. \S+, \d{2}:\d{2}$/);
+        expect(String(titleOf(chat.sessionId))).not.toContain(MARK);
+        expect(llmTitle).not.toHaveBeenCalled();
+
+        const missing = engine.createSession();
+        mockSend.mockResolvedValueOnce('ok');
+        await missing.run(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}${firstLine}`);
+        expect(titleOf(missing.sessionId)).toBe(firstLine);
+        expect(llmTitle).toHaveBeenCalledTimes(1);
+      } finally {
+        llmTitle.mockRestore();
+        updates.mockRestore();
+      }
     });
 
     it('two runs are two groups, also when the second is started from inside the first', async () => {

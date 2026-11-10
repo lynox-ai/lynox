@@ -58,11 +58,41 @@ describe('F2: the workflow is taken over with the plan', () => {
 			'Dieser Plan nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow. Dann laufen auch diese Pläne wieder: A, B.',
 		);
 	});
+	it('the role F2 says is not said again for the same person\'s other access', () => {
+		// Paused for two accesses of one person, the second renewed: both entries carry the copy of the role.
+		const p = preview({ members: [wfMember(['workflow-edited']), { name: 'ida@x.ch', roles: ['workflow-edited'], ended: false, reason: null }], workflow: wf });
+		expect(kinds(p).filter((k) => k === 'role' || k === 'f2')).toEqual(['f2']);
+	});
 	it('with two members, it names the one who changed the workflow, not the one who created it', () => {
 		const p = preview({ members: [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf });
 		expect(takeoverLines(p, fmt).find((l) => l.kind === 'f2')?.text).toBe(
 			'Dieser Plan nutzt den Workflow „Rechnungen“, den b@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
 		);
+	});
+	it('names the member whose mark the takeover reads, wherever the list has it', () => {
+		const f2 = (p: TakeoverPreview): string | undefined => takeoverLines(p, fmt).find((l) => l.kind === 'f2')?.text;
+		const changedBy = (name: string): string => `Dieser Plan nutzt den Workflow „Rechnungen“, den ${name} geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow.`;
+		// Both paused with a change to the workflow; the workflow's mark is a@x.ch's now.
+		const members = [wfMember(['workflow-edited'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')];
+		const from = { name: 'a@x.ch', role: 'workflow-edited' as const };
+		expect(f2(preview({ members, workflow: { ...wf, from } }))).toBe(changedBy('a@x.ch'));
+		expect(f2(preview({ members: [...members].reverse(), workflow: { ...wf, from } }))).toBe(changedBy('a@x.ch'));
+		expect(f2(preview({ members, workflow: { ...wf, from: { name: 'b@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('b@x.ch'));
+		// The role is the mark's, not the member's: a member who also changed it is said to have created it when the
+		// mark is the creation. (Not a state the engine makes today: a covered editor's mark is covered with the creator's.)
+		const both = [wfMember(['workflow-created'], 'b@x.ch'), wfMember(['workflow-created', 'workflow-edited'], 'a@x.ch')];
+		expect(f2(preview({ members: both, workflow: { ...wf, from: { name: 'a@x.ch', role: 'workflow-created' } } }))).toBe(
+			'Dieser Plan nutzt den Workflow „Rechnungen“, den a@x.ch angelegt hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
+		);
+		// The mark's address alone is not enough: a member under it without the mark's role is not named for it.
+		// (Guards the fallback; the engine always lists a member with the mark's address and role.)
+		const other = [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')];
+		expect(f2(preview({ members: other, workflow: { ...wf, from: { name: 'a@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('b@x.ch'));
+		// The member named takes the place of its role line; the other member's line stays.
+		const lines = takeoverLines(preview({ members, workflow: { ...wf, from: { name: 'b@x.ch', role: 'workflow-edited' } } }), fmt);
+		expect(lines.filter((l) => l.kind === 'role').map((l) => l.text)).toEqual(['Nutzt den Workflow „Rechnungen“, den a@x.ch geändert hat']);
+		// No member under the mark's address with its role: the change first, then the creation, in the list's order.
+		expect(f2(preview({ members, workflow: { ...wf, from: { name: 'z@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('a@x.ch'));
 	});
 	it('without plans released, the last sentence goes', () => {
 		const p = preview({ members: [wfMember(['workflow-created'])], workflow: wf });
@@ -177,6 +207,38 @@ describe('T-4 or T-5: whom the plan runs for afterwards', () => {
 		expect(takeoverLines(stays(['workflow-created', 'workflow-edited']), fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
 			'bo@x.ch changed the workflow “Rechnungen” and still has access. So after you take over, the plan runs under bo@x.ch\'s name, not yours. If that access ends, the plan pauses again, and you can take it over once more.',
 		);
+	});
+});
+
+describe('one person under two grants (1029)', () => {
+	it('T-5 reads the live grant\'s roles, not the ended one\'s listed first, and each grant keeps its own line', () => {
+		const p = preview({
+			// The plan was made under an ended grant; the workflow was changed under the person's live one.
+			members: [{ name: 'ida@x.ch', roles: ['created'], ended: true, reason: 'expired' }, { name: 'ida@x.ch', roles: ['workflow-edited'], ended: false, reason: null }],
+			runsAs: 'mandate:ida@x.ch',
+			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
+		});
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
+			'Den Workflow „Rechnungen“ hat ida@x.ch geändert, und ida@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von ida@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
+		);
+		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'role').map((l) => l.text)).toEqual(['Angelegt von ida@x.ch', 'Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat']);
+	});
+	it('T-5 reads the live grant also when it is listed first, before an ended one that changed the workflow', () => {
+		const p = preview({
+			members: [{ name: 'ida@x.ch', roles: ['workflow-created'], ended: false, reason: null }, { name: 'ida@x.ch', roles: ['workflow-edited'], ended: true, reason: 'expired' }],
+			runsAs: 'mandate:ida@x.ch',
+			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
+		});
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text.startsWith('Den Workflow „Rechnungen“ hat ida@x.ch angelegt,')).toBe(true);
+	});
+	it('the same role under both grants is said once', () => {
+		// The ended grant's roles are the copy the pause took; the live grant changed the workflow again.
+		const p = preview({
+			members: [{ name: 'ida@x.ch', roles: ['workflow-edited'], ended: true, reason: 'expired' }, { name: 'ida@x.ch', roles: ['workflow-edited'], ended: false, reason: null }],
+			runsAs: 'mandate:ida@x.ch',
+			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
+		});
+		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'role').map((l) => l.text)).toEqual(['Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat']);
 	});
 });
 

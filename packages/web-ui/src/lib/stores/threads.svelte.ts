@@ -145,6 +145,7 @@ export async function renameThread(id: string, title: string): Promise<void> {
 	// A request that never got an answer is a failed rename too: the optimistic title is taken
 	// back and the user is told, the same as for a refused one. This never rejects.
 	let ok = false;
+	let keyRefused = false;
 	try {
 		const res = await fetch(`${getApiBase()}/threads/${id}`, {
 			method: 'PATCH',
@@ -152,10 +153,12 @@ export async function renameThread(id: string, title: string): Promise<void> {
 			body: JSON.stringify({ title }),
 		});
 		ok = res.ok;
+		// A helper's title that reads as carrying a key (ux U-150): saying why stops a retry of the same.
+		if (res.status === 422) keyRefused = ((await res.json().catch(() => null)) as { code?: unknown } | null)?.code === 'mandate_key_input';
 	} catch { /* reported below */ }
 	if (!ok) {
 		if (thread && (prev !== null && prev !== undefined)) thread.title = prev;
-		addToast(t('threads.error_rename'), 'error');
+		addToast(t(keyRefused ? 'chat.mandate_key_input_other' : 'threads.error_rename'), 'error');
 	}
 }
 

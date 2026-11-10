@@ -95,7 +95,11 @@ export type CaptureEvent =
  * outcomes and cannot tell which rule produced which. `outcome` says WHAT happened
  * (`pending_review` / `active`); this says which of the three rules decided it.
  *
- * - `turn_trusted`     — the turn ingested nothing external; no gate applied.
+ * - `turn_trusted`     — the turn ingested nothing external, and the extractor placed the
+ *                        fact under the operator label; no gate applied.
+ * - `turn_trusted_assistant` — the turn ingested nothing external, but the fact stands only
+ *                        under the assistant label (a draft or example the assistant wrote,
+ *                        or an unparseable attribution); it goes to review (row 1103).
  * - `excerpt_external` — the excerpt itself embeds wrapped third-party text, so the
  *                        extractor's own attribution was NOT consulted (it is written by
  *                        a model reading attacker-reachable content).
@@ -115,6 +119,7 @@ export type CaptureEvent =
  */
 export type CaptureRouting =
   | 'turn_trusted'
+  | 'turn_trusted_assistant'
   | 'excerpt_external'
   | 'injection_suspected'
   | 'fact_external'

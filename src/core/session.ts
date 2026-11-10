@@ -30,7 +30,7 @@ import { effectiveContextWindow, profileNamed } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } from './agent.js';
 import { isInputRequired } from './input-required.js';
 import { loopGuardStopReason } from './loop-guard-stop.js';
 import type { SendStop } from './agent.js';
@@ -67,9 +67,11 @@ import {
   withCurrentTimePrefix, languageOverrideSuffix } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
 import { isFeatureEnabled } from './features.js';
-import { stripLoadedContext } from './chat-context.js';
+import { opensLoadedApprovalDraft, stripLoadedContext } from './chat-context.js';
+import { approvalChatTitle } from './approval-chat-title.js';
+import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
-import { setupHistorySubscriptions } from './engine-init.js';
+import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
@@ -160,6 +162,7 @@ export function classifyRunFailure(err: unknown): { noteCode: string; report: bo
   if (err instanceof ThinkingOnlyLoopError) return { noteCode: 'thinking_loop', report: true };
   if (err instanceof ContinuationLoopError) return { noteCode: 'continuation_loop', report: true };
   if (err instanceof ToolLoopBreakError) return { noteCode: 'tool_loop_break', report: true };
+  if (err instanceof ToolCallImitationError) return { noteCode: 'tool_call_imitation', report: true };
   if (err instanceof RunAbortedError) return { noteCode: 'run_interrupted', report: true };
   return { noteCode: 'provider_error', report: true };
 }
@@ -566,9 +569,9 @@ export class Session {
     // Only on the default path, as before: a caller's own briefing never carried the listing.
     // `?.()` on the method: several suites hand Session a partial engine double.
     const rawSecrets = opts?.briefing === undefined ? engine.getSecretsBriefing?.() : undefined;
-    this.secretsBriefing = rawSecrets && rawSecrets.length > 8000
-      ? rawSecrets.slice(0, 8000) + '\n[...truncated]'
-      : rawSecrets;
+    // Bounded like the briefing, but on an entry boundary and with its closing tag kept: the wire
+    // capture redacts the listing only inside a whole `<secrets>` frame.
+    this.secretsBriefing = rawSecrets === undefined ? undefined : capSecretsListing(rawSecrets, 8000);
     this.onStream = opts?.onStream ?? null;
     this._promptUser = opts?.promptUser ?? null;
     this._promptTabs = opts?.promptTabs ?? null;
@@ -1327,13 +1330,16 @@ export class Session {
       });
 
       // In-run helper calls (the follow-up-chip recovery) spend on the pool key without
-      // producing tokens in `this.usage`, so the deltas above cannot see them.
+      // producing tokens in `this.usage`, so the deltas above cannot see them. Aborted helper
+      // calls and a main-model call ended mid-stream (by the stream guard, or by a stop of the
+      // run after the provider answered) add an estimate here too (and an upper bound to the
+      // cost caps); those reach no tenant debit at all.
       //
       // ⚠ This is a DISPLAY term and must never reach `onAfterRun`. `costUsd` above is the
-      // value the managed hook DEBITS, and the helper already debited itself through its own
-      // `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`) under a fresh
-      // run id. `managed-hook.ts` dedups per run id, so adding the same dollars to `costUsd`
-      // bills the tenant twice — which a first version of this did, on the belief that the
+      // value the managed hook DEBITS, and a helper call that finished already debited itself
+      // through its own `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`)
+      // under a fresh run id. `managed-hook.ts` dedups per run id, so adding the same dollars
+      // to `costUsd` bills the tenant twice — which a first version of this did, on the belief that the
       // CP figure was the one missing them. It was the other way round: the CP was right and
       // the numbers the CUSTOMER reads were short.
       //
@@ -1462,13 +1468,16 @@ export class Session {
             // web-ui strip can't reach). generateThreadTitle self-strips the
             // preamble; strip it for the LLM-title path too. Both are no-ops when
             // there is no preamble.
-            const title = generateThreadTitle(taskText);
+            // A chat on a loaded approval draft is titled by the engine alone ({@link firstThreadTitle}).
+            const { title, llmUpgrade } = firstThreadTitle(taskText, {
+              language: noticeLanguage(this.engine.config.language), at: new Date(), timeZone: this._userTimezone,
+            });
             threadStore.updateThread(this.sessionId, { title });
             // Upgrade to an LLM-written title on the `fast` tier (a cheap inline
             // background consumer, like memory extraction). Async + best-effort:
             // never blocks the run, skipped in private mode, and never clobbers a
             // manual rename (the method re-checks the title before writing).
-            if (taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
+            if (llmUpgrade && taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
               void this._generateLLMTitle(stripLoadedContext(taskText), title);
             }
           }
@@ -2801,6 +2810,9 @@ export class Session {
       durableMemoryEnabled: userConfig.durable_memory_enabled === true,
       costGuard: this.agentOverrides.costGuard,
       onStream: streamHandler,
+      // The handler adds each `turn_end` usage into `this.usage` (above), which the run's cost
+      // line and debit are priced from.
+      turnEndUsageCounted: true,
       // F-Eager-Persist (2026-05-18): Persist messages to the ThreadStore at
       // each stable point in the agent loop (after assistant reply, after
       // tool_results). Without this the end-of-run persist (line 506-526)
@@ -2997,6 +3009,24 @@ export class Session {
   async shutdown(): Promise<void> {
     await this.engine.shutdown();
   }
+}
+
+/**
+ * The title a thread gets from its first message, and whether the LLM may upgrade it. A chat
+ * opened on an approval entry whose draft loaded is titled by the engine alone
+ * (`approval-chat-title.ts`): its first line is the same for every entry, and the draft's
+ * subject must not become a title. No LLM upgrade there either — it would read that same first
+ * line and name every such chat alike again. Exported so the dictation test drives the same
+ * derivation the run does.
+ */
+export function firstThreadTitle(
+  taskText: string,
+  opts: { language: NoticeLanguage; at: Date; timeZone?: string | null | undefined },
+): { title: string; llmUpgrade: boolean } {
+  if (opensLoadedApprovalDraft(taskText)) {
+    return { title: approvalChatTitle(opts.language, opts.at, opts.timeZone), llmUpgrade: false };
+  }
+  return { title: generateThreadTitle(taskText), llmUpgrade: true };
 }
 
 /** Generate a short thread title from the first user message. Exported for

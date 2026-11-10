@@ -33,13 +33,14 @@ import { CpRefusalTally, CpTrail } from '../core/cp-trail.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
 import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
-import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { WorkflowStore } from '../core/workflow-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
+import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { ChangesetManager } from '../core/changeset.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { currentRunGroup } from '../core/run-group.js';
@@ -2802,6 +2803,27 @@ describe('LynoxHTTPApi', () => {
       const text = await res.text();
       expect(text).toContain('event: error');
       expect(text).toContain('"fatal":true');
+    });
+
+    /** The JSON payload of the run stream's `event: error` frame. */
+    const errorFrame = (text: string): Record<string, unknown> => {
+      const frame = text.split('\n\n').find((f) => f.startsWith('event: error\n'));
+      if (frame === undefined) throw new Error('no error frame');
+      return JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice(6)) as Record<string, unknown>;
+    };
+
+    it('a reply the AI service cut off on every attempt: the terminal error carries the stable code', async () => {
+      repayRateWindow();
+      mockSessionRun.mockImplementationOnce(async () => { throw new StreamIncompleteError(); });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'boom' }) });
+      expect(errorFrame(await res.text())).toEqual({ error: 'the AI service ended the reply before it was finished', fatal: true, code: 'stream_incomplete' });
+    });
+
+    it('control: another terminal error carries no code', async () => {
+      repayRateWindow();
+      mockSessionRun.mockImplementationOnce(async () => { throw new Error('provider exploded'); });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'boom' }) });
+      expect(errorFrame(await res.text())).toEqual({ error: 'provider exploded', fatal: true });
     });
 
     it('a run that ended needing input ends with done and its reason — no fatal error, no red toast', async () => {
@@ -5835,15 +5857,15 @@ describe('LynoxHTTPApi', () => {
     // The approved wording, copied byte for byte. A difference here is a text that was not
     // approved; change it only with a new approval.
     const APPROVED = [
-      'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an bexio schickt, und er geschieht erst nach deinem Ja. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-      'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
+      'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
+      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
       'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
     ];
     // The page around it, approved 2026-10-21 under the same rule.
     const APPROVED_FRAME = {
       title: 'Schreibrechte für bexio bestätigen',
       scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Das Recht ist damit breiter als das, was lynox damit tut.',
+      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
       button: 'Zustimmen und weiter zu bexio',
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
     };
@@ -11837,6 +11859,22 @@ describe('LynoxHTTPApi', () => {
       expect(shown['writeFormNote']).toBeNull();
     });
 
+    it('shows a list whose stored filters were changed past what a parse takes by its host, without failing, and a withdrawn path as its address', async () => {
+      repayRateWindow();
+      const host = 'shop.example.com';
+      const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, filters: { category: ['12', '13'] } })), planned.status.id);
+      const res = await jsonFetch(`/api/bulk/runs/${planned.status.id}`);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as Record<string, unknown>)['listFirstPage']).toBe(host);
+      // A run whose path was withdrawn since still has an address, and shows it.
+      bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, path: '/wp-json/wc/v3/orders' })), planned.status.id);
+      const withdrawn = await (await jsonFetch(`/api/bulk/runs/${planned.status.id}`)).json() as Record<string, unknown>;
+      expect(withdrawn['listFirstPage']).toBe(`https://${host}/wp-json/wc/v3/orders?category=12&orderby=id&order=asc&_fields=id&per_page=50&page=1`);
+    });
+
     it('starts a list read only with the checksum of the list it shows the owner', async () => {
       const host = 'shop.example.com';
       const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
@@ -11957,6 +11995,21 @@ describe('LynoxHTTPApi', () => {
 
       // The link domains the owner allows a judged list run's verdicts to add (PRD
       // shopify-preset §20.2 item 5, S20-4): taken at the start that begins the judge only.
+      it('shows the owner the context the judge reads beside the record, as the hash binds it (PRD shopify-preset §20.2 item 7)', async () => {
+        const withContext = normalizeJudgeRule({ rule: 'Write a short title.', schema: { title: { type: 'string', maxLength: 40 } }, context: ['brand', 'note'] });
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old', brand: 'Acme', note: 'n' } }, after: judgeTemplate(withContext) }],
+          judge: withContext,
+        }).id;
+        const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+        expect(shown['judgeRule']).toEqual({ rule: withContext.rule, schema: withContext.schema, tier: 'fast', context: ['brand', 'note'] });
+        expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
+        // Twin: a rule without one shows no context key at all.
+        const plain = await (await jsonFetch(`/api/bulk/runs/${judgedRun()}`)).json() as { judgeRule: Record<string, unknown> };
+        expect(Object.hasOwn(plain.judgeRule, 'context')).toBe(false);
+      });
+
       it('takes the start list at the judge start, refuses it at the list read and on a resume', async () => {
         const host = 'shop.example.com';
         const LIST_RULE = normalizeJudgeRule({ rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } }, { idField: 'id' });
@@ -12166,7 +12219,8 @@ describe('LynoxHTTPApi', () => {
       try {
         // Shown with its note and the statement to confirm; approved only with the literal `true`.
         const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
-        expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+        // One target to write: the note keeps its first two sentences.
+        expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
         for (const extra of [{}, { unmeasuredConfirmed: 'true' }, { unmeasuredConfirmed: 1 }]) {
           const unconfirmed = await approve(extra);
           expect(unconfirmed.status, JSON.stringify(extra)).toBe(409);
@@ -12249,12 +12303,48 @@ describe('LynoxHTTPApi', () => {
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
       const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
-      expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+      expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
       // The same run read as an undo: it restores under its source's confirmation, and does
       // not write one target first, so neither the note nor the statement applies.
       bulkDb.getDb().prepare(`UPDATE bulk_runs SET kind = 'undo' WHERE id = ?`).run(id);
       const asUndo = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
       expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
+    });
+
+    it('gives the unmeasured note its first two sentences at one target to write, counted as the write counts', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((n) => `https://${host}/products/${String(n)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      const note = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as Record<string, unknown>)['writeFormNote'];
+      expect(bulkLedger.countWriting(id)).toBe(2);
+      expect(await note()).toBe(BULK_UNMEASURED_NOTE);
+      // One taken out: the write counts one, and the note says nothing of "the rest".
+      const deselected = bulkDb.getDb().prepare(`UPDATE bulk_targets SET deselected_at = 1 WHERE run_id = ? AND seq = (SELECT MAX(seq) FROM bulk_targets WHERE run_id = ?)`).run(id, id);
+      expect(deselected.changes).toBe(1);
+      expect(bulkLedger.countWriting(id)).toBe(1);
+      expect(await note()).toBe(BULK_UNMEASURED_NOTE_ONE);
+    });
+
+    it('says when the probe was found as planned after a send without a clear answer, not written', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      // Sent without a clear answer, then read back holding the planned value.
+      bulkLedger.markSent(id, 0);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'already');
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      const probe = ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown }).probe;
+      expect(probe).toEqual({ key: keys[0], fields: ['price'], found: true });
     });
 
     it('names the one target a probe wrote and the fields it changed, until the probe is confirmed', async () => {
@@ -12278,9 +12368,40 @@ describe('LynoxHTTPApi', () => {
       expect(await probeOf()).toBeNull();
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
       // The written target, and only the fields the write changed — not the ones sent unchanged.
-      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'] });
+      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'], found: false });
+      // Writing on wider before the confirmation is refused with the engine's reason: what the kind
+      // of entry lacks, and that the one written target is the probe to confirm.
+      const block = { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'confirm' };
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: `https://${host}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((k: string) => (k === 'SHOP_TOKEN' ? 'not-a-real-token-only-a-fixture' : null));
+      try {
+        const wider = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), maxTargets: 2 }) });
+        expect(wider.status).toBe(409);
+        expect(await wider.json()).toMatchObject({ code: 'probe_required', probe: block });
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+      const blockOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probeBlock: unknown }).probeBlock;
+      // Only a run halted for want of a probe carries the reason on its page; this one halted at its maximum.
+      expect(await blockOf()).toBeNull();
+      bulkLedger.halt(id, BULK_HALT_REASONS.probeRequired);
+      expect(await blockOf()).toEqual(block);
+      const ownOf = async (runId: string): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${runId}`)).json()) as { probeOwn: unknown }).probeOwn;
+      expect(await ownOf(id)).toBe(false);
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
       expect(await probeOf()).toBeNull();
+      // Confirmed, the probe stays this run's step, and only this run's.
+      expect(await ownOf(id)).toBe(true);
+      expect(await ownOf(planRun())).toBe(false);
     });
 
     it('offers no probe for a target found already holding its value, and names the halt and what an undo takes back', async () => {
@@ -12355,8 +12476,9 @@ describe('LynoxHTTPApi', () => {
       try {
         const widened = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets: 2 }) });
         expect(widened.status).toBe(409);
+        const refusal = (await widened.json()) as { error: string };
         // The sentence is prompt surface (the model reads refusals): pinned word for word.
-        expect(((await widened.json()) as { error: string }).error).toBe(
+        expect(refusal.error).toBe(
           'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the '
           + 'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes '
           + 'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, '
@@ -12364,6 +12486,19 @@ describe('LynoxHTTPApi', () => {
           + 'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes '
           + 'in a run of their own.',
         );
+        // With it, the engine's reason: no confirmed probe for the kind, and nothing written yet.
+        expect(refusal).toMatchObject({ code: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'write_one' } });
+        // Approving such a run for more than one target is refused with the same reason, before
+        // anything is written: there is no step of this run to name yet.
+        const other = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '3' } })), contract: mintBulkContract(host, keys) });
+        if (!other.ok) throw new Error('not planned');
+        const otherId = other.status.id;
+        bulkLedger.resumePreview(otherId);
+        for (const seq of [0, 1]) bulkLedger.recordRead(otherId, seq, { before: { price: '2' } });
+        bulkLedger.finishPreview(otherId);
+        const wide = await jsonFetch(`/api/bulk/runs/${otherId}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(otherId), maxTargets: 2, unmeasuredConfirmed: true }) });
+        expect(wide.status).toBe(409);
+        expect(await wide.json()).toMatchObject({ code: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: null } });
       } finally {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
@@ -13771,6 +13906,29 @@ describe('LynoxHTTPApi', () => {
       expect(body.configured.api_key).toBe(true);
       expect(body.configured.search).toBe(false);
       expect(body.count).toBe(1);
+    });
+
+    it('GET /api/secrets/status gives a mandate the booleans but not the size of the owner\'s vault', async () => {
+      repayRateWindow();
+      mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY', 'STRIPE_KEY', 'SHOPIFY_TOKEN']);
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-vault' : null));
+      type Resolver = Parameters<typeof api.setPrincipalResolverForTesting>[0];
+      const saved = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown> & { configured: Record<string, boolean> };
+        expect(body.configured.api_key).toBe(true);
+        expect(body.configured.search).toBe(false);
+        expect('count' in body).toBe(false);
+        expect(JSON.stringify(body)).not.toMatch(/"count"/);
+      } finally {
+        api.setPrincipalResolverForTesting(saved);
+      }
+      // The owner, on the same vault, still gets it.
+      const owner = await (await jsonFetch('/api/secrets/status')).json() as { count?: number };
+      expect(owner.count).toBe(3);
     });
 
     // Regression: HN-launch installer bug (2026-05-23). When the npx wizard

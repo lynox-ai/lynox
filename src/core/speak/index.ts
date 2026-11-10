@@ -154,8 +154,9 @@ function hasSpeakableContent(s: string): boolean {
  * no voice for the language, this returns no voice, the provider's default reads the
  * text, and a warning says the speaker does not match the text. It does not throw:
  * that would take a working feature away from German users. The current provider's
- * catalogue has no German voice (see `mistral-voxtral-tts.ts`), so German text is read
- * by a voice whose accent is not German.
+ * catalogue has a German voice its pinned model cannot speak; the provider then reads
+ * with its default voice, whose accent is not German (see `postSpeech` in
+ * `mistral-voxtral-tts.ts`).
  */
 async function resolveVoice(
   provider: SpeakProvider,

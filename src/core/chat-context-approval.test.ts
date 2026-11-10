@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, type FileApprovalInput, type MailReplyPayload, type MailSendPayload } from './approval-store.js';
-import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext, resolveChatContext, stripLoadedContext, type ChatApprovalReader } from './chat-context.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext, opensLoadedApprovalDraft, resolveChatContext, stripLoadedContext, type ChatApprovalReader } from './chat-context.js';
 import { APPROVAL_OUTCOMES, APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, type ApprovalScope } from './approval-view.js';
 import { channels } from './observability.js';
 import { containsUntrustedMarker } from './data-boundary.js';
@@ -547,5 +547,26 @@ describe('what a chat reads when its approval draft does not load', () => {
     );
     // The web-ui and the title strip it as every other loaded block.
     expect(stripLoadedContext(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}change it`)).toBe('change it');
+  });
+});
+
+// The thread title (`approval-chat-title.ts`) recognises a loaded draft by the block the resolver
+// writes, so it is read here from the resolver's own output for both ways a draft loads.
+describe('recognising a loaded approval draft in a composed first message', () => {
+  const first = 'Ich möchte diesen Entwurf ändern, bevor er rausgeht.';
+
+  it('recognises a moved draft and a draft that was not sent, as the resolver writes them', () => {
+    const movedOut = load(moved(file()), OWNER);
+    const failedOut = load(failed(file(), { reason: 'receive_only' }), OWNER);
+    expect(opensLoadedApprovalDraft(`${closeLoadedContext(movedOut!)}${first}`)).toBe(true);
+    expect(opensLoadedApprovalDraft(`${closeLoadedContext(failedOut!)}${first}`)).toBe(true);
+  });
+
+  it('does not recognise a draft that did not load, another loaded context, or a typed opener', () => {
+    expect(opensLoadedApprovalDraft(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}${first}`)).toBe(false);
+    expect(opensLoadedApprovalDraft(`${closeLoadedContext('[Loaded mail — id: m1]\nFrom: a@example.com')}${first}`)).toBe(false);
+    // The opening line alone, without the closing sentinel, is the user's own text.
+    expect(opensLoadedApprovalDraft('[Loaded draft moved from the approval queue — entry: x]\nhello')).toBe(false);
+    expect(opensLoadedApprovalDraft(first)).toBe(false);
   });
 });

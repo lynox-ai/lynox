@@ -9,13 +9,13 @@
  * So each test names the thing that would otherwise slip through.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -1155,12 +1155,13 @@ describe('gate-record — a public body names no register row', () => {
       const env = { ...process.env };
       delete env.REPO_PRIVATE;
       delete env.GITHUB_REPOSITORY;
-      return spawnSync(process.execPath, [script, '--event-file', ev, '--head', HEAD, '--base', old.sha, '--files-file', files, '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
+      // The head is a commit of the checkout the script runs in: a head it lacks is refused (exit 2).
+      return spawnSync(process.execPath, [script, '--event-file', ev, '--head', old.sha, '--base', old.sha, '--files-file', files, '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
     };
     const old = oldBase();
     try {
-      // No `--base` here, so a ux review is owed unjudged; the line keeps this test about titles.
-      const cliRec = record({ ux: 'reviewed U-001' });
+      // The `ux:` line keeps this test about titles, whatever the base owes.
+      const cliRec = record({ ux: 'reviewed U-001', head: old.sha.slice(0, 8) });
       const ok = run({ title: 'Fix the thing', body: cliRec });
       expect(ok.status, ok.stdout + ok.stderr).toBe(0);
       const badTitle = run({ title: `Fix ${ID}`, body: cliRec });
@@ -2438,15 +2439,16 @@ describe('gate-record — wording about open work in title, body and commit mess
       const ev = join(dir, 'event.json');
       const files = join(dir, 'files.txt');
       const commits = join(dir, 'commits.txt');
-      // No `--base`: a ux review is owed unjudged, so the record carries one.
-      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record({ ux: 'reviewed U-001' }) } }));
+      // The head is a commit of the checkout the script runs in: a head it lacks is refused (exit 2).
+      const old = oldBase();
+      // The record carries a `ux:` line, so this test stays about commit wording.
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record({ ux: 'reviewed U-001', head: old.sha.slice(0, 8) }) } }));
       writeFileSync(files, CODE.join('\n'));
       writeFileSync(commits, `abc1234\x1fFix\n\n${PUT_OFF}\n\x1e\n`);
       const env = { ...process.env };
       delete env.REPO_PRIVATE;
       delete env.GITHUB_REPOSITORY;
-      const old = oldBase();
-      const r = spawnSync(process.execPath, [script, '--event-file', ev, '--commits-file', commits, '--head', HEAD, '--base', old.sha, '--files-file', files, '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
+      const r = spawnSync(process.execPath, [script, '--event-file', ev, '--commits-file', commits, '--head', old.sha, '--base', old.sha, '--files-file', files, '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
       rmSync(old.dir, { recursive: true, force: true });
       expect(r.status, r.stdout + r.stderr).toBe(0);
       expect(r.stdout).toMatch(/^::warning::gate-record: the message of commit abc1234 may say/m);
@@ -2870,12 +2872,14 @@ describe('gate-record — the `ux:` line', () => {
       } finally { cleanup(r); }
     });
 
-    it('a head the clone does not have, and a blob missing from a commit that exists, are "cannot read"', () => {
+    it('a head the clone does not have is refused before the read; a blob missing from a commit that exists is "cannot read"', () => {
       const r = repo(`// script\n${UX_LINE_MARK}{ files }) {}\n`);
       try {
+        // A head the clone lacks no longer reaches the read: `wrongRunErrors` refuses it first, and
+        // louder (exit 2 rather than 1). The read's own "cannot read" stays for the blob below.
         const gone = run({ ...r, head: 'f'.repeat(40) }, 'not user-facing — fixture');
-        expect(gone.status, gone.stdout).toBe(1);
-        expect(gone.stdout).toContain('cannot read src/x.ts at ffffffffffff');
+        expect(gone.status, gone.stdout).toBe(2);
+        expect(gone.stdout).toContain(`--head ${'f'.repeat(40)}\` is not a commit in this checkout`);
         // The head blob of a change WITHOUT any signal: read as "absent", it would pass.
         writeFileSync(join(r.dir, 'src/x.ts'), 'a\nplain\n');
         r.g('commit', '-q', '-am', 'plain');
@@ -3189,4 +3193,120 @@ describe('gate-record — `delta:` names the range its round covered', () => {
       } finally { cleanup(r); }
     });
   });
+});
+
+describe('a run this script cannot judge is refused', () => {
+  const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+  /** A checkout with one commit; `pro: true` gives it lynox-pro's marker directory. */
+  function checkout(pro: boolean) {
+    const dir = mkdtempSync(join(tmpdir(), 'gr-repo-'));
+    const g = (...a: string[]) => {
+      const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+      if (r.status !== 0) throw new Error(r.stderr);
+      return r.stdout.trim();
+    };
+    g('init', '-q', '-b', 'main');
+    g('config', 'user.email', 't@example.invalid');
+    g('config', 'user.name', 't');
+    g('config', 'commit.gpgsign', 'false');
+    if (pro) {
+      mkdirSync(join(dir, OTHER_REPO_MARKER), { recursive: true });
+      writeFileSync(join(dir, OTHER_REPO_MARKER, 'package.json'), '{}\n');
+    }
+    // The dir in the content: two fixtures made in the same second would otherwise share one SHA.
+    writeFileSync(join(dir, 'README.md'), `${dir}\n`);
+    g('add', '-A');
+    g('commit', '-q', '-m', 'base');
+    return { dir, head: g('rev-parse', 'HEAD') };
+  }
+  function run(r: { dir: string; head: string }, base: string, cwd = r.dir) {
+    const body = join(r.dir, 'body.md');
+    writeFileSync(body, '```gate-record\nhead: ' + r.head + '\ncloses: none\n```\n');
+    const files = join(r.dir, 'files.txt');
+    writeFileSync(files, 'README.md\n');
+    const env = { ...process.env };
+    delete env.REPO_PRIVATE;
+    delete env.GITHUB_REPOSITORY;
+    return spawnSync(process.execPath, [script, '--body-file', body, '--head', r.head, '--base', base, '--base-tip', r.head, '--files-file', files, '--repo-visibility', 'public'], { cwd, encoding: 'utf8', env });
+  }
+
+  it('from lynox-pro\'s checkout: exit 2, naming the script to run instead', () => {
+    const r = checkout(true);
+    try {
+      const out = run(r, r.head);
+      expect(out.status, out.stdout).toBe(2);
+      expect(out.stdout).toContain("lynox-pro's own script");
+      expect(out.stdout).not.toContain('gate-record: ok');
+    } finally { rmSync(r.dir, { recursive: true, force: true }); }
+  });
+
+  it('from a subdirectory of that checkout too: the marker is read at the top', () => {
+    const r = checkout(true);
+    try {
+      mkdirSync(join(r.dir, 'sub'));
+      expect(run(r, r.head, join(r.dir, 'sub')).status).toBe(2);
+    } finally { rmSync(r.dir, { recursive: true, force: true }); }
+  });
+
+  it('`--base main` (a local branch) is refused; the same commit by SHA passes', () => {
+    const r = checkout(false);
+    try {
+      const named = run(r, 'main');
+      expect(named.status, named.stdout).toBe(2);
+      expect(named.stdout).toContain('`--base main` resolves through a local branch');
+      const sha = run(r, r.head);
+      expect(sha.status, sha.stdout).toBe(0);
+      expect(sha.stdout).toContain('gate-record: ok');
+    } finally { rmSync(r.dir, { recursive: true, force: true }); }
+  });
+
+  it('from outside any git checkout (a lane directory): exit 2', () => {
+    const r = checkout(false);
+    const bare = mkdtempSync(join(tmpdir(), 'gr-nogit-'));
+    try {
+      const out = run(r, r.head, bare);
+      expect(out.status, out.stdout).toBe(2);
+      expect(out.stdout).toContain('not inside a git checkout');
+    } finally { rmSync(r.dir, { recursive: true, force: true }); rmSync(bare, { recursive: true, force: true }); }
+  });
+
+  it('a head this checkout does not have (the other repo\'s body): exit 2; its own head passes', () => {
+    const r = checkout(false);
+    const other = checkout(false);
+    try {
+      const out = run({ dir: r.dir, head: other.head }, r.head);
+      expect(out.status, out.stdout).toBe(2);
+      expect(out.stdout).toContain(`\`--head ${other.head}\` is not a commit in this checkout`);
+      expect(run(r, r.head).status).toBe(0);
+    } finally { rmSync(r.dir, { recursive: true, force: true }); rmSync(other.dir, { recursive: true, force: true }); }
+  });
+
+  it('`--base main~0` and `@~0` (a suffix on the local branch, or on HEAD) are refused too', () => {
+    const r = checkout(false);
+    try {
+      const out = run(r, 'main~0');
+      expect(out.status, out.stdout).toBe(2);
+      expect(out.stdout).toContain('`--base main~0` resolves through a local branch');
+      // `@` is git's shorthand for HEAD, which on a branch resolves through it.
+      expect(run(r, '@~0').status).toBe(2);
+    } finally { rmSync(r.dir, { recursive: true, force: true }); }
+  });
+
+  it('this repo does not carry the marker it refuses (else every run here would be refused)', () => {
+    expect(existsSync(join(fileURLToPath(new URL('..', import.meta.url)), OTHER_REPO_MARKER))).toBe(false);
+    // Positive control: the same probe finds a directory this repo does have.
+    expect(existsSync(join(fileURLToPath(new URL('..', import.meta.url)), 'scripts'))).toBe(true);
+  });
+
+  it('the pure check: own checkout, known head and SHAs → nothing; each wrong input → one reason', () => {
+    const none = { tops: ['/c'], exists: () => false, head: 'h', headKnown: () => true, base: 'abc', baseTip: 'def', localBranch: () => false };
+    expect(wrongRunErrors(none)).toEqual([]);
+    expect(wrongRunErrors({ ...none, exists: (p: string) => p === join('/c', OTHER_REPO_MARKER) })).toHaveLength(1);
+    // Every checkout the run reads is checked, not only the first.
+    expect(wrongRunErrors({ ...none, tops: ['/c', '/d'], exists: (p: string) => p === join('/d', OTHER_REPO_MARKER) })).toHaveLength(1);
+    expect(wrongRunErrors({ ...none, tops: [] })[0]).toContain('not inside a git checkout');
+    expect(wrongRunErrors({ ...none, headKnown: () => false })[0]).toContain('`--head h` is not a commit in this checkout');
+    expect(wrongRunErrors({ ...none, localBranch: (n: string) => n === 'def' })[0]).toContain('`--base-tip def`');
+  });
+
 });

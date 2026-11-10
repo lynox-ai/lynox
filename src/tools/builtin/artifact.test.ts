@@ -12,8 +12,8 @@ import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from '../../core/artifac
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 // Minimal agent — the artifact tools only read agent.toolContext.artifactStore.
-function makeAgent(store: ArtifactStore | null): IAgent {
-  return { principal: OWNER_PRINCIPAL, toolContext: { artifactStore: store } } as unknown as IAgent;
+function makeAgent(store: ArtifactStore | null, currentThreadId?: string, originThreadId?: string): IAgent {
+  return { principal: OWNER_PRINCIPAL, toolContext: { artifactStore: store }, ...(currentThreadId ? { currentThreadId } : {}), ...(originThreadId ? { originThreadId } : {}) } as unknown as IAgent;
 }
 
 describe('artifact history/restore tool handlers', () => {
@@ -301,5 +301,39 @@ describe('the version path in the restore refusal is one read_file reads', () =>
       clearTenantWorkspace();
       rmSync(ws, { recursive: true, force: true });
     }
+  });
+});
+
+describe('artifact_save records the chat that made the artifact (row 1072)', () => {
+  let dir: string;
+  let store: ArtifactStore;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'artifact-thread-')); store = new ArtifactStore(dir); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const idOf = (out: string): string => {
+    const id = store.list().map(a => a.id).find(i => out.includes(i));
+    if (!id) throw new Error(`no artifact id in: ${out}`);
+    return id;
+  };
+
+  it('a new artifact lists the running chat\'s thread id, and an edit from another chat keeps it', async () => {
+    const created = await artifactSaveTool.handler({ title: 'Plan', content: 'first draft of the plan' }, makeAgent(store, 'thread-a'));
+    const id = idOf(created);
+    expect(store.list().find(a => a.id === id)?.threadId).toBe('thread-a');
+
+    await artifactSaveTool.handler({ id, title: 'Plan', content: 'second draft of the plan' }, makeAgent(store, 'thread-b'));
+    const after = store.list().find(a => a.id === id);
+    expect(after?.version).toBe(2);
+    expect(after?.threadId).toBe('thread-a');
+  });
+
+  it('a spawn_agent child or workflow step, which has no thread of its own, records the chat it runs for', async () => {
+    const id = idOf(await artifactSaveTool.handler({ title: 'From a helper', content: 'made by a subagent' }, makeAgent(store, undefined, 'thread-parent')));
+    expect(store.list().find(a => a.id === id)?.threadId).toBe('thread-parent');
+  });
+
+  it('an artifact saved outside a chat stays without one', async () => {
+    const id = idOf(await artifactSaveTool.handler({ title: 'Loose', content: 'no chat around this one' }, makeAgent(store)));
+    expect(store.list().find(a => a.id === id)?.threadId).toBe('');
   });
 });

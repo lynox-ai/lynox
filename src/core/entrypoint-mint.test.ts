@@ -30,19 +30,21 @@ function sandbox(): { home: string; lynox: string } {
     '#!/bin/sh',
     'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
     'echo "ENGINE_KEY=${LYNOX_VAULT_KEY:-}"',
+    'echo "ENGINE_KEY_SOURCE=${LYNOX_VAULT_KEY_SOURCE-unset}"',
   ].join('\n') + '\n', { mode: 0o755 });
   const lynox = join(home, '.lynox');
   mkdirSync(lynox, { mode: 0o700 });
   return { home, lynox };
 }
 
-function start(home: string, env: Record<string, string> = {}): { status: number | null; out: string; err: string; engineKey: string | null } {
+function start(home: string, env: Record<string, string> = {}): { status: number | null; out: string; err: string; engineKey: string | null; keySource: string | null } {
   const run = spawnSync('sh', [SCRIPT], {
     env: { HOME: home, PATH: `${join(home, 'bin')}:${process.env['PATH'] ?? ''}`, REAL_NODE: process.execPath, LYNOX_HTTP_SECRET: 'fixed', ...env },
     encoding: 'utf8',
   });
   const m = /^ENGINE_KEY=(.*)$/m.exec(run.stdout);
-  return { status: run.status, out: run.stdout, err: run.stderr, engineKey: m ? m[1]! : null };
+  const source = /^ENGINE_KEY_SOURCE=(.*)$/m.exec(run.stdout);
+  return { status: run.status, out: run.stdout, err: run.stderr, engineKey: m ? m[1]! : null, keySource: source ? source[1]! : null };
 }
 
 const keyLines = (file: string): string[] => readFileSync(file, 'utf8').split('\n').filter(l => l.startsWith('LYNOX_VAULT_KEY='));
@@ -269,5 +271,43 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     expect(r.engineKey).toBe('from-compose');
     expect(existsSync(join(lynox, '.env'))).toBe(false);
     expect(r.err).not.toMatch(/WARNING: no vault key/);
+  });
+
+  // The engine reports where its key came from (`LYNOX_VAULT_KEY_SOURCE`, src/core/vault-key-source.ts).
+  it('tells the engine where the key came from: generated, then read back from .env', () => {
+    const { home } = sandbox();
+    expect(start(home).keySource).toBe('minted');
+    expect(start(home).keySource).toBe('volume-env');
+  });
+
+  it('tells the engine the key came from the environment when it is set from outside', () => {
+    const { home } = sandbox();
+    expect(start(home, { [VAR]: 'A'.repeat(64) }).keySource).toBe('env');
+  });
+
+  it('tells the engine there is no key when the vault exists and no key was found', () => {
+    const { home, lynox } = sandbox();
+    writeFileSync(join(lynox, 'vault.db'), 'encrypted');
+    expect(start(home).keySource).toBe('none');
+  });
+
+  it('sets the source itself, whatever the environment said', () => {
+    const { home } = sandbox();
+    expect(start(home, { LYNOX_VAULT_KEY_SOURCE: 'env' }).keySource).toBe('minted');
+  });
+
+  it('tells the engine the key came from .env when the vault exists and .env holds it', () => {
+    const { home, lynox } = sandbox();
+    writeFileSync(join(lynox, 'vault.db'), 'encrypted');
+    writeFileSync(join(lynox, '.env'), `${VAR}=${'B'.repeat(64)}\n`, { mode: 0o600 });
+    const r = start(home);
+    expect(r.engineKey).toBe('B'.repeat(64));
+    expect(r.keySource).toBe('volume-env');
+  });
+
+  it('says none over an existing vault, also when the environment said env', () => {
+    const { home, lynox } = sandbox();
+    writeFileSync(join(lynox, 'vault.db'), 'encrypted');
+    expect(start(home, { LYNOX_VAULT_KEY_SOURCE: 'env' }).keySource).toBe('none');
   });
 });

@@ -41,7 +41,8 @@ export interface TakeoverPreview {
 	members: TakeoverMember[];
 	/** `owner`, or the tag of the workflow's member that stays. */
 	runsAs: string;
-	workflow: { id: string; name: string; takenOver: boolean } | null;
+	/** `from`: whose mark on the workflow the takeover reads, by address and role (engine `planMandate`). */
+	workflow: { id: string; name: string; takenOver: boolean; from?: { name: string; role: 'workflow-edited' | 'workflow-created' } | null } | null;
 	memberChanges: TakeoverMemberChange[];
 	alsoReleased: Array<{ id: string; title: string }>;
 	connections: TakeoverConnection[];
@@ -83,15 +84,18 @@ function roleLines(m: TakeoverMember, workflow: string | null, saidByF2: Takeove
 
 /**
  * F2: the workflow is taken over with the plan. Named after the member it is taken over from: the
- * one with a workflow role, its change before its creation. Without plans released, the last
- * sentence goes.
+ * one whose mark the takeover reads (`workflow.from`); without it, the one with a workflow role,
+ * its change before its creation. Without plans released, the last sentence goes.
  */
 function f2Line(p: TakeoverPreview): { line: TakeoverLine; by: TakeoverMember; role: 'workflow-edited' | 'workflow-created' } | null {
 	if (p.workflow === null || !p.workflow.takenOver) return null;
-	const by = p.members.find((m) => m.roles.includes('workflow-edited')) ?? p.members.find((m) => m.roles.includes('workflow-created'));
+	const from = p.workflow.from ?? null;
+	const marked = from === null ? undefined : p.members.find((m) => m.name === from.name && m.roles.includes(from.role));
+	const by = marked
+		?? p.members.find((m) => m.roles.includes('workflow-edited')) ?? p.members.find((m) => m.roles.includes('workflow-created'));
 	if (by === undefined) return null;
-	const changed = by.roles.includes('workflow-edited');
-	const role = changed ? 'workflow-edited' : 'workflow-created';
+	const role = marked !== undefined && from !== null ? from.role : by.roles.includes('workflow-edited') ? 'workflow-edited' : 'workflow-created';
+	const changed = role === 'workflow-edited';
 	const vars = { workflow: p.workflow.name, name: by.name };
 	const head = tf(changed ? 'takeover.f2.changed' : 'takeover.f2.created', vars);
 	const text = p.alsoReleased.length === 0 ? head : `${head} ${tf('takeover.f2.released', { plans: planList(p.alsoReleased.map((r) => r.title)) })}`;
@@ -142,7 +146,9 @@ function connectionLines(p: TakeoverPreview): TakeoverLine[] {
 function runsAsLine(p: TakeoverPreview): TakeoverLine {
 	if (p.runsAs === 'owner') return { kind: 'runs_as_owner', text: t('takeover.runs_as_owner') };
 	const name = nameOfTag(p.runsAs);
-	const member = p.members.find((m) => m.name === name);
+	// The same person can be listed once per access (an ended one and the live one): the member that
+	// stays is the one whose access still runs, and its own roles say how it came to the workflow.
+	const member = p.members.find((m) => m.name === name && !m.ended) ?? p.members.find((m) => m.name === name);
 	const changed = member?.roles.includes('workflow-edited') === true;
 	return {
 		kind: 'runs_as_member',
@@ -162,7 +168,18 @@ function scheduleLines(p: TakeoverPreview, formatDate: (iso: string) => string):
 export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => string): TakeoverLine[] {
 	const lines: TakeoverLine[] = [];
 	const f2 = f2Line(p);
-	for (const m of p.members) lines.push(...roleLines(m, p.workflow?.name ?? null, f2 !== null && f2.by === m ? f2.role : null));
+	// One person can be listed once per access, and the roles an ended access was paused with are
+	// a copy from the pause: the same role under two accesses is one sentence, said once.
+	const said = new Set<string>();
+	// The workflow role F2 says for its member counts as said, also for the same person's other access.
+	if (f2 !== null) for (const line of roleLines({ ...f2.by, roles: [f2.role] }, p.workflow?.name ?? null, null)) said.add(line.text);
+	for (const m of p.members) {
+		for (const line of roleLines(m, p.workflow?.name ?? null, f2 !== null && f2.by === m ? f2.role : null)) {
+			if (said.has(line.text)) continue;
+			said.add(line.text);
+			lines.push(line);
+		}
+	}
 	if (f2 !== null) lines.push(f2.line);
 	lines.push(...memberChangeLines(p));
 	lines.push(...connectionLines(p));

@@ -359,6 +359,18 @@ describe('buildCaptureReport', () => {
     expect(r.untrustedEligible).toBe(1);
   });
 
+  it('counts a clean turn\'s assistant-half fact in its own routing row, apart from the trusted one (row 1103)', async () => {
+    // Without the label in the known set, the line reads as "cannot tell" and the row stays
+    // at zero: the review volume the clean-turn attribution adds would be invisible.
+    await seed([
+      entry({ event: 'remember_invoked', source: 'capture', routing: 'turn_trusted_assistant', outcome: 'pending_review' }),
+      entry({ event: 'remember_invoked', source: 'capture', routing: 'turn_trusted', outcome: 'active' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.routing.find(x => x.rule === 'turn_trusted_assistant')).toMatchObject({ facts: 1, written: 0, queued: 1 });
+    expect(r.routing.find(x => x.rule === 'turn_trusted')).toMatchObject({ facts: 1, written: 1, queued: 0 });
+  });
+
   it('emits NO entry-id, thread-id or fact text — the report aggregates, it does not echo', async () => {
     await seed([entry({ event: 'propose_confirmed', entryId: 'ke_secret_handle', thread: 'thread_abc' })]);
     const serialized = JSON.stringify(await buildCaptureReport());

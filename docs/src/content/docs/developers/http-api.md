@@ -274,7 +274,7 @@ POST   /api/searxng/check         # Validate SearXNG URL
 ### Backups
 
 ```
-GET  /api/backups                 # List backups
+GET  /api/backups                 # List backups (file_count, total_bytes; ?files=1 adds each file)
 POST /api/backups                 # Create backup
 POST /api/backups/:id/restore     # Restore backup
 ```

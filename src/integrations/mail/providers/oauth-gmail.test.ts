@@ -1069,6 +1069,113 @@ describe('OAuthGmailProvider — watch', () => {
   });
 });
 
+// Gmail emits a mail once (its dedup map), so a mail the inbox defers would never come back from
+// the provider. The watcher holds it and hands it over on the next poll.
+describe('OAuthGmailProvider under MailWatcher — a deferred mail', () => {
+  it('is handed over again on a later tick although Gmail does not emit it twice', async () => {
+    const { MailWatcher } = await import('../watch.js');
+    const { MailStateDb } = await import('../state.js');
+    const { InboundMailDeferred } = await import('../inbound-deferred.js');
+    fetchMock.mockImplementation((url: string) => {
+      const s = String(url);
+      if (s.includes('/messages?') && !s.match(/\/messages\/[^?]+/)) {
+        return Promise.resolve(respondJson({ messages: [{ id: 'msg-deferred', threadId: 't-1' }] }));
+      }
+      if (s.match(/\/messages\/msg-deferred\?/)) {
+        return Promise.resolve(respondJson(metadataMessage('msg-deferred', { subject: 'deferred' })));
+      }
+      return Promise.resolve(respondJson({}));
+    });
+    const state = new MailStateDb({ path: ':memory:' });
+    const handed: string[] = [];
+    let first = true;
+    const watcher = new MailWatcher(state, async (_accountId, envelopes) => {
+      if (first) { first = false; throw new InboundMailDeferred('test'); }
+      handed.push(...envelopes.map((e) => e.subject));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    try {
+      await watcher.attach(provider, { intervalMs: 50, applyPrefilter: false });
+      // Until the second hand-over, not a fixed wait: two ticks on a loaded box take longer.
+      for (let waited = 0; handed.length === 0 && waited < 5_000; waited += 25) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    } finally {
+      await watcher.stopAll();
+      await provider.close();
+    }
+    expect(first, 'fixture: the first hand-over was deferred').toBe(false);
+    expect(handed).toEqual(['deferred']);
+    expect(state.countForAccount(makeAccount().id)).toBe(1);
+    state.close();
+  });
+
+  // After a restart Gmail starts its window at "now" and does not list the mail again, so only
+  // the state DB brings it back: watcher, provider and the DB connection are all new here.
+  it('is handed over after a restart of watcher and provider', async () => {
+    const { MailWatcher } = await import('../watch.js');
+    const { MailStateDb } = await import('../state.js');
+    const { InboundMailDeferred } = await import('../inbound-deferred.js');
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    let listed = false;
+    fetchMock.mockImplementation((url: string) => {
+      const s = String(url);
+      if (s.includes('/messages?') && !s.match(/\/messages\/[^?]+/)) {
+        // Listed once, before the restart, as Gmail does.
+        const messages = listed ? [] : [{ id: 'msg-restart', threadId: 't-1' }];
+        listed = true;
+        return Promise.resolve(respondJson({ messages }));
+      }
+      if (s.match(/\/messages\/msg-restart\?/)) {
+        return Promise.resolve(respondJson(metadataMessage('msg-restart', { subject: 'restart' })));
+      }
+      return Promise.resolve(respondJson({}));
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'gmail-restart-'));
+    const path = join(dir, 'mail-state.db');
+    const waitFor = async (done: () => boolean): Promise<void> => {
+      for (let waited = 0; !done() && waited < 5_000; waited += 25) await new Promise((r) => setTimeout(r, 25));
+    };
+    try {
+      // Before the restart: the inbox defers the mail.
+      const before = new MailStateDb({ path });
+      before.upsertAccount(makeAccount());
+      let deferred = false;
+      const w1 = new MailWatcher(before, async () => { deferred = true; throw new InboundMailDeferred('restore'); });
+      const p1 = new OAuthGmailProvider(makeAccount(), makeAuth());
+      try {
+        await w1.attach(p1, { intervalMs: 50, applyPrefilter: false });
+        await waitFor(() => deferred);
+      } finally {
+        await w1.stopAll();
+        await p1.close();
+        before.close();
+      }
+      expect(deferred, 'fixture: the mail was deferred before the restart').toBe(true);
+
+      // After it.
+      const after = new MailStateDb({ path });
+      const classified: string[] = [];
+      const w2 = new MailWatcher(after, async (_a, envelopes) => { classified.push(...envelopes.map((e) => e.subject)); });
+      const p2 = new OAuthGmailProvider(makeAccount(), makeAuth());
+      try {
+        await w2.attach(p2, { intervalMs: 50, applyPrefilter: false });
+        await waitFor(() => classified.length > 0);
+      } finally {
+        await w2.stopAll();
+        await p2.close();
+      }
+      expect(classified).toEqual(['restart']);
+      expect(after.countForAccount(makeAccount().id)).toBe(1);
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 // A stop of the run ends Gmail's reads in flight, never a send that started. Each case runs inside a
 // call slot, stops the call afterwards, and looks at the signal each request carried.
 describe('OAuthGmailProvider — a stopped run', () => {
