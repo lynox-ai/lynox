@@ -210,11 +210,11 @@ export const OAUTH_RESULT_TEXTS = {
   },
   noteProviderUnknown: {
     en: 'This connection has no provider this instance knows, so it cannot show what the owner sees of it. Nothing was sent to the provider.',
-    de: 'Diese Verbindung hat keinen Anbieter, den diese Instanz kennt. Deshalb kann sie nicht zeigen, was der Inhaber davon sieht. An den Anbieter wurde nichts gesendet.',
+    de: 'Diese Verbindung nennt keinen Anbieter, den lynox kennt. Deshalb kann diese Seite nicht zeigen, was der Inhaber dieser Instanz von ihr sieht. An den Anbieter wurde nichts gesendet.',
   },
   noteChanged: {
     en: 'This connection now shows another note than the page you confirmed. Open the link again and read the page. Nothing was sent to the provider.',
-    de: 'Diese Verbindung zeigt jetzt einen anderen Hinweis als die Seite, die du bestätigt hast. Öffne den Link noch einmal und lies die Seite. An den Anbieter wurde nichts gesendet.',
+    de: 'Der Hinweis zu dieser Verbindung hat sich geändert, seit du die Seite bestätigt hast. Öffne den Link noch einmal und lies die Seite. An den Anbieter wurde nichts gesendet.',
   },
 } as const satisfies Record<string, OAuthText>;
 
