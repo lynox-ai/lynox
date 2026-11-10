@@ -83,9 +83,9 @@ export function oauthLangOf(language: string | undefined): OAuthLang {
 }
 
 /**
- * Every fixed text of the result page, by the place that sends it. German wording by ux
- * the English one names lynox or this instance where it
- * used to say "this engine", a word a customer does not know.
+ * Every fixed text of the result page, by the place that sends it, in German and English. The
+ * English one names lynox or this instance where it used to say "this engine", a word a
+ * customer does not know.
  */
 export const OAUTH_RESULT_TEXTS = {
   confirmFromOwnPage: {
