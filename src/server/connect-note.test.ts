@@ -3,7 +3,7 @@ import { OAUTH_PRESETS } from '../core/oauth-presets.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, noteVersionFor } from './connect-note.js';
 import { consentPageHtml } from './http-api.js';
 
-// The note a helper reads before connecting (legal POS-069, notes 6 and 7), word for word. A
+// The note a helper reads before connecting (the approved wording), word for word. A
 // difference here is a text that was not approved; change it only with a new approval.
 const NOTE1 = {
   de: 'Der Inhaber dieser Instanz sieht, welches Konto du hier verbindest. Ein Plan, den er bestätigt, kann diese Verbindung nutzen.',
@@ -25,7 +25,7 @@ describe('the note before a helper connects', () => {
     expect(noteText('3', 'en', 'Acme')).toBe(NOTE3.en);
   });
 
-  it('says title and button as ux wrote them (U-180)', () => {
+  it('says title and button as agreed (U-180)', () => {
     expect([noteTitle('de', 'Acme'), noteTitle('en', 'Acme')]).toEqual(['Acme verbinden', 'Connect Acme']);
     expect([noteButton('de', 'Acme'), noteButton('en', 'Acme')]).toEqual(['Weiter zu Acme', 'Continue to Acme']);
   });

@@ -3788,7 +3788,7 @@ export function connectOpensLine(host: string, pageWrites: readonly string[], he
     ? `with what lynox may do there and the write access this link asks for (${pageWrites.join(', ')})`
     : '';
   if (!helper) return writes === '' ? `It opens ${host}` : `It first shows a page on this instance ${writes}; they read it and continue to ${host}`;
-  // ux U-180: the reply names the way, not the page's content. What the owner sees stands on the
+  // U-180: the reply names the way, not the page's content. What the owner sees stands on the
   // page, where it is binding text; a description here is something the model would paraphrase.
   const button = `a button that continues to ${host}`;
   return `It first opens a page on this instance ${writes === '' ? `with ${button}` : `${writes}, and ${button}`}`;

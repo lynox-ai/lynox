@@ -5768,7 +5768,7 @@ describe('LynoxHTTPApi', () => {
         .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1' });
     });
 
-    // The note before the provider's login (legal POS-069, notes 6 and 7), word for word: a
+    // The note before the provider's login (the approved wording), word for word: a
     // difference here is a text that was not approved.
     const NOTE3_DE = 'Der Inhaber dieser Instanz sieht, dass du hier bexio mit deinem eigenen Login verbindest, und, wenn bexio es lynox mitteilt, mit welchem Konto. Ein Plan, den er bestätigt, kann diese Verbindung nutzen.';
     const NOTE3_EN = 'The owner of this instance sees that you connect bexio here with your own login and, if bexio tells lynox, with which account. A plan they confirm can use this connection.';
