@@ -281,7 +281,7 @@ export class ClassifierQueue<T> {
       await fn();
     } catch (err) {
       // Surface to stderr so the host operator sees something — never throw.
-      console.error(`[ClassifierQueue] ${label} callback threw:`, processErrorText(err));
+      console.error(`[ClassifierQueue] ${label} callback threw:`, processErrorText(err, true));
     }
   }
 }

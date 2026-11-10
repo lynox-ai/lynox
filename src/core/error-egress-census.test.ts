@@ -176,7 +176,6 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
   ],
   'core/crm.ts': [
     { marker: 'CRM contact mirror failed', count: 1, why: 'subject-graph mirror writes: SQLite, or lynox errors naming ids and kinds only' },
-    { marker: 'S2 contact backfill skipped a row', count: 1, why: 'the subject-graph mirror writes: SQLite, lynox errors naming ids and kinds, or a TypeError naming the expression' },
   ],
   'core/api-store.ts': [
     { marker: 'Hosts of grant for', count: 2, why: 'ledger.recordHosts over hosts lynox derives from the profile' },
@@ -198,7 +197,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'verb-graph wiring failed', count: 1, why: 'three store constructors over engine.db: SQLite' },
     { marker: 'verb-graph backfill failed', count: 1, why: 'legacy row reads and engine.db upserts: SQLite; the manifest parse is guarded and quotes nothing' },
     { marker: 'workflow content-schema migration failed', count: 1, why: 'the workflow blob scan and UPDATE: SQLite; a blob that does not parse is skipped, not quoted' },
-    { marker: 'ThreadStore init failed', count: 1, why: 'a module import and statement prepares on history.db' },
+    { marker: 'ThreadStore init failed', count: 1, why: 'a module import; the constructor only keeps the handle' },
     { marker: 'model-provenance backfill failed', count: 1, why: 'a thread SELECT and UPDATEs by id: SQLite' },
     { marker: 'PromptStore init failed', count: 1, why: 'prompt expiry UPDATEs: SQLite; the mandate sweep catches its own' },
     { marker: 'RunRegistry init failed', count: 1, why: 'a run-status UPDATE: SQLite' },
@@ -210,7 +209,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'Security audit trail unavailable', count: 1, why: 'its own history.db connection and table: SQLite and fs' },
     { marker: 'durable-memory wiring failed', count: 1, why: 'module imports and store constructors over engine.db; the seed backfill catches its own' },
     { marker: 'Failed to wire pipeline-mode lookup', count: 1, why: 'a failed import of a lynox module' },
-    { marker: 'DataStore init failed', count: 1, why: 'datastore.db open, drops of fixed CRM names, ALTERs that catch their own: SQLite' },
+    { marker: 'DataStore init failed', count: 1, why: 'datastore.db open, drops of fixed CRM names, ALTERs that catch their own: SQLite; the tool registration throws lynox registry text' },
     { marker: 'ArtifactStore init failed', count: 1, why: 'fs errno on the artifacts dir; the index parse is guarded' },
     { marker: 'SearXNG init failed', count: 1, why: 'lynox literals about the operator-set URL; the health probe catches its own' },
     { marker: 'DuckDuckGo fallback init failed', count: 1, why: 'a module import, a constructor and a tool registration' },
@@ -271,7 +270,7 @@ it('names a judgement whose sink moved away or multiplied', () => {
 const FROZEN: Record<string, number> = {
   'core/api-store.ts': 6,
   'core/config.ts': 1,
-  'core/crm.ts': 2,
+  'core/crm.ts': 1,
   'core/engine-init.ts': 1,
   'core/engine.ts': 30,
   'core/knowledge-layer.ts': 8,
