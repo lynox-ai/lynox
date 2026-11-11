@@ -7,7 +7,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { instructionOf, markHidden, marksHidden, watchOf } from '../utils/trigger-consent.js';
+	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
 	import { confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
@@ -91,18 +91,22 @@
 			return typeof s === 'string' && s !== '' ? markHidden(s) : null;
 		} catch { return null; }
 	});
-	// The address as stored, whenever the parsed one would not show all of it: the run writes the
-	// stored text into its prompt (without the characters it strips), while the parsed address
-	// percent-encodes hidden characters, drops line breaks and tabs, and is cut at its display
-	// length. Then the block shows the stored address in full, hidden characters marked, so the
-	// owner confirms what they read and the note's "marked above" points at a mark.
+	// The address as stored, whenever the parsed one above does not show exactly it: the run writes
+	// the stored text into its prompt (without the characters it strips), while parsing drops line
+	// breaks, tabs, a user part before the host and `..` segments with what they cancel, encodes
+	// hidden and non-ASCII characters, and the display cuts each part at its length. Then the block
+	// shows the stored address in full under the parsed host, hidden characters marked, so the owner
+	// confirms what they read and the note's "marked above" points at a mark.
 	const storedUrl = $derived.by(() => {
 		if (!preview?.subject.watch || !watch) return null;
 		try {
 			const u = (JSON.parse(preview.subject.watch) as { url?: unknown }).url;
 			if (typeof u !== 'string') return null;
+			const p = new URL(u);
+			const path = p.pathname === '/' && !u.slice(p.protocol.length + 2 + p.host.length).startsWith('/') ? '' : p.pathname;
+			const shown = `${p.protocol}//${p.host}${path}${p.search}${p.hash}`;
 			const cut = watch.host.endsWith('\u2026') || watch.rest.endsWith('\u2026');
-			return marksHidden(u) || /\s/u.test(u) || cut ? markHidden(u) : null;
+			return shown !== u || cut ? markHidden(u) : null;
 		} catch { return null; }
 	});
 	const sentence = $derived(preview ? connectionsSentence(preview) : null);
@@ -131,7 +135,10 @@
 			<div data-stamp-watch>
 				<span class="font-medium">{t('triggers.watch_url')}:</span>
 				{#if storedUrl !== null}
-					<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-all rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5" data-stamp-watch-stored>{storedUrl}</p>
+					<div class="mt-0.5 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">
+						<p class="font-medium text-text break-all" data-stamp-watch-host>{watch.host}</p>
+						<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-all" data-stamp-watch-stored>{storedUrl}</p>
+					</div>
 				{:else}
 					<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watch.host}</span>{watch.rest}</p>
 				{/if}
