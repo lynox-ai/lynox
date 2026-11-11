@@ -802,8 +802,10 @@ describe('a mandate\'s call to a pattern writer is refused by the lock', () => {
   });
 });
 
-describe('a block that throws after a proven change', () => {
-  it('save_workflow from the session: the workflow is saved, the lineage write throws: failed, wrote=part, created=', async () => {
+describe('a lineage write that fails after the workflow is saved', () => {
+  // The lineage record is internal: once the workflow is saved, its failure is logged and the block
+  // returns the saved workflow. (A block that throws after a proven change: instance-trail-outcome.test.ts.)
+  it('save_workflow from the session: the answer is the saved workflow, and the trail records it returned and created', async () => {
     const base = FIXTURES.find(f => f.site === 'save_workflow#session')!;
     const f: Fixture = {
       ...base,
@@ -815,10 +817,11 @@ describe('a block that throws after a proven change', () => {
       },
     };
     const { result, trail } = await drive(f, false);
-    expect(JSON.stringify(result.content)).toContain('history.db is read-only');
+    expect(JSON.stringify(result.content)).not.toContain('No workflow was saved');
+    expect(JSON.stringify(result.content)).toContain('It is saved and reusable.');
     const rows = trail.db.prepare('SELECT phase, target FROM audit_log WHERE action LIKE ? ORDER BY id').all('instance:save_workflow#session:%') as Array<{ phase: string; target: string }>;
-    expect(rows.map(r => r.phase)).toEqual(['attempt', 'failed']);
-    expect(rows[1]!.target).toMatch(/^workflows wrote=part created=[0-9a-f-]{36} workflow=[0-9a-f-]{36}$/);
+    expect(rows.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    expect(rows[1]!.target).toMatch(/^workflows wrote=all created=[0-9a-f-]{36} workflow=[0-9a-f-]{36}$/);
   });
 });
 
