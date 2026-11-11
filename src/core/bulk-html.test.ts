@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   checkMarkup, droppedTagsOf, htmlFieldsOfListForm, markupChangesOf, markupOf, plainTextMarkupOf,
-  type MarkupCheckInput, type MarkupRefusal,
+  withinAllowlist, type MarkupCheckInput, type MarkupItem, type MarkupRefusal,
 } from './bulk-html.js';
 import { parseFragment, defaultTreeAdapter, html as p5 } from 'parse5';
+import { canonicalHtml } from './html-tree.js';
 
 const STORE = 'shop.example.com';
 
@@ -376,11 +377,11 @@ describe('checkMarkup: tags the fragment drops', () => {
   });
 
   it('lets a text that swallowed a tag hold only the same tags, not a prefix of another tag', () => {
-    // A `>` inside a quoted value: a match cut there would be the same for both tags. With
-    // attributes, neither is held at all.
+    // A `>` inside a quoted value: a match cut there would be the same for both tags. The other tag
+    // is not held; the same one is, since the canonical form the run sends drops it (1130).
     const before = '<p>x<body title="a>b">y</p>';
     expect(reason(before, '<p>x<body title="a>" class="z">y</p>')).toBe('markup_dropped');
-    expect(reason(before, before)).toBe('markup_dropped_before');
+    expect(reason(before, before)).toBe('ok');
     // Without attributes, the same tags with what lies between them are held, a `>` in the text included.
     expect(reason('<p>x</div>y > z</p>', '<p>w</div>y > z.</p>')).toBe('ok');
     expect(reason('<p>x</div>y > z</p>', '<p>w</div>y</div> > z</p>')).toBe('markup_dropped');
@@ -403,17 +404,22 @@ describe('checkMarkup: tags the fragment drops', () => {
     expect(reason(before, '<p>b</p></section>')).toBe('markup_dropped');
   });
 
-  it('holds no dropped start tag with attributes, wherever the before-image has it', () => {
-    // Inert in a template or a select there, read by the page where the after-state puts it.
+  it('holds a dropped start tag with attributes only as often as the before-image carries it (1130)', () => {
+    // Read by the page where the after-state puts it. Held anyway: the run stores and sends the
+    // canonical form, which drops the stretch, so the shop's own stray tag is cleaned by the write
+    // (U-103), not refused. The send checks that the bytes are canonical (`rawHtmlField`).
     for (const before of ['<template><body class="z"></template>', '<select><option>a</option><body class="z"></select>', '<body class="z"><p>a</p>']) {
-      // The before-image carries it: planning again cannot help, the refusal says so.
-      expect(reason(before, '<p>a<body class="z">b</p>'), before).toBe('markup_dropped_before');
-      expect(reason(before, `${before}`), before).toBe('markup_dropped_before');
+      expect(reason(before, '<p>a<body class="z">b</p>'), before).toBe('ok');
+      expect(reason(before, `${before}`), before).toBe('ok');
+      // A second copy is the value's own.
+      expect(reason(before, `<p>a<body class="z">b</p>${before}`), before).toBe('markup_dropped');
     }
-    // Not carried: planning again can leave it out.
+    // Not carried: the value's own, refused.
     expect(reason('<p>a</p>', '<p>a<body class="z">b</p>')).toBe('markup_dropped');
-    // An attribute after a slash is an attribute too: held by the bytes, still refused.
-    expect(reason('<body/class=z><p>a</p>', '<body/class=z><p>b</p>')).toBe('markup_dropped_before');
+    // An attribute after a slash is an attribute too, held by the bytes like any other.
+    expect(reason('<body/class=z><p>a</p>', '<body/class=z><p>b</p>')).toBe('ok');
+    // What the page would receive from either value: neither carries the stretch once canonical.
+    expect(droppedTagsOf(canonicalHtml('<p>a<body class="z">b</p>'))).toEqual([]);
   });
 
   it('finds nothing in markup the fragment keeps, however it is written', () => {
@@ -477,8 +483,44 @@ describe('markupChangesOf', () => {
   });
 
   it('leaves out a bare p that comes or goes', () => {
-    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [] });
-    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [] });
+    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false });
+    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false });
+  });
+
+  it('says whether an added item lies outside what a write may add (1010, ux U-092)', () => {
+    const outside = (before: string, after: string): boolean => markupChangesOf('d', before, after).addsOutsideAllowlist;
+    // Within: a link with its href only.
+    expect(outside('<p>a</p>', '<p>a <a href="/x">b</a></p>')).toBe(false);
+    // Outside, one condition each: an element off the list, a second attribute on a link, an
+    // attribute on another allowlisted element, raw text, a comment, an allowlisted element in a template.
+    expect(outside('<p>a</p>', '<p>a</p><img src="/i.jpg">')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="/x" target="_blank">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p class="x">a</p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><script>x()</script>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><!-- c -->')).toBe(true);
+    expect(outside('<p>a</p><template></template>', '<p>a</p><template><p>b</p></template>')).toBe(true);
+    // A bare element off the list, which fails on the list alone; a link in SVG, which fails on
+    // its namespace alone; an href on an element that is not a link.
+    expect(outside('<p>a</p>', '<p>a</p><div>b</div>')).toBe(true);
+    expect(outside('<p>a</p><svg></svg>', '<p>a</p><svg><a href="/x">b</a></svg>')).toBe(true);
+    expect(outside('<p>a</p>', '<p href="/x">a</p>')).toBe(true);
+    // A link whose href the link check refuses: a script scheme, a mail link with a second recipient.
+    expect(outside('<p>a</p>', '<p>a <a href="javascript:steal()">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example?bcc=x@evil.example">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example">b</a></p>')).toBe(false);
+    // A comment fails on its kind, its namespace and its name at once, and raw text lies only in
+    // elements off the list: parsed markup reaches neither condition alone (the next test does).
+    // Only what is added counts: a removed image does not.
+    expect(outside('<p>a</p><img src="/i.jpg">', '<p>a</p>')).toBe(false);
+  });
+
+  it('holds its kind and raw-text conditions alone, for an item no parse yields', () => {
+    // The kind and the raw text guard against an item that breaks the parser's invariants: a
+    // comment carrying an element's namespace and name, an allowlisted element carrying raw text.
+    const p: MarkupItem = { kind: 'element', namespace: 'html', element: 'p', attributes: [], text: null, inTemplate: false };
+    expect(withinAllowlist(p)).toBe(true);
+    expect(withinAllowlist({ ...p, kind: 'comment' })).toBe(false);
+    expect(withinAllowlist({ ...p, text: 'x' })).toBe(false);
   });
 
   it('names an allowlisted element with an attribute, and one inside a template', () => {

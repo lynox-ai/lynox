@@ -348,6 +348,27 @@ export class SecretVault {
   }
 
   /**
+   * How many stored entries do not decrypt under the loaded key. A vault opened with a key it
+   * was not written with counts every entry here; one opened with its own key counts none,
+   * unless an entry is corrupt or was written under another key before. Decrypts each entry and
+   * keeps no value; writes nothing.
+   */
+  undecryptableCount(): number {
+    const rows = this.db.prepare(
+      'SELECT encrypted_value, iv, auth_tag FROM vault_secrets',
+    ).all() as Array<Pick<RawRow, 'encrypted_value' | 'iv' | 'auth_tag'>>;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        this._decrypt(row.encrypted_value, row.iv, row.auth_tag);
+      } catch {
+        failed++;
+      }
+    }
+    return failed;
+  }
+
+  /**
    * Get all decrypted secrets as name→value map.
    * Used by SecretStore for loading vault entries.
    */

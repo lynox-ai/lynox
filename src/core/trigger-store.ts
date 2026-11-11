@@ -839,7 +839,8 @@ export class TriggerStore {
     // trigger a mandate last changed (the mandate gate in getDue). A schedule-only change doesn't alter WHAT runs,
     // so it does NOT clear consent. The watched ADDRESS would alter it — a watch run
     // builds its prompt from the page it fetches — but no path edits it: after creation
-    // the only writer of `watch_config` is the run storing its own `last_hash`. A writer
+    // the only writer of `watch_config` is the run storing its own baseline (`last_hash`,
+    // `last_summary`). A writer
     // that repoints a watch has to clear consent right here; `trigger-consent.test.ts`
     // pins the set of files that may name the setter, so a new one shows up red.
     if (params.title !== undefined || params.description !== undefined) {

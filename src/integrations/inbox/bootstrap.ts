@@ -21,7 +21,7 @@ import {
   wrapAnthropicAsLLMCaller,
 } from './classifier/llm.js';
 import { createMistralEuLLMCaller, DEFAULT_MISTRAL_MODEL } from './classifier/llm-mistral.js';
-import { DrainedForRestoreError, DrainedForShutdownError, type ClassifierQueue } from './classifier/queue.js';
+import { DrainedForRestoreError, DrainedForShutdownError, HandedOverError, type ClassifierQueue } from './classifier/queue.js';
 import { runColdStartForAccount } from './cold-start-adapter.js';
 import type { NotificationRouter } from '../../core/notification-router.js';
 import { createInboxNotifier } from './notifier.js';
@@ -44,6 +44,7 @@ import {
 } from './runner.js';
 import { DEFAULT_TENANT_ID, InboxStateDb } from './state.js';
 import { reconcileOutboundReply } from './outbound-reconcile.js';
+import type { MailEnvelope } from '../mail/provider.js';
 import type { SensitiveMode } from './sensitive-content.js';
 import {
   type AccountResolver,
@@ -94,11 +95,14 @@ export interface InboxRuntime {
    * surfaced unclassified (the migration restore, which must not wait for a backlog). With
    * `within`, the process is about to be killed: the queue classifies until `classifyUntil` and
    * surfaces the rest unclassified, cutting off running jobs at `cutOffAt` (see
-   * `ClassifierQueue.drainWithin`), and the counts go to stderr.
+   * `ClassifierQueue.drainWithin`), and the counts go to stderr. With `within` and `handOver`, the
+   * runtime is being replaced (the rebootstrap on a region switch): what the window leaves is not
+   * surfaced but handed to `handOver`, the replacing runtime's queue (`HandedOverError`).
    */
   shutdown(options?: {
     deadLetterBacklog?: boolean | undefined;
     within?: { classifyUntil: number; cutOffAt: number } | undefined;
+    handOver?: ((payload: InboxQueuePayload) => boolean) | undefined;
   }): Promise<void>;
 }
 
@@ -137,6 +141,8 @@ export interface BootstrapInboxOptions {
   folderBlacklist?: ReadonlySet<string> | undefined;
   /** Account ids whose mails skip the inbox entirely. */
   disabledAccounts?: ReadonlySet<string> | undefined;
+  /** See `InboxClassifierHookOptions.confirmAutoReply`; the engine reads the message through its mail registry. */
+  confirmAutoReply?: ((accountId: string, env: MailEnvelope) => Promise<boolean>) | undefined;
   /**
    * When `llmRegion='us'` and this is true, bootstrap throws unless the
    * caller has confirmed via `privacyAck=true` that the operator agreed
@@ -324,7 +330,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const accounts: AccountResolver = {
     resolve: (id) => {
       const acct = opts.mailStateDb.getAccount(id);
-      return acct ? { address: acct.address, displayName: acct.displayName } : null;
+      return acct ? { address: acct.address, displayName: acct.displayName, authType: acct.authType } : null;
     },
   };
 
@@ -339,6 +345,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   if (opts.folderBlacklist !== undefined) hookOpts.folderBlacklist = opts.folderBlacklist;
   if (opts.disabledAccounts !== undefined) hookOpts.disabledAccounts = opts.disabledAccounts;
   if (notifier !== undefined) hookOpts.notifier = notifier;
+  if (opts.confirmAutoReply !== undefined) hookOpts.confirmAutoReply = opts.confirmAutoReply;
   const hook = createInboxClassifierHook(hookOpts);
 
   // Disabled accounts must not get a backfill — same opt-out as the
@@ -455,6 +462,16 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     shutdown: async (shutdownOpts) => {
       reminderPoller?.stop();
       const within = shutdownOpts?.within;
+      const handOver = shutdownOpts?.handOver;
+      if (within && handOver && shutdownOpts?.deadLetterBacklog !== true) {
+        const queued = queue.depth;
+        const { deadLetteredWaiting, cutOffRunning } = await queue.drainWithin({
+          ...within,
+          reason: new HandedOverError((payload) => handOver(payload as InboxQueuePayload)),
+        });
+        process.stderr.write(`[lynox] inbox classifier replaced: ${String(queued)} mails queued, ${String(deadLetteredWaiting)} handed over waiting, ${String(cutOffRunning)} handed over after a cut-off\n`);
+        return;
+      }
       if (within && shutdownOpts?.deadLetterBacklog !== true) {
         const queued = queue.depth;
         const { deadLetteredWaiting, cutOffRunning } = await queue.drainWithin({ ...within, reason: new DrainedForShutdownError() });

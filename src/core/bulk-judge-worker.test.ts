@@ -99,7 +99,7 @@ async function tick(runId: string, hooks: unknown[] = [], language?: string): Pr
     .mockImplementation(async () => () => null);
   const engine = {
     getTaskManager: () => manager,
-    getRunHistory: () => ({ getTrigger: () => task, updateTrigger: () => { /* none */ }, recordBulkJudgeCost: () => { /* none */ } }),
+    getRunHistory: () => ({ getTrigger: () => task, updateTrigger: () => { /* none */ }, recordBulkJudgeCost: () => undefined, settleBulkJudgeCost: () => { /* none */ } }),
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
@@ -201,6 +201,17 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     await vi.waitFor(() => { if (captured.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
     expect(captured.map((e) => e.message)).toEqual(['bulk_judge call failed: Error']);
     for (const text of [...records, ...notes]) expect(text).not.toContain(MARK);
+  });
+
+  it('a throw before the judge begins, told to a German owner: the halt in German, the stored reason as it is (ux Rest-P E13)', async () => {
+    model.create = async () => ({});
+    const id = startedRun();
+    vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
+    const { records, notes } = await tick(id, [], 'de');
+    const de = 'Beurteilung angehalten: KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.';
+    expect(records).toEqual([de]);
+    expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual([de]);
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
   });
 
   it('a halt that throws in the catch still lets the class reach the tracker', async () => {

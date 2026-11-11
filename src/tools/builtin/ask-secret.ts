@@ -37,6 +37,22 @@ const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROMPT_MAX_CHARS = 300;
 
 /**
+ * What a mandate's turn gets instead of a dialog. The dialog would send what the person at the
+ * screen types to the vault route, which only the owner may write, so the key would leave their
+ * hands and be refused. It says who stores keys, what a saved profile does, and where the owner
+ * acts on it: the owner sees a release request only when lynox answers in the owner's own chat
+ * (`releaseRequestsNote`). It asks for nothing again: the refusal is prompt surface, and a retry
+ * instruction here would teach a loop.
+ */
+export const MANDATE_SECRET_REFUSAL =
+  'Refused: in this session no key or password is entered. Only the owner of this instance stores keys. ' +
+  'A profile you save here asks the owner to release the keys it reads, and until the owner does, the engine ' +
+  'sends nothing under those keys. Tell the user to ask the owner to do it in a chat of the owner\'s own: ' +
+  'store the key there if it is not stored yet, and, if a profile saved here reads it, ask lynox there to release ' +
+  'it to that profile, naming the key and the profile. Do not ask for the key again, and never ask the user to ' +
+  'paste it into this chat.';
+
+/**
  * A name in the vault that holds a connection's token is used through that connection's API
  * profile: the `secret:` gate refuses a reference to it, so no text here offers one. Answered from
  * the API store the engine wired; without one, no name counts as a token, and the texts stay as
@@ -146,6 +162,11 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     }
 
     // action: 'collect'
+    // A mandate is refused before anything else, decided like `list` on the principal of this
+    // turn: before the dialog, which would collect a key the vault refuses, and before the name
+    // checks, whose answers name the keys the owner already stores.
+    const principal = agent.principal as IAgent['principal'] | undefined;
+    if (principal === undefined || toolLockFor(principal) !== null) return MANDATE_SECRET_REFUSAL;
     if (!input.name || !input.prompt) {
       return 'Error: ask_secret with action:"collect" needs both `name` and `prompt`. To see what is already stored, call ask_secret with action:"list".';
     }

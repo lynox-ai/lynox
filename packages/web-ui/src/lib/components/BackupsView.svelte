@@ -12,7 +12,7 @@
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { onOff, orNotSet } from './settings-readonly/values.js';
 
-	interface Backup extends BackupCoverageFields { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
+	interface Backup extends BackupCoverageFields { backup_id: string; version: string; created_at: string; encrypted: boolean; file_count?: number; total_bytes?: number; files?: { size_bytes?: number }[]; checksum: string; }
 
 	type Config = BackupConfigFields;
 
@@ -150,6 +150,10 @@
 		confirmRestore = null;
 	}
 
+	// The engine sends the totals; an engine from before they existed sends only the `files` list.
+	function fileCount(b: Backup): number { return b.file_count ?? b.files?.length ?? 0; }
+	function totalBytes(b: Backup): number { return b.total_bytes ?? (b.files ?? []).reduce((s, f) => s + (f.size_bytes ?? 0), 0); }
+
 	function formatSize(bytes: number): string {
 		if (bytes < 1024) return `${bytes} B`;
 		if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -217,7 +221,7 @@
 							{#if coverage}
 								<span data-testid="backup-coverage-badge" class="text-xs rounded-[var(--radius-sm)] px-1.5 py-0.5 {coverage.tone === 'warning' ? 'bg-warning/15 text-warning' : 'bg-border text-text-muted'}">{t(coverage.badge)}</span>
 							{/if}
-							<span class="text-xs text-text-muted">{backup.files.length} {t('backups.files')}</span>
+							<span class="text-xs text-text-muted">{fileCount(backup)} {t('backups.files')}</span>
 						</div>
 					</div>
 					{#if coverage}
@@ -226,7 +230,7 @@
 					<div class="flex items-center justify-between mt-1.5">
 						<div class="flex gap-2 text-xs text-text-subtle">
 							<span>v{backup.version}</span>
-							<span>{formatSize(backup.files.reduce((s, f) => s + (f.size_bytes ?? 0), 0))}</span>
+							<span>{formatSize(totalBytes(backup))}</span>
 						</div>
 						{#if !isOwnerSession()}
 							<!-- no restore until the server said this is the owner's session -->

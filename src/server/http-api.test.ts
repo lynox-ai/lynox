@@ -21,6 +21,7 @@ import { buildPdf, buildDocx } from '../../tests/fixtures/minimal-documents.js';
 import { MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun, writesMandateTrail, consentPageHtml } from './http-api.js';
+import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, oauthPageHtml } from './oauth-pages.js';
 import { EngineDb } from '../core/engine-db.js';
 import { ApprovalStore, type ApprovalFiling } from '../core/approval-store.js';
 import { MandateEnds } from '../core/mandate-ends.js';
@@ -33,13 +34,14 @@ import { CpRefusalTally, CpTrail } from '../core/cp-trail.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
 import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
-import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { WorkflowStore } from '../core/workflow-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
+import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { ChangesetManager } from '../core/changeset.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { currentRunGroup } from '../core/run-group.js';
@@ -2802,6 +2804,27 @@ describe('LynoxHTTPApi', () => {
       const text = await res.text();
       expect(text).toContain('event: error');
       expect(text).toContain('"fatal":true');
+    });
+
+    /** The JSON payload of the run stream's `event: error` frame. */
+    const errorFrame = (text: string): Record<string, unknown> => {
+      const frame = text.split('\n\n').find((f) => f.startsWith('event: error\n'));
+      if (frame === undefined) throw new Error('no error frame');
+      return JSON.parse(frame.split('\n').find((l) => l.startsWith('data: '))!.slice(6)) as Record<string, unknown>;
+    };
+
+    it('a reply the AI service cut off on every attempt: the terminal error carries the stable code', async () => {
+      repayRateWindow();
+      mockSessionRun.mockImplementationOnce(async () => { throw new StreamIncompleteError(); });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'boom' }) });
+      expect(errorFrame(await res.text())).toEqual({ error: 'the AI service ended the reply before it was finished', fatal: true, code: 'stream_incomplete' });
+    });
+
+    it('control: another terminal error carries no code', async () => {
+      repayRateWindow();
+      mockSessionRun.mockImplementationOnce(async () => { throw new Error('provider exploded'); });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'boom' }) });
+      expect(errorFrame(await res.text())).toEqual({ error: 'provider exploded', fatal: true });
     });
 
     it('a run that ended needing input ends with done and its reason — no fatal error, no red toast', async () => {
@@ -5629,13 +5652,13 @@ describe('LynoxHTTPApi', () => {
 
     async function connect(
       author: string | undefined, asMandate: boolean, id = 'books',
-      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean } = {},
+      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string } = {},
     ): Promise<{ status: number; text: string; state: string | null; location: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
       store.register({
         id: 'books', name: 'Books', base_url: 'https://api.bexio.com/3.0', description: 'd',
-        auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: opts.clientIdKey ?? 'BOOKS_CLIENT_ID', client_secret_key: 'BOOKS_CLIENT_SECRET', scope: 'openid offline_access' } },
+        auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: opts.clientIdKey ?? 'BOOKS_CLIENT_ID', client_secret_key: 'BOOKS_CLIENT_SECRET', scope: opts.scope ?? 'openid offline_access' } },
         custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
         ...(author === undefined ? {} : { created_by: author }),
       });
@@ -5664,9 +5687,16 @@ describe('LynoxHTTPApi', () => {
       });
       try {
         const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
-        const res = await fetch(`${baseUrl}/api/oauth/connect/${id}`, {
+        // A mandate's connect goes on from the note page with a POST that names the note shown.
+        const method = opts.method ?? (asMandate ? 'POST' : 'GET');
+        const query = opts.query ?? (asMandate && method === 'POST' ? '?shown_note=3' : '');
+        const res = await fetch(`${baseUrl}/api/oauth/connect/${id}${query}`, {
+          method,
           redirect: 'manual',
-          headers: { cookie: `lynox_session=${token}`, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document' },
+          headers: {
+            cookie: `lynox_session=${token}`, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document',
+            ...(opts.lang === undefined ? {} : { 'Accept-Language': opts.lang }),
+          },
         });
         const set = res.headers.getSetCookie().find((c) => c.startsWith('lynox_profile_oauth_state='));
         const state = set === undefined ? null : decodeURIComponent(set.split(';')[0]!.slice('lynox_profile_oauth_state='.length));
@@ -5739,6 +5769,78 @@ describe('LynoxHTTPApi', () => {
         .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1' });
     });
 
+    // The note before the provider's login (the approved wording), word for word: a
+    // difference here is a text that was not approved.
+    const NOTE3_DE = 'Der Inhaber dieser Instanz sieht, dass du hier bexio mit deinem eigenen Login verbindest, und, wenn bexio es lynox mitteilt, mit welchem Konto. Ein Plan, den er bestätigt, kann diese Verbindung nutzen.';
+    const NOTE3_EN = 'The owner of this instance sees that you connect bexio here with your own login and, if bexio tells lynox, with which account. A plan they confirm can use this connection.';
+    const reEsc = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    /** The note, then right after it the form with the one button, posting the note's version. */
+    const noteThenButton = (note: string, button: string, version = '3'): RegExp =>
+      new RegExp(`<p data-connect-note="${version}">${reEsc(note)}</p><form method="post" action="\\?shown_scopes=[^"]*&amp;shown_note=${version}"><button type="submit">${reEsc(button)}</button></form>`);
+
+    it('shows a mandate\'s session the note before a connect that only reads, and starts nothing', async () => {
+      const r = await connect(TAG, true, 'books', { method: 'GET', lang: 'de-CH,de;q=0.9,en;q=0.8' });
+      expect(r.status).toBe(200);
+      expect([r.state, r.location]).toEqual([null, '']);
+      expect(r.text).toMatch(noteThenButton(NOTE3_DE, 'Weiter zu bexio'));
+      expect(r.text).toContain('<html lang="de">');
+      expect(r.text).toContain('<title>bexio verbinden</title>');
+      expect(r.text).toContain('<h1>bexio verbinden</h1>');
+      expect(r.text.match(/<button/g)).toHaveLength(1);
+    });
+
+    it.each([
+      ['no Accept-Language', undefined, 'en'],
+      ['de-DE', 'de-DE', 'de'],
+      ['English preferred over German', 'de;q=0.4, en-GB;q=0.9', 'en'],
+      ['a language it has no text in first', 'fr-CH, de;q=0.8', 'de'],
+    ])('writes the note page in the browser\'s language: %s', async (_label, lang, want) => {
+      const r = await connect(TAG, true, 'books', { method: 'GET', ...(lang === undefined ? {} : { lang }) });
+      expect(r.status).toBe(200);
+      expect(r.text).toMatch(want === 'de' ? noteThenButton(NOTE3_DE, 'Weiter zu bexio') : noteThenButton(NOTE3_EN, 'Continue to bexio'));
+      expect(r.text).toContain(want === 'de' ? '<title>bexio verbinden</title>' : '<title>Connect bexio</title>');
+    });
+
+    it('puts the note on the customer text\'s page, before its one button, when the connect asks to write', async () => {
+      const r = await connect(TAG, true, 'books', { method: 'GET', lang: 'en', scope: 'openid offline_access contact_show kb_invoice_edit note_edit' });
+      expect(r.status).toBe(200);
+      // The page is the customer text's, in its language and with its button and title.
+      expect(r.text).toMatch(noteThenButton(NOTE3_DE, 'Zustimmen und weiter zu bexio'));
+      expect(r.text).toContain('<title>Schreibrechte für bexio bestätigen</title>');
+      expect(r.text.match(/<button/g)).toHaveLength(1);
+      expect(r.text.indexOf('Rechnungen: Schreibzugriff')).toBeLessThan(r.text.indexOf('data-connect-note'));
+    });
+
+    it('answers a mandate\'s HEAD like its GET: no cookie, nobody sent on', async () => {
+      const r = await connect(TAG, true, 'books', { method: 'HEAD' });
+      expect(r.status).toBe(200);
+      expect([r.state, r.location]).toEqual([null, '']);
+    });
+
+    it('holds a confirmation of the write page to the note as well as to the scopes it showed', async () => {
+      const scope = 'openid offline_access contact_show kb_invoice_edit note_edit';
+      const page = await connect(TAG, true, 'books', { method: 'GET', scope });
+      const action = /<form method="post" action="([^"]+)">/.exec(page.text)?.[1]?.replaceAll('&amp;', '&') ?? '';
+      expect(action).toMatch(/^\?shown_scopes=.+&shown_note=3$/);
+      const without = await connect(TAG, true, 'books', { method: 'POST', scope, query: action.replace('&shown_note=3', '') });
+      expect(without.status).toBe(409);
+      expect(without.text).toContain('another note than the page you confirmed');
+      expect(without.state).toBeNull();
+      // Control: the page's own address goes on, so the refusal above is the note's.
+      const confirmed = await connect(TAG, true, 'books', { method: 'POST', scope, query: action });
+      expect(confirmed.status).toBe(302);
+    });
+
+    it.each([
+      ['without the note it showed', '?shown_scopes=openid+offline_access'],
+      ['for another note than this provider\'s', '?shown_scopes=openid+offline_access&shown_note=1'],
+    ])('refuses a mandate\'s confirmation %s, and starts nothing', async (_label, query) => {
+      const r = await connect(TAG, true, 'books', { method: 'POST', query });
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('another note than the page you confirmed');
+      expect([r.state, r.location]).toEqual([null, '']);
+    });
+
     // H2i-2a-R: the client id is the owner's; a mandate's profile reads it only once released.
     it('gives a mandate\'s session no link while the owner has not released the client id, and says so', async () => {
       const r = await connect(TAG, true, 'books', { unreleased: true });
@@ -5749,8 +5851,10 @@ describe('LynoxHTTPApi', () => {
 
     it('control: the owner\'s session starts on a mandate\'s profile, signed as the owner', async () => {
       const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
-      const r = await connect(TAG, false);
+      const r = await connect(TAG, false, 'books', { lang: 'de-CH' });
+      // Straight to the provider: the owner's session never gets the note page.
       expect(r.status).toBe(302);
+      expect(r.text).not.toContain('data-connect-note');
       expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by).toEqual({ tag: 'owner' });
     });
 
@@ -5829,21 +5933,51 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  describe('GET /api/oauth/connect/:id leads a refusal back into lynox', () => {
+    const hrefs = (page: string): string[] => [...page.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
+    it.each([
+      ['an id no profile has, to /app', 'nope', { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document' }, 404, '/app'],
+      ['a request from another site, to /app', 'books', { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'document' }, 403, '/app'],
+      ['a profile that is not OAuth, to Settings → APIs', 'plain', { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document' }, 400, '/app/settings/apis'],
+    ])('%s', async (_label, id, headers, status, href) => {
+      repayRateWindow();
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'books', name: 'Books', base_url: 'https://api.bexio.com/3.0', description: 'd',
+        auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: 'BOOKS_CLIENT_ID', client_secret_key: 'BOOKS_CLIENT_SECRET', scope: 'openid offline_access' } },
+      });
+      store.register({ id: 'plain', name: 'Plain', base_url: 'https://api.example.com', description: 'd' });
+      mockGetApiStore.mockReturnValue(store);
+      const priorSecret = process.env['LYNOX_HTTP_SECRET'];
+      process.env['LYNOX_HTTP_SECRET'] = TEST_SECRET;
+      try {
+        const res = await fetch(`${baseUrl}/api/oauth/connect/${id}`, { redirect: 'manual', headers: { ...authHeaders(), ...headers } });
+        expect(res.status).toBe(status);
+        expect(hrefs(await res.text())).toEqual([href]);
+      } finally {
+        if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
+        else process.env['LYNOX_HTTP_SECRET'] = priorSecret;
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+  });
+
   // A link that asks bexio for a write scope shows the approved customer text first, and only the
   // page's own button sends the person on.
   describe('/api/oauth/connect/:id shows the customer text before a write scope', () => {
     // The approved wording, copied byte for byte. A difference here is a text that was not
     // approved; change it only with a new approval.
     const APPROVED = [
-      'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an bexio schickt, und er geschieht erst nach deinem Ja. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-      'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
+      'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
+      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
       'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
     ];
     // The page around it, approved 2026-10-21 under the same rule.
     const APPROVED_FRAME = {
       title: 'Schreibrechte für bexio bestätigen',
       scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Das Recht ist damit breiter als das, was lynox damit tut.',
+      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
       button: 'Zustimmen und weiter zu bexio',
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
     };
@@ -5864,7 +5998,7 @@ describe('LynoxHTTPApi', () => {
     async function open(
       scope: string,
       req: { method?: string; query?: string; site?: string; contentType?: string; body?: string; origin?: string } = {},
-    ): Promise<{ status: number; text: string; state: string | null; location: string }> {
+    ): Promise<{ status: number; text: string; state: string | null; location: string; csp: string; xfo: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
       store.register({
@@ -5891,7 +6025,7 @@ describe('LynoxHTTPApi', () => {
           ...(req.body === undefined ? {} : { body: req.body }),
         });
         const set = res.headers.getSetCookie().find((c) => c.startsWith('lynox_profile_oauth_state='));
-        return { status: res.status, text: await res.text(), state: set ?? null, location: res.headers.get('location') ?? '' };
+        return { status: res.status, text: await res.text(), state: set ?? null, location: res.headers.get('location') ?? '', csp: res.headers.get('content-security-policy') ?? '', xfo: res.headers.get('x-frame-options') ?? '' };
       } finally {
         mockDerivePresetEndpoints.mockReset();
         if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
@@ -5920,27 +6054,57 @@ describe('LynoxHTTPApi', () => {
       const NAMES = { kb_invoice_edit: 'Rechnungen: Schreibzugriff', note_edit: 'Notizen: Schreibzugriff' };
       const SCOPES = ['openid', 'kb_invoice_edit', 'note_edit'];
 
-      it('without one, is the English page as it was, byte for byte', () => {
-        expect(consentPageHtml(TEXT, SCOPES)).toBe(
-          '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorization</title></head><body>'
+      // The page is sent without `form-action` (the provider's own redirects would trip it), so
+      // this is the net instead: whatever a caller can put on the page, it holds one form, whose
+      // action is this server's, and no value arrives as markup.
+      it('holds exactly one form, posting back here, whatever hostile values it is given', () => {
+        const H = '"><form action="https://evil.example/x"><x-evil a=\'1\'>';
+        const hostile = {
+          lang: H, writeScopes: [H, 'note_edit'], paragraphs: [H, `a ${H} b`],
+          scopeNames: { [H]: H, note_edit: H },
+        };
+        const frame = { title: H, scopesIntro: H, scopesNote: H, button: H, afterButton: H };
+        const note = { version: '3', lang: 'de', provider: H } as const;
+        const cases: [Parameters<typeof consentPageHtml>[0], typeof note | undefined][] = [
+          [hostile, undefined], [{ ...hostile, lang: 'de' }, undefined], [{ ...hostile, frame }, undefined],
+          [hostile, note], [{ ...hostile, frame }, note], [undefined, note],
+        ];
+        for (const [consent, n] of cases) {
+          const page = consentPageHtml(consent, [H, 'openid'], n);
+          expect(page.match(/<form\b/g)).toHaveLength(1);
+          const action = /<form method="post" action="([^"]*)">/.exec(page)?.[1];
+          expect(action?.startsWith('?shown_scopes=')).toBe(true);
+          expect(action).not.toMatch(/["<>]/);
+          expect(page).not.toContain(H);
+          expect(page).not.toMatch(/<x-evil|action="https:/);
+        }
+      });
+
+      it('without one, is a plain frame in the text\'s language: German for a German text', () => {
+        expect(consentPageHtml(TEXT, SCOPES)).toBe(oauthPageHtml('de', 'Verbindung bestätigen',
+          '<h1>Verbindung bestätigen</h1>'
           + '<div lang="de"><p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p></div>'
+          + '<p>Schreibrechte, die diese Verbindung verlangt: kb_invoice_edit, note_edit</p>'
+          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Weiter</button></form>'));
+      });
+
+      it('without one, is the English plain frame for a text in any other language', () => {
+        expect(consentPageHtml({ ...TEXT, lang: 'fr' }, SCOPES)).toBe(oauthPageHtml('en', 'Authorization',
+          '<h1>Authorization</h1>'
+          + '<div lang="fr"><p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p></div>'
           + '<p>Write access this connection asks for: kb_invoice_edit, note_edit</p>'
-          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Continue</button></form>'
-          + '</body></html>',
-        );
+          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Continue</button></form>'));
       });
 
       it('with one, is wholly in the text\'s language and names each write access in the order asked', () => {
-        expect(consentPageHtml({ ...TEXT, frame: FRAME, scopeNames: NAMES }, SCOPES)).toBe(
-          '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Titel</title></head><body>'
+        expect(consentPageHtml({ ...TEXT, frame: FRAME, scopeNames: NAMES }, SCOPES)).toBe(oauthPageHtml('de', 'Titel',
+          '<h1>Titel</h1>'
           + '<p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p>'
           + '<p>Vor der Liste:</p>'
           + '<ul><li>Rechnungen: Schreibzugriff</li><li>Notizen: Schreibzugriff</li></ul>'
-          + '<p>Nach der Liste.</p>'
+          + '<p class="small">Nach der Liste.</p>'
           + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Zustimmen</button></form>'
-          + '<p>Nach dem Knopf.</p>'
-          + '</body></html>',
-        );
+          + '<p class="small">Nach dem Knopf.</p>'));
       });
 
       it('with one, takes a name only from the names given, not from what every object inherits', () => {
@@ -5956,10 +6120,11 @@ describe('LynoxHTTPApi', () => {
           scopeNames: { ...NAMES, note_edit: '<x>' },
         }, SCOPES);
         expect(html).toContain('<title>&lt;t&gt;</title>');
+        expect(html).toContain('<h1>&lt;t&gt;</h1>');
         expect(html).toContain('<p>&quot;i&quot;</p>');
         expect(html).toContain('<li>&lt;x&gt;</li>');
-        expect(html).toContain('<p>n &amp; m</p>');
-        expect(html).toContain('<button type="submit">&lt;b&gt;</button></form></body></html>');
+        expect(html).toContain('<p class="small">n &amp; m</p>');
+        expect(html).toContain('<button type="submit">&lt;b&gt;</button></form></main></body></html>');
       });
     });
 
@@ -5967,17 +6132,19 @@ describe('LynoxHTTPApi', () => {
       const r = await open(WRITING);
       expect(r.status).toBe(200);
       // The whole page in German, the approved words in place, the names in the order asked.
-      expect(r.text).toBe(
-        '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        + `<title>${APPROVED_FRAME.title}</title></head><body>`
+      expect(r.text).toBe(oauthPageHtml('de', APPROVED_FRAME.title,
+        `<h1>${APPROVED_FRAME.title}</h1>`
         + APPROVED.map((p) => `<p>${p}</p>`).join('')
         + `<p>${APPROVED_FRAME.scopesIntro}</p>`
         + `<ul><li>${APPROVED_NAMES.kb_invoice_edit}</li><li>${APPROVED_NAMES.note_edit}</li></ul>`
-        + `<p>${APPROVED_FRAME.scopesNote}</p>`
+        + `<p class="small">${APPROVED_FRAME.scopesNote}</p>`
         + `<form method="post" action="${SHOWN}"><button type="submit">${APPROVED_FRAME.button}</button></form>`
-        + `<p>${APPROVED_FRAME.afterButton}</p>`
-        + '</body></html>',
-      );
+        + `<p class="small">${APPROVED_FRAME.afterButton}</p>`));
+      // Sent with the frame's one stylesheet admitted, and nothing else.
+      expect(r.csp).toBe(OAUTH_CONSENT_CSP);
+      // Unframeable twice over: the older header the /api/ branch sets, and the policy itself.
+      expect(r.xfo).toBe('DENY');
+      expect(r.csp).toContain("frame-ancestors 'none'");
       expect(r.state).toBeNull();
       expect(r.location).toBe('');
     });
@@ -10673,6 +10840,121 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('GET /api/triggers tells the owner what the stamp of a confirmed plan lists, and a helper nothing', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const MID = 'M-EVA';
+      const crm = {
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'd', created_by: 'mandate:eva@kanzlei.example',
+        auth: { type: 'oauth2', vault_keys: [], oauth: { token_url: 'https://api.crm.example/oauth/token', client_id_key: 'CRM_CLIENT_ID' } },
+        oauth_grant: { connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: MID, grant_id: 'grant-1', account: { label: 'eva@crm', source: 'userinfo' } },
+      };
+      const AT = '2026-10-08T00:00:00.000Z';
+      const row = { id: 'trg-eva', title: 't', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: MID, confirmed_at: AT, created_at: AT };
+      ref['getApiStore'] = () => ({ knownProfiles: () => [crm] });
+      ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
+      const { bindingOf } = await import('../core/profile-secret-view.js');
+      const raw = JSON.stringify({ at: AT, wf: null, entries: [{ profile: 'crm-api', grant: 'grant-1', binding: bindingOf(crm as never) }] });
+      const history = { getTriggerStampConnections: (id: string) => (id === 'trg-eva' || id === 'trg-held' || id === 'trg-notify' ? { confirmedAt: id === 'trg-held' ? null : AT, stampConnections: raw } : undefined) };
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [row, { id: 'trg-own', title: 'o', effect: 'run_agent', created_by: 'owner', confirmed_at: AT }, { ...row, id: 'trg-held', confirmed_at: undefined }, { ...row, id: 'trg-notify', effect: 'notify' }] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          expect(triggers.find((t) => t.id === 'trg-eva')!['stamp_listed']).toEqual({ lapsed: false, ended: false, ended_on: null, entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'listed' }] });
+          // The owner's own plan acts for no mandate: nothing to list, no field.
+          expect(triggers.find((t) => t.id === 'trg-own')).not.toHaveProperty('stamp_listed');
+          // A plan that waits for its stamp shows its confirm block, not a list (it holds a stale column).
+          expect(triggers.find((t) => t.id === 'trg-held')).not.toHaveProperty('stamp_listed');
+          // A notice uses no connection, whatever its column holds.
+          expect(triggers.find((t) => t.id === 'trg-notify')).not.toHaveProperty('stamp_listed');
+          expect(JSON.stringify(triggers)).not.toContain('grant-1');
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: MID }) as RequestPrincipal);
+          const helper = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          for (const t of helper.triggers) expect(t).not.toHaveProperty('stamp_listed');
+        });
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+        ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+      }
+    });
+
+    it('GET /api/triggers keeps the other rows when one row\'s stamp list cannot be read', async () => {
+      const AT = '2026-10-08T00:00:00.000Z';
+      const history = {
+        getTriggerStampConnections: (id: string) => { if (id === 'trg-bad') throw new Error('row unreadable'); return { confirmedAt: AT, stampConnections: null }; },
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => undefined,
+      };
+      const row = (id: string): Record<string, unknown> => ({ id, title: id, effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'M-EVA', confirmed_at: AT });
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const savedApi = ref['getApiStore'];
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [row('trg-bad'), row('trg-ok')] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const res = await jsonFetch('/api/triggers');
+          expect(res.status).toBe(200);
+          const { triggers } = (await res.json()) as Flags;
+          expect(triggers.map((t) => t.id)).toEqual(['trg-bad', 'trg-ok']);
+          expect(triggers[0]!['stamp_listed']).toBeUndefined();
+          expect(warn).toHaveBeenCalledWith(expect.stringContaining('trg-bad'));
+        });
+      } finally {
+        warn.mockRestore();
+        ref['getApiStore'] = savedApi;
+      }
+    });
+
+    it('GET /api/triggers says on which side a member whose access ended sits', async () => {
+      // The way out differs: a member on the workflow's side needs the workflow copied too.
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const MID = 'M-EVA';
+      const AT = '2026-10-08T00:00:00.000Z';
+      const crm = {
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'd', created_by: 'mandate:eva@kanzlei.example',
+        auth: { type: 'oauth2', vault_keys: [], oauth: { token_url: 'https://api.crm.example/oauth/token', client_id_key: 'CRM_CLIENT_ID' } },
+        oauth_grant: { connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: MID, grant_id: 'grant-1' },
+      };
+      const raw = JSON.stringify({ at: AT, wf: null, entries: [{ profile: 'crm-api', grant: 'grant-1', binding: 'b'.repeat(64) }] });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [crm] });
+      ref['getMandateEnds'] = () => ({ isLive: () => false, record: (): void => {} });
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: AT } : undefined));
+      const history = {
+        getTriggerStampConnections: () => ({ confirmedAt: AT, stampConnections: raw }),
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => ({ createdBy: 'mandate:eva@kanzlei.example', createdMandateId: MID, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-10-01 00:00:00' }),
+      };
+      const onWorkflow = { id: 'trg-wf', title: 'w', effect: 'run_workflow', pipeline_id: 'wf-eva', created_by: 'owner', confirmed_at: AT };
+      const onPlan = { id: 'trg-plan', title: 'p', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: MID, confirmed_at: AT };
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [onWorkflow, onPlan] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          const side = (id: string): unknown => (triggers.find((t) => t.id === id)!['stamp_listed'] as { ended_on: unknown; ended: unknown });
+          expect(side('trg-wf')).toMatchObject({ ended: true, ended_on: 'workflow' });
+          expect(side('trg-plan')).toMatchObject({ ended: true, ended_on: 'plan' });
+        });
+        // The member the plan acts for is live, the workflow's has ended: the run is refused all
+        // the same (the gate reads every member), so the list says ended.
+        ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === 'M-IDA', record: (): void => {} });
+        const idaPlan = { ...onWorkflow, id: 'trg-ida', created_by: 'mandate:ida@kanzlei.example', created_mandate_id: 'M-IDA', created_at: '2026-10-08 00:00:00' };
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [idaPlan] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          expect(triggers[0]!['stamp_listed']).toMatchObject({ ended: true, ended_on: 'workflow' });
+        });
+        // The schedule's mandate ended, the workflow's is live: a new plan on that workflow would run
+        // for the workflow's mandate, so the note says the workflow is someone else's.
+        ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [idaPlan] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          expect(triggers[0]!['stamp_listed']).toMatchObject({ ended: true, ended_on: 'workflow_other' });
+        });
+      } finally {
+        ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
+    });
+
     it('GET /api/triggers adds the two flags, and the pause\'s, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
       // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's
@@ -11722,6 +12004,22 @@ describe('LynoxHTTPApi', () => {
       expect(shown['writeFormNote']).toBeNull();
     });
 
+    it('shows a list whose stored filters were changed past what a parse takes by its host, without failing, and a withdrawn path as its address', async () => {
+      repayRateWindow();
+      const host = 'shop.example.com';
+      const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, filters: { category: ['12', '13'] } })), planned.status.id);
+      const res = await jsonFetch(`/api/bulk/runs/${planned.status.id}`);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as Record<string, unknown>)['listFirstPage']).toBe(host);
+      // A run whose path was withdrawn since still has an address, and shows it.
+      bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, path: '/wp-json/wc/v3/orders' })), planned.status.id);
+      const withdrawn = await (await jsonFetch(`/api/bulk/runs/${planned.status.id}`)).json() as Record<string, unknown>;
+      expect(withdrawn['listFirstPage']).toBe(`https://${host}/wp-json/wc/v3/orders?category=12&orderby=id&order=asc&_fields=id&per_page=50&page=1`);
+    });
+
     it('starts a list read only with the checksum of the list it shows the owner', async () => {
       const host = 'shop.example.com';
       const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
@@ -11842,6 +12140,21 @@ describe('LynoxHTTPApi', () => {
 
       // The link domains the owner allows a judged list run's verdicts to add (PRD
       // shopify-preset §20.2 item 5, S20-4): taken at the start that begins the judge only.
+      it('shows the owner the context the judge reads beside the record, as the hash binds it (PRD shopify-preset §20.2 item 7)', async () => {
+        const withContext = normalizeJudgeRule({ rule: 'Write a short title.', schema: { title: { type: 'string', maxLength: 40 } }, context: ['brand', 'note'] });
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old', brand: 'Acme', note: 'n' } }, after: judgeTemplate(withContext) }],
+          judge: withContext,
+        }).id;
+        const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+        expect(shown['judgeRule']).toEqual({ rule: withContext.rule, schema: withContext.schema, tier: 'fast', context: ['brand', 'note'] });
+        expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
+        // Twin: a rule without one shows no context key at all.
+        const plain = await (await jsonFetch(`/api/bulk/runs/${judgedRun()}`)).json() as { judgeRule: Record<string, unknown> };
+        expect(Object.hasOwn(plain.judgeRule, 'context')).toBe(false);
+      });
+
       it('takes the start list at the judge start, refuses it at the list read and on a resume', async () => {
         const host = 'shop.example.com';
         const LIST_RULE = normalizeJudgeRule({ rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } }, { idField: 'id' });
@@ -12051,7 +12364,8 @@ describe('LynoxHTTPApi', () => {
       try {
         // Shown with its note and the statement to confirm; approved only with the literal `true`.
         const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
-        expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+        // One target to write: the note keeps its first two sentences.
+        expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
         for (const extra of [{}, { unmeasuredConfirmed: 'true' }, { unmeasuredConfirmed: 1 }]) {
           const unconfirmed = await approve(extra);
           expect(unconfirmed.status, JSON.stringify(extra)).toBe(409);
@@ -12134,12 +12448,48 @@ describe('LynoxHTTPApi', () => {
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
       const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
-      expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+      expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
       // The same run read as an undo: it restores under its source's confirmation, and does
       // not write one target first, so neither the note nor the statement applies.
       bulkDb.getDb().prepare(`UPDATE bulk_runs SET kind = 'undo' WHERE id = ?`).run(id);
       const asUndo = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
       expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
+    });
+
+    it('gives the unmeasured note its first two sentences at one target to write, counted as the write counts', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((n) => `https://${host}/products/${String(n)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      const note = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as Record<string, unknown>)['writeFormNote'];
+      expect(bulkLedger.countWriting(id)).toBe(2);
+      expect(await note()).toBe(BULK_UNMEASURED_NOTE);
+      // One taken out: the write counts one, and the note says nothing of "the rest".
+      const deselected = bulkDb.getDb().prepare(`UPDATE bulk_targets SET deselected_at = 1 WHERE run_id = ? AND seq = (SELECT MAX(seq) FROM bulk_targets WHERE run_id = ?)`).run(id, id);
+      expect(deselected.changes).toBe(1);
+      expect(bulkLedger.countWriting(id)).toBe(1);
+      expect(await note()).toBe(BULK_UNMEASURED_NOTE_ONE);
+    });
+
+    it('says when the probe was found as planned after a send without a clear answer, not written', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      // Sent without a clear answer, then read back holding the planned value.
+      bulkLedger.markSent(id, 0);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'already');
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      const probe = ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown }).probe;
+      expect(probe).toEqual({ key: keys[0], fields: ['price'], found: true });
     });
 
     it('names the one target a probe wrote and the fields it changed, until the probe is confirmed', async () => {
@@ -12163,9 +12513,40 @@ describe('LynoxHTTPApi', () => {
       expect(await probeOf()).toBeNull();
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
       // The written target, and only the fields the write changed — not the ones sent unchanged.
-      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'] });
+      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'], found: false });
+      // Writing on wider before the confirmation is refused with the engine's reason: what the kind
+      // of entry lacks, and that the one written target is the probe to confirm.
+      const block = { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'confirm' };
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: `https://${host}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((k: string) => (k === 'SHOP_TOKEN' ? 'not-a-real-token-only-a-fixture' : null));
+      try {
+        const wider = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), maxTargets: 2 }) });
+        expect(wider.status).toBe(409);
+        expect(await wider.json()).toMatchObject({ code: 'probe_required', probe: block });
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+      const blockOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probeBlock: unknown }).probeBlock;
+      // Only a run halted for want of a probe carries the reason on its page; this one halted at its maximum.
+      expect(await blockOf()).toBeNull();
+      bulkLedger.halt(id, BULK_HALT_REASONS.probeRequired);
+      expect(await blockOf()).toEqual(block);
+      const ownOf = async (runId: string): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${runId}`)).json()) as { probeOwn: unknown }).probeOwn;
+      expect(await ownOf(id)).toBe(false);
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
       expect(await probeOf()).toBeNull();
+      // Confirmed, the probe stays this run's step, and only this run's.
+      expect(await ownOf(id)).toBe(true);
+      expect(await ownOf(planRun())).toBe(false);
     });
 
     it('offers no probe for a target found already holding its value, and names the halt and what an undo takes back', async () => {
@@ -12240,8 +12621,9 @@ describe('LynoxHTTPApi', () => {
       try {
         const widened = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets: 2 }) });
         expect(widened.status).toBe(409);
+        const refusal = (await widened.json()) as { error: string };
         // The sentence is prompt surface (the model reads refusals): pinned word for word.
-        expect(((await widened.json()) as { error: string }).error).toBe(
+        expect(refusal.error).toBe(
           'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the '
           + 'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes '
           + 'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, '
@@ -12249,6 +12631,19 @@ describe('LynoxHTTPApi', () => {
           + 'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes '
           + 'in a run of their own.',
         );
+        // With it, the engine's reason: no confirmed probe for the kind, and nothing written yet.
+        expect(refusal).toMatchObject({ code: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'write_one' } });
+        // Approving such a run for more than one target is refused with the same reason, before
+        // anything is written: there is no step of this run to name yet.
+        const other = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '3' } })), contract: mintBulkContract(host, keys) });
+        if (!other.ok) throw new Error('not planned');
+        const otherId = other.status.id;
+        bulkLedger.resumePreview(otherId);
+        for (const seq of [0, 1]) bulkLedger.recordRead(otherId, seq, { before: { price: '2' } });
+        bulkLedger.finishPreview(otherId);
+        const wide = await jsonFetch(`/api/bulk/runs/${otherId}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(otherId), maxTargets: 2, unmeasuredConfirmed: true }) });
+        expect(wide.status).toBe(409);
+        expect(await wide.json()).toMatchObject({ code: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: null } });
       } finally {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
@@ -13656,6 +14051,29 @@ describe('LynoxHTTPApi', () => {
       expect(body.configured.api_key).toBe(true);
       expect(body.configured.search).toBe(false);
       expect(body.count).toBe(1);
+    });
+
+    it('GET /api/secrets/status gives a mandate the booleans but not the size of the owner\'s vault', async () => {
+      repayRateWindow();
+      mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY', 'STRIPE_KEY', 'SHOPIFY_TOKEN']);
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-vault' : null));
+      type Resolver = Parameters<typeof api.setPrincipalResolverForTesting>[0];
+      const saved = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown> & { configured: Record<string, boolean> };
+        expect(body.configured.api_key).toBe(true);
+        expect(body.configured.search).toBe(false);
+        expect('count' in body).toBe(false);
+        expect(JSON.stringify(body)).not.toMatch(/"count"/);
+      } finally {
+        api.setPrincipalResolverForTesting(saved);
+      }
+      // The owner, on the same vault, still gets it.
+      const owner = await (await jsonFetch('/api/secrets/status')).json() as { count?: number };
+      expect(owner.count).toBe(3);
     });
 
     // Regression: HN-launch installer bug (2026-05-23). When the npx wizard
@@ -19212,7 +19630,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     // Whoever kept the cookie's value and the URL replays both: refused like any invalid round-trip.
     const replay = await call(query, cookie);
     expect(replay.status).toBe(400);
-    expect(await replay.text()).toContain('This authorization link is no longer valid.');
+    expect(await replay.text()).toContain('This sign-in link is no longer valid. Start the connection again in lynox.');
     expect([mockExchangeToken.mock.calls.length, exchangePassFor.calls.length]).toEqual([1, 1]);
   });
 
@@ -19253,6 +19671,28 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(page).toContain('You can start the connection again.');
     expect(page).not.toMatch(/possibly landed|Do not repeat|same write again/);
     expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('shows the result page in the instance\'s language, in the frame, under the policy that admits only its stylesheet', async () => {
+    repayRateWindow();
+    const { cookie } = await arrange();
+    mockExchangeToken.mockResolvedValue({ ok: false, message: 'token exchange failed: 401.' });
+    // The language is the instance's configured one (`config.language`), read at the page.
+    const config = loadConfig as unknown as { mockReturnValue: (v: unknown) => void };
+    config.mockReturnValue({ default_tier: 'deep', language: 'de' });
+    try {
+      const res = await call(signed(good()), cookie);
+      expect(res.status).toBe(502);
+      expect(res.headers.get('content-security-policy')).toBe(OAUTH_PAGE_CSP);
+      expect(res.headers.get('x-frame-options')).toBe('DENY');
+      expect(OAUTH_PAGE_CSP).toContain("frame-ancestors 'none'");
+      expect(await res.text()).toBe(oauthPageHtml('de', 'Verbindung nicht abgeschlossen',
+        '<h1>Verbindung nicht abgeschlossen</h1>'
+        + '<p>Die Anmeldung beim Anbieter liess sich nicht abschliessen. Es wurde nichts gespeichert. Du kannst die Verbindung neu starten.</p>'
+        + '<a class="go" href="/app/settings/apis">Zu lynox</a>'));
+    } finally {
+      config.mockReturnValue({ default_tier: 'deep' });
+    }
   });
 
   it('when no exchange pass is minted (here: the switch is off), the callback hands the exchange none', async () => {
@@ -19346,9 +19786,32 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     const res = await call(signed(good()), cookie);
     expect(res.status).toBe(200);
     const page = await res.text();
-    expect(page).toContain('Connected. You can close this tab');
+    expect(page).toContain('<h1>Connected</h1><p>Shopify is connected to lynox.</p><a class="go" href="/app/settings/apis">Go to lynox</a>');
     expect(page).not.toContain('more access');
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products']);
+  });
+
+  it('leads back into lynox from every page, to a fixed path that nothing in the request can choose', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const hrefs = (page: string): string[] => [...page.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!);
+    const foreign = { return_to: 'https://evil.example/x', next: '//evil.example', redirect: '/app/settings/../../evil' };
+    // Before the round-trip is known to be this profile's: to /app.
+    const { cookie } = await arrange();
+    const declined = await call(`?${new URLSearchParams({ error: 'access_denied', ...foreign }).toString()}`, cookie);
+    expect(declined.status).toBe(400);
+    const declinedPage = await declined.text();
+    expect(hrefs(declinedPage)).toEqual(['/app']);
+    expect(declinedPage).not.toMatch(/close this tab|Tab schliessen/i);
+    const expired = await call(signed(good({ state: 'not-the-state', ...foreign })), cookie);
+    expect(expired.status).toBe(400);
+    expect(hrefs(await expired.text())).toEqual(['/app']);
+    // Once it is: to Settings → APIs, where the connection's state shows.
+    const { cookie: cookie2 } = await arrange();
+    const ok = await call(signed(good(foreign)), cookie2);
+    expect(ok.status).toBe(200);
+    const okPage = await ok.text();
+    expect(hrefs(okPage)).toEqual(['/app/settings/apis']);
+    expect(okPage).not.toMatch(/close this tab|Tab schliessen|evil/i);
   });
 
   it('records no granted scope when the answer names none', async () => {
@@ -20972,8 +21435,11 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         mockConfirmTrigger.mockClear();
         const preview = await jsonFetch('/api/tasks/task-1/stamp-preview');
         expect(preview.status).toBe(200);
-        const shown = await preview.json() as { expect: string; connections: unknown[] };
+        const shown = await preview.json() as { expect: string; connections: unknown[]; subject: Record<string, unknown>; by: unknown; workflow: unknown };
         expect(shown.connections).toEqual([{ id: 'crm-api', profile: 'CRM', provider: 'api.crm.example', account: 'eva@crm' }]);
+        // What the digest holds, shown field for field (the mandate ids as whom it acts for).
+        expect(shown.subject).toEqual({ id: 'task-1', effect: 'run_agent', source: null, title: 'Report', description: 'Weekly', schedule_cron: null, watch: null, pipeline_id: null, pipeline_params: null, model_tier: null, wf: null });
+        expect([shown.by, shown.workflow]).toEqual(['eva@kanzlei.example', null]);
         // Names only: the grant and the mandate's id stay on the engine.
         expect(JSON.stringify(shown)).not.toContain('grant-secret-1');
         expect(JSON.stringify(shown)).not.toContain(MID);
@@ -20982,6 +21448,8 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         profiles = [crm, { ...crm, id: 'crm2-api', name: 'CRM 2', oauth_grant: { ...crm.oauth_grant, grant_id: 'grant-2' } }];
         const stale = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) });
         expect(stale.status).toBe(409);
+        // The one 409 that asks for another look carries its own code; the view reloads only on it.
+        expect(((await stale.json()) as { code?: unknown }).code).toBe('changed');
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
 
         // The schedule changed since the preview (a mandate's edit): the same list no longer
@@ -21004,6 +21472,16 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         // Without the digest: stamped without a list, as every confirm was before.
         expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+
+        // A mandate's backup or notice never uses a connection: nothing is listed or shown for it.
+        for (const effect of ['backup', 'notify']) {
+          Object.assign(trigger, { effect });
+          const none = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[]; by: unknown };
+          expect([none.connections, none.by]).toEqual([[], null]);
+          expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: none.expect }) })).status).toBe(200);
+          expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+        }
+        Object.assign(trigger, { effect: 'run_agent' });
 
         // The owner's own schedule acts for no mandate: nothing to list, whatever is sent.
         Object.assign(trigger, { created_by: 'owner', created_mandate_id: undefined });
@@ -21040,8 +21518,9 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
       try {
         mockConfirmTrigger.mockClear();
-        const shown = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[] };
+        const shown = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[]; workflow: unknown; subject: Record<string, unknown> };
         expect(shown.connections).toHaveLength(1);
+        expect([shown.workflow, shown.subject['pipeline_id'], shown.subject['wf']]).toEqual([{ name: 'W', confirmed: true }, 'wf-eva', WF]);
         // The workflow was confirmed again since the preview: the list shown went with the
         // earlier confirmation, so it does not confirm this one.
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-09T00:00:00.000Z' } : undefined));
@@ -21054,6 +21533,10 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         editAfter = Infinity;
         expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: WF, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-1' })] });
+        // A workflow nobody confirmed: the preview says so, and the view offers no confirm (a
+        // confirmed schedule on it is switched off by its first run).
+        mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W' } : undefined));
+        expect(((await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json()) as { workflow: unknown }).workflow).toEqual({ name: 'W', confirmed: false });
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();

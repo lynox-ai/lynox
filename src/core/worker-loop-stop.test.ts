@@ -724,6 +724,8 @@ function makeClassHarness(opts: {
       // A run whose targets were given, not listed.
       getListRun: () => null,
       listUnread: () => [1],
+      // A run without the judge's context C.
+      judgeContextOf: () => [],
       getStatus: () => undefined,
       haltPreview: (_id: string, reason: string) => { halts.push(reason); },
     }

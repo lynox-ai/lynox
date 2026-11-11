@@ -14,6 +14,7 @@ import {
   MICROSOFT_OAUTH_CLAIM_PARAM,
   MICROSOFT_OAUTH_DECLINE_CODES,
   MICROSOFT_OAUTH_ERROR_PARAM,
+  MICROSOFT_OAUTH_START_ADDRESS_PARAM,
   OAUTH_DECLINE_CODES,
   isMicrosoftOAuthDeclineCode,
 } from '../src/contract/http.js';
@@ -49,11 +50,12 @@ describe('the Microsoft decline vocabulary', () => {
 });
 
 describe('the new symbols are registered as migrated', () => {
-  it('names all nine, owned by http.ts', () => {
+  it('names all ten, owned by http.ts', () => {
     const rows = MIGRATED.filter((m) => m.contractFile === 'http.ts').map((m) => m.name);
     for (const name of [
       'OAuthHandleProvider', 'OAuthHandleClaimResponse', 'MICROSOFT_OAUTH_DECLINE_CODES', 'MicrosoftOAuthDeclineCode', 'isMicrosoftOAuthDeclineCode',
       'MICROSOFT_OAUTH_CLAIM_PARAM', 'MICROSOFT_OAUTH_ERROR_PARAM', 'AdminConsentStatusRequest', 'AdminConsentStatusResponse',
+      'MICROSOFT_OAUTH_START_ADDRESS_PARAM',
     ]) {
       expect(rows, name).toContain(name);
     }
@@ -82,6 +84,19 @@ describe('the Microsoft return parameters', () => {
   });
 });
 
+describe('the work address on the Microsoft start', () => {
+  it('is microsoft_work_address', () => {
+    expect(MICROSOFT_OAUTH_START_ADDRESS_PARAM).toBe('microsoft_work_address');
+  });
+
+  it('shares no name with the return parameters or the start\'s own', () => {
+    // The start already carries `instance_id` and `token`; the card reads the return names.
+    for (const name of ['instance_id', 'token', MICROSOFT_OAUTH_CLAIM_PARAM, MICROSOFT_OAUTH_ERROR_PARAM, 'google_oauth', 'google_oauth_error']) {
+      expect(MICROSOFT_OAUTH_START_ADDRESS_PARAM).not.toBe(name);
+    }
+  });
+});
+
 describe('the admin-consent status', () => {
   it('has its compile welds in a file tsc reads', () => {
     expect(typeof adminConsentStatusWelds).toBe('function');
@@ -91,7 +106,10 @@ describe('the admin-consent status', () => {
 // The twin check in `migrated.ts` sees a re-declared NAME. A param name drifts by a
 // re-typed STRING instead (the Google card reads `'google_oauth'` by hand), so the
 // literal is swept for here: outside the contract, code imports the constant.
-const PARAM_LITERAL = /['"]microsoft_oauth(?:_error)?['"]|[?&]microsoft_oauth(?:_error)?=/;
+const PARAM_NAMES = String.raw`microsoft_oauth(?:_error)?|microsoft_work_address`;
+// Quoted, as a template literal passed to a call, in a query string, or as an object key.
+// A name in backticks inside a comment is a doc mention and stays allowed.
+const PARAM_LITERAL = new RegExp(String.raw`['"](?:${PARAM_NAMES})['"]|\(\s*\`(?:${PARAM_NAMES})\`|[?&](?:${PARAM_NAMES})=|\b(?:${PARAM_NAMES})\s*:`);
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -101,22 +119,28 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
-describe('the Microsoft return parameters are imported, never typed', () => {
+describe('the Microsoft parameters are imported, never typed', () => {
   it('the sweep finds the literal in each form it is meant to catch, and not in a doc mention', () => {
     for (const line of [
       "params.get('microsoft_oauth')",
       'params.get("microsoft_oauth_error")',
       'c.redirect(`${url}?microsoft_oauth=${nonce}`)',
       'c.redirect(`${url}?x=1&microsoft_oauth_error=${code}`)',
+      "c.req.query('microsoft_work_address')",
+      'c.req.query(`microsoft_work_address`)',
+      '`${cp}/oauth/microsoft/start?instance_id=${id}&microsoft_work_address=${encodeURIComponent(a)}`',
+      'new URLSearchParams({ instance_id: id, microsoft_work_address: a })',
     ]) expect(PARAM_LITERAL.test(line), line).toBe(true);
     for (const line of [
       '// the card reads `microsoft_oauth` through the constant',
       'params.get(MICROSOFT_OAUTH_CLAIM_PARAM)',
+      '// the start carries the user\'s address next to the token',
+      "params.get('work_address')",
       "params.get('google_oauth')",
     ]) expect(PARAM_LITERAL.test(line), line).toBe(false);
   });
 
-  it('no source file under src/ or packages/web-ui/src/ outside the contract types either name', () => {
+  it('no source file under src/ or packages/web-ui/src/ outside the contract types any of the names', () => {
     const files = [...sourceFiles('src'), ...sourceFiles('packages/web-ui/src')];
     // A walk that read nothing would pass; the two trees hold far more than this.
     expect(files.length).toBeGreaterThan(500);

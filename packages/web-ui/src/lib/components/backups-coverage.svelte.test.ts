@@ -24,7 +24,7 @@ let config: Record<string, unknown>;
 
 const backup = (id: string, over: Record<string, unknown>): Record<string, unknown> => ({
 	backup_id: id, version: '2.17.0', created_at: '2026-10-28T08:00:00.000Z', encrypted: false,
-	files: [{ path: 'config.json', size_bytes: 10 }], checksum: 'c', ...over,
+	files: [{ path: 'config.json', size_bytes: 10 }], file_count: 1, total_bytes: 10, checksum: 'c', ...over,
 });
 
 beforeEach(() => {

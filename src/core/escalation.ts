@@ -11,6 +11,9 @@ export interface EscalateOpts {
   title: string;
   /** The context the user needs — becomes the thread's seed message. */
   body: string;
+  /** What the push says instead of `body`, when the push speaks the owner's language and the seed
+   *  stays model context (ux Rest-P E15). Cut like `body`. */
+  pushBody?: string | undefined;
   /** Channel passthrough merged into the push (`threadId` is always added). */
   data?: Record<string, string> | undefined;
   /**
@@ -66,7 +69,7 @@ export function escalateToUser(
   opts: EscalateOpts,
 ): { threadId: string } | null {
   if (!threadStore) {
-    sendWakeup(router, { title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
+    sendWakeup(router, { title: opts.title, body: opts.pushBody ?? opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
     return null;
   }
   const threadId = escalationThreadId(threadStore, opts.key);
@@ -78,7 +81,7 @@ export function escalateToUser(
   // as without a thread store. `POST /api/sessions` refuses a mandate this id up front; this is
   // the second layer, for a row that got there any other way.
   if (isMandateTag(threadStore.getThread(threadId)?.created_by)) {
-    sendWakeup(router, { title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
+    sendWakeup(router, { title: opts.title, body: opts.pushBody ?? opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
     return null;
   }
   // Seed the agent's detail as an `assistant` turn, fronted by a user-role
@@ -107,9 +110,10 @@ export function escalateToUser(
   // Re-mark unread + bump updated_at → floats to the top of the thread list.
   threadStore.updateThread(threadId, { is_unread: true });
   // The push is the wakeup that points at the thread (not the payload).
+  const pushed = opts.pushBody ?? opts.body;
   sendWakeup(router, {
     title: opts.title,
-    body: opts.body.length > 200 ? opts.body.slice(0, 197) + '…' : opts.body,
+    body: pushed.length > 200 ? pushed.slice(0, 197) + '…' : pushed,
     priority: 'high',
     data: { ...(opts.data ?? {}), threadId },
   }, opts.onReported);

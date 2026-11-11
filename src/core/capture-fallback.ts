@@ -318,7 +318,17 @@ export function routeCapturedFact(
   override: AttributionOverride | null,
   factSource: FactSource,
 ): { readonly routing: CaptureRouting; readonly untrusted: boolean } {
-  if (!turnUntrusted) return { routing: 'turn_trusted', untrusted: false };
+  // A turn that read nothing external still has two halves. What the operator said is the
+  // operator's; what stands only under the assistant label is the assistant's own text — a
+  // draft, an example, a newsletter it was asked to write — and a fact taken from it is
+  // invented, not stated (row 1103: a draft for a company with no details left "the company
+  // plans to widen its range next quarter" as an active memory). So the attribution is read
+  // here too, and anything but a literal `user_stated` goes to review, as on an untrusted turn.
+  if (!turnUntrusted) {
+    return factSource === 'user_stated'
+      ? { routing: 'turn_trusted', untrusted: false }
+      : { routing: 'turn_trusted_assistant', untrusted: true };
+  }
   if (override !== null) {
     switch (override) {
       case 'wrapped': return { routing: 'excerpt_external', untrusted: true };

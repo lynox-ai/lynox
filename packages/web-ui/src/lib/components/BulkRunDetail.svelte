@@ -6,13 +6,15 @@
 	returned with the run — so a run that changed since is refused, not approved.
 -->
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
+	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -99,7 +101,9 @@
 			// So is a run whose rollback left targets: the sentence names the marked ones, and each
 			// has to be on the page to be seen. So is a run with a product its store kept with markup
 			// lynox did not send: the halt's sentence points at it, and the mark outlives that halt.
-			const approving = r.body.phase === 'previewed' && r.body.kind === 'apply';
+			// An undo the owner approves is loaded whole too: each target that writes markup back is
+			// listed with it (1010), and an approval covers every one.
+			const approving = r.body.phase === 'previewed';
 			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
@@ -269,7 +273,8 @@
 
 	/** Write on a run that halted while writing (`bulkResumeKind`), against the checksum of the
 	 *  run as this page showed it: a run that changed since is refused, never written on. A run
-	 *  halted at its maximum writes on only under the higher maximum the owner typed. */
+	 *  halted at its maximum writes on only under the higher maximum the owner typed. `check` is
+	 *  the same resume: its pass would send nothing and only reads the unclear targets. */
 	function resume(): Promise<void> {
 		return act(async () => {
 			if (!run?.checksum) return t('common.load_failed');
@@ -279,7 +284,7 @@
 				const max = bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run));
 				if (max === null) return tf('bulk.resume.max_more', { max: String(run.maxTargets ?? 0), all: String(bulkWriting(run)) });
 				body['maxTargets'] = max;
-			} else if (kind !== 'write') {
+			} else if (kind !== 'write' && kind !== 'check') {
 				return t('common.load_failed');
 			}
 			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body));
@@ -317,10 +322,14 @@
 
 	const host = $derived(run ? bulkHostOf(run.targetSystem) : null);
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
-	const step = $derived(run ? bulkStep(run) : 0);
+	const step = $derived(run ? bulkStep(run) : 'planned');
+	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
-	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote ? t('bulk.approve.unmeasured_note') : run.writeFormNote);
+	// With one target to write the note keeps its first two sentences, here and in the engine's own (EN).
+	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote
+		? t(run !== null && bulkWriting(run) === 1 ? 'bulk.approve.unmeasured_note_one' : 'bulk.approve.unmeasured_note')
+		: run.writeFormNote);
 	const unmeasuredConfirmation = $derived(getLocale() === 'de' || !run?.writeFormConfirmation ? t('bulk.approve.unmeasured_confirm') : run.writeFormConfirmation);
 	const canUndo = $derived(run !== null && bulkCanUndo(run));
 	const startKind = $derived(run ? bulkStartKind(run) : null);
@@ -336,12 +345,27 @@
 	const view = $derived(mandate ? bulkMandateI18n(i18n) : i18n);
 	const restartKind = $derived(run ? bulkRestartKind(run) : null);
 	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
+	// A long filter list is folded until the owner shows it all; for this run only (ux U-175).
+	let filtersShownFor = $state<string | null>(null);
+	const filtersFolded = $derived(run !== null && filtersShownFor !== run.id ? bulkListFilterFolded(run.listFilters) : 0);
+	const listFilterText = $derived(run ? bulkListFilterText(run.listFilters, i18n, filtersFolded > 0) : null);
+	let filterLine = $state<HTMLParagraphElement | null>(null);
+	async function showAllFilters(): Promise<void> {
+		if (run === null) return;
+		filtersShownFor = run.id;
+		// The button is gone: focus moves to the line it opened, not to nowhere.
+		await tick();
+		filterLine?.focus();
+	}
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
+	const conflictsText = $derived(run ? bulkConflictsText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
 	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, view) : { text: null, nothing: false });
+	// Counted over the loaded targets: a preview the owner approves is loaded whole.
+	const seoEntity = $derived(approving ? bulkSeoEntityCount(targets) : 0);
 	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
 	const foldedUnchanged = $derived(targets.length - shownTargets.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
@@ -353,12 +377,35 @@
 </script>
 
 <!-- Taking the run back: offered on its own, and beside writing on a run that halted. -->
+{#snippet filterLineOf(text: string)}
+	<p class="text-sm" tabindex="-1" bind:this={filterLine}>{filtersFolded > 0 ? `${text} ` : text}{#if filtersFolded > 0}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => showAllFilters()}>{tf('bulk.list.showAll', { n: String(filtersFolded) })}</button>{/if}</p>
+{/snippet}
+
 {#snippet undoOffer()}
 	<div class="space-y-3 border-t border-border pt-4">
 		<h2 class="text-sm font-medium">{t('bulk.undo.title')}</h2>
 		<p class="text-sm">{t('bulk.undo.explain')}</p>
 		<button type="button" class={btnPlain} disabled={busy} onclick={planUndo}>{t('bulk.undo.prepare')}</button>
 	</div>
+{/snippet}
+
+<!-- The markup a target's new value adds and removes in an HTML field (1010), as code text with
+     every attribute whole (sec-core M3): set as text, never rendered, and wrapped so a long value
+     stays in view. On an undo it says what the undo writes back and takes out. -->
+{#snippet markupList(target: BulkTarget, undo: boolean)}
+	{#each target.markupChanges ?? [] as change (change.field)}
+		{@const list = bulkMarkupList(change, undo, shopify ? bulkFieldNamesText(host, [change.field], t) : bulkVisibleText(change.field), view)}
+		<div class="mt-1 text-xs" data-testid="bulk-markup">
+			{#if list.head}<div class="text-text-subtle">{list.head}</div>{/if}
+			{#if list.restoresNote}<p class="text-warning" data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
+			<ul class="space-y-0.5">
+				{#each list.lines as markupLine, i (i)}
+					<li class="min-w-0"><span class="text-text-subtle">{markupLine.label}</span> <code class="whitespace-pre-wrap break-all">{bulkVisibleText(markupLine.code)}</code><span class="text-text-subtle">{markupLine.template === null ? '' : ` ${markupLine.template}`}</span></li>
+				{/each}
+			</ul>
+			<p class="text-text-subtle">{list.note}</p>
+		</div>
+	{/each}
 {/snippet}
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
@@ -374,8 +421,8 @@
 			<h1 class="text-lg font-medium">{bulkLabel(run, i18n)}</h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
-				{#each BULK_STEPS as s, i (s)}
-					<li class="rounded-full px-2 py-0.5 {i === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={i === step ? 'step' : undefined}>{t(`bulk.step.${s}`)}</li>
+				{#each steps as s (s)}
+					<li class="rounded-full px-2 py-0.5 {s === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={s === step ? 'step' : undefined}>{t(`bulk.step.${s}`)}</li>
 				{/each}
 			</ol>
 
@@ -406,8 +453,8 @@
 				{/if}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.list_note')}</p>
 			{/if}
-			{#if run.conflicts > 0}
-				<p class="text-sm text-text-muted">{tf('bulk.conflicts', { n: String(run.conflicts) })}</p>
+			{#if conflictsText}
+				<p class="text-sm text-text-muted">{conflictsText}</p>
 			{/if}
 			{#if (run.hostRewrote ?? 0) > 0}
 				<p class="text-sm text-text-muted" data-testid="bulk-host-rewrote-count">{run.hostRewrote === 1 ? t('bulk.run.host_rewrote_one') : tf('bulk.run.host_rewrote', { n: String(run.hostRewrote) })}</p>
@@ -421,6 +468,9 @@
 					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(targets.length), n: String(run.total) })}</h2>
 					{#if skipped.text && !skipped.nothing}
 						<p class="text-sm mb-2">{skipped.text}</p>
+					{/if}
+					{#if seoEntity > 0}
+						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-seo-entity-count">{seoEntity === 1 ? t('bulk.preview.seo_entity_one') : tf('bulk.preview.seo_entity', { n: String(seoEntity) })}</p>
 					{/if}
 					<div class="overflow-x-auto">
 						<table class="w-full text-sm">
@@ -440,6 +490,9 @@
 											{/if}
 											{#if target.hostRewrote && !target.shopAddedMarkup}
 												<span class="ml-1 inline-block rounded-full bg-bg-subtle border border-border px-1.5 text-[11px] text-text-muted" data-testid="bulk-host-rewrote">{t('bulk.target.host_rewrote')}</span>
+											{/if}
+											{#if (target.seoEntityFields?.length ?? 0) > 0}
+												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-seo-entity">{t('bulk.target.seo_entity')}</span>
 											{/if}
 											{#if bulkRollbackLeft(run, target)}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
@@ -461,8 +514,15 @@
 											{:else if target.error && target.change !== 'invalid'}
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
+											{@render markupList(target, false)}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n)}</p>
+												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store' })}</p>
+												{#if target.error === 'shortcode_changed' && target.refusedValues}
+													{#each target.refusedValues as { field, value } (field)}
+														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle">{bulkVisibleText(field)}:</div>{/if}
+														<BulkRefusedValue {value} />
+													{/each}
+												{/if}
 											{/if}
 											{#if approving && (target.deselected || writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
@@ -482,7 +542,7 @@
 						</table>
 					</div>
 					{#if foldedUnchanged > 0}
-						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? 'bulk.preview.show_unchanged' : 'bulk.preview.show_unchanged_targets', { n: String(foldedUnchanged) })}</button>
+						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? bulkOne('bulk.preview.show_unchanged', foldedUnchanged) : bulkOne('bulk.preview.show_unchanged_targets', foldedUnchanged), { n: String(foldedUnchanged) })}</button>
 					{/if}
 					{#if targets.length < run.total}
 						<button type="button" class="{btnPlain} mt-2" onclick={showMore}>{tf('bulk.preview.show_all', { n: String(run.total) })}</button>
@@ -505,6 +565,7 @@
 			{:else if startKind === 'list' && run.listFirstPage}
 				<div class="space-y-3 border-t border-border pt-4">
 					<p class="text-sm">{tf('bulk.start.list_explain', { provider, address: bulkVisibleText(run.listFirstPage) })}</p>
+					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t(startButton ?? 'bulk.start.list')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
@@ -529,6 +590,18 @@
 							{/each}
 						</ul>
 					</div>
+					{#if run.judgeRule.context && run.judgeRule.context.length > 0}
+						<!-- The context C goes to the judge's provider too: shown before the start the hash binds (U-140). -->
+						<div data-testid="bulk-start-context">
+							<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.context_fields')}</h3>
+							<ul class="text-sm space-y-0.5">
+								{#each run.judgeRule.context as field (field)}
+									<li>{#if shopify}{bulkFieldNamesText(host, [field], t)}{:else}<code class="text-xs">{bulkVisibleText(field)}</code>{/if}</li>
+								{/each}
+							</ul>
+							<p class="text-xs text-text-muted mt-1">{tf('bulk.start.context_explain', { provider: bulkJudgeProviderName(run.judgeServedBy.provider) })}</p>
+						</div>
+					{/if}
 					<div class="text-sm space-y-1">
 						<label class="flex flex-wrap items-center gap-2">
 							{t('bulk.start.cap_prefix')}
@@ -612,6 +685,8 @@
 					{/if}
 					{#if resumeKind === 'none'}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.resume.none')}</p>
+					{:else if resumeKind === 'nothing'}
+						<p class="text-sm">{resumeText.check}</p>
 					{:else}
 						{#if resumeText.soFar}
 							<p class="text-sm">{resumeText.soFar}</p>
@@ -628,13 +703,20 @@
 								{/if}
 							</div>
 						{/if}
-						<p class="text-sm text-text-muted">{resumeText.kept}</p>
+						{#if resumeText.check}
+							<p class="text-sm">{resumeText.check}</p>
+						{/if}
+						{#if resumeText.kept}
+							<p class="text-sm text-text-muted">{resumeText.kept}</p>
+						{/if}
 						{#if resumeText.allows}
 							<p class="text-sm">{resumeText.allows}</p>
 						{/if}
-						<p class="text-sm text-text-muted">{t('bulk.resume.window')}</p>
+						{#if resumeKind !== 'check'}
+							<p class="text-sm text-text-muted">{t('bulk.resume.window')}</p>
+						{/if}
 						<div class="flex flex-wrap gap-2">
-							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{t('bulk.resume.write')}</button>
+							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{t(resumeKind === 'check' ? 'bulk.resume.check' : 'bulk.resume.write')}</button>
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
 					{/if}
@@ -645,6 +727,14 @@
 			{:else if run.phase === 'previewed' && run.kind === 'apply'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.approve.title')}</h2>
+					{#if skipped.nothing}
+						<!-- Nothing left to write: no note on what a write does, no button that cannot act. -->
+						<p id="bulk-approve-nothing" class="text-sm">{skipped.text}</p>
+						<div class="flex flex-wrap gap-2">
+							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+						</div>
+					{:else}
+					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}
 					{#if run.writeForm === 'unmeasured'}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{unmeasuredNote}</p>
 						<label class="flex gap-2 items-start text-sm">
@@ -656,7 +746,8 @@
 						<p class="text-sm">{t('bulk.approve.shopify_visible')}</p>
 					{/if}
 					{#if host !== null && !run.probeConfirmed}
-						<p class="text-sm">{t('bulk.approve.one_first')}</p>
+						<!-- With one target to write, the first is the whole run: nothing is left to approve after it. -->
+						<p class="text-sm">{t(bulkWriting(run) === 1 ? 'bulk.approve.only_one' : 'bulk.approve.one_first')}</p>
 					{:else}
 						<label class="flex items-center gap-2 text-sm">
 							{t('bulk.approve.at_most')}
@@ -666,25 +757,24 @@
 					{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary}
-							disabled={busy || skipped.nothing || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
-							aria-describedby={skipped.nothing ? 'bulk-approve-nothing' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
+							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
+							aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>
-							{host !== null && !run.probeConfirmed ? t('bulk.approve.write_one') : t('bulk.approve.approve')}
+							{host !== null && !run.probeConfirmed ? t(bulkWriting(run) === 1 ? 'bulk.approve.write_only' : 'bulk.approve.write_one') : t('bulk.approve.approve')}
 						</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
-					{#if skipped.nothing}
-						<p id="bulk-approve-nothing" class="text-sm">{skipped.text}</p>
-					{:else if run.writeForm === 'unmeasured' && !unmeasuredOk}
+					{#if run.writeForm === 'unmeasured' && !unmeasuredOk}
 						<p id="bulk-approve-confirm-first" class="text-xs text-text-subtle">{t('bulk.approve.confirm_first')}</p>
+					{/if}
 					{/if}
 				</div>
 			{:else if atProbe && run.probe}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
 					<p class="text-sm">{run.probe.fields.length > 0
-						? tf('bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
-						: tf('bulk.probe.explain_whole', { target: bulkVisibleText(run.probe.key), provider })}</p>
+						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
+						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: bulkVisibleText(run.probe.key), provider })}</p>
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
 						<span>{tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
@@ -704,6 +794,12 @@
 					<h2 class="text-sm font-medium">{t('bulk.undo.approve_title')}</h2>
 					<!-- The targets that get a value back; the entries the source created are listed apart. -->
 					<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
+					{#each targets.filter((x) => (x.markupChanges?.length ?? 0) > 0) as target (target.seq)}
+						<div class="text-sm" data-testid="bulk-undo-markup">
+							<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+							{@render markupList(target, true)}
+						</div>
+					{/each}
 					{#if run.changes.delete > 0}
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>

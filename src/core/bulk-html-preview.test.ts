@@ -61,6 +61,7 @@ describe('getPreview: markupChanges', () => {
       field: 'description',
       added: [{ kind: 'element', namespace: 'html', element: 'a', attributes: [['href', 'https://partner.example/p?q=1']], text: null, inTemplate: false }],
       removed: [{ kind: 'element', namespace: 'html', element: 'img', attributes: [['src', 'https://shop.example.com/a.jpg']], text: null, inTemplate: false }],
+      addsOutsideAllowlist: false,
     }]);
   });
 
@@ -71,7 +72,7 @@ describe('getPreview: markupChanges', () => {
     );
     const [t] = ledger.getPreview(id);
     expect(t!.markupChanges).toEqual([
-      { field: 'short_description', added: [{ kind: 'comment', namespace: '', element: '', attributes: [], text: ' c ', inTemplate: false }], removed: [] },
+      { field: 'short_description', added: [{ kind: 'comment', namespace: '', element: '', attributes: [], text: ' c ', inTemplate: false }], removed: [], addsOutsideAllowlist: true },
     ]);
   });
 

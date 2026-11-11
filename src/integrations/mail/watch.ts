@@ -17,6 +17,8 @@ import {
   type MailProvider,
   type MailWatchHandle,
 } from './provider.js';
+import { InboundMailDeferred } from './inbound-deferred.js';
+import { processErrorText } from '../../core/error-egress.js';
 import { prefilter } from './triage/rules.js';
 import type { MailStateDb } from './state.js';
 
@@ -25,6 +27,9 @@ import type { MailStateDb } from './state.js';
  * polling interval — we want timely reminders even if no new mail arrives.
  */
 const FOLLOWUP_CHECK_INTERVAL_MS = 60_000;
+
+/** Cap on mails held back per account after a deferral; beyond it the newest are not held. */
+const DEFERRED_MAX_PER_ACCOUNT = 500;
 
 /**
  * Called for each batch of truly-new envelopes (post-dedup, optionally
@@ -50,6 +55,8 @@ export interface MailWatcherAttachOptions {
 interface Attachment {
   provider: MailProvider;
   handle: MailWatchHandle;
+  /** Ends this attachment's claim on the held mails: a poll still in its handler holds nothing. */
+  retire: () => void;
 }
 
 export class MailWatcher {
@@ -68,6 +75,16 @@ export class MailWatcher {
    * channel must not assume it is throttled in that case.
    */
   private readonly lastErrors = new Map<string, { code: MailErrorCode; at: string }>();
+  /**
+   * Mails a handler deferred (`InboundMailDeferred`), per account, handed over again with the
+   * account's next successful poll. The watcher holds them itself because a provider does not
+   * list a mail twice: Gmail remembers what it emitted and moves its window on, Graph commits its
+   * cursor. Only IMAP would list it again. Held here for the polls, and kept in the state DB
+   * (`holdDeferredMail`) so a restart does not lose them: `attach` takes the kept ones back, and
+   * a kept mail is released once it is marked seen. A deferral that lands after the account was
+   * detached is still kept there (a restore defers and then exits), only not held here.
+   */
+  private readonly deferred = new Map<string, MailEnvelope[]>();
   private followupTimer: ReturnType<typeof setInterval> | null = null;
   /** Optional callback invoked each time the followup-check fires. */
   private followupCheckCallback: (() => Promise<void>) | null = null;
@@ -130,6 +147,14 @@ export class MailWatcher {
     const folder = options.folder;
     const intervalMs = options.intervalMs;
     const maxPerTick = options.maxPerTick;
+    // A poll can still be in its handler when the account is detached; its deferral must not
+    // bring back a held list that detach cleared (it would reach a later account of the same id).
+    let live = true;
+    // Mails deferred before a restart come back first.
+    const kept = this.keptDeferred(accountId);
+    if (kept.length > 0) {
+      this.deferred.set(accountId, withoutRepeats([...kept, ...(this.deferred.get(accountId) ?? [])]).slice(0, DEFERRED_MAX_PER_ACCOUNT));
+    }
 
     const handle = await provider.watch(
       {
@@ -147,10 +172,16 @@ export class MailWatcher {
         }
         // A successful poll, with or without new mail, ends any error state.
         this.lastErrors.delete(accountId);
-        if (event.type === 'ok') return;
+        // Mails deferred on an earlier poll come first; one the provider lists again counts once.
+        const held = this.deferred.get(accountId) ?? [];
+        this.deferred.delete(accountId);
+        const listed = event.type === 'new' ? event.envelopes : [];
+        const envelopes = held.length === 0 ? listed : withoutRepeats([...held, ...listed], listed);
+        if (envelopes.length === 0) return;
 
         // 1. Dedup against the SQLite state DB
-        const { fresh } = this.state.partition(accountId, event.envelopes);
+        const { fresh, alreadySeen } = this.state.partition(accountId, envelopes);
+        if (held.length > 0) this.release(accountId, alreadySeen);
         if (fresh.length === 0) return;
 
         // 2. Optional prefilter — deterministic noise rejection
@@ -179,9 +210,12 @@ export class MailWatcher {
         //    follow-up resolution) left the mail marked seen yet unprocessed.
         //    (A throw inside the classifier hook itself is swallowed upstream
         //    in MailContext's wrapper, so it does not reach here — the hook
-        //    dead-letters instead of throwing on backpressure.) The hook is
+        //    dead-letters instead of throwing on backpressure. The one throw
+        //    let through is `InboundMailDeferred`, which a hook uses exactly
+        //    to keep the mail unseen for the next tick.) The hook is
         //    thread-idempotent (findItemByThread short-circuit) so a next-tick
         //    retry cannot double-insert.
+        // A held mail is never noise here: it passed this same prefilter when it was deferred.
         if (noise.length > 0) this.state.markSeenBatch(accountId, noise);
 
         if (survivors.length === 0) return;
@@ -193,17 +227,70 @@ export class MailWatcher {
         try {
           await this.handler(accountId, survivors);
           this.state.markSeenBatch(accountId, survivors);
-        } catch {
-          /* swallow — survivors stay unseen for next-tick retry */
+          if (held.length > 0) this.release(accountId, survivors);
+        } catch (err: unknown) {
+          // Swallowed — survivors stay unseen. A deferral also holds them for the next poll, as
+          // the provider will not list them again (see `deferred`), and keeps them in the state
+          // DB, also once the account is detached: a restore defers and then exits.
+          if (err instanceof InboundMailDeferred) {
+            this.keep(accountId, survivors);
+            if (live) this.hold(accountId, survivors);
+          }
         }
       },
     );
 
-    this.attachments.set(accountId, { provider, handle });
+    this.attachments.set(accountId, { provider, handle, retire: () => { live = false; } });
 
     return async () => {
       await this.detach(accountId);
     };
+  }
+
+  /**
+   * Hold deferred mails for the account's next poll, after what it already holds: a Gmail poll
+   * can overlap the one before it (no guard there), so a second deferral must not replace the
+   * first one's mails. Beyond the cap the newest are dropped, and the drop is logged.
+   */
+  private hold(accountId: string, survivors: ReadonlyArray<MailEnvelope>): void {
+    const all = withoutRepeats([...(this.deferred.get(accountId) ?? []), ...survivors]);
+    if (all.length > DEFERRED_MAX_PER_ACCOUNT) {
+      process.stderr.write(`[lynox] mail watcher: ${String(all.length - DEFERRED_MAX_PER_ACCOUNT)} deferred mail(s) for one account over the cap of ${String(DEFERRED_MAX_PER_ACCOUNT)} not held for the next poll\n`);
+    }
+    this.deferred.set(accountId, all.slice(0, DEFERRED_MAX_PER_ACCOUNT));
+  }
+
+  /**
+   * The state DB's side of the held mails. Each step is best-effort: a failing write is logged
+   * and the poll goes on, as it did when the mails lived only in memory.
+   */
+  private keep(accountId: string, envelopes: ReadonlyArray<MailEnvelope>): void {
+    try {
+      const notKept = this.state.holdDeferredMail(accountId, envelopes, DEFERRED_MAX_PER_ACCOUNT);
+      if (notKept > 0) {
+        process.stderr.write(`[lynox] mail watcher: ${String(notKept)} deferred mail(s) for one account over the cap of ${String(DEFERRED_MAX_PER_ACCOUNT)} not kept across a restart\n`);
+      }
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] mail watcher: deferred mail not kept across a restart: ${processErrorText(err)}\n`);
+    }
+  }
+
+  private release(accountId: string, envelopes: ReadonlyArray<MailEnvelope>): void {
+    if (envelopes.length === 0) return;
+    try {
+      this.state.releaseDeferredMail(accountId, envelopes);
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] mail watcher: kept deferred mail not released: ${processErrorText(err)}\n`);
+    }
+  }
+
+  private keptDeferred(accountId: string): MailEnvelope[] {
+    try {
+      return this.state.deferredMail(accountId);
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] mail watcher: kept deferred mail not read: ${processErrorText(err)}\n`);
+      return [];
+    }
   }
 
   /** Detach a single provider. Idempotent. */
@@ -212,6 +299,8 @@ export class MailWatcher {
     if (!attached) return;
     this.attachments.delete(accountId);
     this.lastErrors.delete(accountId);
+    attached.retire();
+    this.deferred.delete(accountId);
     await attached.handle.stop();
   }
 
@@ -220,6 +309,28 @@ export class MailWatcher {
     this.stopFollowupCheck();
     const all = [...this.attachments.values()];
     this.attachments.clear();
+    for (const a of all) a.retire();
+    this.deferred.clear();
     await Promise.allSettled(all.map(a => a.handle.stop()));
   }
+}
+
+/**
+ * The envelopes without a second copy of one, in the place of the first copy. Same key as the
+ * state DB's dedup (the Message-ID), and folder plus uid for a mail without one. The copy taken
+ * is the one in `preferred` where there is one (what the provider lists now, with a uid valid in
+ * this process; a mail kept across a restart carries uid 0), else the first.
+ */
+function withoutRepeats(envelopes: ReadonlyArray<MailEnvelope>, preferred: ReadonlyArray<MailEnvelope> = []): MailEnvelope[] {
+  const keyOf = (env: MailEnvelope): string => (env.messageId ? `id\u0000${env.messageId}` : `uid\u0000${env.folder}\u0000${String(env.uid)}`);
+  const current = new Map(preferred.map((env) => [keyOf(env), env] as const));
+  const seen = new Set<string>();
+  const out: MailEnvelope[] = [];
+  for (const env of envelopes) {
+    const key = keyOf(env);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(current.get(key) ?? env);
+  }
+  return out;
 }

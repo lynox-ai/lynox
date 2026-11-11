@@ -13,7 +13,7 @@ import { Engine } from '../../src/core/engine.js';
 
 // The options each real bootstrap was called with, so a test can read what the cold boot chose
 // for the classifier's key and meter. The bootstrap itself still runs.
-const bootCalls = vi.hoisted(() => [] as Array<{ mistralApiKey?: string; meteredHost?: unknown }>);
+const bootCalls = vi.hoisted(() => [] as Array<{ mistralApiKey?: string; meteredHost?: unknown; confirmAutoReply?: unknown }>);
 vi.mock('../../src/integrations/inbox/bootstrap.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/integrations/inbox/bootstrap.js')>();
   return {
@@ -108,6 +108,48 @@ describe('Engine boot — unified-inbox flag', () => {
     expect(mailContext!.hooks.inboxLabelOf).toBe(runtime!.inboxLabelOf);
     // inbox_read reads the store through the same wiring.
     expect(mailContext!.hooks.inboxReader).toBe(runtime!.inboxReader);
+  });
+
+  // 801 part 1b: a Graph envelope from the watch carries no headers, so the hook asks the mail
+  // registry for the full message before a follow-up reopens a replied item.
+  it('flag on: the cold boot gives the inbox a lookup that reads the message through the mail registry', async () => {
+    process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
+    engine = new Engine({});
+    await engine.init();
+    const confirm = (bootCalls.at(-1) as { confirmAutoReply?: (id: string, env: unknown) => Promise<boolean> } | undefined)?.confirmAutoReply;
+    expect(confirm).toBeInstanceOf(Function);
+    const mailContext = (engine as unknown as { _mailContext: { registry: { add(p: unknown): void } } | null })._mailContext;
+    expect(mailContext, 'the boot made a mail context').not.toBeNull();
+    const fetch = vi.fn(async () => ({ envelope: { isAutoReply: true }, text: '' }));
+    mailContext!.registry.add({ accountId: 'acct-graph', authType: 'oauth_microsoft', fetch });
+    await expect(confirm!('acct-graph', { uid: 7, folder: 'INBOX' })).resolves.toBe(true);
+    expect(fetch).toHaveBeenCalledWith({ uid: 7, folder: 'INBOX' });
+    await expect(confirm!('acct-missing', { uid: 7, folder: 'INBOX' })).rejects.toThrow();
+
+    // End to end through the runtime's hook: a Graph account's follow-up on a replied item stays
+    // closed when the fetched message is an automatic reply, and opens when it is not.
+    const runtime = engine.getInboxRuntime()!;
+    const mailDb = (engine as unknown as { _mailStateDb: { upsertAccount(a: unknown): void } })._mailStateDb;
+    mailDb.upsertAccount({
+      id: 'acct-graph', displayName: 'M365', address: 'me@m365.example', preset: 'custom',
+      imap: { host: 'i', port: 993, secure: true }, smtp: { host: 's', port: 465, secure: true },
+      authType: 'oauth_microsoft', type: 'personal', isDefault: false,
+    });
+    const itemId = runtime.state.insertItem({
+      accountId: 'acct-graph', channel: 'email', threadKey: 'graph:conv-1', bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'r', classifiedAt: new Date('2026-11-03T08:00:00Z'), classifierVersion: 'v1', messageId: '<first@m365>',
+    });
+    runtime.state.updateUserAction(itemId, 'replied', new Date('2026-11-03T09:00:00Z'));
+    const env = (messageId: string) => ({
+      uid: 7, messageId, folder: 'INBOX', threadKey: 'graph:conv-1', inReplyTo: '<first@m365>',
+      from: [{ address: 'kunde@example.com' }], to: [], cc: [], replyTo: [], subject: 'Re', date: new Date('2026-11-04T09:00:00Z'),
+      flags: [], snippet: 'x', hasAttachments: false, attachmentCount: 0, sizeBytes: 0, isAutoReply: false,
+    });
+    await runtime.hook('acct-graph', env('<ooo@m365>'));
+    expect(runtime.state.getItem(itemId)!.userAction).toBe('replied');
+    fetch.mockResolvedValue({ envelope: { isAutoReply: false }, text: '' });
+    await runtime.hook('acct-graph', env('<real@m365>'));
+    expect(runtime.state.getItem(itemId)!.userAction).toBeUndefined();
   });
 
   it('flag on: shutdown drains the inbox runtime cleanly', async () => {

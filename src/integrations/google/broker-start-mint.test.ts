@@ -2,6 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { createHmac } from 'node:crypto';
 import {
   BROKER_START_GOLDEN as golden,
+  BROKER_START_GOLDEN_V2 as goldenV2,
+  BROKER_START_PROVIDERS,
+  brokerStartPayloadV2,
+  formatBrokerStartTokenV2,
   BROKER_START_NONCE_BYTES,
   BROKER_START_PURPOSE,
   brokerStartPayload,
@@ -50,6 +54,31 @@ describe('the golden broker start token — the bytes the control plane must als
     const proper = deriveBrokerStartKey(golden.signingKey);
     const undomained = createHmac('sha256', golden.signingKey).update('').digest();
     expect(proper.equals(undomained)).toBe(false);
+  });
+});
+
+describe('the golden v2 tokens — provider-bound, the bytes the control plane must also compute (row 1224)', () => {
+  // The engine does not MINT v2 yet (expand/contract: it switches once a control plane that
+  // accepts v2 is on prod). What this repo owes now is the arithmetic: the same signer, over
+  // the v2 payload, produces the contract's vectors, so the control plane can test against them.
+  it.each(BROKER_START_PROVIDERS)('%s: this repo\'s signer produces the contract vector', (provider) => {
+    const payload = brokerStartPayloadV2({ provider, instanceId: goldenV2.instanceId, ts: goldenV2.ts, nonce: goldenV2.nonce });
+    expect(payload).toBe(goldenV2[provider].payload);
+    const sig = signBrokerStartPayload(payload, goldenV2.signingKey);
+    expect(formatBrokerStartTokenV2({ ts: goldenV2.ts, nonce: goldenV2.nonce, sig })).toBe(goldenV2[provider].token);
+  });
+
+  it('matches the written-down derivation, computed independently', () => {
+    const key = createHmac('sha256', goldenV2.signingKey).update(BROKER_START_PURPOSE).digest();
+    for (const provider of BROKER_START_PROVIDERS) {
+      const sig = createHmac('sha256', key).update(goldenV2[provider].payload).digest('hex');
+      expect(goldenV2[provider].token).toBe(`v2.${goldenV2.ts}.${goldenV2.nonce}.${sig}`);
+    }
+  });
+
+  it('a token signed for one provider is not a token for the other, nor a v1 token', () => {
+    expect(goldenV2.google.token).not.toBe(goldenV2.microsoft.token);
+    expect(goldenV2.google.token.slice(-64)).not.toBe(golden.token.slice(-64));
   });
 });
 

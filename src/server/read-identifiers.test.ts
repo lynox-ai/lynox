@@ -26,14 +26,16 @@ const NOT_IDENTIFYING = new Set([
   'limit', 'offset', 'before', 'since', 'fromSeq', 'days', 'dateFrom', 'dateTo', 'tzOffsetMin', 'window',
   // Filters over a list: what kind, not which one.
   'status', 'type', 'stage', 'bucket', 'model', 'includeArchived', 'snoozedOnly', 'hidden', 'reveal', 'view',
+  // How much of each listed item to send: the backup list's per-file entries.
+  'files',
   // Free text: content, never logged.
   'q',
   // An OAuth provider's answer: a code and a state are credentials.
   'code', 'state', 'error',
   // Read outside a mandate's GET routes, or not naming an object: usage period (a helper of
   // the usage routes), a memory delete's pattern, an admin cleanup's preview, an admin window,
-  // the scopes a connect confirmation was shown (read on the POST only).
-  'period', 'pattern', 'dryRun', 'hours', 'shown_scopes',
+  // the scopes and the helper's note a connect confirmation was shown (read on the POST only).
+  'period', 'pattern', 'dryRun', 'hours', 'shown_scopes', 'shown_note',
 ]);
 const IDENTIFYING = new Set([...READ_IDENTIFIERS.values()].flat());
 /** Routes that read the query through a helper taking a variable name; each says which names. */
@@ -144,8 +146,8 @@ describe('the query identifiers of a read row, held to the handlers', () => {
     expect(other).toEqual([
       // A plugin's file URL, not a request's.
       'const mod = await import(pathToFileURL(abs).href) as { handler?: unknown };',
-      // The request log line, with a webhook route token taken out.
-      "const url = redactWebhookPath(req.url ?? '/');",
+      // The request log line: path and parameter names, no route token, no query value.
+      "const url = requestLogUrl(req.url ?? '/');",
       // The webhook route admits a raw path only when it equals the parsed one; the comparison
       // reads the path up to `?`, never the query.
       "if (token !== null && isCanonicalRequestPath(req.url ?? '/', url.pathname)) {",

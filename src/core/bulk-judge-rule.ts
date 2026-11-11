@@ -48,6 +48,27 @@ export interface JudgeRule {
    *  is without the model repeating it. Absent: the flat verdict over F, as every rule planned
    *  before the envelope was stored; such a rule keeps its hash, and its run its checksum. */
   verdict?: 'envelope' | undefined;
+  /** The context C (PRD shopify-preset §20.2 item 7): fields the judge reads beside the record
+   *  and never writes — disjoint from F, never the id field, on a Shopify list only
+   *  {@link SHOPIFY_CONTEXT_FIELDS}. Shown to the owner before the start. Absent when none is
+   *  planned, never empty: a rule planned without C keeps its hash, and its run its checksum. */
+  context?: string[] | undefined;
+}
+
+/** The fields a Shopify product run may read as context C: the product's own texts and its
+ *  type, vendor and tags, flat as {@link shopifyContextOf} projects them. */
+export const SHOPIFY_CONTEXT_FIELDS: readonly string[] = Object.freeze([
+  'title', 'descriptionHtml', 'seo_title', 'seo_description', 'productType', 'vendor', 'tags',
+]);
+
+/** The names a context may take on a list of this form, or undefined where the form does not
+ *  bound them (a list that is not a store's: its elements' fields are the API's). A store form
+ *  that takes no judge yet takes no context either. */
+export function contextFieldsOfListForm(form: unknown): readonly string[] | undefined {
+  // A filtered product list (`shopify_filtered`) reads its products with the same document.
+  if (form === 'shopify' || form === 'shopify_filtered') return SHOPIFY_CONTEXT_FIELDS;
+  if (form === 'shopify_media') return [];
+  return undefined;
 }
 
 /** Targets with a verdict a write can use: not invalid (before the judge or by its answer), and
@@ -137,10 +158,46 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
 }
 
 /**
- * Build the rule a run stores from what `bulk_plan` was given, or refuse it. `idField`: the
- * field a list identifies its elements by — a verdict never sets it.
+ * The context C a rule plans, or undefined for none: 0 to {@link JUDGE_MAX_FIELDS} top-level
+ * names under F's name rule, no duplicates, none of F, not the id field, and where `allowed` is
+ * given only its names. An empty list is no context, so it is left out of the rule.
  */
-export function normalizeJudgeRule(input: unknown, opts: { idField?: string | undefined } = {}): JudgeRule {
+function normalizeContext(
+  raw: unknown, fields: readonly string[], idField: string | undefined, allowed: readonly string[] | undefined,
+): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > JUDGE_MAX_FIELDS) {
+    throw new BulkSourceError(`judge.context must be a list of 0–${String(JUDGE_MAX_FIELDS)} field names.`);
+  }
+  const seen = new Set<string>();
+  for (const name of raw) {
+    if (typeof name !== 'string' || !FIELD_RE.test(name) || RESERVED_NAMES.has(name)) {
+      throw new BulkSourceError('judge.context: a field name must be one top-level name (letters, digits, _), not __proto__, constructor or prototype.');
+    }
+    if (seen.has(name)) throw new BulkSourceError(`judge.context names ${name} twice.`);
+    if (fields.includes(name)) {
+      throw new BulkSourceError(`judge.context names ${name}, which judge.schema decides: a field is either read as context or decided, not both.`);
+    }
+    if (idField !== undefined && name === idField) {
+      throw new BulkSourceError('judge.context must not name the id field: the run reads it already, as the target.');
+    }
+    if (allowed !== undefined && !allowed.includes(name)) {
+      throw new BulkSourceError(`judge.context names ${name}, which this form does not read. It reads: ${allowed.join(', ')}.`);
+    }
+    seen.add(name);
+  }
+  return seen.size === 0 ? undefined : [...seen];
+}
+
+/**
+ * Build the rule a run stores from what `bulk_plan` was given, or refuse it. `idField`: the
+ * field a list identifies its elements by — a verdict never sets it, and the context never names
+ * it. `contextFields`: the names a context may take where the source's form bounds them (a
+ * Shopify list: {@link SHOPIFY_CONTEXT_FIELDS}); any name of F's rule without it.
+ */
+export function normalizeJudgeRule(
+  input: unknown, opts: { idField?: string | undefined; contextFields?: readonly string[] | undefined } = {},
+): JudgeRule {
   if (!isPlainObject(input)) throw new BulkSourceError('judge must be an object with rule and schema.');
   const rule = input['rule'];
   if (typeof rule !== 'string' || rule.trim() === '') {
@@ -178,7 +235,10 @@ export function normalizeJudgeRule(input: unknown, opts: { idField?: string | un
   const tierRaw = input['tier'];
   const tier = tierRaw === undefined ? 'fast' : normalizeTier(typeof tierRaw === 'string' ? tierRaw : '');
   if (tier === undefined) throw new BulkSourceError('judge.tier must be fast, balanced or deep.');
-  return { rule, schema, tier, verdict: 'envelope' };
+  const context = normalizeContext(input['context'], names, opts.idField, opts.contextFields);
+  // Left out, never `undefined`: `canonicalJson` writes an undefined key as null, and the rule's
+  // hash would change for every rule planned without a context.
+  return { rule, schema, tier, verdict: 'envelope', ...(context !== undefined ? { context } : {}) };
 }
 
 /** The schema the judge's call is bound by: the rule's own over F, or around it the envelope

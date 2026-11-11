@@ -24,7 +24,7 @@ import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
-import { WORKFLOW_ENDED_MID_RUN, sourceRefusal, type RunSource } from './run-source.js';
+import { NestedRunEndedError, WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR, heldSource, isAuthorStop, sourceRefusal, type RunSource } from './run-source.js';
 import { childFilingContext } from '../core/approval-filing.js';
 import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
@@ -844,21 +844,24 @@ export async function retryManifest(
  * has ended since the run started ends here, before its next step, as `sourceRefusal` refuses it
  * at the start. A worker's plan run is also stopped by its sweep (`stopEndedStarters`); this is the
  * same end for a run nothing else watches — the library's Run, a chat's `run_workflow` — and the
- * worker records it as that sweep's stop. A check that throws ends the run too. A run that already
- * ended on a cause of its own keeps it, as with the stop. True when the run must halt.
+ * worker records it as that sweep's stop. A sub-run (`runtime: 'pipeline'`) reads the saved
+ * workflow that holds it, so its own steps stop too, not only the outer ones (1184). A check that
+ * throws ends the run too, with an error of its own that does not say an access ended. A run that
+ * already ended on a cause of its own keeps it, as with the stop. True when the run must halt.
  */
 export function stopForEndedAuthor(options: RunManifestOptions, state: RunState): boolean {
-  if (options.source.kind !== 'saved') return false;
-  let ended: boolean;
+  const saved = heldSource(options.source);
+  if (saved === undefined) return false;
+  let error: string | undefined;
   try {
-    ended = sourceRefusal(options.source, options.depth ?? 0) !== undefined;
+    error = sourceRefusal(saved, options.depth ?? 0) !== undefined ? WORKFLOW_ENDED_MID_RUN_ERROR : undefined;
   } catch {
-    ended = true;
+    error = WORKFLOW_END_CHECK_FAILED_ERROR;
   }
-  if (!ended) return false;
+  if (error === undefined) return false;
   if (state.status !== 'running') return true;
   state.status = 'failed';
-  state.error = WORKFLOW_ENDED_MID_RUN;
+  state.error = error;
   state.completedAt = new Date().toISOString();
   return true;
 }
@@ -1200,7 +1203,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset, options.source);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -1335,6 +1338,24 @@ async function executeStep(
     // aborted) or ends the run anyway: a stopped run does not carry on to the next step.
     if (stoppedByOwner(options, state)) return 'halt';
     if (questionUnanswered(options, state)) return 'halt';
+    // …and so does a sub-run that stopped for its makers' access: the run that holds it ends with
+    // that cause as the sub-run read it, whatever `on_failure` says. Only that error: a step that
+    // failed on its own keeps its outcome, and the next step's check reads the access again.
+    if (err instanceof NestedRunEndedError) {
+      if (state.status === 'running') {
+        state.status = 'failed';
+        state.error = err.runError;
+        state.completedAt = new Date().toISOString();
+      }
+      return 'halt';
+    }
+    // A sibling in the same phase already ended the run for its makers' access: the two branches
+    // below that would write the run's own cause leave it. This step's failure or rejection may
+    // follow from the same end, and only that cause tells the worker to stop the plan and the model
+    // not to start it again (1184, review r2). Under `continue` and `notify` nothing overwrites it,
+    // so the step's failure is still recorded and notified there (review r3).
+    const overwritesCause = err instanceof GateRejectedError || err instanceof GateExpiredError || manifest.on_failure === 'stop';
+    if (overwritesCause && state.status !== 'running' && isAuthorStop(state.error)) return 'halt';
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
       state.status = 'rejected';

@@ -28,9 +28,13 @@ export type SeoTextResult = { ok: true } | { ok: false; reason: 'seo_text_refuse
 // --- Which fields are checked. Only the form knows a field's content type; a key name is no
 // evidence. WooCommerce keeps its SEO fields in plugin `meta_data`, not in the list form.
 
+// A theme falls back to the product title where the meta title is empty.
+const SHOPIFY_PRODUCT_SEO_FIELDS: readonly string[] = Object.freeze(['title', 'seo_title', 'seo_description']);
+
 const SEO_FIELDS: Readonly<Record<BulkListSourceForm, readonly string[]>> = Object.freeze({
-  // A theme falls back to the product title where the meta title is empty.
-  shopify: Object.freeze(['title', 'seo_title', 'seo_description']),
+  shopify: SHOPIFY_PRODUCT_SEO_FIELDS,
+  // A filtered list holds the same products, written with the same document.
+  shopify_filtered: SHOPIFY_PRODUCT_SEO_FIELDS,
   shopify_media: Object.freeze([]),
   woocommerce: Object.freeze([]),
 });

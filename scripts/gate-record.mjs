@@ -34,11 +34,13 @@
  * PUBLIC — the strict case. In THIS repo that is also the right answer, so the flag only matters
  * to a preflight run against the private repo's copy of this check. The refusal says so.
  *
- * Exits 0 when the record is acceptable (or the PR is exempt), 1 otherwise.
+ * Exits 0 when the record is acceptable (or the PR is exempt), 1 otherwise, and 2 for a run it
+ * cannot judge (`wrongRunErrors`: lynox-pro's checkout, or a local branch name as `--base`).
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { proseOpenCountLines } from './guard-patterns/prose-open-count.mjs';
 import { LEGAL_APPROVERS, approvedVerdict } from './guard-patterns/legal-sign-off.mjs';
@@ -1110,8 +1112,11 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
   // CI record check is not a wire contract — so it does not belong in the vendored `contract/`
   // either. Two copies beat a dependency that exists to share one branch. They may diverge, and
   // nothing breaks if they do: each governs its own repo's records. pro's copy landed first
-  // (pro#1406); this is the same field with the same accepted shapes, so a record written for one
-  // repo is valid in the other. (The prose scan is the opposite case: a weaker copy lets public
+  // (pro#1406); this is the same field with the same accepted shapes. That makes the grammar of a
+  // record shared, not its verdict: each script also runs rules only it has (here the public-body
+  // rules, in pro its own rules for `closes:` ids, and in both their own `SECURITY_PATHS`, so
+  // which gates a diff owes), and a record that passes one may fail the other. `wrongRunErrors`
+  // therefore refuses a run from the other repo's checkout. (The prose scan is the opposite case: a weaker copy lets public
   // text through, so it has ONE source in guard-patterns/, for pro to vendor.)
   //
   // ⛔ WHY THIS FIELD EXISTS, and it is a measured reason rather than a tidiness one.
@@ -1550,8 +1555,109 @@ function gitGraph() {
   };
 }
 
+/**
+ * The marker of the OTHER repo's checkout: lynox-pro keeps its hosting package here, and this
+ * repo has no such directory. Its presence at the top of the checkout means this script was run
+ * from a pro checkout, where it would judge a pro body by core's rules.
+ */
+export const OTHER_REPO_MARKER = 'packages/managed';
+
+/**
+ * Refuse a run this script cannot judge. Returns the reasons, empty when the run is fine.
+ *
+ * Each repo ships its own `gate-record.mjs`, and the two differ in rules only one of them runs:
+ * here the public-body rules, in lynox-pro its own rules for `closes:` ids, and in both their
+ * own `SECURITY_PATHS`. Run against the other repo's body, either script answered `ok` for rules
+ * it never ran, among them a missing security round. The CI runs
+ * each repo's own script, so the wrong-repo run only misled a local preflight — the step where an
+ * author decides to push, and here the push publishes the body.
+ *
+ * `--base` and `--base-tip` must not be a local branch name: a local `main` lags `origin/main`,
+ * and the rules this script reads at the base (`ux:`, the `delta:` range) then come from an old
+ * script. That happened three times with `--base main` and answered with a retired rule.
+ *
+ * `tops` are the checkouts the run reads, empty when the working directory is in none; `exists`,
+ * `headKnown` and `localBranch` are injected so the CLI test can run them against a real checkout.
+ * The head check is the second signal: a body names its own repo's head, and that commit does not
+ * exist in the other repo's clone, so it also catches the right script run on the other repo's body.
+ */
+export function wrongRunErrors({ tops, exists, head = '', headKnown, base = '', baseTip = '', localBranch }) {
+  const errors = [];
+  const fix = 'Run this repo\'s script from its own checkout, with the bases the CI uses: `--base "$(git merge-base origin/main HEAD)" --base-tip origin/main`.';
+  if (tops.length === 0) {
+    errors.push(`this run is not inside a git checkout, so this script cannot tell which repo the body belongs to, and it cannot read the base or the head. ${fix}`);
+  }
+  for (const top of tops) {
+    if (exists(join(top, OTHER_REPO_MARKER))) {
+      errors.push(`this checkout (${top}) is lynox-pro's: it has \`${OTHER_REPO_MARKER}\`. This script is lynox's and does not run lynox-pro's own rules (\`closes:\` ids, its security paths), so its \`ok\` would mean nothing. Run lynox-pro's own script from that checkout: \`node scripts/gate-record.mjs …\`.`);
+    }
+  }
+  if (tops.length > 0 && head && !headKnown(head)) {
+    errors.push(`\`--head ${head}\` is not a commit in this checkout. Either the body belongs to the other repo (run that repo's script from its checkout), or this checkout lacks the commit (fetch it first).`);
+  }
+  for (const [flag, value] of [['--base', base], ['--base-tip', baseTip]]) {
+    if (value && localBranch(value)) {
+      errors.push(`\`${flag} ${value}\` resolves through a local branch, which can lag the remote; the rules read at the base would then come from an old script. ${fix}`);
+    }
+  }
+  return errors;
+}
+
+/** The top directory of the checkout the working directory is in, or null when it is in none. */
+function checkoutTop() {
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `rev` names a commit in the checkout. */
+function isKnownCommit(rev) {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${rev}^{commit}`], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `rev` resolves through a local branch: `main`, `heads/main` and `refs/heads/main` all
+ * do. A suffix (`main~1`, `main^0`) hides the ref from `--symbolic-full-name`, so the name before
+ * the first `~`, `^` or `@` is asked too. `HEAD` on a checked-out branch resolves through it and
+ * is refused as well, and so is `@`, its shorthand (detached, neither is); no caller passes them,
+ * and the CI passes SHAs.
+ */
+function isLocalBranch(rev) {
+  const ask = (r) => {
+    try {
+      return execFileSync('git', ['rev-parse', '--symbolic-full-name', r], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().startsWith('refs/heads/');
+    } catch {
+      return false;
+    }
+  };
+  // `@` alone is git's shorthand for `HEAD`, so an empty name before the suffix asks `HEAD`.
+  return ask(rev) || ask(rev.split(/[~^@]/)[0] || 'HEAD');
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  const top = checkoutTop();
+  const wrong = wrongRunErrors({
+    tops: top ? [top] : [],
+    exists: existsSync,
+    head: args.head || '',
+    headKnown: isKnownCommit,
+    base: args.base || '',
+    baseTip: args['base-tip'] || '',
+    localBranch: isLocalBranch,
+  });
+  if (wrong.length > 0) {
+    for (const e of wrong) console.log(`::error::${MARK}: ${e}`);
+    process.exitCode = 2;
+    return;
+  }
   // In CI the body and title come from the event payload FILE (`--event-file "$GITHUB_EVENT_PATH"`),
   // not from the step's `env`: Actions prints a step's env block, values included, into the log,
   // and this repo's logs are public. `--body-file` stays for a local preflight run.

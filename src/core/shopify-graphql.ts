@@ -37,13 +37,14 @@ export const SHOPIFY_MEDIA_PER_PRODUCT = 250;
  */
 export const SHOPIFY_READ_DOCUMENTS: Readonly<Record<ShopifyReadForm, string>> = Object.freeze({
   shopify_products_list: 'query($n: Int!, $q: String!) { products(first: $n, sortKey: ID, query: $q) { nodes { id } } }',
-  shopify_product_read: 'query($id: ID!) { product(id: $id) { id title descriptionHtml seo { title description } } }',
+  shopify_product_read: 'query($id: ID!) { product(id: $id) { id title descriptionHtml productType vendor tags seo { title description } } }',
   shopify_media_list: 'query($n: Int!, $q: String!, $m: Int!) { products(first: $n, sortKey: ID, query: $q) { nodes { id media(first: $m) { nodes { id mediaContentType } pageInfo { hasNextPage } } } } }',
   shopify_media_read: 'query($id: ID!) { node(id: $id) { ... on MediaImage { id alt } } }',
 });
 
-/** A store host as the preset derives it: one subdomain label of `myshopify.com`, nothing else. */
-const STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+/** A store host as the preset derives it: one subdomain label of `myshopify.com`, nothing else.
+ *  A DNS label holds at most 63 characters; a longer one names no store. */
+const STORE_HOST = /^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$/;
 
 /** Whether `host` is exactly a store host — a bare name, no port, path, query or trailing dot. */
 export function isShopifyStoreHostName(host: string): boolean {
@@ -79,16 +80,132 @@ export function shopifyGraphqlEndpoint(host: string): string | null {
   return `https://${host}/admin/api/${version}/graphql.json`;
 }
 
+/** The fields a Shopify list may be narrowed by, in the order `$q` names them (PRD shopify-preset §22). */
+export const SHOPIFY_LIST_FILTER_KEYS = ['product_type', 'vendor'] as const;
+export type ShopifyListFilterKey = (typeof SHOPIFY_LIST_FILTER_KEYS)[number];
+/** How many values one filter may list: a store's groups. Measured on a development store
+ *  (2026-11-06, Admin API 2026-10): 250 values of about 40 characters in one search, 13 362
+ *  characters, listed exactly; the longest a list here can build (2 × 50 × 255) is not measured.
+ *  Either way it fails closed: a search the store refuses fails the read, and a term it dropped
+ *  is caught by the check after the read (`shopifyInFilter`). */
+export const SHOPIFY_LIST_FILTER_MAX_VALUES = 50;
+/** One filter's value: one value, or a list of 2–{@link SHOPIFY_LIST_FILTER_MAX_VALUES}, any of which matches. */
+export type ShopifyListFilterValue = string | readonly string[];
+/** A Shopify list's filters: each key at most once, none when the list reads every product. */
+export type ShopifyListFilters = Readonly<Partial<Record<ShopifyListFilterKey, ShopifyListFilterValue>>>;
+
+/** A filter's values as a list: one value is a list of one. */
+export function shopifyFilterValues(value: ShopifyListFilterValue): readonly string[] {
+  return typeof value === 'string' ? [value] : value;
+}
+
+/** A text with only `A`–`Z` made lower case: no locale and no Unicode case mapping takes part. */
+export function asciiLower(text: string): string {
+  return text.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
 /**
- * The body of one list page: the products after `afterId`, by id. `afterId` is the last id the
- * run listed (0 before the first page); a value that is not a safe integer ≥ 0 builds nothing,
- * so the cursor can neither round nor be steered.
+ * Whether a filter's value is one value the rule takes, or a list of 2–{@link SHOPIFY_LIST_FILTER_MAX_VALUES}
+ * such values, no two equal up to ASCII letter case (the check after the read could not tell them
+ * apart). Values the store's search folds together (`Gemüse`, `Gemuse`) are taken: they only
+ * overlap. A list of one, or an empty one, is refused rather than read as one value or as no filter.
  */
-export function shopifyListBody(afterId: number): string | null {
+export function isShopifyFilterValues(value: unknown): value is ShopifyListFilterValue {
+  if (typeof value === 'string') return isShopifyFilterValue(value);
+  if (!Array.isArray(value) || value.length < 2 || value.length > SHOPIFY_LIST_FILTER_MAX_VALUES) return false;
+  if (!value.every((v) => isShopifyFilterValue(v))) return false;
+  return new Set((value as string[]).map(asciiLower)).size === value.length;
+}
+
+/**
+ * The punctuation a filter value may hold inside a word, besides `-` (which has a rule of its
+ * own). Each is measured literal inside a quoted Shopify search value; `,` is not (PRD §22.4,
+ * M-F1), so it is left out. The refusal sentence names this set, and a test holds the two equal.
+ */
+const FILTER_PUNCTUATION = "_.&'/+";
+
+/** The one sentence every refusal of the value rule gives; the key is filled in, never the value. */
+export function shopifyFilterRefusal(key: string): string {
+  return `source_list.filters.${key} may hold ${SHOPIFY_FILTER_VALUE_RULE}.`;
+}
+
+/** The one sentence a refused list of values gives: its size and its duplicates, never a value. */
+export function shopifyFilterListRefusal(key: string): string {
+  return `source_list.filters.${key} as a list holds 2 to ${String(SHOPIFY_LIST_FILTER_MAX_VALUES)} values, no two the same up to letter case; for one value give it as text.`;
+}
+
+/** What a filter value may hold, in the words of its refusal; the form's rules in bulk_plan say the same. */
+export const SHOPIFY_FILTER_VALUE_RULE = `letters, digits, single spaces and ${[...FILTER_PUNCTUATION].join(' ')} ; every word starts with a letter or digit, - stands only between two letters or digits, no run of letters and digits is OR, AND or NOT in any letter case (so Forget-Me-Not and Salt and Pepper are refused), and at most 255 characters`;
+
+const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
+const ALLOWED_CODE_POINT = /^[\p{L}\p{M}\p{N} -]$/u;
+const MODIFIER_LETTER = /^\p{Lm}$/u;
+const DEFAULT_IGNORABLE = /^\p{Default_Ignorable_Code_Point}$/u;
+/** `OR`, `AND`, `NOT` in any ASCII letter case — spelled out, so no locale and no Unicode folding takes part. */
+const SEARCH_WORD = /^(?:[Oo][Rr]|[Aa][Nn][Dd]|[Nn][Oo][Tt])$/;
+
+/**
+ * Whether a filter value is one the engine puts between the quotes of a Shopify search as it
+ * stands: taken as written or refused, never escaped, trimmed or normalised (PRD shopify-preset
+ * §22.2 item 2). Every rule fails closed: a value it refuses is reached by a run over every
+ * product instead, while a value it took wrongly could change what the search lists.
+ */
+export function isShopifyFilterValue(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const cps = [...value];
+  if (cps.length < 1 || cps.length > 255) return false;
+  // A fullwidth `ＯＲ` or a decomposed letter would read as another word or match nothing.
+  if (value.normalize('NFKC') !== value) return false;
+  for (let i = 0; i < cps.length; i++) {
+    const c = cps[i]!;
+    const allowed = (ALLOWED_CODE_POINT.test(c) || FILTER_PUNCTUATION.includes(c)) && !MODIFIER_LETTER.test(c) && !DEFAULT_IGNORABLE.test(c);
+    if (!allowed) return false;
+    // Every word starts with a letter or a digit: the value's first code point, and each after a space.
+    if ((i === 0 || cps[i - 1] === ' ') && !LETTER_OR_DIGIT.test(c)) return false;
+    // No trailing space; a double space is refused above, as a word that starts with a space.
+    if (c === ' ' && i === cps.length - 1) return false;
+    // `-` opens a negated term in Shopify's search: only between two letters or digits.
+    if (c === '-' && !(i > 0 && LETTER_OR_DIGIT.test(cps[i - 1]!) && i < cps.length - 1 && LETTER_OR_DIGIT.test(cps[i + 1]!))) return false;
+  }
+  // A word is a run of letters, marks and digits; every other allowed character separates words.
+  return !value.split(/[^\p{L}\p{M}\p{N}]+/u).some((w) => SEARCH_WORD.test(w));
+}
+
+/** Whether `filters` names only known keys, at least one, each with a value the rule takes. */
+export function isShopifyListFilters(filters: unknown): filters is ShopifyListFilters {
+  if (typeof filters !== 'object' || filters === null || Array.isArray(filters)) return false;
+  const keys = Object.keys(filters);
+  return keys.length > 0
+    && keys.every((k) => (SHOPIFY_LIST_FILTER_KEYS as readonly string[]).includes(k))
+    && keys.every((k) => isShopifyFilterValues((filters as Record<string, unknown>)[k]));
+}
+
+/** `$q` of one list page: the products after `afterId`, then each filter as a quoted value, a list
+ *  as its values joined by OR in parentheses (without them `id:>N AND a OR b` would not bind the
+ *  cursor to `b`). One value builds as it always did. */
+function shopifyListQuery(afterId: number, filters: ShopifyListFilters): string {
+  let q = `id:>${String(afterId)}`;
+  for (const key of SHOPIFY_LIST_FILTER_KEYS) {
+    const value = filters[key];
+    if (value === undefined) continue;
+    q += typeof value === 'string' ? ` AND ${key}:"${value}"` : ` AND (${value.map((v) => `${key}:"${v}"`).join(' OR ')})`;
+  }
+  return q;
+}
+
+/**
+ * The body of one list page: the products after `afterId`, by id, within `filters`. `afterId`
+ * is the last id the run listed (0 before the first page); a value that is not a safe integer
+ * ≥ 0 builds nothing, so the cursor can neither round nor be steered. `filters` is `{}` for a
+ * list of every product; filters the value rule refuses build nothing, so neither a grant nor a
+ * request can carry them.
+ */
+export function shopifyListBody(afterId: number, filters: ShopifyListFilters): string | null {
   if (!Number.isSafeInteger(afterId) || afterId < 0) return null;
+  if (Object.keys(filters).length > 0 && !isShopifyListFilters(filters)) return null;
   return JSON.stringify({
     query: SHOPIFY_READ_DOCUMENTS.shopify_products_list,
-    variables: { n: SHOPIFY_LIST_PAGE_SIZE, q: `id:>${String(afterId)}` },
+    variables: { n: SHOPIFY_LIST_PAGE_SIZE, q: shopifyListQuery(afterId, filters) },
   });
 }
 
@@ -202,21 +319,69 @@ export function shopifyMediaAltWriteBody(gid: string, after: Readonly<Record<str
   return JSON.stringify({ query: SHOPIFY_WRITE_DOCUMENTS.shopify_media_alt, variables: { id: gid, alt } });
 }
 
-/** One read a bulk run sends: a list page after the last id, or one target's before-image. */
+/**
+ * One read a bulk run sends: a list page after the last id, or one target's before-image. A
+ * product list page's `filters` is required, `{}` for every product: a caller that forgot them
+ * would otherwise send an unfiltered page under a filtered run's grant.
+ */
 export type ShopifyRead =
-  | { readonly form: 'shopify_products_list'; readonly afterId: number }
+  | { readonly form: 'shopify_products_list'; readonly afterId: number; readonly filters: ShopifyListFilters }
   | { readonly form: 'shopify_product_read'; readonly gid: string }
   | { readonly form: 'shopify_media_list'; readonly afterId: number }
   | { readonly form: 'shopify_media_read'; readonly gid: string };
 
+/** The room a list search has in its trail row when the caller does not say: the row holds 400
+ *  characters (`audit-log.ts` TARGET_MAX) and cuts the rest unmarked, and `POST <host>/admin/api/
+ *  <version>/graphql.json shopify_products_list ` takes 59 of them plus the host, 77 for a store
+ *  name of 63 characters (the longest a DNS label holds). The client passes the room its own
+ *  row has, so a shorter store name leaves more. */
+export const SHOPIFY_READ_DETAIL_MAX = 264;
+
+/**
+ * The search of a list page as its trail row names it: as sent where it fits; otherwise the
+ * search as sent up to the end of the last whole value that fits, then how many values it leaves
+ * out. It is the sent text itself, operators and all, cut at a value's end and saying so: never
+ * a value cut in two, never a cut the row does not say, never a search that was not sent.
+ */
+function shopifyListDetail(afterId: number, filters: ShopifyListFilters, room: number): string {
+  const sent = shopifyListQuery(afterId, filters);
+  if (sent.length <= room) return sent;
+  // The same text as `shopifyListQuery`, with the offset where each value's term ends.
+  let q = `id:>${String(afterId)}`;
+  const ends: number[] = [];
+  for (const key of SHOPIFY_LIST_FILTER_KEYS) {
+    const value = filters[key];
+    if (value === undefined) continue;
+    const values = shopifyFilterValues(value);
+    q += typeof value === 'string' ? ' AND ' : ' AND (';
+    values.forEach((v, i) => {
+      q += `${i === 0 ? '' : ' OR '}${key}:"${v}"`;
+      ends.push(q.length);
+    });
+    if (typeof value !== 'string') q += ')';
+  }
+  // Never name a search other than the one sent: should the two ever differ, name no value.
+  if (q !== sent) ends.length = 0;
+  const cut = (left: number): string => ` … [cut here: ${String(left)} of ${String(ends.length)} values left out]`;
+  let shown = 0;
+  while (shown < ends.length && ends[shown]! + cut(ends.length - shown - 1).length <= room) shown++;
+  const kept = shown === 0 ? `id:>${String(afterId)}` : sent.slice(0, ends[shown - 1]);
+  return `${kept}${cut(ends.length - shown)}`;
+}
+
 /**
  * The body a read sends and the line its actor-trail row names — both built here from the
  * form and the value bound into it, so the row cannot say other than what was sent and no
- * caller's text reaches the trail. Null for a value that does not fit.
+ * caller's text reaches the trail. A list search too long for the row names the values that
+ * fit and how many it leaves out ({@link shopifyListDetail}). Null for a value that does not fit.
  */
-export function shopifyReadRequest(read: ShopifyRead): { body: string; detail: string } | null {
-  if (read.form === 'shopify_products_list' || read.form === 'shopify_media_list') {
-    const body = read.form === 'shopify_products_list' ? shopifyListBody(read.afterId) : shopifyMediaListBody(read.afterId);
+export function shopifyReadRequest(read: ShopifyRead, room = SHOPIFY_READ_DETAIL_MAX): { body: string; detail: string } | null {
+  if (read.form === 'shopify_products_list') {
+    const body = shopifyListBody(read.afterId, read.filters);
+    return body === null ? null : { body, detail: `${read.form} ${shopifyListDetail(read.afterId, read.filters, room)}` };
+  }
+  if (read.form === 'shopify_media_list') {
+    const body = shopifyMediaListBody(read.afterId);
     return body === null ? null : { body, detail: `${read.form} id:>${String(read.afterId)}` };
   }
   const body = read.form === 'shopify_product_read' ? shopifyProductReadBody(read.gid) : shopifyMediaReadBody(read.gid);

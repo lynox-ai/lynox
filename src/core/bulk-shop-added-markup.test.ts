@@ -331,6 +331,7 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
       field: 'description',
       added: [{ kind: 'element', namespace: 'html', element: 'script', attributes: [], text: 'steal()', inTemplate: false }],
       removed: [],
+      addsOutsideAllowlist: true,
     }]);
     expect(ledger.htmlFieldsOf(undo)).toEqual(['description', 'short_description']);
   });

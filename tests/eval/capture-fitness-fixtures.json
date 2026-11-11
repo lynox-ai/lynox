@@ -112,6 +112,36 @@
         "Briefing Newsletter Sonnrain{N} — Betreff unter 40 Zeichen, zwei Absätze, Schlusssatz «Bis bald.», kein Ausrufezeichen. Thema: die neuen Kräutertees.",
         "Kategorie Gärtöpfe bei Brunnmatt{N}, Titel maximal 60 Zeichen, Keyword «Gärtopf» vorne, keine Wirkversprechen. Zuerst der 5-Liter-Topf."
       ]
+    },
+    {
+      "id": "N7-assistant-draft",
+      "expect": "silent",
+      "why": "A draft the operator orders, with nothing said about the company. Whatever the assistant writes about the company in it is invented; stored as a fact, a later chat reads it as true. Seen in the 998 eval runs (row 1103): a newsletter draft for a company with no details left 'the company plans to widen its range next quarter' as an active memory. A write here is a miss unless its text is a fact the operator's own turn stated. The runner counts every write, queued or active, from the capture pass and from the model's own remember tool alike; which path wrote it is in capture-telemetry.jsonl.",
+      "cases": [
+        "Schreib mir einen Newsletter für Kaltwerk{N}, drei kurze Absätze, freundlicher Ton.",
+        "Entwirf einen kurzen Über-uns-Text für die Website von Brunnhof{N}, etwa 80 Wörter.",
+        "Schreib einen kurzen Instagram-Post für Lindenwerk{N}, mit zwei passenden Hashtags."
+      ]
+    },
+    {
+      "id": "N8-product-text-draft",
+      "expect": "silent",
+      "why": "SEO and product texts ordered for a shop, with no company details: the kind of order a shop customer gives every week. Anything the draft says about the company (history, origin, values, certificates) is invented; stored as a fact, a later chat reads it as true. Product names and the shop name come from the operator's order and are no miss. The runner counts every write, queued or active, from the capture pass and from the model's own remember tool alike; read the texts.",
+      "cases": [
+        "Schreib eine SEO-optimierte Produktbeschreibung, etwa 120 Wörter, für die Gartenschere Schnittfix im Onlineshop von Astmühle{N}.",
+        "Formuliere Meta-Title und Meta-Description für die Kategorieseite Gartenwerkzeug im Onlineshop von Laubwinkel{N}.",
+        "Schreib einen kurzen Produkttext für die Ersatzklinge Kerbe 3 von Heckenhof{N}, mit drei Stichpunkten zu den Vorteilen."
+      ]
+    },
+    {
+      "id": "S7-draft-with-fact",
+      "expect": "capture",
+      "why": "The control for N7 and N8: a draft ordered the same way, but the operator also states a durable fact about the business. A change that silences N7 and N8 by not recording anything on a draft turn fails here. The fact is said, not asked for in the text, so it is not a job instruction (N4). The runner counts any write as a hit; read the texts: a write that keeps only the fact is a hit, one that keeps what the draft invented is a miss.",
+      "cases": [
+        "Schreib einen kurzen Über-uns-Text für Mühlbach{N}, etwa 80 Wörter. Zur Info: Wir sind seit 1950 ein Familienbetrieb und beschäftigen zwölf Leute.",
+        "Entwirf einen Newsletter für Sonnhalde{N}, drei kurze Absätze. Hintergrund: Seit diesem Monat liefern wir auch nach Österreich.",
+        "Schreib eine Produktbeschreibung für den Rucksack Gipfel 30 von Felsgrat{N}, etwa 100 Wörter. Alle unsere Rucksäcke werden in Portugal genäht."
+      ]
     }
   ]
 }
