@@ -38,7 +38,7 @@ gates the diff OWES, derived from the real file list, so leaving out a required
 - `head` — this PR's **current** head, which is also the SHA the gates ran against:
   `git rev-parse --short HEAD`. Update it after every push.
 - `gates` — which ran, from: `code-review`, `delta`, `security`, `prd`, `staging-walk`, `legal`.
-  `legal` is required for `SUBPROCESSORS.md`, the one binding text `LEGAL_PATHS` covers, and
+  `legal` is required for `SUBPROCESSORS.md`, the one legal text `LEGAL_PATHS` covers, and
   then the record also needs `approved: <who> <YYYY-MM-DD>`, naming who signed off on the
   WORDING: <who> is one of `LEGAL_APPROVERS` in `scripts/guard-patterns/legal-sign-off.mjs`, the date follows
   directly, free text may come after it. While the sign-off does not exist, `approved: PENDING — <why>` is the true line,
