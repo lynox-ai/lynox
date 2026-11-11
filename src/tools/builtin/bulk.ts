@@ -291,6 +291,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     'Once started, the engine reads the list page by page with the host\'s stored API credential and stops, so the user sees how many targets it holds. ' +
       'Each target is read only after the user starts the run a second time; bulk_status shows phase previewed when that is done. ' +
       'What the list and the targets hold is in the run\'s ledger for the user to review; it is not shown to you.',
+    NO_PLACE_NOTE,
   ].join('\n');
 }
 
@@ -304,6 +305,10 @@ const JUDGE_COLUMN_TYPES: Record<string, readonly string[]> = {
 };
 
 /** What a planner is told about a judged run. Counts and rules only — never a verdict. */
+// Where the run is in lynox is not given to the model, so a place it names is one it made up
+// (a walk found a tab that does not exist). Said with the result, where the reply is written.
+export const NO_PLACE_NOTE = 'You are not told where in lynox the user finds this run: do not name a tab, page, menu, button or link for it, and do not make one up. Say only that they find it in lynox, outside this chat.';
+
 const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +
   'Then a model decides each target\'s new values with your rule, one target at a time, without tools. ' +
   'The user reviews every verdict before anything is written.';
@@ -323,7 +328,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       'Or, for target_system "http", source_list: a list on target_host the engine reads itself, page by page — every element it lists gets the one "after" given, written with write_method to <path>/<id of the element>. ' +
       'The list is read only after the user starts the run, with the host\'s stored API credential; what it holds is never shown to you. ' +
       'Elements can be missed when the list changes while it is read, and the number of targets is known only once it is read. ' +
-      'You get back counts only. The user reviews the per-target before/after and approves the run outside this chat — you cannot apply it, and there is no screen or button for it you could point them to. ' +
+      'You get back counts only. The user reviews the per-target before/after and approves the run outside this chat — you cannot apply it. ' +
       'atomic: true when the targets only make sense together — the run is then written whole or rolled back, and can only be undone whole. ' +
       'judge: instead of giving each target\'s new values, give a rule and the fields it decides; a model then decides the values per target, after the user started the run with a spend limit. ' +
       'With judge, only each source row\'s target is read (no "after"), and target_system must be "data_store" or "http".',
@@ -469,7 +474,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           ...(judge && !nothingToApprove(out.status) ? [JUDGE_NOTE] : []),
           ...(nothingToApprove(out.status) ? [] : ['Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
             'The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
-            'Only the user can start and approve it, outside this chat.']),
+            'Only the user can start and approve it, outside this chat.', NO_PLACE_NOTE]),
         ].join('\n');
       } else {
         throw new BulkSourceError('target_system must be "workspace", "data_store" or "http".');
@@ -489,6 +494,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           ? 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you.'
           : 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +
             'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
+        ...(nothingToApprove(status) ? [] : [NO_PLACE_NOTE]),
       ].join('\n');
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return `Error: ${err.message}${shopifyHostHint(input, agent)}`;

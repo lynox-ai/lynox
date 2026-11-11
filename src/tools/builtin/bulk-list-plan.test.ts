@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { bulkPlanTool, bulkStatusTool } from './bulk.js';
+import { bulkPlanTool, bulkStatusTool, NO_PLACE_NOTE } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS } from '../../core/bulk-ledger.js';
 import { mintBulkContract, parseBulkContract } from '../../core/bulk-external.js';
@@ -52,6 +52,8 @@ describe('bulk_plan with source_list', () => {
     const out = await plan({ write_method: 'PUT' });
     expect(out).toContain('List dry run recorded — nothing was sent, read or written.');
     expect(out).toContain('0 page(s) read');
+    // Where the run is in lynox is not given to the model, and the result says so.
+    expect(out).toContain(NO_PLACE_NOTE);
     const id = runIdOf(out);
     const run = ledger.getListRun(id)!;
     expect(run).toMatchObject({ state: 'pending', page: 0, phase: 'planned', haltReason: BULK_HALT_REASONS.awaitingStart });
