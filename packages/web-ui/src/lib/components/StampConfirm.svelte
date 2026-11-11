@@ -91,14 +91,18 @@
 			return typeof s === 'string' && s !== '' ? markHidden(s) : null;
 		} catch { return null; }
 	});
-	// The address as stored, when it hides characters: the parsed one above shows it percent-encoded
-	// or with a clean host, where no mark would stand, while the run reads the stored text. Then the
-	// block shows the stored address, marked, so the note's "marked above" points at a mark.
-	const hiddenUrl = $derived.by(() => {
-		if (!preview?.subject.watch) return null;
+	// The address as stored, whenever the parsed one would not show all of it: the run writes the
+	// stored text into its prompt (without the characters it strips), while the parsed address
+	// percent-encodes hidden characters, drops line breaks and tabs, and is cut at its display
+	// length. Then the block shows the stored address in full, hidden characters marked, so the
+	// owner confirms what they read and the note's "marked above" points at a mark.
+	const storedUrl = $derived.by(() => {
+		if (!preview?.subject.watch || !watch) return null;
 		try {
 			const u = (JSON.parse(preview.subject.watch) as { url?: unknown }).url;
-			return typeof u === 'string' && marksHidden(u) ? markHidden(u) : null;
+			if (typeof u !== 'string') return null;
+			const cut = watch.host.endsWith('\u2026') || watch.rest.endsWith('\u2026');
+			return marksHidden(u) || /\s/u.test(u) || cut ? markHidden(u) : null;
 		} catch { return null; }
 	});
 	const sentence = $derived(preview ? connectionsSentence(preview) : null);
@@ -126,8 +130,8 @@
 		{:else if as === 'watch' && watch}
 			<div data-stamp-watch>
 				<span class="font-medium">{t('triggers.watch_url')}:</span>
-				{#if hiddenUrl !== null}
-					<p class="mt-0.5 break-all rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5" data-stamp-watch-stored>{hiddenUrl}</p>
+				{#if storedUrl !== null}
+					<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-all rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5" data-stamp-watch-stored>{storedUrl}</p>
 				{:else}
 					<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watch.host}</span>{watch.rest}</p>
 				{/if}
