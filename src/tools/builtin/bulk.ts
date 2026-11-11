@@ -307,7 +307,8 @@ const JUDGE_COLUMN_TYPES: Record<string, readonly string[]> = {
 // A model asked where the run is guesses: a walk found it naming the tab by its English label in a
 // German interface, under a menu that does not exist; measured, it also made up URLs. Said with the
 // result, where the reply is written; it names no place, so it cannot go stale with the interface.
-export const NO_PLACE_NOTE = 'Do not name a tab, page, menu, button or link for this run, and do not make one up: when you say where it is, say only that the user finds it in lynox, outside this chat.';
+// Measured: without the opening clause, one provider went on naming wrong places.
+export const NO_PLACE_NOTE = 'This result does not tell you where in lynox the user finds this run: do not name a tab, page, menu, button or link for it, and do not make one up. When you say where it is, say only that they find it in lynox, outside this chat.';
 
 /** What a planner is told about a judged run. Counts and rules only — never a verdict. */
 const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +
