@@ -8,7 +8,7 @@ const said = (outcome: string): string =>
 	t(escalationNotice({ last_escalation_at: AT, last_escalation_outcome: outcome })!.key);
 
 /**
- * The whole sentence per branch (ux U-033): a notice that a wakeup reached nobody names why and
+ * The whole sentence per branch: a notice that a wakeup reached nobody names why and
  * where the owner fixes it. Without a thread id on the trigger, no branch says where the
  * question is.
  */
