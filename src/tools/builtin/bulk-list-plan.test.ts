@@ -52,7 +52,7 @@ describe('bulk_plan with source_list', () => {
     const out = await plan({ write_method: 'PUT' });
     expect(out).toContain('List dry run recorded — nothing was sent, read or written.');
     expect(out).toContain('0 page(s) read');
-    // Where the run is in lynox is not given to the model, and the result says so.
+    // The result asks the model not to name a place for the run.
     expect(out).toContain(NO_PLACE_NOTE);
     const id = runIdOf(out);
     const run = ledger.getListRun(id)!;

@@ -2,7 +2,7 @@
  * Online eval: after a Shopify bulk run is planned, where does the model tell the user to find it?
  *
  * The run is reviewed and approved outside the chat, on the tab "Massenläufe" / "Bulk runs" under
- * "Aktivität & Kosten" / "Activity & Cost". The model is not given that path, so it guesses: a walk
+ * "Aktivität & Kosten" / "Activity & Cost". bulk_plan's result does not give that path, so the model guesses: a walk
  * found it naming the tab by its English label in a German interface. This eval counts how often a
  * reply names a place, right or wrong, so the tool's text can be compared before and after a
  * change; whether a named place is the real one is judged by hand against that path:
