@@ -390,6 +390,9 @@ describe('planTaskTool', () => {
       );
       const parsed = JSON.parse(result) as { approved: boolean; workflow_id: string };
       expect(parsed.approved).toBe(true);
+      // Saved: nothing says otherwise.
+      expect(parsed).not.toHaveProperty('saved');
+      expect(parsed).not.toHaveProperty('note');
       // The workflow_id must be resolvable from SQLite, not just memory.
       const persisted = history.getPlannedPipelines(10).find((r) => r.id === parsed.workflow_id);
       expect(persisted).toBeDefined();
@@ -402,6 +405,16 @@ describe('planTaskTool', () => {
       history.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('says a plan without a run history is held for this session only, not saved', async () => {
+    const agent = makeAgent({ promptUser: undefined });
+    agent.toolContext.runHistory = null;
+    const parsed = JSON.parse(await planTaskTool.handler({ summary: 'Volatile plan', phases: [{ name: 'Step one', steps: ['Do the thing'] }] }, agent)) as { approved: boolean; workflow_id?: string; saved?: boolean; note?: string };
+    expect(parsed.approved).toBe(true);
+    expect(parsed.workflow_id).toBeTruthy();
+    expect(parsed.saved).toBe(false);
+    expect(parsed.note).toContain('not saved');
   });
 
   it('creates the plan under the principal of the turn, approved or auto-approved (engine.db v45)', async () => {

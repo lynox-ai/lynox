@@ -346,7 +346,13 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       w.created('pipeline', pipelineId);
       storePipeline(pipelineId, planned);
       record.promotedToPipelineId = pipelineId;
-      runHistory.insertProcess(record);
+      // The lineage record is internal (never agent-facing). Once the workflow above is saved, a
+      // failure here must not make the answer say that nothing was saved: it is saved and runs.
+      try {
+        runHistory.insertProcess(record);
+      } catch (err: unknown) {
+        logErrorChain('save_workflow:lineage', err);
+      }
 
       const paramNames = record.parameters.map(p => p.name);
       return JSON.stringify({

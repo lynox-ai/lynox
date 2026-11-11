@@ -203,9 +203,9 @@ function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | un
  * Every workflow runs through the orchestrator (`runManifest`) — there is one
  * execution path (D9).
  */
-function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, historicalAvg?: Record<string, number>): string {
+function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, historicalAvg?: Record<string, number>): { id: string; durable: boolean } {
   const pipelineSteps = phasesToPipelineSteps(phases);
-  if (pipelineSteps.length === 0) return '';
+  if (pipelineSteps.length === 0) return { id: '', durable: false };
 
   const pipelineId = randomUUID();
   const costEstimate = estimatePipelineCost(pipelineSteps, historicalAvg);
@@ -244,7 +244,7 @@ function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, his
     if (runHistory) w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, author), ifReturned);
     w.created('pipeline', pipelineId);
     storePipeline(pipelineId, planned);
-    return pipelineId;
+    return { id: pipelineId, durable: runHistory !== undefined && runHistory !== null };
   });
 }
 
@@ -420,9 +420,10 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
      * preserve the existing return-JSON contract.
      */
     const finalizeApprovedPlan = (
-      workflowId: string,
+      converted: { id: string; durable: boolean },
       includeEstimatedCost: boolean,
     ): string => {
+      const workflowId = converted.id;
       const planned = workflowId ? getPipeline(workflowId) : undefined;
       const userSteps = userPhaseNames.length > 0 ? userPhaseNames : undefined;
 
@@ -432,14 +433,16 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         steps: planned?.steps.map(s => ({ id: s.id, task: s.task })),
         user_steps: userSteps,
         ...(includeEstimatedCost ? { estimated_cost_usd: estimatedCostUsd } : {}),
+        // Without a run history only this process holds the workflow: say so rather than let the
+        // id read as saved.
+        ...(workflowId && !converted.durable ? { saved: false, note: 'This workflow is held for this session only and is not saved: it is gone after a restart, and a schedule cannot run it.' } : {}),
       });
     };
 
     // Auto-approve in non-interactive context
     if (!agent.promptUser) {
       if (hasPhases) {
-        const workflowId = convertToPipeline(input.summary, phases, agent, historicalAvg);
-        return finalizeApprovedPlan(workflowId, true);
+        return finalizeApprovedPlan(convertToPipeline(input.summary, phases, agent, historicalAvg), true);
       }
       return JSON.stringify({ approved: true });
     }
@@ -450,8 +453,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
 
     if (['proceed', 'y', 'yes'].includes(normalized)) {
       if (hasPhases) {
-        const workflowId = convertToPipeline(input.summary, phases, agent, historicalAvg);
-        return finalizeApprovedPlan(workflowId, false);
+        return finalizeApprovedPlan(convertToPipeline(input.summary, phases, agent, historicalAvg), false);
       }
       return JSON.stringify({ approved: true });
     }

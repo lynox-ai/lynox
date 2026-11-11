@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -41,6 +41,20 @@ describe('contacts tools', () => {
   });
 
   describe('contacts_save', () => {
+    it('says the contact was not saved when the store wrote no row, with the store\'s reason', async () => {
+      // The store reports a record it could not write in `errors`, not by throwing.
+      vi.spyOn(crm, 'upsertContact').mockReturnValueOnce({ inserted: 0, updated: 0, errors: ['Record 0: NOT NULL constraint failed'] });
+      const result = await contactsSaveTool.handler({ name: 'Dana', email: 'dana@acme.com' }, mockAgent);
+      expect(result).toBe('contacts_save error: the contact was not saved. Record 0: NOT NULL constraint failed');
+      expect(result).not.toContain('Saved contact');
+    });
+
+    it('says Saved for a row it wrote, and passes on what the store noted about it', async () => {
+      vi.spyOn(crm, 'upsertContact').mockReturnValueOnce({ inserted: 1, updated: 0, errors: ['Record 0: unknown field "x" ignored.'] });
+      const result = await contactsSaveTool.handler({ name: 'Dana', email: 'dana@acme.com' }, mockAgent);
+      expect(result).toBe('Saved contact: Dana <dana@acme.com>. Note: Record 0: unknown field "x" ignored.');
+    });
+
     it('creates a new contact that the inbox resolver then finds (scope round-trip)', async () => {
       const result = await contactsSaveTool.handler(
         { name: 'Dana', email: 'dana@acme.com', company: 'Acme' },
