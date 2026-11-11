@@ -49,6 +49,14 @@ describe('contacts tools', () => {
       expect(result).not.toContain('Saved contact');
     });
 
+    it('keeps two contacts saved with a blank email apart, as the answer says', async () => {
+      const first = await contactsSaveTool.handler({ name: 'Dana', email: '', company: 'Acme' }, mockAgent);
+      const second = await contactsSaveTool.handler({ name: 'Eli', email: '', company: 'Beta' }, mockAgent);
+      expect([first, second]).toEqual(['Saved contact: Dana (no email — not deduplicated).', 'Saved contact: Eli (no email — not deduplicated).']);
+      const names = crm.listContacts({}).map((c) => c.name).sort();
+      expect(names).toEqual(['Dana', 'Eli']);
+    });
+
     it('says Saved for a row it wrote, and passes on what the store noted about it', async () => {
       vi.spyOn(crm, 'upsertContact').mockReturnValueOnce({ inserted: 1, updated: 0, errors: ['Record 0: unknown field "x" ignored.'] });
       const result = await contactsSaveTool.handler({ name: 'Dana', email: 'dana@acme.com' }, mockAgent);

@@ -241,8 +241,10 @@ function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, his
   const author = by.principal;
   return withInstanceWrite(by, { site: 'plan_task#create', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]], main: ['pipeline'] }, (w) => {
     // Without a run history only this process holds the workflow: no step, no proven write.
-    if (runHistory) w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, author), ifReturned);
-    w.created('pipeline', pipelineId);
+    if (runHistory) {
+      w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, author), ifReturned);
+      w.created('pipeline', pipelineId);
+    }
     storePipeline(pipelineId, planned);
     return { id: pipelineId, durable: runHistory !== undefined && runHistory !== null };
   });
@@ -435,7 +437,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         ...(includeEstimatedCost ? { estimated_cost_usd: estimatedCostUsd } : {}),
         // Without a run history only this process holds the workflow: say so rather than let the
         // id read as saved.
-        ...(workflowId && !converted.durable ? { saved: false, note: 'This workflow is held for this session only and is not saved: it is gone after a restart, and a schedule cannot run it.' } : {}),
+        ...(workflowId && !converted.durable ? { saved: false, note: 'This workflow is held in memory for this session only and is not saved: it can be dropped when more plans are made, and it is gone after a restart.' } : {}),
       });
     };
 

@@ -84,7 +84,9 @@ export const contactsSaveTool: ToolEntry<ContactsSaveInput> = {
         name,
         source: deriveTurnUntrusted(agent) ? 'agent_external' : 'agent',
       };
-      if (input.email !== undefined) data.email = input.email;
+      // A blank address is no address: stored as "" it is a real value of the unique key, and the
+      // next blank save would overwrite this contact while the answer says it was not deduplicated.
+      if (input.email !== undefined && input.email.trim() !== '') data.email = input.email;
       if (input.phone !== undefined) data.phone = input.phone;
       if (input.company !== undefined) data.company = input.company;
       if (input.type !== undefined) data.type = input.type;
