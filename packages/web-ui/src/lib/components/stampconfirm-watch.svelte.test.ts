@@ -82,7 +82,7 @@ describe('the stamp of a watch whose stored address the parsed one would not sho
 		expect(target.querySelector('[data-stamp-watch-host]')?.textContent).toBe(`https://${host}`);
 	});
 
-	it('shows a host past the display length in full, not cut', async () => {
+	it('shows a host past the display length in full in the stored line (the host line above is cut)', async () => {
 		watchUrl = `https://${'h'.repeat(60)}.${'i'.repeat(60)}.${'j'.repeat(60)}.example/p`;
 		await open();
 		expect(target.querySelector('[data-stamp-watch-stored]')?.textContent).toBe(watchUrl);
@@ -110,7 +110,9 @@ describe('the stamp of a watch whose stored address hides characters', () => {
 		watchUrl = url;
 		await open();
 		expect(target.querySelector('[data-stamp-watch-stored]')).toBeNull();
-		expect(block()).toContain('https://shop.example');
+		const parsed = new URL(url);
+		expect(target.querySelector('[data-stamp-watch] span.font-medium.text-text')?.textContent).toBe('https://shop.example');
+		expect(block()).toContain(`https://shop.example${parsed.pathname}${parsed.search}${parsed.hash}`);
 		expect(target.textContent).not.toContain('oben markiert');
 		expect(target.querySelector('[data-stamp-confirm-button]')?.textContent?.trim()).toBe('Bestätigen');
 	});
