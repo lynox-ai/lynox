@@ -83,8 +83,8 @@ gates the diff OWES, derived from the real file list, so leaving out a required
   means no test covers that line and fails the check.
 
 A documentation-only diff needs none of this — delete the block. (A binding text is
-NOT documentation for this purpose: `SUBPROCESSORS.md` is markdown, and it is the
-document the managed DPA points customers at, so it needs the `legal` gate and an
+NOT documentation for this purpose: `SUBPROCESSORS.md` is markdown, but it is a legal
+text published in this repository, so it needs the `legal` gate and an
 `approved:` line naming who signed off on the wording and when. `delta` and `mutations`
 are dropped for a markdown-only legal change: there is no delta round to report, and a
 fabricated line is worse than none.)
