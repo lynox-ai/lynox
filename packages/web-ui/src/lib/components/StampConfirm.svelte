@@ -137,7 +137,8 @@
 				{#if storedUrl !== null}
 					<div class="mt-0.5 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">
 						<p class="font-medium text-text break-all" data-stamp-watch-host>{watch.host}</p>
-						<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-all" data-stamp-watch-stored>{storedUrl}</p>
+						<p class="mt-0.5 text-warning" data-stamp-watch-stored-hint>{t('stamp.watch_stored')}</p>
+						<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere]" data-stamp-watch-stored>{storedUrl}</p>
 					</div>
 				{:else}
 					<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watch.host}</span>{watch.rest}</p>

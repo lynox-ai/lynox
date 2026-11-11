@@ -67,6 +67,7 @@ describe('the stamp of a watch whose stored address the parsed one would not sho
 		const stored = target.querySelector('[data-stamp-watch-stored]');
 		expect(stored?.textContent).toBe(watchUrl);
 		expect(stored?.className).toContain('whitespace-pre-wrap');
+		expect(stored?.className).toContain('[overflow-wrap:anywhere]');
 		expect(target.querySelector('[data-stamp-confirm-button]')).not.toBeNull();
 	});
 
@@ -80,6 +81,7 @@ describe('the stamp of a watch whose stored address the parsed one would not sho
 		await open();
 		expect(target.querySelector('[data-stamp-watch-stored]')?.textContent).toBe(url);
 		expect(target.querySelector('[data-stamp-watch-host]')?.textContent).toBe(`https://${host}`);
+		expect(target.querySelector('[data-stamp-watch-stored-hint]')?.textContent).toBe('Gespeichert ist mehr als diese Adresse. Der Lauf liest den ganzen Text darunter.');
 	});
 
 	it('shows a host past the display length in full in the stored line (the host line above is cut)', async () => {
@@ -110,6 +112,7 @@ describe('the stamp of a watch whose stored address hides characters', () => {
 		watchUrl = url;
 		await open();
 		expect(target.querySelector('[data-stamp-watch-stored]')).toBeNull();
+		expect(target.querySelector('[data-stamp-watch-stored-hint]')).toBeNull();
 		const parsed = new URL(url);
 		expect(target.querySelector('[data-stamp-watch] span.font-medium.text-text')?.textContent).toBe('https://shop.example');
 		expect(block()).toContain(`https://shop.example${parsed.pathname}${parsed.search}${parsed.hash}`);
