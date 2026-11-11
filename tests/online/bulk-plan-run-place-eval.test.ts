@@ -1,10 +1,11 @@
 /**
  * Online eval: after a Shopify bulk run is planned, where does the model tell the user to find it?
  *
- * The run is reviewed and approved outside the chat, on a page of the app. The model is not told
- * where that page is, so any place it names (a tab, a menu, a page, a link) is one it made up.
- * A walk found it naming a tab that does not exist ("Bulk Runs"). This eval counts how often a
- * reply names a place, so the tool's text can be compared before and after a change:
+ * The run is reviewed and approved outside the chat, on the tab "Massenläufe" / "Bulk runs" under
+ * "Aktivität & Kosten" / "Activity & Cost". The model is not given that path, so it guesses: a walk
+ * found it naming the tab by its English label in a German interface. This eval counts how often a
+ * reply names a place, right or wrong, so the tool's text can be compared before and after a
+ * change; whether a named place is the real one is judged by hand against that path:
  * (p1) "set the SEO title of every product to one text" → form shopify, after.seo_title;
  * (p2) "write each product an SEO title from its name" → form shopify with a judge.
  *
@@ -57,8 +58,10 @@ const CASES = [
 
 interface Plan { input: Record<string, unknown>; answer: string }
 
-function realBulkPlan(ledger: BulkLedger, plans: Plan[]): ToolEntry {
-  const owner = { toolContext: { bulkLedger: ledger, apiStore: PRODUCT_STORE }, currentThreadId: 'place-eval', principal: OWNER_PRINCIPAL } as unknown as IAgent;
+const ownerOn = (ledger: BulkLedger): IAgent =>
+  ({ toolContext: { bulkLedger: ledger, apiStore: PRODUCT_STORE }, currentThreadId: 'place-eval', principal: OWNER_PRINCIPAL } as unknown as IAgent);
+
+function realBulkPlan(owner: IAgent, plans: Plan[]): ToolEntry {
   return {
     ...(bulkPlanTool as ToolEntry),
     handler: async (input: unknown) => {
@@ -70,8 +73,8 @@ function realBulkPlan(ledger: BulkLedger, plans: Plan[]): ToolEntry {
 }
 
 const RECORDED = /^List dry run recorded/;
-// A place in the app the reply points to. Wide on purpose: it is a count for the hand judge, who
-// reads every flagged reply in the dump; a word like "Seite" can be meant otherwise.
+// A place in the app the reply points to, the real one included. Wide on purpose: it is a count for
+// the hand judge, who reads every flagged reply in the dump; a word like "Seite" can be meant otherwise.
 const PLACE = /\b(Tab|Reiter|Registerkarte|Menü|Menüpunkt|Bereich|Seite|Dashboard|Übersicht|Navigation|Sidebar|Seitenleiste)\b|Bulk[ -]?Runs?|Massenläufe|Aktivität|\bklick|\blink\b|https?:\/\//i;
 
 const table: string[] = [];
@@ -100,10 +103,12 @@ async function runOnce(provider: string, make: (tools: ToolEntry[]) => Agent, la
   dirs.push(dir);
   const engineDb = new EngineDb(join(dir, 'engine.db'), 'place-eval-vault-key');
   const plans: Plan[] = [];
+  const owner = ownerOn(new BulkLedger(engineDb, null));
   const agent = make([
-    realBulkPlan(new BulkLedger(engineDb, null), plans),
+    realBulkPlan(owner, plans),
     { ...(httpRequestTool as ToolEntry), handler: async () => PRODUCTS } as ToolEntry,
-    { ...(bulkStatusTool as ToolEntry), handler: async () => 'No bulk runs recorded.' } as ToolEntry,
+    // The real status tool on the same ledger, so a model that checks sees the run it planned.
+    { ...(bulkStatusTool as ToolEntry), handler: async (input: unknown) => (bulkStatusTool as ToolEntry).handler(input, owner) } as ToolEntry,
     { ...(askUserTool as ToolEntry), handler: async () => 'Mach einfach, so wie beschrieben.' } as ToolEntry,
   ]);
   let reply = '';

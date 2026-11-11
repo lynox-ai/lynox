@@ -304,11 +304,12 @@ const JUDGE_COLUMN_TYPES: Record<string, readonly string[]> = {
   boolean: ['boolean', 'string', 'json'],
 };
 
-/** What a planner is told about a judged run. Counts and rules only — never a verdict. */
-// Where the run is in lynox is not given to the model, so a place it names is one it made up
-// (a walk found a tab that does not exist). Said with the result, where the reply is written.
-export const NO_PLACE_NOTE = 'You are not told where in lynox the user finds this run: do not name a tab, page, menu, button or link for it, and do not make one up. Say only that they find it in lynox, outside this chat.';
+// A model asked where the run is guesses: a walk found it naming the tab by its English label in a
+// German interface, under a menu that does not exist; measured, it also made up URLs. Said with the
+// result, where the reply is written; it names no place, so it cannot go stale with the interface.
+export const NO_PLACE_NOTE = 'Do not name a tab, page, menu, button or link for this run, and do not make one up: when you say where it is, say only that the user finds it in lynox, outside this chat.';
 
+/** What a planner is told about a judged run. Counts and rules only — never a verdict. */
 const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +
   'Then a model decides each target\'s new values with your rule, one target at a time, without tools. ' +
   'The user reviews every verdict before anything is written.';

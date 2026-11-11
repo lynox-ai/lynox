@@ -444,9 +444,9 @@ describe('bulk_plan over data-store rows', () => {
   });
 });
 
-// A walk found the model naming a tab for the run that does not exist. Where the run is in lynox
-// is not given to the model, and the result it writes its reply from says so: in every plan the
-// user is to start or approve, and in none with nothing to approve.
+// A walk found the model sending the user to the run under a label and a menu the interface does
+// not show. The result the model writes its reply from asks it not to name a place: in every plan
+// the user is to start or approve, and in none with nothing to approve.
 describe('where the user finds a planned run', () => {
   it('is not claimed to be nowhere: the description no longer says there is no screen for it', () => {
     expect(bulkPlanTool.definition.description).not.toMatch(/no screen or button/);
