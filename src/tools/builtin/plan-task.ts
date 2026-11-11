@@ -241,10 +241,8 @@ function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, his
   const author = by.principal;
   return withInstanceWrite(by, { site: 'plan_task#create', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]], main: ['pipeline'] }, (w) => {
     // Without a run history only this process holds the workflow: no step, no proven write.
-    if (runHistory) {
-      w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, author), ifReturned);
-      w.created('pipeline', pipelineId);
-    }
+    if (runHistory) w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, author), ifReturned);
+    w.created('pipeline', pipelineId);
     storePipeline(pipelineId, planned);
     return { id: pipelineId, durable: runHistory !== undefined && runHistory !== null };
   });
