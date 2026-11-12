@@ -102,10 +102,13 @@ export interface BulkJudgeDeps {
  * The model that judges, per provider that serves the call — decided, not the provider's tier
  * model. The tier models are chosen for chat; measured as a judge, Mistral's `fast` model did not
  * hold the rule or resist an injection in a target. A provider not listed here gets no judge.
+ * On Anthropic and Vertex the judge is Sonnet, not Haiku: measured on the same rule, Haiku broke
+ * it in about a third of the targets (it repeated the context into the verdict), Sonnet in none.
+ * Sonnet sits in the `balanced` band, so an instance capped at `fast` gets no judge there.
  */
 export const JUDGE_MODELS = {
-  anthropic: 'claude-haiku-4-5-20251001',
-  vertex: 'claude-haiku-4-5',
+  anthropic: 'claude-sonnet-4-6',
+  vertex: 'claude-sonnet-4-6',
   mistral: 'mistral-medium-2604',
   fireworks: 'accounts/fireworks/models/gpt-oss-120b',
 } as const;
