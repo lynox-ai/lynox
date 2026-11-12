@@ -224,6 +224,8 @@ describe('a Shopify run\'s field names and note', () => {
 
 	it('knows a store host exactly, not by a suffix', () => {
 		expect(bulkIsShopifyHost('acme.myshopify.com')).toBe(true);
+		expect(bulkIsShopifyHost(`${'a'.repeat(63)}.myshopify.com`)).toBe(true);
+		expect(bulkIsShopifyHost(`${'a'.repeat(64)}.myshopify.com`)).toBe(false);
 		for (const host of ['myshopify.com', 'a.b.myshopify.com', 'acme.myshopify.com.evil.io', 'admin.shopify.com', null]) expect(bulkIsShopifyHost(host), String(host)).toBe(false);
 	});
 });

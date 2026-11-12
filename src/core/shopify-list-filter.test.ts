@@ -386,13 +386,14 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-list.ts | if (source.form === SHOPIFY_LIST_FORM) return source.path ==',
     'core/bulk-list.ts | return form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTER',
     'core/bulk-list.ts | return isListForm(source.form) && BULK_LIST_FORMS[source.for',
+    'core/bulk-list.ts | return isListForm(source.form) && Object.values(source.filte',
     'core/bulk-list.ts | return isShopifyListForm(source.form);',
     'core/bulk-list.ts | return list !== null && list.source.form === SHOPIFY_FILTERE',
     'core/bulk-preview.ts | BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_L',
     'core/bulk-preview.ts | const shopify = list !== null && isShopifyListSource(list.so',
     // A filtered list is written with the product form.
     'core/bulk-preview.ts | const shopifyForm = list !== null && isShopifyListForm(list.',
-    'core/bulk-preview.ts | const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST',
+    'core/bulk-preview.ts | const onFilters = list.source.form === SHOPIFY_FILTERED_LIST',
     'core/bulk-preview.ts | if (isShopifyListForm(source.form)) throw new Error(\'a Shopi',
     // The product writer and the HTML fields of a product run: a filtered list writes products too.
     'core/bulk-external-writer.ts | const fields = htmlFieldsOfListForm(\'shopify\').filter((f) =>',
@@ -400,7 +401,7 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-judge-rule.ts | if (form === \'shopify\' || form === \'shopify_filtered\') retur',
     'core/bulk-judge-rule.ts | if (form === \'shopify_media\') return [];',
     'core/bulk-ledger.ts | if (this.shopifyFormOfRun(run) === \'shopify_product\') for (c',
-    'server/http-api.ts | import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl, s',
+    'server/http-api.ts | import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource',
     'server/http-api.ts | listFirstPage: listRun ? (isShopifyListSource(listRun.source',
     // The image list: every other stored form, filtered or not, is read and written as products.
     'core/bulk-ledger.ts | import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type ',

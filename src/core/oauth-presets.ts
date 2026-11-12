@@ -377,8 +377,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
-    // starting with a hyphen. Shopify itself admits upper case; the boundary does not.
-    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
+    // starting with a hyphen, at most 63 of them (one DNS label). Shopify itself admits upper
+    // case; the boundary does not.
+    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]{0,62}$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
     requiredScopes: [],
     // `read_all_orders` stays out: Shopify grants it only on request. `write_products` is the one
     // write scope: a bulk run writes a product only through the engine's own write document
