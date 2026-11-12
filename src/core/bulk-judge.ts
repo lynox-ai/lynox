@@ -102,9 +102,10 @@ export interface BulkJudgeDeps {
  * The model that judges, per provider that serves the call — decided, not the provider's tier
  * model. The tier models are chosen for chat; measured as a judge, Mistral's `fast` model did not
  * hold the rule or resist an injection in a target. A provider not listed here gets no judge.
- * On Anthropic and Vertex the judge is Sonnet, not Haiku: measured on the same rule, Haiku broke
- * it in about a third of the targets (it repeated the context into the verdict), Sonnet in none.
- * Sonnet sits in the `balanced` band, so an instance capped at `fast` gets no judge there.
+ * On Anthropic and Vertex the judge is Sonnet, not Haiku: measured on a real rule, Haiku repeated
+ * the context into the verdict on part of the targets, Sonnet held the rule on the same sample.
+ * Sonnet is also the `balanced` chat model, so two operator settings now reach the judge: an
+ * instance capped at `fast` gets no judge there, and a blocklist entry for Sonnet blocks it too.
  */
 export const JUDGE_MODELS = {
   anthropic: 'claude-sonnet-4-6',
