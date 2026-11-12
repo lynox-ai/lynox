@@ -128,12 +128,12 @@ describe('an undone run’s page', () => {
 		await render();
 		const befores = [...target.querySelectorAll<HTMLElement>('[data-testid="bulk-before"]')];
 		expect(befores.map((el) => [el.tagName, el.textContent?.trim()])).toEqual([['SPAN', 'Alt 1'], ['DEL', 'Alt 2'], ['SPAN', '- Alt 3'], ['DEL', '- Alt 4']]);
-		expect(['no-underline', 'bg-danger/10'].every((c) => befores[3]!.classList.contains(c))).toBe(true);
+		expect(['no-underline', 'bg-danger/10', 'dark:bg-danger/20'].every((c) => befores[3]!.classList.contains(c))).toBe(true);
 		expect(befores[0]!.classList.contains('text-text')).toBe(true);
 		expect(befores[0]!.classList.contains('text-danger')).toBe(false);
 		expect(befores[1]!.classList.contains('text-danger')).toBe(true);
 		// Marked by a tint, not struck: a line through a „1“ reads as „4“.
-		expect(['no-underline', 'bg-danger/10'].every((c) => befores[1]!.classList.contains(c))).toBe(true);
+		expect(['no-underline', 'bg-danger/10', 'dark:bg-danger/20'].every((c) => befores[1]!.classList.contains(c))).toBe(true);
 		expect(befores[2]!.classList.contains('text-text')).toBe(true);
 	});
 
