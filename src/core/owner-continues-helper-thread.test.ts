@@ -244,7 +244,7 @@ describe('setUpByOther: whose plan an escalation is about', () => {
   });
 });
 
-describe('shownMandate: the address an escalation title may name (ux U-202)', () => {
+describe('shownMandate: the address an escalation title may name', () => {
   it('a mandate\'s plain address, the last editor first', async () => {
     const { shownMandate } = await import('./worker-loop.js');
     expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example' })).toEqual({ address: 'eva@kanzlei.example', changed: false });

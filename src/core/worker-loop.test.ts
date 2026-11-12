@@ -593,7 +593,7 @@ describe('WorkerLoop', () => {
       getMandateEnds: () => null,
       // The helper's read is recorded first (PRD §3.9); a log that takes it.
       getAuditLog: () => ({ record: vi.fn() }),
-      // A German owner: the helper's thread bubble is lynox's own words, so in German (ux U-202).
+      // A German owner: the helper's thread bubble is lynox's own words, so in German.
       config: { language: 'de' },
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);

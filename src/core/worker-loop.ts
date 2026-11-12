@@ -681,7 +681,7 @@ export function setUpByOther(t: { created_by?: string | null | undefined; mandat
 const SHOWN_ADDRESS = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$/;
 
 /**
- * The mandate an escalation's title may name (ux U-202): who changed the plan, if a mandate other
+ * The mandate an escalation's title may name: who changed the plan, if a mandate other
  * than its creator did, else the mandate that set it up. The engine sets these tags from the
  * grant, so the address is not the helper's text. `undefined` for a plan no mandate set up or
  * changed, an unknown tag, or an address of another shape; the title then says "someone you let in".
@@ -3983,7 +3983,7 @@ export class WorkerLoop {
       this.engine.escalateToUser({
         key: task.id,
         title: othersWatch ? notices.helperWatchTitle(shownMandate(task)) : `\uD83D\uDD0D ${task.title}`,
-        // The helper's case is lynox's own bubble to the owner, so in the owner's language (ux U-202).
+        // The helper's case is lynox's own bubble to the owner, so in the owner's language.
         body: othersWatch ? notices.helperWatchChanged : `${config.url} changed.\n\n${truncatedAnalysis}`,
         pushBody: othersWatch ? notices.helperWatchChangedPush : notices.watchChanged(config.url, truncatedAnalysis),
         data: { taskId: task.id },

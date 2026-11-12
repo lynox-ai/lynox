@@ -438,7 +438,7 @@ describe('display and fetch name the same target', () => {
 	});
 });
 
-describe('showsWatchAddress — a confirmed watch names its page (ux U-202)', () => {
+describe('showsWatchAddress — a confirmed watch names its page', () => {
 	const cfg = JSON.stringify({ url: 'https://example.com/preise', interval_minutes: 60 });
 	it('a confirmed watch: yes; the same watch waiting: no (its consent block shows it)', () => {
 		expect(showsWatchAddress({ source: 'watch', effect: 'run_agent', confirmed_at: '2026-01-01T00:00:00Z', watch_config: cfg })).toBe(true);
