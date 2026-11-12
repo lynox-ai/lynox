@@ -1145,8 +1145,60 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     const redo = ledger.planUndo(undo.status.id);
     if (!redo.ok) throw new Error(redo.reason);
     approve(redo.status.id);
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 3 });
     expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
     expect([...state.values()]).toEqual(['w0', 'w1', 'w2']);
+    // The run's writes stand again: it reads done, none of its targets is taken back, and no
+    // undo is named for it. The first undo is the one taken back now.
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', undone: 0 });
+    const left = engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND undone_at IS NOT NULL').get(runId) as { n: number };
+    expect(left.n).toBe(0);
+    expect(ledger.undoneBy(runId)).toBeNull();
+    expect(ledger.getStatus(undo.status.id)!.phase).toBe('undone');
+    expect(ledger.undoneBy(undo.status.id)!.runId).toBe(redo.status.id);
+    // Done again, so it can be taken back again, and that undo covers all three.
+    const again = ledger.planUndo(runId);
+    if (!again.ok) throw new Error(again.reason);
+    expect(again.status.total).toBe(3);
+  });
+
+  it('an undo of the undo that writes nothing back leaves the run undone', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id);
+    // Someone else changed every target since: each is a conflict, none is written back.
+    for (const k of state.keys()) state.set(k, 'someone else');
+    await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer));
+    expect(ledger.getStatus(redo.status.id)!.conflicts).toBe(3);
+    expect(ledger.getStatus(undo.status.id)!.phase).toBe('done');
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 3 });
+  });
+
+  it('an undo of the undo of a run halted at its maximum writes it back, and the run stays undone', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId, { maxTargets: 2 });
+    const { writer, state } = memory(initial);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('halted');
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    expect(ledger.getStatus(runId)!.phase).toBe('undone');
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id);
+    expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([...state.values()]).toEqual(['w0', 'w1', 'v2', 'v3']);
+    // Its two writes stand again, but which phase it stood in before is not kept: it stays undone.
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 0 });
   });
 });
 

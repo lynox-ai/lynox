@@ -3317,6 +3317,15 @@ export class BulkLedger {
           `UPDATE bulk_targets SET undone_at = ? WHERE run_id = ?
              AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND seq = ?)`,
         ).run(at, run.sourceRunId, run.id, seq);
+        // An undo of an undo writes back what the first undo took back: that target of the run
+        // the first undo came from stands again, as after the rollback of an undo
+        // ({@link recordRolledBack}). Only an undo carries a source run ({@link planUndo}).
+        db.prepare(
+          `UPDATE bulk_targets SET undone_at = NULL
+             WHERE run_id = (SELECT source_run_id FROM bulk_runs WHERE id = ?)
+               AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ?
+                            AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND seq = ?))`,
+        ).run(run.sourceRunId, run.sourceRunId, run.id, seq);
       }
     })();
   }
@@ -3469,6 +3478,19 @@ export class BulkLedger {
       ).get(run.sourceRunId) as { n: number };
       if (standing.n === 0) {
         db.prepare(`UPDATE bulk_runs SET phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(run.sourceRunId);
+      }
+      // An undo of an undo: the run the first undo took back holds its writes again
+      // ({@link recordApplied}), so it is `done` again once any of them stands. Only a run that
+      // had finished: one taken back after a halt or an abort keeps its reason, and which phase
+      // it stood in then is not kept, so it stays `undone`.
+      if (src.source_run_id === null) return;
+      const orig = this.runRow(src.source_run_id);
+      if (!orig || orig.phase !== 'undone') return;
+      const again = db.prepare(
+        `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(orig.target_system) !== null)}`,
+      ).get(orig.id) as { n: number };
+      if (again.n > 0) {
+        db.prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ? AND phase = 'undone' AND halt_reason IS NULL`).run(orig.id);
       }
     })();
   }
