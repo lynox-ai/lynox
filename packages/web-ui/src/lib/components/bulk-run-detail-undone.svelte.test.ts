@@ -103,6 +103,22 @@ describe('an undone run’s page', () => {
 		expect(live!.classList.contains('text-success')).toBe(true);
 	});
 
+	it('greys a target the owner took out before the write: on a run taken back it was never live', async () => {
+		const out = { ...written(3, false), written: false, deselected: true } as BulkTarget;
+		targets = [written(1, true), out];
+		await render();
+		const [, never] = afters();
+		expect(never!.classList.contains('text-text-subtle')).toBe(true);
+		expect(never!.classList.contains('text-success')).toBe(false);
+	});
+
+	it('on a run that is only done, a target taken out keeps its colour', async () => {
+		run = makeRun({ phase: 'done', undone: 0, undoneBy: null });
+		targets = [written(1, false), { ...written(3, false), written: false, deselected: true } as BulkTarget];
+		await render();
+		expect(afters()[1]!.classList.contains('text-success')).toBe(true);
+	});
+
 	it('says when and how many, and opens the undo', async () => {
 		const before = getLocale();
 		setLocale('de');
@@ -113,6 +129,8 @@ describe('an undone run’s page', () => {
 		const time = d.toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' });
 		const line = target.querySelector('[data-testid="bulk-undone"]');
 		expect(line?.textContent).toContain(tf('bulk.undone.sentence', { date, time, n: '2' }));
+		// The count leads and the time closes the sentence, so no line breaks between „09:00:“ and „2“.
+		expect(line?.textContent?.trim()).toMatch(new RegExp(`^2 Ziele haben ihren Wert von vorher zurück\\. Zurückgenommen am ${date.replace(/\./g, '\\.')} um ${time}\\.`));
 		[...line!.querySelectorAll('button')].find((b) => b.textContent?.trim() === t('bulk.undone.open'))!.click();
 		expect(opened).toEqual(['u1']);
 	});

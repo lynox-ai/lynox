@@ -866,9 +866,10 @@ export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'>, step: BulkStepName
 	return step === 'done' && run.phase === 'undone' ? 'bulk.phase.undone' : `bulk.step.${step}`;
 }
 
-/** Whether a target's after-value is shown as no longer live: an undo or a rollback took it back. */
-export function bulkAfterTakenBack(target: Pick<BulkTarget, 'undone'>): boolean {
-	return target.undone === true;
+/** Whether a target's after-value is shown as not live: an undo or a rollback took it back, or, on
+ *  a run taken back, the owner took it out before the write, so it never was. */
+export function bulkAfterTakenBack(run: Pick<BulkRun, 'phase'>, target: Pick<BulkTarget, 'undone' | 'deselected'>): boolean {
+	return target.undone === true || (run.phase === 'undone' && target.deselected === true);
 }
 
 /** The sentence over an undone run: when it was taken back and how many targets have their value

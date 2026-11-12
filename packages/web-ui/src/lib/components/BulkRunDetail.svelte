@@ -513,12 +513,12 @@
 													<div>
 														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
-														→ <ins class="{bulkAfterTakenBack(target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{bulkValueText(f.after)}</ins>
+														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{bulkValueText(f.after)}</ins>
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
 												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
-{/each}{#each target.diff.added as line, i (i)}<ins class="{bulkAfterTakenBack(target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">+ {bulkVisibleText(line)}</ins>
+{/each}{#each target.diff.added as line, i (i)}<ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">+ {bulkVisibleText(line)}</ins>
 {/each}</pre>
 											{:else if target.error && target.change !== 'invalid'}
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>

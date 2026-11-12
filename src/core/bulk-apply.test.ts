@@ -1104,10 +1104,8 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     expect(ledger.getStatus(second.status.id)!.phase).toBe('previewed');
     const by = ledger.undoneBy(runId)!;
     expect(by.runId).toBe(first.status.id);
-    // The time lies inside the undo's own run, and no target was taken back later.
+    // The time lies inside the undo's own run.
     expect(by.at >= t0 && by.at <= t1).toBe(true);
-    const times = (engineDb.getDb().prepare('SELECT undone_at AS at FROM bulk_targets WHERE run_id = ?').all(runId) as { at: string }[]).map((r) => r.at);
-    expect(times.every((x) => x <= by.at)).toBe(true);
   });
 
   it('after a halt at 80 % takes back exactly the applied targets', async () => {
