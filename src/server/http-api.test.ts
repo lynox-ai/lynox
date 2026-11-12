@@ -12575,6 +12575,19 @@ describe('LynoxHTTPApi', () => {
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(409);
     });
 
+    it('names the undo that took an undone run back, and none for a run that is not undone', async () => {
+      const id = planRun();
+      const undoneByOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { undoneBy: unknown }).undoneBy;
+      expect(await undoneByOf()).toBeNull();
+      const spy = vi.spyOn(bulkLedger, 'undoneBy').mockReturnValue({ runId: 'u1', at: '2026-11-12T08:00:30.000Z' });
+      try {
+        expect(await undoneByOf()).toEqual({ runId: 'u1', at: '2026-11-12T08:00:30.000Z' });
+        expect(spy).toHaveBeenCalledWith(id);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('says when a run that stands still is picked up again, for the read and for the write trigger', async () => {
       const id = planRun();
       const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;

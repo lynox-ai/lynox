@@ -1058,6 +1058,8 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     const runId = await planFiles(rows);
     approve(runId);
     await runBulkEffect(runId, 'bulk_apply', effectDeps(workspaceWriter()));
+    // A run that is done, not undone, names no undo.
+    expect(ledger.undoneBy(runId)).toBeNull();
 
     const undo = ledger.planUndo(runId);
     if (!undo.ok) throw new Error(undo.reason);
@@ -1077,6 +1079,11 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     }
     expect(ledger.getStatus(runId)!.phase).toBe('undone');
     expect(ledger.getStatus(runId)!.undone).toBe(210);
+    // The owner's page names the undo and when its last target was taken back (ux U-228);
+    // the undo itself is not undone, so it names none.
+    const lastUndone = (engineDb.getDb().prepare('SELECT MAX(undone_at) AS at FROM bulk_targets WHERE run_id = ?').get(runId) as { at: string }).at;
+    expect(ledger.undoneBy(runId)).toEqual({ runId: undo.status.id, at: lastUndone });
+    expect(ledger.undoneBy(undo.status.id)).toBeNull();
     // Nothing left to take back.
     expect(ledger.planUndo(runId)).toEqual({ ok: false, reason: 'not_undoable' });
   });
@@ -1312,6 +1319,8 @@ describe('conflicts — shown, not overwritten (§7 h)', () => {
     expect([s.conflicts, s.applied, s.failed]).toEqual([1, 209, 0]);
     // The source is not fully undone while one of its targets still stands.
     expect(ledger.getStatus(runId)!.phase).toBe('done');
+    // So its page does not say it was taken back, though a finished undo of it exists.
+    expect(ledger.undoneBy(runId)).toBeNull();
   });
 
   it('a file changed between approval and apply is a conflict, not overwritten', async () => {

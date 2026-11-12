@@ -14,7 +14,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -324,6 +324,7 @@
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
 	const step = $derived(run ? bulkStep(run) : 'planned');
 	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
+	const undoneText = $derived(run ? bulkUndoneText(run, getLocale(), i18n) : null);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
 	// With one target to write the note keeps its first two sentences, here and in the engine's own (EN).
@@ -422,9 +423,17 @@
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
 				{#each steps as s (s)}
-					<li class="rounded-full px-2 py-0.5 {s === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={s === step ? 'step' : undefined}>{t(`bulk.step.${s}`)}</li>
+					<li class="rounded-full px-2 py-0.5 {s === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={s === step ? 'step' : undefined}>{t(bulkStepLabelKey(run, s))}</li>
 				{/each}
 			</ol>
+			{#if undoneText}
+				<p class="text-sm rounded-[var(--radius-sm)] bg-bg-muted border border-border px-3 py-2" data-testid="bulk-undone">
+					{undoneText}
+					{#if run.undoneBy}
+						<button type="button" class="{btnPlain} ml-1" onclick={() => onOpen(run!.undoneBy!.runId)}>{t('bulk.undone.open')}</button>
+					{/if}
+				</p>
+			{/if}
 
 			<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
@@ -504,12 +513,12 @@
 													<div>
 														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
-														→ <ins class="text-success no-underline">{bulkValueText(f.after)}</ins>
+														→ <ins class="{bulkAfterTakenBack(target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{bulkValueText(f.after)}</ins>
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
 												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
-{/each}{#each target.diff.added as line, i (i)}<ins class="text-success no-underline">+ {bulkVisibleText(line)}</ins>
+{/each}{#each target.diff.added as line, i (i)}<ins class="{bulkAfterTakenBack(target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">+ {bulkVisibleText(line)}</ins>
 {/each}</pre>
 											{:else if target.error && target.change !== 'invalid'}
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
