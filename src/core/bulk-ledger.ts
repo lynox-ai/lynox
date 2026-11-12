@@ -361,6 +361,12 @@ export interface BulkProbeBlock { missing: BulkProbeMissing[]; step: BulkProbeSt
  * `bulk_status`, and anything else written there — an error message, a file's content
  * — would carry a target's strings into the model's context.
  */
+/** What an undo is refused with when it would put back a run taken back before its earlier
+ *  phase was stored ({@link BulkLedger} `phaseNotKept`). Read by whoever calls the HTTP API. */
+export const BULK_PHASE_NOT_KEPT =
+  'This run was undone before lynox kept the phase a run had before its undo, so it cannot be reapplied. Nothing was written. ' +
+  'To write its values again, plan a new bulk run with the same targets and values; it needs its own approval.';
+
 export const BULK_HALT_REASONS = {
   awaitingStart: 'waiting for the owner to start reading the targets',
   failureRate: 'more than 5 % of the targets failed',
@@ -650,6 +656,8 @@ interface RunRow {
   id: string; created_at: string; target_system: string; phase: BulkPhase; undo: UndoKind | 'mixed';
   targets_total: number; targets_applied: number; targets_failed: number; halt_reason: string | null;
   atomic: number; kind: BulkRunKind; source_run_id: string | null; target_collection: string | null;
+  /** The phase an undo took this run back from (v69); NULL before that or when not undone. */
+  phase_before_undo: BulkPhase | null;
   rule_hash: string; approval_checksum: string | null; max_targets: number | null; expires_at: string | null;
   contract_json: string | null; created_by: string | null; principal: string | null; mandate_id: string | null;
   list_source: string | null; list_state: ListState | null; list_page: number; list_calls: number; list_bytes: number;
@@ -869,7 +877,7 @@ export const OPEN_IN_FAMILY_SQL =
    WHERE b.phase IN ('approved','writing') AND b.halt_reason IS NULL AND b.id IS NOT ? LIMIT 1`;
 
 /** Why a run may not start writing because of an undo — see `BulkLedger.writeBlocked`. */
-export type UndoRefusal = 'undo_open' | 'source_running' | 'undo_stale';
+export type UndoRefusal = 'undo_open' | 'source_running' | 'undo_stale' | 'phase_not_kept';
 
 /** A run whose own loop has stopped and is not started again unless a human resumes it. */
 function isStopped(r: { phase: BulkPhase; halt_reason: string | null }): boolean {
@@ -2431,10 +2439,28 @@ export class BulkLedger {
    * engines share one data directory, and a halt set by one loop does not stop the other's
    * write in flight.
    */
+  /**
+   * An undo of `sourceRunId` may put back a run further up its chain that an undo took back before
+   * the phase it stood in was stored (v69), with a halt reason: it stood halted or aborted, and
+   * which one is not known. Refused for any such run above the source, not only one this undo
+   * would put back (an even distance up): such chains predate v69, and refusing is the safe side.
+   */
+  private phaseNotKept(sourceRunId: string): boolean {
+    let up = this.runRow(sourceRunId)?.source_run_id ?? null;
+    while (up !== null) {
+      const r = this.runRow(up);
+      if (!r) return false;
+      if (r.phase === 'undone' && r.phase_before_undo === null && r.halt_reason !== null) return true;
+      up = r.source_run_id;
+    }
+    return false;
+  }
+
   private writeBlocked(run: RunRow): UndoRefusal | null {
     const open = this.openInFamily(run.id, run.id);
     if (open !== null) return open === run.source_run_id ? 'source_running' : 'undo_open';
     if (run.kind !== 'undo' || run.source_run_id === null) return null;
+    if (this.phaseNotKept(run.source_run_id)) return 'phase_not_kept';
     const src = this.runRow(run.source_run_id);
     if (!src) return null;
     if (src.phase === 'undone') return 'undo_stale';
@@ -2484,7 +2510,7 @@ export class BulkLedger {
    * shown, not overwritten. An undo of an undo is the same mechanism.
    */
   planUndo(sourceRunId: string, params: { createdBy?: string | undefined } = {}):
-    { ok: true; status: BulkRunStatus } | { ok: false; reason: 'not_found' | 'not_undoable' | 'nothing_to_undo' | 'atomic_partial' | 'undo_open' | 'mail_api' } {
+    { ok: true; status: BulkRunStatus } | { ok: false; reason: 'not_found' | 'not_undoable' | 'nothing_to_undo' | 'atomic_partial' | 'undo_open' | 'mail_api' | 'phase_not_kept' } {
     const src = this.runRow(sourceRunId);
     if (!src) return { ok: false, reason: 'not_found' };
     // An undo writes the same host and paths under the same contract, so it could never be
@@ -2493,6 +2519,7 @@ export class BulkLedger {
     if (!isStopped(src)) return { ok: false, reason: 'not_undoable' };
     // An undo beside another run of the family that may write would write the same targets.
     if (this.openInFamily(sourceRunId, null) !== null) return { ok: false, reason: 'undo_open' };
+    if (this.phaseNotKept(sourceRunId)) return { ok: false, reason: 'phase_not_kept' };
     const db = this.engineDb.getDb();
     if (src.atomic === 1) {
       // Form B's rule (PRD §2.2): an atomic run is taken back whole or not at all.
@@ -3495,7 +3522,7 @@ export class BulkLedger {
         `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}`,
       ).get(run.sourceRunId) as { n: number };
       if (standing.n === 0) {
-        db.prepare(`UPDATE bulk_runs SET phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(run.sourceRunId);
+        db.prepare(`UPDATE bulk_runs SET phase_before_undo = phase, phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(run.sourceRunId);
       }
       // Further up the chain each run is as this undo's write left its targets ({@link flipChain}):
       // at an even distance its writes stand again, at an odd one they are taken back again.
@@ -3507,14 +3534,15 @@ export class BulkLedger {
           `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(r.target_system) !== null)}`,
         ).get(r.id) as { n: number }).n;
         if (depth % 2 === 1 && left === 0) {
-          db.prepare(`UPDATE bulk_runs SET phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(r.id);
+          db.prepare(`UPDATE bulk_runs SET phase_before_undo = phase, phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(r.id);
         } else if (depth % 2 === 0 && left > 0) {
-          // A run that had finished is done again. One taken back after a halt or an abort keeps
-          // its reason, and which of the two it stood in is not stored: it reads aborted, the one
-          // of the two that needs nothing stored. It can be taken back like any stopped run, and
-          // not resumed.
+          // Back in the phase the undo took it from. Taken back before that was stored (v69), a run
+          // without a halt reason stood done; one with a reason is never reached here, the undo
+          // that would put it back is refused ({@link phaseNotKept}), and it would stay undone.
           db.prepare(
-            `UPDATE bulk_runs SET phase = CASE WHEN halt_reason IS NULL THEN 'done' ELSE 'aborted' END
+            `UPDATE bulk_runs SET phase = CASE WHEN phase_before_undo IS NOT NULL THEN phase_before_undo
+                 WHEN halt_reason IS NULL THEN 'done' ELSE phase END,
+               phase_before_undo = NULL
                WHERE id = ? AND phase = 'undone'`,
           ).run(r.id);
         }

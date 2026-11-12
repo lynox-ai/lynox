@@ -12707,6 +12707,18 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(409);
     });
 
+    it('refuses an undo that would put back a run whose phase was not kept, saying why', async () => {
+      const spy = vi.spyOn(bulkLedger, 'planUndo').mockReturnValue({ ok: false, reason: 'phase_not_kept' });
+      try {
+        const res = await jsonFetch('/api/bulk/runs/u1/undo', { method: 'POST' });
+        expect(res.status).toBe(409);
+        expect(JSON.stringify(await res.json())).toContain('This run was undone before lynox kept the phase a run had before its undo, so it cannot be reapplied. Nothing was written. To write its values again, plan a new bulk run with the same targets and values; it needs its own approval.');
+        expect(spy).toHaveBeenCalledWith('u1');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('plans an undo of a finished run as a previewed run with its own checksum', async () => {
       const id = planRun();
       bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)! });
