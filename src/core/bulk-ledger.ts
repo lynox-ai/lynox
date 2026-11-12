@@ -3510,8 +3510,9 @@ export class BulkLedger {
           db.prepare(`UPDATE bulk_runs SET phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(r.id);
         } else if (depth % 2 === 0 && left > 0) {
           // A run that had finished is done again. One taken back after a halt or an abort keeps
-          // its reason, and which of the two it stood in is not kept: it is aborted, so its loop
-          // does not start again unseen, and it can be taken back like any stopped run.
+          // its reason, and which of the two it stood in is not stored: it reads aborted, the one
+          // of the two that needs nothing stored. It can be taken back like any stopped run, and
+          // not resumed.
           db.prepare(
             `UPDATE bulk_runs SET phase = CASE WHEN halt_reason IS NULL THEN 'done' ELSE 'aborted' END
                WHERE id = ? AND phase = 'undone'`,
