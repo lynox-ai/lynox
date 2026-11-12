@@ -2408,6 +2408,8 @@ export class BulkLedger {
    *    source's rows, and taking back what an undo of the later undo wrote again is that undo's
    *    job. (A source only partly taken back by another undo is not refused: each target is
    *    still checked against the state the source wrote, so nothing is overwritten unseen.)
+   *    And an undo planned before an undo of another undo of its source wrote the source's
+   *    values back: those are that run's writes now.
    *
    * "May write" means approved or writing and NOT halted. Two states are left out
    * on purpose, and each would look like a gap to a reader who does not know why:
@@ -2436,6 +2438,17 @@ export class BulkLedger {
     const src = this.runRow(run.source_run_id);
     if (!src) return null;
     if (src.phase === 'undone') return 'undo_stale';
+    // The same once an undo of an undo of the source (another one, or this one halted) wrote the
+    // source's values back after this undo was planned ({@link flipChain}): what this one would
+    // take back is that run's write now, and taking it back is the job of an undo of that run.
+    const rewritten = this.engineDb.getDb().prepare(
+      `SELECT 1 FROM bulk_runs s JOIN bulk_runs x ON x.source_run_id = s.id
+         WHERE s.source_run_id = ?
+           AND (x.created_at > ? OR (x.created_at = ? AND x.rowid > (SELECT rowid FROM bulk_runs WHERE id = ?)))
+           AND EXISTS (SELECT 1 FROM bulk_targets t WHERE t.run_id = x.id AND t.applied_at IS NOT NULL)
+         LIMIT 1`,
+    ).get(src.id, run.created_at, run.created_at, run.id);
+    if (rewritten !== undefined) return 'undo_stale';
     const missing = this.engineDb.getDb().prepare(
       `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}
          AND seq NOT IN (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND source_seq IS NOT NULL)`,
@@ -3278,6 +3291,29 @@ export class BulkLedger {
   }
 
   /**
+   * Set `undone_at` up an undo chain after an undo's write to target `seq` (`written`) or its
+   * rollback. Each undo writes back what its source overwrote, so the values alternate: after
+   * a write the source's target is taken back, the target that source took back stands again,
+   * and so on; after a rollback it is the other way round. Called inside the caller's transaction.
+   */
+  private flipChain(undoRunId: string, seq: number, at: string, written: boolean): void {
+    this.engineDb.getDb().prepare(
+      `WITH RECURSIVE up(run_id, seq, depth) AS (
+         SELECT r.source_run_id, t.source_seq, 1 FROM bulk_targets t JOIN bulk_runs r ON r.id = t.run_id
+           WHERE t.run_id = ? AND t.seq = ? AND r.source_run_id IS NOT NULL AND t.source_seq IS NOT NULL
+         UNION ALL
+         SELECT r.source_run_id, t.source_seq, up.depth + 1 FROM up
+           JOIN bulk_targets t ON t.run_id = up.run_id AND t.seq = up.seq JOIN bulk_runs r ON r.id = t.run_id
+           WHERE r.source_run_id IS NOT NULL AND t.source_seq IS NOT NULL
+       )
+       UPDATE bulk_targets SET undone_at = CASE
+           WHEN (SELECT depth FROM up WHERE up.run_id = bulk_targets.run_id AND up.seq = bulk_targets.seq) % 2 = ? THEN ?
+           ELSE NULL END
+         WHERE (run_id, seq) IN (SELECT run_id, seq FROM up)`,
+    ).run(undoRunId, seq, written ? 1 : 0, at);
+  }
+
+  /**
    * Record a written target, releasing its claim, in one transaction with the run's
    * counter — and, for an undo target, the source target it took back.
    */
@@ -3312,21 +3348,7 @@ export class BulkLedger {
         ).run(run.id, seq, run.id);
       }
       db.prepare('UPDATE bulk_runs SET targets_applied = targets_applied + 1 WHERE id = ?').run(run.id);
-      if (run.kind === 'undo' && run.sourceRunId !== null) {
-        db.prepare(
-          `UPDATE bulk_targets SET undone_at = ? WHERE run_id = ?
-             AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND seq = ?)`,
-        ).run(at, run.sourceRunId, run.id, seq);
-        // An undo of an undo writes back what the first undo took back: that target of the run
-        // the first undo came from stands again, as after the rollback of an undo
-        // ({@link recordRolledBack}). Only an undo carries a source run ({@link planUndo}).
-        db.prepare(
-          `UPDATE bulk_targets SET undone_at = NULL
-             WHERE run_id = (SELECT source_run_id FROM bulk_runs WHERE id = ?)
-               AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ?
-                            AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND seq = ?))`,
-        ).run(run.sourceRunId, run.sourceRunId, run.id, seq);
-      }
+      if (run.kind === 'undo' && run.sourceRunId !== null) this.flipChain(run.id, seq, at, true);
     })();
   }
 
@@ -3403,19 +3425,15 @@ export class BulkLedger {
   /**
    * Mark a target written by this run as taken back (an atomic run's rollback). For an
    * undo run the rollback restores what the source wrote, so the source target stands
-   * again: its `undone_at` is cleared in the same transaction.
+   * again, and further up the chain each target is as the source's write left it
+   * ({@link flipChain}), in the same transaction.
    */
   recordRolledBack(run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, now: number = Date.now()): void {
     const db = this.engineDb.getDb();
     db.transaction(() => {
       db.prepare('UPDATE bulk_targets SET undone_at = ? WHERE run_id = ? AND seq = ? AND applied_at IS NOT NULL')
         .run(new Date(now).toISOString(), run.id, seq);
-      if (run.kind === 'undo' && run.sourceRunId !== null) {
-        db.prepare(
-          `UPDATE bulk_targets SET undone_at = NULL WHERE run_id = ?
-             AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND seq = ?)`,
-        ).run(run.sourceRunId, run.id, seq);
-      }
+      if (run.kind === 'undo' && run.sourceRunId !== null) this.flipChain(run.id, seq, new Date(now).toISOString(), false);
     })();
   }
 
@@ -3479,18 +3497,28 @@ export class BulkLedger {
       if (standing.n === 0) {
         db.prepare(`UPDATE bulk_runs SET phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(run.sourceRunId);
       }
-      // An undo of an undo: the run the first undo took back holds its writes again
-      // ({@link recordApplied}), so it is `done` again once any of them stands. Only a run that
-      // had finished: one taken back after a halt or an abort keeps its reason, and which phase
-      // it stood in then is not kept, so it stays `undone`.
-      if (src.source_run_id === null) return;
-      const orig = this.runRow(src.source_run_id);
-      if (!orig || orig.phase !== 'undone') return;
-      const again = db.prepare(
-        `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(orig.target_system) !== null)}`,
-      ).get(orig.id) as { n: number };
-      if (again.n > 0) {
-        db.prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ? AND phase = 'undone' AND halt_reason IS NULL`).run(orig.id);
+      // Further up the chain each run is as this undo's write left its targets ({@link flipChain}):
+      // at an even distance its writes stand again, at an odd one they are taken back again.
+      let up = src.source_run_id, depth = 2;
+      while (up !== null) {
+        const r = this.runRow(up);
+        if (!r) return;
+        const left = (db.prepare(
+          `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(r.target_system) !== null)}`,
+        ).get(r.id) as { n: number }).n;
+        if (depth % 2 === 1 && left === 0) {
+          db.prepare(`UPDATE bulk_runs SET phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(r.id);
+        } else if (depth % 2 === 0 && left > 0) {
+          // A run that had finished is done again. One taken back after a halt or an abort keeps
+          // its reason, and which of the two it stood in is not kept: it is aborted, so its loop
+          // does not start again unseen, and it can be taken back like any stopped run.
+          db.prepare(
+            `UPDATE bulk_runs SET phase = CASE WHEN halt_reason IS NULL THEN 'done' ELSE 'aborted' END
+               WHERE id = ? AND phase = 'undone'`,
+          ).run(r.id);
+        }
+        up = r.source_run_id;
+        depth++;
       }
     })();
   }
