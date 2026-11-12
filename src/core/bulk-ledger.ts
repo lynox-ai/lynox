@@ -2204,13 +2204,15 @@ export class BulkLedger {
 
   /** The undo that took an undone run back, for the owner's page: the last finished undo started
    *  from it, and when its last target was taken back. Null for a run that is not `undone`.
-   *  Only an undo carries a `source_run_id` ({@link planUndo}), so the source link alone finds it. */
+   *  Only an undo carries a `source_run_id` ({@link planUndo}), so the source link alone finds it.
+   *  Only a finished one counts: a second undo planned beside it stays previewed for good. Two
+   *  planned in the same second are told apart by insertion order, as the prune does. */
   undoneBy(runId: string): { runId: string; at: string } | null {
     const run = this.runRow(runId);
     if (!run || run.phase !== 'undone') return null;
     const db = this.engineDb.getDb();
     const undo = db.prepare(
-      `SELECT id FROM bulk_runs WHERE source_run_id = ? AND phase = 'done' ORDER BY created_at DESC, id DESC LIMIT 1`,
+      `SELECT id FROM bulk_runs WHERE source_run_id = ? AND phase = 'done' ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     ).get(runId) as { id: string } | undefined;
     const at = (db.prepare('SELECT MAX(undone_at) AS at FROM bulk_targets WHERE run_id = ?').get(runId) as { at: string | null }).at;
     return undo === undefined || at === null ? null : { runId: undo.id, at };

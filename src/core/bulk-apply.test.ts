@@ -1088,6 +1088,28 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     expect(ledger.planUndo(runId)).toEqual({ ok: false, reason: 'not_undoable' });
   });
 
+  it('names the undo that finished, not a second one planned beside it, and when it took the last target back', async () => {
+    const runId = await planFiles(seedFiles());
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(workspaceWriter()));
+    const first = ledger.planUndo(runId);
+    if (!first.ok) throw new Error(first.reason);
+    // A previewed undo holds nothing, so a second one can be planned beside it; it never runs.
+    const second = ledger.planUndo(runId);
+    if (!second.ok) throw new Error(second.reason);
+    approve(first.status.id);
+    const t0 = new Date().toISOString();
+    expect((await runBulkEffect(first.status.id, 'bulk_undo', effectDeps(workspaceWriter()))).status).toBe('done');
+    const t1 = new Date().toISOString();
+    expect(ledger.getStatus(second.status.id)!.phase).toBe('previewed');
+    const by = ledger.undoneBy(runId)!;
+    expect(by.runId).toBe(first.status.id);
+    // The time lies inside the undo's own run, and no target was taken back later.
+    expect(by.at >= t0 && by.at <= t1).toBe(true);
+    const times = (engineDb.getDb().prepare('SELECT undone_at AS at FROM bulk_targets WHERE run_id = ?').all(runId) as { at: string }[]).map((r) => r.at);
+    expect(times.every((x) => x <= by.at)).toBe(true);
+  });
+
   it('after a halt at 80 % takes back exactly the applied targets', async () => {
     const { runId, initial } = recordMemoryRun(10);
     approve(runId, { maxTargets: 8 });
@@ -1321,6 +1343,16 @@ describe('conflicts — shown, not overwritten (§7 h)', () => {
     expect(ledger.getStatus(runId)!.phase).toBe('done');
     // So its page does not say it was taken back, though a finished undo of it exists.
     expect(ledger.undoneBy(runId)).toBeNull();
+    // Put back what the run wrote, and a second undo takes the rest. Its page names that one,
+    // though both undos finished and were planned within the same second (`created_at` has seconds).
+    writeFileSync(join(ws, 'pages/p003.md'), 'new 3\n');
+    const rest = ledger.planUndo(runId);
+    if (!rest.ok) throw new Error(rest.reason);
+    engineDb.getDb().prepare('UPDATE bulk_runs SET created_at = (SELECT created_at FROM bulk_runs WHERE id = ?) WHERE id = ?').run(undo.status.id, rest.status.id);
+    approve(rest.status.id);
+    expect((await runBulkEffect(rest.status.id, 'bulk_undo', effectDeps(workspaceWriter()))).status).toBe('done');
+    expect(ledger.getStatus(runId)!.phase).toBe('undone');
+    expect(ledger.undoneBy(runId)?.runId).toBe(rest.status.id);
   });
 
   it('a file changed between approval and apply is a conflict, not overwritten', async () => {
