@@ -548,8 +548,11 @@ function resolveRunWallClockMs(): number {
 }
 /** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
 const SPEAK_MAX_TEXT_CHARS = 10_000;
-/** Mistral Voxtral TTS rate (2026-04): $0.016 per 1 000 characters. No usage headers exposed — billed client-side. */
-const SPEAK_USD_PER_CHAR = 0.016 / 1000;
+/**
+ * Mistral's list price for Voxtral TTS 3 (`voxtral-mini-tts-3-0`): $13 per million characters,
+ * docs.mistral.ai/inference/pricing, read 2026-11-08. No usage headers exposed — billed client-side.
+ */
+const SPEAK_USD_PER_CHAR = 13 / 1_000_000;
 /** Usage Dashboard summary cache: 30 s per (period, windowStart). Long enough to dedupe tab re-opens, short enough to feel live. */
 const USAGE_SUMMARY_TTL_MS = 30_000;
 /**
@@ -10782,7 +10785,7 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
-      const { hasSpeakProvider, speakStream, isVoiceLanguageTag } = await import('../core/speak.js');
+      const { hasSpeakProvider, speakStream, isVoiceLanguageTag, VOXTRAL_TTS_MODEL } = await import('../core/speak.js');
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -10832,6 +10835,12 @@ export class LynoxHTTPApi {
         langHead === 'de' || langHead === 'en' ? langHead : langRaw?.toLowerCase() === 'auto' ? 'auto' : undefined;
       const voiceLanguage = tag;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
+      // The rate below is the pinned model's, so no other model may be asked for: one billed at
+      // this rate could cost Mistral more than it debits. No client of ours sends `model`.
+      if (model !== undefined && model !== VOXTRAL_TTS_MODEL) {
+        errorResponse(res, 400, `model must be ${VOXTRAL_TTS_MODEL} or left out`);
+        return;
+      }
       // Hard ceiling on one request to bound Mistral cost + latency. Phase 0
       // tested up to 2 687 chars; 10 k gives headroom for long replies without
       // a single call burning through a tenant's budget.
@@ -10880,8 +10889,8 @@ export class LynoxHTTPApi {
       if (meta) {
         // Bill the post-prep character count to RunHistory so the Usage
         // Dashboard line-items voice TTS separately from chat runs. Mistral
-        // doesn't surface usage headers — $0.016/1 000 chars is the
-        // documented rate, applied after text-prep has stripped Markdown
+        // doesn't surface usage headers — the documented rate per character
+        // (`SPEAK_USD_PER_CHAR`) is applied after text-prep has stripped Markdown
         // noise. (TTS no longer increments the in-memory session-cost
         // counter — it isn't tied to a chat Session, and the dashboard's
         // daily/monthly caps still pick the cost up via RunHistory.)
