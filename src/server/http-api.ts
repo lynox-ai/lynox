@@ -9752,6 +9752,8 @@ export class LynoxHTTPApi {
         // What an undo would take back now; for an external run that includes a failed write,
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
+        // An undone run names the undo that took it back and when, so its page says it is no longer live.
+        undoneBy: ledger.undoneBy(status.id),
       });
     }, READS));
 
