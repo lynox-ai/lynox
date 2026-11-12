@@ -1254,8 +1254,27 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     // Nothing was written, and the run still reads taken back.
     expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
     expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 2 });
-    // The undo of the run itself is not refused: there is nothing to put back.
-    expect(ledger.planUndo(runId)).not.toEqual({ ok: false, reason: 'phase_not_kept' });
+    // The run itself reads taken back, so it has nothing left to undo.
+    expect(ledger.planUndo(runId)).toEqual({ ok: false, reason: 'not_undoable' });
+  });
+
+  it('refuses to resume an undo of the undo that halted before the run lost its phase', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId, { maxTargets: 2 });
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id, { maxTargets: 1 });
+    expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('halted');
+    forgetPhase(runId);
+    expect(ledger.resume(redo.status.id, { checksum: ledger.computeChecksum(redo.status.id)!, maxTargets: 2 })).toEqual({ ok: false, reason: 'phase_not_kept' });
+    // The one it wrote stays, as a halt leaves it; the other is not written.
+    expect([...state.values()].filter((v) => v.startsWith('w'))).toHaveLength(1);
   });
 
   it('says why such an undo is refused, word for word', () => {

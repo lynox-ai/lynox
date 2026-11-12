@@ -3537,8 +3537,9 @@ export class BulkLedger {
           db.prepare(`UPDATE bulk_runs SET phase_before_undo = phase, phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(r.id);
         } else if (depth % 2 === 0 && left > 0) {
           // Back in the phase the undo took it from. Taken back before that was stored (v69), a run
-          // without a halt reason stood done; one with a reason is never reached here, the undo
-          // that would put it back is refused ({@link phaseNotKept}), and it would stay undone.
+          // without a halt reason stood done. One with a reason stays undone: the undo that would
+          // put it back is refused at plan, approval and resume ({@link phaseNotKept}), and only one
+          // approved before v69 and started after it reaches this point.
           db.prepare(
             `UPDATE bulk_runs SET phase = CASE WHEN phase_before_undo IS NOT NULL THEN phase_before_undo
                  WHEN halt_reason IS NULL THEN 'done' ELSE phase END,
