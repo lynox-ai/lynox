@@ -517,12 +517,12 @@
 												{#each target.diff.fields as f (f.field)}
 													<div>
 														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
-														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else if bulkAfterTakenBack(run, target)}<span class="text-text" data-testid="bulk-before">{bulkValueText(f.before)}</span>{:else}<del class="text-danger decoration-1 decoration-danger/50" data-testid="bulk-before">{bulkValueText(f.before)}</del>{/if}
+														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else if bulkAfterTakenBack(run, target)}<span class="text-text" data-testid="bulk-before">{bulkValueText(f.before)}</span>{:else}<del class="text-danger no-underline bg-danger/10 rounded-[var(--radius-sm)] px-0.5" data-testid="bulk-before">{bulkValueText(f.before)}</del>{/if}
 														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{bulkValueText(f.after)}</ins>
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
-												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}{#if bulkAfterTakenBack(run, target)}<span class="text-text" data-testid="bulk-before">- {bulkVisibleText(line)}</span>{:else}<del class="text-danger decoration-1 decoration-danger/50" data-testid="bulk-before">- {bulkVisibleText(line)}</del>{/if}
+												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}{#if bulkAfterTakenBack(run, target)}<span class="text-text" data-testid="bulk-before">- {bulkVisibleText(line)}</span>{:else}<del class="text-danger no-underline bg-danger/10 rounded-[var(--radius-sm)] px-0.5" data-testid="bulk-before">- {bulkVisibleText(line)}</del>{/if}
 {/each}{#each target.diff.added as line, i (i)}<ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">+ {bulkVisibleText(line)}</ins>
 {/each}</pre>
 											{:else if target.error && target.change !== 'invalid'}

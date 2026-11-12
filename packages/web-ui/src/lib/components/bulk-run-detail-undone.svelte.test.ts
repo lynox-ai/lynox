@@ -119,7 +119,7 @@ describe('an undone run’s page', () => {
 		expect(afters()[1]!.classList.contains('text-success')).toBe(true);
 	});
 
-	it('shows the before-value of a target taken back as the value that holds again, not struck out; a live one struck thin', async () => {
+	it('shows the before-value of a target taken back as the value that holds again, not struck out; a live one tinted, not struck', async () => {
 		const back = { ...written(1, true), diff: fieldsDiff('Alt 1', 'Neu 1') } as BulkTarget;
 		const live = { ...written(2, false), diff: fieldsDiff('Alt 2', 'Neu 2') } as BulkTarget;
 		const text = { ...written(3, true), diff: { kind: 'text', from: 0, removed: ['Alt 3'], added: ['Neu 3'] } } as BulkTarget;
@@ -128,12 +128,12 @@ describe('an undone run’s page', () => {
 		await render();
 		const befores = [...target.querySelectorAll<HTMLElement>('[data-testid="bulk-before"]')];
 		expect(befores.map((el) => [el.tagName, el.textContent?.trim()])).toEqual([['SPAN', 'Alt 1'], ['DEL', 'Alt 2'], ['SPAN', '- Alt 3'], ['DEL', '- Alt 4']]);
-		expect(['decoration-1', 'decoration-danger/50'].every((c) => befores[3]!.classList.contains(c))).toBe(true);
+		expect(['no-underline', 'bg-danger/10'].every((c) => befores[3]!.classList.contains(c))).toBe(true);
 		expect(befores[0]!.classList.contains('text-text')).toBe(true);
 		expect(befores[0]!.classList.contains('text-danger')).toBe(false);
 		expect(befores[1]!.classList.contains('text-danger')).toBe(true);
-		// A thin, half-transparent strike, so a struck „1“ does not read as „4“.
-		expect(['decoration-1', 'decoration-danger/50'].every((c) => befores[1]!.classList.contains(c))).toBe(true);
+		// Marked by a tint, not struck: a line through a „1“ reads as „4“.
+		expect(['no-underline', 'bg-danger/10'].every((c) => befores[1]!.classList.contains(c))).toBe(true);
 		expect(befores[2]!.classList.contains('text-text')).toBe(true);
 	});
 
