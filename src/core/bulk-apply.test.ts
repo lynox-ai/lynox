@@ -1079,7 +1079,7 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     }
     expect(ledger.getStatus(runId)!.phase).toBe('undone');
     expect(ledger.getStatus(runId)!.undone).toBe(210);
-    // The owner's page names the undo and when its last target was taken back (ux U-228);
+    // The owner's page names the undo and when its last target was taken back;
     // the undo itself is not undone, so it names none.
     const lastUndone = (engineDb.getDb().prepare('SELECT MAX(undone_at) AS at FROM bulk_targets WHERE run_id = ?').get(runId) as { at: string }).at;
     expect(ledger.undoneBy(runId)).toEqual({ runId: undo.status.id, at: lastUndone });

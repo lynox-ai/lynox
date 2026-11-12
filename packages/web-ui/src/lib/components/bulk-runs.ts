@@ -861,7 +861,7 @@ export function bulkStep(run: BulkStepRun): BulkStepName {
 }
 
 /** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
- *  („zurückgenommen“), not „fertig“: its values are no longer live (ux U-228). */
+ *  („zurückgenommen“), not „fertig“: its values are no longer live. */
 export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'>, step: BulkStepName): string {
 	return step === 'done' && run.phase === 'undone' ? 'bulk.phase.undone' : `bulk.step.${step}`;
 }

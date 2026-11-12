@@ -6,7 +6,7 @@ import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // The page of a run an undo took back: it reads as the list reads it („zurückgenommen“), says when
 // and how many targets have their value back, links the undo, and greys the values that are no
-// longer live (ux U-228). Before, the chip said „fertig“ and the after-values stayed green.
+// longer live. Before, the chip said „fertig“ and the after-values stayed green.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -129,7 +129,7 @@ describe('an undone run’s page', () => {
 });
 
 describe('the undo’s explanation', () => {
-	it('promises no preview it does not show (ux U-228 b)', () => {
+	it('promises no preview it does not show', () => {
 		const before = getLocale();
 		onTestFinished(() => setLocale(before));
 		setLocale('de');
