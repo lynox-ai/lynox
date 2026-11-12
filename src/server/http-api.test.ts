@@ -17869,7 +17869,7 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(costArg).toBeCloseTo(0.0013, 6);
     });
 
-    it('takes only the pinned model, whose rate the debit uses', async () => {
+    it('refuses a model other than the pinned one before the budget gate', async () => {
       repayRateWindow();
       const { VOXTRAL_TTS_MODEL } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
       const onBeforeRun = vi.fn();
