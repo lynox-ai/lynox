@@ -81,7 +81,11 @@ describe('the judge model per provider', () => {
     expect(judgeModelId(uc({ blocked_model_ids: [JUDGE_MODELS.anthropic] }), 'balanced', 'anthropic')).toBeNull();
     expect(judgeModelId(uc({ blocked_model_ids: [JUDGE_MODELS.mistral], api_base_url: MISTRAL_BASE }), 'fast', 'openai')).toBeNull();
     expect(judgeModelId(uc({ blocked_model_ids: [JUDGE_MODELS.vertex] }), 'fast', 'vertex')).toBeNull();
-    // A blocked chat model on the tier is not the judge's: the judge still judges.
+    // The judge is the balanced chat model: blocking that model for chat blocks the judge too.
+    expect(MODEL_MAP.balanced).toBe(JUDGE_MODELS.anthropic);
+    expect(judgeModelId(uc({ blocked_model_ids: [MODEL_MAP.balanced] }), 'fast', 'anthropic')).toBeNull();
+    expect(judgeModelId(uc({ blocked_model_ids: ['claude-sonnet'] }), 'fast', 'vertex')).toBeNull();
+    // A blocked chat model that is not the judge's leaves it alone: the judge still judges.
     expect(MODEL_MAP.fast).not.toBe(JUDGE_MODELS.anthropic);
     expect(judgeModelId(uc({ blocked_model_ids: [MODEL_MAP.fast] }), 'fast', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
   });
