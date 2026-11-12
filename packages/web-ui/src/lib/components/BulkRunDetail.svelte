@@ -371,6 +371,11 @@
 	const foldedUnchanged = $derived(targets.length - shownTargets.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
 
+	// A target an undo took back reads grey as a whole row: its value and every mark beside it
+	// are a record now, not what the run holds.
+	const chipTone = (r: BulkRunDetailData, x: BulkTarget, tone: string): string =>
+		bulkAfterTakenBack(r, x) ? 'bg-bg-muted text-text-subtle' : tone;
+
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
 	const btnPlain = `${btn} border border-border hover:bg-bg-muted`;
@@ -495,13 +500,13 @@
 										<td class="py-1.5 pr-3">
 											<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
 											{#if target.shopAddedMarkup}
-												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
+												<span class="ml-1 inline-block rounded-full px-1.5 text-[11px] {chipTone(run, target, 'bg-danger/15 border border-danger/40 text-danger')}" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
 											{/if}
 											{#if target.hostRewrote && !target.shopAddedMarkup}
-												<span class="ml-1 inline-block rounded-full bg-bg-subtle border border-border px-1.5 text-[11px] text-text-muted" data-testid="bulk-host-rewrote">{t('bulk.target.host_rewrote')}</span>
+												<span class="ml-1 inline-block rounded-full px-1.5 text-[11px] {chipTone(run, target, 'bg-bg-subtle border border-border text-text-muted')}" data-testid="bulk-host-rewrote">{t('bulk.target.host_rewrote')}</span>
 											{/if}
 											{#if (target.seoEntityFields?.length ?? 0) > 0}
-												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-seo-entity">{t('bulk.target.seo_entity')}</span>
+												<span class="ml-1 inline-block rounded-full px-1.5 text-[11px] {chipTone(run, target, 'bg-warning/15 border border-warning/40 text-warning')}" data-testid="bulk-seo-entity">{t('bulk.target.seo_entity')}</span>
 											{/if}
 											{#if bulkRollbackLeft(run, target)}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
@@ -512,12 +517,12 @@
 												{#each target.diff.fields as f (f.field)}
 													<div>
 														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
-														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
+														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else if bulkAfterTakenBack(run, target)}<span class="text-text" data-testid="bulk-before">{bulkValueText(f.before)}</span>{:else}<del class="text-danger" data-testid="bulk-before">{bulkValueText(f.before)}</del>{/if}
 														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{bulkValueText(f.after)}</ins>
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
-												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
+												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}{#if bulkAfterTakenBack(run, target)}<span class="text-text" data-testid="bulk-before">- {bulkVisibleText(line)}</span>{:else}<del class="text-danger" data-testid="bulk-before">- {bulkVisibleText(line)}</del>{/if}
 {/each}{#each target.diff.added as line, i (i)}<ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">+ {bulkVisibleText(line)}</ins>
 {/each}</pre>
 											{:else if target.error && target.change !== 'invalid'}

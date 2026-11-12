@@ -119,6 +119,36 @@ describe('an undone run’s page', () => {
 		expect(afters()[1]!.classList.contains('text-success')).toBe(true);
 	});
 
+	it('shows the before-value of a target taken back as the value that holds again, not struck out', async () => {
+		const back = { ...written(1, true), diff: fieldsDiff('Alt 1', 'Neu 1') } as BulkTarget;
+		const live = { ...written(2, false), diff: fieldsDiff('Alt 2', 'Neu 2') } as BulkTarget;
+		const text = { ...written(3, true), diff: { kind: 'text', from: 0, removed: ['Alt 3'], added: ['Neu 3'] } } as BulkTarget;
+		targets = [back, live, text];
+		await render();
+		const befores = [...target.querySelectorAll<HTMLElement>('[data-testid="bulk-before"]')];
+		expect(befores.map((el) => [el.tagName, el.textContent?.trim()])).toEqual([['SPAN', 'Alt 1'], ['DEL', 'Alt 2'], ['SPAN', '- Alt 3']]);
+		expect(befores[0]!.classList.contains('text-text')).toBe(true);
+		expect(befores[0]!.classList.contains('text-danger')).toBe(false);
+		expect(befores[1]!.classList.contains('text-danger')).toBe(true);
+		expect(befores[2]!.classList.contains('text-text')).toBe(true);
+	});
+
+	it('greys every mark beside a target taken back, and only there: the whole row is a record', async () => {
+		const marks = { seoEntityFields: ['seo_title'], shopAddedMarkup: true } as Partial<BulkTarget>;
+		const rewrote = { hostRewrote: true } as Partial<BulkTarget>;
+		targets = [{ ...written(1, true), ...marks } as BulkTarget, { ...written(2, false), ...marks } as BulkTarget,
+			{ ...written(3, true), ...rewrote } as BulkTarget, { ...written(4, false), ...rewrote } as BulkTarget];
+		await render();
+		const grey = (el: Element | undefined): boolean => el!.classList.contains('text-text-subtle') && el!.classList.contains('bg-bg-muted');
+		for (const id of ['bulk-seo-entity', 'bulk-shop-added-markup', 'bulk-host-rewrote']) {
+			const [back, live] = [...target.querySelectorAll(`[data-testid="${id}"]`)];
+			expect(grey(back), id).toBe(true);
+			expect(grey(live), id).toBe(false);
+		}
+		const [seoLive] = [...target.querySelectorAll('[data-testid="bulk-seo-entity"]')].slice(1);
+		expect(seoLive!.classList.contains('text-warning')).toBe(true);
+	});
+
 	it('says when and how many, and opens the undo', async () => {
 		const before = getLocale();
 		setLocale('de');
