@@ -196,7 +196,8 @@ export async function startupSweep(deps: DaemonDeps): Promise<void> {
   for (let uid = deps.pool.acquire(); uid !== null; uid = deps.pool.acquire()) uids.push(uid);
   for (const uid of uids) await finishUid(uid, deps);
   const left = readdirSync(deps.callsDir);
-  if (left.length > 0) throw new Error(`calls dir not empty after the start-up sweep: ${left.slice(0, 5).join(', ')}`);
+  // A count, not the names: a pool uid (a model-run command) chooses them, and this message reaches the log.
+  if (left.length > 0) throw new Error(`calls dir not empty after the start-up sweep: ${left.length} entries left`);
   const { free, quarantined } = deps.pool.stats();
   if (free === 0) throw new Error(`no usable pool uid after the start-up sweep (${quarantined} quarantined)`);
 }
