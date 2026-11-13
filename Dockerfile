@@ -13,7 +13,7 @@
 #     copied into the final image (multi-stage), so image size is unaffected.
 
 # --- Stage 1: Build Engine ---
-FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS build-engine
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS build-engine
 WORKDIR /app
 # Disable lefthook in the build: its dev-dep postinstall runs `lefthook install`
 # which needs a git repo/binary that isn't in this stage, failing the build on a
@@ -41,7 +41,7 @@ COPY tsconfig.json ./
 RUN pnpm run build
 
 # --- Stage 2: Build Web UI ---
-FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS build-webui
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS build-webui
 WORKDIR /app
 
 # Bake the build SHA into the web-ui bundle so the running client can detect
@@ -73,7 +73,7 @@ COPY packages/web-ui/ packages/web-ui/
 RUN cd packages/web-ui && pnpm run build
 
 # --- Stage 3: Production deps (Engine) ---
-FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS deps
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS deps
 WORKDIR /app
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -98,7 +98,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     && node -e "require(require('path').resolve(process.argv[1])); console.log('onnxruntime-node OK')" "$ORT_DIR"
 
 # --- Stage 4: Whisper.cpp (audio transcription) ---
-FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS whisper-build
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS whisper-build
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -137,7 +137,20 @@ RUN --mount=type=bind,source=scripts/fetch-pinned.sh,target=/tmp/fetch-pinned.sh
        https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin
 
 # --- Stage 5: Production image ---
-FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS production
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS production
+
+# The Node binary carries its own undici, which backs the global `fetch`. No lockfile
+# scan sees it, and the image scan runs with `ignore-unfixed` on OS packages only, so
+# a base image whose bundled undici is inside an advisory range would ship silently.
+# The floor is the first release fixed for GHSA-xjj6-f33q-929c; raise it when a later
+# advisory moves the fixed version. Below the floor the build fails here, and so it
+# does on another undici major (a new Node line): each major has its own fixed release,
+# so the floor has to be set again for it rather than pass by comparison.
+RUN node -e 'const floor = [6, 29, 1]; const have = process.versions.undici; \
+  const v = have.split(".").map(Number); \
+  const d = v.map((x, i) => x - floor[i]).find((x) => x !== 0) ?? 0; \
+  if (v.length !== 3 || v.some(Number.isNaN) || v[0] !== floor[0] || d < 0) { \
+    console.error("bundled undici " + have + " does not meet the floor " + floor.join(".") + " (same major, not below)"); process.exit(1); }'
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
