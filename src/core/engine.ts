@@ -114,12 +114,14 @@ import {
   bulkStatusTool,
 } from '../tools/builtin/index.js';
 import { BulkLedger } from './bulk-ledger.js';
+import { setPersistentCaps } from './session-budget.js';
 import { ERASURE_SWEEP_INTERVAL_MS, runConnectionErasureSweeps } from './connection-erasure.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { ToolContext } from './tool-context.js';
 import { hostPolicyOf, createToolContext } from './tool-context.js';
 import {
   configureBudgetAndRateLimits,
+  budgetCapsFromConfig,
   applyEgressSettings,
   generateInitBriefing,
   initSecrets,
@@ -666,6 +668,10 @@ export class Engine {
     // `network_policy`, host floor or `enforce_https` changed at runtime is stored and
     // reported back while the tools keep enforcing the boot value until a restart.
     applyEgressSettings(this.userConfig, this._toolContext);
+    // The same for the session/daily/monthly caps: a cap raised or lowered under
+    // Settings → Limits holds for the next run, not after the next restart. An env
+    // value still wins over the config, as at boot.
+    setPersistentCaps(budgetCapsFromConfig(this.userConfig));
     // Bulk runs follow the config live: no restart, and a run under way when they go
     // off is stopped as by its owner.
     this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));

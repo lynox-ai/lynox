@@ -138,9 +138,9 @@ export interface WorkerNotices {
   readonly budgetCutWayOut: string;
   /**
    * The way out when the room left in the daily or monthly AI budget set the run's grant:
-   * waiting helps there, splitting does not. `caps` names the cap that set it (both when
-   * they tied); `canRaise`: the owner can raise it under Settings → Limits (not on a plan
-   * whose budget lynox sets).
+   * waiting helps there, splitting does not. `caps` names the caps recorded spend left too
+   * short (both when both are); `canRaise`: the owner can raise it under Settings → Limits (not on a plan
+   * the control plane runs, and not where an environment variable set the cap).
    */
   budgetCutWaitWayOut(caps: readonly BudgetCapName[], canRaise: boolean): string;
   /** The ids the agent needs to diagnose the run when the owner replies. */
@@ -214,7 +214,7 @@ const EN: WorkerNotices = Object.freeze({
     `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
   budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
   budgetCutWaitWayOut: (caps: readonly BudgetCapName[], canRaise: boolean) => {
-    // One named budget: raising it helps at once, so the sentence says to start again now.
+    // One named budget: a raised cap holds for the next run, so the sentence says to start again now.
     const raiseNow = canRaise ? ', or raise it under Settings → Limits and start it again now.' : '.';
     if (caps.length === 1 && caps[0] === 'daily') return `The daily AI budget was nearly used up. Start the run again tomorrow${raiseNow}`;
     if (caps.length === 1 && caps[0] === 'monthly') return `The monthly AI budget was nearly used up. Start the run again next month${raiseNow}`;

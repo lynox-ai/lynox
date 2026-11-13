@@ -8,6 +8,7 @@ import type { GDriveBackupUploader, RootFolderPin, UploadResult } from './backup
 import type { LynoxConfig } from '../types/index.js';
 import { SubjectStore } from './subject-store.js';
 import { RunHistory } from './run-history.js';
+import { persistentBudgetHeadroom, budgetCapSetByEnv } from './session-budget.js';
 import { WIRE_CAPTURE_RETENTION_MS, type WireSnapshot } from './wire-capture.js';
 import type { ExtractionResult } from './entity-extractor.js';
 
@@ -334,6 +335,30 @@ describe('Engine boot — the init() data-protection gates are actually wired', 
     expect(result.manifest.encrypted, 'the boot must have produced a vault key').toBe(true);
     expect(existsSync(join(result.path, 'manifest.json'))).toBe(true);   // witness 1
     expect(calls).toHaveLength(0);                                       // witness 2
+  });
+
+  it('a daily cap changed in the settings holds for the next run, without a restart', async () => {
+    // Before this, boot set the caps once and a reload left them alone: an owner who raised
+    // the daily cap under Settings → Limits saw it saved while the runs kept stopping at the
+    // old figure until the process restarted.
+    const dir = freshDataDir('budget-reload');
+    setEnv('LYNOX_MAX_DAILY_COST_USD', undefined);
+    writeUserConfig(dir, { max_daily_cost_usd: 5 });
+    await boot();
+    expect(persistentBudgetHeadroom(), 'FIXTURE GUARD: the boot applied the configured cap').toBe(5);
+
+    writeUserConfig(dir, { max_daily_cost_usd: 40 });
+    reloadConfig();
+    await engines[engines.length - 1]!.reloadUserConfig();
+    expect(persistentBudgetHeadroom(), 'the raised cap holds at once').toBe(40);
+    expect(budgetCapSetByEnv('daily'), 'and the settings set it').toBe(false);
+
+    // An environment variable still wins over the settings, at a reload as at boot.
+    setEnv('LYNOX_MAX_DAILY_COST_USD', '7');
+    reloadConfig();
+    await engines[engines.length - 1]!.reloadUserConfig();
+    expect(persistentBudgetHeadroom()).toBe(7);
+    expect(budgetCapSetByEnv('daily'), 'so the settings cannot raise it').toBe(true);
   });
 
   it('REVOKING the opt-in stops uploads in the running process, without a restart', async () => {

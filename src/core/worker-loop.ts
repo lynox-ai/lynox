@@ -49,8 +49,8 @@ import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
-import { persistentBudgetRoom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget, type BudgetCapName } from './session-budget.js';
-import { cpSuppliesLLMKey } from '../contract/vocab.js';
+import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget, budgetCapsToWaitFor, budgetCapSetByEnv, type BudgetCapName } from './session-budget.js';
+import { isHostedInstance } from '../contract/vocab.js';
 import { readEnvAlias } from './env.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
 // handler was its first consumer; src/core/ is the better home now that there
@@ -274,6 +274,15 @@ const WORKER_MAX_ITERATIONS = 30; // cap agent loops per background task (cost c
 // unattended run. $15 is generous for a legitimate multi-step task yet well under
 // the $50 interactive session ceiling. Doubles as the reservation estimate below.
 const WORKER_MAX_COST_USD = 15;
+
+/**
+ * Whether the owner can raise these caps under Settings → Limits: not on an instance the
+ * control plane runs (the page is not shown there, and the plan's caps come by env), and not
+ * where an environment variable set the cap (it wins over the settings).
+ */
+function canRaiseBudget(caps: readonly BudgetCapName[]): boolean {
+  return !isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER')) && caps.every(cap => !budgetCapSetByEnv(cap));
+}
 /**
  * The least headroom a scheduled run is started with.
  *
@@ -1554,8 +1563,7 @@ export class WorkerLoop {
         // per-run `costGuard`, so there is a number to lower. `run_workflow` has no
         // per-run cap of its own — its bound is the per-session ceiling — so it keeps the
         // worst-case reservation rather than a grant that nothing would enforce.
-        const room = persistentBudgetRoom();
-        const headroom = room?.usd ?? null;
+        const headroom = persistentBudgetHeadroom();
         // ⛔ The SESSION ceiling is in the min, and leaving it out was a real hole: the
         // worker is the one caller that always passes a `costGuard`, and
         // `Engine.createSession` applies the managed per-run ceiling only when the caller
@@ -1568,11 +1576,14 @@ export class WorkerLoop {
           ? Math.min(estimate, headroom, sessionCeiling)
           : null;
         const grant = capUSD ?? estimate;
-        // Which budget set the grant, for the stop's way out: only when the room in the daily
-        // or monthly budget, not the estimate or the session ceiling, was strictly the
-        // smallest. Then waiting helps; otherwise the run was too big for one run and the
-        // way out stays "split it".
-        const capBy = capUSD !== null && room !== null && room.usd < estimate && room.usd < sessionCeiling ? room.caps : [];
+        // Which budget to wait for, for the stop's way out: only when the room in the daily
+        // or monthly budget, not the estimate or the session ceiling, set the grant, and only
+        // the caps that recorded spend made short and a new day or month refills
+        // (`budgetCapsToWaitFor`). Otherwise the way out stays "split it".
+        const need = Math.min(estimate, sessionCeiling);
+        // A cap short on spend leaves less headroom than `need`, so it also set the grant; and
+        // with no recorded spend or no finite cap (`capUSD` null) no cap is short.
+        const capBy = budgetCapsToWaitFor(need);
 
         if (capUSD !== null && capUSD < MIN_VIABLE_RUN_USD) {
           // ⚠ This branch PREEMPTS the reservation below, which is where the name of the
@@ -3255,7 +3266,7 @@ export class WorkerLoop {
           : null;
     // A cost stop on the room left in the daily or monthly budget is waited out, not split.
     const wayOut = stop?.cause === 'budget_cap' && capBy.length > 0
-      ? notices.budgetCutWaitWayOut(capBy, !cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER')))
+      ? notices.budgetCutWaitWayOut(capBy, canRaiseBudget(capBy))
       : notices.budgetCutWayOut;
     const budgetCut = capStop === null ? null : `${capStop} ${wayOut}`;
     // Composed BEFORE the truncation, so the reason survives a long result rather than

@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   checkSessionBudget, recordSessionCost, getSessionCost,
   configurePersistentBudget, checkPersistentBudget, resetPersistentBudget,
   reservePersistentBudget, releasePersistentBudget, getReservedInFlight,
-  persistentBudgetHeadroom,
+  persistentBudgetHeadroom, budgetCapsToWaitFor, setPersistentCaps, budgetCapSetByEnv,
   type CostQueryProvider,
 } from './session-budget.js';
 import type { SessionCounters } from '../types/index.js';
@@ -371,5 +371,67 @@ describe('persistent budget — in-flight reservation (parallel-fire admission c
     expect(getReservedInFlight()).toBe(15);
     resetPersistentBudget();
     expect(getReservedInFlight()).toBe(0);
+  });
+});
+
+describe('persistent budget — what a stop can say to wait for', () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const spentToday = (usd: number): CostQueryProvider => ({ getCostByDay: () => [{ day: today, cost_usd: usd, run_count: 1 }] });
+  beforeEach(() => { resetPersistentBudget(); });
+
+  it('names the cap that spend made short, and only that one', () => {
+    configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 15, monthlyCapUSD: 500 });
+    expect(budgetCapsToWaitFor(15)).toEqual(['daily']);
+    expect(budgetCapsToWaitFor(10), 'room for the run: nothing to wait for').toEqual([]);
+  });
+
+  it('names both when both are short', () => {
+    configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 15, monthlyCapUSD: 18 });
+    expect(budgetCapsToWaitFor(15)).toEqual(['daily', 'monthly']);
+  });
+
+  it('names none when a short cap is itself below the run: waiting does not help', () => {
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 10 });
+    expect(budgetCapsToWaitFor(15)).toEqual([]);
+    configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 15, monthlyCapUSD: 12 });
+    expect(budgetCapsToWaitFor(15), 'also when only the other short cap is too small').toEqual([]);
+  });
+
+  it('counts recorded spend, not runs in flight: their room comes back when they settle', () => {
+    configurePersistentBudget({ costProvider: spentToday(0), dailyCapUSD: 25 });
+    reservePersistentBudget(15);
+    expect(persistentBudgetHeadroom(), 'FIXTURE GUARD: the reservation took the room').toBe(10);
+    expect(budgetCapsToWaitFor(15)).toEqual([]);
+  });
+
+  it('the monthly budget counts the whole month, not only today', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-13T12:00:00Z'));
+    try {
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: '2026-11-13', cost_usd: 1, run_count: 1 }, { day: '2026-11-02', cost_usd: 290, run_count: 1 }] },
+        dailyCapUSD: 100, monthlyCapUSD: 300,
+      });
+      expect(budgetCapsToWaitFor(15), '$9 left in the month, $99 today').toEqual(['monthly']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names none without recorded spend to read', () => {
+    configurePersistentBudget({ costProvider: null, dailyCapUSD: 1 });
+    expect(budgetCapsToWaitFor(15)).toEqual([]);
+  });
+
+  it('setting the caps again keeps the cost provider and the runs in flight', () => {
+    configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 15 });
+    reservePersistentBudget(4);
+    setPersistentCaps({ dailyCapUSD: 30, setByEnv: ['monthly'] });
+    expect(persistentBudgetHeadroom(), 'new cap, same spend, same reservation').toBe(21);
+    expect(getReservedInFlight()).toBe(4);
+    expect(budgetCapSetByEnv('monthly')).toBe(true);
+    expect(budgetCapSetByEnv('daily')).toBe(false);
+    resetPersistentBudget();
+    expect(budgetCapSetByEnv('monthly'), 'a reset forgets it').toBe(false);
   });
 });
