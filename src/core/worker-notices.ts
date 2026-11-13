@@ -214,9 +214,11 @@ const EN: WorkerNotices = Object.freeze({
     `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
   budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
   budgetCutWaitWayOut: (caps: readonly BudgetCapName[], canRaise: boolean) => {
+    // One named budget: raising it helps at once, so the sentence says to start again now.
+    const raiseNow = canRaise ? ', or raise it under Settings → Limits and start it again now.' : '.';
+    if (caps.length === 1 && caps[0] === 'daily') return `The daily AI budget was nearly used up. Start the run again tomorrow${raiseNow}`;
+    if (caps.length === 1 && caps[0] === 'monthly') return `The monthly AI budget was nearly used up. Start the run again next month${raiseNow}`;
     const raise = canRaise ? ', or once you raise it under Settings → Limits.' : '.';
-    if (caps.length === 1 && caps[0] === 'daily') return `The daily AI budget was nearly used up. Start the run again tomorrow${raise}`;
-    if (caps.length === 1 && caps[0] === 'monthly') return `The monthly AI budget was nearly used up. Start the run again next month${raise}`;
     return `The daily or monthly AI budget was nearly used up. Start the run again once the budget allows it: the daily budget the next day, the monthly budget the next month${raise}`;
   },
   errorLabel: 'Error:',
@@ -316,9 +318,10 @@ const DE: WorkerNotices = Object.freeze({
     `${kind === 'cost' ? `Gestoppt an der Kostengrenze (${value})` : `Gestoppt am Rundenlimit (${value})`}, obwohl noch Arbeit offen war.`,
   budgetCutWayOut: 'Ein Neustart kann wieder an derselben Stelle stoppen. Bitte lynox im Chat, die Aufgabe in kleinere Pläne aufzuteilen.',
   budgetCutWaitWayOut: (caps: readonly BudgetCapName[], canRaise: boolean) => {
+    const raiseNow = canRaise ? ', oder heb es unter Einstellungen → Limits an und starte ihn gleich neu.' : '.';
+    if (caps.length === 1 && caps[0] === 'daily') return `Das Tagesbudget für KI war fast aufgebraucht. Starte den Lauf morgen neu${raiseNow}`;
+    if (caps.length === 1 && caps[0] === 'monthly') return `Das Monatsbudget für KI war fast aufgebraucht. Starte den Lauf im nächsten Monat neu${raiseNow}`;
     const raise = canRaise ? ', oder wenn du es unter Einstellungen → Limits anhebst.' : '.';
-    if (caps.length === 1 && caps[0] === 'daily') return `Das Tagesbudget für KI war fast aufgebraucht. Starte den Lauf morgen neu${raise}`;
-    if (caps.length === 1 && caps[0] === 'monthly') return `Das Monatsbudget für KI war fast aufgebraucht. Starte den Lauf im nächsten Monat neu${raise}`;
     return `Das Tages- oder Monatsbudget für KI war fast aufgebraucht. Starte den Lauf neu, sobald es wieder reicht: das Tagesbudget am nächsten Tag, das Monatsbudget im nächsten Monat${raise}`;
   },
   errorLabel: 'Fehler:',
