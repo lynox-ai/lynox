@@ -1,4 +1,4 @@
-import { defaultTreeAdapter, html, parseFragment, serialize, type DefaultTreeAdapterTypes } from 'parse5';
+import { defaultTreeAdapter, html, parseFragment, Parser, serialize, type DefaultTreeAdapterTypes } from 'parse5';
 
 /**
  * The one place an HTML field value is parsed (a Shopify product description, a WooCommerce
@@ -54,6 +54,19 @@ export const MARKUP_MAX_BYTES = 1024 * 1024;
 export const MARKUP_MAX_DEPTH = 512;
 export const MARKUP_MAX_CARRIER_NESTING = 8;
 export const MARKUP_MAX_NODES = 50_000;
+/** Tags and the attributes of one tag, as the parser's own tokenizer reads them: its work on
+ *  some inputs grows faster than the nodes it builds, so it stops before that. */
+export const MARKUP_MAX_TAGS = 5_000;
+export const MARKUP_MAX_ATTRIBUTES_PER_TAG = 128;
+
+/** The bounds a test may set smaller, to reach them quickly. */
+export interface ReadingBounds {
+  readonly depth: number;
+  readonly nodes: number;
+  readonly tags: number;
+  readonly attributesPerTag: number;
+}
+const READING_BOUNDS: ReadingBounds = { depth: MARKUP_MAX_DEPTH, nodes: MARKUP_MAX_NODES, tags: MARKUP_MAX_TAGS, attributesPerTag: MARKUP_MAX_ATTRIBUTES_PER_TAG };
 
 /** The elements whose text a markup extraction reads again for each one above it, by name in
  *  every namespace: wider than `carriesContent`, which only errs toward refusing. */
@@ -61,15 +74,29 @@ export const READ_AGAIN_CARRIERS: ReadonlySet<string> = new Set([
   'script', 'style', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'plaintext', 'textarea', 'title',
 ]);
 
-class NodeBoundExceeded extends Error {}
+class BoundExceeded extends Error {}
 
-/** A parse that stops once it has built more than `maxNodes` nodes. Text appended to the text
- *  node before it builds none, so it does not count. */
-function parseCounted(value: string, maxNodes: number): HtmlFragment {
+/** The tokenizer steps the counting parse wraps: `parse5`'s own, not part of its typed interface. */
+interface TokenizerSteps {
+  _createStartTagToken(): void;
+  _createEndTagToken(): void;
+  _createAttr(first: string): void;
+}
+const TOKENIZER_STEPS = ['_createStartTagToken', '_createEndTagToken', '_createAttr'] as const;
+
+/**
+ * A parse that stops once its tokenizer has read more than `bounds.tags` tags or one tag with more
+ * than `bounds.attributesPerTag` attributes, it has built more than `bounds.nodes` nodes, or given
+ * one element more than `bounds.attributesPerTag` attributes. The depth is read after the parse,
+ * on the tree it built. Text appended to the text node before it builds none, so it does not
+ * count. The tags are counted where the tokenizer makes them, so whatever state it reads them in —
+ * raw text, a comment, foreign content — is its own, never a guess from the bytes.
+ */
+function parseCounted(value: string, bounds: ReadingBounds): HtmlFragment {
   let built = 0;
   const count = (): void => {
     built += 1;
-    if (built > maxNodes) throw new NodeBoundExceeded();
+    if (built > bounds.nodes) throw new BoundExceeded();
   };
   const appendsToText = (parent: DefaultTreeAdapterTypes.ParentNode): boolean =>
     defaultTreeAdapter.getChildNodes(parent).at(-1)?.nodeName === '#text';
@@ -79,27 +106,51 @@ function parseCounted(value: string, maxNodes: number): HtmlFragment {
     createCommentNode: (...a) => { count(); return defaultTreeAdapter.createCommentNode(...a); },
     insertText: (parent, text) => { if (!appendsToText(parent)) count(); defaultTreeAdapter.insertText(parent, text); },
     insertTextBefore: (...a) => { count(); defaultTreeAdapter.insertTextBefore(...a); },
+    adoptAttributes: (recipient, attrs) => {
+      if (recipient.attrs.length + attrs.length > bounds.attributesPerTag) throw new BoundExceeded();
+      defaultTreeAdapter.adoptAttributes(recipient, attrs);
+    },
   };
-  return parseFragment(divContext(), value, { scriptingEnabled: true, treeAdapter });
+  const parser = Parser.getFragmentParser(divContext(), { scriptingEnabled: true, treeAdapter });
+  const tokenizer = parser.tokenizer as unknown as TokenizerSteps;
+  const own = Object.getPrototypeOf(tokenizer) as TokenizerSteps;
+  // A parse5 without these steps is not the one this was written against: refuse, never read uncounted.
+  if (!TOKENIZER_STEPS.every((step) => typeof own[step] === 'function')) throw new Error('html-tree: parse5 tokenizer steps not found');
+  let tags = 0;
+  let attributes = 0;
+  const tag = (): void => {
+    tags += 1;
+    attributes = 0;
+    if (tags > bounds.tags) throw new BoundExceeded();
+  };
+  tokenizer._createStartTagToken = () => { tag(); own._createStartTagToken.call(tokenizer); };
+  tokenizer._createEndTagToken = () => { tag(); own._createEndTagToken.call(tokenizer); };
+  tokenizer._createAttr = (first) => {
+    attributes += 1;
+    if (attributes > bounds.attributesPerTag) throw new BoundExceeded();
+    own._createAttr.call(tokenizer, first);
+  };
+  parser.tokenizer.write(value, true);
+  return parser.getFragment();
 }
 
 /** Whether a value stays within the bounds above: one counted parse and one pass over its tree.
- *  Ask it before any other parse or walk of a value a shop, a plan or a model wrote. `maxNodes`
- *  is {@link MARKUP_MAX_NODES}; a test may set a smaller one to reach it quickly. */
-export function withinReadingBounds(value: string, maxNodes: number = MARKUP_MAX_NODES): boolean {
+ *  Ask it before any other parse or walk of a value a shop, a plan or a model wrote. A test may set smaller bounds to reach them quickly. */
+export function withinReadingBounds(value: string, bounds: Partial<ReadingBounds> = {}): boolean {
+  const limits: ReadingBounds = { ...READING_BOUNDS, ...bounds };
   if (Buffer.byteLength(value, 'utf8') > MARKUP_MAX_BYTES) return false;
   let fragment: HtmlFragment;
   try {
-    fragment = parseCounted(value, maxNodes);
+    fragment = parseCounted(value, limits);
   } catch (err: unknown) {
-    if (err instanceof NodeBoundExceeded) return false;
+    if (err instanceof BoundExceeded) return false;
     throw err;
   }
   const stack: [HtmlParent | HtmlChild, number, number][] = [[fragment, 0, 0]];
   while (stack.length > 0) {
     const [n, depth, above] = stack.pop()!;
     const carriers = above + ('tagName' in n && READ_AGAIN_CARRIERS.has(n.tagName) ? 1 : 0);
-    if (depth > MARKUP_MAX_DEPTH || carriers > MARKUP_MAX_CARRIER_NESTING) return false;
+    if (depth > limits.depth || carriers > MARKUP_MAX_CARRIER_NESTING) return false;
     if ('childNodes' in n) for (const c of childrenOf(n).nodes) stack.push([c, depth + 1, carriers]);
   }
   return true;

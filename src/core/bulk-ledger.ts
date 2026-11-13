@@ -26,7 +26,7 @@ import { mergeConnections, type AttachedConnection } from './bulk-connection.js'
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
 import { checkMarkup, droppedTagsOf, endsClosed, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
-import { canonicalHtml, htmlEqual } from './html-tree.js';
+import { canonicalHtml, htmlEqual, withinReadingBounds } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter, shopifySeoEntityFields } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
@@ -841,6 +841,7 @@ function isPlainRecord(v: unknown): v is Record<string, unknown> {
 /** Whether the shortcode check refuses this value of one field. A value the parser cannot read
  *  is refused by `checkMarkup` for another reason, so it is not one the preview shows to copy. */
 function refusesShortcode(value: string, was: string | null): boolean {
+  if (!withinReadingBounds(value)) return false;
   try {
     return shortcodeRefusalOf(value, was) !== null;
   } catch {
@@ -979,7 +980,8 @@ export function canonicalJson(value: unknown): string {
  * closed (`endsClosed`) and neither holds a stretch the parser drops (`droppedTagsOf`): the tree
  * never sees a tag left open at the end, a `<body onload>` or a stray end tag, nor where it sits,
  * while the page runs and places it all the same, so such a value compares byte for byte. A field
- * one side holds and the other does not differs; every other field stays byte-equal.
+ * one side holds and the other does not differs; every other field stays byte-equal. A value beyond
+ * the reading bounds ({@link withinReadingBounds}) is not parsed and compares byte for byte too.
  */
 export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] = []): boolean {
   const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -988,7 +990,8 @@ export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] 
     if (Object.hasOwn(a, k) !== Object.hasOwn(b, k)) return false;
     const x = a[k];
     const y = b[k];
-    const same = htmlFields.includes(k) && typeof x === 'string' && typeof y === 'string' && endsClosed(x) && endsClosed(y)
+    const same = htmlFields.includes(k) && typeof x === 'string' && typeof y === 'string'
+      && withinReadingBounds(x) && withinReadingBounds(y) && endsClosed(x) && endsClosed(y)
       && droppedTagsOf(x).length === 0 && droppedTagsOf(y).length === 0
       ? htmlEqual(x, y) : canonicalJson(x) === canonicalJson(y);
     if (!same) return false;
@@ -2031,6 +2034,8 @@ export class BulkLedger {
     if (fields.length === 0) return after;
     const out: Record<string, unknown> = { ...after };
     for (const f of fields) {
+      // A value beyond the reading bounds is left as it is: the markup check refuses it.
+      if (!withinReadingBounds(after[f] as string)) continue;
       const canonical = canonicalHtml(after[f] as string);
       if (canonicalHtml(canonical) === canonical) out[f] = canonical;
     }
@@ -2602,7 +2607,8 @@ export class BulkLedger {
           if (htmlFields.some((f) => {
             const a = restored[f];
             const k = held[f];
-            return typeof a === 'string' && typeof k === 'string' && htmlEqual(a, k);
+            // Beyond the reading bounds the two are not parsed: counted as the same, the strict direction.
+            return typeof a === 'string' && typeof k === 'string' && (!withinReadingBounds(a) || !withinReadingBounds(k) || htmlEqual(a, k));
           })) return true;
         }
       }
@@ -2712,8 +2718,11 @@ export class BulkLedger {
       if (value === was) return true;
       // Canonical bytes: the parser drops what it cannot place (a `<body onload>`), so a value the
       // check passes must also be the bytes it reads.
-      if (typeof value !== 'string' || canonicalHtml(value) !== value) return false;
-      return checkMarkup({ before: typeof was === 'string' ? was : null, after: value, storeHost: host, startDomains }).ok;
+      // The check first: it reads the value only within the reading bounds, and the canonical
+      // form is parsed only for a value it passed.
+      if (typeof value !== 'string') return false;
+      if (!checkMarkup({ before: typeof was === 'string' ? was : null, after: value, storeHost: host, startDomains }).ok) return false;
+      return canonicalHtml(value) === value;
     });
   }
 
