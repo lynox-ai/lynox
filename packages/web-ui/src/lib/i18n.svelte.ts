@@ -3192,6 +3192,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'approvals.mass_send': { de: 'Massenversand: geht an {count} Empfänger.', en: 'Mass send: goes to {count} recipients.' },
 	'approvals.recipient_differs': { de: 'Die Antwort geht an jemanden, den die ursprüngliche Mail nicht nennt.', en: 'The reply goes to someone the original email does not name.' },
 	'approvals.after_untrusted': { de: 'Entstanden, nachdem der Lauf fremde Inhalte gelesen hatte.', en: 'Written after the run had read external content.' },
+	'approvals.after_untrusted_instruction': { de: 'Die Anweisung für diesen Lauf entstand, nachdem fremde Inhalte gelesen worden waren.', en: 'The instruction for this run was written after external content had been read.' },
+	'approvals.after_untrusted_both': { de: 'Die Anweisung für diesen Lauf entstand, nachdem fremde Inhalte gelesen worden waren, und auch der Lauf selbst hat fremde Inhalte gelesen.', en: 'The instruction for this run was written after external content had been read, and the run itself read external content too.' },
 	'approvals.created': { de: 'Erstellt {date}', en: 'Created {date}' },
 	'approvals.expires': { de: 'läuft ab {date}', en: 'expires {date}' },
 	'approvals.origin_workflow': { de: 'aus einem Workflow', en: 'from a workflow' },

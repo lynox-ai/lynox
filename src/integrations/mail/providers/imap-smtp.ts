@@ -33,6 +33,7 @@ import {
   type MailWatchOptions,
 } from '../provider.js';
 import { currentCallSignal } from '../../../core/call-connection.js';
+import { processErrorText } from '../../../core/error-egress.js';
 
 // ── Credentials ────────────────────────────────────────────────────────────
 //
@@ -977,7 +978,7 @@ export class ImapSmtpProvider implements MailProvider {
               setTimeout(() => reject(new Error('sent-copy append timed out')), SENT_APPEND_TIMEOUT_MS).unref()),
           ]);
         } catch (err) {
-          console.warn('[mail] sent-copy append failed (mail is delivered):', err instanceof Error ? err.message : String(err));
+          console.warn('[mail] sent-copy append failed (mail is delivered):', processErrorText(err));
         }
       }
 
