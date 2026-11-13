@@ -1290,6 +1290,60 @@ describe('LynoxHTTPApi', () => {
       expect(((await asOwner.json()) as { error: string }).error).toBe('Missing provider');
     });
 
+    // The search endpoint check is the owner's (register 1400): it makes this instance send a
+    // request to an address the caller names, and setting up search is the owner's business.
+    it('refuses a mandate the search endpoint check, and lets the owner through', async () => {
+      repayRateWindow();
+      const probe = (token: string): Promise<Response> => fetch(`${baseUrl}/api/searxng/check`, {
+        method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const asMandate = await probe(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+      expect(asMandate.status).toBe(403);
+      expect(await asMandate.json()).toEqual({ error: 'Only the owner of this instance can check a search endpoint.' });
+      // Twin: the owner's cookie reaches the handler, which answers the empty body itself.
+      const asOwner = await probe(webUiLoginSession(TEST_SECRET, null)!.token);
+      expect(asOwner.status).toBe(400);
+      expect(((await asOwner.json()) as { error: string }).error).toBe('Missing url');
+    });
+
+    // On a provisioned instance a private address is the tenant host's network (register 1401):
+    // the check answers only for the configured endpoint or a public address there. A self-hosted
+    // owner keeps checking a LAN endpoint.
+    it('checks a private search endpoint on a provisioned instance only when it is the configured one', async () => {
+      const { createServer } = await import('node:http');
+      const hits: string[] = [];
+      const lan = createServer((req, res) => { hits.push(req.url ?? ''); res.writeHead(200); res.end('ok'); });
+      await new Promise<void>(r => lan.listen(0, '127.0.0.1', () => r()));
+      onTestFinished(() => new Promise<void>(r => lan.close(() => r())));
+      const lanUrl = `http://127.0.0.1:${(lan.address() as { port: number }).port}`;
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      const check = async (url: string): Promise<{ status: number; body: unknown }> => {
+        repayRateWindow();
+        const res = await fetch(`${baseUrl}/api/searxng/check`, {
+          method: 'POST', headers: { cookie: `lynox_session=${owner}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+        });
+        return { status: res.status, body: await res.json() };
+      };
+      const keys = ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'SEARXNG_URL'] as const;
+      const saved = keys.map(k => process.env[k]);
+      onTestFinished(() => { keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; }); });
+      for (const k of keys) delete process.env[k];
+
+      // Self-hosted: the LAN endpoint is checked, and the request reaches it.
+      expect(await check(lanUrl)).toEqual({ status: 200, body: { healthy: true } });
+      expect(hits).toEqual(['/healthz']);
+
+      // Provisioned, not configured: refused before any request leaves.
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      expect(await check(lanUrl)).toEqual({ status: 400, body: { error: 'On this instance, a search endpoint must be the configured one or a public address' } });
+      expect(hits).toEqual(['/healthz']);
+
+      // Provisioned, configured (trailing slash on either side does not matter): checked.
+      process.env['SEARXNG_URL'] = `${lanUrl}/`;
+      expect(await check(lanUrl)).toEqual({ status: 200, body: { healthy: true } });
+      expect(hits).toEqual(['/healthz', '/healthz']);
+    });
+
     for (const [path, field, value, what] of [
       ['/api/auth/token', 'token', TEST_SECRET, 'see the access token'],
       ['/api/vault/key', 'key', 'TEST-VAULT-KEY-0000000000000000', 'see the vault key'],
@@ -22032,7 +22086,6 @@ describe('mandate stance of every user route', () => {
       'POST /api/push/subscribe own',
       'POST /api/push/test own',
       'POST /api/push/unsubscribe own',
-      'POST /api/searxng/check free',
       'POST /api/secrets/validate-key free',
       'POST /api/sessions own',
       'POST /api/sessions/stance-probe/abort own',
