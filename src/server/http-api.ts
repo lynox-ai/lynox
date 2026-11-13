@@ -3801,6 +3801,34 @@ export class LynoxHTTPApi {
       : `⚠ No vault key is set, but ${found.stores.join(' and ')} already ${found.stores.length === 1 ? 'holds' : 'hold'} encrypted values. New data in them is being stored unencrypted. Restore LYNOX_VAULT_KEY (env, ~/.lynox/.env or vault.key in the data dir).\n`);
   }
 
+  /**
+   * The boot stores that did not open, for the owner's status field; absent for anyone else and when
+   * both opened. The engine runs on without such a store until a restart opens it, and `/api/health`
+   * says only `degraded` (it answers without auth); the owner learns here which one, the log says why.
+   */
+  private _bootStoreField(req: IncomingMessage): Record<string, unknown> {
+    const engine = this.engine;
+    if (engine === null || !isOwnerPrincipal(this._principalOf(req))) return {};
+    const missing = [
+      ...(engine.getEngineDb() === null ? ['engine.db'] : []),
+      ...(engine.getRunHistory() === null ? ['history.db'] : []),
+    ];
+    if (missing.length === 0) return {};
+    // A control plane sets this id on every instance it runs, and its health monitor alerts on a
+    // degraded engine: the UI then says the team is told, not "read the log".
+    const alerted = (process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '') !== '';
+    // Durable memory was switched on and did not load because engine.db is missing: the engine runs
+    // on the old memory files, and a mandate cannot sign in. With durable memory off both are the
+    // normal state, so the UI says neither. The engine.db check matters only if the knowledge store
+    // failed for another reason with engine.db open; then memory is not an old copy of engine.db.
+    const memoryOld = engine.getEngineDb() === null && engine.getLegacyMemoryReason() === 'store_missing';
+    return {
+      boot_stores_missing: missing,
+      ...(alerted ? { boot_stores_alerted: true } : {}),
+      ...(memoryOld ? { boot_store_memory_old: true } : {}),
+    };
+  }
+
   /** The keyless state for the owner's status field; absent for anyone else and when nothing was found. */
   private _keylessField(req: IncomingMessage): Record<string, unknown> {
     if (this._keyless === null || !isOwnerPrincipal(this._principalOf(req))) return {};
@@ -10560,8 +10588,8 @@ export class LynoxHTTPApi {
     // it already carries credentials on this call.
     this.addStatic('user', 'GET /api/providers/status', async (req, res) => {
       const providers = await this.getProvidersStatus();
-      // The status bar polls this on every page; the keyless field rides it for the owner only.
-      jsonResponse(res, 200, { providers, ...this._keylessField(req) });
+      // The status bar polls this on every page; the keyless and boot-store fields ride it for the owner only.
+      jsonResponse(res, 200, { providers, ...this._keylessField(req), ...this._bootStoreField(req) });
     }, READS);
 
     // ── LLM model catalog ──
