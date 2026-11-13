@@ -128,6 +128,7 @@ import type {
 import { readMandateRevocation, MANDATE_REVOCATION_MAX } from '../contract/http.js';
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
+import { awaitsOwnQuestion } from './own-question.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
@@ -5669,7 +5670,8 @@ export class LynoxHTTPApi {
       if (!registry) { jsonResponse(res, 200, { runs: [] }); return; }
       const promptStoreForRuns = this.engine?.getPromptStore();
       const runs = registry.getActive().map((r) => {
-        const awaiting = r.status === 'running' && !!promptStoreForRuns?.getPending(r.thread_id);
+        // Only the run's own question: a scheduled run's, asked before it started, is not.
+        const awaiting = awaitsOwnQuestion(r, promptStoreForRuns?.getPending(r.thread_id));
         return {
           runId: r.run_id,
           threadId: r.thread_id,
@@ -5691,7 +5693,9 @@ export class LynoxHTTPApi {
       // listed after it, and the nav marks the thread with the question. The run id is the question's id, and
       // there is no stream behind it: `attachable: false` tells the client not to re-attach.
       // A workflow's question is closed at boot, so its mark goes with it rather than turning
-      // into an `interrupted` banner.
+      // into an `interrupted` banner. A thread with a live chat run lists that run only, also
+      // when the question is a scheduled run's: the client reads a thread with both as having a
+      // question, and would then hold back a turn that is running.
       const live = new Set(runs.filter((r) => r.status !== 'interrupted').map((r) => r.threadId));
       for (const p of promptStoreForRuns?.listPendingSessions() ?? []) {
         if (live.has(p.session_id)) continue;
@@ -6454,7 +6458,7 @@ export class LynoxHTTPApi {
       if (registry) {
         const row = registry.getActive().find((r) => r.thread_id === params['id']);
         if (row) {
-          const awaiting = row.status === 'running' && !!this.engine?.getPromptStore()?.getPending(row.thread_id);
+          const awaiting = awaitsOwnQuestion(row, this.engine?.getPromptStore()?.getPending(row.thread_id));
           activeRun = {
             runId: row.run_id,
             status: awaiting ? 'awaiting_input' : row.status,
@@ -7499,13 +7503,40 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Blocked: cloud metadata endpoint');
         return;
       }
+      // On an instance the control plane provisions, a private address is the tenant host's
+      // network, not the owner's LAN: answering "reachable?" for any of them makes this route a
+      // probe into it. There the URL is either the search endpoint the control plane gave this
+      // instance (`SEARXNG_URL`, set for every provisioned instance), or a public address fetched
+      // through the guarded transport (each redirect hop re-checked, the resolved address
+      // pinned). The config file's `searxng_url` does not count: the owner writes it, so it
+      // would reopen the probe. A self-hosted owner keeps checking a LAN or Docker endpoint,
+      // which is what the route is for.
+      if (isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER'))) {
+        const provisioned = (process.env['SEARXNG_URL'] ?? '').replace(/\/+$/, '');
+        if (url !== provisioned) {
+          const { assertPublicUrl, fetchWithPublicRedirects } = await import('../core/network-guard.js');
+          try {
+            await assertPublicUrl(url);
+          } catch {
+            errorResponse(res, 400, 'On this instance, a search endpoint must be the configured one or a public address');
+            return;
+          }
+          try {
+            const response = await fetchWithPublicRedirects(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
+            jsonResponse(res, 200, { healthy: response.ok });
+          } catch {
+            jsonResponse(res, 200, { healthy: false });
+          }
+          return;
+        }
+      }
       try {
         const response = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
         jsonResponse(res, 200, { healthy: response.ok });
       } catch {
         jsonResponse(res, 200, { healthy: false });
       }
-    }, free('checks a search endpoint and stores nothing'));
+    }, ownerOnly('check a search endpoint'));
 
     // Search reranker capability probe — read-time provider snapshot so the
     // Settings → Search page can surface "Reranker is Anthropic-only" instead
