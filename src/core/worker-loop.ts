@@ -1678,6 +1678,7 @@ export class WorkerLoop {
         // reservation once the task settles, via .finally so it runs even if
         // executeTask's synchronous prologue throws — a leaked reservation would
         // otherwise shrink the tenant's daily headroom for the process lifetime.
+        // run-group-starter: the callback settles with this run and only frees its reservation; it reports no spend
         void this.executeTask(task, capUSD, undefined, capBy).finally(() => releasePersistentBudget(reservation.reservedUSD));
       }
       // After the due triggers, and on its own: a drain that throws leaves the next tick's
