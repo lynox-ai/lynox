@@ -15,18 +15,21 @@ import { join, relative } from 'node:path';
 const SRC = join(__dirname, '..');
 
 const BYPASS: readonly RegExp[] = [
-  /\b(secretStore|store|vault|secrets|inner|target)\??!?\.resolve\(/,
-  /getMasked\(/,
-  /\.fingerprint\(/,
-  /\bvault\??\.get\(/,
+  // Each call also in its optional and non-null forms, on the receiver and on the call, in either
+  // order (`?.resolve?.(`, `!.get(`, `resolve!(`, `!?.`): the first version of this list missed the
+  // optional call, the second the non-null ones.
+  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.resolve[?!]*\.?\(/,
+  /getMasked[?!]*\.?\(/,
+  /\.fingerprint[?!]*\.?\(/,
+  /\bvault[?!]*\.get[?!]*\.?\(/,
   /principal: OWNER_PRINCIPAL/,
-  /resolveSecretRefs\(/,
-  /\.getAll\(\)/,
-  /getSecretStore\(\)\??\.resolve\(/,
+  /resolveSecretRefs[?!]*\.?\(/,
+  /\.getAll[?!]*\.?\(\)/,
+  /getSecretStore[?!]*\.?\(\)[?!]*\.resolve[?!]*\.?\(/,
   // Gives nothing readable, but whether another member's or the owner's token exists is information too.
-  /\b(secretStore|store|vault|secrets|inner|target)\??!?\.holds[?!]?\.?\(/,
-  /\b(inner|target)\??\.holds\??\.bind\(/,
-  /getSecretStore\(\)\??\.holds\??\.?\(/,
+  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.holds[?!]*\.?\(/,
+  /\b(inner|target)[?!]*\.holds[?!]*\.bind\(/,
+  /getSecretStore[?!]*\.?\(\)[?!]*\.holds[?!]*\.?\(/,
 ];
 
 /** `file|line text` → why it may stand. Keyed by text, not line number, so an edit elsewhere in the file keeps it. */
@@ -44,13 +47,16 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/http.ts|const current = secretStore.resolve(refreshKey);': 'view; revoked-grant compare, not sent',
   'tools/builtin/http.ts|const stored = secretStore.resolve(refreshSlot);': 'view; renewal input',
   'tools/builtin/http.ts|const resolved = secretStore.resolve(tokenKey);': 'view; the attach, behind the member refusal',
+  'tools/builtin/http.ts|if (store?.holds !== undefined) return store.holds(mpSlot);': '401 reminder: whether a refresh token is there picks a fixed sentence',
+  'tools/builtin/http.ts|return (store?.resolve?.(mpSlot) ?? null) !== null;': 'fallback for a store without holds; existence only, value compared with null',
   'tools/builtin/http.ts|const user = secretStore.resolve(userKey);': 'view; basic auth, no token slot',
   'tools/builtin/http.ts|const pass = secretStore.resolve(passKey);': 'view; basic auth, no token slot',
   'tools/builtin/http.ts|const token = secretStore.resolve(tokenKey);': 'view; a profile\'s own key',
   'tools/builtin/http.ts|: a.secretStore.resolve(key)': 'view; existence answer for a model-owned key',
   'tools/builtin/http.ts|return { inputs: oauthRenewalInputs(profile, stores.secretStore.resolve(slot)), ms };': 'hashed into a hold key after a renewal that went through; not sent',
   // Existence and fingerprint compares: the value decides a boolean, it is not sent or shown.
-  'tools/builtin/api-setup.ts|if (store.resolve(name) !== null) left.push(name);': 'existence after delete, before a save',
+  'tools/builtin/api-setup.ts|if (store.holds !== undefined ? store.holds(name) : store.resolve(name) !== null) left.push(name);': 'existence after delete, before a save',
+  'tools/builtin/api-setup.ts|if (store.holds !== undefined) return !isInfraSecret(name) && store.holds(name);': 'existence probe, boolean only',
   // Raw on purpose: any token in a slot, a member's included, keeps the "not connected" line out;
   // read through the view, a member's connection would read as not connected to the owner.
   'tools/builtin/api-setup.ts|if (slots.some((name) => store.holds!(name))) return \'\';': 'view: existence of a token decides whether "not connected" is said',
@@ -153,6 +159,40 @@ describe('bypasses of the member-connection view', () => {
   it('mutant: a raw read of a token slot added to the worker is caught', () => {
     const mutated = new Map(files);
     mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\nconst leaked = secretStore.resolve(accessTokenKey(profile.id));\n`);
+    expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
+  });
+
+  it('mutant: a raw read in its optional-call form is caught', () => {
+    const mutated = new Map(files);
+    mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\nconst leaked = agent.secretStore?.resolve?.(refreshSlot);\n`);
+    expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
+  });
+
+  // One line per rule and form; each is a read that the list must not let through.
+  it.each([
+    'const a = store.resolve!(slot);',
+    'const a = secretStore!?.resolve(slot);',
+    'const a = vault!.get(name);',
+    'const a = vault?.get?.(name);',
+    'const a = vault!.getAll();',
+    'const a = agent.secretStore?.getMasked?.(name);',
+    'const a = view.fingerprint!(name);',
+    'const a = resolveSecretRefs?.(input, store);',
+    'const a = getSecretStore()!.resolve(x);',
+    'const a = getSecretStore?.()?.resolve(x);',
+    'const a = getSecretStore()!.holds(x);',
+    'const a = inner!.holds?.bind(inner);',
+    'const a = store.getMasked!(name);',
+    'const a = resolveSecretRefs!(input, store);',
+    'const a = vault.getAll!();',
+    'const a = store!?.holds(slot);',
+    'const a = store.resolve!?.(slot);',
+    'const a = vault.get!?.(name);',
+    'const a = getSecretStore?.().holds(x);',
+    'const a = inner.holds!.bind(inner);',
+  ])('mutant: the raw read %s is caught', (read) => {
+    const mutated = new Map(files);
+    mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\n${read}\n`);
     expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
   });
 

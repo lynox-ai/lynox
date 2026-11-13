@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { connectionTokenAllowed, mandateMayConnect, mandateMayRead, mayServeAsClientId, releaseBinding, releaseBoundFields, releaseObstacle, releaseState, secretsForProfile, withheldFrom, type ReadCtx } from './profile-secret-view.js';
+import { connectionShown, connectionTokenAllowed, mandateMayConnect, mandateMayRead, mayServeAsClientId, releaseBinding, releaseBoundFields, releaseObstacle, releaseState, secretsForProfile, withheldFrom, type ReadCtx } from './profile-secret-view.js';
 import type { ApiProfile } from './api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
@@ -531,5 +531,16 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
   it('control: a profile the owner wrote reads its name with no release at all', () => {
     expect(secretsForProfile(vault, ownerCrm, { knownProfiles: () => [ownerCrm] }, NO_RELEASES).resolve('OWNER_KEY')).toBe('owner-value');
     expect(withheldFrom(vault, ownerCrm, { knownProfiles: () => [ownerCrm] }, ['OWNER_KEY'], NO_RELEASES)).toEqual([]);
+  });
+});
+
+// The connection lists name a profile's provider only when it goes through it.
+describe('connectionShown', () => {
+  const books = (auth: ApiProfile['auth']): ApiProfile => ({ id: 'books', name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'd', auth });
+  it('names the built-in provider of a profile that goes through it', () => {
+    expect(connectionShown(books({ type: 'oauth2', oauth: { preset_id: 'bexio' } })).provider).toBe('bexio');
+  });
+  it('names the host of a static-credential profile that still carries a preset_id', () => {
+    expect(connectionShown(books({ type: 'bearer', vault_keys: ['K'], oauth: { preset_id: 'bexio' } } as never)).provider).toBe('api.bexio.com');
   });
 });

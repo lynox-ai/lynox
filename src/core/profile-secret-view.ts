@@ -22,7 +22,7 @@ import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-stor
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
 import { currentPlanOf, currentPlanOwnerStarted, currentPlanStamp } from './plan-run-context.js';
-import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
+import { builtInPresetOf, derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
 import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
 import { collapseToSingleLine } from './sanitize.js';
@@ -1318,9 +1318,10 @@ function planMayUse(profile: ApiProfile): boolean {
 const OWNER_ALLOWS_AT = 'The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
 
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
-  const presetId = profile.auth?.oauth?.preset_id;
   return {
-    provider: singleLine((presetId !== undefined ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? hostLabel(profile.base_url)),
+    // A profile that does not go through its built-in provider is named by its host, a stray
+    // preset_id on a static-credential profile included.
+    provider: singleLine(builtInPresetOf(profile)?.label ?? hostLabel(profile.base_url)),
     // The id too: one the import held back is read from a file, where it can carry a line break.
     shown: `${JSON.stringify(singleLine(profile.name))} (id ${singleLine(profile.id)})`,
   };
