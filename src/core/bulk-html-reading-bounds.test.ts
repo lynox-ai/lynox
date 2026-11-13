@@ -4,6 +4,7 @@ import {
   MARKUP_MAX_BYTES, MARKUP_MAX_CARRIER_NESTING, MARKUP_MAX_DEPTH,
 } from './bulk-html.js';
 import { BULK_MAX_TARGET_BYTES } from './bulk-plan.js';
+import { html as p5 } from 'parse5';
 
 // The markup check reads a value's tree once per text carrier above each node. A value larger or
 // nested deeper than the bounds is refused before it is read, and the list the approval view shows
@@ -15,7 +16,7 @@ const check = (after: string, before: string | null = null) => checkMarkup({ bef
 /** The names this module treats as text carriers, and the contexts a value may open: the pair that
  *  nests is found by the check itself, so no test names it. */
 const CARRIERS = ['script', 'style', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'plaintext', 'textarea', 'title'];
-const CONTEXTS = ['', '<svg>', '<math>'];
+const CONTEXTS = ['', ...Object.keys(p5.NS).map((ns) => `<${ns.toLowerCase()}>`)];
 const nested = (context: string, carrier: string, n: number): string => context + `<${carrier}>`.repeat(n);
 const nesting = ((): [string, string] => {
   for (const context of CONTEXTS) {
