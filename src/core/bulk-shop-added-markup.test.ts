@@ -12,6 +12,7 @@ import { runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import type { BeforeImage } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
+import { MARKUP_MAX_DEPTH } from './html-tree.js';
 
 // The read-back after a write and the undo of a description (PRD shopify-preset §21.2 items 2, 6
 // and 7). Until descriptions are written on Shopify (item 1), the ledger's side runs here on a
@@ -320,6 +321,40 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     await run(u1, stubWriter(store), 'bulk_undo');
     engineDb.getDb().prepare('UPDATE bulk_targets SET source_seq = 999 WHERE run_id = ?').run(u1);
     expect(byKey(planned(u1), `${LIST}/2`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+  });
+
+  /** Puts `to` where a run's targets hold the value the store kept in {@link markedRun}. */
+  const swap = (runId: string, column: 'before' | 'after_actual', to: string): void => {
+    const kept = JSON.stringify(`<p>Neu</p>${SCRIPT}`);
+    const db = engineDb.getDb();
+    for (const r of db.prepare(`SELECT seq, ${column} AS v FROM bulk_targets WHERE run_id = ?`).all(runId) as { seq: number; v: string | null }[]) {
+      if (r.v === null) continue;
+      const plain = engineDb.dec(r.v);
+      if (plain.includes(kept)) db.prepare(`UPDATE bulk_targets SET ${column} = ? WHERE run_id = ? AND seq = ?`).run(engineDb.enc(plain.replace(kept, JSON.stringify(to))), runId, r.seq);
+    }
+  };
+
+  it('counts a value beyond the reading bounds down the chain as marked, unread', async () => {
+    const { id, store } = await markedRun();
+    const u1 = planned(id);
+    approve(u1);
+    await run(u1, stubWriter(store), 'bulk_undo');
+    // Down the chain the store kept one value and the undo restores another, both beyond the depth
+    // the reading bounds take: neither is parsed, so the two are not told apart.
+    const deep = (text: string): string => '<span>'.repeat(MARKUP_MAX_DEPTH + 10) + text + '</span>'.repeat(MARKUP_MAX_DEPTH + 10);
+    swap(id, 'after_actual', deep('kept'));
+    swap(u1, 'before', deep('restored'));
+    expect(byKey(planned(u1), `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+  });
+
+  it('CONTROL: does not count a value within the bounds that differs from the one the store kept', async () => {
+    const { id, store } = await markedRun();
+    const u1 = planned(id);
+    approve(u1);
+    await run(u1, stubWriter(store), 'bulk_undo');
+    swap(id, 'after_actual', '<p>kept</p>');
+    swap(u1, 'before', '<p>restored</p>');
+    expect(byKey(planned(u1), `${LIST}/1`).change).toBe('update');
   });
 
   it('lists what an undo restores, the HTML fields resolved from the run its family started from', async () => {

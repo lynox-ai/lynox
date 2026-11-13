@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { withinReadingBounds, MARKUP_MAX_DEPTH } from './html-tree.js';
+import { withinReadingBounds, MARKUP_MAX_ATTRIBUTES_PER_TAG, MARKUP_MAX_DEPTH } from './html-tree.js';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, sameValue } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
@@ -41,6 +41,12 @@ describe('the bounds read off the bytes, before the parse', () => {
     expect(withinReadingBounds('<p a b c d>x</p>', { attributesPerTag: 3 })).toBe(false);
     expect(withinReadingBounds('<p a="x y z" b=\'u v\' c=w>x</p>', { attributesPerTag: 3 })).toBe(true);
     expect(withinReadingBounds('<p a="x y z" b=\'u v\' c=w d>x</p>', { attributesPerTag: 3 })).toBe(false);
+  });
+
+  it('ends at the default attribute bound, not one earlier', () => {
+    const tag = (n: number): string => `<p ${range(n, (i) => `a${i} `)}>x</p>`;
+    expect(withinReadingBounds(tag(MARKUP_MAX_ATTRIBUTES_PER_TAG))).toBe(true);
+    expect(withinReadingBounds(tag(MARKUP_MAX_ATTRIBUTES_PER_TAG + 1))).toBe(false);
   });
 
   it('holds the defaults far above the descriptions shops write', () => {
