@@ -47,6 +47,7 @@
 
 	async function json<T>(path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; body: T }> {
 		const res = await fetch(`${getApiBase()}${path}`, init);
+		if (res.status === 429) lastRetryAfter = Number(res.headers.get('Retry-After'));
 		const body = (await res.json().catch(() => ({}))) as T;
 		return { ok: res.ok, status: res.status, body };
 	}
@@ -91,6 +92,8 @@
 	// The run a follow loop (below) belongs to: a new load for another run, or the page going
 	// away, ends the loop of the one before.
 	let following = 0;
+	// What the engine's last 429 said to wait (Retry-After, seconds), for a follow loop's next wait.
+	let lastRetryAfter: number | null = null;
 
 	/** Ask for the run again while the engine moves it on by itself (a list read, a judging, a
 	 *  write the owner started), so the page shows the next step without a reload. Only while the
@@ -114,21 +117,63 @@
 			}
 			if (mine !== following) return;
 			const body = res?.ok ? ((await res.json().catch(() => null)) as BulkRunDetailData | null) : null;
-			const retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
-			delay = bulkFollowDelay(delay, body !== null, retryAfter);
-			if (body !== null && run !== null && bulkFollowMark(body) !== bulkFollowMark(run)) await load({ quiet: true });
+			let retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
+			let ok = body !== null;
+			if (mine !== following) return;
+			if (body !== null && run !== null && bulkFollowMark(body) !== bulkFollowMark(run)) {
+				// Still working: the run and the targets the page shows, in one request, never the
+				// whole list (a large run would cost ten pages an ask). Done working: the page loads
+				// it as on opening, whole where the next step needs it.
+				const step = bulkEngineWorking(body) ? await followStep(body, mine) : await quietLoad();
+				ok = step.ok;
+				if (step.retryAfter !== null) retryAfter = step.retryAfter;
+			}
+			delay = bulkFollowDelay(delay, ok, retryAfter);
 		}
 	}
 
-	async function load(opts: { quiet?: boolean } = {}): Promise<void> {
+	/** A quiet load for a follow loop, with the wait a 429 inside it asked for. */
+	async function quietLoad(): Promise<{ ok: boolean; retryAfter: number | null }> {
+		lastRetryAfter = null;
+		const ok = await load({ quiet: true });
+		return { ok, retryAfter: ok ? null : lastRetryAfter };
+	}
+
+	/** One step of a follow loop for a run the engine still works on: the run as asked, and the
+	 *  targets the page shows asked again in one request (the first page, or as many as the owner
+	 *  opened up to a page; more than that stay as they are). Nothing is written when the page
+	 *  moved on meanwhile (another run, a newer loop, the owner opening more targets). */
+	async function followStep(body: BulkRunDetailData, mine: number): Promise<{ ok: boolean; retryAfter: number | null }> {
+		const id = runId;
+		const had = targets.length;
+		if (had > PAGE) { run = body; return { ok: true, retryAfter: null }; }
+		let res: Response | null = null;
+		try {
+			res = await fetch(`${getApiBase()}/bulk/runs/${encodeURIComponent(id)}/targets?offset=0&limit=${Math.max(FIRST_PAGE, had)}`);
+		} catch {
+			res = null;
+		}
+		const page = res?.ok ? ((await res.json().catch(() => null)) as { targets?: BulkTarget[] } | null)?.targets : undefined;
+		if (!Array.isArray(page)) return { ok: false, retryAfter: res?.status === 429 ? Number(res.headers.get('Retry-After')) : null };
+		if (mine !== following || id !== runId || targets.length !== had) return { ok: true, retryAfter: null };
+		run = body;
+		targets = page;
+		return { ok: true, retryAfter: null };
+	}
+
+	/** Load the run and its targets. True when the page now shows them; false when the load
+	 *  failed (a quiet load leaves the page as it was) or the page moved on to another run. */
+	async function load(opts: { quiet?: boolean } = {}): Promise<boolean> {
 		const quiet = opts.quiet === true;
+		const id = runId;
 		if (!quiet) {
 			loading = true;
 			error = '';
 		}
 		try {
-			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(runId)}`);
-			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return; }
+			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
+			if (id !== runId) return false;
+			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
@@ -142,8 +187,11 @@
 			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
-			if (whole && shown.length !== r.body.total) { if (!quiet) error = t('common.load_failed'); loading = false; return; }
+			if (id !== runId) return false;
+			if (whole && shown.length !== r.body.total) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
 			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
+			// A load for a run the page no longer shows writes nothing: the newer load owns the page.
+			if (id !== runId) return false;
 			run = r.body;
 			targets = shown;
 			creates = deleted;
@@ -153,16 +201,24 @@
 			probeOk = false;
 			supersedable = null;
 		} catch {
+			if (id !== runId) return false;
 			if (!quiet) error = t('common.load_failed');
+			loading = false;
+			return false;
 		}
 		loading = false;
 		if (!quiet && run !== null && bulkEngineWorking(run)) void follow();
+		return true;
 	}
 
 	async function showMore(): Promise<void> {
 		if (!run) return;
 		try {
-			targets = [...targets, ...(await loadFrom(targets.length, run.total))];
+			// Appended to the targets the page holds when the page arrives: a follow step may have
+			// asked the shown ones again meanwhile.
+			const from = targets.length;
+			const more = await loadFrom(from, run.total);
+			targets = [...targets.slice(0, from), ...more];
 		} catch {
 			actionError = t('common.load_failed');
 		}

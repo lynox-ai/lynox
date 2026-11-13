@@ -697,8 +697,9 @@ export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): bool
 /** Whether the engine is moving the run on by itself right now: reading its list or judging it
  *  (planned, no halt), or writing it (approved, or writing without a halt). Every other state
  *  waits for the owner or has ended, so the page has nothing to wait for there. */
-export function bulkEngineWorking(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
-	if (run.haltKey !== null) return false;
+export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason'>): boolean {
+	// Any halt, by its key or by a reason this page does not know (an engine newer than the page).
+	if (run.haltKey !== null || run.haltReason !== null) return false;
 	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
 }
 
@@ -724,7 +725,7 @@ export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number |
 /** What a follow ask compares to see whether the run moved: its step and its counts. */
 export function bulkFollowMark(run: BulkRunDetailData): string {
 	return JSON.stringify([run.phase, run.haltKey, run.total, run.applied, run.failed, run.conflicts, run.sentUnknown,
-		run.undone, run.deselected, run.changes, run.judge?.unjudged ?? null, run.costUsd]);
+		run.undone, run.deselected, run.changes, run.judge?.unjudged ?? null, run.costUsd, run.resumesAt]);
 }
 
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo

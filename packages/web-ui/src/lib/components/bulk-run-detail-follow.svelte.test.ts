@@ -41,6 +41,11 @@ let runStatus: number;
 let retryAfter: string | null;
 // Statuses for the next asks, one each, before `runStatus` applies again.
 let nextStatuses: number[];
+// Statuses for the next asks for targets, one each, before 200 applies again; and each ask's limit.
+let targetStatuses: number[];
+let targetLimits: number[];
+// The run's targets as the engine serves them, page by page.
+let allTargets: BulkTarget[];
 
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -53,13 +58,23 @@ beforeEach(() => {
 	runStatus = 200;
 	retryAfter = null;
 	nextStatuses = [];
+	targetStatuses = [];
+	targetLimits = [];
+	allTargets = [];
 	Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
 		if (init?.method === 'POST') { posts.push(u); return reply({}); }
-		if (/\/targets\?/.test(u)) { targetAsks++; return reply({ targets: [] as BulkTarget[] }); }
+		if (/\/targets\?/.test(u)) {
+			targetAsks++;
+			targetLimits.push(Number(/limit=(\d+)/.exec(u)?.[1]));
+			const ts = targetStatuses.shift() ?? 200;
+			if (ts !== 200) return new Response('{}', { status: ts, headers: { 'Content-Type': 'application/json', ...(retryAfter !== null ? { 'Retry-After': retryAfter } : {}) } });
+			const off = Number(/offset=(\d+)/.exec(u)?.[1]);
+			return reply({ targets: allTargets.slice(off, off + targetLimits.at(-1)!) });
+		}
 		runAsks++;
 		const status = nextStatuses.shift() ?? runStatus;
 		if (status !== 200) return new Response(JSON.stringify({ error: 'Too many requests' }), { status, headers: { 'Content-Type': 'application/json', ...(retryAfter !== null ? { 'Retry-After': retryAfter } : {}) } });
@@ -99,17 +114,19 @@ const shown = (): string => target.textContent ?? '';
 
 describe('bulkEngineWorking', () => {
 	it('is true only while the engine moves the run on by itself', () => {
-		expect(bulkEngineWorking({ phase: 'planned', haltKey: null })).toBe(true);
-		expect(bulkEngineWorking({ phase: 'approved', haltKey: null })).toBe(true);
-		expect(bulkEngineWorking({ phase: 'writing', haltKey: null })).toBe(true);
+		expect(bulkEngineWorking({ phase: 'planned', haltKey: null, haltReason: null })).toBe(true);
+		expect(bulkEngineWorking({ phase: 'approved', haltKey: null, haltReason: null })).toBe(true);
+		expect(bulkEngineWorking({ phase: 'writing', haltKey: null, haltReason: null })).toBe(true);
 		// Waiting for the owner: a start, a probe or any halt, an approval, or an end.
-		expect(bulkEngineWorking({ phase: 'planned', haltKey: 'awaitingStart' })).toBe(false);
-		expect(bulkEngineWorking({ phase: 'planned', haltKey: 'listed' })).toBe(false);
-		expect(bulkEngineWorking({ phase: 'writing', haltKey: 'probe' })).toBe(false);
-		expect(bulkEngineWorking({ phase: 'previewed', haltKey: null })).toBe(false);
-		expect(bulkEngineWorking({ phase: 'done', haltKey: null })).toBe(false);
-		expect(bulkEngineWorking({ phase: 'aborted', haltKey: null })).toBe(false);
-		expect(bulkEngineWorking({ phase: 'undone', haltKey: null })).toBe(false);
+		expect(bulkEngineWorking({ phase: 'planned', haltKey: 'awaitingStart', haltReason: 'awaitingStart' })).toBe(false);
+		expect(bulkEngineWorking({ phase: 'planned', haltKey: 'listed', haltReason: 'listed' })).toBe(false);
+		expect(bulkEngineWorking({ phase: 'writing', haltKey: 'probeRequired', haltReason: 'probeRequired' })).toBe(false);
+		expect(bulkEngineWorking({ phase: 'previewed', haltKey: null, haltReason: null })).toBe(false);
+		expect(bulkEngineWorking({ phase: 'done', haltKey: null, haltReason: null })).toBe(false);
+		expect(bulkEngineWorking({ phase: 'aborted', haltKey: null, haltReason: null })).toBe(false);
+		expect(bulkEngineWorking({ phase: 'undone', haltKey: null, haltReason: null })).toBe(false);
+		// A halt whose reason this page does not know (a newer engine) still counts as a halt.
+		expect(bulkEngineWorking({ phase: 'writing', haltKey: null, haltReason: 'someNewHalt' })).toBe(false);
 	});
 });
 
@@ -156,7 +173,7 @@ describe('the page of a run the engine is moving on', () => {
 		expect(runAsks).toBe(1);
 	});
 
-	it('gives up after its limit, and stops when the page goes away', async () => {
+	it('gives up after its limit', async () => {
 		await render();
 		await pass(BULK_FOLLOW_MAX_MS + BULK_FOLLOW_MS * 2);
 		const atLimit = runAsks;
@@ -220,16 +237,98 @@ describe('the page of a run the engine is moving on', () => {
 });
 
 describe('a follow ask whose load is refused', () => {
-	it('keeps the page as it was when the load after a moved run gets a 429', async () => {
+	it('keeps the page as it was and backs off when the targets of a moved run get a 429', async () => {
 		await render();
-		// The ask finds the run moved; the load that follows it is refused.
+		// The ask finds the run moved and still working; its targets are refused.
 		run = makeRun({ total: 17, changes: { update: 17, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
-		nextStatuses = [200, 429];
-		retryAfter = '4';
+		targetStatuses = [429];
+		retryAfter = '20';
 		await pass(BULK_FOLLOW_MS);
-		expect(runAsks).toBe(3);
+		const refused = runAsks;
 		expect(shown()).not.toMatch(/Laden fehlgeschlagen|Failed to load/);
 		expect(target.querySelector('[aria-current="step"]')).not.toBeNull();
+		// The page did not take the run half: no 17 without its targets.
+		expect(shown()).not.toContain('17');
+		await pass(19_000);
+		expect(runAsks).toBe(refused);
+		await pass(1_500);
+		expect(runAsks).toBe(refused + 1);
+		expect(shown()).toContain('17');
+	});
+
+	it('keeps the page as it was and backs off when the load after the run stopped working gets a 429', async () => {
+		await render();
+		// The ask finds the run waiting for the owner now; the load that follows is refused.
+		run = makeRun({ total: 17, changes: { update: 17, create: 0, delete: 0, unchanged: 0, invalid: 0 }, haltKey: 'listed', haltReason: 'listed' });
+		nextStatuses = [200, 429];
+		retryAfter = '20';
+		await pass(BULK_FOLLOW_MS);
+		const refused = runAsks;
+		expect(refused).toBe(3);
+		expect(shown()).not.toMatch(/Laden fehlgeschlagen|Failed to load/);
+		expect(target.querySelector('[aria-current="step"]')).not.toBeNull();
+		await pass(19_000);
+		expect(runAsks).toBe(refused);
+		await pass(1_500);
+		expect(shown()).toContain('17');
+	});
+});
+
+describe('a large run being written', () => {
+	const many = (n: number): BulkTarget[] => Array.from({ length: n }, (_, i) => ({ seq: i + 1, key: `k${i + 1}`, change: 'update', diff: { kind: 'none' }, error: null, deselected: false }) as BulkTarget);
+
+	it('asks for the shown targets in one request of at most a page, never page by page', async () => {
+		allTargets = many(300);
+		run = makeRun({ phase: 'writing', total: 300, applied: 10, shopAddedMarkup: 1 } as Partial<BulkRunDetailData>);
+		await render();
+		const runsAtStart = runAsks;
+		const targetsAtStart = targetAsks;
+		run = makeRun({ phase: 'writing', total: 300, applied: 60, shopAddedMarkup: 1 } as Partial<BulkRunDetailData>);
+		await pass(BULK_FOLLOW_MS);
+		expect(runAsks).toBe(runsAtStart + 1);
+		expect(targetAsks).toBe(targetsAtStart + 1);
+		expect(targetLimits.at(-1)).toBe(300);
+	});
+
+	it('does not ask a whole list of more than a page again while the run is written', async () => {
+		allTargets = many(1200);
+		run = makeRun({ phase: 'writing', total: 1200, applied: 10, shopAddedMarkup: 1 } as Partial<BulkRunDetailData>);
+		await render();
+		// Opening loads it whole (three pages): the mark points into the whole list.
+		expect(targetAsks).toBe(3);
+		run = makeRun({ phase: 'writing', total: 1200, applied: 60, shopAddedMarkup: 1 } as Partial<BulkRunDetailData>);
+		await pass(BULK_FOLLOW_MS * 3);
+		expect(targetAsks).toBe(3);
+		expect(runAsks).toBe(4);
+	});
+});
+
+describe('a load for a run the page no longer shows', () => {
+	it('writes nothing once the page shows another run', async () => {
+		// r1 answers only when released; r2 at once.
+		let release: () => void = () => {};
+		const held = new Promise<void>((r) => { release = r; });
+		const r1 = makeRun({ id: 'r1', phase: 'done', total: 17 });
+		const r2 = makeRun({ id: 'r2', phase: 'done', total: 42 });
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+			const u = String(url);
+			const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
+			if (/\/targets\?/.test(u)) return reply({ targets: [] });
+			if (u.includes('/bulk/runs/r1')) { await held; return reply(r1); }
+			return reply(r2);
+		}));
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		props.runId = 'r2';
+		await settle();
+		expect(shown()).toContain('42');
+		release();
+		await settle();
+		expect(shown()).toContain('42');
+		expect(shown()).not.toContain('17');
 	});
 });
 
