@@ -28,6 +28,7 @@ import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
 import { credentialBearing, credentialHosts, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
+import { processErrorText, reducedErrorText } from './error-egress.js';
 
 // ── Errors ──
 
@@ -1935,7 +1936,10 @@ export class ApiStore {
         }
         read.push({ source, deleteId: row.id, profile: migrateV1Profile(profile) });
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${err instanceof Error ? err.message : String(err)}\n`);
+        // Never the error's message, as for a profile file: the parser's quotes the stored config
+        // around the fault. Named by its class instead.
+        const why = err instanceof SyntaxError ? 'not valid JSON' : `could not be read as a profile (${reducedErrorText(err)})`;
+        process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${why}\n`);
         fault.push(unreadableEntry(source, row.id, profile, row.configJson, [row.name, row.vaultKeys]));
       }
     }
@@ -1970,7 +1974,9 @@ export class ApiStore {
         try {
           if (this.register(profile, 'load')) loaded.push(profile.id);
         } catch (err: unknown) {
-          process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${err instanceof Error ? err.message : String(err)}\n`);
+          // `register` returns its refusals; what throws here is a runtime error over a stored
+          // profile, whose message may quote one of its values.
+          process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${processErrorText(err)}\n`);
           this.unreadable.set(source, unreadableEntry(source, deleteId, profile, null));
           threw = true;
         }

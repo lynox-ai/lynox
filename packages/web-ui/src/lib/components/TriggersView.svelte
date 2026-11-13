@@ -7,7 +7,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
-	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
+	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
@@ -608,6 +608,14 @@
 									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
+							<!-- A confirmed watch names its page too: its escalation leaves the address out when
+							     someone the owner let in set it up, and points here (PRD B6). -->
+							{#if showsWatchAddress(trigger) && !held(trigger)}
+								<p class="mt-1 break-words text-xs text-text-muted" data-trigger-watch>
+									<span class="font-medium">{t('triggers.watch_url')}:</span>
+									<span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}
+								</p>
+							{/if}
 							{#if held(trigger)}
 								<!-- Confirming allows this to run without the owner present, so what the run
 								     would carry out is shown beside the button — a button next to nothing but an

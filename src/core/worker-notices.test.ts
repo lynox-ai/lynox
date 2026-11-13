@@ -465,6 +465,8 @@ const STILL_ENGLISH: readonly string[] = [
   // its chat thread, which the model reads when the owner replies, so it stays English model
   // context. The push the owner reads is `pushBody`, from the table (`WorkerNotices.watchChanged`).
   'src/core/worker-loop.ts: `${config.url} changed.\\n\\n${truncatedAnalysis}`',
+  // The same seed for a watch someone the owner let in set up (PRD B6): English model
+  // context too; its push is `helperWatchChangedPush`, from the table.
 ];
 
 describe('the fixed-notice detector', () => {

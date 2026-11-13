@@ -20,6 +20,7 @@ const KEPT_BY_DECISION = new Set([
   '.last_version',
   '.tos-accepted-1',
   '.volume-check',
+  'export-slot.lock',
   'http-secret',
   'plugins',
   'pricing.json',

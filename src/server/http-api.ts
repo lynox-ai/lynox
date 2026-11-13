@@ -55,7 +55,7 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
-import { loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
+import { getLynoxDir, loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
@@ -95,6 +95,8 @@ import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
+import { acquireSlot, readSlot, sweepSlot, type HeldSlot } from '../core/export-slot.js';
+import { sweepStaleExports } from '../core/export-archive.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded , toMistralEuBase } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
@@ -1878,6 +1880,8 @@ const PAUSED_REFUSAL = 'paused because an access ended; it needs to be taken ove
  * answers 409 and erases nothing, and the caller tries again.
  */
 const ERASURE_RUN_DRAIN_MS = 5_000;
+/** When this process started, ms since the epoch: the export slot's boot sweep removes an HTTP-held slot taken before it. */
+const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
 /** Past this many unknown entries the erasure asks whether the data dir is set correctly. */
 const ERASURE_MANY_UNKNOWN = 20;
 
@@ -1911,10 +1915,11 @@ export class LynoxHTTPApi {
   private erasureInProgress = false;
 
   /**
-   * One workspace export at a time: each stages a full copy of the workspace on disk, so two at
-   * once would double that, and a second request gets a 409 instead.
+   * One export at a time, and none beside an erasure: the slot is a lock file in the data
+   * directory (`export-slot.ts`), so it also holds against the export command running in another
+   * process. Each export stages a full copy on disk, so two at once would double that, and a
+   * second request gets a 409 instead.
    */
-  private workspaceExportInProgress = false;
 
   /**
    * How long a workspace download may sit without the client taking a byte before it is cut. A
@@ -1922,6 +1927,13 @@ export class LynoxHTTPApi {
    * the erasure's refusal for as long as the connection lives. A field so a test can shorten it.
    */
   private workspaceExportIdleMs = 120_000;
+
+  /**
+   * How often an export that holds the slot moves its time forward while it streams (the slot's
+   * heartbeat), so a download slower than the slot's TTL still holds the erasures off. A field so
+   * a test can shorten it.
+   */
+  private exportSlotHeartbeatMs = 60_000;
 
   /**
    * The first reason the erasure has to wait, or `null`. Each reason is something that
@@ -2006,11 +2018,16 @@ export class LynoxHTTPApi {
       };
     }
     // Its files are on their way out until the download ends; an erasure beside it would answer
-    // "deleted" while they still leave.
-    if (this.workspaceExportInProgress) {
+    // "deleted" while they still leave. Read from the slot file, so an export the export command
+    // holds in another process counts too; a holder streaming past the TTL keeps it live by its
+    // heartbeat.
+    // A staged copy whose holder is gone (free or stale slot: its heartbeat stopped) is an orphan,
+    // and the wipe removes `export-staging` with everything else.
+    const slot = readSlot(getLynoxDir());
+    if (slot !== null && slot.kind === 'export') {
       return {
         code: 'workspace_export_running',
-        error: 'A workspace export is running. Wait until its download has finished, then erase.',
+        error: 'An export is running. Wait until its download has finished, then erase.',
       };
     }
     return null;
@@ -2326,9 +2343,13 @@ export class LynoxHTTPApi {
     // Before any route can start an export: a process that died mid-export left its staged copy
     // of the workspace behind, and no request would ever remove it.
     try {
-      const { getLynoxDir } = await import('../core/config.js');
       const { sweepExportStaging } = await import('../core/workspace-export.js');
-      const removed = sweepExportStaging(getLynoxDir());
+      const { sweepStagedArchives } = await import('../core/export-archive.js');
+      const dataDir = getLynoxDir();
+      // The slot first: a slot this API held before this process started died with it, and the
+      // archive sweep below leaves a staged archive alone only while the export command holds it.
+      sweepSlot(dataDir, PROCESS_STARTED_AT);
+      const removed = sweepExportStaging(dataDir) + sweepStagedArchives(dataDir);
       if (removed > 0) process.stderr.write(`[lynox] export staging: removed ${String(removed)} leftover export(s)\n`);
     } catch (err: unknown) {
       process.stderr.write(`[lynox] export staging sweep failed: ${err instanceof Error ? err.name : 'error'}\n`);
@@ -7464,13 +7485,40 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Blocked: cloud metadata endpoint');
         return;
       }
+      // On an instance the control plane provisions, a private address is the tenant host's
+      // network, not the owner's LAN: answering "reachable?" for any of them makes this route a
+      // probe into it. There the URL is either the search endpoint the control plane gave this
+      // instance (`SEARXNG_URL`, set for every provisioned instance), or a public address fetched
+      // through the guarded transport (each redirect hop re-checked, the resolved address
+      // pinned). The config file's `searxng_url` does not count: the owner writes it, so it
+      // would reopen the probe. A self-hosted owner keeps checking a LAN or Docker endpoint,
+      // which is what the route is for.
+      if (isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER'))) {
+        const provisioned = (process.env['SEARXNG_URL'] ?? '').replace(/\/+$/, '');
+        if (url !== provisioned) {
+          const { assertPublicUrl, fetchWithPublicRedirects } = await import('../core/network-guard.js');
+          try {
+            await assertPublicUrl(url);
+          } catch {
+            errorResponse(res, 400, 'On this instance, a search endpoint must be the configured one or a public address');
+            return;
+          }
+          try {
+            const response = await fetchWithPublicRedirects(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
+            jsonResponse(res, 200, { healthy: response.ok });
+          } catch {
+            jsonResponse(res, 200, { healthy: false });
+          }
+          return;
+        }
+      }
       try {
         const response = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
         jsonResponse(res, 200, { healthy: response.ok });
       } catch {
         jsonResponse(res, 200, { healthy: false });
       }
-    }, free('checks a search endpoint and stores nothing'));
+    }, ownerOnly('check a search endpoint'));
 
     // Search reranker capability probe — read-time provider snapshot so the
     // Settings → Search page can surface "Reranker is Anthropic-only" instead
@@ -10382,11 +10430,32 @@ export class LynoxHTTPApi {
       // After the last await: from here to the answer the route runs without yielding, so nothing
       // checked below can change before the erasure has run.
       if (this.erasureInProgress) { noStoreJson(res, 409, { error: 'An erasure is already running', code: 'erasure_in_progress' }); return; }
+      // An export on its way out holds the person until its staged copy is gone (also one the
+      // export command holds in another process): erasing beside it would answer "erased" while
+      // the data still leaves. A staged copy whose holder is gone is an orphan: removed first.
+      const personDataDir = getLynoxDir();
+      {
+        const slot = readSlot(personDataDir);
+        if (slot !== null && slot.kind === 'export') {
+          noStoreJson(res, 409, { error: 'An export is running, so nothing was erased; try again when its download has finished', code: 'export_running' });
+          return;
+        }
+      }
       // A running chat can write the person again right after the erasure (its extraction runs
       // when the turn ends), and the answer could not say so. Refused instead; stopping the chat
       // and trying again erases what it wrote too.
       if (this.runningSessions.size > 0) {
         noStoreJson(res, 409, { error: 'A chat is running, so nothing was erased; stop it or let it finish, then try again', code: 'runs_active' });
+        return;
+      }
+      // The shared slot around the erasure itself: in this process nothing yields until the
+      // answer, but the export command runs in another one and would otherwise snapshot the
+      // stores halfway. Taken after the checks above; held, it is an export that started between.
+      const personSlot = acquireSlot(personDataDir, 'erasure', 'http');
+      if (!personSlot.ok) {
+        noStoreJson(res, 409, personSlot.held.kind === 'export'
+          ? { error: 'An export is running, so nothing was erased; try again when its download has finished', code: 'export_running' }
+          : { error: 'An erasure is already running', code: 'erasure_in_progress' });
         return;
       }
       // The owner's trail: an attempt row before the first step, an outcome row after it, ids and
@@ -10395,6 +10464,7 @@ export class LynoxHTTPApi {
       const trail: { entry: AuditEntry | null } = { entry: null };
       let result: PersonErasureResult | PersonErasureRefusal;
       try {
+        sweepStaleExports(personDataDir);
         result = erasePerson(deps, {
           subjectId, plan, entryIds, memoryIds, entityIds,
           beforeErase: (planned) => {
@@ -10413,6 +10483,8 @@ export class LynoxHTTPApi {
           return;
         }
         throw err;
+      } finally {
+        personSlot.slot.release();
       }
       if ('refused' in result) { personErasureRefusal(res, result); return; }
       const opened = trail.entry;
@@ -13884,21 +13956,25 @@ export class LynoxHTTPApi {
     // An admin route, NOT on the control plane's positive list: the control plane does not call
     // it, and its bearer reaches only the routes it calls (`addCpAdminRoute`).
     this.addStatic('admin', 'GET /api/export/workspace', async (_req, res) => {
-      // Loaded before the checks: an await between a check and the flag would let an erasure start in it.
-      const { getLynoxDir } = await import('../core/config.js');
+      // Loaded before the checks: an await between a check and the slot would let an erasure start in it.
       const { archiveBound, describeWorkspace, ExportSpaceError, stageArchive, writeWorkspaceArchive } = await import('../core/workspace-export.js');
       const { WorkspaceAccessError } = await import('../core/workspace-fd.js');
       const { createReadStream, rmSync } = await import('node:fs');
       const { pipeline } = await import('node:stream/promises');
-      if (this.workspaceExportInProgress) {
-        errorResponse(res, 409, 'A workspace export is already running; try again when it has finished.', 'export_in_progress');
-        return;
-      }
       if (this.erasureInProgress) {
         errorResponse(res, 409, 'An erasure is running; export after it has finished.', 'erasure_in_progress');
         return;
       }
-      this.workspaceExportInProgress = true;
+      const taken = acquireSlot(getLynoxDir(), 'export', 'http');
+      if (!taken.ok) {
+        if (taken.held.kind === 'erasure') errorResponse(res, 409, 'An erasure is running; export after it has finished.', 'erasure_in_progress');
+        else errorResponse(res, 409, 'An export is already running; try again when it has finished.', 'export_in_progress');
+        return;
+      }
+      const heartbeat = setInterval(() => {
+        try { taken.slot.refresh(); } catch { /* the next beat tries again; the TTL is the bound */ }
+      }, this.exportSlotHeartbeatMs);
+      heartbeat.unref();
       let staged: StagedArchive | null = null;
       try {
         const dataDir = getLynoxDir();
@@ -13932,8 +14008,9 @@ export class LynoxHTTPApi {
         res.setTimeout(this.workspaceExportIdleMs, () => res.destroy());
         await pipeline(createReadStream(staged.path), res).catch(() => { /* nothing left to answer */ });
       } finally {
+        clearInterval(heartbeat);
         if (staged !== null) rmSync(staged.dir, { recursive: true, force: true });
-        this.workspaceExportInProgress = false;
+        taken.slot.release();
       }
     });
 
@@ -13977,9 +14054,9 @@ export class LynoxHTTPApi {
       }
       this.erasureInProgress = true;
       let resumeLogs: (() => void) | null = null;
+      let erasureSlot: HeldSlot | null = null;
       try {
         // Before the synchronous stretch: the stores' files are looked up by name below.
-        const { getLynoxDir } = await import('../core/config.js');
         const dataDir = getLynoxDir();
         const { isAnchoredRoot, workspaceAccessIfPresent } = await import('../core/workspace-access.js');
         const { closeAnchor, emptyDir, ensureSubAnchor } = await import('../core/workspace-fd.js');
@@ -14013,6 +14090,18 @@ export class LynoxHTTPApi {
           jsonResponse(res, 409, { ...busy, error: `${busy.error} Nothing was erased.` });
           return;
         }
+        // The shared slot for the whole wipe, so the export command (another process, which does
+        // not see `erasureInProgress`) cannot start reading the stores half emptied. Taken after
+        // the checks above and before anything is deleted; held, it is an export that started in
+        // between.
+        const erasureTaken = acquireSlot(dataDir, 'erasure', 'http');
+        if (!erasureTaken.ok) {
+          jsonResponse(res, 409, erasureTaken.held.kind === 'export'
+            ? { code: 'workspace_export_running', error: 'An export is running. Wait until its download has finished, then erase. Nothing was erased.' }
+            : { code: 'erasure_in_progress', error: 'An erasure is already running. Nothing was erased.' });
+          return;
+        }
+        erasureSlot = erasureTaken.slot;
 
         // The data dir is scanned BEFORE anything is deleted. It is configurable and can be
         // a broad directory (`--data-dir .`, `LYNOX_DATA_DIR=$HOME`); an entry the inventory
@@ -14532,6 +14621,7 @@ export class LynoxHTTPApi {
         jsonResponse(res, 200, { deleted: true, message: 'All user data has been permanently deleted' });
       } finally {
         resumeLogs?.();
+        erasureSlot?.release();
         this.erasureInProgress = false;
       }
     });
