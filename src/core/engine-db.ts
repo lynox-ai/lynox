@@ -43,6 +43,15 @@ import { epochStartByTimeSql } from './grant-ledger.js';
  */
 
 const ENGINE_HKDF_INFO = 'lynox-engine-encryption';
+
+/**
+ * The key engine.db's encrypted columns are stored under, derived from the vault key. Exported for
+ * the data export, which reads a snapshot by raw SQL and must not open the live store (the
+ * constructor migrates or recreates it).
+ */
+export function deriveEngineEncKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
 /** Separate label for the keyed-digest subkey: the MAC never shares a key with AES-GCM. */
 const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
 /**
@@ -1652,7 +1661,7 @@ export class EngineDb {
     // share a derived key.
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
-      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._encKey = deriveEngineEncKey(vaultKey);
       this._hashKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HASH_HKDF_INFO, CRYPTO_KEY_LENGTH));
       this._bindKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', STORE_BINDING_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {

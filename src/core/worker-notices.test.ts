@@ -157,6 +157,8 @@ function bulkSamples(n: BulkNotices): Record<string, string> {
     listWaiting: n.listWaiting, judgeDone: n.judgeDone,
     listNoMatchType: n.listNoMatch('product_type'), listNoMatchVendor: n.listNoMatch('vendor'), listNoMatchBoth: n.listNoMatch('both'),
     listNoneLeftType: n.listNoneLeft('product_type'), listNoneLeftVendor: n.listNoneLeft('vendor'), listNoneLeftBoth: n.listNoneLeft('both'),
+    listNoMatchTypeMany: n.listNoMatch('product_type', true), listNoMatchVendorMany: n.listNoMatch('vendor', true), listNoMatchBothMany: n.listNoMatch('both', true),
+    listNoneLeftTypeMany: n.listNoneLeft('product_type', true), listNoneLeftVendorMany: n.listNoneLeft('vendor', true), listNoneLeftBothMany: n.listNoneLeft('both', true),
     applyCounts: n.applyCounts({ applied: 3, foundAsPlanned: 1, failed: 1, conflicts: 0, undone: 0, total: 5, sentUnknown: 1 }),
     previewCounts: n.previewCounts(2, 1, 0, 3), judgeCounts: n.judgeCounts(2, 1, 0, 3), costs: n.costs(2, 0.01),
     previewStopped: n.previewStopped, listStopped: n.listStopped, judgeStopped: n.judgeStopped,
@@ -463,6 +465,8 @@ const STILL_ENGLISH: readonly string[] = [
   // its chat thread, which the model reads when the owner replies, so it stays English model
   // context. The push the owner reads is `pushBody`, from the table (`WorkerNotices.watchChanged`).
   'src/core/worker-loop.ts: `${config.url} changed.\\n\\n${truncatedAnalysis}`',
+  // The same seed for a watch someone the owner let in set up (PRD B6): English model
+  // context too; its push is `helperWatchChangedPush`, from the table.
 ];
 
 describe('the fixed-notice detector', () => {

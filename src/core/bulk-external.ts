@@ -19,6 +19,7 @@
  */
 import { effectiveWriteMethod, gateReading, isGraphqlEndpoint, isOutboundEffectWrite, isReadMethod, normalizeWritePath, outboundEffectField } from './outbound-write.js';
 import { shopifyReadRequest, shopifyWriteRequest, type ShopifyRead, type ShopifyWrite } from './shopify-graphql.js';
+import { TARGET_MAX, httpTarget } from './audit-log.js';
 import { isMeasuredWriteForm } from './bulk-write-forms.js';
 import { canonicalHost } from './canonical-host.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
@@ -501,7 +502,8 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     get: (url, signal, maxBytes) => send('GET', url, undefined, signal, undefined, undefined, maxBytes),
     write: (url, method, body, signal, onSend, onRefused) => send(method, url, body, signal, onSend, onRefused),
     graphqlRead: (url, read, signal, maxBytes) => {
-      const request = shopifyReadRequest(read);
+      // The room its trail row has for the search: the row is `POST <url> <form> <search>`.
+      const request = shopifyReadRequest(read, TARGET_MAX - `${httpTarget('POST', url)} ${read.form} `.length);
       return request === null ? Promise.resolve({ kind: 'not_granted' }) : send('POST', url, undefined, signal, undefined, undefined, maxBytes, request);
     },
     graphqlWrite: (url, write, signal, onSend, onRefused) => {

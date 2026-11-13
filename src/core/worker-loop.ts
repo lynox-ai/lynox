@@ -15,7 +15,7 @@ import { noticeLanguage } from './notice-language.js';
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
-  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
+  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices, type ShownMandate,
 } from './worker-notices.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -26,7 +26,7 @@ import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
@@ -664,6 +664,36 @@ export function reservationEstimate(task: TriggerRecord): number {
 
 /** Re-exported where it was born; it lives beside the tags it reads. */
 export { mandateNeedsOwnerStamp };
+
+/**
+ * Whether a plan was set up or last changed by someone other than the owner: the last mandate
+ * that changed it, else its creator. The owner's stamp and the owner's later edit leave
+ * `mandate_editor` as it is, and so the text as written (PRD customer-granted-operator-access B6).
+ * Fail-closed: any tag but the owner's (or none: a row from before tags, or the owner's agent)
+ * counts.
+ */
+export function setUpByOther(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): boolean {
+  const tag = t.mandate_editor ?? t.created_by;
+  return !(tag === undefined || tag === null || tag === principalTag(OWNER_PRINCIPAL));
+}
+
+/** A plain address: what an owner types when letting someone in. Anything else is not shown. */
+const SHOWN_ADDRESS = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$/;
+
+/**
+ * The mandate an escalation's title may name: who changed the plan, if a mandate other
+ * than its creator did, else the mandate that set it up. The engine sets these tags from the
+ * grant, so the address is not the helper's text. `undefined` for a plan no mandate set up or
+ * changed, an unknown tag, or an address of another shape; the title then says "someone you let in".
+ */
+export function shownMandate(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): ShownMandate | undefined {
+  const editor = t.mandate_editor ?? undefined;
+  const changed = editor !== undefined && editor !== t.created_by;
+  const tag = changed ? editor : t.created_by;
+  if (tag === undefined || tag === null || !isMandateTag(tag)) return undefined;
+  const address = tag.slice(MANDATE_TAG_PREFIX.length);
+  return address.length <= 254 && SHOWN_ADDRESS.test(address) ? { address, changed } : undefined;
+}
 
 /**
  * Whether a hand-run grant covers this trigger: only the proposal of the person who holds
@@ -2544,6 +2574,7 @@ export class WorkerLoop {
         gate: (tier) => fireBeforeRunGate(this.engine, tier),
         report: (gateRunId, usd, tier) => reportMeteredCost(this.engine, gateRunId, usd, tier),
         bookSpend: (entry) => history?.recordBulkJudgeCost(entry),
+        settleSpend: (row, entry) => history?.settleBulkJudgeCost(row, entry),
         budgetAllows: () => checkPersistentBudget().allowed,
         scanSecret: detectSecretInContent,
         maskVault: (text) => secretStore ? secretStore.maskSecrets(text) : text,
@@ -3604,11 +3635,20 @@ export class WorkerLoop {
     // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
     const notices = this.#notices();
     const ref = notices.workflowRef(result.runId, task.pipeline_id ?? undefined);
+    // A plan someone the owner let in set up or changed: its title and errors stay out of the
+    // thread, where they would read as lynox's own words (PRD B6). The ids stay for the diagnosis.
+    // The plan is the trigger and, for `run_workflow`, its workflow: an owner's schedule of a
+    // workflow a mandate wrote runs that mandate's steps, read at dispatch (`planOf`).
+    const othersTrigger = setUpByOther(task);
+    // (A mandate's test run by hand has no `planOf`, but covers only its own proposal: `othersTrigger`.)
+    const planOf = this.#runSlotOf(task.id)?.planOf;
+    const othersPlan = othersTrigger || (planOf !== undefined && !isOwnerPrincipal(planOf));
     this.engine.escalateToUser({
       key: task.id,
-      title: `✗ ${task.title}`,
-      body:
-        `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
+      title: othersPlan ? notices.helperPlanFailedTitle(othersTrigger ? shownMandate(task) : undefined) : `✗ ${task.title}`,
+      body: othersPlan
+        ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
+        : `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
         (result.error ? `${notices.errorLabel} ${result.error}\n\n` : '') +
         (stepDetail ? `${notices.failedStepsLabel}\n${stepDetail}\n\n` : '') +
         (grantLines.length > 0 ? `${notices.writesLabel}\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
@@ -3937,12 +3977,15 @@ export class WorkerLoop {
     // in chat. Not on the first run (baseline only). escalateToUser fires its own
     // push-as-wakeup (pointing at the thread).
     if (!isFirstRun) {
+      // A watch someone the owner let in set up: the address and the analysis stay out (PRD B6).
+      const othersWatch = setUpByOther(task);
+      const notices = this.#notices();
       this.engine.escalateToUser({
         key: task.id,
-        title: `\uD83D\uDD0D ${task.title}`,
-        // The thread's seed is model context and stays English (ux Rest-P E15); the push is the owner's.
-        body: `${config.url} changed.\n\n${truncatedAnalysis}`,
-        pushBody: this.#notices().watchChanged(config.url, truncatedAnalysis),
+        title: othersWatch ? notices.helperWatchTitle(shownMandate(task)) : `\uD83D\uDD0D ${task.title}`,
+        // The helper's case is lynox's own bubble to the owner, so in the owner's language.
+        body: othersWatch ? notices.helperWatchChanged : `${config.url} changed.\n\n${truncatedAnalysis}`,
+        pushBody: othersWatch ? notices.helperWatchChangedPush : notices.watchChanged(config.url, truncatedAnalysis),
         data: { taskId: task.id },
         onReported: this.#recordEscalation(task.id),
       });

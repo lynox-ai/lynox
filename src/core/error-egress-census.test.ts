@@ -142,6 +142,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
   ],
   'core/wire-capture.ts': [
     { marker: 'wire capture sink refused', count: 1, why: 'reason is built from the env-configured sink path and its file mode' },
+    { marker: 'prune of ${dir} failed', count: 1, why: 'fs errno on the env-configured sink dir and lynox-named capture files' },
   ],
   'core/run-history.ts': [
     { marker: 'verb-graph mirror write failed', count: 1, why: 'the task mirror upsert and the assignee subject it may create: SQLite, no values in the message' },
@@ -158,6 +159,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
   ],
   'core/knowledge-store.ts': [
     { marker: 'could not drop the retired line', count: 1, why: 'BlockOverLimitError names the block id and lengths; otherwise SQLite' },
+    { marker: 'profile seed backfill failed', count: 1, why: 'the seed marker, block and entry reads and the seed INSERT: SQLite' },
   ],
   'core/knowledge-layer.ts': [
     { marker: 'gc mirror failed', count: 1, why: 'the stub GC after every 50th run: SQLite deletes, no values in the message' },
@@ -169,6 +171,9 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'confidence mirror (', count: 1, why: 'a confidence UPDATE by id' },
     { marker: 'tier-raise mirror failed', count: 1, why: 'stub supersede and upsert: SQLite' },
   ],
+  'core/memory-graph-store.ts': [
+    { marker: 'gc reap failed', count: 1, why: 'the subject reap after the stub GC: deletes and merge closure by id in one SQLite transaction; the cross-store probes catch their own errors and report them reduced' },
+  ],
   'core/crm.ts': [
     { marker: 'CRM contact mirror failed', count: 1, why: 'subject-graph mirror writes: SQLite, or lynox errors naming ids and kinds only' },
   ],
@@ -176,6 +181,8 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'Hosts of grant for', count: 2, why: 'ledger.recordHosts over hosts lynox derives from the profile' },
     { marker: 'Renewed credential for', count: 1, why: 'the row write of a profile lynox built' },
     { marker: 'Grant ${reason} for', count: 1, why: 'ledger.mint, the in-memory vault fingerprints, recordHosts and the row write, in one local transaction' },
+    { marker: 'Import waits — could not read', count: 1, why: 'fs errno naming the profile file, which the line already prints' },
+    { marker: 'Import transaction failed', count: 1, why: 'the atomic upsert of the parsed rows: SQLite, bound values never quoted' },
   ],
   'core/engine.ts': [
     { marker: '[escalation] recording the delivery failed', count: 1, why: 'a SQLite UPDATE binding a fixed delivery summary' },
@@ -184,6 +191,30 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'Grant host recompute failed', count: 1, why: 'recomputeGrantHosts, the same ledger write as above' },
     { marker: '[lynox:vault-bindings] Migration failed', count: 1, why: 'binds vault names to the hosts of stored profiles' },
     { marker: 'ending bulk runs of ended mandates failed', count: 1, why: 'the bulk ledger sweep, rows only' },
+    { marker: 'startup reap failed', count: 1, why: 'the agent-memory GC: SQLite deletes; the mirror GC catches its own' },
+    { marker: 'RunHistory init failed', count: 1, why: 'history.db open, integrity check and migrations: SQLite and fs on the lynox dir' },
+    { marker: 'EngineDb init failed', count: 1, why: 'engine.db open, integrity check and migrations: SQLite and fs on the lynox dir' },
+    { marker: 'verb-graph wiring failed', count: 1, why: 'three store constructors over engine.db: SQLite' },
+    { marker: 'verb-graph backfill failed', count: 1, why: 'legacy row reads and engine.db upserts: SQLite; the manifest parse is guarded and quotes nothing' },
+    { marker: 'workflow content-schema migration failed', count: 1, why: 'the workflow blob scan and UPDATE: SQLite; a blob that does not parse is skipped, not quoted' },
+    { marker: 'ThreadStore init failed', count: 1, why: 'a module import; the constructor only keeps the handle' },
+    { marker: 'model-provenance backfill failed', count: 1, why: 'a thread SELECT and UPDATEs by id: SQLite' },
+    { marker: 'PromptStore init failed', count: 1, why: 'prompt expiry UPDATEs: SQLite; the mandate sweep catches its own' },
+    { marker: 'RunRegistry init failed', count: 1, why: 'a run-status UPDATE: SQLite' },
+    { marker: 'run-history sweep failed', count: 1, why: 'a run-status UPDATE: SQLite' },
+    { marker: 'pipeline-run sweep failed', count: 1, why: 'a pipeline-run status UPDATE: SQLite' },
+    { marker: 'run-claim sweep failed', count: 1, why: 'a claim DELETE: SQLite' },
+    { marker: 'RunBufferManager init failed', count: 1, why: 'a module import and an in-memory constructor' },
+    { marker: 'RunExecutor init failed', count: 1, why: 'a module import and an in-memory constructor' },
+    { marker: 'Security audit trail unavailable', count: 1, why: 'its own history.db connection and table: SQLite and fs' },
+    { marker: 'durable-memory wiring failed', count: 1, why: 'module imports and store constructors over engine.db; the seed backfill catches its own' },
+    { marker: 'Failed to wire pipeline-mode lookup', count: 1, why: 'a failed import of a lynox module' },
+    { marker: 'DataStore init failed', count: 1, why: 'datastore.db open, drops of fixed CRM names, ALTERs that catch their own: SQLite; the tool registration throws lynox registry text' },
+    { marker: 'ArtifactStore init failed', count: 1, why: 'fs errno on the artifacts dir; the index parse is guarded' },
+    { marker: 'SearXNG init failed', count: 1, why: 'lynox literals about the operator-set URL; the health probe catches its own' },
+    { marker: 'DuckDuckGo fallback init failed', count: 1, why: 'a module import, a constructor and a tool registration' },
+    { marker: 'context-scoping tool wiring failed', count: 1, why: 'module imports, store constructors over engine.db and tool registration; the ledger prune catches its own' },
+    { marker: 'wire snapshot prune failed', count: 1, why: 'a DELETE by capture time' },
   ],
   'server/http-api.ts': [
     { marker: 'mandate end not recorded', count: 1, why: 'an INSERT with bound values; the plan-pause listener reports through processErrorText' },
@@ -191,9 +222,28 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'stopping the run of deleted schedule', count: 1, why: 'map lookups and an abort; nothing that throws carries run text' },
     { marker: 'data dir scan failed', count: 1, why: 'fs errno naming entries of the configured data directory, an operator path, not workspace content' },
     { marker: 'Grant for the credential write to', count: 1, why: 'secretWritten mints a grant locally after the vault write' },
+    { marker: 'TLS setup failed', count: 1, why: 'fs errno on the env-set cert and key paths, or the TLS code for a PEM it cannot load; no key material is quoted' },
   ],
   'tools/builtin/http.ts': [
     { marker: 'api_setup did not load', count: 1, why: 'a failed dynamic import of a lynox module; a store connection never renews here' },
+  ],
+  'core/engine-init.ts': [
+    { marker: 'Agent memory init failed', count: 1, why: 'agent-memory.db open and schema, store constructors: SQLite and fs on the lynox dir' },
+  ],
+  'egress-proxy/main.ts': [
+    { marker: '[egress-proxy] fatal', count: 1, why: 'start-up only: env and interface checks in lynox literals (an operator-set deny entry at most) and the listen errno with the bind address' },
+  ],
+  'integrations/google/google-auth.ts': [
+    { marker: 'Google token-change hook failed', count: 1, why: 'the engine hook writes the google connection row: SQLite; its parse of the stored row is guarded' },
+  ],
+  'integrations/push/web-push-channel.ts': [
+    { marker: 'access grant could not be checked', count: 1, why: 'a SQLite SELECT of the mandate end by id' },
+  ],
+  'shell-sidecar/exec-daemon.ts': [
+    { marker: '[exec-daemon] fatal', count: 1, why: 'start-up only: uid, pid and env checks in lynox literals, fs errno on fixed paths, a count of left calls; never a name a pool uid chose' },
+  ],
+  'integrations/microsoft/microsoft-auth.ts': [
+    { marker: 'Microsoft token-change hook failed', count: 1, why: 'reason is a MicrosoftTokenChangeReason literal; the error itself goes through processErrorText' },
   ],
 };
 
@@ -218,35 +268,29 @@ it('names a judgement whose sink moved away or multiplied', () => {
 
 /** Raw sinks per file as of this change. A rise fails (a new sink); a drop asks to lower it here. */
 const FROZEN: Record<string, number> = {
-  'core/api-store.ts': 8,
+  'core/api-store.ts': 6,
   'core/config.ts': 1,
-  'core/crm.ts': 2,
+  'core/crm.ts': 1,
   'core/engine-init.ts': 1,
-  'core/engine.ts': 34,
+  'core/engine.ts': 30,
   'core/knowledge-layer.ts': 8,
   'core/knowledge-store.ts': 2,
   'core/llm-wire-rules.ts': 1,
   'core/managed-hook.ts': 1,
-  'core/mandate-ends.ts': 1,
   'core/memory-graph-store.ts': 1,
   'core/mistral-health-check.ts': 1,
   'core/onboarding-promotion.ts': 2,
   'core/retrieval-engine.ts': 1,
   'core/run-history.ts': 1,
-  'core/speak/mistral-voxtral-tts.ts': 2,
   'core/transcribe/mistral-voxtral.ts': 2,
-  'core/transcribe/whisper-cpp.ts': 2,
   'core/wire-capture.ts': 2,
   'core/worker-loop.ts': 11,
   'core/workflow-questions.ts': 4,
   'egress-proxy/main.ts': 1,
   'integrations/google/google-auth.ts': 1,
-  'integrations/inbox/classifier/queue.ts': 1,
-  'integrations/mail/escalation-mail-channel.ts': 1,
-  'integrations/mail/providers/imap-smtp.ts': 1,
   'integrations/microsoft/microsoft-auth.ts': 1,
+  'integrations/mail/escalation-mail-channel.ts': 1,
   'integrations/push/web-push-channel.ts': 1,
-  'scripts/subject-sweep.ts': 1,
   'server/http-api.ts': 6,
   'shell-sidecar/exec-daemon.ts': 1,
   'tools/builtin/http.ts': 1,

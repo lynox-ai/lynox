@@ -36,10 +36,15 @@ interface MockedAgentShape {
   getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
   getRecordedToolCallCount: () => number;
   getLastStop: () => import('../../core/agent.js').SendStop | null;
+  getHelperCostUsd: () => number;
+  getStoppedCallSessionCostUsd: () => number;
+  getCapOnlyCostUsd: () => number;
 }
 
 /** How many tool calls each constructed child reports having recorded. */
 let mockRecordedToolCalls = 0;
+/** The estimate of ended calls each constructed child reports (`getHelperCostUsd`). */
+let mockHelperCostUsd = 0;
 /** Why each constructed child says its `send()` ended (null = clean end_turn). */
 let mockLastStop: import('../../core/agent.js').SendStop | null = null;
 
@@ -96,6 +101,12 @@ vi.mock('../../core/agent.js', () => ({
     // `mockRecordedToolCalls` and then asserts the value REACHED updateRun.
     this.getRecordedToolCallCount = () => mockRecordedToolCalls;
     this.getLastStop = () => mockLastStop;
+    // By default no ended calls in a mocked child: nothing on its cost line beyond the
+    // snapshot, nothing to take back off the session cap, and no bound for the parent's ceiling. The real booking is pinned in
+    // `spawn-stopped-call-cost.test.ts`, against a real child agent.
+    this.getHelperCostUsd = () => mockHelperCostUsd;
+    this.getStoppedCallSessionCostUsd = () => 0;
+    this.getCapOnlyCostUsd = () => 0;
   }),
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
   // factory mock replaces the whole module, so this export must exist or the
@@ -287,6 +298,7 @@ describe('spawn_agent tool', () => {
     mockCostSnapshot = null;
     mockCostSnapshotQueue = null;
     mockRecordedToolCalls = 0;
+    mockHelperCostUsd = 0;
     mockLastStop = null;
     testCounters = {
       httpRequests: 0,
@@ -4395,6 +4407,46 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.toolContext['runHistory']).toBe(sentinelRunHistory);
     });
 
+    // The provider-side web search, judged by the real gate (agent.ts) on the context the child is
+    // handed. The reachable case first: a child with a narrower tool list (no web_research) under
+    // deny-all starts from its parent's policy.
+    const childContext = async (parentCtx: import('../../core/tool-context.js').ToolContext, tools?: string[]): Promise<{ ctx: import('../../core/tool-context.js').ToolContext; toolNames: string[] }> => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'narrow', task: 'Look something up', ...(tools ? { tools } : {}) }] },
+        makeAgent({ toolContext: parentCtx }),
+      );
+      const arg = vi.mocked(MockAgent).mock.calls[0]![0] as { tools: Array<{ definition: { name: string } }>; toolContext: import('../../core/tool-context.js').ToolContext };
+      return { ctx: arg.toolContext, toolNames: arg.tools.map((t) => t.definition.name) };
+    };
+    const actual = async (): Promise<{ providerSearchAdmitted: typeof import('../../core/agent.js').providerSearchAdmitted; tc: typeof import('../../core/tool-context.js') }> => ({
+      providerSearchAdmitted: (await vi.importActual<typeof import('../../core/agent.js')>('../../core/agent.js')).providerSearchAdmitted,
+      tc: await vi.importActual<typeof import('../../core/tool-context.js')>('../../core/tool-context.js'),
+    });
+
+    it('hands a child with no web_research the parent\'s deny-all, and the gate withholds the search', async () => {
+      const { providerSearchAdmitted, tc } = await actual();
+      const parent = tc.createToolContext({});
+      tc.applyNetworkPolicy(parent, 'deny-all', []);
+      const { ctx, toolNames } = await childContext(parent, ['read_file']);
+      expect(toolNames).not.toContain('web_research');
+      expect(ctx.networkPolicy).toBe('deny-all');
+      expect(providerSearchAdmitted(ctx)).toBe(false);
+    });
+
+    it('keeps the child of a parent with no policy of its own withheld, and the child of an open one offered', async () => {
+      const { providerSearchAdmitted, tc } = await actual();
+      const unread = tc.markPolicyUnread(tc.createToolContext({}));
+      const child = (await childContext(unread)).ctx;
+      expect(child).not.toBe(unread);
+      expect(tc.isPolicyUnread(child)).toBe(true);
+      expect(providerSearchAdmitted(child)).toBe(false);
+      // Control: the same context unmarked (the engine's, no policy) — the child is offered it.
+      const open = (await childContext(tc.createToolContext({}))).ctx;
+      expect(providerSearchAdmitted(open)).toBe(true);
+    });
+
     it('gives the child a SCOPED VIEW of the vault, not the parent store itself', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const parentStore = makeVault({ STRIPE_KEY: 'sk_live', HR_PAYROLL: 'pay' });
@@ -4984,6 +5036,17 @@ describe('spawn_agent tool', () => {
         expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited once, its own spend').toEqual([0.2]);
         expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'recorded the same').toBe(0.2);
         expect(charged, 'the delegating ceiling sees the whole').toEqual([0.5]);
+      });
+
+      it('when it succeeds with an ended call on its cost line: the row adds the estimate, the debit does not', async () => {
+        delegated();
+        mockHelperCostUsd = 0.07;
+        const charged: number[] = [];
+        const { agent, onAfterRun, updateRun } = parent(charged);
+        await spawnAgentTool.handler({ agents: [{ name: 'delegator', task: 'x' }] }, agent);
+        expect((updateRun.mock.calls[0]![1] as { status: string }).status).toBe('completed');
+        expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'own spend plus the estimate').toBeCloseTo(0.27, 12);
+        expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited its own spend only').toEqual([0.2]);
       });
 
       it('when it fails', async () => {

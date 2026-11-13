@@ -3,9 +3,11 @@
  *
  * A timeout or a user stop ends a helper stream early, and `finalMessage()` rejects. Every
  * helper books its spend from the reply, so an aborted call booked nothing — while the
- * provider still bills the prompt and whatever it generated before the abort. The same holds
+ * provider still bills the prompt and whatever it generated before the abort (assumed, not
+ * confirmed by the provider). The same holds
  * for the run's own model call when it is ended mid-stream, by the guard on a tool call
- * written out as text, by a stop of the run, or by its stream timeout: its usage would arrive
+ * written out as text, by a stop of the run, by its stream timeout, or by an error after the
+ * provider answered (an `error` event inside the stream, a dropped connection): its usage would arrive
  * only with the last event. Both kinds are booked here, the same way. A stopped or timed-out
  * main call the provider had not answered yet gets only the cap bound (agent.ts, `_callAPI`):
  * it may not have been sent.
