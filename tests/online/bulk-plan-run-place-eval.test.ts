@@ -80,7 +80,7 @@ const RECORDED = /^List dry run recorded/;
 const PLACE = /\b(Tab|Reiter|Registerkarte|Menü|Menüpunkt|Bereich|Seite|Dashboard|Übersicht|Navigation|Sidebar|Seitenleiste)\b|Bulk[ -]?Runs?|Massenläufe|Aktivität|\bklick|\blink\b|https?:\/\//i;
 
 // The real place in a German reply (the cases are German), menu and tab in either order of mention.
-const RIGHT = /Aktivität\s*&\s*Kosten[\s\S]{0,40}Massenläufe/;
+const RIGHT = /Aktivität\s*&\s*Kosten[\s\S]{0,40}Massenläufe|Massenläufe[\s\S]{0,40}Aktivität\s*&\s*Kosten/;
 // What the note forbids beside it: a link or address, or a place word that is not part of the path.
 const OTHER = /https?:\/\/|\/app\b|\?tab=|\b(Dashboard|Sidebar|Seitenleiste|Einstellungen|Settings)\b|\bBulk[ -]?Runs?\b/i;
 
