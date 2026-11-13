@@ -377,8 +377,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
-    // starting with a hyphen. Shopify itself admits upper case; the boundary does not.
-    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
+    // starting with a hyphen, at most 63 of them (one DNS label). Shopify itself admits upper
+    // case; the boundary does not.
+    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]{0,62}$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
     requiredScopes: [],
     // `read_all_orders` stays out: Shopify grants it only on request. `write_products` is the one
     // write scope: a bulk run writes a product only through the engine's own write document
@@ -625,6 +626,23 @@ export function presetScopeNeedUnmet(preset: OAuthPreset, profileScope: string |
 }
 
 /**
+ * The built-in provider a profile goes through: its `auth.oauth.preset_id`, when `auth.type` is
+ * oauth2 and the register knows that id. Undefined otherwise — a static-credential profile that
+ * still carries a `preset_id` from an earlier shape goes through no provider, and an id this
+ * engine does not know names none. The one answer to "which built-in preset does this profile
+ * have", asked by the save path (`api_setup`), the renewal gate (`http_request`) and
+ * {@link presetNotFollowed}; three copies of it once differed on the `auth.type` check.
+ */
+export function builtInPresetOf(
+  profile: { readonly auth?: { readonly type?: string | undefined; readonly oauth?: { readonly preset_id?: string | undefined } | undefined } | undefined },
+  register: PresetRegister = OAUTH_PRESETS,
+): OAuthPreset | undefined {
+  if (profile.auth?.type !== 'oauth2') return undefined;
+  const presetId: unknown = profile.auth.oauth?.preset_id;
+  return typeof presetId === 'string' ? register.get(presetId) : undefined;
+}
+
+/**
  * The built-in provider whose API host a profile points at, when the profile does not go
  * through it: anything but `auth.type` oauth2 with that provider's `preset_id`. Undefined when
  * no provider claims the host, or when the profile follows the one that does. Asked where a
@@ -648,8 +666,8 @@ export function presetNotFollowed(
   // Every provider that claims the host: a profile that follows any of them is in order.
   const claiming = register.ids().map((id) => register.get(id)).filter((p): p is OAuthPreset => p !== undefined
     && (p.apiHosts.includes(host) || (options.storesClaimed === true && presetDerivesHost(p, host, register))));
-  const follows = (preset: OAuthPreset): boolean => profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === preset.id;
-  return claiming.some(follows) ? undefined : claiming[0];
+  const followed = builtInPresetOf(profile, register);
+  return claiming.some((preset) => followed?.id === preset.id) ? undefined : claiming[0];
 }
 
 /**

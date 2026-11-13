@@ -858,7 +858,7 @@ describe('api_setup tool', () => {
     const shopify = (oauth: Record<string, unknown> = {}): ApiProfile => ({
       id: 'shop-admin',
       name: 'Shop admin',
-      base_url: 'https://acme.myshopify.com/admin/api/2026-04',
+      base_url: 'https://acme.myshopify.com/admin/api/2026-10',
       description: 'The admin API of one store',
       auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, ...oauth } },
     });

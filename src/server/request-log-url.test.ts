@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { MAX_LOGGED_PATH, requestLogUrl } from './request-log-url.js';
 
@@ -35,6 +36,54 @@ describe('requestLogUrl', () => {
     const opaque = 'Ab3dEfGh'.repeat(6);
     expect(requestLogUrl(`/api/memory/${opaque}`)).not.toContain(opaque);
     expect(requestLogUrl('/c/jane%ef%bc%a0customer.ch')).toBe('/c/<address>');
+  });
+
+  // Every route that takes a contact in the path below /api/crm/contacts/, read from the route
+  // table's source in any registration form, so a route added later is checked as well. The
+  // row-id route (`:id`) names no one and is checked below.
+  const crmContactRoutes = [...readFileSync(new URL('./http-api.ts', import.meta.url), 'utf8')
+    .matchAll(/['`](\/api\/crm\/contacts\/:([A-Za-z]+)[^'`]*)['`]/g)]
+    .filter((m) => m[2] !== 'id')
+    .map((m) => m[1]!.replace(/:[A-Za-z]+/, ':name'));
+
+  it('finds the CRM routes that name a contact in the path', () => {
+    expect(crmContactRoutes).toEqual(expect.arrayContaining(['/api/crm/contacts/:name/interactions', '/api/crm/contacts/:name/deals']));
+  });
+
+  it.each(crmContactRoutes)('writes the contact of %s as a placeholder', (route) => {
+    const written = route.replace(':name', '<contact>');
+    for (const name of ['Jane%20Doe', 'M%C3%BCller', 'Jane', '42a', 'Jane%3Fx', 'Jane%2Fdoe']) {
+      const url = route.replace(':name', name);
+      expect(requestLogUrl(url)).toBe(written);
+      expect(requestLogUrl(`${url}/`)).toBe(`${written}/`);
+      expect(requestLogUrl(`${url}?limit=5`)).toBe(`${written}?limit=<redacted>`);
+    }
+  });
+
+  // The router reads the path through `URL` and accepts `/api/v1/` for `/api/`; each of these
+  // reaches the deals route of the contact Jane.
+  it.each([
+    ['/api/v1/crm/contacts/Jane/deals', '/api/v1/crm/contacts/<contact>/deals'],
+    ['//host/api/crm/contacts/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['http://host/api/crm/contacts/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api/crm/./contacts/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api/crm/x/../contacts/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api/crm/contacts/./Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api/crm/contacts/%2e/Jane/deals', '/api/crm/contacts/<contact>/deals'],
+    ['/api\\crm\\contacts\\Jane\\deals', '/api/crm/contacts/<contact>/deals'],
+  ])('writes the contact as a placeholder when %s reaches the route', (url, written) => {
+    expect(requestLogUrl(url)).toBe(written);
+  });
+
+  it('keeps the contact row id and the list route as they are', () => {
+    expect(requestLogUrl('/api/crm/contacts/17')).toBe('/api/crm/contacts/17');
+    expect(requestLogUrl('/api/crm/contacts/17/')).toBe('/api/crm/contacts/17/');
+    expect(requestLogUrl('/api/crm/contacts/0791234567/deals')).toBe('/api/crm/contacts/<contact>/deals');
+    expect(requestLogUrl(`/api/crm/contacts/Jane/deals/${'{'.repeat(1990)}`)).toBe('<long path>');
+    expect(requestLogUrl('/api/crm/contacts/')).toBe('/api/crm/contacts/');
+    expect(requestLogUrl('/api/crm/contacts?limit=5')).toBe('/api/crm/contacts?limit=<redacted>');
+    expect(requestLogUrl('/api/crm/deals')).toBe('/api/crm/deals');
+    expect(requestLogUrl('/api/inbox/contacts/Jane')).toBe('/api/inbox/contacts/Jane');
   });
 
   it('replaces everything after an encoded question mark in the path', () => {

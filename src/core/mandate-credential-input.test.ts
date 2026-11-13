@@ -73,6 +73,41 @@ describe('mandateCredentialInput', () => {
     expect(mandateCredentialInput(`Hier der Key:\n\n${hexKey(32)}`)).toBe('credential after a cue word');
   });
 
+  it('rule 3: a hex key whose characters spread less than a letters-and-digits key does', () => {
+    // Eight symbols, evenly: 3 bits, under the 3.3 a key of letters and digits needs.
+    const key = 'aabbccdd11223344'.repeat(2);
+    expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Passwort: ${key.slice(0, 16)}`)).toBe('password');
+    expect(mandateCredentialInput(`Der Token lautet ${'aaaabbbb11112222cccc'}`)).toBeNull();
+    expect(mandateCredentialInput(`Der Token lautet ${'gghhkkmm11223344'.repeat(2)}`)).toBeNull();
+    expect(mandateCredentialInput(`Der Token lautet ${'aAbB1122'.repeat(4)}`)).toBeNull();
+  });
+
+  it('passes a GPG key id or a certificate thumbprint, printed in capitals, after a cue word', () => {
+    expect(mandateCredentialInput(`Mein GPG-Key: ${hexKey(16).toUpperCase()}`)).toBeNull();
+    expect(mandateCredentialInput(`Der Schlüssel hat den Thumbprint ${hexKey(40).toUpperCase()}`)).toBeNull();
+  });
+
+  it('rule 3: a key of letters alone, with capitals side by side as in a random key', () => {
+    const key = ['XqLMpzRT', 'vbNcKDwf', 'HjSAyueG'].join('');
+    expect(mandateCredentialInput(`Der Token lautet ${key}`)).toBe('credential after a cue word');
+    expect(mandateCredentialInput(`Der Token lautet ${key.toLowerCase()}`)).toBeNull();
+    expect(mandateCredentialInput(`Der Token lautet ${'ABab'.repeat(5)}`)).toBeNull();
+    expect(mandateCredentialInput(`Der Token lautet ${['XqLM', 'pzRT', 'vbNc', 'KDwf'].join('-')}`)).toBeNull();
+    // Ordinary camel-case names.
+    expect(mandateCredentialInput('Der Key kommt aus getIOsKeyForAnAppOnMyPc')).toBeNull();
+    expect(mandateCredentialInput('Der Key steht in MailboxNotEnabledForRESTAPI')).toBeNull();
+  });
+
+  it('caught though not a key: a camel-case name with capitals side by side twice, after a cue word', () => {
+    // Three capitals in a row (AIM, APIT) or two acronyms apart (API, JWT).
+    expect(mandateCredentialInput('Der Key kommt aus getOpenAIModelMap')).toBe('credential after a cue word');
+    expect(mandateCredentialInput('Der Token kommt aus getAPITokenForShop')).toBe('credential after a cue word');
+    expect(mandateCredentialInput('Das Token-Feld heisst xAPIKeyOrJWTForCLI')).toBe('credential after a cue word');
+    // With its capitals apart, a camel-case name passes.
+    expect(mandateCredentialInput('Der Key kommt aus loadVaultKeyFromDotEnv')).toBeNull();
+  });
+
   it('rule 3, password: plainly the value after a password cue', () => {
     expect(mandateCredentialInput('Das Passwort ist Sommer2026!Shop')).toBe('password');
     expect(mandateCredentialInput('Passwort lautet: Wald#Haus77')).toBe('password');
@@ -188,6 +223,9 @@ describe('mandateCredentialInput', () => {
     'Passwort-Hinweis: steht im Ordner',
     'Bitte Kennwort-Hinweis lesen',
     'Password-Manager: 1Password',
+    'Der Token kommt aus vaultKeyForAccount',
+    'Das Secret steht in isAdminOnlySecret',
+    'StrictHostKeyChecking ist aus, der Key liegt im Agent',
   ];
   it.each(ORDINARY)('passes an ordinary message: %s', (text) => {
     expect(mandateCredentialInput(text)).toBeNull();
@@ -196,16 +234,21 @@ describe('mandateCredentialInput', () => {
 
 /**
  * How often a fully drawn key typed after a cue word gets through, pinned per shape. The bands
- * come from a measured rate (100 000 random draws per shape) plus four standard deviations at
- * this sample size; the draws here are seeded, so the count is the same on every run. A change
- * to the detector that moves the rate either way fails here and has to be measured again.
+ * come from a measured rate (random draws, counts below) plus four standard deviations at this
+ * sample size; the draws here are seeded, so the count is the same on every run. A change to the
+ * detector that lets more through than the band holds fails here and has to be measured again; a
+ * smaller rise inside the band does not. Where the measured rate is that low, the floor is 0, so a
+ * change that refuses more is not caught here at all, only where it refuses one of the ordinary
+ * messages above.
  */
 describe('mandateCredentialInput — rate pinned', () => {
   const N = 4000;
   const SHAPES: Array<[string, number, string, number, number]> = [
-    ['32 hex', 32, HEX, 37, 104],
-    ['40 hex', 40, HEX, 0, 16],
-    ['24 alnum', 24, ALNUM, 34, 100],
+    // Measured: 0 of 100 000 for both hex shapes, 665 of 300 000 for 24 alnum. The band floor
+    // stays at 0 where the rate is that low.
+    ['32 hex', 32, HEX, 0, 0],
+    ['40 hex', 40, HEX, 0, 0],
+    ['24 alnum', 24, ALNUM, 0, 21],
   ];
   it.each(SHAPES)('a key of %s after a cue word: the count let through stays in its measured band', (name, n, alphabet, low, high) => {
     const draw = seeded(`mandate-key-rate:${name}`);

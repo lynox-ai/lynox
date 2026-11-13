@@ -43,9 +43,9 @@ export const SHOPIFY_CALLBACK_WINDOW_SECONDS = 90;
 /**
  * The store domain as Shopify's OAuth documentation checks it, anchored at both
  * ends. Stricter than the library's `sanitizeShop`, which also takes `_` and
- * other Shopify domains.
+ * other Shopify domains. Its label holds at most 63 characters, as a DNS label does.
  */
-const SHOPIFY_SHOP = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
+const SHOPIFY_SHOP = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}\.myshopify\.com$/;
 
 /** What the authorize redirect has to carry beyond the signature. */
 const REQUIRED = ['code', 'shop', 'state'] as const;
