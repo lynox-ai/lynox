@@ -469,6 +469,19 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
       expect(JSON.stringify(engine().getThreadStore()!.getMessages(sid))).not.toContain(b64(`SHOPIFY=${VENDOR_KEY}`).slice(0, 16));
     }, 60_000);
 
+    it('an image over the image limit is refused for its size before its content is read', async () => {
+      // The pre-pass reads an image only up to the size the store takes; above it the store's own
+      // limit answers (413). The test just above is the twin: the same content, small, is read and refused.
+      const sid = await helperSession();
+      const run = spyRun();
+      const data = b64(`SHOPIFY=${VENDOR_KEY}\n${'a'.repeat(4_500_000)}`);
+      expect(data.length, 'between the image and the file limit').toBeGreaterThan(5 * 1024 * 1024);
+      expect(data.length).toBeLessThan(10 * 1024 * 1024);
+      const res = await call('POST', `/api/sessions/${sid}/run`, { task: 'Bitte ansehen.', files: [{ name: 'bild.png', type: 'image/png', data }] });
+      expect(res.status, res.text).toBe(413);
+      expect(run).not.toHaveBeenCalled();
+    }, 60_000);
+
     it('a key sent as an image\'s data string is refused (a key made of base64 characters only)', async () => {
       const sid = await helperSession();
       const run = spyRun();
