@@ -63,30 +63,34 @@ export const READ_AGAIN_CARRIERS: ReadonlySet<string> = new Set([
 
 class NodeBoundExceeded extends Error {}
 
-/** A parse that stops once it has built more than {@link MARKUP_MAX_NODES} nodes. */
-function parseCounted(value: string): HtmlFragment {
+/** A parse that stops once it has built more than `maxNodes` nodes. Text appended to the text
+ *  node before it builds none, so it does not count. */
+function parseCounted(value: string, maxNodes: number): HtmlFragment {
   let built = 0;
   const count = (): void => {
     built += 1;
-    if (built > MARKUP_MAX_NODES) throw new NodeBoundExceeded();
+    if (built > maxNodes) throw new NodeBoundExceeded();
   };
+  const appendsToText = (parent: DefaultTreeAdapterTypes.ParentNode): boolean =>
+    defaultTreeAdapter.getChildNodes(parent).at(-1)?.nodeName === '#text';
   const treeAdapter: typeof defaultTreeAdapter = {
     ...defaultTreeAdapter,
     createElement: (...a) => { count(); return defaultTreeAdapter.createElement(...a); },
     createCommentNode: (...a) => { count(); return defaultTreeAdapter.createCommentNode(...a); },
-    insertText: (...a) => { count(); defaultTreeAdapter.insertText(...a); },
+    insertText: (parent, text) => { if (!appendsToText(parent)) count(); defaultTreeAdapter.insertText(parent, text); },
     insertTextBefore: (...a) => { count(); defaultTreeAdapter.insertTextBefore(...a); },
   };
   return parseFragment(divContext(), value, { scriptingEnabled: true, treeAdapter });
 }
 
-/** Whether a value stays within the bounds above: one counted parse and one pass, linear in the
- *  value. Ask it before any other parse or walk of a value a shop, a plan or a model wrote. */
-export function withinReadingBounds(value: string): boolean {
+/** Whether a value stays within the bounds above: one counted parse and one pass over its tree.
+ *  Ask it before any other parse or walk of a value a shop, a plan or a model wrote. `maxNodes`
+ *  is {@link MARKUP_MAX_NODES}; a test may set a smaller one to reach it quickly. */
+export function withinReadingBounds(value: string, maxNodes: number = MARKUP_MAX_NODES): boolean {
   if (Buffer.byteLength(value, 'utf8') > MARKUP_MAX_BYTES) return false;
   let fragment: HtmlFragment;
   try {
-    fragment = parseCounted(value);
+    fragment = parseCounted(value, maxNodes);
   } catch (err: unknown) {
     if (err instanceof NodeBoundExceeded) return false;
     throw err;
