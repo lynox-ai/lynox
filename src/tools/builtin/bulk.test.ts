@@ -473,6 +473,8 @@ describe('where the user finds a planned run', () => {
     expect(RUN_PLACE_NOTE).toContain('once its targets are read, they see each target\'s before and after and decide');
     expect(RUN_PLACE_NOTE).toContain('Only the owner of this lynox can start or approve it.');
     expect(RUN_PLACE_NOTE).toContain('make up no link or address');
+    // Measured: a model still built a URL to the run and named buttons the page does not have.
+    expect(RUN_PLACE_NOTE).toContain('give no URL and no button names or steps beyond this');
   });
 
   it('is not claimed to be nowhere: the description no longer says there is no screen for it', () => {

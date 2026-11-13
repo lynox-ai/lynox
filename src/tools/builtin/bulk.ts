@@ -320,7 +320,8 @@ export const BULK_RUNS_PLACE = {
 export const RUN_PLACE_NOTE = `The user finds this run in lynox under ${BULK_RUNS_PLACE.en.menu} › ${BULK_RUNS_PLACE.en.tab} ` +
   `(in a German interface: ${BULK_RUNS_PLACE.de.menu} › ${BULK_RUNS_PLACE.de.tab}). There they follow it: once its targets are read, they see each target's before and after and decide. ` +
   'Only the owner of this lynox can start or approve it. ' +
-  'If you say where it is, use exactly these labels, in the language of the interface; name no other tab, page, menu, button or link, and make up no link or address.';
+  'If you say where it is, use exactly these labels, in the language of the interface; name no other tab, page, menu, button or link, and make up no link or address. ' +
+  'You do not know the run\'s address or what its page shows step by step, so give no URL and no button names or steps beyond this.';
 
 /** What a planner is told about a judged run. Counts and rules only — never a verdict. */
 const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +

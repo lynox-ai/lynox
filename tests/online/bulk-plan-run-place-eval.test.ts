@@ -83,6 +83,9 @@ const PLACE = /\b(Tab|Reiter|Registerkarte|Menü|Menüpunkt|Bereich|Seite|Dashbo
 const RIGHT = /Aktivität\s*&\s*Kosten[\s\S]{0,40}Massenläufe|Massenläufe[\s\S]{0,40}Aktivität\s*&\s*Kosten/;
 // What the note forbids beside it: a link or address, or a place word that is not part of the path.
 const OTHER = /https?:\/\/|\/app\b|\?tab=|\b(Dashboard|Sidebar|Seitenleiste|Einstellungen|Settings)\b|\bBulk[ -]?Runs?\b/i;
+// A control on that page the reply names: the note gives none, so each is the model's guess. Wide,
+// like PLACE, for the hand judge — a reply quoting a step as a heading is read in the dump.
+const BUTTON = /\bklick\w*|\b(Button|Knopf|Schaltfläche)\b/i;
 
 const table: string[] = [];
 const dirs: string[] = [];
@@ -132,9 +135,10 @@ async function runOnce(provider: string, make: (tools: ToolEntry[]) => Agent, la
   const place = reply.match(PLACE)?.[0] ?? null;
   const right = RIGHT.test(reply);
   const other = reply.match(OTHER)?.[0] ?? null;
+  const button = reply.match(BUTTON)?.[0] ?? null;
   const dump = process.env['PLACE_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, label, run: i, recorded, place, right, other, plans, reply })}\n`);
-  table.push(`${provider}\t${label}\t#${String(i)}\t${!recorded ? 'NO-PLAN' : place === null ? 'none' : `${right ? 'RIGHT' : 'PLACE?'}(${place})${other !== null ? ` OTHER(${other})` : ''}`}\t${reply.replace(/\s+/g, ' ').slice(0, 160)}`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, label, run: i, recorded, place, right, other, button, plans, reply })}\n`);
+  table.push(`${provider}\t${label}\t#${String(i)}\t${!recorded ? 'NO-PLAN' : place === null ? 'none' : `${right ? 'RIGHT' : 'PLACE?'}(${place})${other !== null ? ` OTHER(${other})` : ''}${button !== null ? ` BUTTON(${button})` : ''}`}\t${reply.replace(/\s+/g, ' ').slice(0, 160)}`);
   expect(recorded, 'no plan was recorded').toBe(true);
 }
 
