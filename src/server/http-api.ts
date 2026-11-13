@@ -7471,13 +7471,40 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Blocked: cloud metadata endpoint');
         return;
       }
+      // On an instance the control plane provisions, a private address is the tenant host's
+      // network, not the owner's LAN: answering "reachable?" for any of them makes this route a
+      // probe into it. There the URL is either the search endpoint the control plane gave this
+      // instance (`SEARXNG_URL`, set for every provisioned instance), or a public address fetched
+      // through the guarded transport (each redirect hop re-checked, the resolved address
+      // pinned). The config file's `searxng_url` does not count: the owner writes it, so it
+      // would reopen the probe. A self-hosted owner keeps checking a LAN or Docker endpoint,
+      // which is what the route is for.
+      if (isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER'))) {
+        const provisioned = (process.env['SEARXNG_URL'] ?? '').replace(/\/+$/, '');
+        if (url !== provisioned) {
+          const { assertPublicUrl, fetchWithPublicRedirects } = await import('../core/network-guard.js');
+          try {
+            await assertPublicUrl(url);
+          } catch {
+            errorResponse(res, 400, 'On this instance, a search endpoint must be the configured one or a public address');
+            return;
+          }
+          try {
+            const response = await fetchWithPublicRedirects(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
+            jsonResponse(res, 200, { healthy: response.ok });
+          } catch {
+            jsonResponse(res, 200, { healthy: false });
+          }
+          return;
+        }
+      }
       try {
         const response = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
         jsonResponse(res, 200, { healthy: response.ok });
       } catch {
         jsonResponse(res, 200, { healthy: false });
       }
-    }, free('checks a search endpoint and stores nothing'));
+    }, ownerOnly('check a search endpoint'));
 
     // Search reranker capability probe — read-time provider snapshot so the
     // Settings → Search page can surface "Reranker is Anthropic-only" instead
