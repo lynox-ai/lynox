@@ -5246,8 +5246,8 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
   });
 });
 
-// The refusal path of a renewal with a preset id the engine does not know was pinned
-// in 637; the success path too must never repeat that model-authored id.
+// The refusal path of a renewal with a preset id the engine does not know already has a test;
+// the success path too must never repeat that model-authored id.
 describe('the 401 reminders keep their own profiles', () => {
   it('a built-in provider\'s profile that renews by its refresh token and names no token_url gets neither reminder', async () => {
     const { accessTokenKey } = await import('../../core/api-store.js');

@@ -18,18 +18,18 @@ const BYPASS: readonly RegExp[] = [
   // Each call also in its optional and non-null forms, on the receiver and on the call, in either
   // order (`?.resolve?.(`, `!.get(`, `resolve!(`, `!?.`): the first version of this list missed the
   // optional call, the second the non-null ones.
-  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.resolve[?!]?\.?\(/,
-  /getMasked[?!]?\.?\(/,
-  /\.fingerprint[?!]?\.?\(/,
-  /\bvault[?!]*\.get[?!]?\.?\(/,
+  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.resolve[?!]*\.?\(/,
+  /getMasked[?!]*\.?\(/,
+  /\.fingerprint[?!]*\.?\(/,
+  /\bvault[?!]*\.get[?!]*\.?\(/,
   /principal: OWNER_PRINCIPAL/,
-  /resolveSecretRefs[?!]?\.?\(/,
-  /\.getAll[?!]?\.?\(\)/,
-  /getSecretStore[?!]?\.?\(\)[?!]*\.resolve[?!]?\.?\(/,
+  /resolveSecretRefs[?!]*\.?\(/,
+  /\.getAll[?!]*\.?\(\)/,
+  /getSecretStore[?!]*\.?\(\)[?!]*\.resolve[?!]*\.?\(/,
   // Gives nothing readable, but whether another member's or the owner's token exists is information too.
-  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.holds[?!]?\.?\(/,
+  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.holds[?!]*\.?\(/,
   /\b(inner|target)[?!]*\.holds[?!]*\.bind\(/,
-  /getSecretStore[?!]?\.?\(\)[?!]*\.holds[?!]?\.?\(/,
+  /getSecretStore[?!]*\.?\(\)[?!]*\.holds[?!]*\.?\(/,
 ];
 
 /** `file|line text` → why it may stand. Keyed by text, not line number, so an edit elsewhere in the file keeps it. */
@@ -186,6 +186,10 @@ describe('bypasses of the member-connection view', () => {
     'const a = resolveSecretRefs!(input, store);',
     'const a = vault.getAll!();',
     'const a = store!?.holds(slot);',
+    'const a = store.resolve!?.(slot);',
+    'const a = vault.get!?.(name);',
+    'const a = getSecretStore?.().holds(x);',
+    'const a = inner.holds!.bind(inner);',
   ])('mutant: the raw read %s is caught', (read) => {
     const mutated = new Map(files);
     mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\n${read}\n`);
