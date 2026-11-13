@@ -462,6 +462,21 @@ export function lapsedSlot(apiStore: Pick<ApiStore, 'knownProfiles'>, name: stri
   }
 }
 
+/**
+ * Whether `profile` reads the refresh slot of another profile's grant as a member of it: the two
+ * share the grant through a built-in provider ({@link SlotGrant} `owned`, another owner, `profile`
+ * among the members). Such a profile renews through the owner's grant on purpose; its own refresh
+ * slot is not missing. Anything that throws answers false.
+ */
+export function sharesAnotherGrant(apiStore: Pick<ApiStore, 'knownProfiles'>, profile: ApiProfile): boolean {
+  try {
+    const grant = slotGrant(apiStore.knownProfiles(), readersRefreshSlot(profile));
+    return grant.kind === 'owned' && grant.owner.id !== profile.id && grant.members.some((m) => m.id === profile.id);
+  } catch {
+    return false;
+  }
+}
+
 /** Whether `name` is a refresh slot of `p`: the one its id derives, or the one it configures. */
 function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
   return p.auth?.type === 'oauth2' && (refreshTokenKey(p.id) === name || p.auth.oauth?.refresh_token_key === name);
@@ -1172,7 +1187,7 @@ function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string,
  * with only "Tell the owner", it sometimes told the member instead.
  */
 function planRefusalFinal(person: string): string {
-  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${RUN_REFUSAL_CLOSE}`;
+  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${OWNER_ALLOWS_AT} ${RUN_REFUSAL_CLOSE}`;
 }
 
 /**
@@ -1295,6 +1310,13 @@ function planMayUse(profile: ApiProfile): boolean {
   return state === 'no-plan' || state === 'listed';
 }
 
+/**
+ * Where the owner lifts a plan's refusal of a connection it may not use (641 4b ii-c-min, ux U-058).
+ * The model reads it and passes it on, so it names the place in both languages the owner's screen
+ * may be in: what it says is what the owner finds.
+ */
+const OWNER_ALLOWS_AT = 'The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
+
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
   const presetId = profile.auth?.oauth?.preset_id;
   return {
@@ -1375,6 +1397,13 @@ export function secretsForProfile(
     get(target, prop, receiver) {
       if (prop === 'resolve') {
         return (name: string): string | null => (hidden(name) ? null : target.resolve(name));
+      }
+      if (prop === 'holds') {
+        // Whether a name is there is information about it too: a hidden name answers false. A store
+        // that cannot answer stays one that cannot: no function, so the caller assumes nothing.
+        const holds = target.holds?.bind(target);
+        if (holds === undefined) return undefined;
+        return (name: string): boolean => (hidden(name) ? false : holds(name));
       }
       if (prop === 'resolveSecretRefs') {
         // Nothing is resolved when any name is hidden: the callers probe one name at a time,

@@ -25,7 +25,8 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import { LIST_QUERY_MAX } from '../tools/permission-guard.js';
 import {
   SHOPIFY_ALT_MAX_CHARS, SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS,
-  isShopifyAltLength, isShopifyFilterValue, isShopifyListFilters, isShopifyStoreHostName, shopifyFilterRefusal, type ShopifyWriteForm,
+  isShopifyAltLength, isShopifyFilterValue, isShopifyFilterValues, isShopifyListFilters, isShopifyStoreHostName, shopifyFilterListRefusal, shopifyFilterRefusal,
+  type ShopifyListFilterValue, type ShopifyWriteForm,
 } from './shopify-graphql.js';
 
 /** One provider's list shape: the filters it documents, how it pages and how it orders. */
@@ -110,8 +111,9 @@ export interface BulkListSource {
   form: BulkListSourceForm;
   /** The list's path on the run's host: `/seg/seg`, no trailing slash, no query. Empty for Shopify. */
   path: string;
-  /** Filter name → value, names from the form only. */
-  filters: Record<string, string>;
+  /** Filter name → value, names from the form only. A list of values only in a Shopify list's
+   *  filters (`ShopifyListFilterValue`); every other form takes one value each. */
+  filters: Record<string, ShopifyListFilterValue>;
   /** The top-level field of an element that holds its id. */
   idField: string;
   /** The verb the targets are written with; null for a Shopify list, which is read only. */
@@ -149,7 +151,7 @@ export function isShopifyListSource(source: BulkListSource): boolean {
 }
 
 /** A filtered Shopify list's filters as the owner is shown them, or null for any other list. */
-export function shopifyListFiltersOf(list: { readonly source: BulkListSource } | null): Record<string, string> | null {
+export function shopifyListFiltersOf(list: { readonly source: BulkListSource } | null): Record<string, ShopifyListFilterValue> | null {
   return list !== null && list.source.form === SHOPIFY_FILTERED_LIST_FORM ? { ...list.source.filters } : null;
 }
 
@@ -169,6 +171,24 @@ export function isOfferedListSource(source: BulkListSource): boolean {
   if (source.form === SHOPIFY_FILTERED_LIST_FORM) return source.path === '' && source.method === null && isShopifyListFilters(source.filters);
   // A media list reads every image: one stored with filters would be read past them.
   if (source.form === SHOPIFY_MEDIA_LIST_FORM) return source.path === '' && source.method === null && Object.keys(source.filters).length === 0;
+  if (!isOfferedListPath(source)) return false;
+  const spec: BulkListFormSpec = BULK_LIST_FORMS[source.form as BulkListForm];
+  // The filters by the rule `parseListSource` holds them to: a stored source cannot have been
+  // planned with anything else, so one that carries more was changed after it was planned.
+  return Object.entries(source.filters).every(
+    ([name, value]) => spec.filters.includes(name) && typeof value === 'string' && TOKEN_RE.test(value));
+}
+
+/** Whether {@link listPageUrl} can build a stored source's address: its form has a spec and
+ *  every filter holds one value. Whether the address is still one a run may read is
+ *  {@link isOfferedListSource}'s question; this one only asks whether there is an address. */
+export function hasListPageUrl(source: BulkListSource): boolean {
+  return isListForm(source.form) && Object.values(source.filters).every((value) => typeof value === 'string');
+}
+
+/** Whether a stored source of a list form other than Shopify's still has a form that is offered
+ *  and that form's path: one that has, and is still not offered, fails on its filters. */
+export function isOfferedListPath(source: BulkListSource): boolean {
   return isListForm(source.form) && BULK_LIST_FORMS[source.form].path.test(source.path);
 }
 
@@ -267,15 +287,27 @@ function parseShopifyListSource(host: string, input: Record<string, unknown>, sc
  * object or an empty value is refused, never read as "no filter": that would turn a run over
  * one group into a run over the whole store.
  */
-function parseShopifyFilters(raw: unknown, scan: (text: string) => string | null): Record<string, string> {
+function parseShopifyFilters(raw: unknown, scan: (text: string) => string | null): Record<string, ShopifyListFilterValue> {
   if (raw === undefined) return {};
   const allowed = SHOPIFY_LIST_FILTER_KEYS.join(', ');
   if (!isPlainObject(raw) || Object.keys(raw).length === 0) {
     throw new BulkSourceError(`source_list.filters for form shopify must name ${allowed} or both.`);
   }
-  const filters: Record<string, string> = {};
+  const filters: Record<string, ShopifyListFilterValue> = {};
   for (const [key, value] of Object.entries(raw)) {
     if (!(SHOPIFY_LIST_FILTER_KEYS as readonly string[]).includes(key)) throw new BulkSourceError(`source_list.filters for form shopify may only use: ${allowed}.`);
+    // One value, or a list of them taken as written, in the planner's order: never folded to one
+    // value, never deduplicated, never trimmed — a list the rule refuses is refused whole.
+    if (Array.isArray(value)) {
+      for (const v of value) {
+        if (!isShopifyFilterValue(v)) throw new BulkSourceError(shopifyFilterRefusal(key));
+        if (scan(v) !== null) throw new BulkSourceError(`source_list.filters.${key} holds something that looks like a credential.`);
+      }
+      // Its size and its duplicates: after each value, so a refused value is named as such.
+      if (!isShopifyFilterValues(value)) throw new BulkSourceError(shopifyFilterListRefusal(key));
+      filters[key] = [...(value as string[])];
+      continue;
+    }
     if (!isShopifyFilterValue(value)) throw new BulkSourceError(shopifyFilterRefusal(key));
     if (scan(value) !== null) throw new BulkSourceError(`source_list.filters.${key} holds something that looks like a credential.`);
     filters[key] = value;
@@ -342,6 +374,13 @@ export const PLACEHOLDER_REFUSAL_MEDIA =
   'Form shopify_media writes one alt text into every image and takes no judge: give that one text, without such braces. ' +
   'If the user wanted a different alt text per image, or braces as literal text, tell them in one sentence that this run cannot do that.';
 
+/** A filter value of a list form other than Shopify's, which parses one value each: a list there
+ *  is a source no parse built, so it throws rather than reach an address or a grant. */
+function oneValue(value: ShopifyListFilterValue): string {
+  if (typeof value !== 'string') throw new RangeError('only a Shopify list takes a list of filter values');
+  return value;
+}
+
 /**
  * The address of one page. Built here, in a fixed order — filters by name, then the form's
  * order, page size and page — from values {@link parseListSource} checked, so it holds
@@ -351,7 +390,7 @@ export function listPageUrl(host: string, source: BulkListSource, page: number):
   if (isShopifyListForm(source.form)) throw new RangeError('a Shopify list has no page address');
   if (!Number.isSafeInteger(page) || page < 1 || page > maxListPages(source.form)) throw new RangeError('page out of range');
   const spec: BulkListFormSpec = BULK_LIST_FORMS[source.form];
-  const pairs: [string, string][] = Object.keys(source.filters).sort().map((n) => [n, source.filters[n]!]);
+  const pairs: [string, string][] = Object.keys(source.filters).sort().map((n) => [n, oneValue(source.filters[n]!)]);
   pairs.push(...spec.order.map(([n, v]): [string, string] => [n, v]));
   const fields = listFieldsValue(source);
   if (fields !== null) pairs.push([spec.fieldsParam, fields]);
@@ -379,7 +418,7 @@ export function listQueryParams(source: BulkListSource): Record<string, { enum?:
   if (isShopifyListForm(source.form)) return undefined;
   const spec: BulkListFormSpec = BULK_LIST_FORMS[source.form];
   const out: Record<string, { enum?: string[]; regex?: string }> = {};
-  for (const [n, v] of Object.entries(source.filters)) out[n] = { enum: [v] };
+  for (const [n, v] of Object.entries(source.filters)) out[n] = { enum: [oneValue(v)] };
   for (const [n, v] of spec.order) out[n] = { enum: [v] };
   const fields = listFieldsValue(source);
   if (fields !== null) out[spec.fieldsParam] = { enum: [fields] };

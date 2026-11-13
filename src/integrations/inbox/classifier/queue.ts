@@ -47,6 +47,19 @@ export class DrainedForShutdownError extends Error {
   }
 }
 
+/**
+ * The reason a job leaves a queue that is being replaced (the inbox rebootstrap on a region
+ * switch): it was still waiting, or it was running when the window ran out. It is not classified
+ * here; `handOver` gives it to the replacing queue, and returns false when that one does not take
+ * it (full or draining), in which case it is dead-lettered as a failed classification.
+ */
+export class HandedOverError extends Error {
+  constructor(readonly handOver: (input: unknown) => boolean) {
+    super('handed-over');
+    this.name = 'HandedOver';
+  }
+}
+
 export interface QueueClassifyFn<T> {
   (input: T, opts: { signal: AbortSignal }): Promise<ClassifyResult>;
 }

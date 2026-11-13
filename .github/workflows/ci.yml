@@ -22,7 +22,7 @@ jobs:
   # Decides ONCE whether this change is docs-only; the required jobs below read its answer.
   # Not a required check itself.
   detect:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -48,7 +48,7 @@ jobs:
   # gitleaks runs on EVERY change, docs-only included: a secret pasted into a .md file is one of
   # the likelier ways this public repo would leak one.
   gitleaks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,7 +67,7 @@ jobs:
   # cancelled at the timeout with no failing test. Unconditional like `test`: this is the CI twin
   # of the pre-commit lint (scripts/lint-changed.mjs) and covers a push made without it.
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 15
@@ -82,7 +82,7 @@ jobs:
   # `test` runs on docs-only changes too; it carries the osv gate, which may not be conditional
   # (tests/osv-workflow-pin.test.ts). Do not gate it on detect.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Scoped because this job downloads a third-party executable and runs it
     # over the checkout, and because the install action is handed a token: the
     # comment that calls it read-only is now enforced rather than asserted.
@@ -161,7 +161,7 @@ jobs:
     # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
     # `needs` would turn a broken `detect` into three green required checks.
     if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Successful runs take 3-5 min (job time p95 4.2 min over 397 runs, 17-20 Oct 2026); one green
     # run still showed 12.07 min job time, most of it after its last step, so the bound leaves room
     # for that. Without a bound a stalled build holds the required check open for the 6 h default.
@@ -218,7 +218,7 @@ jobs:
     # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
     # `needs` would turn a broken `detect` into three green required checks.
     if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -267,7 +267,7 @@ jobs:
     # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
     # `needs` would turn a broken `detect` into three green required checks.
     if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

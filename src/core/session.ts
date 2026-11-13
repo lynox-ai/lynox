@@ -30,7 +30,7 @@ import { effectiveContextWindow, profileNamed } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } from './agent.js';
 import { isInputRequired } from './input-required.js';
 import { loopGuardStopReason } from './loop-guard-stop.js';
 import type { SendStop } from './agent.js';
@@ -162,6 +162,7 @@ export function classifyRunFailure(err: unknown): { noteCode: string; report: bo
   if (err instanceof ThinkingOnlyLoopError) return { noteCode: 'thinking_loop', report: true };
   if (err instanceof ContinuationLoopError) return { noteCode: 'continuation_loop', report: true };
   if (err instanceof ToolLoopBreakError) return { noteCode: 'tool_loop_break', report: true };
+  if (err instanceof ToolCallImitationError) return { noteCode: 'tool_call_imitation', report: true };
   if (err instanceof RunAbortedError) return { noteCode: 'run_interrupted', report: true };
   return { noteCode: 'provider_error', report: true };
 }
@@ -216,6 +217,42 @@ export interface RunOptions {
    *  the group of the run that started it. Must match `RUN_GROUP_ID_FORMAT`; a run passed any
    *  other form is refused before it starts. */
   runGroupId?: string | undefined;
+}
+
+/**
+ * Whether a thread may hold turns of someone other than the owner, for the owner's taint (PRD
+ * customer-granted-operator-access B6): its row names a creator other than the owner. A mandate
+ * reaches only threads it created (`ownedBy`), so a thread a mandate's turns are in carries its
+ * tag — the live session and a resume read the same row. Fail-closed where the row cannot be
+ * read: a store that throws, or a tag this does not know, count as foreign. Only `null` (a row
+ * from before tags) and the owner's tag are the owner's.
+ *
+ * No store, and no row, are NOT foreign. A route admits a mandate only to a row that records it
+ * (`ownedBy`: a missing row belongs to no mandate), so a thread without a row, or an engine without
+ * a store (its history failed to open, `engine.ts`), can hold a helper's turns only from a run in
+ * this live session, which `Session._foreignRunHere` covers. Counting them foreign would send the
+ * owner's writes to review wherever the row write failed, and protect nothing more.
+ *
+ * Row and history go together, so "no row" also means "no helper's turns on disk": a restore brings
+ * back `threads` and `thread_messages` as one file (both in `history.db`, run-history.ts:718, :735);
+ * `ThreadStore.deleteThread` (thread-store.ts:323) removes the row and its messages with it
+ * (`ON DELETE CASCADE`, `foreign_keys = ON` at run-history.ts:1804); and a resume loads messages
+ * only for a thread that has a row (session-store.ts:126). A session opened before a delete keeps
+ * the history in memory: it read the row as it opened (the constructor) and keeps the mark.
+ */
+export function threadHoldsForeignTurns(
+  store: Pick<import('./thread-store.js').ThreadStore, 'getThread'> | null,
+  threadId: string,
+): boolean {
+  if (store === null) return false;
+  let row: { readonly created_by: string | null } | undefined;
+  try {
+    row = store.getThread(threadId);
+  } catch {
+    return true;
+  }
+  if (row === undefined) return false;
+  return !(row.created_by === null || row.created_by === principalTag(OWNER_PRINCIPAL));
 }
 
 export interface SessionOptions {
@@ -383,6 +420,9 @@ export class Session {
    * library's default; the engine's own places name theirs (principal-sites.test.ts).
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
+  /** A run of someone other than the owner happened in this session, or its thread's row named
+   *  another creator when it opened (PRD B6, see `_run`). Never reset. */
+  private _foreignRunHere = false;
 
   /** Who ran here last — the run in flight, or the one before it (PRD
    *  customer-granted-operator-access §3.13 E7). Stopping, reviewing or compacting a session
@@ -680,6 +720,10 @@ export class Session {
           ...(opts?.principal ? { created_by: principalTag(opts.principal) } : {}),
         });
       } catch { /* best-effort */ }
+      // Who the thread is by, read once as the session opens with its history (PRD B6): a row
+      // deleted later (`ThreadStore.deleteThread`, thread-store.ts:323) takes its tag along while a
+      // session opened before keeps the helper's turns in memory, and `_run` would find no row.
+      if (threadHoldsForeignTurns(threadStore, this.sessionId)) this._foreignRunHere = true;
     }
 
     if (opts?.messages) {
@@ -814,6 +858,9 @@ export class Session {
     // Before anything that could rebuild the agent below, so every rebuild of this run is
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
     if (runOptions?.principal !== undefined) this._principal = runOptions.principal;
+    // Sticky for this session: someone other than the owner has run here (B6 below). Not left to
+    // the thread row alone, which depends on the route refusing a mandate on another's thread.
+    if (this._principal.kind !== 'owner') this._foreignRunHere = true;
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
     // Before anything that could rebuild the agent below, like the principal: every rebuild
     // of this run marks its agent by what this run's client said, never by an earlier run.
@@ -1267,6 +1314,16 @@ export class Session {
       }
     }
 
+    // PRD customer-granted-operator-access B6: the owner's turn in a thread a mandate's turns are
+    // in is tainted before the model hears it. The helper's messages are user turns there with no
+    // mark, so the history scan finds nothing; without this, a helper's text the model follows
+    // would be written as the owner's trusted memory. Here, after every rebuild of this run's
+    // prologue: later rebuilds and compactions carry the latch on (`restoreConversationTaint`).
+    // Only the owner's turn: a mandate's own turns are bounded by its tool lock, not by this.
+    if (this._principal.kind === 'owner' && (this._foreignRunHere || threadHoldsForeignTurns(threadStore, this.sessionId))) {
+      this.agent.restoreConversationTaint();
+    }
+
     // ⛔ CAPTURED BEFORE THE SEND, and the stop is read off THIS object rather than
     // off `this.agent` afterwards.
     //
@@ -1329,13 +1386,16 @@ export class Session {
       });
 
       // In-run helper calls (the follow-up-chip recovery) spend on the pool key without
-      // producing tokens in `this.usage`, so the deltas above cannot see them.
+      // producing tokens in `this.usage`, so the deltas above cannot see them. Aborted helper
+      // calls and a main-model call ended mid-stream (by the stream guard, or by a stop of the
+      // run after the provider answered) add an estimate here too (and an upper bound to the
+      // cost caps); those reach no tenant debit at all.
       //
       // ⚠ This is a DISPLAY term and must never reach `onAfterRun`. `costUsd` above is the
-      // value the managed hook DEBITS, and the helper already debited itself through its own
-      // `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`) under a fresh
-      // run id. `managed-hook.ts` dedups per run id, so adding the same dollars to `costUsd`
-      // bills the tenant twice — which a first version of this did, on the belief that the
+      // value the managed hook DEBITS, and a helper call that finished already debited itself
+      // through its own `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`)
+      // under a fresh run id. `managed-hook.ts` dedups per run id, so adding the same dollars
+      // to `costUsd` bills the tenant twice — which a first version of this did, on the belief that the
       // CP figure was the one missing them. It was the other way round: the CP was right and
       // the numbers the CUSTOMER reads were short.
       //
@@ -2806,6 +2866,9 @@ export class Session {
       durableMemoryEnabled: userConfig.durable_memory_enabled === true,
       costGuard: this.agentOverrides.costGuard,
       onStream: streamHandler,
+      // The handler adds each `turn_end` usage into `this.usage` (above), which the run's cost
+      // line and debit are priced from.
+      turnEndUsageCounted: true,
       // F-Eager-Persist (2026-05-18): Persist messages to the ThreadStore at
       // each stable point in the agent loop (after assistant reply, after
       // tool_results). Without this the end-of-run persist (line 506-526)
