@@ -1581,10 +1581,10 @@ export class WorkerLoop {
         // the caps that recorded spend made short and a new day or month refills
         // (`budgetCapsToWaitFor`). Otherwise the way out stays "split it".
         const need = Math.min(estimate, sessionCeiling);
-        // Only a run_agent turn outside a watch reads it (`executeStandard`). A cap short on
-        // spend leaves less headroom than `need`, so it set the grant too, short of spend
-        // recorded between the two reads.
-        const capBy = task.effect === 'run_agent' && task.source !== 'watch' ? budgetCapsToWaitFor(need) : [];
+        // Only `executeStandard` (a run_agent turn outside a watch) reads it; other effects
+        // carry it unread. A cap short on spend leaves less headroom than `need`, so it set
+        // the grant too, short of spend recorded between the two reads.
+        const capBy = budgetCapsToWaitFor(need);
 
         if (capUSD !== null && capUSD < MIN_VIABLE_RUN_USD) {
           // ⚠ This branch PREEMPTS the reservation below, which is where the name of the
