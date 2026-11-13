@@ -1533,7 +1533,7 @@ export class Engine {
           try {
             promptStore.expireEndedMandates(mandateLive);
           } catch (err: unknown) {
-            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${processErrorText(err)}\n`);
           }
         };
         sweepEnded();
@@ -1691,8 +1691,9 @@ export class Engine {
     }
 
     // Configure persistent budget caps, HTTP rate limits and the egress policy.
-    // Called with or without RunHistory: the limits that count against it are
-    // skipped when it failed to open, the egress policy is applied regardless.
+    // Called with or without RunHistory. Without it the daily/monthly caps cannot be
+    // checked and refuse every run (session-budget.ts); the HTTP and mail rate limits
+    // that count against it are skipped; the egress policy is applied regardless.
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
     configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
   }
@@ -2936,7 +2937,7 @@ export class Engine {
       try {
         end();
       } catch (err: unknown) {
-        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${processErrorText(err)}\n`);
       }
     }
   }

@@ -4,6 +4,11 @@
 
 ### Upgrade notes
 
+- Under `network_policy` `deny-all` or `allow-list` the agent is no longer
+  offered the model provider's own web search (Anthropic's server-side
+  `web_search`), which runs at the provider rather than through this
+  instance's network settings. It is offered only under no policy,
+  `allow-all` or `guarded`, and never to an agent whose policy cannot be read.
 - `StreamProcessor.process` now throws `StreamIncompleteError` when a stream ends
   before any stop reason (no `message_delta` naming one, no `message_stop`), instead
   of returning the partial reply as finished. The Agent retries such a call.
@@ -109,6 +114,27 @@
   $0.006 cached, $1.20 output per 1M tokens). It is now the first model of the
   Fireworks tile in the tier pickers. The older id stays registered and
   selectable, so a slot that names it keeps it.
+
+## 2.17.1 — 2026-11-02
+
+This release contains security fixes in the image's Debian packages and in two
+npm dependencies. Upgrading is recommended for every instance.
+
+### Security
+
+- The Docker image is rebuilt from the 2.17.0 code with current Debian security
+  updates. It fixes CVE-2026-111497 in `libbrotli1` (critical) and
+  CVE-2026-84782 in `libssl3`. The 2.17.0 image carried `libbrotli1
+  1.0.9-2+b6`; the fixed versions are `1.0.9-2+deb12u1` and `libssl3
+  3.0.22-1~deb12u2` or newer.
+- `undici` moves from 7.30.0 to 7.30.1 and `zod` from 4.4.3 to 4.6.7, past
+  high-severity advisories. This is the same lockfile change as on main
+  (#2131). The docs site drops an unused `zod` dependency.
+
+### Upgrade notes
+
+- Apart from these two dependency versions, the code is the same as 2.17.0.
+  There are no database migrations.
 
 ## 2.17.0 — 2026-10-23
 
