@@ -209,7 +209,7 @@ describe('a helper\'s answer refused as carrying a key', () => {
 	});
 });
 
-// ux U-150, held where the page picks it: the code the server sends maps to the sentence, and the
+// Held where the page picks it: the code the server sends maps to the sentence, and the
 // branch (could the text go back into the field or not) picks which one, verbatim in both languages.
 const SENTENCE = {
 	de: {
