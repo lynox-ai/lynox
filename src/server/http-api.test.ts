@@ -12231,7 +12231,7 @@ describe('LynoxHTTPApi', () => {
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
     });
 
-    it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb', async () => {
+    it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb, and its filters as an empty set', async () => {
       const host = 'acme.myshopify.com';
       const source = parseListSource(host, { form: 'shopify', after: { seo_title: 'x' } }, 'PATCH', () => null);
       const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
@@ -12240,9 +12240,11 @@ describe('LynoxHTTPApi', () => {
       expect(shown['listFirstPage']).toBe(`https://${host}/admin/api/2026-10/graphql.json`);
       expect(shown['list']).toMatchObject({ state: 'pending', method: null, after: { seo_title: 'x' } });
       expect(shown['writeFormNote']).toBeNull();
+      // A store's product list without a filter names an empty set, so the page says every status is read.
+      expect(shown['listFilters']).toEqual({});
     });
 
-    it('shows a list whose stored filters were changed past what a parse takes by its host, without failing, and a withdrawn path as its address', async () => {
+    it('shows a list whose stored filters were changed past what a parse takes by its host, without failing and with no store filters, and a withdrawn path as its address', async () => {
       repayRateWindow();
       const host = 'shop.example.com';
       const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
@@ -12251,7 +12253,10 @@ describe('LynoxHTTPApi', () => {
       bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, filters: { category: ['12', '13'] } })), planned.status.id);
       const res = await jsonFetch(`/api/bulk/runs/${planned.status.id}`);
       expect(res.status).toBe(200);
-      expect(((await res.json()) as Record<string, unknown>)['listFirstPage']).toBe(host);
+      const changed = await res.json() as Record<string, unknown>;
+      expect(changed['listFirstPage']).toBe(host);
+      // A list that is not a store's products has no filters to show, not an empty set.
+      expect(changed['listFilters']).toBeNull();
       // A run whose path was withdrawn since still has an address, and shows it.
       bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, path: '/wp-json/wc/v3/orders' })), planned.status.id);
       const withdrawn = await (await jsonFetch(`/api/bulk/runs/${planned.status.id}`)).json() as Record<string, unknown>;
