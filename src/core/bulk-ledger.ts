@@ -3534,8 +3534,9 @@ export class BulkLedger {
       // Bounded like `listFormOfFamily`: a cycle or an overlong chain ends the walk, it must not
       // hang the run's last write.
       const seen = new Set<string>([run.id, src.id]);
+      // Depths 2..64, the same runs `flipChain` reaches (it counts `src` as depth 1).
       let up = src.source_run_id, depth = 2;
-      while (up !== null && !seen.has(up) && depth < 66) {
+      while (up !== null && !seen.has(up) && depth <= 64) {
         seen.add(up);
         const r = this.runRow(up);
         if (!r) return;
