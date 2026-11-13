@@ -140,8 +140,9 @@ RUN --mount=type=bind,source=scripts/fetch-pinned.sh,target=/tmp/fetch-pinned.sh
 FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS production
 
 # The Node binary carries its own undici, which backs the global `fetch`. No lockfile
-# scan sees it, and the image scan runs with `ignore-unfixed` on OS packages only, so
-# a base image whose bundled undici is inside an advisory range would ship silently.
+# scan sees it, and neither does the image scan: it reads OS and library packages, and
+# undici inside the node binary is neither (the scan also fails on CRITICAL only). A
+# base image whose bundled undici is inside an advisory range would ship silently.
 # The floor is the first release fixed for GHSA-xjj6-f33q-929c; raise it when a later
 # advisory moves the fixed version. Below the floor the build fails here, and so it
 # does on another undici major (a new Node line): each major has its own fixed release,
