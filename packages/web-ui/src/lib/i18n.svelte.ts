@@ -241,7 +241,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'privacy.export_heading':       { de: 'Daten exportieren',                                                                   en: 'Export data' },
 	'privacy.export_subtitle_managed': { de: 'Deine Inhalte dieser Instanz als JSON-Datei. Den Export startest du auf deiner Kontoseite, dort meldest du dich mit einem Code per E-Mail an. Was nicht in der Datei ist, etwa die Dateien deines Arbeitsbereichs, erhältst du auf Anfrage an support@lynox.ai.', en: 'Your content from this instance as a JSON file. You start the export on your account page, where you sign in with a code sent by email. What the file does not hold, such as the files in your workspace, you get on request at support@lynox.ai.' },
 	'privacy.export_link':          { de: 'Zur Kontoseite',                                                                      en: 'Open your account page' },
-	'privacy.export_subtitle_selfhost': { de: 'Auf Self-Host gibt es den Export aus der App noch nicht. Eine Sicherung der Instanz erstellst du unter Einstellungen → Backups.', en: 'Self-host has no export from the app yet. You can create a backup of the instance under Settings → Backups.' },
+	'privacy.export_subtitle_selfhost': { de: 'Auf Self-Host gibt es keinen Export aus der App. Eine Sicherung der Instanz erstellst du unter Einstellungen → Backups.', en: 'Self-hosted instances have no export in the app. You can create a backup of the instance under Settings → Backups.' },
 	'privacy.audit_heading':        { de: 'Instanz-Protokoll',                                                                   en: 'Instance log' },
 	'privacy.audit_subtitle':       { de: 'Was Personen, denen du Zugang gegeben hast, auf dieser Instanz getan haben: ein Eintrag je Lauf, Schritt oder Ereignis, ohne Inhalte.', en: 'What people you gave access to did on this instance: one entry per run, step or event, without content.' },
 	'privacy.audit_open':           { de: 'Instanz-Protokoll öffnen',                                                            en: 'Open the instance log' },
@@ -249,7 +249,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'privacy.bugsink_subtitle':     { de: 'Anonyme Stack-Traces an unseren Bugsink in Frankfurt (DE) senden, damit wir Bugs schneller finden.', en: 'Send anonymous stack traces to our Bugsink in Frankfurt (DE) so we can find bugs faster.' },
 	'privacy.bugsink_label':        { de: 'Fehler-Reporting aktivieren',                                                         en: 'Enable error reporting' },
 	'privacy.bugsink_managed_fixed':{ de: 'Auf Managed-Plänen immer aktiv (per DPIA, Hetzner Frankfurt).',                       en: 'Always on for managed plans (per DPIA, Hetzner Frankfurt).' },
-	'privacy.bugsink_self_host_env':{ de: 'Selbst-Hosting: Aktivieren durch Setzen der Env-Variable LYNOX_BUGSINK_DSN. UI-Toggle folgt.', en: 'Self-host: enable by setting env LYNOX_BUGSINK_DSN. UI toggle in a follow-up release.' },
+	'privacy.bugsink_self_host_env':{ de: 'Auf Self-Host schaltest du das Fehler-Reporting mit der Umgebungsvariable LYNOX_BUGSINK_DSN ein.', en: 'On self-host, you turn on error reporting with the environment variable LYNOX_BUGSINK_DSN.' },
 	'privacy.wire_capture_heading': { de: 'Erweiterte Debug-Aufzeichnung',                                                        en: 'Extended debug capture' },
 	'privacy.wire_capture_subtitle':{ de: 'Speichert bei jedem Modellaufruf eine geschwärzte Momentaufnahme der vollständig zusammengesetzten Anfrage — genau das, was das Modell erhalten hat (Geheimnisse entfernt) — in der Datenbank dieser Instanz und legt sie deinem Debug-Export bei. Nach sieben Tagen wird sie gelöscht. Ein Backup, das sie enthält, behält sie, bis das Backup selbst gelöscht wird. Nützlich für Fehlerberichte. Standardmäßig aus.', en: 'Stores a redacted snapshot of the fully assembled request on every model call — exactly what the model received, secrets removed — in this instance\'s database and bundles it into your debug export. Each snapshot is deleted after seven days. A backup that contains one keeps it until that backup is deleted. Useful for bug reports. Off by default.' },
 	'privacy.wire_capture_label':   { de: 'Debug-Aufzeichnung aktivieren',                                                          en: 'Enable debug capture' },
@@ -1742,7 +1742,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.owner_only': { de: 'Das Instanz-Protokoll kann nur der Inhaber dieser Instanz lesen. Wenn du etwas daraus brauchst, wende dich an den Inhaber.', en: 'Only the owner of this instance can read the instance log. If you need something from it, ask the owner.' },
 	'access_trail.incomplete': { de: 'Einige Einträge sind hier nicht ganz zu sehen.', en: 'Some entries are not shown in full here.' },
 	'access_trail.error_older': { de: 'Ältere Einträge konnten nicht geladen werden.', en: 'Older entries could not be loaded.' },
-	'access_trail.empty': { de: 'Noch keine Einträge.', en: 'No entries yet.' },
+	'access_trail.empty': { de: 'Noch keine Einträge. Hier erscheinen Läufe, Schritte und Ereignisse von Personen, denen du Zugang gegeben hast.', en: 'No entries yet. Runs, steps and events of people you gave access to appear here.' },
 	'access_trail.empty_filtered': { de: 'Keine Einträge für diese Auswahl.', en: 'No entries for this selection.' },
 	'access_trail.load_older': { de: 'Ältere laden', en: 'Load older' },
 	'access_trail.filter_person': { de: 'Person', en: 'Person' },
@@ -2014,7 +2014,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// A save the server refused, with its reason (ux U-102). {reason} is the server's sentence.
 	'settings.save_refused': { de: 'Nicht gespeichert: {reason}', en: 'Not saved: {reason}' },
 	'settings.delete': { de: 'Löschen', en: 'Delete' },
-	'settings.back': { de: 'Settings', en: 'Settings' },
+	'settings.back': { de: 'Zurück zu Einstellungen', en: 'Back to Settings' },
 
 	// Config
 	'config.title': { de: 'Konfiguration', en: 'Configuration' },

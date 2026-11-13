@@ -238,7 +238,7 @@ describe('PrivacyDataSettings', () => {
 	const accountLinks = () => [...target.querySelectorAll('a')].filter((a) => a.getAttribute('href') === 'https://lynox.ai/managed/account');
 	const ownerConfig = (managed: string) => ({ '/config': { managed, bugsink_enabled: false, bugsink_dsn_configured: true, debug_wire_capture: false, viewer: 'owner' } });
 
-	it('tells a self-host owner there is no export from the app yet, instead of "coming soon"', async () => {
+	it('tells a self-host owner there is no export in the app, instead of "coming soon"', async () => {
 		await render(load, ownerConfig(SELF_HOST));
 		expect(target.textContent).toContain(t('privacy.export_subtitle_selfhost'));
 		expect(target.textContent).not.toContain(t('privacy.export_subtitle_managed'));

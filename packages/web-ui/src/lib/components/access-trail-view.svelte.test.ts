@@ -237,7 +237,7 @@ describe('the states around the list', () => {
 
 	it('no entries: the empty line', async () => {
 		await render([]);
-		expect(text(target.querySelector('[data-state="empty"]'))).toBe('Noch keine Einträge.');
+		expect(text(target.querySelector('[data-state="empty"]'))).toBe('Noch keine Einträge. Hier erscheinen Läufe, Schritte und Ereignisse von Personen, denen du Zugang gegeben hast.');
 	});
 });
 
