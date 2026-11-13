@@ -694,6 +694,21 @@ export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): bool
 	return run.phase === 'planned' && (run.haltKey === 'awaitingStart' || run.haltKey === 'listed');
 }
 
+/** Whether the engine is moving the run on by itself right now: reading its list or judging it
+ *  (planned, no halt), or writing it (approved, or writing without a halt). Every other state
+ *  waits for the owner or has ended, so the page has nothing to wait for there. */
+export function bulkEngineWorking(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
+	if (run.haltKey !== null) return false;
+	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
+}
+
+/** How the page follows a run the engine is moving on: it asks again every `BULK_FOLLOW_MS`, and
+ *  gives up after `BULK_FOLLOW_MAX_MS` (a run still working then is reloaded by the owner).
+ *  An ask is two requests (the run and its first page of targets), and the engine allows a
+ *  client 120 requests a minute, the status bar's own asks included: every 5 s is 24 of them. */
+export const BULK_FOLLOW_MS = 5000;
+export const BULK_FOLLOW_MAX_MS = 10 * 60 * 1000;
+
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo
  *  would take back, and is not at its probe (that has its own way back). An atomic run is taken
  *  back whole or not at all, so only once it finished: the engine refuses any other

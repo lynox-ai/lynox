@@ -14,7 +14,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkEngineWorking, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -88,12 +88,36 @@
 		return out;
 	}
 
-	async function load(): Promise<void> {
-		loading = true;
-		error = '';
+	// The run a follow loop (below) belongs to: a new load for another run, or the page going
+	// away, ends the loop of the one before.
+	let following = 0;
+
+	/** Ask for the run again while the engine moves it on by itself (a list read, a judging, a
+	 *  write the owner started), so the page shows the next step without a reload. A failed ask
+	 *  leaves the page as it is and asks again; the loop ends when the run waits for the owner or
+	 *  has ended, after `BULK_FOLLOW_MAX_MS`, or when the page shows another run. */
+	async function follow(): Promise<void> {
+		const mine = ++following;
+		const until = Date.now() + BULK_FOLLOW_MAX_MS;
+		while (mine === following && run !== null && bulkEngineWorking(run) && Date.now() < until) {
+			await new Promise((r) => setTimeout(r, BULK_FOLLOW_MS));
+			if (mine !== following || busy) continue;
+			await load({ quiet: true });
+		}
+	}
+
+	async function load(opts: { quiet?: boolean } = {}): Promise<void> {
+		const quiet = opts.quiet === true;
+		if (!quiet) {
+			loading = true;
+			error = '';
+		}
 		try {
 			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(runId)}`);
-			if (!r.ok) { error = t('common.load_failed'); loading = false; return; }
+			// Read after the first await: read before it, `run` would become a dependency of the
+			// effect that loads the page, and every load would start the next.
+			const before = run === null ? null : `${run.phase}|${run.haltKey}|${run.checksum}`;
+			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
@@ -107,19 +131,24 @@
 			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
-			if (whole && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
+			if (whole && shown.length !== r.body.total) { if (!quiet) error = t('common.load_failed'); loading = false; return; }
 			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
 			run = r.body;
 			targets = shown;
 			creates = deleted;
-			maxTargets = Math.max(1, bulkWriting(run));
-			unmeasuredOk = false;
-			probeOk = false;
-			supersedable = null;
+			// What the owner set for the next act starts over only when the run moved to another
+			// step: a follow ask that finds it where it was leaves the owner's input alone.
+			if (!quiet || before !== `${run.phase}|${run.haltKey}|${run.checksum}`) {
+				maxTargets = Math.max(1, bulkWriting(run));
+				unmeasuredOk = false;
+				probeOk = false;
+				supersedable = null;
+			}
 		} catch {
-			error = t('common.load_failed');
+			if (!quiet) error = t('common.load_failed');
 		}
 		loading = false;
+		if (!quiet && run !== null && bulkEngineWorking(run)) void follow();
 	}
 
 	async function showMore(): Promise<void> {
@@ -307,7 +336,9 @@
 		return d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 	}
 
-	$effect(() => { void runId; void load(); });
+	$effect(() => { void runId; following++; void load(); });
+	// The page going away ends a follow loop.
+	$effect(() => () => { following++; });
 	$effect(() => {
 		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
