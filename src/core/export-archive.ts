@@ -548,6 +548,7 @@ export async function prepareArchive(dataDir: string, opts: PrepareArchiveOption
   const path = join(dir, ARCHIVE_FILE);
   // The heartbeat while staging: a large instance can take longer than the slot's TTL, and an
   // erasure must not find the slot stale (and remove this archive) while it is still being made.
+  // run-group-starter: cleared in this function's finally and only touches the slot file, no spend.
   const beat = setInterval(() => {
     try { opts.slot.refresh(); } catch { /* the next beat tries again; the TTL is the bound */ }
   }, opts.heartbeatMs ?? 60_000);
