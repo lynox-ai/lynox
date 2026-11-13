@@ -106,8 +106,8 @@
 			shownLoad = load;
 			viewer = data.viewer ?? 'none';
 			// A check left open closes once its row stops offering it (the access ended, the plan waits
-			// again): otherwise it would reopen by itself, without a click, when the row offers it again.
-			// Before the list is replaced, so a row that left the list cannot leave a check behind.
+			// again, the row left the list): otherwise it would reopen by itself, without a click, when the
+			// row offers it again.
 			for (const id of Object.keys(checking)) {
 				const row = data.triggers.find((x) => x.id === id);
 				if (row === undefined || !offersCheck(row)) delete checking[id];

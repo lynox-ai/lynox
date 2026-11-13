@@ -320,18 +320,24 @@ describe('"Check connections" on a confirmed schedule', () => {
 		}
 	});
 
-	it('a row deleted while its check is open leaves the list on the next refresh', async () => {
+	it('a row that leaves the list while its check is open does not come back with it open', async () => {
 		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
 		try {
-			rows = [CONFIRMED, { ...CONFIRMED, id: 't2', title: 'Second' }];
+			rows = [CONFIRMED];
 			await render();
 			check()!.click();
 			await settle();
-			rows = [{ ...CONFIRMED, id: 't2', title: 'Second' }];
+			expect(check()!.getAttribute('aria-expanded')).toBe('true');
+			rows = [];
 			vi.advanceTimersByTime(15_000);
 			await settle();
-			expect(target.textContent).not.toContain('Row title (from the list)');
-			expect(target.textContent).toContain('Second');
+			expect(check()).toBeNull();
+			rows = [CONFIRMED];
+			vi.advanceTimersByTime(15_000);
+			await settle();
+			expect(check()!.getAttribute('aria-expanded')).toBe('false');
+			expect(confirmButton()).toBeNull();
+			expect(previews).toBe(1);
 		} finally {
 			vi.useRealTimers();
 		}
