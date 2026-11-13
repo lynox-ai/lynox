@@ -18,7 +18,7 @@ import dns from 'node:dns/promises';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, httpStoppedMessage, isWriteMethod, undoClassFor } from './http.js';
+import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, httpStoppedMessage, isWriteMethod, undoClassFor, HTTP_RATE_UNCOUNTED } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -2459,6 +2459,39 @@ describe('httpRequestTool', () => {
 
     beforeEach(() => {
       // testCtx already reset by outer beforeEach; rate limits start unset.
+    });
+
+    it('the uncounted refusal says, verbatim, that nothing was sent or kept, and tells the model not to offer a later fetch', () => {
+      expect(HTTP_RATE_UNCOUNTED).toBe('Blocked: the HTTP request limit cannot be checked, because the history database did not open when lynox started. This request was not sent, and nothing keeps it for later. No http_request call goes out until someone restarts lynox and lynox can open the history database again; the log lynox writes at start says why it could not. Do not retry and do not offer to fetch it later on your own: nothing will remind you after the restart. Tell the user it was not sent; after the restart they can ask again. Do not ask whether to try again later either; if they want that, they ask after the restart.');
+    });
+
+    it('refuses with the reason, and sends nothing, when a limit is set but no history counts it', async () => {
+      // A working network, so a request that is not refused is answered and fails the asserts below.
+      mockDnsPublic();
+      const fetchSpy = vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchSpy);
+      applyHttpRateLimits(testCtx, null, 50);
+      const result = await visible({ url: 'http://example.com' }, makeAgent());
+      expect(result).toBe(HTTP_RATE_UNCOUNTED);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses with the reason when only the daily limit is set and no history counts it', async () => {
+      mockDnsPublic();
+      const fetchSpy = vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchSpy);
+      applyHttpRateLimits(testCtx, null, undefined, 200);
+      const result = await visible({ url: 'http://example.com' }, makeAgent());
+      expect(result).toBe(HTTP_RATE_UNCOUNTED);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('sends without a history when no limit is set', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      applyHttpRateLimits(testCtx, null);
+      const result = await handler({ url: 'http://example.com' }, makeAgent());
+      expect(result).toContain('HTTP 200');
     });
 
     it('blocks when hourly limit exceeded', async () => {

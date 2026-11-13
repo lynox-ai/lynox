@@ -1694,8 +1694,8 @@ export class Engine {
 
     // Configure persistent budget caps, HTTP rate limits and the egress policy.
     // Called with or without RunHistory. Without it the daily/monthly caps cannot be
-    // checked and refuse every run (session-budget.ts); the HTTP and mail rate limits
-    // that count against it are skipped; the egress policy is applied regardless.
+    // checked and refuse every run (session-budget.ts), and the send-rate limits that
+    // count against it refuse rather than send uncounted; the egress policy is applied regardless.
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
     configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
   }

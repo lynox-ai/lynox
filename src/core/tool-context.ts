@@ -253,11 +253,13 @@ export function applyNetworkPolicy(
 }
 
 /**
- * Configure cross-session HTTP rate limits on a ToolContext.
+ * Configure cross-session HTTP rate limits on a ToolContext. `provider` is null when
+ * the history database did not open: a set limit then cannot be counted, and
+ * `http_request` refuses rather than send uncounted.
  */
 export function applyHttpRateLimits(
   ctx: ToolContext,
-  provider: ToolCallCountProvider,
+  provider: ToolCallCountProvider | null,
   hourlyLimit?: number,
   dailyLimit?: number,
 ): void {

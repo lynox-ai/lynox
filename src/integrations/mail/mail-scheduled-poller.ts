@@ -21,6 +21,7 @@ import type { MailRegistry } from './tools/registry.js';
 import type { MailStateDb, ScheduledSend } from './state.js';
 import type { MailErrorCode } from './provider.js';
 import { accountLookupOnly, sendMail, type MailAccountLookup, type SendCoreFailureStatus, type SendCoreInput } from './send-core.js';
+import { mailSendsUncounted } from './tools/rate-limit.js';
 
 /** Max retries before a row is marked permanently failed. */
 const MAX_ATTEMPTS = 3;
@@ -142,6 +143,9 @@ async function fireOne(
   opts: ScheduledSendPollerOptions,
   now: () => number,
 ): Promise<'sent' | 'retry' | 'failed' | 'skipped'> {
+  // No send limit can be counted (the history database did not open at boot): nothing goes
+  // out, a scheduled row neither. Left unclaimed, it is sent once a restart opens the history.
+  if (mailSendsUncounted()) return 'skipped';
   // Claimed by someone else since the list was read: not ours to send.
   if (!opts.state.claimScheduledSend(row.id, new Date(now()))) return 'skipped';
   const sendInput: SendCoreInput = {
