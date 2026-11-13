@@ -18,8 +18,13 @@ const ENGINE_MEMORY = {
 	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed, lynox only knows an old state of its memory, and people you gave access cannot sign in. API connections such as bexio or Shopify come from an older copy; what you change in them can be lost once the engine opens engine.db again.',
 };
 const HISTORY = {
-	de: 'Die Engine ist ohne history.db gestartet: Verlauf, Threads, Aufgaben, Trigger und Workflows sind nicht verfügbar. Neue Chats werden nicht gespeichert; sie gehen beim Neuladen der Seite oder nach etwa einer halben Stunde ohne Eingabe verloren. Tages- und Monatsgrenzen für Kosten gelten in dieser Zeit nicht.',
-	en: 'The engine started without history.db: history, threads, tasks, triggers and workflows are not available. New chats are not saved; they are lost when the page is reloaded or after about half an hour without input. Daily and monthly cost limits do not apply meanwhile.',
+	de: 'Die Engine ist ohne history.db gestartet: Verlauf, Threads, Aufgaben, Trigger und Workflows sind nicht verfügbar. Der Agent läuft gar nicht, auch nicht im Chat, solange eine Tages- oder Monatsgrenze für Kosten gesetzt ist; ab Werk sind beide gesetzt. Nur wenn beide aufgehoben sind, laufen Chats, werden aber nicht gespeichert; sie gehen beim Neuladen der Seite oder nach etwa einer halben Stunde ohne Eingabe verloren.',
+	en: 'The engine started without history.db: history, threads, tasks, triggers and workflows are not available. The agent does not run at all, not even in a chat, while a daily or monthly cost limit is set; both are set by default. Only if both are removed do chats run, but they are not saved; they are lost when the page is reloaded or after about half an hour without input.',
+};
+// Managed sets both cost caps, so its history sentence has no condition.
+const HISTORY_MANAGED = {
+	de: 'Die Engine ist ohne history.db gestartet: Verlauf, Threads, Aufgaben, Trigger und Workflows sind nicht verfügbar, und der Agent läuft gar nicht, auch nicht im Chat.',
+	en: 'The engine started without history.db: history, threads, tasks, triggers and workflows are not available, and the agent does not run at all, not even in a chat.',
 };
 const SELFHOST = {
 	de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Den Grund nennt das Log, das die Engine beim Start schreibt; behebe ihn und starte die Engine neu.',
@@ -41,6 +46,7 @@ describe('the boot store line, verbatim, one paragraph per store and one for the
 		for (const alerted of [false, true]) {
 			const close = alerted ? MANAGED[lang] : SELFHOST[lang];
 			const mode = alerted ? 'managed' : 'self-host';
+			const history = alerted ? HISTORY_MANAGED[lang] : HISTORY[lang];
 			it(`${lang}, ${mode}: engine.db alone`, () => {
 				setLocale(lang);
 				expect(render(['engine.db'], alerted)).toEqual([ENGINE[lang], close]);
@@ -51,13 +57,13 @@ describe('the boot store line, verbatim, one paragraph per store and one for the
 			});
 			it(`${lang}, ${mode}: history.db alone, the memory flag changes nothing`, () => {
 				setLocale(lang);
-				expect(render(['history.db'], alerted)).toEqual([HISTORY[lang], close]);
-				expect(render(['history.db'], alerted, true)).toEqual([HISTORY[lang], close]);
+				expect(render(['history.db'], alerted)).toEqual([history, close]);
+				expect(render(['history.db'], alerted, true)).toEqual([history, close]);
 			});
 			it(`${lang}, ${mode}: both, the closing paragraph once`, () => {
 				setLocale(lang);
-				expect(render(['engine.db', 'history.db'], alerted)).toEqual([ENGINE[lang], HISTORY[lang], close]);
-				expect(render(['engine.db', 'history.db'], alerted, true)).toEqual([ENGINE_MEMORY[lang], HISTORY[lang], close]);
+				expect(render(['engine.db', 'history.db'], alerted)).toEqual([ENGINE[lang], history, close]);
+				expect(render(['engine.db', 'history.db'], alerted, true)).toEqual([ENGINE_MEMORY[lang], history, close]);
 			});
 		}
 	}
