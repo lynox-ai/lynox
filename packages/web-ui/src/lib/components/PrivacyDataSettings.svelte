@@ -125,7 +125,7 @@
 		{/if}
 	{:else}
 	<!-- Data export. A CP-provisioned instance (BYOK `hosted` included) exports from the account
-	     page; self-host has no export from the app yet and is told so, without a date. Nothing is
+	     page; self-host has no export in the app and is told so, without a date. Nothing is
 	     said until the config has loaded, so neither text shows on a guess. -->
 	{#if loaded}
 	<section class="border-t border-border pt-6 space-y-2">
