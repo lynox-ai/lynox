@@ -3533,11 +3533,12 @@ export class LynoxHTTPApi {
     let budgetCents: number;
     if (cpSummary?.managed) {
       // Budget stays CP-driven (Stripe tier amount is the canonical truth);
-      // `used_cents` is always recomputed from local `daily` below so it
-      // stays consistent with the rest of the response shape (`by_kind`,
-      // `daily`, and the StatusBar footer all read the same engine SQLite).
-      // The CP-supplied `used_cents` was a separate counter that drifted to
-      // 0 on staging — see commit message for the regression details.
+      // `used_cents` is recomputed from local `daily` below so it stays
+      // consistent with the rest of the response shape (`by_kind`, `daily`,
+      // and the StatusBar footer all read the same engine SQLite). The
+      // CP-supplied `used_cents` can only lift it, and only over the billing
+      // period it was counted for (`managedUsedCents`): as a separate counter
+      // it once drifted to 0 on staging.
       budgetCents = cpSummary.budget_cents ?? 0;
     } else if (isManagedTier) {
       budgetCents = 0;
@@ -3562,17 +3563,13 @@ export class LynoxHTTPApi {
     // we re-derive here defensively in case a future caller mocks
     // `summary.used_cents` out of sync with `daily`).
     //
-    // Managed-tier floor: if the CP supplied its own `used_cents` (Stripe-
-    // canonical for the current billing window), take the MAX of local-sum
-    // and CP-sum. Prevents under-reporting against Stripe when the engine
-    // SQLite is younger than the Stripe billing cycle — post-migration,
-    // post-restore, or any tenant whose engine was provisioned mid-cycle.
-    // Self-hosted tenants have `cpSummary = null`, so this is a no-op for
-    // the OSS path.
+    // Managed-tier floor: the CP's `used_cents` lifts the local sum only when it
+    // comes with the billing period it was counted over (`managedUsedCents`).
+    // Self-hosted tenants have `cpSummary = null`, so this is a no-op for the
+    // OSS path.
     const localUsedCents = summary.daily.reduce((sum, d) => sum + d.cost_cents, 0);
-    const usedCents = cpSummary?.managed
-      ? Math.max(localUsedCents, cpSummary.used_cents ?? 0)
-      : localUsedCents;
+    const { managedUsedCents } = await import('../core/managed-usage-summary.js');
+    const usedCents = managedUsedCents(localUsedCents, cpSummary);
     const projection = this._projectExhaust(summary.daily, usedCents, availableCents, endIso);
     const hardLimits = isManagedTier
       ? { tier: 'managed', contact_for_quotas: true }
