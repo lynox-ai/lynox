@@ -11,6 +11,7 @@ import { parseListSource } from './bulk-list.js';
 import { rawHtmlField } from './bulk-apply.js';
 import { judgeContext } from './bulk-judge.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
+import { Parser } from 'parse5';
 
 // Every path that parses or walks a value a shop, a plan or a model wrote asks the reading bounds
 // first, and a value beyond them takes the strict side: compared byte for byte, left as it is, or
@@ -23,13 +24,12 @@ const unquoted = (n: number): string => '<span class=k>'.repeat(n) + 'x' + '</sp
 const quoted = (n: number): string => '<span class="k">'.repeat(n) + 'x' + '</span>'.repeat(n);
 const DEEP = MARKUP_MAX_DEPTH + 10;
 
-describe('the bounds read off the bytes, before the parse', () => {
-  it('ends at the tag bound, counting every start, end, comment and declaration', () => {
+describe('the bounds the tokenizer of the parser counts', () => {
+  it('ends at the tag bound, counting start and end tags', () => {
     expect(withinReadingBounds('<br>'.repeat(10), { tags: 10 })).toBe(true);
     expect(withinReadingBounds('<br>'.repeat(11), { tags: 10 })).toBe(false);
-    expect(withinReadingBounds('<p>x</p><!-- c --><?x>', { tags: 4 })).toBe(true);
-    expect(withinReadingBounds('<p>x</p><!-- c --><?x>', { tags: 3 })).toBe(false);
-    expect(withinReadingBounds('<p>x</p><!-- c --><!x>', { tags: 3 })).toBe(false);
+    expect(withinReadingBounds('<p>x</p>'.repeat(5), { tags: 10 })).toBe(true);
+    expect(withinReadingBounds('<p>x</p>'.repeat(5) + '</p>', { tags: 10 })).toBe(false);
   });
 
   it('does not count a < the parser reads as text', () => {
@@ -41,6 +41,17 @@ describe('the bounds read off the bytes, before the parse', () => {
     expect(withinReadingBounds('<p a b c d>x</p>', { attributesPerTag: 3 })).toBe(false);
     expect(withinReadingBounds('<p a="x y z" b=\'u v\' c=w>x</p>', { attributesPerTag: 3 })).toBe(true);
     expect(withinReadingBounds('<p a="x y z" b=\'u v\' c=w d>x</p>', { attributesPerTag: 3 })).toBe(false);
+  });
+
+  it('counts the tags and attributes after a comment or raw text whatever these hold', () => {
+    // What a comment or raw text holds is no tag; an open quote in it hides nothing after it.
+    // Each with the tags it holds itself: none in a comment, a start and an end tag otherwise.
+    for (const [before, own] of [['<!-- <q a=" -->', 0], ['<script><q a="</script>', 2], ['<title><q a=\'</title>', 2], ['<svg><![CDATA[<q a="]]></svg>', 2]] as const) {
+      expect(withinReadingBounds(`${before}<p a b c>x</p>`, { attributesPerTag: 3 }), before).toBe(true);
+      expect(withinReadingBounds(`${before}<p a b c d>x</p>`, { attributesPerTag: 3 }), before).toBe(false);
+      expect(withinReadingBounds(`${before}${'<br>'.repeat(20)}`, { tags: own + 20 }), before).toBe(true);
+      expect(withinReadingBounds(`${before}${'<br>'.repeat(21)}`, { tags: own + 20 }), before).toBe(false);
+    }
   });
 
   it('ends at the default attribute bound, not one earlier', () => {
@@ -63,6 +74,13 @@ describe('the bounds the parse keeps while it runs', () => {
     expect(withinReadingBounds(range(6, (i) => `<html a${i}>`), { attributesPerTag: 5 })).toBe(false);
   });
 
+  it('reads the depth of a node the parser moved up, not where it stood before', () => {
+    // A misnested end tag moves a block and what it holds up a level; the tree is 402 deep.
+    const moved = '<b>' + '<span>'.repeat(300) + '<div>'.repeat(200) + '</b>' + '<div>'.repeat(200) + 'x';
+    expect(withinReadingBounds(moved)).toBe(true);
+    expect(withinReadingBounds(moved, { depth: 401 })).toBe(false);
+  });
+
   it('ends at the depth bound', () => {
     expect(withinReadingBounds('<b>'.repeat(10) + 'x', { depth: 11 })).toBe(true);
     expect(withinReadingBounds('<b>'.repeat(11) + 'x', { depth: 11 })).toBe(false);
@@ -78,6 +96,28 @@ describe('the bounds the parse keeps while it runs', () => {
     // The same value under a small and a large depth bound: a parse that runs to its end costs
     // the same under both. Compared to each other, so a slow machine does not change the answer.
     expect(fastest(10)).toBeLessThan(fastest(1e9) / 5);
+  });
+
+  it('stops a parse at the depth bound inside template content as well', () => {
+    const v = '<template>'.repeat(4000);
+    const fastest = (depth: number): number => Math.min(...[0, 1, 2].map(() => {
+      const start = performance.now();
+      withinReadingBounds(v, { depth });
+      return performance.now() - start;
+    }));
+    expect(fastest(10)).toBeLessThan(fastest(1e9) / 5);
+  });
+
+  it('refuses to read at all with a parser whose tokenizer it cannot count', () => {
+    const steps = Object.getPrototypeOf(Parser.getFragmentParser().tokenizer) as Record<string, unknown>;
+    const own = steps['_createAttr'];
+    steps['_createAttr'] = undefined;
+    try {
+      expect(() => withinReadingBounds('<p a>x</p>')).toThrow(/tokenizer steps/);
+    } finally {
+      steps['_createAttr'] = own;
+    }
+    expect(withinReadingBounds('<p a>x</p>')).toBe(true);
   });
 });
 

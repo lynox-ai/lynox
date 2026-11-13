@@ -1,4 +1,4 @@
-import { defaultTreeAdapter, html, parseFragment, serialize, type DefaultTreeAdapterTypes } from 'parse5';
+import { defaultTreeAdapter, html, parseFragment, Parser, serialize, type DefaultTreeAdapterTypes } from 'parse5';
 
 /**
  * The one place an HTML field value is parsed (a Shopify product description, a WooCommerce
@@ -54,8 +54,8 @@ export const MARKUP_MAX_BYTES = 1024 * 1024;
 export const MARKUP_MAX_DEPTH = 512;
 export const MARKUP_MAX_CARRIER_NESTING = 8;
 export const MARKUP_MAX_NODES = 50_000;
-/** Tags and attributes before the parse: the parser's own work on some inputs grows faster than the
- *  nodes it builds, so these are read off the bytes, in one pass, before it runs. */
+/** Tags and the attributes of one tag, as the parser's own tokenizer reads them: its work on
+ *  some inputs grows faster than the nodes it builds, so it stops before that. */
 export const MARKUP_MAX_TAGS = 5_000;
 export const MARKUP_MAX_ATTRIBUTES_PER_TAG = 128;
 
@@ -76,71 +76,38 @@ export const READ_AGAIN_CARRIERS: ReadonlySet<string> = new Set([
 
 class BoundExceeded extends Error {}
 
-const isSpace = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\f' || c === '\r';
-const isLetter = (c: string): boolean => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+/** The tokenizer steps the counting parse wraps: `parse5`'s own, not part of its typed interface. */
+interface TokenizerSteps {
+  _createStartTagToken(): void;
+  _createEndTagToken(): void;
+  _createAttr(first: string): void;
+}
+const TOKENIZER_STEPS = ['_createStartTagToken', '_createEndTagToken', '_createAttr'] as const;
 
 /**
- * Whether a value holds at most `bounds.tags` tags and no tag with more than
- * `bounds.attributesPerTag` attributes, read in one pass. It counts more than the parser reads,
- * never less: every `<` that may open a tag, a comment or a declaration counts, inside raw text
- * too, and a tag's attributes are read the way the tokenizer reads them, a quoted value skipped
- * whole.
+ * A parse that stops once its tokenizer has read more than `bounds.tags` tags or one tag with more
+ * than `bounds.attributesPerTag` attributes, it has built more than `bounds.nodes` nodes, put a
+ * node deeper than `bounds.depth`, or given one element more than `bounds.attributesPerTag`
+ * attributes. Text appended to the text node before it builds none, so it does not count. The
+ * tags are counted where the tokenizer makes them, so whatever state it reads them in — raw text,
+ * a comment, foreign content — is its own, never a guess from the bytes.
  */
-function tokensWithin(value: string, bounds: ReadingBounds): boolean {
-  let tags = 0;
-  let i = 0;
-  while (i < value.length) {
-    const lt = value.indexOf('<', i);
-    if (lt < 0) return true;
-    const next = value[lt + 1] ?? '';
-    i = lt + 1;
-    if (!(isLetter(next) || next === '/' || next === '!' || next === '?')) continue;
-    tags += 1;
-    if (tags > bounds.tags) return false;
-    if (next === '!' || next === '?') continue;
-    // The tag's name, then its attributes up to the `>` that ends it.
-    i = lt + 2;
-    while (i < value.length && !isSpace(value[i]!) && value[i] !== '/' && value[i] !== '>') i += 1;
-    let attributes = 0;
-    for (;;) {
-      while (i < value.length && (isSpace(value[i]!) || value[i] === '/')) i += 1;
-      if (i >= value.length || value[i] === '>') break;
-      attributes += 1;
-      if (attributes > bounds.attributesPerTag) return false;
-      i += 1;
-      while (i < value.length && !isSpace(value[i]!) && value[i] !== '/' && value[i] !== '>' && value[i] !== '=') i += 1;
-      while (i < value.length && isSpace(value[i]!)) i += 1;
-      if (value[i] !== '=') continue;
-      i += 1;
-      while (i < value.length && isSpace(value[i]!)) i += 1;
-      const quote = value[i];
-      if (quote === '"' || quote === "'") {
-        const close = value.indexOf(quote, i + 1);
-        i = close < 0 ? value.length : close + 1;
-      } else {
-        while (i < value.length && !isSpace(value[i]!) && value[i] !== '>') i += 1;
-      }
-    }
-    i += 1;
-  }
-  return true;
-}
-
-/** A parse that stops once it has built more than `bounds.nodes` nodes, put a node deeper than
- *  `bounds.depth`, or given one element more than `bounds.attributesPerTag`
- *  attributes. Text appended to the text node before it builds none, so it does not count. */
 function parseCounted(value: string, bounds: ReadingBounds): HtmlFragment {
   let built = 0;
   const count = (): void => {
     built += 1;
     if (built > bounds.nodes) throw new BoundExceeded();
   };
-  const depths = new WeakMap<object, number>();
-  const placed = (parent: object, child: object): void => {
-    const depth = (depths.get(parent) ?? 0) + 1;
-    // The parser places a fragment's nodes under a root element of its own, one level more.
-    if (depth > bounds.depth + 1) throw new BoundExceeded();
-    depths.set(child, depth);
+  // A node's depth is read up its parents where it is placed: the parser moves nodes, and a depth
+  // recorded once would not move with them. Template content counts below its template.
+  const hosts = new WeakMap<object, DefaultTreeAdapterTypes.ParentNode>();
+  const placed = (parent: DefaultTreeAdapterTypes.ParentNode): void => {
+    let depth = 1;
+    for (let n: DefaultTreeAdapterTypes.ParentNode | null | undefined = parent; n; n = ('parentNode' in n ? n.parentNode : null) ?? hosts.get(n)) {
+      depth += 1;
+      // The parser places a fragment's nodes under a root element of its own, one level more.
+      if (depth > bounds.depth + 2) throw new BoundExceeded();
+    }
   };
   const appendsToText = (parent: DefaultTreeAdapterTypes.ParentNode): boolean =>
     defaultTreeAdapter.getChildNodes(parent).at(-1)?.nodeName === '#text';
@@ -150,24 +117,42 @@ function parseCounted(value: string, bounds: ReadingBounds): HtmlFragment {
     createCommentNode: (...a) => { count(); return defaultTreeAdapter.createCommentNode(...a); },
     insertText: (parent, text) => { if (!appendsToText(parent)) count(); defaultTreeAdapter.insertText(parent, text); },
     insertTextBefore: (...a) => { count(); defaultTreeAdapter.insertTextBefore(...a); },
-    appendChild: (parent, child) => { placed(parent, child); defaultTreeAdapter.appendChild(parent, child); },
-    insertBefore: (parent, child, ref) => { placed(parent, child); defaultTreeAdapter.insertBefore(parent, child, ref); },
-    setTemplateContent: (template, content) => { depths.set(content, depths.get(template) ?? 0); defaultTreeAdapter.setTemplateContent(template, content); },
+    appendChild: (parent, child) => { placed(parent); defaultTreeAdapter.appendChild(parent, child); },
+    insertBefore: (parent, child, ref) => { placed(parent); defaultTreeAdapter.insertBefore(parent, child, ref); },
+    setTemplateContent: (template, content) => { hosts.set(content, template); defaultTreeAdapter.setTemplateContent(template, content); },
     adoptAttributes: (recipient, attrs) => {
       if (recipient.attrs.length + attrs.length > bounds.attributesPerTag) throw new BoundExceeded();
       defaultTreeAdapter.adoptAttributes(recipient, attrs);
     },
   };
-  return parseFragment(divContext(), value, { scriptingEnabled: true, treeAdapter });
+  const parser = Parser.getFragmentParser(divContext(), { scriptingEnabled: true, treeAdapter });
+  const tokenizer = parser.tokenizer as unknown as TokenizerSteps;
+  const own = Object.getPrototypeOf(tokenizer) as TokenizerSteps;
+  // A parse5 without these steps is not the one this was written against: refuse, never read uncounted.
+  if (!TOKENIZER_STEPS.every((step) => typeof own[step] === 'function')) throw new Error('html-tree: parse5 tokenizer steps not found');
+  let tags = 0;
+  let attributes = 0;
+  const tag = (): void => {
+    tags += 1;
+    attributes = 0;
+    if (tags > bounds.tags) throw new BoundExceeded();
+  };
+  tokenizer._createStartTagToken = () => { tag(); own._createStartTagToken.call(tokenizer); };
+  tokenizer._createEndTagToken = () => { tag(); own._createEndTagToken.call(tokenizer); };
+  tokenizer._createAttr = (first) => {
+    attributes += 1;
+    if (attributes > bounds.attributesPerTag) throw new BoundExceeded();
+    own._createAttr.call(tokenizer, first);
+  };
+  parser.tokenizer.write(value, true);
+  return parser.getFragment();
 }
 
-/** Whether a value stays within the bounds above: one pass over its bytes, one counted parse and
- *  one pass over its tree. Ask it before any other parse or walk of a value a shop, a plan or a
- *  model wrote. A test may set smaller bounds to reach them quickly. */
+/** Whether a value stays within the bounds above: one counted parse and one pass over its tree.
+ *  Ask it before any other parse or walk of a value a shop, a plan or a model wrote. A test may set smaller bounds to reach them quickly. */
 export function withinReadingBounds(value: string, bounds: Partial<ReadingBounds> = {}): boolean {
   const limits: ReadingBounds = { ...READING_BOUNDS, ...bounds };
   if (Buffer.byteLength(value, 'utf8') > MARKUP_MAX_BYTES) return false;
-  if (!tokensWithin(value, limits)) return false;
   let fragment: HtmlFragment;
   try {
     fragment = parseCounted(value, limits);
