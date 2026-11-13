@@ -1048,6 +1048,8 @@ export class Engine {
         this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
         // The store as the inbox view reads it, for inbox_read.
         this._mailContext.hooks.inboxReader = runtime.inboxReader;
+        // Waiting rules for inbox_rule_propose.
+        this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -1062,7 +1064,7 @@ export class Engine {
       console.error(
         '[lynox] Inbox classifier rebootstrap on provider-switch failed — '
         + 'classifier disabled until next restart:',
-        err,
+        processErrorText(err, true),
       );
       // No runtime to hand over to: what the old one still holds is surfaced as a failed
       // classification, still within the bound.
@@ -1538,7 +1540,7 @@ export class Engine {
           try {
             promptStore.expireEndedMandates(mandateLive);
           } catch (err: unknown) {
-            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${processErrorText(err)}\n`);
           }
         };
         sweepEnded();
@@ -1696,8 +1698,9 @@ export class Engine {
     }
 
     // Configure persistent budget caps, HTTP rate limits and the egress policy.
-    // Called with or without RunHistory: the limits that count against it are
-    // skipped when it failed to open, the egress policy is applied regardless.
+    // Called with or without RunHistory. Without it the daily/monthly caps cannot be
+    // checked and refuse every run (session-budget.ts); the HTTP and mail rate limits
+    // that count against it are skipped; the egress policy is applied regardless.
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
     configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
   }
@@ -2418,6 +2421,8 @@ export class Engine {
           this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
           // The store as the inbox view reads it, for inbox_read.
           this._mailContext.hooks.inboxReader = runtime.inboxReader;
+          // Waiting rules for inbox_rule_propose.
+          this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —
@@ -2441,7 +2446,7 @@ export class Engine {
       } catch (err) {
         // Surface the failure so a silently-disabled feature does not
         // become a debugging black hole. Mail integration still works.
-        console.error('[lynox] Inbox bootstrap failed — feature disabled:', err);
+        console.error('[lynox] Inbox bootstrap failed — feature disabled:', processErrorText(err, true));
       }
     }
 
@@ -2939,7 +2944,7 @@ export class Engine {
       try {
         end();
       } catch (err: unknown) {
-        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${processErrorText(err)}\n`);
       }
     }
   }

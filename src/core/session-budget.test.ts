@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   checkSessionBudget, recordSessionCost, getSessionCost,
   configurePersistentBudget, checkPersistentBudget, resetPersistentBudget,
@@ -215,7 +215,7 @@ describe('persistent budget — in-flight reservation (parallel-fire admission c
     resetPersistentBudget();
   });
 
-  it('no-op when no provider configured (self-hosted, caps off)', () => {
+  it('no-op before the engine configured the budget (module load, tests)', () => {
     const r = reservePersistentBudget(15);
     expect(r.allowed).toBe(true);
     expect(r.reservedUSD).toBe(0);
@@ -435,5 +435,102 @@ describe('persistent budget — what a stop can say to wait for', () => {
     expect(budgetCapSetByEnv('daily')).toBe(false);
     resetPersistentBudget();
     expect(budgetCapSetByEnv('monthly'), 'a reset forgets it').toBe(false);
+  });
+});
+
+describe('persistent budget — a cap that cannot be checked refuses (no cost provider)', () => {
+  const today = new Date().toISOString().slice(0, 10);
+
+  beforeEach(() => {
+    resetPersistentBudget();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  // The two texts word for word: one for a self-hoster, who reads the startup log
+  // and repairs the file, one for a managed tenant, who can do neither.
+  const selfHost = (caps: string): string =>
+    `Spending cap (${caps}) cannot be checked: the history database (history.db) did not open when lynox started, `
+    + "so today's and this month's spend are unknown. The agent does not run, not even for a chat, until lynox opens the history database again at a restart. "
+    + 'The log lynox writes at startup names the cause ("RunHistory init failed"); fix it, for example '
+    + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
+  const managed = (caps: string): string =>
+    `Spending cap (${caps}) cannot be checked: the history database did not open when lynox started, `
+    + "so today's and this month's spend are unknown. The agent does not run, not even for a chat, until lynox opens the history database again at a restart. "
+    + 'The lynox team gets an automatic alert about it.';
+
+  const capVariants: Array<[string, { dailyCapUSD?: number; monthlyCapUSD?: number }, string]> = [
+    ['both caps set', { dailyCapUSD: 15, monthlyCapUSD: 150 }, 'daily $15, monthly $150'],
+    ['both caps at their defaults', {}, 'daily $100, monthly $500'],
+    ['only the daily cap set', { dailyCapUSD: 15, monthlyCapUSD: Infinity }, 'daily $15'],
+    ['only the monthly cap set', { dailyCapUSD: Infinity, monthlyCapUSD: 150 }, 'monthly $150'],
+  ];
+  for (const [what, caps, named] of capVariants) {
+    it(`self-host, ${what}: refuses with the self-host text, word for word`, () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', undefined);
+      configurePersistentBudget({ costProvider: null, ...caps });
+      const r = checkPersistentBudget();
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toBe(selfHost(named));
+    });
+    it(`managed, ${what}: refuses with the managed text, word for word`, () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-test');
+      configurePersistentBudget({ costProvider: null, ...caps });
+      const r = checkPersistentBudget();
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toBe(managed(named));
+    });
+  }
+
+  it('reports the caps it refuses on', () => {
+    configurePersistentBudget({ costProvider: null, dailyCapUSD: 15, monthlyCapUSD: 150 });
+    const r = checkPersistentBudget();
+    expect(r.dailyLimitUSD).toBe(15);
+    expect(r.monthlyLimitUSD).toBe(150);
+  });
+
+  it('refuses a reservation, also for a zero estimate, and holds nothing', () => {
+    configurePersistentBudget({ costProvider: null, dailyCapUSD: 15 });
+    for (const estimate of [5, 0]) {
+      const r = reservePersistentBudget(estimate);
+      expect(r.allowed).toBe(false);
+      expect(r.reservedUSD).toBe(0);
+      expect(r.reason).toContain('cannot be checked');
+    }
+    expect(getReservedInFlight()).toBe(0);
+  });
+
+  it('reports no headroom, not "nothing enforced"', () => {
+    configurePersistentBudget({ costProvider: null, dailyCapUSD: 15 });
+    expect(persistentBudgetHeadroom()).toBe(0);
+  });
+
+  it('treats a provider without getCostByDay as no provider', () => {
+    configurePersistentBudget({ costProvider: {} as CostQueryProvider, dailyCapUSD: 15 });
+    expect(checkPersistentBudget().allowed).toBe(false);
+  });
+
+  it('allows when no cap is set: nothing to check, nothing refused', () => {
+    configurePersistentBudget({ costProvider: null, dailyCapUSD: Infinity, monthlyCapUSD: Infinity });
+    expect(checkPersistentBudget().allowed).toBe(true);
+    expect(reservePersistentBudget(5).allowed).toBe(true);
+    expect(persistentBudgetHeadroom()).toBeNull();
+  });
+
+  it('allows with a provider and spend under the cap (the control for the refusals above)', () => {
+    configurePersistentBudget({
+      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 1, run_count: 1 }] },
+      dailyCapUSD: 15,
+    });
+    expect(checkPersistentBudget().allowed).toBe(true);
+  });
+
+  it('resetPersistentBudget returns to the unconfigured state', () => {
+    configurePersistentBudget({ costProvider: null, dailyCapUSD: 15 });
+    expect(checkPersistentBudget().allowed).toBe(false);
+    resetPersistentBudget();
+    expect(checkPersistentBudget().allowed).toBe(true);
   });
 });

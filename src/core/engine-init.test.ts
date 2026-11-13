@@ -22,7 +22,12 @@ vi.mock('./config.js', () => ({
   setVaultApiKeyExists: vi.fn(),
   getLynoxDir: vi.fn().mockReturnValue('/tmp/.lynox'),
 }));
-vi.mock('./session-budget.js', () => ({ configurePersistentBudget: vi.fn() }));
+vi.mock('./session-budget.js', () => ({
+  configurePersistentBudget: vi.fn(),
+  // The boot's log line for caps that cannot be checked; its own test is budget-boot-without-history.
+  isPersistentBudgetUnverifiable: vi.fn().mockReturnValue(false),
+  describeSetCaps: vi.fn().mockReturnValue(''),
+}));
 vi.mock('../tools/builtin/http.js', () => ({
   configureHttpRateLimits: vi.fn(),
   configureEnforceHttps: vi.fn(),

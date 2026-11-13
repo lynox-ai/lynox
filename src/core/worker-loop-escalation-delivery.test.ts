@@ -24,6 +24,9 @@ const { EngineDb } = await import('./engine-db.js');
 const { TaskManager } = await import('./task-manager.js');
 const { NotificationRouter } = await import('./notification-router.js');
 const { escalateToUser } = await import('./escalation.js');
+const { WORKER_NOTICES } = await import('./worker-notices.js');
+const { MandateEnds } = await import('./mandate-ends.js');
+const { AuditLog } = await import('./audit-log.js');
 import type { Engine } from './engine.js';
 import type { ChannelOutcome } from './notification-router.js';
 import type { EscalateOpts } from './escalation.js';
@@ -50,7 +53,7 @@ type Channel = ChannelOutcome | ((row: () => Escalation) => Promise<ChannelOutco
  * sees the trigger's record at send time); ticks the trigger once. `awaitAnswer: false` for a
  * channel that never answers.
  */
-async function failOnce(channels: Channel[], awaitAnswer = true): Promise<{ escalation: () => Escalation; escalated: number }> {
+async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: string, mandateEditor?: string, workflowBy?: string): Promise<{ escalation: () => Escalation; escalated: number; seen: EscalateOpts[] }> {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-escal-'));
   dirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
@@ -60,11 +63,17 @@ async function failOnce(channels: Channel[], awaitAnswer = true): Promise<{ esca
   closers.push(() => { try { engineDb.close(); } catch { /* twice is fine */ } });
   const manager = new TaskManager(history);
   const router = new NotificationRouter();
+  // A live grant for the helper: its runs here end by their workflow's failure, not by its access.
+  const ends = new MandateEnds(engineDb.getDb());
+  const audit = new AuditLog(engineDb.getDb());
+  const nowS = Math.floor(T0 / 1000);
+  ends.record({ kind: 'mandate', email: 'helper@example.com', mandateId: 'M-1', mandateExp: nowS + 86_400 }, nowS - 60);
   const escalation = (): Escalation =>
     engineDb.getDb().prepare('SELECT last_escalation_at AS at, last_escalation_outcome AS outcome FROM triggers WHERE id = ?').get('trg-1') as Escalation;
   channels.forEach((c, i) => router.register({ name: `ch${String(i)}`, send: async () => (typeof c === 'function' ? c(escalation) : c) }));
 
   let escalated = 0;
+  const seen: EscalateOpts[] = [];
   let settled!: () => void;
   const done = new Promise<void>((r) => { settled = r; });
   const engine = {
@@ -78,13 +87,15 @@ async function failOnce(channels: Channel[], awaitAnswer = true): Promise<{ esca
     workerRunModelOverride: () => ({}),
     escalateToUser: (opts: EscalateOpts) => {
       escalated++;
+      seen.push(opts);
       return escalateToUser(null, router, {
         ...opts,
         onReported: (d) => { try { opts.onReported?.(d); } finally { settled(); } },
       });
     },
     getEngineDb: () => null,
-    getMandateEnds: () => null,
+    getAuditLog: () => audit,
+    getMandateEnds: () => ends,
   } as unknown as Engine;
   vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
@@ -93,7 +104,15 @@ async function failOnce(channels: Channel[], awaitAnswer = true): Promise<{ esca
   history.insertTrigger({
     id: 'trg-1', title: 'Nightly export', source: 'cron', effect: 'run_workflow',
     scheduleCron: '0 9 * * *', nextRunAt: DUE, pipelineId: 'wf-1',
+    // A mandate's trigger runs only with the owner's stamp (PRD B5).
+    ...(createdBy !== undefined ? { createdBy, createdMandateId: 'M-1', confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner' } : {}),
   });
+  if (workflowBy !== undefined) {
+    engineDb.getDb().prepare('UPDATE workflows SET created_by = ?, created_mandate_id = ? WHERE id = ?').run(workflowBy, 'M-1', 'wf-1');
+  }
+  if (mandateEditor !== undefined) {
+    engineDb.getDb().prepare('UPDATE triggers SET mandate_editor = ?, mandate_editor_id = ? WHERE id = ?').run(mandateEditor, 'M-1', 'trg-1');
+  }
   const loop = new WorkerLoop(engine, router, 60_000);
   closers.push(() => loop.stop());
   vi.useFakeTimers({ toFake: ['Date'] });
@@ -101,7 +120,7 @@ async function failOnce(channels: Channel[], awaitAnswer = true): Promise<{ esca
   await loop.tick();
   await vi.waitFor(() => { expect(escalated).toBe(1); });
   if (awaitAnswer) await done;
-  return { escalation, escalated };
+  return { escalation, escalated, seen };
 }
 
 describe('a failed scheduled workflow records whether its escalation reached anyone', () => {
@@ -191,5 +210,41 @@ describe('a failed scheduled workflow records whether its escalation reached any
     // A gone trigger is not an error.
     expect(manager.startEscalation('nope', first)).toBe(false);
     expect(manager.recordEscalationOutcome('nope', 'delivered', first)).toBe(false);
+  });
+
+  it('a plan someone the owner let in set up escalates without its title and errors (PRD B6)', async () => {
+    const helper = await failOnce(['delivered'], true, 'mandate:helper@example.com');
+    const owner = await failOnce(['delivered']);
+    const h = helper.seen[0]!;
+    for (const text of [h.title, h.body]) {
+      expect(text).not.toContain('Nightly export');
+      expect(text).not.toContain('boom');
+    }
+    expect(h.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle({ address: 'helper@example.com', changed: false }));
+    // The ids stay, so the agent can read the run with the owner.
+    expect(h.body).toContain('run run-1');
+    // Control: the owner's own plan names its title and its step's error.
+    expect(owner.seen[0]!.title).toContain('Nightly export');
+    expect(owner.seen[0]!.body).toContain('boom');
+  });
+
+  it('a helper\'s change to the owner\'s plan counts the same, even after the owner\'s stamp', async () => {
+    const edited = await failOnce(['delivered'], true, undefined, 'mandate:helper@example.com');
+    // The owner's plan: the helper changed it, it did not set it up.
+    expect(edited.seen[0]!.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle({ address: 'helper@example.com', changed: true }));
+    expect(edited.seen[0]!.body).not.toContain('boom');
+  });
+
+  it('the owner\'s schedule of a workflow a helper wrote escalates without its errors', async () => {
+    // The trigger is the owner's; the steps that failed are the helper's (`planMembers` at dispatch).
+    const wf = await failOnce(['delivered'], true, undefined, undefined, 'mandate:helper@example.com');
+    const w = wf.seen[0]!;
+    for (const text of [w.title, w.body]) {
+      expect(text).not.toContain('boom');
+      expect(text).not.toContain('Nightly export');
+    }
+    // The trigger names no mandate, so the title does not either.
+    expect(w.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle(undefined));
+    expect(w.body).toContain('run run-1');
   });
 });

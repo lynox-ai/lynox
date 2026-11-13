@@ -74,6 +74,13 @@ export interface CostQueryProvider {
 }
 
 let _costProvider: CostQueryProvider | null = null;
+/**
+ * Whether {@link configurePersistentBudget} ran. The engine calls it once at boot,
+ * with or without a cost provider; until then (module load, a test that never
+ * configures) nothing is enforced, as before. After it, a missing provider no longer
+ * means "nothing to check": see {@link spendUnverifiable}.
+ */
+let _configured = false;
 const DEFAULT_DAILY_CAP_USD = 100;
 const DEFAULT_MONTHLY_CAP_USD = 500;
 
@@ -94,11 +101,13 @@ let _reservedInFlightUSD = 0;
 
 /**
  * Configure the session cap and the persistent budget caps. Called once at
- * engine init. Without a cost provider the session cap still applies; the
- * daily/monthly caps need recorded spend and are not enforced.
+ * engine init. Without a cost provider (the run history did not open) the session
+ * cap still applies, and a daily or monthly cap that is set can no longer be
+ * checked: every run is refused with that reason instead of running unchecked.
  */
 export function configurePersistentBudget(opts: { costProvider: CostQueryProvider | null } & PersistentCaps): void {
   _costProvider = opts.costProvider;
+  _configured = true;
   setPersistentCaps(opts);
 }
 
@@ -158,8 +167,62 @@ function computeRecordedSpend(): { todayCost: number; monthCost: number } | null
   return { todayCost, monthCost };
 }
 
+/**
+ * True when a daily or monthly cap is set but there is no recorded spend to hold it
+ * against: the engine was configured without a cost provider, because the run history
+ * did not open at boot. Fail-closed: a cap that cannot be checked refuses, it does not
+ * read as "nothing spent". Before the engine configured the budget this is false.
+ */
+function spendUnverifiable(): boolean {
+  return _configured
+    && (!_costProvider || !_costProvider.getCostByDay)
+    && (_dailyCapUSD < Infinity || _monthlyCapUSD < Infinity);
+}
+
+/**
+ * Whether the daily/monthly caps are set but cannot be checked (see {@link spendUnverifiable}).
+ * The boot reads it once to say so in the startup log.
+ */
+export function isPersistentBudgetUnverifiable(): boolean {
+  return spendUnverifiable();
+}
+
+/** The caps that are set, as the refusal and the startup log name them: `daily $15, monthly $150`. */
+export function describeSetCaps(): string {
+  return [
+    _dailyCapUSD < Infinity ? `daily $${_dailyCapUSD}` : null,
+    _monthlyCapUSD < Infinity ? `monthly $${_monthlyCapUSD}` : null,
+  ].filter((c): c is string => c !== null).join(', ');
+}
+
+/**
+ * The refusal while spend is unknown. Two readers: a self-hoster can read the startup log and
+ * repair the file; a managed tenant can do neither, and the operator is alerted instead (the
+ * health probe reports the instance degraded). Managed is recognised by the same env as
+ * everywhere else in the engine. Read per refusal, not cached at boot.
+ */
+function unverifiableReason(): string {
+  const head = `Spending cap (${describeSetCaps()}) cannot be checked: `;
+  const tail = "so today's and this month's spend are unknown. The agent does not run, not even for a chat, until lynox opens the history database again at a restart. ";
+  if (process.env['LYNOX_MANAGED_INSTANCE_ID']) {
+    return `${head}the history database did not open when lynox started, ${tail}`
+      + 'The lynox team gets an automatic alert about it.';
+  }
+  return `${head}the history database (history.db) did not open when lynox started, ${tail}`
+    + 'The log lynox writes at startup names the cause ("RunHistory init failed"); fix it, for example '
+    + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
+}
+
 /** Check if persistent daily/monthly budget allows another run. */
 export function checkPersistentBudget(): PersistentBudgetCheck {
+  if (spendUnverifiable()) {
+    return {
+      allowed: false, todayCostUSD: 0, monthCostUSD: 0,
+      dailyLimitUSD: _dailyCapUSD < Infinity ? _dailyCapUSD : null,
+      monthlyLimitUSD: _monthlyCapUSD < Infinity ? _monthlyCapUSD : null,
+      reason: unverifiableReason(),
+    };
+  }
   const spend = computeRecordedSpend();
   if (!spend) {
     return { allowed: true, todayCostUSD: 0, monthCostUSD: 0, dailyLimitUSD: null, monthlyLimitUSD: null };
@@ -205,6 +268,8 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
  * run at its own session-entry gate.
  */
 export function reservePersistentBudget(estimatedCostUSD: number): PersistentBudgetReservation {
+  // Before the zero-estimate shortcut: with spend unknown there is no headroom to admit into.
+  if (spendUnverifiable()) return { allowed: false, reservedUSD: 0, reason: unverifiableReason() };
   const spend = computeRecordedSpend();
   if (!spend || estimatedCostUSD <= 0) {
     // No enforcement (no provider / caps disabled), or nothing to reserve.
@@ -252,6 +317,9 @@ export function reservePersistentBudget(estimatedCostUSD: number): PersistentBud
  * tick cannot both be granted the same headroom.
  */
 export function persistentBudgetHeadroom(): number | null {
+  // Unknown spend leaves nothing that can be shown free; the WorkerLoop defers the task and
+  // names the reason it reads from `checkPersistentBudget`.
+  if (spendUnverifiable()) return 0;
   const spend = computeRecordedSpend();
   if (!spend) return null;
   const remaining: number[] = [];
@@ -305,6 +373,7 @@ export function getSessionCostCeiling(): number {
 /** Reset persistent budget config (for testing). */
 export function resetPersistentBudget(): void {
   _costProvider = null;
+  _configured = false;
   _maxSessionCostUSD = DEFAULT_SESSION_COST_USD;
   _reservedInFlightUSD = 0;
   _dailyCapUSD = DEFAULT_DAILY_CAP_USD;

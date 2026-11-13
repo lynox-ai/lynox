@@ -4407,6 +4407,46 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.toolContext['runHistory']).toBe(sentinelRunHistory);
     });
 
+    // The provider-side web search, judged by the real gate (agent.ts) on the context the child is
+    // handed. The reachable case first: a child with a narrower tool list (no web_research) under
+    // deny-all starts from its parent's policy.
+    const childContext = async (parentCtx: import('../../core/tool-context.js').ToolContext, tools?: string[]): Promise<{ ctx: import('../../core/tool-context.js').ToolContext; toolNames: string[] }> => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'narrow', task: 'Look something up', ...(tools ? { tools } : {}) }] },
+        makeAgent({ toolContext: parentCtx }),
+      );
+      const arg = vi.mocked(MockAgent).mock.calls[0]![0] as { tools: Array<{ definition: { name: string } }>; toolContext: import('../../core/tool-context.js').ToolContext };
+      return { ctx: arg.toolContext, toolNames: arg.tools.map((t) => t.definition.name) };
+    };
+    const actual = async (): Promise<{ providerSearchAdmitted: typeof import('../../core/agent.js').providerSearchAdmitted; tc: typeof import('../../core/tool-context.js') }> => ({
+      providerSearchAdmitted: (await vi.importActual<typeof import('../../core/agent.js')>('../../core/agent.js')).providerSearchAdmitted,
+      tc: await vi.importActual<typeof import('../../core/tool-context.js')>('../../core/tool-context.js'),
+    });
+
+    it('hands a child with no web_research the parent\'s deny-all, and the gate withholds the search', async () => {
+      const { providerSearchAdmitted, tc } = await actual();
+      const parent = tc.createToolContext({});
+      tc.applyNetworkPolicy(parent, 'deny-all', []);
+      const { ctx, toolNames } = await childContext(parent, ['read_file']);
+      expect(toolNames).not.toContain('web_research');
+      expect(ctx.networkPolicy).toBe('deny-all');
+      expect(providerSearchAdmitted(ctx)).toBe(false);
+    });
+
+    it('keeps the child of a parent with no policy of its own withheld, and the child of an open one offered', async () => {
+      const { providerSearchAdmitted, tc } = await actual();
+      const unread = tc.markPolicyUnread(tc.createToolContext({}));
+      const child = (await childContext(unread)).ctx;
+      expect(child).not.toBe(unread);
+      expect(tc.isPolicyUnread(child)).toBe(true);
+      expect(providerSearchAdmitted(child)).toBe(false);
+      // Control: the same context unmarked (the engine's, no policy) — the child is offered it.
+      const open = (await childContext(tc.createToolContext({}))).ctx;
+      expect(providerSearchAdmitted(open)).toBe(true);
+    });
+
     it('gives the child a SCOPED VIEW of the vault, not the parent store itself', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const parentStore = makeVault({ STRIPE_KEY: 'sk_live', HR_PAYROLL: 'pay' });

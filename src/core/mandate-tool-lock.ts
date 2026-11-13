@@ -91,6 +91,7 @@ export const MANDATE_WITHHELD_TOOLS: Readonly<Record<string, string>> = Object.f
   edit_file: 'edits any absolute path outside a workspace',
   batch_files: 'reads and writes files like read_file and write_file',
   memory_focus: 'sets the knowledge focus for every session of the instance',
+  inbox_rule_propose: 'files inbox rules only the owner may confirm',
   // The form it opens asks the person at the screen for the mailbox password and sends it to
   // the account route, which only the owner may write. For a mandate the password would leave
   // their hands for an account that is never created, and there is no step to send them to.
