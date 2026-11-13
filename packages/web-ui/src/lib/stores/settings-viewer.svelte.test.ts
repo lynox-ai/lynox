@@ -258,6 +258,16 @@ describe('the line about the provider the engine changed', () => {
 		expect(providerResetNotice()).toBe('Mistral');
 	});
 
+	it('does not bring the line back with a page\'s own body asked for before a provider save', async () => {
+		noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		const note = viewerNote();
+		serve(json({ viewer: 'owner', locks: {}, provider_reset: null }));
+		await refreshProviderReset(true);
+		expect(providerResetNotice()).toBeNull();
+		note({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		expect(providerResetNotice()).toBeNull();
+	});
+
 	it('does not bring the line back with the page-load answer asked for before "Got it"', async () => {
 		let release: (r: Response) => void = () => {};
 		vi.stubGlobal('fetch', vi.fn((url: string) => url.endsWith('/dismiss')

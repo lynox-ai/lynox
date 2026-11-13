@@ -18,7 +18,7 @@ describe('the Shopify exchange on an instance that picked Mistral (real engine)'
   // Built at runtime, never a literal: this repo is public and the commit scan looks for keys.
   const SECRET = `t-${randomBytes(12).toString('hex')}`;
   const POOL_KEY = `sk-ant-${randomBytes(12).toString('hex')}`;
-  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_SHOPIFY_EXCHANGE', 'ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_MANAGED_INSTANCE_ID'];
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_SHOPIFY_EXCHANGE', 'ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_DURABLE_MEMORY_ENABLED'];
   const saved: Record<string, string | undefined> = {};
   let api: InstanceType<typeof LynoxHTTPApi> | undefined;
   let baseUrl: string;
@@ -49,6 +49,8 @@ describe('the Shopify exchange on an instance that picked Mistral (real engine)'
     // A managed tier boots with its control plane named; nothing here calls it.
     process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.example.test';
     process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'zz-inst';
+    // A mandate is let in only with durable knowledge on, as on the fleet.
+    process.env['LYNOX_DURABLE_MEMORY_ENABLED'] = 'true';
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ provider: 'openai', api_base_url: 'https://api.eu.mistral.ai/v1', openai_model_id: 'mistral-large-2512' }));
     reloadConfig();
     api = new LynoxHTTPApi();
@@ -113,6 +115,24 @@ describe('the Shopify exchange on an instance that picked Mistral (real engine)'
       process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
     }
     expect((await call('GET', '/api/config')).json['provider_reset']).toEqual({ from: 'Mistral' });
+  });
+
+  it('a mandate reads the line but cannot end it', async () => {
+    const { loginSession } = await import('../../packages/web-ui/src/lib/server/auth.js');
+    const mandate = loginSession(SECRET, {
+      kind: 'mandate', email: 'ida@example.invalid', display: 'IDA', mandate_id: 'TEST-MANDATE-NOTICE',
+      mandate_expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    })?.token;
+    if (mandate === undefined) throw new Error('fixture: no mandate cookie');
+    const as = (method: string, path: string): Promise<Response> => fetch(`${baseUrl}${path}`, {
+      method,
+      headers: { cookie: `lynox_session=${mandate}`, 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    });
+    const read = await as('GET', '/api/config');
+    expect(read.status).toBe(200);
+    expect(((await read.json()) as Record<string, unknown>)['provider_reset']).toEqual({ from: 'Mistral' });
+    expect((await as('POST', '/api/config/provider-reset/dismiss')).status).toBe(403);
+    expect(existsSync(noticeFile())).toBe(true);
   });
 
   it('"Got it" ends the line for every page', async () => {
