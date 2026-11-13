@@ -741,8 +741,6 @@ describe('a link inside a shortcode is held to the run\'s domains', () => {
     expect(check(`<p>${own}</p>`)).toMatchObject({ ok: false, reason: 'url_scheme' });
   });
 
-  // Each value holds its own bound below; the whole test reads fourteen of them, each parsed once
-  // more for the reading bounds, so it takes longer than the default timeout on a slow machine.
   it('reads values of many attributes, quotes and colons in linear time', () => {
     for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`, `${'\n'.repeat(100_000)}x`, `${' \n'.repeat(60_000)}x`, `${'\r'.repeat(100_000)}x`, `${' \r'.repeat(60_000)}x`, `[e]${'%'.repeat(30_000)}${'0a'.repeat(30_000)}[/e]`, `[x a="${'%'.repeat(30_000)}${'0a'.repeat(30_000)}"]`]) {
       const start = performance.now();
@@ -756,5 +754,5 @@ describe('a link inside a shortcode is held to the run\'s domains', () => {
       check('<p>x</p>', before);
       expect(performance.now() - start, `before ${before.slice(0, 12)}… of ${before.length}`).toBeLessThan(3000);
     }
-  }, 30_000);
+  });
 });
