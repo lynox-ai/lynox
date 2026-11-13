@@ -669,8 +669,8 @@ export class Engine {
     // reported back while the tools keep enforcing the boot value until a restart.
     applyEgressSettings(this.userConfig, this._toolContext);
     // The same for the session/daily/monthly caps: a cap raised or lowered under
-    // Settings → Limits holds for the next run, not after the next restart. An env
-    // value still wins over the config, as at boot.
+    // Settings → Limits holds from the next admission or budget check on, not after
+    // the next restart. An env value still wins over the config, as at boot.
     setPersistentCaps(budgetCapsFromConfig(this.userConfig));
     // Bulk runs follow the config live: no restart, and a run under way when they go
     // off is stopped as by its owner.
@@ -740,6 +740,7 @@ export class Engine {
     // This path installs a freshly loaded config as well, so the tools must read its egress
     // settings too (see `reloadUserConfig`).
     applyEgressSettings(this.userConfig, this._toolContext);
+    setPersistentCaps(budgetCapsFromConfig(this.userConfig));
     // The fresh config may switch bulk runs too (a config.json edited by hand, then a secret
     // written): the tools and the ledger follow it here as in `reloadUserConfig`.
     this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));

@@ -342,7 +342,7 @@ describe('Engine boot — the init() data-protection gates are actually wired', 
     // the daily cap under Settings → Limits saw it saved while the runs kept stopping at the
     // old figure until the process restarted.
     const dir = freshDataDir('budget-reload');
-    setEnv('LYNOX_MAX_DAILY_COST_USD', undefined);
+    for (const k of ['LYNOX_MAX_DAILY_COST_USD', 'LYNOX_MAX_MONTHLY_COST_USD', 'LYNOX_MAX_SESSION_COST_USD']) setEnv(k, undefined);
     writeUserConfig(dir, { max_daily_cost_usd: 5 });
     await boot();
     expect(persistentBudgetHeadroom(), 'FIXTURE GUARD: the boot applied the configured cap').toBe(5);
@@ -359,6 +359,17 @@ describe('Engine boot — the init() data-protection gates are actually wired', 
     await engines[engines.length - 1]!.reloadUserConfig();
     expect(persistentBudgetHeadroom()).toBe(7);
     expect(budgetCapSetByEnv('daily'), 'so the settings cannot raise it').toBe(true);
+    expect(budgetCapSetByEnv('monthly'), 'FIXTURE GUARD: the monthly cap still comes from the settings').toBe(false);
+
+    // The same for the monthly cap, and through the credentials reload, which installs a
+    // freshly loaded config as well.
+    setEnv('LYNOX_MAX_DAILY_COST_USD', undefined);
+    setEnv('LYNOX_MAX_MONTHLY_COST_USD', '3');
+    reloadConfig();
+    await engines[engines.length - 1]!.reloadCredentials();
+    expect(persistentBudgetHeadroom(), 'the env monthly cap, applied by the credentials reload').toBe(3);
+    expect(budgetCapSetByEnv('monthly')).toBe(true);
+    expect(budgetCapSetByEnv('daily'), 'and the daily cap is back with the settings').toBe(false);
   });
 
   it('REVOKING the opt-in stops uploads in the running process, without a restart', async () => {

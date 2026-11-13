@@ -388,6 +388,8 @@ describe('persistent budget — what a stop can say to wait for', () => {
   it('names both when both are short', () => {
     configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 15, monthlyCapUSD: 18 });
     expect(budgetCapsToWaitFor(15)).toEqual(['daily', 'monthly']);
+    configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 15, monthlyCapUSD: 20 });
+    expect(budgetCapsToWaitFor(15), 'a month with exactly the room left is not short').toEqual(['daily']);
   });
 
   it('names none when a short cap is itself below the run: waiting does not help', () => {

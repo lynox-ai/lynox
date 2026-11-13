@@ -1917,6 +1917,12 @@ describe('WorkerLoop', () => {
         expect(recorded).not.toContain('Settings → Limits');
       });
 
+      it('both budgets short and only one set by env: the settings are not offered', async () => {
+        const { recorded } = await stopUnder({ dailyCapUSD: 15, monthlyCapUSD: 15.1, setByEnv: ['monthly'] });
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWaitWayOut(['daily', 'monthly'], false));
+        expect(recorded).not.toContain('Settings → Limits');
+      });
+
       it('on an instance the control plane runs with your own key, Settings → Limits is not offered either', async () => {
         vi.stubEnv('LYNOX_BILLING_TIER', 'hosted');
         onTestFinished(() => { vi.stubEnv('LYNOX_BILLING_TIER', ''); });
