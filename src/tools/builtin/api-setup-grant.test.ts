@@ -5272,7 +5272,7 @@ describe('the 401 reminders keep their own profiles', () => {
   });
 });
 
-// sec-core on 1314: the 401 reminder now reaches a built-in provider's profile without a token_url.
+// The 401 reminder now reaches a built-in provider's profile without a token_url.
 // Held in each direction: what newly gets it, what still does not, and what stays as it was.
 describe('which profiles a 401 reminder reaches', () => {
   const MANAGED = '**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**';
