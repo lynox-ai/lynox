@@ -471,8 +471,9 @@ export class TriggerStore {
         max_retries = excluded.max_retries,
         retry_count = excluded.retry_count,
         confirmed_at = excluded.confirmed_at,
-        -- One way: a re-write may record a creator's taint, never clear one already recorded.
-        created_untrusted = COALESCE(excluded.created_untrusted, triggers.created_untrusted),
+        -- One way: a re-write may record a creator's taint, never clear one already recorded,
+        -- also not by writing the clean cause 'none' over it.
+        created_untrusted = COALESCE(NULLIF(excluded.created_untrusted, 'none'), triggers.created_untrusted),
         -- The creator is set once: a re-write never replaces it. edited_by is not
         -- written here at all; only markEditedBy writes it.
         created_by = COALESCE(triggers.created_by, excluded.created_by),
