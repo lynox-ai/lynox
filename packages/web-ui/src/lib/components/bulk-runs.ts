@@ -512,6 +512,8 @@ export interface BulkTarget {
 	change: BulkChange;
 	diff: TargetDiff;
 	error: string | null;
+	/** What the target held before the run, as the engine read it (`{ absent, value }`). */
+	before?: unknown;
 	/** The owner took it out of the write before approving. */
 	deselected: boolean;
 	/** This run wrote it (not found already as planned). Optional: an older engine sends neither. */
@@ -628,6 +630,41 @@ const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$/;
 /** Whether an external run writes to a Shopify store. */
 export function bulkIsShopifyHost(host: string | null): boolean {
 	return host !== null && SHOPIFY_STORE_HOST.test(host);
+}
+
+/** A Shopify product's key, exactly: the number is taken from nothing else (a key in any other
+ *  form gets no link). */
+const SHOPIFY_PRODUCT_GID = /^gid:\/\/shopify\/Product\/(\d+)$/;
+
+/** How a target is named to the owner. On a Shopify run with a product key: the product's title
+ *  from the target's before-image (the shop's text, shown through {@link bulkVisibleText}; null
+ *  where the run holds no before-image or the title is empty — never fetched from elsewhere), its
+ *  number, and the link to it in the store's admin (https, the run's own host). Anything else is
+ *  named by its key alone. */
+export interface BulkTargetName {
+	title: string | null;
+	number: string | null;
+	adminUrl: string | null;
+}
+
+export function bulkTargetName(targetSystem: string, target: { key: string; before?: unknown }): BulkTargetName {
+	const host = bulkHostOf(targetSystem);
+	const m = bulkIsShopifyHost(host) ? SHOPIFY_PRODUCT_GID.exec(target.key) : null;
+	if (m === null) return { title: null, number: null, adminUrl: null };
+	const before = target.before;
+	const value = before !== null && typeof before === 'object' && (before as { absent?: unknown }).absent === false
+		? (before as { value?: unknown }).value : null;
+	const raw = value !== null && typeof value === 'object' ? (value as Record<string, unknown>)['title'] : null;
+	const title = typeof raw === 'string' && raw.trim() !== '' ? bulkVisibleText(raw) : null;
+	return { title, number: m[1]!, adminUrl: `https://${host}/admin/products/${m[1]}` };
+}
+
+/** A target's name in a sentence: its title, else „Produkt <Zahl>“, else its key. */
+export function bulkTargetLabel(targetSystem: string, target: { key: string; before?: unknown }, i18n: Pick<BulkI18n, 'tf'>): string {
+	const name = bulkTargetName(targetSystem, target);
+	if (name.title !== null) return name.title;
+	if (name.number !== null) return i18n.tf('bulk.target.product', { n: name.number });
+	return bulkVisibleText(target.key);
 }
 
 /** The fields a Shopify run writes or its judge reads (U-140), each with the i18n key of its readable name. */
