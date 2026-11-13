@@ -1634,7 +1634,7 @@ export class BulkLedger {
           const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
           if (typeof next !== 'string' || next === was) return [];
           const c = markupChangesOf(f, typeof was === 'string' ? was : null, next);
-          return c.added.length + c.removed.length > 0 ? [c] : [];
+          return c.added.length + c.removed.length > 0 || c.unread === true ? [c] : [];
         })
         : [];
       // The fields a `shortcode_changed` refusal is about, each with the whole value written for it:

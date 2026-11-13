@@ -44,6 +44,68 @@ export function canonicalHtml(value: string): string {
 }
 
 /**
+ * The size and shape a value may have for a check to read it. A text carrier's occurrence holds
+ * the text and layout of everything below it, so each carrier above a node reads that node again;
+ * the parser may build many nodes from few bytes; and the element depth bounds the recursive
+ * walks and the serialiser. Far above product descriptions as shops write them. A value beyond
+ * them is refused or left unread, never cut.
+ */
+export const MARKUP_MAX_BYTES = 1024 * 1024;
+export const MARKUP_MAX_DEPTH = 512;
+export const MARKUP_MAX_CARRIER_NESTING = 8;
+export const MARKUP_MAX_NODES = 50_000;
+
+/** The elements whose text a markup extraction reads again for each one above it, by name in
+ *  every namespace: wider than `carriesContent`, which only errs toward refusing. */
+export const READ_AGAIN_CARRIERS: ReadonlySet<string> = new Set([
+  'script', 'style', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'plaintext', 'textarea', 'title',
+]);
+
+class NodeBoundExceeded extends Error {}
+
+/** A parse that stops once it has built more than `maxNodes` nodes. Text appended to the text
+ *  node before it builds none, so it does not count. */
+function parseCounted(value: string, maxNodes: number): HtmlFragment {
+  let built = 0;
+  const count = (): void => {
+    built += 1;
+    if (built > maxNodes) throw new NodeBoundExceeded();
+  };
+  const appendsToText = (parent: DefaultTreeAdapterTypes.ParentNode): boolean =>
+    defaultTreeAdapter.getChildNodes(parent).at(-1)?.nodeName === '#text';
+  const treeAdapter: typeof defaultTreeAdapter = {
+    ...defaultTreeAdapter,
+    createElement: (...a) => { count(); return defaultTreeAdapter.createElement(...a); },
+    createCommentNode: (...a) => { count(); return defaultTreeAdapter.createCommentNode(...a); },
+    insertText: (parent, text) => { if (!appendsToText(parent)) count(); defaultTreeAdapter.insertText(parent, text); },
+    insertTextBefore: (...a) => { count(); defaultTreeAdapter.insertTextBefore(...a); },
+  };
+  return parseFragment(divContext(), value, { scriptingEnabled: true, treeAdapter });
+}
+
+/** Whether a value stays within the bounds above: one counted parse and one pass over its tree.
+ *  Ask it before any other parse or walk of a value a shop, a plan or a model wrote. `maxNodes`
+ *  is {@link MARKUP_MAX_NODES}; a test may set a smaller one to reach it quickly. */
+export function withinReadingBounds(value: string, maxNodes: number = MARKUP_MAX_NODES): boolean {
+  if (Buffer.byteLength(value, 'utf8') > MARKUP_MAX_BYTES) return false;
+  let fragment: HtmlFragment;
+  try {
+    fragment = parseCounted(value, maxNodes);
+  } catch (err: unknown) {
+    if (err instanceof NodeBoundExceeded) return false;
+    throw err;
+  }
+  const stack: [HtmlParent | HtmlChild, number, number][] = [[fragment, 0, 0]];
+  while (stack.length > 0) {
+    const [n, depth, above] = stack.pop()!;
+    const carriers = above + ('tagName' in n && READ_AGAIN_CARRIERS.has(n.tagName) ? 1 : 0);
+    if (depth > MARKUP_MAX_DEPTH || carriers > MARKUP_MAX_CARRIER_NESTING) return false;
+    if ('childNodes' in n) for (const c of childrenOf(n).nodes) stack.push([c, depth + 1, carriers]);
+  }
+  return true;
+}
+
+/**
  * Elements whose text the reference walk carries as `content`, because a change to it is a change
  * to what runs or what is read raw: `script` and `style` in every namespace (an SVG `script` runs),
  * and the HTML raw-text and RCDATA elements. A markup extraction keeps its own list and is tested

@@ -21,6 +21,7 @@
 import { parseFragment, serialize, defaultTreeAdapter, html as p5 } from 'parse5';
 import type { DefaultTreeAdapterTypes } from 'parse5';
 import { HIDDEN_ALLOWED_MAX, hiddenCharIndexes } from './hidden-chars.js';
+import { withinReadingBounds } from './html-tree.js';
 import type { BulkListSourceForm } from './bulk-list.js';
 
 export type HtmlFragment = DefaultTreeAdapterTypes.DocumentFragment;
@@ -160,7 +161,7 @@ const NAMESPACES: Readonly<Record<string, MarkupNamespace>> = {
  *  `style` in every namespace: in SVG and MathML their body hangs below them as text nodes,
  *  and an inline SVG `<script>` runs. Wider than the PRD's list where the parser has more
  *  raw-text elements (`iframe`, `noframes`, `plaintext`); wider only errs toward refusing. */
-const TEXT_CARRIERS = new Set([
+export const TEXT_CARRIERS: ReadonlySet<string> = new Set([
   'script', 'style', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'plaintext', 'textarea', 'title',
 ]);
 
@@ -517,6 +518,9 @@ export function shortcodeRefusalOf(after: string, before: string | null): string
 /** Whether a verdict's or a plan's value for an HTML field adds markup the owner does not read. */
 export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
   try {
+    if (!withinReadingBounds(input.after) || (input.before !== null && !withinReadingBounds(input.before))) {
+      return refused('not_canonical', 'The value or its before-image is larger or nested deeper than this check reads.');
+    }
     const canonical = canonicalHtml(input.after);
     if (canonicalHtml(canonical) !== canonical) {
       return refused('not_canonical', 'The value parses to another tree once serialised.');
@@ -575,6 +579,11 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
  */
 export function markupAddedByHost(input: { sent: string; back: string; storeHost: string; startDomains: readonly string[] }): MarkupCheckResult {
   try {
+    // The bytes sent read back unchanged add nothing, whatever their size.
+    if (input.back === input.sent) return { ok: true };
+    if (!withinReadingBounds(input.sent) || !withinReadingBounds(input.back)) {
+      return refused('not_canonical', 'The value read back or the value sent is larger or nested deeper than this check reads.');
+    }
     // A tag, comment or attribute value left open at the end falls away from the fragment's tree,
     // so no tree check sees it, nor what the host writes into it; the theme's next `>` closes it,
     // live. A value read back open counts as added unless it is the bytes sent: a before-image an
@@ -1114,6 +1123,10 @@ export interface FieldMarkupChange {
    *  element) counts as outside here. It does not judge a link's domain, which depends on what
    *  the product pointed to before: a link to a domain new to the product counts as within. */
   addsOutsideAllowlist: boolean;
+  /** Set where the value or its before-image lies beyond {@link withinReadingBounds}: nothing is
+   *  listed, the page says the field's markup could not be listed, and `addsOutsideAllowlist` is
+   *  set, so an undo still says it may write back a script. */
+  unread?: true;
 }
 
 /** A base for resolving a relative `href`: the scheme and character checks do not read the host. */
@@ -1143,6 +1156,9 @@ function toItem(o: Occurrence): MarkupItem {
 /** The elements and comments the after-state of one field adds and removes, over the tree of
  *  the bytes sent (sec-core M3: a rewrite to the allowlist must not delete an image unseen). */
 export function markupChangesOf(field: string, before: string | null, after: string): FieldMarkupChange {
+  if (!withinReadingBounds(after) || (before !== null && !withinReadingBounds(before))) {
+    return { field, added: [], removed: [], addsOutsideAllowlist: true, unread: true };
+  }
   const b = markupOf(parseHtmlFragment(before ?? '')).occurrences.filter(named);
   const a = markupOf(parseHtmlFragment(after)).occurrences.filter(named);
   const added = multisetMinus(a, b).map(toItem);
