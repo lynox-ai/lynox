@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { UntrustedCause } from './untrusted-signals.js';
 import type { RunHistory } from './run-history.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
@@ -204,6 +205,9 @@ export interface TaskUpdateParams {
    *  string or null clears the choice. Only a `run_agent` trigger takes one (see
    *  {@link TriggerTierUnsupportedError}); a TODO has no runs, so it ignores this. */
   modelTier?: ModelTier | '' | null | undefined;
+  /** What the editing turn had taken in (`describeTurnUntrusted`). On a trigger whose title or
+   *  description this changes, anything but `none` is recorded as its mark; it never clears one. */
+  untrusted?: UntrustedCause | undefined;
 }
 
 /** Whether a trigger with this effect starts an agent session, the only kind of run a
@@ -583,8 +587,10 @@ export class TaskManager {
         nextRunAt?: string | null | undefined;
         scheduleCron?: string | null | undefined;
         modelTier?: ModelTier | null | undefined;
+        editedUntrusted?: string | null | undefined;
       } = {};
       if (params.title !== undefined) triggerUpdate.title = params.title;
+      if (params.untrusted !== undefined && params.untrusted !== 'none') triggerUpdate.editedUntrusted = params.untrusted;
       if (params.modelTier !== undefined) {
         // Clearing is allowed on any trigger; setting only where a run would read it.
         if (params.modelTier && !triggerTakesModelTier(trigger.effect)) throw new TriggerTierUnsupportedError(trigger.effect);

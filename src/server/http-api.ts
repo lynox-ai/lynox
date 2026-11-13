@@ -9072,7 +9072,10 @@ export class LynoxHTTPApi {
       }
       let task;
       try {
-        task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        // `untrusted` is what the agent's turn had taken in (task_update reads it off the agent); a
+        // request does not get to say it, so it is dropped here rather than stored as sent.
+        const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
+        task = taskManager.update(params['id']!, edit as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }

@@ -562,6 +562,8 @@ export class Agent implements IAgent {
     const runId = this.currentRunId ?? '';
     let result;
     try {
+      const runUntrusted = filing.kind === 'mail_reply' || this._sawUntrustedData || this._conversationSawUntrusted;
+      const instructionUntrusted = ctx.createdUntrusted === true;
       result = ctx.store.file({
         filing,
         origin: {
@@ -575,8 +577,10 @@ export class Agent implements IAgent {
           // taint is set only after the handler returns, so a reply counts as after foreign
           // content by its kind (PRD §4.5 fact 14). A trigger marked as set up after foreign
           // content passes that on to everything its run files.
-          afterUntrusted: filing.kind === 'mail_reply' || ctx.createdUntrusted === true
-            || this._sawUntrustedData || this._conversationSawUntrusted,
+          afterUntrusted: runUntrusted || instructionUntrusted,
+          // The card names which (U-209): the instruction, the run, or both.
+          ...(instructionUntrusted ? { instructionUntrusted: true } : {}),
+          ...(runUntrusted ? { runUntrusted: true } : {}),
         },
         createdBy: ctx.createdBy,
         mandateId: ctx.mandateId,

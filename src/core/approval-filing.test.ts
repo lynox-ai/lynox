@@ -327,6 +327,23 @@ describe('only the marked call can file', () => {
     expect(file(child, 'from trigger, child')).toBe(true);
   });
 
+  it('stores which side held: the run read outside content, the trigger\'s instruction was written after some, or both (U-209)', () => {
+    const sides = (agent: Agent, subject: string) => {
+      const r = runInCallSlot({ filing: true }, () => agent.fileApproval({ kind: 'mail_send', payload: payload({ subject }) }));
+      const o = r.ok ? store.get(r.id)!.origin! : undefined;
+      return { after: o?.afterUntrusted, instruction: o?.instructionUntrusted, run: o?.runUntrusted };
+    };
+    expect(sides(agentWith([]), 'clean')).toEqual({ after: false, instruction: undefined, run: undefined });
+    const read = agentWith([], { currentRunId: 'run-u1' });
+    read.noteUntrustedData();
+    expect(sides(read, 'run read')).toEqual({ after: true, instruction: undefined, run: true });
+    const fromTrigger = agentWith([], { currentRunId: 'run-u2', approvalFiling: ctx({ createdUntrusted: true }) });
+    expect(sides(fromTrigger, 'instruction')).toEqual({ after: true, instruction: true, run: undefined });
+    const both = agentWith([], { currentRunId: 'run-u3', approvalFiling: ctx({ createdUntrusted: true }) });
+    both.noteUntrustedData();
+    expect(sides(both, 'both')).toEqual({ after: true, instruction: true, run: true });
+  });
+
   it('a reply always counts as after foreign content: it answers a mail nobody here wrote', () => {
     const agent = agentWith([]);
     const reply = {
