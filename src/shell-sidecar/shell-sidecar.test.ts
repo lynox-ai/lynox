@@ -194,6 +194,12 @@ describe('releasing a uid', () => {
 
   it('quarantines when root still sees residue after the sweep', async () => {
     const { ops } = fakeOps([0], { residue: ['shm 7'] });
-    expect(await releaseUid(20000, ops)).toEqual({ ok: false, reason: 'uid 20000: residue after the sweep: shm 7' });
+    expect(await releaseUid(20000, ops)).toEqual({ ok: false, reason: 'uid 20000: residue after the sweep: 1 entry (shm 1)' });
+  });
+
+  it('counts residue a call left per place and names none of it: the call chose the names, and the reason reaches the log', async () => {
+    const { ops } = fakeOps([0], { residue: ['/dev/shm/name-a-call-chose', '/dev/shm/other', '/tmp/calls/x (unreadable)', 'sem 3'] });
+    const result = await releaseUid(20000, ops);
+    expect(result).toEqual({ ok: false, reason: 'uid 20000: residue after the sweep: 4 entries (/dev/shm 2, /tmp/calls 1, sem 1)' });
   });
 });

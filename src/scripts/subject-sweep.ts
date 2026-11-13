@@ -49,6 +49,7 @@ import { SQLITE_BUSY_TIMEOUT_MS } from '../core/sqlite-constants.js';
 import { runMerge, rollbackMergeRun } from '../core/subject-merge-runner.js';
 import type { MergeLedgerFile, MergeRunResult } from '../core/subject-merge-runner.js';
 import { isCleanupTarget, isJunkPersonShape } from '../core/kg-stopwords.js';
+import { reducedErrorText } from '../core/error-egress.js';
 
 // Re-exported so this script's API surface (its tests + callers) keeps one import site.
 export type { MergeLedgerFile } from '../core/subject-merge-runner.js';
@@ -329,7 +330,7 @@ function openOrphanOracle(
   const external = makeSubjectExternalRefs(threadStore, ds, (probe, err) => {
     if (failed) return;
     failed = true;
-    process.stderr.write(`[subject-sweep] ${probe} probe failed — the orphan report cannot be trusted and is being refused: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`[subject-sweep] ${probe} probe failed — the orphan report cannot be trusted and is being refused: ${reducedErrorText(err)}\n`);
   });
   return { external, probeFailed: () => failed };
 }
