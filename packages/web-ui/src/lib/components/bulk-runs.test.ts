@@ -1279,10 +1279,14 @@ describe('the markup list of a target (1010)', () => {
 		const de = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: false, unread: true }, false, 'Beschreibung', DE);
 		expect([de.head, de.lines, de.note]).toEqual([
 			'Geändertes Markup in Beschreibung:', [],
-			'Das Markup dieses Felds ist zu groß oder zu tief verschachtelt, um hier aufgelistet zu werden.',
+			'Das Markup dieses Felds ist zu gross oder zu tief verschachtelt, um hier aufgelistet zu werden.',
 		]);
-		const en = bulkMarkupList({ field: 'description', added: [], removed: [], unread: true }, true, 'Description', EN);
-		expect([en.head, en.note]).toEqual([null, 'The markup of this field is too large or nested too deeply to be listed here.']);
+		// On an undo the engine sets addsOutsideAllowlist with it, so the undo still says it may write back a script.
+		const en = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, unread: true }, true, 'Description', EN);
+		expect([en.head, en.restoresNote, en.note]).toEqual([
+			null, 'This markup was in your shop before the run. The undo writes it back, a script included.',
+			'The markup of this field is too large or nested too deeply to be listed here.',
+		]);
 	});
 
 	it('lists an undo without a head, as what it restores and takes out', () => {

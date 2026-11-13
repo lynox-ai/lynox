@@ -21,6 +21,7 @@
 import { parseFragment, serialize, defaultTreeAdapter, html as p5 } from 'parse5';
 import type { DefaultTreeAdapterTypes } from 'parse5';
 import { HIDDEN_ALLOWED_MAX, hiddenCharIndexes } from './hidden-chars.js';
+import { withinReadingBounds } from './html-tree.js';
 import type { BulkListSourceForm } from './bulk-list.js';
 
 export type HtmlFragment = DefaultTreeAdapterTypes.DocumentFragment;
@@ -160,7 +161,7 @@ const NAMESPACES: Readonly<Record<string, MarkupNamespace>> = {
  *  `style` in every namespace: in SVG and MathML their body hangs below them as text nodes,
  *  and an inline SVG `<script>` runs. Wider than the PRD's list where the parser has more
  *  raw-text elements (`iframe`, `noframes`, `plaintext`); wider only errs toward refusing. */
-const TEXT_CARRIERS = new Set([
+export const TEXT_CARRIERS: ReadonlySet<string> = new Set([
   'script', 'style', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'plaintext', 'textarea', 'title',
 ]);
 
@@ -191,29 +192,6 @@ function* descendants(n: Node, inTemplate: boolean): Generator<[Node, boolean]> 
     yield [c, t];
     push(c, t);
   }
-}
-
-/** The size and nesting a value may have for this module to read it. A text carrier's occurrence
- *  holds the text and layout of everything below it, so each carrier above a node reads that node
- *  again: the cost grows with the bytes times the carriers nested above them, and the element depth
- *  bounds the parser's own serialising. Far above product descriptions as shops write them; a value
- *  beyond them is refused, never cut. */
-export const MARKUP_MAX_BYTES = 1024 * 1024;
-export const MARKUP_MAX_DEPTH = 512;
-export const MARKUP_MAX_CARRIER_NESTING = 8;
-
-/** Whether a value stays within {@link MARKUP_MAX_BYTES}, {@link MARKUP_MAX_DEPTH} and
- *  {@link MARKUP_MAX_CARRIER_NESTING}: one parse and one pass, linear in the value. */
-export function withinReadingBounds(value: string): boolean {
-  if (Buffer.byteLength(value, 'utf8') > MARKUP_MAX_BYTES) return false;
-  const stack: [Node, number, number][] = [[parseHtmlFragment(value), 0, 0]];
-  while (stack.length > 0) {
-    const [n, depth, above] = stack.pop()!;
-    const carriers = above + (isElement(n) && TEXT_CARRIERS.has(n.tagName) ? 1 : 0);
-    if (depth > MARKUP_MAX_DEPTH || carriers > MARKUP_MAX_CARRIER_NESTING) return false;
-    for (const c of childrenOf(n)) stack.push([c, depth + 1, carriers]);
-  }
-  return true;
 }
 
 function textBelow(n: Node): string {
@@ -601,6 +579,8 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
  */
 export function markupAddedByHost(input: { sent: string; back: string; storeHost: string; startDomains: readonly string[] }): MarkupCheckResult {
   try {
+    // The bytes sent read back unchanged add nothing, whatever their size.
+    if (input.back === input.sent) return { ok: true };
     if (!withinReadingBounds(input.sent) || !withinReadingBounds(input.back)) {
       return refused('not_canonical', 'The value read back or the value sent is larger or nested deeper than this check reads.');
     }
@@ -1144,7 +1124,8 @@ export interface FieldMarkupChange {
    *  the product pointed to before: a link to a domain new to the product counts as within. */
   addsOutsideAllowlist: boolean;
   /** Set where the value or its before-image lies beyond {@link withinReadingBounds}: nothing is
-   *  listed, and the page says the field's markup could not be listed. */
+   *  listed, the page says the field's markup could not be listed, and `addsOutsideAllowlist` is
+   *  set, so an undo still says it may write back a script. */
   unread?: true;
 }
 
@@ -1176,9 +1157,9 @@ function toItem(o: Occurrence): MarkupItem {
  *  the bytes sent (sec-core M3: a rewrite to the allowlist must not delete an image unseen). */
 export function markupChangesOf(field: string, before: string | null, after: string): FieldMarkupChange {
   if (!withinReadingBounds(after) || (before !== null && !withinReadingBounds(before))) {
-    return { field, added: [], removed: [], addsOutsideAllowlist: false, unread: true };
+    return { field, added: [], removed: [], addsOutsideAllowlist: true, unread: true };
   }
-  const b =markupOf(parseHtmlFragment(before ?? '')).occurrences.filter(named);
+  const b = markupOf(parseHtmlFragment(before ?? '')).occurrences.filter(named);
   const a = markupOf(parseHtmlFragment(after)).occurrences.filter(named);
   const added = multisetMinus(a, b).map(toItem);
   return { field, added, removed: multisetMinus(b, a).map(toItem), addsOutsideAllowlist: added.some((i) => !withinAllowlist(i)) };

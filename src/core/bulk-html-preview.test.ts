@@ -88,6 +88,6 @@ describe('getPreview: markupChanges', () => {
     const id = previewOne({ description: deep }, { description: '<p>Alt</p>' });
     const [t] = ledger.getPreview(id);
     expect(t!.change).toBe('update');
-    expect(t!.markupChanges).toEqual([{ field: 'description', added: [], removed: [], addsOutsideAllowlist: false, unread: true }]);
+    expect(t!.markupChanges).toEqual([{ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, unread: true }]);
   });
 });

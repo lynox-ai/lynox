@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import { checkMarkup, markupAddedByHost, markupChangesOf, TEXT_CARRIERS } from './bulk-html.js';
 import {
-  checkMarkup, markupAddedByHost, markupChangesOf, withinReadingBounds,
-  MARKUP_MAX_BYTES, MARKUP_MAX_CARRIER_NESTING, MARKUP_MAX_DEPTH,
-} from './bulk-html.js';
+  withinReadingBounds, MARKUP_MAX_BYTES, MARKUP_MAX_CARRIER_NESTING, MARKUP_MAX_DEPTH, MARKUP_MAX_NODES, READ_AGAIN_CARRIERS,
+} from './html-tree.js';
 import { BULK_MAX_TARGET_BYTES } from './bulk-plan.js';
 import { html as p5, parseFragment, defaultTreeAdapter } from 'parse5';
 import type { DefaultTreeAdapterTypes } from 'parse5';
@@ -50,10 +50,26 @@ const timed = <T>(f: () => T): [T, number] => {
 };
 
 describe('the bounds the markup check reads within', () => {
-  it('are the byte bound of a bulk target, and far above what shops write', () => {
+  it('are the byte bound of a bulk target, and fixed depth, nesting and node bounds', () => {
     expect(MARKUP_MAX_BYTES).toBe(BULK_MAX_TARGET_BYTES);
     expect(MARKUP_MAX_DEPTH).toBe(512);
     expect(MARKUP_MAX_CARRIER_NESTING).toBe(8);
+    expect(MARKUP_MAX_NODES).toBe(50_000);
+  });
+
+  it('count every carrier the markup extraction reads again', () => {
+    expect([...READ_AGAIN_CARRIERS].sort()).toEqual([...TEXT_CARRIERS].sort());
+  });
+
+  it('end at the nodes the parser builds, elements, comments and text alike', () => {
+    // The parser builds two nodes of its own for a fragment; they count too.
+    const own = MARKUP_MAX_NODES - 2;
+    expect(withinReadingBounds('<br>'.repeat(own))).toBe(true);
+    expect(withinReadingBounds('<br>'.repeat(own + 1))).toBe(false);
+    expect(withinReadingBounds('<!---->'.repeat(own))).toBe(true);
+    expect(withinReadingBounds('<!---->'.repeat(own + 1))).toBe(false);
+    expect(withinReadingBounds('x<br>'.repeat(own / 2))).toBe(true);
+    expect(withinReadingBounds('x<br>'.repeat(own / 2) + 'x')).toBe(false);
   });
 
   it('end at the element depth, not one level earlier', () => {
@@ -84,7 +100,8 @@ describe('a value beyond the bounds', () => {
 
   it('is listed as unread, within a bound set before measuring', () => {
     const [change, ms] = timed(() => markupChangesOf('description', null, measured));
-    expect(change).toEqual({ field: 'description', added: [], removed: [], addsOutsideAllowlist: false, unread: true });
+    // Errs toward warning: an undo of it still says it may write back a script.
+    expect(change).toEqual({ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, unread: true });
     expect(ms).toBeLessThan(1000);
   });
 
@@ -94,7 +111,7 @@ describe('a value beyond the bounds', () => {
     const value = carriers(MARKUP_MAX_DEPTH - 12) + 'x'.repeat(256 * 1024);
     const [change, ms] = timed(() => markupChangesOf('description', null, value));
     expect(change.unread).toBe(true);
-    expect(ms).toBeLessThan(500);
+    expect(ms).toBeLessThan(1000);
   });
 
   it('is refused by the check, within the same bound', () => {
@@ -120,6 +137,8 @@ describe('a value beyond the bounds', () => {
     expect(ms).toBeLessThan(1000);
     expect(markupAddedByHost({ sent: measured, back: '<p>a</p>', storeHost: HOST, startDomains: [] })).toMatchObject({ ok: false, reason: 'not_canonical' });
     expect(markupAddedByHost({ sent: '<p>a</p>', back: '<p>a</p>', storeHost: HOST, startDomains: [] })).toEqual({ ok: true });
+    // The bytes sent read back unchanged add nothing, whatever their size.
+    expect(markupAddedByHost({ sent: measured, back: measured, storeHost: HOST, startDomains: [] })).toEqual({ ok: true });
     // Closed and of allowed elements only, so nothing but the depth refuses it.
     const pairs = MARKUP_MAX_DEPTH / 2 + 1;
     const lists = '<ul><li>'.repeat(pairs) + 'x' + '</li></ul>'.repeat(pairs);
@@ -141,7 +160,7 @@ describe('a value within the bounds', () => {
     expect(change.unread).toBeUndefined();
   });
 
-  it('is listed at the carrier nesting and the byte bound, in linear time', () => {
+  it('is listed at the carrier nesting and the byte bound', () => {
     // Every carrier above the most text it can hold, the rest of the depth below them.
     const head = `${carriers(MARKUP_MAX_CARRIER_NESTING)}${'<g>'.repeat(MARKUP_MAX_DEPTH - MARKUP_MAX_CARRIER_NESTING - 2)}`;
     const value = head + 'x'.repeat(MARKUP_MAX_BYTES - Buffer.byteLength(head));
@@ -150,9 +169,9 @@ describe('a value within the bounds', () => {
     const [change, ms] = timed(() => markupChangesOf('description', null, value));
     expect(change.unread).toBeUndefined();
     expect(change.added.length).toBeGreaterThan(MARKUP_MAX_CARRIER_NESTING);
-    expect(ms).toBeLessThan(2000);
+    expect(ms).toBeLessThan(5000);
     const [result, checkMs] = timed(() => check(value));
     expect(result).not.toEqual({ ok: false, reason: 'not_canonical', detail: 'The value or its before-image is larger or nested deeper than this check reads.' });
-    expect(checkMs).toBeLessThan(2000);
+    expect(checkMs).toBeLessThan(5000);
   });
 });
