@@ -40,7 +40,7 @@ import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenHolders, vaultNameAllowed } from './profile-secret-view.js';
+import { connectionTokenHolders, resolveGuardAllows } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -51,7 +51,7 @@ import { closeWorkspaceBase } from './workspace-rel.js';
 import { ensureWorkspaceRoot } from './workspace-root.js';
 import { workspaceAccess } from './workspace-access.js';
 
-import { isProtectedSecretWrite, type SecretStore } from './secret-store.js';
+import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
@@ -1948,7 +1948,7 @@ export class Engine {
         }
       }
       // The stored profiles are loaded: the guard set with the secret store answers by them, and by
-      // the entries it could not read (`vaultNameAllowed`).
+      // the entries it could not read (`resolveGuardAllows`).
       this._profilesKnown = true;
       // The LLM client was built before this, when the guard handed out only the environment's and
       // the platform's names: a Vertex project id kept in the vault is read now.
@@ -2982,19 +2982,14 @@ export class Engine {
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
 
-  /**
-   * The secret store's resolve guard. Once the stored profiles are loaded it is the B9 check over
-   * them, over the ones the import waits to write, and over the entries the boot could not read
-   * ({@link vaultNameAllowed}). Before that, and for good when loading them failed, nobody knows
-   * which vault names hold a connection's token, so only names that cannot hold one go out: the
-   * environment's, and the platform's own slots, which are never attached to an outbound request.
-   * A failed load closes the vault's other names; it does not open a waiting token.
-   */
+  /** The secret store's resolve guard: {@link resolveGuardAllows} over this engine's state. */
   private resolveGuard(name: string): boolean {
-    if (!this._profilesKnown || this._apiStore === null) {
-      return this.secretStore?.isEnvironmentSecret(name) === true || isProtectedSecretWrite(name);
-    }
-    return vaultNameAllowed(this._apiStore, this._mandateEnds, name);
+    return resolveGuardAllows({
+      profilesKnown: this._profilesKnown,
+      apiStore: this._apiStore,
+      ends: this._mandateEnds,
+      fromEnvironment: (n) => this.secretStore?.isEnvironmentSecret(n) === true,
+    }, name);
   }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 

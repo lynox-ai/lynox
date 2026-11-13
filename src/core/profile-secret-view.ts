@@ -1096,18 +1096,32 @@ export function connectionTokenAllowed(
 }
 
 /**
- * The engine's resolve guard once the profiles are loaded: {@link connectionTokenAllowed} over every
- * stored profile, the ones the import still waits to write included, and no for a name a stored
- * entry the boot could not read may hold — whose connection that is, and whether its mandate
- * ended, cannot be told, so it is not handed out until the entry is repaired or removed.
+ * The engine's resolve guard (`Engine.resolveGuard`), set as soon as the secret store exists.
+ *
+ * - A name the environment set, or one of the platform's own slots, always goes out: neither can
+ *   hold a connection's token (a protected name is refused as a token's slot on every write path,
+ *   and an environment value shadows any vault value of the same name).
+ * - Every other name needs the profiles: before they are loaded, and for good when loading them
+ *   failed (`apiStore` null), it does not go out.
+ * - Loaded, it is {@link connectionTokenAllowed} over every stored profile, the ones the import
+ *   still waits to write included, and no for a name a stored entry the boot could not read may
+ *   hold: whose connection that is, and whether its mandate ended, cannot be told until the entry
+ *   is repaired or removed.
  */
-export function vaultNameAllowed(
-  apiStore: Pick<ApiStore, 'knownProfiles' | 'waitingProfiles' | 'unreadableHolds'>,
-  ends: Pick<MandateEnds, 'isLive'> | null,
+export function resolveGuardAllows(
+  state: {
+    readonly profilesKnown: boolean;
+    readonly apiStore: Pick<ApiStore, 'knownProfiles' | 'waitingProfiles' | 'unreadableHolds'> | null;
+    readonly ends: Pick<MandateEnds, 'isLive'> | null;
+    readonly fromEnvironment: (name: string) => boolean;
+  },
   name: string,
 ): boolean {
+  if (state.fromEnvironment(name) || isProtectedSecretWrite(name)) return true;
+  const apiStore = state.apiStore;
+  if (!state.profilesKnown || apiStore === null) return false;
   if (apiStore.unreadableHolds(name)) return false;
-  return connectionTokenAllowed({ knownProfiles: () => [...apiStore.knownProfiles(), ...apiStore.waitingProfiles()] }, ends, name);
+  return connectionTokenAllowed({ knownProfiles: () => [...apiStore.knownProfiles(), ...apiStore.waitingProfiles()] }, state.ends, name);
 }
 
 /**
