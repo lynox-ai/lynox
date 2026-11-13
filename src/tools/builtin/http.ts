@@ -168,6 +168,10 @@ function blockedVerbatim(message: string): never {
   throw new ToolSoftFailure(message, message);
 }
 
+/** The refusal when an HTTP request limit is set but the history database that counts it did not open. */
+export const HTTP_RATE_UNCOUNTED =
+  'Blocked: the HTTP request limit cannot be checked, because the history database did not open when lynox started. This request was not sent, and nothing keeps it for later. No http_request call goes out until someone restarts lynox and lynox can open the history database again; the log lynox writes at start says why it could not. Do not retry and do not offer to fetch it later on your own: nothing will remind you after the restart. Tell the user it was not sent; after the restart they can ask again. Do not ask whether to try again later either; if they want that, they ask after the restart.';
+
 /** Why a hop after a sent write was not followed, as the note after the write says it. */
 const REFUSED_HOP_REASON = {
   grant: "which this run's grant does not cover",
@@ -3093,6 +3097,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const rateLimitProvider = toolContext?.rateLimitProvider ?? null;
     const hourlyLimit = toolContext?.hourlyRateLimit ?? Infinity;
     const dailyLimit = toolContext?.dailyRateLimit ?? Infinity;
+    if (!rateLimitProvider && (hourlyLimit < Infinity || dailyLimit < Infinity)) {
+      // A limit is set and nothing can count against it: the history database did not
+      // open at startup. Refuse rather than send uncounted. Verbatim: the friendly
+      // rewrite matches on substrings, and this text is not written to avoid them.
+      blockedVerbatim(HTTP_RATE_UNCOUNTED);
+    }
     if (rateLimitProvider && (hourlyLimit < Infinity || dailyLimit < Infinity)) {
       if (hourlyLimit < Infinity) {
         const hourlyCount = rateLimitProvider.getToolCallCountSince('http_request', 1);
