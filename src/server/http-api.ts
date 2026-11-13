@@ -3507,11 +3507,12 @@ export class LynoxHTTPApi {
     let budgetCents: number;
     if (cpSummary?.managed) {
       // Budget stays CP-driven (Stripe tier amount is the canonical truth);
-      // `used_cents` is always recomputed from local `daily` below so it
-      // stays consistent with the rest of the response shape (`by_kind`,
-      // `daily`, and the StatusBar footer all read the same engine SQLite).
-      // The CP-supplied `used_cents` was a separate counter that drifted to
-      // 0 on staging — see commit message for the regression details.
+      // `used_cents` is recomputed from local `daily` below so it stays
+      // consistent with the rest of the response shape (`by_kind`, `daily`,
+      // and the StatusBar footer all read the same engine SQLite). The
+      // CP-supplied `used_cents` can only lift it, and only over the billing
+      // period it was counted for (`managedUsedCents`): as a separate counter
+      // it once drifted to 0 on staging.
       budgetCents = cpSummary.budget_cents ?? 0;
     } else if (isManagedTier) {
       budgetCents = 0;
