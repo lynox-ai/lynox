@@ -1082,13 +1082,16 @@ export function occupiedTokenSlots(store: SecretStoreLike, id: string): string[]
  * no mandate counts as live. What lifts it is the owner's consent: connecting the account again,
  * or adopting the connection (`api_setup` action `adopt_connection`, which asks the person).
  * Saving over the profile alone keeps the mandate's grant.
+ *
+ * It needs the profiles: without them nobody knows which names hold a connection's token. The
+ * engine's guard does not ask this before every profile is known, nor after loading them failed
+ * (`Engine`, `resolveGuard`); there is no answer here for a missing store.
  */
 export function connectionTokenAllowed(
-  apiStore: Pick<ApiStore, 'knownProfiles'> | null,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   ends: Pick<MandateEnds, 'isLive'> | null,
   name: string,
 ): boolean {
-  if (apiStore === null) return true;
   return !apiStore.knownProfiles().some((p) => connectionWaits(p, ends) && grantTokenNames(p).has(name));
 }
 

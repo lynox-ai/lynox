@@ -51,7 +51,7 @@ import { closeWorkspaceBase } from './workspace-rel.js';
 import { ensureWorkspaceRoot } from './workspace-root.js';
 import { workspaceAccess } from './workspace-access.js';
 
-import type { SecretStore } from './secret-store.js';
+import { isProtectedSecretWrite, type SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
@@ -476,6 +476,8 @@ export class Engine {
     driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
   } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
+  /** Set once every stored API profile is loaded; until then {@link resolveGuard} cannot tell which vault names hold a connection's token. */
+  private _profilesKnown = false;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _subjectStore: import('./subject-store.js').SubjectStore | null = null;
@@ -1726,6 +1728,10 @@ export class Engine {
     const secretResult = initSecrets(this.userConfig);
     this.secretVault = secretResult.vault;
     this.secretStore = secretResult.store;
+    // From the moment the store exists, a token of a connection whose mandate has ended is not
+    // handed out, to anyone. Set here, not after the profiles load: a guard set at the end of that
+    // block is never set when the block throws.
+    this.secretStore?.setResolveGuard((name) => this.resolveGuard(name));
     this.secretsBriefing = secretResult.secretsBriefing;
     for (const part of secretResult.briefingParts) {
       this.briefing = compose(
@@ -1941,8 +1947,8 @@ export class Engine {
           process.stderr.write(`[lynox:vault-bindings] Migration failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }
-      // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
-      this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
+      // Every stored profile is known now: the guard set with the secret store answers by them.
+      this._profilesKnown = true;
       if (loaded > 0) {
         const store = this._apiStore;
         const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
@@ -2968,6 +2974,20 @@ export class Engine {
   getLegacyMemoryReason(): LegacyMemoryReason | null { return this._legacyMemory; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
+
+  /**
+   * The secret store's resolve guard. With every profile known it is the B9 check
+   * ({@link connectionTokenAllowed}). Before that, and for good when loading them failed, nobody
+   * knows which vault names hold a connection's token, so only names that cannot hold one go out:
+   * the environment's, and the platform's own slots, which are never attached to an outbound
+   * request. A failed load closes the vault's other names; it does not open a waiting token.
+   */
+  private resolveGuard(name: string): boolean {
+    if (!this._profilesKnown || this._apiStore === null) {
+      return this.secretStore?.isEnvironmentSecret(name) === true || isProtectedSecretWrite(name);
+    }
+    return connectionTokenAllowed(this._apiStore, this._mandateEnds, name);
+  }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 
   /**

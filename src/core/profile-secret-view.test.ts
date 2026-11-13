@@ -253,11 +253,12 @@ describe('connectionTokenAllowed', () => {
     expect(allowed(grantOf(M, 'M-1'), null, 'BOOKS_API_ACCESS_TOKEN')).toBe(false);
   });
 
-  it('control: leaves the owner\'s consent, an unstamped grant, other names and a missing API store alone', () => {
+  // A missing API store is no longer an input: the engine's guard answers without profiles itself
+  // (connection-token-guard-boot.test.ts, "the profiles fail to load").
+  it('control: leaves the owner\'s consent, an unstamped grant and other names alone', () => {
     expect(allowed(grantOf('owner'), [], 'BOOKS_API_ACCESS_TOKEN')).toBe(true);
     expect(allowed(grantOf(undefined), [], 'BOOKS_API_ACCESS_TOKEN')).toBe(true);
     expect(allowed(grantOf(M, 'M-1'), [], 'BOOKS_CLIENT_ID')).toBe(true);
-    expect(connectionTokenAllowed(null, null, 'BOOKS_API_ACCESS_TOKEN')).toBe(true);
   });
 });
 
