@@ -2,8 +2,8 @@
  * Online eval: when the owner asks for a bulk run over a store's active products, does the model
  * name the status filter, and does it leave it out when the owner asks for every product?
  *
- * A store's product search lists every status unless a status narrows it: a store's drafts and
- * archived products, and its gift cards, are targets otherwise. bulk_plan now takes `filters.status`. This eval records the
+ * A store's product search lists every status unless a status narrows it: drafts, archived
+ * products and gift cards a store has are targets otherwise. bulk_plan now takes `filters.status`. This eval records the
  * filters of every plan:
  * (s1) "the active products" → status active;
  * (s2) "every product" → no status;
@@ -119,7 +119,9 @@ async function runOnce(provider: string, make: (tools: ToolEntry[]) => Agent, la
   const filters = ((last?.input['source_list'] as { filters?: Record<string, unknown> } | undefined)?.filters) ?? null;
   // A hit names exactly the wanted filters: a status that replaced the group is a miss.
   const status = filters === null ? null : (filters['status'] ?? null);
-  const hit = want === null ? status === null : JSON.stringify(Object.entries(filters ?? {}).sort()) === JSON.stringify(Object.entries(want).sort());
+  // Compared as the engine compares them: up to ASCII case.
+  const norm = (o: Record<string, unknown>): string => JSON.stringify(Object.entries(o).sort()).toLowerCase();
+  const hit = want === null ? status === null : norm(filters ?? {}) === norm(want);
   const dump = process.env['STATUS_DUMP'];
   if (dump) appendFileSync(dump, `${JSON.stringify({ provider, label, run: i, recorded: recorded.length > 0, filters, hit, plans, reply })}\n`);
   table.push(`${provider}\t${label}\t#${String(i)}\t${recorded.length === 0 ? 'NO-PLAN' : hit ? 'HIT' : 'MISS'}\t${JSON.stringify(filters)}\t${reply.replace(/\s+/g, ' ').slice(0, 120)}`);
