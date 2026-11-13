@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+	bulkHiddenSegments, bulkHiddenCountText, bulkRawText,
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead, bulkOne,
@@ -1345,4 +1346,66 @@ describe('the singular of a count of one', () => {
 			expect(bulkSkippedHead(run, shopify, EN)).toEqual({ text: enText, nothing: true });
 		});
 	}
+});
+
+// The value with a mark behind each hidden character the run adds in place.
+describe('bulkHiddenSegments', () => {
+	const i18n = { t: (k: string) => k, tf: (k: string, v: Record<string, string>) => `${k}:${Object.values(v).join('|')}` };
+	const textOf = (s: ReturnType<typeof bulkHiddenSegments>): string => s.map((p) => ('text' in p ? p.text : '')).join('');
+
+	it('marks every occurrence of a code point named, and none of one not named', () => {
+		const s = bulkHiddenSegments('Ke\u200ctab\u200cha und Wa\u00adsser', [0x200c], i18n);
+		expect(s.filter((p) => 'mark' in p)).toHaveLength(2);
+		expect(s.filter((p) => 'mark' in p).every((p) => 'label' in p && p.label === 'bulk.hidden.label:bulk.hidden.kind.zwnj (U+200C)')).toBe(true);
+	});
+
+	it('marks an emoji behind its whole grapheme, joiners and selector included, once', () => {
+		const family = '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}';
+		const s = bulkHiddenSegments(`Team ${family}!`, [0x200d], i18n);
+		expect(s).toEqual([{ text: `Team ${family}` }, { mark: 'bulk.hidden.mark', label: 'bulk.hidden.label:bulk.hidden.kind.zwj (U+200D)' }, { text: '!' }]);
+	});
+
+	it('gives no mark to a character the page shows as its code point already', () => {
+		// A soft hyphen at the end is not between letters: hidden, shown as its code point.
+		expect(bulkHiddenSegments('Wasser\u00ad', [0x00ad], i18n)).toEqual([{ text: 'Wasser⟨U+00AD⟩' }]);
+	});
+
+	it('marks a character reference in an HTML field behind it, and none in a plain one', () => {
+		const s = bulkHiddenSegments('<p>Wasser&shy;filter</p>', [0x00ad], i18n, true);
+		expect(s).toEqual([{ text: '<p>Wasser&shy;' }, { mark: 'bulk.hidden.mark', label: 'bulk.hidden.label:bulk.hidden.kind.soft_hyphen (U+00AD)' }, { text: 'filter</p>' }]);
+		expect(bulkHiddenSegments('Wasser&shy;filter', [0x00ad], i18n)).toEqual([{ text: 'Wasser&shy;filter' }]);
+		// Leading zeros in any number, as a browser reads them.
+		// Built, not written out: eleven zeros after `#` read like a colour to the hex guard.
+		const padded = `&#${'0'.repeat(11)}173;`;
+		expect(bulkHiddenSegments(`<p>Wa${padded}sser</p>`, [0x00ad], i18n, true).filter((p) => 'mark' in p)).toHaveLength(1);
+	});
+
+	it('marks a value that is not text in the JSON the page shows', () => {
+		const v = { note: 'Ke\u200ctab' };
+		const s = bulkHiddenSegments(bulkRawText(v), [0x200c], i18n);
+		expect(s.filter((p) => 'mark' in p)).toHaveLength(1);
+		expect(textOf(s)).toBe(bulkValueText(v));
+	});
+
+	// The mark is the page's: the segments' text is the value as the preview shows it, never more.
+	it('keeps the value\'s text whole beside the marks', () => {
+		for (const v of ['Wasser\u00adfilter', '<p title="a\u00adb">Wa\u00adsser</p>', 'x ❤\ufe0f \u200b', 'Ketab\u200cha\u200e.', '']) {
+			expect(textOf(bulkHiddenSegments(v, [0x00ad, 0x200c, 0x200e, 0xfe0f], i18n)), v).toBe(bulkValueText(v) === '' ? '' : bulkValueText(v));
+		}
+	});
+});
+
+describe('bulkHiddenCountText', () => {
+	const i18n = { t: (k: string) => k, tf: (k: string, v: Record<string, string>) => `${k}:${v['n'] ?? ''}` };
+	it('names several targets, one in the singular, and none at zero or unknown', () => {
+		expect(bulkHiddenCountText(4, false, i18n)).toBe('bulk.hidden.count:4');
+		expect(bulkHiddenCountText(1, false, i18n)).toBe('bulk.hidden.count_one:1');
+		expect(bulkHiddenCountText(0, false, i18n)).toBeNull();
+		expect(bulkHiddenCountText(null, false, i18n)).toBeNull();
+	});
+
+	it('names products on Shopify, as every count beside it does', () => {
+		expect(bulkHiddenCountText(4, true, i18n)).toBe('bulk.hidden.count_products:4');
+		expect(bulkHiddenCountText(1, true, i18n)).toBe('bulk.hidden.count_products_one:1');
+	});
 });

@@ -4,6 +4,7 @@
 // without the Svelte plugin.
 
 import { visibleText } from '../visible-text.js';
+import { hiddenCharIndexes, inPlaceReferences } from '../hidden-chars.js';
 
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface BulkI18n {
@@ -90,6 +91,9 @@ export interface BulkRun {
 
 export interface BulkRunDetailData extends BulkRun {
 	checksum: string | null;
+	/** Targets the owner has not taken out that add hidden characters the page marks; null where
+	 *  the run is neither approved nor confirmed from this page. */
+	hiddenAddsTargets?: number | null | undefined;
 	writeFormNote: string | null;
 	writeFormConfirmation: string | null;
 	judgeModel: string | null;
@@ -528,13 +532,17 @@ export interface BulkTarget {
 	seoEntityFields?: string[] | undefined;
 	/** Refused for `shortcode_changed`: each field the shortcode check refuses, with its whole
 	 *  planned value, for the owner to copy into the shop (1130). Set only where one holds. */
-	refusedValues?: { field: string; value: string }[] | undefined;
+	refusedValues?: { field: string; value: string; codePoints?: number[] | undefined }[] | undefined;
 	/** With `secret_in_context`: the field the judge only reads that held it, by its name. */
 	contextField?: string | undefined;
 	/** Per HTML field an `update` target changes: the elements and comments its new value adds and
 	 *  removes, each with its full value (PRD shopify-preset §20.2 item 5, sec-core M3). Computed by
 	 *  the engine from the parser's tree; the page only lists it, as text. */
 	markupChanges?: BulkFieldMarkupChange[] | undefined;
+	/** Per text field an `update` or `create` target writes: the hidden characters it holds more of
+	 *  than its before-image, where text may carry one and the page would not show it. Counted by
+	 *  the engine; the page marks every occurrence of each in that field ({@link bulkHiddenSegments}). */
+	hiddenAdds?: { field: string; codePoints: number[]; html?: true | undefined }[] | undefined;
 }
 
 /** One element or comment a new value adds or removes, as the engine's parser read it. */
@@ -973,4 +981,99 @@ export function bulkSkippedHead(
 export function bulkValueText(v: unknown): string {
 	if (v === undefined || v === null || v === '') return '';
 	return bulkVisibleText(typeof v === 'string' ? v : JSON.stringify(v));
+}
+
+/** A piece of a value as the preview shows it: text, or the mark behind a character the run adds
+ *  and the text would not show ({@link bulkHiddenSegments}). */
+export type BulkValueSegment = { text: string } | { mark: string; label: string };
+
+/** The kind of a hidden character a run may add in place, by the key of its name. */
+const HIDDEN_KIND_KEYS: Readonly<Record<number, string>> = {
+	0x00ad: 'bulk.hidden.kind.soft_hyphen',
+	0x200c: 'bulk.hidden.kind.zwnj',
+	0x200e: 'bulk.hidden.kind.direction',
+	0x200f: 'bulk.hidden.kind.direction',
+	0x061c: 'bulk.hidden.kind.direction',
+	0x200d: 'bulk.hidden.kind.zwj',
+	0xfe0f: 'bulk.hidden.kind.vs16',
+};
+
+/** `text` cut into graphemes; where the browser has no `Intl.Segmenter`, into code points, so a
+ *  mark may then stand inside an emoji but is never left out. */
+function graphemes(text: string): string[] {
+	if (typeof Intl.Segmenter !== 'function') return Array.from(text);
+	return Array.from(new Intl.Segmenter('und', { granularity: 'grapheme' }).segment(text), (s) => s.segment);
+}
+
+function codePointName(cp: number): string {
+	return `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+}
+
+/**
+ * A value as the preview shows it, with a mark behind each character of `codePoints` the text
+ * would not show: hidden characters the engine counted more of in this field than its
+ * before-image holds (`hiddenAdds`). Every occurrence is marked, not
+ * only the new ones. A mark stands behind the whole grapheme, so an emoji is never cut, and names
+ * the kind and code point only in its label. A character the page already shows as its code point
+ * gets no mark. In an HTML field (`html`), a character reference that stands for one (`&shy;`) is
+ * marked behind it too: the source shows it as text, the store's page carries the character. The
+ * segments' text, joined, is the value as {@link bulkValueText} shows it: the mark is the page's,
+ * never part of the value.
+ */
+export function bulkHiddenSegments(text: string, codePoints: readonly number[], i18n: BulkI18n, html = false): BulkValueSegment[] {
+	const shown = new Set(hiddenCharIndexes(text));
+	const marked = new Set(codePoints);
+	// Where a marked reference ends, by its UTF-16 offset: its mark follows the grapheme it ends in.
+	const references = html ? inPlaceReferences(text).filter((r) => marked.has(r.cp)) : [];
+	const out: BulkValueSegment[] = [];
+	let pending = '';
+	let at = 0;
+	let offset = 0;
+	for (const segment of graphemes(text)) {
+		const kinds: number[] = [];
+		for (const c of segment) {
+			const cp = c.codePointAt(0)!;
+			if (shown.has(at)) pending += `⟨${codePointName(cp)}⟩`;
+			else {
+				pending += c;
+				if (marked.has(cp) && !kinds.includes(cp)) kinds.push(cp);
+			}
+			at++;
+		}
+		const end = offset + segment.length;
+		for (const r of references) if (r.end > offset && r.end <= end && !kinds.includes(r.cp)) kinds.push(r.cp);
+		offset = end;
+		if (kinds.length === 0) continue;
+		out.push({ text: pending });
+		pending = '';
+		const names = kinds.map((cp) => `${i18n.t(HIDDEN_KIND_KEYS[cp] ?? 'bulk.hidden.kind.other')} (${codePointName(cp)})`);
+		out.push({ mark: i18n.t('bulk.hidden.mark'), label: i18n.tf('bulk.hidden.label', { kind: names.join(', ') }) });
+	}
+	if (pending !== '' || out.length === 0) out.push({ text: pending });
+	return out;
+}
+
+/** A value as text before its hidden characters are shown: text as it is, anything else as JSON,
+ *  the text {@link bulkValueText} shows and {@link bulkHiddenSegments} marks. */
+export function bulkRawText(v: unknown): string {
+	if (v === undefined || v === null || v === '') return '';
+	return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+/** The code points a target's field adds that the preview marks; none for a field it does not name. */
+export function bulkHiddenAddsOf(target: Pick<BulkTarget, 'hiddenAdds'>, field: string): number[] {
+	return target.hiddenAdds?.find((h) => h.field === field)?.codePoints ?? [];
+}
+
+/** Whether the engine counted a target's field as HTML, whose character references are marked too. */
+export function bulkHiddenHtml(target: Pick<BulkTarget, 'hiddenAdds'>, field: string): boolean {
+	return target.hiddenAdds?.find((h) => h.field === field)?.html === true;
+}
+
+/** The line an approval and a probe's confirmation show when targets add hidden characters, or
+ *  null for none (a mark among hundreds of targets is not left to be found). */
+export function bulkHiddenCountText(n: number | null | undefined, shopify: boolean, i18n: BulkI18n): string | null {
+	if (n === null || n === undefined || n <= 0) return null;
+	// Products on Shopify, targets elsewhere, as every count beside it (U-218).
+	return i18n.tf(bulkOne(shopify ? 'bulk.hidden.count_products' : 'bulk.hidden.count', n), { n: String(n) });
 }

@@ -709,6 +709,13 @@ function countedAttribute(name: string): boolean {
   return /^on/i.test(name) || name === 'style' || name === 'srcdoc' || name === 'srcset' || name === 'id' || name === 'name' || URL_ATTRIBUTES.has(name);
 }
 
+/** Every text an HTML value carries once parsed, as {@link checkMarkup} counts hidden characters
+ *  in them: text nodes and attribute values with their character references resolved, comments
+ *  as written. */
+export function htmlTextsOf(value: string): string[] {
+  return textsOf(parseHtmlFragment(value));
+}
+
 /** Every text a tree carries: text nodes, attribute values, comments. */
 function textsOf(n: Node): string[] {
   const out: string[] = [];

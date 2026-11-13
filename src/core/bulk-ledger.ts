@@ -24,6 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
+import { hiddenAddsOf, targetHiddenAdds, type FieldHiddenAdds } from './bulk-hidden-adds.js';
 import { checkMarkup, droppedTagsOf, endsClosed, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual } from './html-tree.js';
@@ -614,6 +615,10 @@ export interface PreviewTarget {
    *  and removes, each with its full value (PRD shopify-preset §20.2 item 5, M3). Computed here
    *  from the parser's tree, so the view shows it and computes nothing. */
   markupChanges?: FieldMarkupChange[] | undefined;
+  /** Per text field an `update` or `create` target writes: the hidden characters its after-state
+   *  holds more of than its before-image, where real text may carry one and the page would not
+   *  show it (`bulk-hidden-adds.ts`). The view marks every occurrence of each in that field. */
+  hiddenAdds?: FieldHiddenAdds[] | undefined;
   /** A target refused for `new_link_domain` (1010): the domain the refused link points to, as the
    *  check read it (ASCII, lower case, Punycode). Absent on a row recorded before it was kept. */
   linkDomain?: string | undefined;
@@ -622,7 +627,7 @@ export interface PreviewTarget {
    *  target refused at its read holds none), with its whole value as the planner or the judge
    *  wrote it. Nothing is written for the target, so the owner copies these values into the shop
    *  themselves. Set only where one holds. */
-  refusedValues?: { field: string; value: string }[] | undefined;
+  refusedValues?: { field: string; value: string; codePoints?: number[] | undefined }[] | undefined;
   /** Written, and its read-back held markup the write never sent (PRD shopify-preset §21.2
    *  item 6): the target the halt `markupAddedByShop` is about. Set only where it holds. */
   shopAddedMarkup?: true | undefined;
@@ -1646,10 +1651,15 @@ export class BulkLedger {
         ? htmlFields.flatMap((f) => {
           const value = (after as Record<string, unknown>)[f];
           const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
-          return typeof value === 'string' && value !== was && refusesShortcode(value, typeof was === 'string' ? was : null) ? [{ field: f, value }] : [];
+          if (typeof value !== 'string' || value === was || !refusesShortcode(value, typeof was === 'string' ? was : null)) return [];
+          // The owner pastes this value into the shop by hand: a hidden character it adds is marked
+          // there as in the list.
+          const codePoints = hiddenAddsOf(typeof was === 'string' ? was : null, value, true);
+          return [{ field: f, value, ...(codePoints.length > 0 ? { codePoints } : {}) }];
         })
         : [];
       const seoEntityFields = seoNoted && r.change === 'update' ? shopifySeoEntityFields(prior, after) : [];
+      const hiddenAdds = (r.change === 'update' || r.change === 'create') && after !== null ? targetHiddenAdds(prior, after, htmlFields) : [];
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
@@ -1663,8 +1673,32 @@ export class BulkLedger {
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
         ...(seoEntityFields.length > 0 ? { seoEntityFields } : {}),
+        ...(hiddenAdds.length > 0 ? { hiddenAdds } : {}),
       };
     });
+  }
+
+  /** How many targets the owner has not taken out add hidden characters a page would not show
+   *  ({@link PreviewTarget.hiddenAdds}): the line an approval and a probe's confirmation show, so
+   *  that a mark among hundreds of targets is not left to be found. Decrypts
+   *  every writing target, as the checksum does, and computes only this: iterated, not loaded,
+   *  for a run's images can reach 32 MB. A judged target without its verdict counts as none, as
+   *  {@link getPreview} shows it. */
+  hiddenAddsTargets(runId: string): number {
+    const judged = (this.runRow(runId)?.judge_rule ?? null) !== null;
+    const htmlFields = this.htmlFieldsOf(runId);
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT before, after_planned, judged_at FROM bulk_targets
+       WHERE run_id = ? AND deselected_at IS NULL AND change IN ('update', 'create')`,
+    ).iterate(runId) as IterableIterator<{ before: string | null; after_planned: string | null; judged_at: string | null }>;
+    let n = 0;
+    for (const r of rows) {
+      if (r.after_planned === null || (judged && r.judged_at === null)) continue;
+      const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
+      const prior = before !== null && !before.absent ? before.value : null;
+      if (targetHiddenAdds(prior, JSON.parse(this.engineDb.dec(r.after_planned)), htmlFields).length > 0) n++;
+    }
+    return n;
   }
 
   private toStatus(row: RunRow): BulkRunStatus {
