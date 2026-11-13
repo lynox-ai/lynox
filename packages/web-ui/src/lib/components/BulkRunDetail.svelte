@@ -14,7 +14,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkEngineWorking, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkEngineWorking, bulkFollowDelay, bulkFollowMark, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -93,16 +93,30 @@
 	let following = 0;
 
 	/** Ask for the run again while the engine moves it on by itself (a list read, a judging, a
-	 *  write the owner started), so the page shows the next step without a reload. A failed ask
-	 *  leaves the page as it is and asks again; the loop ends when the run waits for the owner or
-	 *  has ended, after `BULK_FOLLOW_MAX_MS`, or when the page shows another run. */
+	 *  write the owner started), so the page shows the next step without a reload. Only while the
+	 *  tab is visible, one request an ask, the targets only once the run moved. A refused or failed
+	 *  ask leaves the page as it is and waits longer ({@link bulkFollowDelay}); the loop ends when
+	 *  the run waits for the owner or has ended, after `BULK_FOLLOW_MAX_MS`, or when the page shows
+	 *  another run. */
 	async function follow(): Promise<void> {
 		const mine = ++following;
 		const until = Date.now() + BULK_FOLLOW_MAX_MS;
+		let delay = BULK_FOLLOW_MS;
 		while (mine === following && run !== null && bulkEngineWorking(run) && Date.now() < until) {
-			await new Promise((r) => setTimeout(r, BULK_FOLLOW_MS));
-			if (mine !== following || busy) continue;
-			await load({ quiet: true });
+			await new Promise((r) => setTimeout(r, delay));
+			if (mine !== following) return;
+			if (busy || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) continue;
+			let res: Response | null = null;
+			try {
+				res = await fetch(`${getApiBase()}/bulk/runs/${encodeURIComponent(runId)}`);
+			} catch {
+				res = null;
+			}
+			if (mine !== following) return;
+			const body = res?.ok ? ((await res.json().catch(() => null)) as BulkRunDetailData | null) : null;
+			const retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
+			delay = bulkFollowDelay(delay, body !== null, retryAfter);
+			if (body !== null && run !== null && bulkFollowMark(body) !== bulkFollowMark(run)) await load({ quiet: true });
 		}
 	}
 

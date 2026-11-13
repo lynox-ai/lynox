@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
-import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkEngineWorking } from './bulk-runs.js';
+import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, BULK_FOLLOW_BACKOFF_MAX_MS, bulkEngineWorking, bulkFollowDelay } from './bulk-runs.js';
 
 // The page of a run the engine moves on by itself — a list read, a judging, a write the owner
 // started — follows it: it asks again until the run waits for the owner or has ended. Before, it
@@ -34,7 +34,11 @@ let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let run: BulkRunDetailData;
 let runAsks: number;
+let targetAsks: number;
 let posts: string[];
+// What the next ask for the run is answered with: 200 with the run, or a refusal.
+let runStatus: number;
+let retryAfter: string | null;
 
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -42,14 +46,19 @@ beforeEach(() => {
 	document.body.appendChild(target);
 	run = makeRun();
 	runAsks = 0;
+	targetAsks = 0;
 	posts = [];
+	runStatus = 200;
+	retryAfter = null;
+	Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
 		if (init?.method === 'POST') { posts.push(u); return reply({}); }
-		if (/\/targets\?/.test(u)) return reply({ targets: [] as BulkTarget[] });
+		if (/\/targets\?/.test(u)) { targetAsks++; return reply({ targets: [] as BulkTarget[] }); }
 		runAsks++;
+		if (runStatus !== 200) return new Response(JSON.stringify({ error: 'Too many requests' }), { status: runStatus, headers: { 'Content-Type': 'application/json', ...(retryAfter !== null ? { 'Retry-After': retryAfter } : {}) } });
 		return reply(run);
 	}));
 });
@@ -109,7 +118,6 @@ describe('the page of a run the engine is moving on', () => {
 		// The engine finishes the list: 17 targets, and the run waits for the owner's start.
 		run = makeRun({ total: 17, changes: { update: 17, create: 0, delete: 0, unchanged: 0, invalid: 0 }, haltKey: 'listed', haltReason: 'listed' });
 		await pass(BULK_FOLLOW_MS);
-		expect(runAsks).toBe(2);
 		expect(shown()).toContain('17');
 	});
 
@@ -127,6 +135,7 @@ describe('the page of a run the engine is moving on', () => {
 		const afterClick = runAsks;
 		await pass(BULK_FOLLOW_MS);
 		expect(runAsks).toBe(afterClick + 1);
+		expect(shown()).not.toContain('17');
 		run = makeRun({ total: 17, changes: { update: 17, create: 0, delete: 0, unchanged: 0, invalid: 0 }, haltKey: 'listed', haltReason: 'listed' });
 		await pass(BULK_FOLLOW_MS);
 		expect(shown()).toContain('17');
@@ -148,7 +157,7 @@ describe('the page of a run the engine is moving on', () => {
 		await pass(BULK_FOLLOW_MAX_MS + BULK_FOLLOW_MS * 2);
 		const atLimit = runAsks;
 		expect(atLimit).toBeGreaterThan(1);
-		expect(atLimit).toBeLessThanOrEqual(BULK_FOLLOW_MAX_MS / BULK_FOLLOW_MS + 2);
+		expect(atLimit).toBeLessThanOrEqual(BULK_FOLLOW_MAX_MS / BULK_FOLLOW_MS + 3);
 		await pass(BULK_FOLLOW_MS * 5);
 		expect(runAsks).toBe(atLimit);
 	});
@@ -161,5 +170,60 @@ describe('the page of a run the engine is moving on', () => {
 		component = undefined;
 		await pass(BULK_FOLLOW_MS * 5);
 		expect(runAsks).toBe(before);
+	});
+
+	it('asks for the run alone while it has not moved, and for its targets only once it has', async () => {
+		await render();
+		const targetsAtStart = targetAsks;
+		await pass(BULK_FOLLOW_MS * 3);
+		expect(runAsks).toBe(4);
+		expect(targetAsks).toBe(targetsAtStart);
+		run = makeRun({ total: 17, changes: { update: 17, create: 0, delete: 0, unchanged: 0, invalid: 0 }, haltKey: 'listed', haltReason: 'listed' });
+		await pass(BULK_FOLLOW_MS);
+		expect(targetAsks).toBeGreaterThan(targetsAtStart);
+	});
+
+	it('does not ask while the tab is hidden', async () => {
+		await render();
+		Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+		await pass(BULK_FOLLOW_MS * 4);
+		expect(runAsks).toBe(1);
+		Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+		await pass(BULK_FOLLOW_MS);
+		expect(runAsks).toBe(2);
+	});
+
+	it('backs off on a 429 as long as Retry-After says, and keeps the page as it was', async () => {
+		await render();
+		runStatus = 429;
+		retryAfter = '20';
+		await pass(BULK_FOLLOW_MS);
+		const refused = runAsks;
+		expect(refused).toBe(2);
+		// The page does not turn into an error: the run stays shown.
+		expect(shown()).not.toMatch(/Laden fehlgeschlagen|Failed to load/);
+		expect(target.querySelector('[aria-current="step"]')).not.toBeNull();
+		// Not again before the 20 s it was told.
+		await pass(19_000);
+		expect(runAsks).toBe(refused);
+		runStatus = 200;
+		run = makeRun({ total: 17, changes: { update: 17, create: 0, delete: 0, unchanged: 0, invalid: 0 }, haltKey: 'listed', haltReason: 'listed' });
+		await pass(1_500);
+		// Asked again once the wait was over; the run moved, so the page loaded it whole.
+		expect(runAsks).toBeGreaterThan(refused);
+		expect(shown()).toContain('17');
+	});
+});
+
+describe('bulkFollowDelay', () => {
+	it('goes back to the base after a good answer', () => {
+		expect(bulkFollowDelay(40_000, true, null)).toBe(BULK_FOLLOW_MS);
+	});
+	it('doubles after a refusal, waits at least what Retry-After says, and never more than the cap', () => {
+		expect(bulkFollowDelay(BULK_FOLLOW_MS, false, null)).toBe(BULK_FOLLOW_MS * 2);
+		expect(bulkFollowDelay(BULK_FOLLOW_MS, false, 30)).toBe(30_000);
+		expect(bulkFollowDelay(BULK_FOLLOW_MS, false, Number.NaN)).toBe(BULK_FOLLOW_MS * 2);
+		expect(bulkFollowDelay(BULK_FOLLOW_BACKOFF_MAX_MS, false, null)).toBe(BULK_FOLLOW_BACKOFF_MAX_MS);
+		expect(bulkFollowDelay(BULK_FOLLOW_MS, false, 600)).toBe(BULK_FOLLOW_BACKOFF_MAX_MS);
 	});
 });

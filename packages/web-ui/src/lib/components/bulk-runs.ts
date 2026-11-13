@@ -702,12 +702,30 @@ export function bulkEngineWorking(run: Pick<BulkRun, 'phase' | 'haltKey'>): bool
 	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
 }
 
-/** How the page follows a run the engine is moving on: it asks again every `BULK_FOLLOW_MS`, and
- *  gives up after `BULK_FOLLOW_MAX_MS` (a run still working then is reloaded by the owner).
- *  An ask is two requests (the run and its first page of targets), and the engine allows a
- *  client 120 requests a minute, the status bar's own asks included: every 5 s is 24 of them. */
+/** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`
+ *  while the tab is visible, loads its targets only when the run moved, and gives up after
+ *  `BULK_FOLLOW_MAX_MS` (a run still working then is reloaded by the owner). The engine allows a
+ *  client (by IP) 120 requests a minute, and an idle tab already asks about 28 (active runs every
+ *  4 s, the status bar every 30 s): one ask every 5 s adds 12. A refused ask (429 or any failure)
+ *  waits longer each time — twice as long, at least as long as Retry-After says, at most
+ *  `BULK_FOLLOW_BACKOFF_MAX_MS` — and never turns the page into an error. */
 export const BULK_FOLLOW_MS = 5000;
 export const BULK_FOLLOW_MAX_MS = 10 * 60 * 1000;
+export const BULK_FOLLOW_BACKOFF_MAX_MS = 60_000;
+
+/** The next wait of a follow loop after an ask: back to the base after a good answer, longer
+ *  after a refused one (`retryAfterS` from a 429's Retry-After, when it names seconds). */
+export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number | null): number {
+	if (ok) return BULK_FOLLOW_MS;
+	const asked = retryAfterS !== null && Number.isFinite(retryAfterS) && retryAfterS > 0 ? retryAfterS * 1000 : 0;
+	return Math.min(Math.max(prev * 2, asked), BULK_FOLLOW_BACKOFF_MAX_MS);
+}
+
+/** What a follow ask compares to see whether the run moved: its step and its counts. */
+export function bulkFollowMark(run: BulkRunDetailData): string {
+	return JSON.stringify([run.phase, run.haltKey, run.total, run.applied, run.failed, run.conflicts, run.sentUnknown,
+		run.undone, run.deselected, run.changes, run.judge?.unjudged ?? null, run.costUsd]);
+}
 
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo
  *  would take back, and is not at its probe (that has its own way back). An atomic run is taken
