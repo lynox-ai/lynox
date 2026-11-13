@@ -4,6 +4,11 @@
 
 ### Upgrade notes
 
+- Under `network_policy` `deny-all` or `allow-list` the agent is no longer
+  offered the model provider's own web search (Anthropic's server-side
+  `web_search`), which runs at the provider rather than through this
+  instance's network settings. It is offered only under no policy,
+  `allow-all` or `guarded`, and never to an agent whose policy cannot be read.
 - `StreamProcessor.process` now throws `StreamIncompleteError` when a stream ends
   before any stop reason (no `message_delta` naming one, no `message_stop`), instead
   of returning the partial reply as finished. The Agent retries such a call.
