@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { getLocale, setLocale, t } from './i18n.svelte.js';
 
-// The inbox rules' texts as ux wrote them, byte for byte, in both languages: the rule view's
+// The inbox rules' texts as reviewed, byte for byte, in both languages: the rule view's
 // proposals, confirming, the count of waiting proposals, the name field, the description kind
 // with its hints, the filter by rule and the reading pane's note on a rule held back. A text that
-// changes here changes with ux, not on its own.
+// changes here changes with a new wording review, not on its own.
 const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 	['inbox.rules_proposals_title', 'Vorschläge des Assistenten', 'Suggestions from the assistant'],
 	['inbox.rules_proposals_intro', 'Diese Regeln hat der Assistent vorgeschlagen. Sie wirken erst, wenn du sie bestätigst. Ein Vorschlag legt Mails immer unter „Braucht dich“ ab. Je Konto können höchstens 10 Vorschläge gleichzeitig warten.', 'The assistant suggested these rules. They only apply once you confirm them. A suggestion always puts mail under “Needs you”. Up to 10 suggestions per account can wait at a time.'],
@@ -65,7 +65,7 @@ const localeBefore = getLocale();
 afterEach(() => setLocale(localeBefore));
 
 describe('inbox rules wording', () => {
-	it.each(WORDING)('%s reads as ux wrote it, in German and in English', (key, de, en) => {
+	it.each(WORDING)('%s reads as reviewed, in German and in English', (key, de, en) => {
 		setLocale('de');
 		expect(t(key)).toBe(de);
 		setLocale('en');
