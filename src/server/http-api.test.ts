@@ -1290,6 +1290,66 @@ describe('LynoxHTTPApi', () => {
       expect(((await asOwner.json()) as { error: string }).error).toBe('Missing provider');
     });
 
+    // The search endpoint check is the owner's: it makes this instance send a
+    // request to an address the caller names, and setting up search is the owner's business.
+    it('refuses a mandate the search endpoint check, and lets the owner through', async () => {
+      repayRateWindow();
+      const probe = (token: string): Promise<Response> => fetch(`${baseUrl}/api/searxng/check`, {
+        method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const asMandate = await probe(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+      expect(asMandate.status).toBe(403);
+      expect(await asMandate.json()).toEqual({ error: 'Only the owner of this instance can check a search endpoint.' });
+      // Twin: the owner's cookie reaches the handler, which answers the empty body itself.
+      const asOwner = await probe(webUiLoginSession(TEST_SECRET, null)!.token);
+      expect(asOwner.status).toBe(400);
+      expect(((await asOwner.json()) as { error: string }).error).toBe('Missing url');
+    });
+
+    // On a provisioned instance a private address is the tenant host's network:
+    // the check answers only for the configured endpoint or a public address there. A self-hosted
+    // owner keeps checking a LAN endpoint.
+    it('checks a private search endpoint on a provisioned instance only when it is the configured one', async () => {
+      const { createServer } = await import('node:http');
+      const hits: string[] = [];
+      const lan = createServer((req, res) => { hits.push(req.url ?? ''); res.writeHead(200); res.end('ok'); });
+      await new Promise<void>(r => lan.listen(0, '127.0.0.1', () => r()));
+      onTestFinished(() => new Promise<void>(r => lan.close(() => r())));
+      const lanUrl = `http://127.0.0.1:${(lan.address() as { port: number }).port}`;
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      const check = async (url: string): Promise<{ status: number; body: unknown }> => {
+        repayRateWindow();
+        const res = await fetch(`${baseUrl}/api/searxng/check`, {
+          method: 'POST', headers: { cookie: `lynox_session=${owner}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+        });
+        return { status: res.status, body: await res.json() };
+      };
+      const keys = ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'SEARXNG_URL'] as const;
+      const saved = keys.map(k => process.env[k]);
+      onTestFinished(() => { keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; }); });
+      for (const k of keys) delete process.env[k];
+
+      // Self-hosted: the LAN endpoint is checked, and the request reaches it.
+      expect(await check(lanUrl)).toEqual({ status: 200, body: { healthy: true } });
+      expect(hits).toEqual(['/healthz']);
+
+      // Provisioned, not configured: refused before any request leaves.
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      expect(await check(lanUrl)).toEqual({ status: 400, body: { error: 'On this instance, a search endpoint must be the configured one or a public address' } });
+      expect(hits).toEqual(['/healthz']);
+
+      // Provisioned, named only in the config file, which the owner writes: still refused.
+      mockGetUserConfig.mockReturnValue({ searxng_url: lanUrl });
+      onTestFinished(() => { mockGetUserConfig.mockReturnValue({}); });
+      expect(await check(lanUrl)).toEqual({ status: 400, body: { error: 'On this instance, a search endpoint must be the configured one or a public address' } });
+      expect(hits).toEqual(['/healthz']);
+
+      // Provisioned, the control plane's endpoint (trailing slash on either side does not matter): checked.
+      process.env['SEARXNG_URL'] = `${lanUrl}/`;
+      expect(await check(lanUrl)).toEqual({ status: 200, body: { healthy: true } });
+      expect(hits).toEqual(['/healthz', '/healthz']);
+    });
+
     for (const [path, field, value, what] of [
       ['/api/auth/token', 'token', TEST_SECRET, 'see the access token'],
       ['/api/vault/key', 'key', 'TEST-VAULT-KEY-0000000000000000', 'see the vault key'],
@@ -3881,6 +3941,116 @@ describe('LynoxHTTPApi', () => {
       }, { signalled: true });
     });
 
+    // A chat run that works on while a scheduled run's question waits in the same thread. The
+    // thread holds one open question, and it is not the run's: the run must not be taken over as
+    // if it were parked on it, and the question must not lapse with the run.
+    async function withRunBesideQuestion(
+      sid: string,
+      body: (ctx: {
+        prompts: { getById: (id: string) => { status: string; closed_reason: string | null } | undefined };
+        slots: Map<string, unknown>;
+        /** The scheduled run's question. */
+        questionId: string;
+      }) => Promise<void>,
+    ): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        segments_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        answer_error TEXT,
+        multi_select INTEGER,
+        payload_json TEXT,
+        origin_json TEXT,
+        trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        closed_reason TEXT, expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      try {
+        const questionId = realPromptStore.insertAskUser(sid, 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+        let finishWork!: () => void;
+        const work = new Promise<void>((r) => { finishWork = r; });
+        // The chat run works, without a question of its own, until the test lets it finish or
+        // `session.abort()` stops it, as the real agent loop does: a takeover then frees the slot.
+        mockSessionRun.mockImplementationOnce(async () => { await work; return 'done'; });
+        mockSessionAbort.mockImplementation(() => { finishWork(); });
+        // Not awaited: a run that writes nothing yet sends no headers either.
+        const runRes = jsonFetch(`/api/sessions/${sid}/run`, {
+          method: 'POST',
+          body: JSON.stringify({ task: 'sort the invoices', protocol: 1 }),
+        }).then((r) => r.text()).catch(() => undefined);
+        for (let i = 0; i < 200 && !slots.has(sid); i++) await new Promise<void>((r) => setTimeout(r, 5));
+        expect(slots.has(sid), 'positive control: the run holds its slot').toBe(true);
+        try {
+          await body({ prompts: realPromptStore, slots, questionId });
+        } finally {
+          finishWork();
+          await runRes;
+          await expectSlotReclaimed(slots, sid);
+        }
+      } finally {
+        mockSessionAbort.mockImplementation(() => undefined);
+        engineRef.getPromptStore = originalGetPromptStore;
+        db.close();
+      }
+    }
+
+    // The stream is marked dead by hand, as in the takeover test above: the server does not see
+    // the connection close on this route today, so no test can drop it for real.
+    // Only the question is ruled out as a reason. That a run silent past the stale window is still
+    // taken over, with the scheduled question left open, is read from the code, not tested here.
+    it('a scheduled question does not let a second message take over a working run', async () => {
+      repayRateWindow();
+      await withRunBesideQuestion('second-beside-1', async ({ prompts, slots, questionId }) => {
+        (slots.get('second-beside-1') as { streamAlive: boolean }).streamAlive = false;
+        const next = await jsonFetch('/api/sessions/second-beside-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'something else', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+        expect(slots.has('second-beside-1')).toBe(true);
+        expect(prompts.getById(questionId)?.status).toBe('pending');
+      });
+    });
+
+    it('stopping a run working beside a scheduled question frees it and leaves the question open', async () => {
+      repayRateWindow();
+      await withRunBesideQuestion('abort-beside-1', async ({ prompts, slots, questionId }) => {
+        const abortRes = await jsonFetch('/api/sessions/abort-beside-1/abort', { method: 'POST' });
+        expect(abortRes.status).toBe(200);
+        await expectSlotReclaimed(slots, 'abort-beside-1');
+        expect(prompts.getById(questionId)?.status).toBe('pending');
+      });
+    });
+
     it('POST /abort reclaims a parked run even when the Session is already gone', async () => {
       await withParkedRun('abort-parked-2', async ({ prompts, slots }) => {
         mockSessionGet.mockReturnValueOnce(undefined);
@@ -4580,6 +4750,38 @@ describe('LynoxHTTPApi', () => {
           store.insertAskUser('chat-thread', 'Continue?', ['Yes', 'No']);
           const here = (await activeRuns()).filter((r) => r.threadId === 'chat-thread');
           expect(here).toEqual([expect.objectContaining({ runId: 'chat-run', status: 'awaiting_input', attachable: true })]);
+        });
+      });
+
+      it('reads a chat run working beside a scheduled run\'s earlier question as running, listed once', async () => {
+        repayRateWindow();
+        await withQuestions(async (reg, store, db) => {
+          const id = store.insertAskUser('shared-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          // Asked a minute before the chat run started: not the run's own question.
+          db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
+          reg.start('shared-thread', 'chat-run');
+          const here = (await activeRuns()).filter((r) => r.threadId === 'shared-thread');
+          expect(here.map((r) => [r.runId, r.status, r.attachable])).toEqual([['chat-run', 'running', true]]);
+        });
+      });
+
+      it('reads it as running in a thread\'s transcript too, and as waiting for a question asked after it started', async () => {
+        repayRateWindow();
+        await withQuestions(async (reg, store, db) => {
+          const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+          const orig = engineRef.getThreadStore;
+          engineRef.getThreadStore = (): unknown => ({ getThread: () => ({ id: 'shared-thread' }), getMessages: () => [] });
+          try {
+            const activeRun = async (): Promise<{ status: string } | null> =>
+              (await (await jsonFetch('/api/threads/shared-thread/messages')).json() as { activeRun: { status: string } | null }).activeRun;
+            const id = store.insertAskUser('shared-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+            db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
+            reg.start('shared-thread', 'chat-run');
+            expect((await activeRun())?.status).toBe('running');
+            // Asked after the run started: read as the run's own question.
+            db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '+1 minute') WHERE id = ?`).run(id);
+            expect((await activeRun())?.status).toBe('awaiting_input');
+          } finally { engineRef.getThreadStore = orig; }
         });
       });
 
@@ -22037,7 +22239,6 @@ describe('mandate stance of every user route', () => {
       'POST /api/push/subscribe own',
       'POST /api/push/test own',
       'POST /api/push/unsubscribe own',
-      'POST /api/searxng/check free',
       'POST /api/secrets/validate-key free',
       'POST /api/sessions own',
       'POST /api/sessions/stance-probe/abort own',

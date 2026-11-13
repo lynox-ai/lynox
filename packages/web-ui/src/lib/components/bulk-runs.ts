@@ -719,6 +719,34 @@ export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): bool
 	return run.phase === 'planned' && (run.haltKey === 'awaitingStart' || run.haltKey === 'listed');
 }
 
+/** Whether the engine is moving the run on by itself right now: reading its list or judging it
+ *  (planned, no halt), or writing it (approved, or writing without a halt). Every other state
+ *  waits for the owner or has ended, so the page has nothing to wait for there. */
+export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason'>): boolean {
+	// Any halt, by its key or by a reason this page does not know (an engine newer than the page).
+	if (run.haltKey !== null || run.haltReason !== null) return false;
+	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
+}
+
+/** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`
+ *  while the tab is visible, loads it whole once the run stopped working, and gives up after
+ *  `BULK_FOLLOW_MAX_MS` (a run still working then is reloaded by the owner). The engine allows a
+ *  client (by IP) 120 requests a minute, and an idle tab already asks about 28 (active runs every
+ *  4 s, the status bar every 30 s): one ask every 5 s adds 12. A refused ask (429 or any failure)
+ *  waits longer each time — twice as long, at least as long as Retry-After says, at most
+ *  `BULK_FOLLOW_BACKOFF_MAX_MS` — and never turns the page into an error. */
+export const BULK_FOLLOW_MS = 5000;
+export const BULK_FOLLOW_MAX_MS = 10 * 60 * 1000;
+export const BULK_FOLLOW_BACKOFF_MAX_MS = 60_000;
+
+/** The next wait of a follow loop after an ask: back to the base after a good answer, longer
+ *  after a refused one (`retryAfterS` from a 429's Retry-After, when it names seconds). */
+export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number | null): number {
+	if (ok) return BULK_FOLLOW_MS;
+	const asked = retryAfterS !== null && Number.isFinite(retryAfterS) && retryAfterS > 0 ? retryAfterS * 1000 : 0;
+	return Math.min(Math.max(prev * 2, asked), BULK_FOLLOW_BACKOFF_MAX_MS);
+}
+
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo
  *  would take back, and is not at its probe (that has its own way back). An atomic run is taken
  *  back whole or not at all, so only once it finished: the engine refuses any other
