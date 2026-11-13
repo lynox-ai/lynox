@@ -915,9 +915,10 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
-   * A check every {@link resolve} asks before it hands a value out, set by the engine once the
-   * stores it reads exist (`connectionTokenAllowed`: a token of a connection whose mandate has
-   * ended). A guard that throws withholds the value.
+   * A check every {@link resolve} asks before it hands a value out, set by the engine as soon as
+   * this store exists (`Engine.resolveGuard`: a token of a connection whose mandate has ended, and,
+   * while the API profiles are not known, every vault name that could hold one). A guard that
+   * throws withholds the value.
    */
   private resolveGuard: ((name: string) => boolean) | null = null;
 

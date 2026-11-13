@@ -40,7 +40,7 @@ import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenAllowed, connectionTokenHolders } from './profile-secret-view.js';
+import { connectionTokenHolders, vaultNameAllowed } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -1947,8 +1947,12 @@ export class Engine {
           process.stderr.write(`[lynox:vault-bindings] Migration failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }
-      // Every stored profile is known now: the guard set with the secret store answers by them.
+      // The stored profiles are loaded: the guard set with the secret store answers by them, and by
+      // the entries it could not read (`vaultNameAllowed`).
       this._profilesKnown = true;
+      // The LLM client was built before this, when the guard handed out only the environment's and
+      // the platform's names: a Vertex project id kept in the vault is read now.
+      if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();
       if (loaded > 0) {
         const store = this._apiStore;
         const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
@@ -1972,8 +1976,11 @@ export class Engine {
       if (suggestedContext) {
         this.briefing = this.briefing ? `${this.briefing}\n\n${suggestedContext}` : suggestedContext;
       }
-    } catch {
+    } catch (err: unknown) {
       this._apiStore = null;
+      // From here on the guard hands out no vault name that could hold a connection's token: say so,
+      // or the owner's own secrets look missing with no cause anywhere.
+      process.stderr.write(`[lynox:api-store] API profiles could not be loaded; until the next start only the environment's and the platform's own secrets are handed out: ${processErrorText(err)}\n`);
     }
 
     // Register builtin tools
@@ -2976,17 +2983,18 @@ export class Engine {
   getSecretStore(): SecretStore | null { return this.secretStore; }
 
   /**
-   * The secret store's resolve guard. With every profile known it is the B9 check
-   * ({@link connectionTokenAllowed}). Before that, and for good when loading them failed, nobody
-   * knows which vault names hold a connection's token, so only names that cannot hold one go out:
-   * the environment's, and the platform's own slots, which are never attached to an outbound
-   * request. A failed load closes the vault's other names; it does not open a waiting token.
+   * The secret store's resolve guard. Once the stored profiles are loaded it is the B9 check over
+   * them, over the ones the import waits to write, and over the entries the boot could not read
+   * ({@link vaultNameAllowed}). Before that, and for good when loading them failed, nobody knows
+   * which vault names hold a connection's token, so only names that cannot hold one go out: the
+   * environment's, and the platform's own slots, which are never attached to an outbound request.
+   * A failed load closes the vault's other names; it does not open a waiting token.
    */
   private resolveGuard(name: string): boolean {
     if (!this._profilesKnown || this._apiStore === null) {
       return this.secretStore?.isEnvironmentSecret(name) === true || isProtectedSecretWrite(name);
     }
-    return connectionTokenAllowed(this._apiStore, this._mandateEnds, name);
+    return vaultNameAllowed(this._apiStore, this._mandateEnds, name);
   }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 

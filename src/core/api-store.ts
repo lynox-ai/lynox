@@ -2405,7 +2405,7 @@ export class ApiStore {
     // registered profiles only, as before; which of two stored rivals the boot keeps is not
     // decided here.
     // A save is asked against the profiles the import waits to write too: they are stored once it runs.
-    const rivals = mode === 'save' && !wasRegistered ? [...this.knownProfiles(), ...this._waitingProfiles()] : [...this.profiles.values()];
+    const rivals = mode === 'save' && !wasRegistered ? [...this.knownProfiles(), ...this.waitingProfiles()] : [...this.profiles.values()];
     const slot = vaultSlotBase(profile.id);
     for (const { id: otherId } of rivals) {
       if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
@@ -2462,7 +2462,7 @@ export class ApiStore {
     if (mode === 'save') {
       const prev = this.profiles.get(profile.id);
       const key = (c: SlotConflict): string => JSON.stringify([c.name, c.loser]);
-      for (const other of [...this.knownProfiles(), ...this._waitingProfiles()]) {
+      for (const other of [...this.knownProfiles(), ...this.waitingProfiles()]) {
         if (other.id === profile.id) continue;
         const had = new Set(prev === undefined ? [] : slotConflicts(prev, other).filter((c) => c.name !== null).map(key));
         const fresh = slotConflicts(profile, other).find((c) => !(c.name === null && c.loser === 'y') && !had.has(key(c)));
@@ -3049,8 +3049,8 @@ export class ApiStore {
     return [...this.profiles.values(), ...[...this.heldBack.values()].filter((p) => !this.profiles.has(p.id))];
   }
 
-  /** The profiles the import waits to write ({@link importWaiting}). */
-  private _waitingProfiles(): ApiProfile[] {
+  /** The profiles the import waits to write ({@link importWaiting}). Stored, not yet registered: whose tokens their names hold is known from them. */
+  waitingProfiles(): ApiProfile[] {
     return [...this.importWaiting.values()].map((w) => w.profile);
   }
 

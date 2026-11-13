@@ -132,6 +132,8 @@ describe('Engine boot — a mandate\'s connection ends with the mandate', () => 
       setEnv('LYNOX_DATA_DIR', dir);
       setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
       setEnv('LYNOX_SECRET_FROM_ENV', 'env-value');
+      // The platform's slot below must pass as a protected name, not as one the environment set.
+      setEnv('ANTHROPIC_API_KEY', undefined);
       reloadConfig();
       const spy = failAt === 'load'
         ? vi.spyOn(ApiStore.prototype, 'loadFromConnections').mockImplementation(() => { throw new Error('broken connections row'); })

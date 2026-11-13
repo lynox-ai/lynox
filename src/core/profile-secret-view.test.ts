@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { connectionTokenAllowed, mandateMayConnect, mandateMayRead, mayServeAsClientId, releaseBinding, releaseBoundFields, releaseObstacle, releaseState, secretsForProfile, withheldFrom, type ReadCtx } from './profile-secret-view.js';
+import { connectionTokenAllowed, vaultNameAllowed, mandateMayConnect, mandateMayRead, mayServeAsClientId, releaseBinding, releaseBoundFields, releaseObstacle, releaseState, secretsForProfile, withheldFrom, type ReadCtx } from './profile-secret-view.js';
 import type { ApiProfile } from './api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
@@ -222,6 +222,31 @@ describe('mandateMayRead', () => {
 
 // PRD §3.13 B9: a token of a connection a mandate consented to is handed out to nobody once that
 // mandate is not live, keyed by the vault name so every way of reaching it is covered.
+describe('vaultNameAllowed (the engine\'s guard once the profiles are loaded)', () => {
+  const ended = (id: string): ApiProfile => ({
+    id, name: id, base_url: `https://${id}.example`, description: 'd',
+    auth: { type: 'oauth2', vault_keys: [], oauth: { client_id_key: 'X_CLIENT_ID' } },
+    oauth_grant: { connected_by: M, connected_mandate_id: 'M-ENDED' },
+  });
+  const store = (o: { known?: ApiProfile[]; waiting?: ApiProfile[]; unreadable?: string[] }) => ({
+    knownProfiles: () => o.known ?? [],
+    waitingProfiles: () => o.waiting ?? [],
+    unreadableHolds: (n: string) => (o.unreadable ?? []).includes(n),
+  });
+  const none = { isLive: () => false };
+
+  it('withholds a token of an ended mandate\'s connection the import still waits to write', () => {
+    expect(vaultNameAllowed(store({ waiting: [ended('waits-api')] }), none, 'WAITS_API_ACCESS_TOKEN')).toBe(false);
+  });
+  it('withholds a name a stored entry the boot could not read may hold', () => {
+    expect(vaultNameAllowed(store({ unreadable: ['BROKEN_API_ACCESS_TOKEN'] }), none, 'BROKEN_API_ACCESS_TOKEN')).toBe(false);
+  });
+  it('control: still withholds a loaded ended connection\'s token, and hands out a name nothing holds', () => {
+    expect(vaultNameAllowed(store({ known: [ended('loaded-api')] }), none, 'LOADED_API_ACCESS_TOKEN')).toBe(false);
+    expect(vaultNameAllowed(store({ known: [ended('loaded-api')], waiting: [ended('waits-api')], unreadable: ['BROKEN_API_ACCESS_TOKEN'] }), none, 'OWNER_OWN_KEY')).toBe(true);
+  });
+});
+
 describe('connectionTokenAllowed', () => {
   const grantOf = (connected_by: string | undefined, connected_mandate_id?: string): ApiProfile => ({
     id: 'books-api', name: 'Books', base_url: 'https://api.books.example', description: 'd', created_by: M,

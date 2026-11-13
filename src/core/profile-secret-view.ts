@@ -1096,6 +1096,21 @@ export function connectionTokenAllowed(
 }
 
 /**
+ * The engine's resolve guard once the profiles are loaded: {@link connectionTokenAllowed} over every
+ * stored profile, the ones the import still waits to write included, and no for a name a stored
+ * entry the boot could not read may hold — whose connection that is, and whether its mandate
+ * ended, cannot be told, so it is not handed out until the entry is repaired or removed.
+ */
+export function vaultNameAllowed(
+  apiStore: Pick<ApiStore, 'knownProfiles' | 'waitingProfiles' | 'unreadableHolds'>,
+  ends: Pick<MandateEnds, 'isLive'> | null,
+  name: string,
+): boolean {
+  if (apiStore.unreadableHolds(name)) return false;
+  return connectionTokenAllowed({ knownProfiles: () => [...apiStore.knownProfiles(), ...apiStore.waitingProfiles()] }, ends, name);
+}
+
+/**
  * Whether `profile` holds a connection whose tokens {@link connectionTokenAllowed} refuses: a
  * mandate consented to it, and that mandate is not live. Such a connection waits for the owner,
  * who can adopt it or connect again; until then it is of no use to anyone.
