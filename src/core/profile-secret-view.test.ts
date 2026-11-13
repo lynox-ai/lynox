@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { connectionTokenAllowed, mandateMayConnect, mandateMayRead, mayServeAsClientId, releaseBinding, releaseBoundFields, releaseObstacle, releaseState, secretsForProfile, withheldFrom, type ReadCtx } from './profile-secret-view.js';
+import { connectionTokenAllowed, resolveGuardAllows, mandateMayConnect, mandateMayRead, mayServeAsClientId, releaseBinding, releaseBoundFields, releaseObstacle, releaseState, secretsForProfile, withheldFrom, type ReadCtx } from './profile-secret-view.js';
 import type { ApiProfile } from './api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
@@ -222,6 +222,53 @@ describe('mandateMayRead', () => {
 
 // PRD §3.13 B9: a token of a connection a mandate consented to is handed out to nobody once that
 // mandate is not live, keyed by the vault name so every way of reaching it is covered.
+describe('resolveGuardAllows (the engine\'s resolve guard)', () => {
+  const ended = (id: string): ApiProfile => ({
+    id, name: id, base_url: `https://${id}.example`, description: 'd',
+    auth: { type: 'oauth2', vault_keys: [], oauth: { client_id_key: 'X_CLIENT_ID' } },
+    oauth_grant: { connected_by: M, connected_mandate_id: 'M-ENDED' },
+  });
+  const store = (o: { known?: ApiProfile[]; waiting?: ApiProfile[]; unreadable?: string[] | 'all' }) => ({
+    knownProfiles: () => o.known ?? [],
+    waitingProfiles: () => o.waiting ?? [],
+    unreadableHolds: (n: string) => o.unreadable === 'all' || (o.unreadable ?? []).includes(n),
+  });
+  const allows = (
+    o: { profilesKnown?: boolean; apiStore?: ReturnType<typeof store> | null; env?: string[] },
+    name: string,
+  ): boolean => resolveGuardAllows({
+    profilesKnown: o.profilesKnown ?? true,
+    apiStore: o.apiStore === undefined ? store({}) : o.apiStore,
+    ends: { isLive: () => false },
+    fromEnvironment: (n) => (o.env ?? []).includes(n),
+  }, name);
+
+  it('before the profiles are loaded, and when loading them failed, hands out no vault name', () => {
+    expect(allows({ profilesKnown: false }, 'OWNER_OWN_KEY')).toBe(false);
+    expect(allows({ apiStore: null }, 'OWNER_OWN_KEY')).toBe(false);
+  });
+  it('hands out the environment\'s names and the platform\'s slots in every state, an unreadable entry that may hold every name included', () => {
+    for (const o of [{ profilesKnown: false }, { apiStore: null }, { apiStore: store({ unreadable: 'all' }) }]) {
+      expect(allows({ ...o, env: ['FROM_ENV'] }, 'FROM_ENV')).toBe(true);
+      expect(allows(o, 'ANTHROPIC_API_KEY')).toBe(true);
+    }
+  });
+  it('loaded: withholds a token of an ended mandate\'s connection the import still waits to write', () => {
+    expect(allows({ apiStore: store({ waiting: [ended('waits-api')] }) }, 'WAITS_API_ACCESS_TOKEN')).toBe(false);
+  });
+  it('loaded: withholds a name a stored entry the boot could not read may hold', () => {
+    expect(allows({ apiStore: store({ unreadable: ['BROKEN_API_ACCESS_TOKEN'] }) }, 'BROKEN_API_ACCESS_TOKEN')).toBe(false);
+    expect(allows({ apiStore: store({ unreadable: 'all' }) }, 'OWNER_OWN_KEY')).toBe(false);
+  });
+  it('loaded: an environment name a connection of an ended mandate wrote its token to is withheld too', () => {
+    expect(allows({ apiStore: store({ known: [ended('env-api')] }), env: ['ENV_API_ACCESS_TOKEN'] }, 'ENV_API_ACCESS_TOKEN')).toBe(false);
+  });
+  it('control: loaded, still withholds a loaded ended connection\'s token, and hands out a name nothing holds', () => {
+    expect(allows({ apiStore: store({ known: [ended('loaded-api')] }) }, 'LOADED_API_ACCESS_TOKEN')).toBe(false);
+    expect(allows({ apiStore: store({ known: [ended('loaded-api')], waiting: [ended('waits-api')], unreadable: ['BROKEN_API_ACCESS_TOKEN'] }) }, 'OWNER_OWN_KEY')).toBe(true);
+  });
+});
+
 describe('connectionTokenAllowed', () => {
   const grantOf = (connected_by: string | undefined, connected_mandate_id?: string): ApiProfile => ({
     id: 'books-api', name: 'Books', base_url: 'https://api.books.example', description: 'd', created_by: M,
@@ -253,11 +300,12 @@ describe('connectionTokenAllowed', () => {
     expect(allowed(grantOf(M, 'M-1'), null, 'BOOKS_API_ACCESS_TOKEN')).toBe(false);
   });
 
-  it('control: leaves the owner\'s consent, an unstamped grant, other names and a missing API store alone', () => {
+  // A missing API store is no longer an input: the engine's guard answers without profiles itself
+  // (connection-token-guard-boot.test.ts, "the profiles fail to load").
+  it('control: leaves the owner\'s consent, an unstamped grant and other names alone', () => {
     expect(allowed(grantOf('owner'), [], 'BOOKS_API_ACCESS_TOKEN')).toBe(true);
     expect(allowed(grantOf(undefined), [], 'BOOKS_API_ACCESS_TOKEN')).toBe(true);
     expect(allowed(grantOf(M, 'M-1'), [], 'BOOKS_CLIENT_ID')).toBe(true);
-    expect(connectionTokenAllowed(null, null, 'BOOKS_API_ACCESS_TOKEN')).toBe(true);
   });
 });
 

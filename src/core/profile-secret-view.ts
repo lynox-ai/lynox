@@ -1082,14 +1082,48 @@ export function occupiedTokenSlots(store: SecretStoreLike, id: string): string[]
  * no mandate counts as live. What lifts it is the owner's consent: connecting the account again,
  * or adopting the connection (`api_setup` action `adopt_connection`, which asks the person).
  * Saving over the profile alone keeps the mandate's grant.
+ *
+ * It needs the profiles: without them nobody knows which names hold a connection's token. The
+ * engine's guard does not ask this before every profile is known, nor after loading them failed
+ * (`Engine`, `resolveGuard`); there is no answer here for a missing store.
  */
 export function connectionTokenAllowed(
-  apiStore: Pick<ApiStore, 'knownProfiles'> | null,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   ends: Pick<MandateEnds, 'isLive'> | null,
   name: string,
 ): boolean {
-  if (apiStore === null) return true;
   return !apiStore.knownProfiles().some((p) => connectionWaits(p, ends) && grantTokenNames(p).has(name));
+}
+
+/**
+ * The engine's resolve guard (`Engine.resolveGuard`), set as soon as the secret store exists.
+ *
+ * - Before the profiles are loaded, and for good when loading them failed (`apiStore` null), only a
+ *   name the environment set or one of the platform's own slots goes out. Nobody knows then which
+ *   other names hold a connection's token. A protected name is refused as a token's slot on every
+ *   write path; an environment name holds the environment's value at boot.
+ * - Loaded, every name is {@link connectionTokenAllowed} over every stored profile, the ones the
+ *   import still waits to write included. That covers an environment name too: a connection that
+ *   writes its token there (`set`) replaces the environment's value in the store.
+ * - Loaded, a name a stored entry the boot could not read may hold does not go out either: whose
+ *   connection that is, and whether its mandate ended, cannot be told until the entry is repaired
+ *   or removed. The environment's names and the platform's slots are exempt from this, so one
+ *   unreadable entry that may hold every name does not take the provider keys with it.
+ */
+export function resolveGuardAllows(
+  state: {
+    readonly profilesKnown: boolean;
+    readonly apiStore: Pick<ApiStore, 'knownProfiles' | 'waitingProfiles' | 'unreadableHolds'> | null;
+    readonly ends: Pick<MandateEnds, 'isLive'> | null;
+    readonly fromEnvironment: (name: string) => boolean;
+  },
+  name: string,
+): boolean {
+  const own = state.fromEnvironment(name) || isProtectedSecretWrite(name);
+  const apiStore = state.apiStore;
+  if (!state.profilesKnown || apiStore === null) return own;
+  if (!own && apiStore.unreadableHolds(name)) return false;
+  return connectionTokenAllowed({ knownProfiles: () => [...apiStore.knownProfiles(), ...apiStore.waitingProfiles()] }, state.ends, name);
 }
 
 /**

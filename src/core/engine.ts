@@ -40,7 +40,7 @@ import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenAllowed, connectionTokenHolders } from './profile-secret-view.js';
+import { connectionTokenHolders, resolveGuardAllows } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -476,6 +476,8 @@ export class Engine {
     driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
   } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
+  /** Set once every stored API profile is loaded; until then {@link resolveGuard} cannot tell which vault names hold a connection's token. */
+  private _profilesKnown = false;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _subjectStore: import('./subject-store.js').SubjectStore | null = null;
@@ -1728,6 +1730,10 @@ export class Engine {
     const secretResult = initSecrets(this.userConfig);
     this.secretVault = secretResult.vault;
     this.secretStore = secretResult.store;
+    // From the moment the store exists, a token of a connection whose mandate has ended is not
+    // handed out, to anyone. Set here, not after the profiles load: a guard set at the end of that
+    // block is never set when the block throws.
+    this.secretStore?.setResolveGuard((name) => this.resolveGuard(name));
     this.secretsBriefing = secretResult.secretsBriefing;
     for (const part of secretResult.briefingParts) {
       this.briefing = compose(
@@ -1943,8 +1949,12 @@ export class Engine {
           process.stderr.write(`[lynox:vault-bindings] Migration failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }
-      // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
-      this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
+      // The stored profiles are loaded: the guard set with the secret store answers by them, and by
+      // the entries it could not read (`resolveGuardAllows`).
+      this._profilesKnown = true;
+      // The LLM client was built before this, when the guard handed out only the environment's and
+      // the platform's names: a Vertex project id kept in the vault is read now.
+      if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();
       if (loaded > 0) {
         const store = this._apiStore;
         const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
@@ -1968,8 +1978,11 @@ export class Engine {
       if (suggestedContext) {
         this.briefing = this.briefing ? `${this.briefing}\n\n${suggestedContext}` : suggestedContext;
       }
-    } catch {
+    } catch (err: unknown) {
       this._apiStore = null;
+      // From here on the guard hands out no vault name that could hold a connection's token: say so,
+      // or the owner's own secrets look missing with no cause anywhere.
+      process.stderr.write(`[lynox:api-store] API profiles could not be loaded; until the next start only the environment's and the platform's own secrets are handed out: ${processErrorText(err)}\n`);
     }
 
     // Register builtin tools
@@ -2972,6 +2985,16 @@ export class Engine {
   getLegacyMemoryReason(): LegacyMemoryReason | null { return this._legacyMemory; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
+
+  /** The secret store's resolve guard: {@link resolveGuardAllows} over this engine's state. */
+  private resolveGuard(name: string): boolean {
+    return resolveGuardAllows({
+      profilesKnown: this._profilesKnown,
+      apiStore: this._apiStore,
+      ends: this._mandateEnds,
+      fromEnvironment: (n) => this.secretStore?.isEnvironmentSecret(n) === true,
+    }, name);
+  }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 
   /**
