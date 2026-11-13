@@ -67,7 +67,7 @@ describe('the bounds the tokenizer of the parser counts', () => {
   });
 });
 
-describe('the bounds the parse keeps while it runs', () => {
+describe('the bounds the parse keeps, and the depth of the tree it built', () => {
   it('ends at the attribute bound where the parser gathers attributes onto one element', () => {
     // Each tag carries one attribute; the parser moves them all onto one element.
     expect(withinReadingBounds(range(5, (i) => `<html a${i}>`), { attributesPerTag: 5 })).toBe(true);
@@ -86,26 +86,12 @@ describe('the bounds the parse keeps while it runs', () => {
     expect(withinReadingBounds('<b>'.repeat(11) + 'x', { depth: 11 })).toBe(false);
   });
 
-  it('stops a parse at the depth bound, not after it has built the whole tree', () => {
-    const v = range(4000, (i) => `<b a${i}>`);
-    const fastest = (depth: number): number => Math.min(...[0, 1, 2].map(() => {
-      const start = performance.now();
-      withinReadingBounds(v, { depth });
-      return performance.now() - start;
-    }));
-    // The same value under a small and a large depth bound: a parse that runs to its end costs
-    // the same under both. Compared to each other, so a slow machine does not change the answer.
-    expect(fastest(10)).toBeLessThan(fastest(1e9) / 5);
-  });
-
-  it('stops a parse at the depth bound inside template content as well', () => {
-    const v = '<template>'.repeat(4000);
-    const fastest = (depth: number): number => Math.min(...[0, 1, 2].map(() => {
-      const start = performance.now();
-      withinReadingBounds(v, { depth });
-      return performance.now() - start;
-    }));
-    expect(fastest(10)).toBeLessThan(fastest(1e9) / 5);
+  it('reads the depth of template content on the tree, one level per template', () => {
+    // 257 nested templates and their text: 258 levels on the tree the parse built.
+    const nested = '<template>'.repeat(257) + 'x';
+    expect(withinReadingBounds(nested)).toBe(true);
+    expect(withinReadingBounds(nested, { depth: 258 })).toBe(true);
+    expect(withinReadingBounds(nested, { depth: 257 })).toBe(false);
   });
 
   it('refuses to read at all with a parser whose tokenizer it cannot count', () => {

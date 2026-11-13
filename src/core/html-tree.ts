@@ -86,28 +86,17 @@ const TOKENIZER_STEPS = ['_createStartTagToken', '_createEndTagToken', '_createA
 
 /**
  * A parse that stops once its tokenizer has read more than `bounds.tags` tags or one tag with more
- * than `bounds.attributesPerTag` attributes, it has built more than `bounds.nodes` nodes, put a
- * node deeper than `bounds.depth`, or given one element more than `bounds.attributesPerTag`
- * attributes. Text appended to the text node before it builds none, so it does not count. The
- * tags are counted where the tokenizer makes them, so whatever state it reads them in — raw text,
- * a comment, foreign content — is its own, never a guess from the bytes.
+ * than `bounds.attributesPerTag` attributes, it has built more than `bounds.nodes` nodes, or given
+ * one element more than `bounds.attributesPerTag` attributes. The depth is read after the parse,
+ * on the tree it built. Text appended to the text node before it builds none, so it does not
+ * count. The tags are counted where the tokenizer makes them, so whatever state it reads them in —
+ * raw text, a comment, foreign content — is its own, never a guess from the bytes.
  */
 function parseCounted(value: string, bounds: ReadingBounds): HtmlFragment {
   let built = 0;
   const count = (): void => {
     built += 1;
     if (built > bounds.nodes) throw new BoundExceeded();
-  };
-  // A node's depth is read up its parents where it is placed: the parser moves nodes, and a depth
-  // recorded once would not move with them. Template content counts below its template.
-  const hosts = new WeakMap<object, DefaultTreeAdapterTypes.ParentNode>();
-  const placed = (parent: DefaultTreeAdapterTypes.ParentNode): void => {
-    let depth = 1;
-    for (let n: DefaultTreeAdapterTypes.ParentNode | null | undefined = parent; n; n = ('parentNode' in n ? n.parentNode : null) ?? hosts.get(n)) {
-      depth += 1;
-      // The parser places a fragment's nodes under a root element of its own, one level more.
-      if (depth > bounds.depth + 2) throw new BoundExceeded();
-    }
   };
   const appendsToText = (parent: DefaultTreeAdapterTypes.ParentNode): boolean =>
     defaultTreeAdapter.getChildNodes(parent).at(-1)?.nodeName === '#text';
@@ -117,9 +106,6 @@ function parseCounted(value: string, bounds: ReadingBounds): HtmlFragment {
     createCommentNode: (...a) => { count(); return defaultTreeAdapter.createCommentNode(...a); },
     insertText: (parent, text) => { if (!appendsToText(parent)) count(); defaultTreeAdapter.insertText(parent, text); },
     insertTextBefore: (...a) => { count(); defaultTreeAdapter.insertTextBefore(...a); },
-    appendChild: (parent, child) => { placed(parent); defaultTreeAdapter.appendChild(parent, child); },
-    insertBefore: (parent, child, ref) => { placed(parent); defaultTreeAdapter.insertBefore(parent, child, ref); },
-    setTemplateContent: (template, content) => { hosts.set(content, template); defaultTreeAdapter.setTemplateContent(template, content); },
     adoptAttributes: (recipient, attrs) => {
       if (recipient.attrs.length + attrs.length > bounds.attributesPerTag) throw new BoundExceeded();
       defaultTreeAdapter.adoptAttributes(recipient, attrs);
