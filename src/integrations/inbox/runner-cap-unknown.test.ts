@@ -1,17 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PersistentBudgetCheck } from '../../types/index.js';
 
-// A refusal of the cap check that names neither cap: both spends under their limits.
-// The check as it stands refuses only with one cap reached, so it is stood in for here;
-// the gate and the runner are the real ones.
-vi.mock('../../core/session-budget.js', async (importActual) => ({
-  ...(await importActual<typeof import('../../core/session-budget.js')>()),
-  checkPersistentBudget: (): PersistentBudgetCheck => ({
-    allowed: false, todayCostUSD: 1, monthCostUSD: 1, dailyLimitUSD: 5, monthlyLimitUSD: 500,
-    reason: 'Spending cap cannot be checked.',
-  }),
-}));
-
+// A refusal of the cap check that names neither cap. Its one real cause: the caps are set but
+// cannot be checked, because the run history did not open at boot (no cost provider). The
+// budget module, the gate and the runner are the real ones.
+import { checkPersistentBudget, configurePersistentBudget, resetPersistentBudget } from '../../core/session-budget.js';
 import { MailStateDb } from '../mail/state.js';
 import type { MailAccountConfig } from '../mail/provider.js';
 import type { LLMCaller } from './classifier/index.js';
@@ -30,11 +22,14 @@ beforeEach(() => {
   mail = new MailStateDb({ path: ':memory:' });
   mail.upsertAccount(ACCOUNT);
   inbox = new InboxStateDb(mail.getConnection());
+  configurePersistentBudget({ costProvider: null, dailyCapUSD: 5, monthlyCapUSD: 500 });
 });
-afterEach(() => { mail.close(); });
+afterEach(() => { mail.close(); resetPersistentBudget(); });
 
-describe('buildInboxRunner — a cap refusal that names neither cap', () => {
-  it('makes no classify call and names the AI budget without a period', async () => {
+describe('buildInboxRunner — the caps cannot be checked (no run history)', () => {
+  it('makes no classify call and says the spend is unknown, not that a budget was reached', async () => {
+    // The precondition, so the test cannot pass on an allowed check.
+    expect(checkPersistentBudget().allowed).toBe(false);
     const llm: LLMCaller = vi.fn(async () => 'should-not-be-called');
     const queue = buildInboxRunner({ state: inbox, llm });
     queue.enqueue({
@@ -48,6 +43,6 @@ describe('buildInboxRunner — a cap refusal that names neither cap', () => {
     await queue.drain();
 
     expect(llm).not.toHaveBeenCalled();
-    expect(inbox.listItems()[0]?.reasonDe).toBe('KI-Budget erreicht — manuell prüfen.');
+    expect(inbox.listItems()[0]?.reasonDe).toBe('KI-Ausgaben gerade unbekannt — manuell prüfen.');
   });
 });
