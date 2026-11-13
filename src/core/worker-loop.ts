@@ -49,7 +49,9 @@ import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
-import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget } from './session-budget.js';
+import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget, budgetCapsToWaitFor, budgetCapSetByEnv, type BudgetCapName } from './session-budget.js';
+import { isHostedInstance } from '../contract/vocab.js';
+import { readEnvAlias } from './env.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
 // handler was its first consumer; src/core/ is the better home now that there
 // are two. `src/core/config.ts` already imports across the same seam, so this
@@ -272,6 +274,15 @@ const WORKER_MAX_ITERATIONS = 30; // cap agent loops per background task (cost c
 // unattended run. $15 is generous for a legitimate multi-step task yet well under
 // the $50 interactive session ceiling. Doubles as the reservation estimate below.
 const WORKER_MAX_COST_USD = 15;
+
+/**
+ * Whether the owner can raise these caps under Settings → Limits: not on an instance the
+ * control plane runs (the page is not shown there, and the plan's caps come by env), and not
+ * where an environment variable set the cap (it wins over the settings).
+ */
+function canRaiseBudget(caps: readonly BudgetCapName[]): boolean {
+  return !isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER')) && caps.every(cap => !budgetCapSetByEnv(cap));
+}
 /**
  * The least headroom a scheduled run is started with.
  *
@@ -1590,10 +1601,20 @@ export class WorkerLoop {
         // than the same tenant's interactive chat, on every tier where the session
         // ceiling is the smaller number. `getSessionCostCeiling` was already imported for
         // `reservationEstimate`; it is the ceiling a single run cannot pass anyway.
+        const sessionCeiling = getSessionCostCeiling();
         const capUSD = task.effect === 'run_agent' && headroom !== null
-          ? Math.min(estimate, headroom, getSessionCostCeiling())
+          ? Math.min(estimate, headroom, sessionCeiling)
           : null;
         const grant = capUSD ?? estimate;
+        // Which budget to wait for, for the stop's way out: only when the room in the daily
+        // or monthly budget, not the estimate or the session ceiling, set the grant, and only
+        // the caps that recorded spend made short and a new day or month refills
+        // (`budgetCapsToWaitFor`). Otherwise the way out stays "split it".
+        const need = Math.min(estimate, sessionCeiling);
+        // Only `executeStandard` (a run_agent turn outside a watch) reads it; other effects
+        // carry it unread. A cap short on spend leaves less headroom than `need`, so it set
+        // the grant too, short of spend recorded between the two reads.
+        const capBy = budgetCapsToWaitFor(need);
 
         if (capUSD !== null && capUSD < MIN_VIABLE_RUN_USD) {
           // ⚠ This branch PREEMPTS the reservation below, which is where the name of the
@@ -1657,7 +1678,8 @@ export class WorkerLoop {
         // reservation once the task settles, via .finally so it runs even if
         // executeTask's synchronous prologue throws — a leaked reservation would
         // otherwise shrink the tenant's daily headroom for the process lifetime.
-        void this.executeTask(task, capUSD).finally(() => releasePersistentBudget(reservation.reservedUSD));
+        // run-group-starter: the callback settles with this run and only frees its reservation; it reports no spend
+        void this.executeTask(task, capUSD, undefined, capBy).finally(() => releasePersistentBudget(reservation.reservedUSD));
       }
       // After the due triggers, and on its own: a drain that throws leaves the next tick's
       // due triggers as they were. No signal from the receiver wakes it, so an event waits
@@ -1891,7 +1913,7 @@ export class WorkerLoop {
    * paths that do not reserve (the manual "Run now" below, and any direct caller). Null
    * keeps each executor's own constant, so an unreserved run behaves exactly as before.
    */
-  private async executeTask(record: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker): Promise<void> {
+  private async executeTask(record: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker, capBy: readonly BudgetCapName[] = []): Promise<void> {
     // Who a plan depends on is read from the row as it is now, not as `getDue` returned it: the
     // owner's takeover (`plan-takeover.ts`) can commit in between, and every reader below — the
     // stamp checks, the plan's members and whom it acts for, the gate, the trail, the watch's
@@ -1918,14 +1940,14 @@ export class WorkerLoop {
     //
     // It is read from the grant, so it holds for the attempt this dispatch starts.
     const starter = grant?.principal;
-    if (!handRun || !grant) return this.#executeTask(task, capUSD, false, starter);
+    if (!handRun || !grant) return this.#executeTask(task, capUSD, false, starter, capBy);
     // One line per hand start, naming who started it. A process log, not a record.
     process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) test run by hand by ${principalTag(grant.principal)}\n`);
-    return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true, grant.principal));
+    return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true, grant.principal, capBy));
   }
 
-  async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter?: RequestPrincipal): Promise<void> {
-    return this.#runInSlot(task, capUSD, handRun, starter, undefined);
+  async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter?: RequestPrincipal, capBy: readonly BudgetCapName[] = []): Promise<void> {
+    return this.#runInSlot(task, capUSD, handRun, starter, undefined, capBy);
   }
 
   /**
@@ -1934,7 +1956,7 @@ export class WorkerLoop {
    * a due trigger and a webhook run share it whole ({@link SlotEvent} says where they differ),
    * so a gate or a stop added here holds for both.
    */
-  async #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
+  async #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined, capBy: readonly BudgetCapName[] = []): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
@@ -2146,7 +2168,7 @@ export class WorkerLoop {
               if (task.source === 'watch') {
                 await this.executeWatch(task, capUSD, starter);
               } else {
-                await this.executeStandard(task, capUSD, starter);
+                await this.executeStandard(task, capUSD, starter, capBy);
               }
               break;
             case 'bulk_apply':
@@ -2719,7 +2741,7 @@ export class WorkerLoop {
   /** Execute a standard or scheduled task via headless Session. */
   /** @param starter Who started this run by hand, when a request did. The run is built for the
    *  mandate its plan acts for, else for this starter (`#runAs`), and that one's tool lock applies. */
-  private async executeStandard(task: TriggerRecord, capUSD: number | null = null, handStarter?: RequestPrincipal): Promise<void> {
+  private async executeStandard(task: TriggerRecord, capUSD: number | null = null, handStarter?: RequestPrincipal, capBy: readonly BudgetCapName[] = []): Promise<void> {
     // §0 A10 — is this run happening BECAUSE a question was answered?
     //
     // The answered row carries both halves the new run needs: the thread the
@@ -3274,7 +3296,11 @@ export class WorkerLoop {
       : stop.cause === 'budget_cap' ? notices.budgetCut('cost', `$${(capUSD ?? WORKER_MAX_COST_USD).toFixed(2)}`)
         : stop.cause === 'iteration_cap' ? notices.budgetCut('turns', String(WORKER_MAX_ITERATIONS))
           : null;
-    const budgetCut = capStop === null ? null : `${capStop} ${notices.budgetCutWayOut}`;
+    // A cost stop on the room left in the daily or monthly budget is waited out, not split.
+    const wayOut = stop?.cause === 'budget_cap' && capBy.length > 0
+      ? notices.budgetCutWaitWayOut(capBy, canRaiseBudget(capBy))
+      : notices.budgetCutWayOut;
+    const budgetCut = capStop === null ? null : `${capStop} ${wayOut}`;
     // Composed BEFORE the truncation, so the reason survives a long result rather than
     // being the thing that gets cut.
     const truncate = (text: string): string => text.length > MAX_TASK_RESULT_CHARS

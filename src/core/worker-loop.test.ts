@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
 import { WORKER_NOTICES } from './worker-notices.js';
 import { PLAN_ENDED_RESULT } from './plan-pause.js';
@@ -1871,6 +1871,127 @@ describe('WorkerLoop', () => {
       expect(call?.[1], 'the record names the way out').toContain(WORKER_NOTICES.en.budgetCutWayOut);
       expect(msg?.body, 'the push does not').not.toContain(WORKER_NOTICES.en.budgetCutWayOut);
       expect(msg?.body).toMatch(/^Stopped at the cost ceiling of \$[\d.]+ with work still pending\.\n\nPartial findings so far\./);
+    });
+
+    describe('a stop on the room left in the daily or monthly budget says to wait, not to split', () => {
+      const spent = (usd: number) => ({ getCostByDay: () => [{ day: FIXED_DAY, cost_usd: usd, run_count: 1 }] });
+      /** The recorded result and the push of one budget-capped run under the given caps. */
+      async function stopUnder(caps: { dailyCapUSD?: number; monthlyCapUSD?: number; sessionCapUSD?: number; setByEnv?: Array<'daily' | 'monthly'> }, spentUSD = 0.22): Promise<{ recorded: string; push: string }> {
+        configurePersistentBudget({ costProvider: spent(spentUSD), ...caps });
+        const tm = makeTaskManager([makeTask()]);
+        const router = makeNotificationRouter();
+        const engine = makeEngine({ taskManager: tm, session: sessionStoppedAt({ cause: 'budget_cap', pendingToolCount: 2 }) });
+        await new WorkerLoop(engine, router, 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+        const recorded = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0]?.[1] ?? '';
+        const push = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0]?.body ?? '';
+        return { recorded, push };
+      }
+
+      it('the daily budget set the grant: wait for tomorrow, or raise it (self-host)', async () => {
+        const { recorded, push } = await stopUnder({ dailyCapUSD: 15 });
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWaitWayOut(['daily'], true));
+        expect(recorded, 'the split advice does not fit a budget that refills').not.toContain(WORKER_NOTICES.en.budgetCutWayOut);
+        expect(push, 'the push keeps only the first sentence').not.toContain('daily AI budget');
+        expect(push).toMatch(/^Stopped at the cost ceiling of \$14\.78 with work still pending\./);
+      });
+
+      it('the monthly budget set the grant: wait for next month', async () => {
+        const { recorded } = await stopUnder({ monthlyCapUSD: 15 });
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWaitWayOut(['monthly'], true));
+      });
+
+      it('both left the same room: the sentence names both', async () => {
+        const { recorded } = await stopUnder({ dailyCapUSD: 15, monthlyCapUSD: 15 });
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWaitWayOut(['daily', 'monthly'], true));
+      });
+
+      it('on a plan whose budget lynox sets, the way out does not offer Settings → Limits', async () => {
+        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+        onTestFinished(() => { vi.stubEnv('LYNOX_BILLING_TIER', ''); });
+        const { recorded } = await stopUnder({ dailyCapUSD: 15 });
+        // A managed instance speaks German by default: this is also the German witness.
+        expect(recorded).toContain(WORKER_NOTICES.de.budgetCutWaitWayOut(['daily'], false));
+        expect(recorded).not.toContain('Einstellungen → Limits');
+      });
+
+      it('the session ceiling, not the budget, set the grant: the way out stays "split it"', async () => {
+        // $14.78 of daily room, but a $4 session ceiling: the run was too big for one run.
+        const { recorded } = await stopUnder({ dailyCapUSD: 15, sessionCapUSD: 4 });
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWayOut);
+        expect(recorded).not.toContain('AI budget was nearly used up');
+      });
+
+      it('a TURN stop under a tight budget keeps "split it": the budget did not end that run', async () => {
+        configurePersistentBudget({ costProvider: spent(0.22), dailyCapUSD: 15 });
+        const tm = makeTaskManager([makeTask()]);
+        const engine = makeEngine({ taskManager: tm, session: sessionStoppedAt({ cause: 'iteration_cap', pendingToolCount: 2 }) });
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+        const recorded = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0]?.[1] ?? '';
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWayOut);
+        expect(recorded).not.toContain('AI budget was nearly used up');
+      });
+
+      it('names both budgets when tomorrow would still leave the month too short for the run', async () => {
+        // Daily room $14.78 is the tighter one, but the month has only $14.88 left: a new day
+        // alone does not give a $15 run its room back.
+        const { recorded } = await stopUnder({ dailyCapUSD: 15, monthlyCapUSD: 15.1 });
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWaitWayOut(['daily', 'monthly'], true));
+      });
+
+      it('a cap below one run keeps "split it": a new day gives no more room than today', async () => {
+        // $10 daily cap, $15 worst case, nothing spent: tomorrow the run stops at $10 again.
+        const { recorded } = await stopUnder({ dailyCapUSD: 10 }, 0);
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWayOut);
+        expect(recorded).not.toContain('AI budget was nearly used up');
+      });
+
+      it('a cap an environment variable set is not offered to raise in the settings', async () => {
+        const { recorded } = await stopUnder({ dailyCapUSD: 15, setByEnv: ['daily'] });
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWaitWayOut(['daily'], false));
+        expect(recorded).not.toContain('Settings → Limits');
+      });
+
+      it('both budgets short and only one set by env: the settings are not offered', async () => {
+        const { recorded } = await stopUnder({ dailyCapUSD: 15, monthlyCapUSD: 15.1, setByEnv: ['monthly'] });
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWaitWayOut(['daily', 'monthly'], false));
+        expect(recorded).not.toContain('Settings → Limits');
+      });
+
+      it('on an instance the control plane runs with your own key, Settings → Limits is not offered either', async () => {
+        vi.stubEnv('LYNOX_BILLING_TIER', 'hosted');
+        onTestFinished(() => { vi.stubEnv('LYNOX_BILLING_TIER', ''); });
+        const { recorded } = await stopUnder({ dailyCapUSD: 15 });
+        expect(recorded, 'it still says to wait').toMatch(/Tagesbudget für KI war fast aufgebraucht|daily AI budget was nearly used up/);
+        expect(recorded).not.toMatch(/Settings → Limits|Einstellungen → Limits/);
+      });
+
+      it('room taken by a run still in flight, not by spend, keeps "split it": no budget is used up', async () => {
+        // $25 daily, $15 session ceiling, nothing spent. The first run is granted $15 and
+        // holds it; the second sees $10 of room, but only because the first holds the rest.
+        configurePersistentBudget({ costProvider: spent(0), dailyCapUSD: 25, sessionCapUSD: 15 });
+        const tm = makeTaskManager([makeTask({ id: 'task-a' }), makeTask({ id: 'task-b' })]);
+        const engine = makeEngine({ taskManager: tm });
+        const holding = { sessionId: 'thread-worker-test', run: vi.fn(() => new Promise<string>(() => { /* never settles */ })), _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null } as unknown as Session;
+        (engine.createSession as unknown as { mockReturnValueOnce: (s: Session) => { mockReturnValueOnce: (s: Session) => void } })
+          .mockReturnValueOnce(holding).mockReturnValueOnce(sessionStoppedAt({ cause: 'budget_cap', pendingToolCount: 2 }));
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+        const calls = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls;
+        expect(calls.map(c => c[0]), 'only the second run ended').toEqual(['task-b']);
+        expect(calls[0]?.[1], 'the second run was capped by the room the first holds').toContain('$10.00');
+        expect(calls[0]?.[1]).toContain(WORKER_NOTICES.en.budgetCutWayOut);
+        expect(calls[0]?.[1]).not.toContain('AI budget was nearly used up');
+      });
+
+      it('the estimate, not the budget, set the grant: the way out stays "split it"', async () => {
+        // $30 of daily room: more than a run's $15 worst case, less than the $50 session
+        // ceiling. So the estimate alone is the smallest, and the budget did not set the grant.
+        const { recorded } = await stopUnder({ dailyCapUSD: 30 }, 0);
+        expect(recorded).toContain(WORKER_NOTICES.en.budgetCutWayOut);
+        expect(recorded).not.toContain('AI budget was nearly used up');
+      });
     });
 
     it('reports a TURN-capped run too, and says which limit it was', async () => {

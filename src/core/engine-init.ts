@@ -35,7 +35,7 @@ import { ifReturned, ifStored, InstanceWriteUnrecorded, withInstanceWriteAs, typ
 import { ALL_NAMESPACES } from '../types/index.js';
 import { INSTANCE_WRITE_SITES } from './mandate-tool-lock.js';
 import type { KnowledgeStoreResult } from '../types/index.js';
-import { configurePersistentBudget, isPersistentBudgetUnverifiable, describeSetCaps } from './session-budget.js';
+import { configurePersistentBudget, isPersistentBudgetUnverifiable, describeSetCaps, type BudgetCapName, type PersistentCaps } from './session-budget.js';
 import { describeConnectionTokens } from './profile-secret-view.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
@@ -70,21 +70,17 @@ import type { Containment } from './containment.js';
  * applied. The session cap and the egress settings
  * (`enforce_https`, `network_policy`, the operator host floor) do not, and are
  * applied whether or not RunHistory opened: an engine that boots without its
- * history must still enforce the limits it was configured with. Of these, only
- * the egress settings are applied again when the config is reloaded
- * (`applyEgressSettings`).
+ * history must still enforce the limits it was configured with. Of these, the
+ * session/daily/monthly caps (`budgetCapsFromConfig`) and the egress settings
+ * (`applyEgressSettings`) are applied again when the config is reloaded; the
+ * HTTP/mail rate limits are not.
  */
 export function configureBudgetAndRateLimits(
   runHistory: RunHistory | null,
   userConfig: LynoxUserConfig,
   toolContext: ToolContext,
 ): void {
-  configurePersistentBudget({
-    costProvider: runHistory,
-    sessionCapUSD: envFloat('LYNOX_MAX_SESSION_COST_USD') ?? userConfig.max_session_cost_usd,
-    dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
-    monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
-  });
+  configurePersistentBudget({ costProvider: runHistory, ...budgetCapsFromConfig(userConfig) });
   // Said at boot, not only at the first refused run: whoever reads the startup log sees
   // that nothing will run, next to the line that says why the history did not open.
   if (isPersistentBudgetUnverifiable()) {
@@ -92,6 +88,25 @@ export function configureBudgetAndRateLimits(
   }
   if (runHistory) configureHistoryBackedLimits(runHistory, userConfig, toolContext);
   configureEgressPolicy(userConfig, toolContext);
+}
+
+/**
+ * The session/daily/monthly caps for this config. An environment variable wins over the
+ * config value and is recorded as such (`setByEnv`), so a stop can tell whether the owner
+ * can raise the cap in the settings at all.
+ */
+export function budgetCapsFromConfig(userConfig: LynoxUserConfig): PersistentCaps {
+  const dailyEnv = envFloat('LYNOX_MAX_DAILY_COST_USD');
+  const monthlyEnv = envFloat('LYNOX_MAX_MONTHLY_COST_USD');
+  const setByEnv: BudgetCapName[] = [];
+  if (dailyEnv !== undefined) setByEnv.push('daily');
+  if (monthlyEnv !== undefined) setByEnv.push('monthly');
+  return {
+    sessionCapUSD: envFloat('LYNOX_MAX_SESSION_COST_USD') ?? userConfig.max_session_cost_usd,
+    dailyCapUSD: dailyEnv ?? userConfig.max_daily_cost_usd,
+    monthlyCapUSD: monthlyEnv ?? userConfig.max_monthly_cost_usd,
+    setByEnv,
+  };
 }
 
 // Env vars override config (managed hosting sets tier-specific limits via env)

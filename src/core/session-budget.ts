@@ -105,17 +105,41 @@ let _reservedInFlightUSD = 0;
  * cap still applies, and a daily or monthly cap that is set can no longer be
  * checked: every run is refused with that reason instead of running unchecked.
  */
-export function configurePersistentBudget(opts: {
-  costProvider: CostQueryProvider | null;
+export function configurePersistentBudget(opts: { costProvider: CostQueryProvider | null } & PersistentCaps): void {
+  _costProvider = opts.costProvider;
+  _configured = true;
+  setPersistentCaps(opts);
+}
+
+/** The persistent caps a run's headroom can come from. */
+export type BudgetCapName = 'daily' | 'monthly';
+
+/** The caps {@link setPersistentCaps} takes; an absent cap falls back to its default. */
+export interface PersistentCaps {
   sessionCapUSD?: number | undefined;
   dailyCapUSD?: number | undefined;
   monthlyCapUSD?: number | undefined;
-}): void {
-  _costProvider = opts.costProvider;
-  _configured = true;
-  _maxSessionCostUSD = opts.sessionCapUSD ?? DEFAULT_SESSION_COST_USD;
-  _dailyCapUSD = opts.dailyCapUSD ?? DEFAULT_DAILY_CAP_USD;
-  _monthlyCapUSD = opts.monthlyCapUSD ?? DEFAULT_MONTHLY_CAP_USD;
+  /** The caps an environment variable set: the owner cannot change those in the settings. */
+  setByEnv?: readonly BudgetCapName[] | undefined;
+}
+
+let _capsSetByEnv: readonly BudgetCapName[] = [];
+
+/**
+ * Set the caps without touching the cost provider or the runs in flight. Boot sets them
+ * through {@link configurePersistentBudget}; a config reload sets them again here, so a cap
+ * the owner changes takes effect for the next run without a restart.
+ */
+export function setPersistentCaps(caps: PersistentCaps): void {
+  _maxSessionCostUSD = caps.sessionCapUSD ?? DEFAULT_SESSION_COST_USD;
+  _dailyCapUSD = caps.dailyCapUSD ?? DEFAULT_DAILY_CAP_USD;
+  _monthlyCapUSD = caps.monthlyCapUSD ?? DEFAULT_MONTHLY_CAP_USD;
+  _capsSetByEnv = caps.setByEnv ?? [];
+}
+
+/** True when an environment variable set this cap, so changing it in the settings has no effect. */
+export function budgetCapSetByEnv(cap: BudgetCapName): boolean {
+  return _capsSetByEnv.includes(cap);
 }
 
 /**
@@ -307,6 +331,23 @@ export function persistentBudgetHeadroom(): number | null {
   return Math.max(0, Math.min(...remaining));
 }
 
+/**
+ * The caps to wait for before a run of `needUSD` can have its full room again: every cap
+ * whose room after recorded spend is below `needUSD` (both when both are). Empty when
+ * waiting does not give that room back: no cap is short on spend (runs still in flight took
+ * the room, and they hand it back when they settle), or a short cap is itself below
+ * `needUSD`, so a new day or month does not make it enough.
+ */
+export function budgetCapsToWaitFor(needUSD: number): readonly BudgetCapName[] {
+  const spend = computeRecordedSpend();
+  if (!spend) return [];
+  const short: Array<readonly [BudgetCapName, number]> = [];
+  if (_dailyCapUSD - spend.todayCost < needUSD) short.push(['daily', _dailyCapUSD]);
+  if (_monthlyCapUSD - spend.monthCost < needUSD) short.push(['monthly', _monthlyCapUSD]);
+  if (short.some(([, cap]) => cap < needUSD)) return [];
+  return short.map(([name]) => name);
+}
+
 /** Release a reservation held by {@link reservePersistentBudget}. */
 export function releasePersistentBudget(reservedUSD: number): void {
   if (reservedUSD <= 0) return;
@@ -337,4 +378,5 @@ export function resetPersistentBudget(): void {
   _reservedInFlightUSD = 0;
   _dailyCapUSD = DEFAULT_DAILY_CAP_USD;
   _monthlyCapUSD = DEFAULT_MONTHLY_CAP_USD;
+  _capsSetByEnv = [];
 }
