@@ -2444,10 +2444,14 @@ export class BulkLedger {
    * the phase it stood in was stored (v69), with a halt reason: it stood halted or aborted, and
    * which one is not known. Refused for any such run above the source, not only one this undo
    * would put back (an even distance up): such chains predate v69, and refusing is the safe side.
+   * Bounded like `listFormOfFamily`: a cycle or an overlong chain ends the walk instead of hanging
+   * the caller; a chain no run of the product writes, so nothing past that point is refused here.
    */
   private phaseNotKept(sourceRunId: string): boolean {
+    const seen = new Set<string>([sourceRunId]);
     let up = this.runRow(sourceRunId)?.source_run_id ?? null;
-    while (up !== null) {
+    for (let depth = 0; up !== null && !seen.has(up) && depth < 64; depth++) {
+      seen.add(up);
       const r = this.runRow(up);
       if (!r) return false;
       if (r.phase === 'undone' && r.phase_before_undo === null && r.halt_reason !== null) return true;
@@ -3322,6 +3326,7 @@ export class BulkLedger {
    * rollback. Each undo writes back what its source overwrote, so the values alternate: after
    * a write the source's target is taken back, the target that source took back stands again,
    * and so on; after a rollback it is the other way round. Called inside the caller's transaction.
+   * Bounded at 64 steps like `listFormOfFamily`: a cycle in the links must not hang the write.
    */
   private flipChain(undoRunId: string, seq: number, at: string, written: boolean): void {
     this.engineDb.getDb().prepare(
@@ -3331,7 +3336,7 @@ export class BulkLedger {
          UNION ALL
          SELECT r.source_run_id, t.source_seq, up.depth + 1 FROM up
            JOIN bulk_targets t ON t.run_id = up.run_id AND t.seq = up.seq JOIN bulk_runs r ON r.id = t.run_id
-           WHERE r.source_run_id IS NOT NULL AND t.source_seq IS NOT NULL
+           WHERE r.source_run_id IS NOT NULL AND t.source_seq IS NOT NULL AND up.depth < 64
        )
        UPDATE bulk_targets SET undone_at = CASE
            WHEN (SELECT depth FROM up WHERE up.run_id = bulk_targets.run_id AND up.seq = bulk_targets.seq) % 2 = ? THEN ?
@@ -3526,8 +3531,12 @@ export class BulkLedger {
       }
       // Further up the chain each run is as this undo's write left its targets ({@link flipChain}):
       // at an even distance its writes stand again, at an odd one they are taken back again.
+      // Bounded like `listFormOfFamily`: a cycle or an overlong chain ends the walk, it must not
+      // hang the run's last write.
+      const seen = new Set<string>([run.id, src.id]);
       let up = src.source_run_id, depth = 2;
-      while (up !== null) {
+      while (up !== null && !seen.has(up) && depth < 66) {
+        seen.add(up);
         const r = this.runRow(up);
         if (!r) return;
         const left = (db.prepare(

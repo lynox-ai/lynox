@@ -1305,6 +1305,28 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     expect(ledger.undoneBy(runId)!.runId).toBe(u1);
   });
 
+  it('an undo whose chain loops back on itself still writes and finishes', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id);
+    // No run of the product links like this: the run now names the undo of its undo as its
+    // source, target by target, so every walk up the chain comes back to where it started.
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_runs SET source_run_id = ? WHERE id = ?').run(redo.status.id, runId);
+    db.prepare('UPDATE bulk_targets SET source_seq = seq WHERE run_id = ?').run(runId);
+    expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([...state.values()]).toEqual(['w0', 'w1', 'w2']);
+    expect(ledger.getStatus(redo.status.id)!.phase).toBe('done');
+  });
+
   it('an atomic undo of the undo that rolls back leaves the run taken back', async () => {
     const { runId, initial } = recordMemoryRun(3, { atomic: true });
     approve(runId);
