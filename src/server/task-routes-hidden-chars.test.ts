@@ -170,4 +170,14 @@ describe('the task routes and characters that render as nothing (real engine)', 
     expect(ok.status, 'positive control: the helper may edit it').toBe(200);
     expect(marks()).toEqual({ mandate_editor: 'mandate:ida@example.invalid' });
   });
+  it('PATCH /api/tasks/:id takes no mark from the request: a client cannot set a trigger\'s created_untrusted', async () => {
+    // The mark records what the turn that wrote an instruction had taken in (task_update reads
+    // it off the agent). An HTTP edit is a person's, so the route passes nothing for it.
+    const t = engine.getTaskManager()!.createScheduled({ title: 'Nightly sync', scheduleCron: '0 2 * * *', confirmedAt: new Date().toISOString() });
+    for (const untrusted of ['conversation', { nested: true }]) {
+      const res = await ask('PATCH', `/api/tasks/${t.id}`, ownerCookie, { description: 'Sync the ledger', untrusted });
+      expect(res.status).toBe(200);
+    }
+    expect(engine.getTaskManager()!.listTriggers({}).find((r) => r.id === t.id)?.created_untrusted).toBeUndefined();
+  });
 });
