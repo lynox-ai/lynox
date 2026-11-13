@@ -195,26 +195,6 @@ describe('the page of a run the engine is moving on', () => {
 		expect(runAsks).toBe(before);
 	});
 
-	it('asks for the run alone while it has not moved, and for its targets only once it has', async () => {
-		await render();
-		const targetsAtStart = targetAsks;
-		await pass(BULK_FOLLOW_MS * 3);
-		expect(runAsks).toBe(4);
-		expect(targetAsks).toBe(targetsAtStart);
-		run = makeRun({ total: 17, changes: { update: 17, create: 0, delete: 0, unchanged: 0, invalid: 0 }, haltKey: 'listed', haltReason: 'listed' });
-		await pass(BULK_FOLLOW_MS);
-		expect(targetAsks).toBeGreaterThan(targetsAtStart);
-	});
-
-	it('takes a run whose only change is when it resumes as moved', async () => {
-		run = makeRun({ phase: 'writing', total: 3, applied: 1 });
-		await render();
-		const targetsAtStart = targetAsks;
-		run = makeRun({ phase: 'writing', total: 3, applied: 1, resumesAt: '2026-11-13T16:00:00Z' });
-		await pass(BULK_FOLLOW_MS);
-		expect(targetAsks).toBe(targetsAtStart + 1);
-	});
-
 	it('does not ask while the tab is hidden', async () => {
 		await render();
 		Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
@@ -248,25 +228,6 @@ describe('the page of a run the engine is moving on', () => {
 });
 
 describe('a follow ask whose load is refused', () => {
-	it('keeps the page as it was and backs off when the targets of a moved run get a 429', async () => {
-		await render();
-		// The ask finds the run moved and still working; its targets are refused.
-		run = makeRun({ total: 17, changes: { update: 17, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
-		targetStatuses = [429];
-		retryAfter = '20';
-		await pass(BULK_FOLLOW_MS);
-		const refused = runAsks;
-		expect(shown()).not.toMatch(/Laden fehlgeschlagen|Failed to load/);
-		expect(target.querySelector('[aria-current="step"]')).not.toBeNull();
-		// The page did not take the run half: no 17 without its targets.
-		expect(shown()).not.toContain('17');
-		await pass(19_000);
-		expect(runAsks).toBe(refused);
-		await pass(1_500);
-		expect(runAsks).toBe(refused + 1);
-		expect(shown()).toContain('17');
-	});
-
 	it('keeps the page as it was and backs off when the load after the run stopped working gets a 429', async () => {
 		await render();
 		// The ask finds the run waiting for the owner now; the load that follows is refused.
@@ -285,32 +246,50 @@ describe('a follow ask whose load is refused', () => {
 	});
 });
 
-describe('a large run being written', () => {
-	const many = (n: number): BulkTarget[] => Array.from({ length: n }, (_, i) => ({ seq: i + 1, key: `k${i + 1}`, change: 'update', diff: { kind: 'none' }, error: null, deselected: false }) as BulkTarget);
+describe('a run being written', () => {
+	const many = (n: number): BulkTarget[] => Array.from({ length: n }, (_, i) => ({ seq: i + 1, key: `k${i + 1}`, change: 'update', diff: { kind: 'none' }, error: null, deselected: false, hostRewrote: i === 0 ? true : undefined }) as BulkTarget);
+	const writing = (applied: number, hostRewrote: number): BulkRunDetailData =>
+		makeRun({ phase: 'writing', total: 300, applied, hostRewrote } as Partial<BulkRunDetailData>);
+	const countLine = (): string | null | undefined => target.querySelector('[data-testid="bulk-host-rewrote-count"]')?.textContent;
 
-	it('asks for the shown targets in one request of at most a page, never page by page', async () => {
+	it('keeps the count of rewritten targets as its marks show it while the run works', async () => {
 		allTargets = many(300);
-		run = makeRun({ phase: 'writing', total: 300, applied: 10, shopAddedMarkup: 1 } as Partial<BulkRunDetailData>);
+		run = writing(10, 1);
+		await render();
+		const before = countLine();
+		expect(before).toBeTruthy();
+		// The engine counts more rewritten targets; the page's marks are from its last load.
+		run = writing(60, 5);
+		await pass(BULK_FOLLOW_MS * 3);
+		expect(countLine()).toBe(before);
+	});
+
+	it('asks for no targets while the run works', async () => {
+		allTargets = many(300);
+		run = writing(10, 1);
+		await render();
+		const targetsAtStart = targetAsks;
+		run = writing(60, 5);
+		await pass(BULK_FOLLOW_MS * 3);
+		expect(targetAsks).toBe(targetsAtStart);
+		expect(runAsks).toBe(4);
+	});
+
+	it('loads it whole exactly once when it stopped working, and then stops asking', async () => {
+		allTargets = many(300);
+		run = writing(10, 1);
 		await render();
 		const runsAtStart = runAsks;
 		const targetsAtStart = targetAsks;
-		run = makeRun({ phase: 'writing', total: 300, applied: 60, shopAddedMarkup: 1 } as Partial<BulkRunDetailData>);
+		run = makeRun({ phase: 'done', total: 300, applied: 300, hostRewrote: 5 } as Partial<BulkRunDetailData>);
 		await pass(BULK_FOLLOW_MS);
-		expect(runAsks).toBe(runsAtStart + 1);
+		// The ask that found it done, then one load: the run and its whole list (one page of 300).
+		expect(runAsks).toBe(runsAtStart + 2);
 		expect(targetAsks).toBe(targetsAtStart + 1);
-		expect(targetLimits.at(-1)).toBe(300);
-	});
-
-	it('does not ask a whole list of more than a page again while the run is written', async () => {
-		allTargets = many(1200);
-		run = makeRun({ phase: 'writing', total: 1200, applied: 10, shopAddedMarkup: 1 } as Partial<BulkRunDetailData>);
-		await render();
-		// Opening loads it whole (three pages): the mark points into the whole list.
-		expect(targetAsks).toBe(3);
-		run = makeRun({ phase: 'writing', total: 1200, applied: 60, shopAddedMarkup: 1 } as Partial<BulkRunDetailData>);
-		await pass(BULK_FOLLOW_MS * 3);
-		expect(targetAsks).toBe(3);
-		expect(runAsks).toBe(4);
+		expect(countLine()).toContain('5');
+		await pass(BULK_FOLLOW_MS * 5);
+		expect(runAsks).toBe(runsAtStart + 2);
+		expect(targetAsks).toBe(targetsAtStart + 1);
 	});
 });
 

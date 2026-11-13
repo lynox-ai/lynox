@@ -704,7 +704,7 @@ export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKe
 }
 
 /** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`
- *  while the tab is visible, loads its targets only when the run moved, and gives up after
+ *  while the tab is visible, loads it whole once the run stopped working, and gives up after
  *  `BULK_FOLLOW_MAX_MS` (a run still working then is reloaded by the owner). The engine allows a
  *  client (by IP) 120 requests a minute, and an idle tab already asks about 28 (active runs every
  *  4 s, the status bar every 30 s): one ask every 5 s adds 12. A refused ask (429 or any failure)
@@ -720,12 +720,6 @@ export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number |
 	if (ok) return BULK_FOLLOW_MS;
 	const asked = retryAfterS !== null && Number.isFinite(retryAfterS) && retryAfterS > 0 ? retryAfterS * 1000 : 0;
 	return Math.min(Math.max(prev * 2, asked), BULK_FOLLOW_BACKOFF_MAX_MS);
-}
-
-/** What a follow ask compares to see whether the run moved: its step and its counts. */
-export function bulkFollowMark(run: BulkRunDetailData): string {
-	return JSON.stringify([run.phase, run.haltKey, run.total, run.applied, run.failed, run.conflicts, run.sentUnknown,
-		run.undone, run.deselected, run.changes, run.judge?.unjudged ?? null, run.costUsd, run.resumesAt]);
 }
 
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo

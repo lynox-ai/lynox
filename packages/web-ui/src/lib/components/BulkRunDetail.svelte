@@ -14,7 +14,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkEngineWorking, bulkFollowDelay, bulkFollowMark, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -97,10 +97,11 @@
 
 	/** Ask for the run again while the engine moves it on by itself (a list read, a judging, a
 	 *  write the owner started), so the page shows the next step without a reload. Only while the
-	 *  tab is visible, one request an ask, the targets only once the run moved. A refused or failed
-	 *  ask leaves the page as it is and waits longer ({@link bulkFollowDelay}); the loop ends when
-	 *  the run waits for the owner or has ended, after `BULK_FOLLOW_MAX_MS`, or when the page shows
-	 *  another run. */
+	 *  tab is visible, one request an ask. While the run still works the page keeps what it shows:
+	 *  its counts and the marks on its targets come from one load and agree. Once the run stopped
+	 *  working, the page loads it once as on opening. A refused or failed ask or load leaves the
+	 *  page as it is and waits longer ({@link bulkFollowDelay}); the loop ends once that load
+	 *  succeeded, after `BULK_FOLLOW_MAX_MS`, or when the page shows another run. */
 	async function follow(): Promise<void> {
 		const mine = ++following;
 		const until = Date.now() + BULK_FOLLOW_MAX_MS;
@@ -119,46 +120,13 @@
 			const body = res?.ok ? ((await res.json().catch(() => null)) as BulkRunDetailData | null) : null;
 			let retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
 			let ok = body !== null;
-			if (mine !== following) return;
-			if (body !== null && run !== null && bulkFollowMark(body) !== bulkFollowMark(run)) {
-				// Still working: the run and the targets the page shows, in one request, never the
-				// whole list (a large run would cost ten pages an ask). Done working: the page loads
-				// it as on opening, whole where the next step needs it.
-				const step = bulkEngineWorking(body) ? await followStep(body, mine) : await quietLoad();
-				ok = step.ok;
-				if (step.retryAfter !== null) retryAfter = step.retryAfter;
+			if (body !== null && !bulkEngineWorking(body)) {
+				lastRetryAfter = null;
+				ok = await load({ quiet: true });
+				if (!ok) retryAfter = lastRetryAfter;
 			}
 			delay = bulkFollowDelay(delay, ok, retryAfter);
 		}
-	}
-
-	/** A quiet load for a follow loop, with the wait a 429 inside it asked for. */
-	async function quietLoad(): Promise<{ ok: boolean; retryAfter: number | null }> {
-		lastRetryAfter = null;
-		const ok = await load({ quiet: true });
-		return { ok, retryAfter: ok ? null : lastRetryAfter };
-	}
-
-	/** One step of a follow loop for a run the engine still works on: the run as asked, and the
-	 *  targets the page shows asked again in one request (the first page, or as many as the owner
-	 *  opened up to a page; more than that stay as they are). Nothing is written when the page
-	 *  moved on meanwhile (another run, a newer loop, the owner opening more targets). */
-	async function followStep(body: BulkRunDetailData, mine: number): Promise<{ ok: boolean; retryAfter: number | null }> {
-		const id = runId;
-		const had = targets.length;
-		if (had > PAGE) { run = body; return { ok: true, retryAfter: null }; }
-		let res: Response | null = null;
-		try {
-			res = await fetch(`${getApiBase()}/bulk/runs/${encodeURIComponent(id)}/targets?offset=0&limit=${Math.max(FIRST_PAGE, had)}`);
-		} catch {
-			res = null;
-		}
-		const page = res?.ok ? ((await res.json().catch(() => null)) as { targets?: BulkTarget[] } | null)?.targets : undefined;
-		if (!Array.isArray(page)) return { ok: false, retryAfter: res?.status === 429 ? Number(res.headers.get('Retry-After')) : null };
-		if (mine !== following || id !== runId || targets.length !== had) return { ok: true, retryAfter: null };
-		run = body;
-		targets = page;
-		return { ok: true, retryAfter: null };
 	}
 
 	/** Load the run and its targets. True when the page now shows them; false when the load
@@ -214,11 +182,7 @@
 	async function showMore(): Promise<void> {
 		if (!run) return;
 		try {
-			// Appended to the targets the page holds when the page arrives: a follow step may have
-			// asked the shown ones again meanwhile.
-			const from = targets.length;
-			const more = await loadFrom(from, run.total);
-			targets = [...targets.slice(0, from), ...more];
+			targets = [...targets, ...(await loadFrom(targets.length, run.total))];
 		} catch {
 			actionError = t('common.load_failed');
 		}
