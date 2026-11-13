@@ -9,6 +9,13 @@
   `web_search`), which runs at the provider rather than through this
   instance's network settings. It is offered only under no policy,
   `allow-all` or `guarded`, and never to an agent whose policy cannot be read.
+- `POST /api/tasks/:id/confirm` now requires `{ "expect": "<digest>" }`, the
+  digest from `GET /api/tasks/:id/stamp-preview`, and answers 400 without it.
+  Until now a confirm without it stamped whatever the schedule held when the
+  request arrived, unbound to anything the owner was shown. The web UI sends it
+  from the release that carries #2207 on; a tab opened before the upgrade gets
+  "confirm failed" until it is reloaded. An API client that confirms schedules
+  reads the preview first.
 - `StreamProcessor.process` now throws `StreamIncompleteError` when a stream ends
   before any stop reason (no `message_delta` naming one, no `message_stop`), instead
   of returning the partial reply as finished. The Agent retries such a call.

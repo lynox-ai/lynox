@@ -1850,7 +1850,7 @@ export const READ_IDENTIFIERS: ReadonlyMap<string, readonly string[]> = new Map(
   ['GET /api/knowledge/queue', ['threadId']],
   ['GET /api/knowledge/queue/count', ['thread']],
   ['GET /api/history/runs', ['sessionId', 'thread_id']],
-  ['GET /api/inbox/items', ['tenantId']],
+  ['GET /api/inbox/items', ['tenantId', 'ruleId']],
   ['GET /api/inbox/counts', ['tenantId']],
   ['GET /api/inbox/rules', ['accountId', 'tenantId']],
   ['GET /api/metrics', ['name']],
@@ -3533,11 +3533,12 @@ export class LynoxHTTPApi {
     let budgetCents: number;
     if (cpSummary?.managed) {
       // Budget stays CP-driven (Stripe tier amount is the canonical truth);
-      // `used_cents` is always recomputed from local `daily` below so it
-      // stays consistent with the rest of the response shape (`by_kind`,
-      // `daily`, and the StatusBar footer all read the same engine SQLite).
-      // The CP-supplied `used_cents` was a separate counter that drifted to
-      // 0 on staging — see commit message for the regression details.
+      // `used_cents` is recomputed from local `daily` below so it stays
+      // consistent with the rest of the response shape (`by_kind`, `daily`,
+      // and the StatusBar footer all read the same engine SQLite). The
+      // CP-supplied `used_cents` can only lift it, and only over the billing
+      // period it was counted for (`managedUsedCents`): as a separate counter
+      // it once drifted to 0 on staging.
       budgetCents = cpSummary.budget_cents ?? 0;
     } else if (isManagedTier) {
       budgetCents = 0;
@@ -3562,17 +3563,13 @@ export class LynoxHTTPApi {
     // we re-derive here defensively in case a future caller mocks
     // `summary.used_cents` out of sync with `daily`).
     //
-    // Managed-tier floor: if the CP supplied its own `used_cents` (Stripe-
-    // canonical for the current billing window), take the MAX of local-sum
-    // and CP-sum. Prevents under-reporting against Stripe when the engine
-    // SQLite is younger than the Stripe billing cycle — post-migration,
-    // post-restore, or any tenant whose engine was provisioned mid-cycle.
-    // Self-hosted tenants have `cpSummary = null`, so this is a no-op for
-    // the OSS path.
+    // Managed-tier floor: the CP's `used_cents` lifts the local sum only when it
+    // comes with the billing period it was counted over (`managedUsedCents`).
+    // Self-hosted tenants have `cpSummary = null`, so this is a no-op for the
+    // OSS path.
     const localUsedCents = summary.daily.reduce((sum, d) => sum + d.cost_cents, 0);
-    const usedCents = cpSummary?.managed
-      ? Math.max(localUsedCents, cpSummary.used_cents ?? 0)
-      : localUsedCents;
+    const { managedUsedCents } = await import('../core/managed-usage-summary.js');
+    const usedCents = managedUsedCents(localUsedCents, cpSummary);
     const projection = this._projectExhaust(summary.daily, usedCents, availableCents, endIso);
     const hardLimits = isManagedTier
       ? { tier: 'managed', contact_for_quotas: true }
@@ -3802,6 +3799,34 @@ export class LynoxHTTPApi {
     process.stderr.write(found.state === 'unknown'
       ? '⚠ No vault key is set, and whether the stores already hold encrypted values could not be checked. If they do, new data in them is being stored unencrypted.\n'
       : `⚠ No vault key is set, but ${found.stores.join(' and ')} already ${found.stores.length === 1 ? 'holds' : 'hold'} encrypted values. New data in them is being stored unencrypted. Restore LYNOX_VAULT_KEY (env, ~/.lynox/.env or vault.key in the data dir).\n`);
+  }
+
+  /**
+   * The boot stores that did not open, for the owner's status field; absent for anyone else and when
+   * both opened. The engine runs on without such a store until a restart opens it, and `/api/health`
+   * says only `degraded` (it answers without auth); the owner learns here which one, the log says why.
+   */
+  private _bootStoreField(req: IncomingMessage): Record<string, unknown> {
+    const engine = this.engine;
+    if (engine === null || !isOwnerPrincipal(this._principalOf(req))) return {};
+    const missing = [
+      ...(engine.getEngineDb() === null ? ['engine.db'] : []),
+      ...(engine.getRunHistory() === null ? ['history.db'] : []),
+    ];
+    if (missing.length === 0) return {};
+    // A control plane sets this id on every instance it runs, and its health monitor alerts on a
+    // degraded engine: the UI then says the team is told, not "read the log".
+    const alerted = (process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '') !== '';
+    // Durable memory was switched on and did not load because engine.db is missing: the engine runs
+    // on the old memory files, and a mandate cannot sign in. With durable memory off both are the
+    // normal state, so the UI says neither. The engine.db check matters only if the knowledge store
+    // failed for another reason with engine.db open; then memory is not an old copy of engine.db.
+    const memoryOld = engine.getEngineDb() === null && engine.getLegacyMemoryReason() === 'store_missing';
+    return {
+      boot_stores_missing: missing,
+      ...(alerted ? { boot_stores_alerted: true } : {}),
+      ...(memoryOld ? { boot_store_memory_old: true } : {}),
+    };
   }
 
   /** The keyless state for the owner's status field; absent for anyone else and when nothing was found. */
@@ -9242,7 +9267,10 @@ export class LynoxHTTPApi {
       }
       let task;
       try {
-        task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        // `untrusted` is what the agent's turn had taken in (task_update reads it off the agent); a
+        // request does not get to say it, so it is dropped here rather than stored as sent.
+        const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
+        task = taskManager.update(params['id']!, edit as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
@@ -9415,8 +9443,8 @@ export class LynoxHTTPApi {
     // (an unconfirmed run_agent trigger is neither, closing the injection-
     // amplification hole). This user-scope HTTP action is the ONLY consent surface;
     // the agent `task_create` tool cannot reach it, so confirmation is always an
-    // explicit human step. A confirm of a confirmed schedule stamps it again: a new `confirmed_at`,
-    // and a list only when it is sent the preview's `expect` (without, a stamp lists none).
+    // explicit human step. A confirm of a confirmed schedule stamps it again: a new `confirmed_at`
+    // and the list the preview's `expect` was the digest of.
     // What the owner's stamp of this schedule would list: the connections the mandate its plan acts
     // for made with its own login (`plan-stamp.ts`). The confirm below writes the list only when
     // it is sent back the digest of exactly this list on exactly this schedule (`stampExpect`).
@@ -9447,24 +9475,23 @@ export class LynoxHTTPApi {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
-      // `expect`: the digest from the preview. Without it the stamp lists no connection, which is
-      // what every confirm did before the list existed.
+      // `expect`: the digest from the preview, required. The owner stamps the schedule they were
+      // shown, never whatever the trigger holds by the time the request arrives.
       const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
         ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm a schedule from its stamp preview (GET /api/tasks/:id/stamp-preview).'); return; }
       let connections: { wf: string | null; entries: readonly StampEntry[] } | undefined;
-      if (expected !== undefined) {
-        const current = engine.getRunHistory()?.getTrigger(params['id']!);
-        if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
-        const listed = await this.#stampListFor(current);
-        // Read again after the await, and stamp with no await in between: what is compared is
-        // what is stamped.
-        const now = engine.getRunHistory()?.getTrigger(params['id']!);
-        if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
-          errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
-          return;
-        }
-        if (listed !== null && listed.entries.length > 0) connections = listed;
+      const current = engine.getRunHistory()?.getTrigger(params['id']!);
+      if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
+      const listed = await this.#stampListFor(current);
+      // Read again after the await, and stamp with no await in between: what is compared is
+      // what is stamped.
+      const now = engine.getRunHistory()?.getTrigger(params['id']!);
+      if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
+        errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
+        return;
       }
+      if (listed !== null && listed.entries.length > 0) connections = listed;
       let trigger;
       try {
         trigger = taskManager.confirmTrigger(params['id']!, undefined, principalTag(this._principalOf(_req)), connections);
@@ -9781,8 +9808,8 @@ export class LynoxHTTPApi {
         listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : hasListPageUrl(listRun.source) ? listPageUrl(listRun.host, listRun.source, 1) : listRun.host) : null,
         listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
         listNote: status.list ? BULK_LIST_NOTE : null,
-        // A Shopify list narrowed to one product type and/or vendor: shown wherever the run is started
-        // or approved, so the owner sees which group the run reads (PRD shopify-preset §22.2 item 5).
+        // A Shopify product list's filters ({} for every product): shown wherever the run is started or
+        // approved, so the owner sees which group and which statuses it reads (PRD shopify-preset §22.2 item 5).
         listFilters: shopifyListFiltersOf(status.list === null ? null : ledger.getListRun(params['id']!)),
         // An unmeasured apply run writes one target first and is approved only with this
         // confirmation. An undo is neither: it restores what its source wrote, under the
@@ -10560,8 +10587,8 @@ export class LynoxHTTPApi {
     // it already carries credentials on this call.
     this.addStatic('user', 'GET /api/providers/status', async (req, res) => {
       const providers = await this.getProvidersStatus();
-      // The status bar polls this on every page; the keyless field rides it for the owner only.
-      jsonResponse(res, 200, { providers, ...this._keylessField(req) });
+      // The status bar polls this on every page; the keyless and boot-store fields ride it for the owner only.
+      jsonResponse(res, 200, { providers, ...this._keylessField(req), ...this._bootStoreField(req) });
     }, READS);
 
     // ── LLM model catalog ──
@@ -12888,6 +12915,9 @@ export class LynoxHTTPApi {
       if (q !== null) query.q = q;
       const snoozedOnly = url.searchParams.get('snoozedOnly');
       if (snoozedOnly !== null) query.snoozedOnly = snoozedOnly;
+      // Names which rule's items are read, so a mandate's read row carries it (READ_IDENTIFIERS).
+      const ruleId = url.searchParams.get('ruleId');
+      if (ruleId !== null) query.ruleId = ruleId;
       sendInbox(res, handleListItems(deps!, query));
     }, READS);
 
@@ -13101,6 +13131,7 @@ export class LynoxHTTPApi {
         bucket: b['bucket'] as import('../integrations/inbox/api.js').CreateRuleBody['bucket'],
         action: b['action'] as import('../integrations/inbox/api.js').CreateRuleBody['action'],
         source: b['source'] as import('../integrations/inbox/api.js').CreateRuleBody['source'],
+        ...(typeof b['name'] === 'string' ? { name: b['name'] } : {}),
       };
       const finalRuleBody: import('../integrations/inbox/api.js').CreateRuleBody =
         typeof b['tenantId'] === 'string'
@@ -13115,6 +13146,15 @@ export class LynoxHTTPApi {
       const { handleDeleteRule } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleDeleteRule(deps!, params['id']!));
     }, ownerOnly('change inbox rules')));
+
+    // A rule the agent proposed applies only once the owner confirms it here.
+    // Owner-only: a mandate can neither propose (the tool is withheld) nor confirm.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/rules/:id/confirm', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleConfirmRule } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleConfirmRule(deps!, params['id']!));
+    }, ownerOnly('confirm an inbox rule')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/entities', async (req, res) => {
       const kg = engine.getKnowledgeLayer();

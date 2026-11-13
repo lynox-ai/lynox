@@ -82,7 +82,7 @@ export class InboxRulesLoader {
     let cached = this.cache.get(key);
     if (cached !== undefined) return cached;
     const fresh = this.state
-      .listRulesForAccount(accountId, tenantId)
+      .listConfirmedRulesForAccount(accountId, tenantId)
       .map((rule) => ({ rule, matcherLower: rule.matcherValue.toLowerCase() }));
     cached = fresh;
     this.cache.set(key, cached);

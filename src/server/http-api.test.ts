@@ -176,6 +176,13 @@ const mockGoogleHasUserScope = vi.fn().mockReturnValue(true);
 const mockGoogleGetAccessToken = vi.fn().mockResolvedValue('access-token');
 const DRIVE_DELETED = { status: 'deleted', deleted: 3, foldersKept: 2, problems: [] };
 const mockDeleteUploadedBackups = vi.fn().mockResolvedValue(DRIVE_DELETED);
+// The control plane's usage summary, as a managed instance would fetch it. Null by default,
+// which is also what the real fetch returns without the managed env vars.
+const mockCpUsageSummary = vi.fn().mockResolvedValue(null);
+vi.mock('../core/managed-usage-summary.js', async (importActual) => ({
+  ...(await importActual<typeof import('../core/managed-usage-summary.js')>()),
+  fetchControlPlaneUsageSummary: (...a: unknown[]) => mockCpUsageSummary(...a),
+}));
 vi.mock('../core/backup-upload-gdrive.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/backup-upload-gdrive.js')>()),
   deleteUploadedBackups: (...a: unknown[]) => mockDeleteUploadedBackups(...a),
@@ -588,6 +595,12 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
     headers['Content-Type'] = 'application/json';
   }
   return fetch(`${baseUrl}${path}`, { ...opts, headers });
+}
+
+/** The confirm body the view sends: the digest from the schedule's stamp preview. */
+async function confirmBody(id: string): Promise<string> {
+  const shown = await (await jsonFetch(`/api/tasks/${id}/stamp-preview`)).json() as { expect: string };
+  return JSON.stringify({ expect: shown.expect });
 }
 
 /**
@@ -8325,6 +8338,35 @@ describe('LynoxHTTPApi', () => {
       expect(body['used_cents']).toBe(1969);
     });
 
+    it('managed: the control plane lifts used_cents only when it sends its billing period', async () => {
+      repayRateWindow();
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+      onTestFinished(() => { vi.stubEnv('LYNOX_BILLING_TIER', ''); mockCpUsageSummary.mockReset(); mockCpUsageSummary.mockResolvedValue(null); });
+      const local = 1500 + 462 + 7;
+      const daily = [
+        { date: '2026-11-02', cost_cents: 1500 },
+        { date: '2026-11-05', cost_cents: 462 },
+        { date: '2026-11-06', cost_cents: 7 },
+      ];
+      const read = async (cp: Record<string, unknown>): Promise<number> => {
+        api._clearUsageCache();
+        mockCpUsageSummary.mockResolvedValueOnce(cp);
+        mockHistoryGetUsageSummary.mockReturnValueOnce({
+          period: { label: 'Nov', start_iso: '2026-11-01T00:00:00.000Z', end_iso: '2026-12-01T00:00:00.000Z', source: 'calendar-month' },
+          used_cents: local, by_model: [], by_kind: [], daily,
+        });
+        const res = await jsonFetch('/api/usage/current');
+        expect(res.status).toBe(200);
+        return (await res.json() as { used_cents: number }).used_cents;
+      };
+      // No period: the control plane counted some other window, the engine's own month stands.
+      expect(await read({ managed: true, budget_cents: 3000, used_cents: 9000 })).toBe(local);
+      // With its period: the same window, so the larger count stands.
+      expect(await read({ managed: true, budget_cents: 3000, used_cents: 9000, period: { start_iso: '2026-11-03T00:00:00.000Z', end_iso: '2026-12-03T00:00:00.000Z', source: 'stripe-billing' } })).toBe(9000);
+      expect(mockCpUsageSummary).toHaveBeenCalledTimes(2);
+    });
+
     it('summary used_cents matches by_kind sum when daily and by_kind agree', async () => {
       mockHistoryGetUsageSummary.mockReturnValueOnce({
         period: { label: 'Apr', start_iso: '2026-04-01T00:00:00.000Z', end_iso: '2026-05-01T00:00:00.000Z', source: 'calendar-month' },
@@ -10660,7 +10702,7 @@ describe('LynoxHTTPApi', () => {
         ['/api/tasks/bulk-r/', 'PATCH', JSON.stringify({ schedule_cron: '1h' })],
         ['/api/tasks/bulk-r/complete', 'POST'],
         ['/api/tasks/bulk-r', 'PATCH', JSON.stringify({ enabled: false })],
-        ['/api/tasks/bulk-r/confirm', 'POST'],
+        ['/api/tasks/bulk-r/confirm', 'POST', await confirmBody('bulk-r')],
       ];
       for (const [path, method, body] of calls) {
         const res = await jsonFetch(path.replace(/\/$/, ''), { method, ...(body ? { body } : {}) });
@@ -10679,16 +10721,42 @@ describe('LynoxHTTPApi', () => {
 
     // triggers-consent — the human consent surface.
     it('POST /api/tasks/:id/confirm confirms a trigger (200)', async () => {
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' });
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') });
       expect(res.status).toBe(200);
       const body = await res.json() as { confirmed_at: string };
       expect(body.confirmed_at).toBeTruthy();
     });
 
-    it('POST /api/tasks/:id/confirm returns 404 for an unknown trigger', async () => {
+    it('POST /api/tasks/:id/confirm returns 404 for a trigger gone by the time it is stamped', async () => {
       mockConfirmTrigger.mockReturnValueOnce(undefined);
-      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST' });
+      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: await confirmBody('nope') });
       expect(res.status).toBe(404);
+    });
+
+    it('POST /api/tasks/:id/confirm returns 404 for a trigger the history does not hold, and stamps nothing', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = ref['getRunHistory'];
+      ref['getRunHistory'] = () => ({ getTrigger: () => undefined });
+      try {
+        mockConfirmTrigger.mockClear();
+        const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'any' }) });
+        expect(res.status).toBe(404);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
+      } finally {
+        ref['getRunHistory'] = saved;
+      }
+    });
+
+    it.each([
+      ['no body', undefined],
+      ['an empty object', '{}'],
+      ['a digest that is not a string', JSON.stringify({ expect: 1 })],
+    ])('POST /api/tasks/:id/confirm with %s stamps nothing (400): the owner confirms from the preview', async (_label, body) => {
+      mockConfirmTrigger.mockClear();
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', ...(body !== undefined ? { body } : {}) });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain('"expect" is required');
+      expect(mockConfirmTrigger).not.toHaveBeenCalled();
     });
 
     // ── Run now, and the two different 409s ──────────────────────────────────
@@ -12195,7 +12263,7 @@ describe('LynoxHTTPApi', () => {
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
     });
 
-    it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb', async () => {
+    it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb, and its filters as an empty set', async () => {
       const host = 'acme.myshopify.com';
       const source = parseListSource(host, { form: 'shopify', after: { seo_title: 'x' } }, 'PATCH', () => null);
       const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
@@ -12204,9 +12272,11 @@ describe('LynoxHTTPApi', () => {
       expect(shown['listFirstPage']).toBe(`https://${host}/admin/api/2026-10/graphql.json`);
       expect(shown['list']).toMatchObject({ state: 'pending', method: null, after: { seo_title: 'x' } });
       expect(shown['writeFormNote']).toBeNull();
+      // A store's product list without a filter names an empty set, so the page says every status is read.
+      expect(shown['listFilters']).toEqual({});
     });
 
-    it('shows a list whose stored filters were changed past what a parse takes by its host, without failing, and a withdrawn path as its address', async () => {
+    it('shows a list whose stored filters were changed past what a parse takes by its host, without failing and with no store filters, and a withdrawn path as its address', async () => {
       repayRateWindow();
       const host = 'shop.example.com';
       const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
@@ -12215,7 +12285,10 @@ describe('LynoxHTTPApi', () => {
       bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, filters: { category: ['12', '13'] } })), planned.status.id);
       const res = await jsonFetch(`/api/bulk/runs/${planned.status.id}`);
       expect(res.status).toBe(200);
-      expect(((await res.json()) as Record<string, unknown>)['listFirstPage']).toBe(host);
+      const changed = await res.json() as Record<string, unknown>;
+      expect(changed['listFirstPage']).toBe(host);
+      // A list that is not a store's products has no filters to show, not an empty set.
+      expect(changed['listFilters']).toBeNull();
       // A run whose path was withdrawn since still has an address, and shows it.
       bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, path: '/wp-json/wc/v3/orders' })), planned.status.id);
       const withdrawn = await (await jsonFetch(`/api/bulk/runs/${planned.status.id}`)).json() as Record<string, unknown>;
@@ -21646,7 +21719,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     });
 
     it('confirms a schedule, recorded as the owner, and its changes leave no mark', async () => {
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockConfirmTrigger).toHaveBeenCalledWith('task-1', undefined, 'owner', undefined);
       await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
       expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
@@ -21704,9 +21777,10 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: null, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-secret-1' })] });
 
-        // Without the digest: stamped without a list, as every confirm was before.
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
-        expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+        // Without the digest: nothing is stamped, not even without a list.
+        mockConfirmTrigger.mockClear();
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(400);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
 
         // A mandate's backup or notice never uses a connection: nothing is listed or shown for it.
         for (const effect of ['backup', 'notify']) {
@@ -21781,7 +21855,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     it('confirming a workflow schedule never stamps the workflow, which every schedule naming it shares', async () => {
       mockConfirmTrigger.mockReturnValueOnce({ id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-sched', confirmed_at: '2026-10-08T00:00:00.000Z' });
       storeWf(); // an unstamped workflow
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
     });
 
@@ -24555,5 +24629,56 @@ describe('moveMistralEndpointsToEu', () => {
     const update = { api_base_url: 'https://api.mistral.ai.evil.com/v1' };
     moveMistralEndpointsToEu(update);
     expect(update.api_base_url).toBe('https://api.mistral.ai.evil.com/v1');
+  });
+});
+
+// Rule names, confirming and the filter by rule over the wire: the route maps the body and the
+// query itself, which the handler tests in `integrations/inbox/api.test.ts` do not reach.
+describe('inbox rules over HTTP: name, confirm, filter by rule', () => {
+  type Host = { engine: Record<string, unknown> };
+  let orig: unknown;
+  let close: () => void = () => {};
+  let state: import('../integrations/inbox/state.js').InboxStateDb;
+
+  beforeEach(async () => {
+    repayRateWindow();
+    const { MailStateDb } = await import('../integrations/mail/state.js');
+    const { InboxStateDb } = await import('../integrations/inbox/state.js');
+    const { InboxRulesLoader } = await import('../integrations/inbox/rules-loader.js');
+    const mail = new MailStateDb({ path: ':memory:' });
+    close = () => mail.close();
+    state = new InboxStateDb(mail.getConnection());
+    const runtime = { state, rules: new InboxRulesLoader(state), coldStartTracker: {}, sensitiveMode: 'skip', contactResolver: null };
+    const host = api as unknown as Host;
+    orig = host.engine['getInboxRuntime'];
+    host.engine['getInboxRuntime'] = () => runtime;
+  });
+  afterEach(() => {
+    (api as unknown as Host).engine['getInboxRuntime'] = orig;
+    close();
+  });
+
+  it('stores the name the owner gives, confirms a waiting rule, and lists the items one rule filed', async () => {
+    const created = await jsonFetch('/api/inbox/rules', {
+      method: 'POST',
+      body: JSON.stringify({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'a@x', bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Belege' }),
+    });
+    expect(created.status).toBe(201);
+    const ruleId = ((await created.json()) as { id: string }).id;
+    expect(state.listRulesForAccount('acct-1').map((r) => r.name)).toEqual(['Belege']);
+
+    const p = state.proposeRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'b@x', name: 'B' }, 10);
+    const waiting = p.ok ? p.id : '';
+    expect((await jsonFetch(`/api/inbox/rules/${waiting}/confirm`, { method: 'POST', body: '{}' })).status).toBe(200);
+    expect(state.listConfirmedRulesForAccount('acct-1').map((r) => r.id)).toContain(waiting);
+    expect((await jsonFetch('/api/inbox/rules/rul_missing/confirm', { method: 'POST', body: '{}' })).status).toBe(404);
+
+    const base = { accountId: 'acct-1', channel: 'email' as const, bucket: 'requires_user' as const, confidence: 1, reasonDe: 'r', classifiedAt: new Date(), classifierVersion: 'v' };
+    state.insertItem({ ...base, threadKey: 'filed', matchedRuleId: ruleId });
+    state.insertItem({ ...base, threadKey: 'other' });
+    const listed = await jsonFetch(`/api/inbox/items?ruleId=${encodeURIComponent(ruleId)}`);
+    expect(listed.status).toBe(200);
+    expect(((await listed.json()) as { items: Array<{ threadKey: string }> }).items.map((i) => i.threadKey)).toEqual(['filed']);
+    expect((await jsonFetch('/api/inbox/items?ruleId=itm_1')).status).toBe(400);
   });
 });
