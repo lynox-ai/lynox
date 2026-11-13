@@ -32,7 +32,7 @@ import { checkMarkup, htmlFieldsOfListForm, plainTextMarkupOf } from './bulk-htm
 import type { BulkListSourceForm } from './bulk-list.js';
 import { checkSeoAfter } from './seo-text.js';
 import { hiddenCharIndexes } from './hidden-chars.js';
-import { parseHtmlFragment, walkHtml } from './html-tree.js';
+import { parseHtmlFragment, walkHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_MAX_TARGET_BYTES, mapToColumns, type dataStoreColumns } from './bulk-plan.js';
 import { judgeCallSchema, judgeFields, judgeMaxOutputTokens, judgedTargets, type JudgeRule } from './bulk-judge-rule.js';
 import {
@@ -363,6 +363,8 @@ export function judgeContext(
   // And with every entity decoded where it stands: the parser leaves one raw in a comment or in
   // `<xmp>`, which the model reads as easily as one it decodes.
   const textHolds = (text: string): boolean => {
+    // A text with markup beyond the reading bounds is not parsed: unread, it is held back as if it held one.
+    if ((text.includes('<') || text.includes('&')) && !withinReadingBounds(text)) return true;
     const readings = [text, htmlTextOf(text), entitiesDecoded(text)].filter((t): t is string => t !== null);
     return readings
       .some((t) => holdsSecret(t) || holdsSecret(withoutHidden(t, { inPlace: false })));

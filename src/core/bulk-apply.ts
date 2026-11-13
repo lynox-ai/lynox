@@ -27,7 +27,7 @@ import {
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
-import { canonicalHtml } from './html-tree.js';
+import { canonicalHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
@@ -161,7 +161,8 @@ export function rawHtmlField(t: Pick<ApplyTarget, 'after' | 'expected'>, fields:
   const was = !t.expected.absent && typeof t.expected.value === 'object' && t.expected.value !== null ? t.expected.value as Record<string, unknown> : {};
   for (const f of fields) {
     const v = (after as Record<string, unknown>)[f];
-    if (typeof v === 'string' && v !== was[f] && canonicalHtml(v) !== v) return f;
+    // A value beyond the reading bounds is not parsed: it counts as not canonical.
+    if (typeof v === 'string' && v !== was[f] && (!withinReadingBounds(v) || canonicalHtml(v) !== v)) return f;
   }
   return null;
 }
