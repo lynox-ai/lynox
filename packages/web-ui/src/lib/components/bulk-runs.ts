@@ -107,6 +107,8 @@ export interface BulkRunDetailData extends BulkRun {
 	/** A Shopify list narrowed to a product type and/or vendor: the values as the planner gave them (supplied text). */
 	listFilters: Readonly<Record<string, string | readonly string[]>> | null;
 	listStartChecksum: string | null;
+	/** An undone run: the undo that took it back and when its last target was taken back. Absent on an older engine. */
+	undoneBy?: { runId: string; at: string } | null | undefined;
 	/** The engine's note on a list read page by page (English). */
 	listNote: string | null;
 	/** A judged run's rule as the owner starts it (owner only), and its hash the start presents. */
@@ -856,6 +858,34 @@ export function bulkStep(run: BulkStepRun): BulkStepName {
 	if (bulkAtProbe(run) && bulkHasProbeStep(run)) return 'probe';
 	if (run.phase === 'approved' || run.phase === 'writing') return 'run';
 	return 'done';
+}
+
+/** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
+ *  („zurückgenommen“), not „fertig“: its values are no longer live. */
+export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'>, step: BulkStepName): string {
+	return step === 'done' && run.phase === 'undone' ? 'bulk.phase.undone' : `bulk.step.${step}`;
+}
+
+/** Whether a target's after-value is shown as not live: an undo or a rollback took it back, or, on
+ *  a run taken back, the owner took it out before the write, so it never was. */
+export function bulkAfterTakenBack(run: Pick<BulkRun, 'phase'>, target: Pick<BulkTarget, 'undone' | 'deselected'>): boolean {
+	return target.undone === true || (run.phase === 'undone' && target.deselected === true);
+}
+
+/** The sentence over an undone run: when it was taken back and how many targets have their value
+ *  back. Null for a run that is not undone, or an engine that does not name its undo. */
+export function bulkUndoneText(
+	run: Pick<BulkRunDetailData, 'phase' | 'undone' | 'undoneBy'>, locale: string, i18n: BulkI18n,
+): string | null {
+	if (run.phase !== 'undone' || !run.undoneBy) return null;
+	const d = new Date(run.undoneBy.at);
+	if (Number.isNaN(d.getTime())) return null;
+	const loc = locale === 'de' ? 'de-CH' : 'en-US';
+	const date = d.toLocaleDateString(loc, { day: '2-digit', month: '2-digit', year: 'numeric' });
+	const time = d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' });
+	return run.undone === 1
+		? i18n.tf('bulk.undone.sentence_one', { date, time })
+		: i18n.tf('bulk.undone.sentence', { date, time, n: String(run.undone) });
 }
 
 /** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),
