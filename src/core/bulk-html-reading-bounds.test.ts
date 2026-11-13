@@ -79,6 +79,7 @@ describe('the bounds the markup check reads within', () => {
 
   it('end at the constant node bound by default', () => {
     // One parse of the bound's size; on a loaded machine it may take seconds.
+    expect(withinReadingBounds('<br>'.repeat(MARKUP_MAX_NODES - 2))).toBe(true);
     expect(withinReadingBounds('<br>'.repeat(MARKUP_MAX_NODES - 1))).toBe(false);
   }, 60_000);
 
@@ -190,7 +191,7 @@ describe('a value within the bounds', () => {
     const value = head + 'x'.repeat(MARKUP_MAX_BYTES - Buffer.byteLength(head));
     expect(Buffer.byteLength(value)).toBe(MARKUP_MAX_BYTES);
     expect(withinReadingBounds(value)).toBe(true);
-    const [change, ms] = timed(() => markupChangesOf('description', null, value));
+    const change = markupChangesOf('description', null, value);
     expect(change.unread).toBeUndefined();
     expect(change.added.length).toBeGreaterThan(MARKUP_MAX_CARRIER_NESTING);
     const result = check(value);
