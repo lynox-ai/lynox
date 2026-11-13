@@ -51,6 +51,8 @@ describe('the bounds read off the bytes, before the parse', () => {
 
   it('holds the defaults far above the descriptions shops write', () => {
     expect(withinReadingBounds(range(600, (i) => `<p class="c${i}">Text ${i}</p>`))).toBe(true);
+    // Shops write a few dozen attributes on one tag at most; the bound sits above that.
+    expect(withinReadingBounds(`<p ${range(64, (i) => `data-a${i}="v" `)}>x</p>`)).toBe(true);
   });
 });
 
