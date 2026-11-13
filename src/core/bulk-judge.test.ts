@@ -18,6 +18,7 @@ import {
 } from './llm-helper.js';
 import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
 import { getPricing } from './pricing.js';
+import { abortedCallCounts } from './aborted-call.js';
 import { modelCapability, type IAgent, type MemoryScopeRef } from '../types/index.js';
 import { createManagedHook } from './managed-hook.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
@@ -118,7 +119,9 @@ function harness(answer: (user: string, n: number) => Promise<{ data: Record<str
     resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as Anthropic }),
     gate: async () => ({ runId: `gate-${String(++gates)}`, blockedReason: null }),
     report: (runId, costUsd) => { h.reports.push({ runId, costUsd }); },
-    bookSpend: (e) => { h.booked.push({ runId: e.runId, costUsd: e.costUsd, tokensIn: e.tokensIn, tokensOut: e.tokensOut }); },
+    // A call's row is booked provisionally before the call and settled after it, as in history.db.
+    bookSpend: (e) => h.booked.push({ runId: e.runId, costUsd: e.costUsd, tokensIn: e.tokensIn, tokensOut: e.tokensOut }) - 1,
+    settleSpend: (row, e) => { Object.assign(h.booked[row]!, e); },
     budgetAllows: () => true,
     scanSecret: (t) => (t.includes('sk-live-') ? 'api_key' : null),
     maskVault: (t) => t,
@@ -431,13 +434,21 @@ describe('runBulkJudge over data-store rows', () => {
   it('a provider 429 or 5xx waits; the target keeps no verdict and is tried again', async () => {
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);
-    for (const status of [429, 529, 503]) {
+    let kept = 0;
+    for (const status of [429, 529, 529, 503]) {
       const h = harness(() => { throw Object.assign(new Error(`provider said ${MARK}`), { status }); });
       const out = await runBulkJudge(id, h.deps);
       expect(out.status).toBe('pending');
       expect(ledger.getStatus(id)!.judge!.unjudged).toBe(1);
       expect(ledger.getStatus(id)!.haltReason).toBeNull();
+      // A 429 or 529 is refused before it is processed: taken back, so a provider overloaded for
+      // an hour adds nothing however often the target is retried. Another 5xx may have been
+      // billed: it keeps its worst case.
+      expect(h.booked).toHaveLength(1);
+      expect(h.booked[0]!.costUsd === 0).toBe(status !== 503);
+      expect(ledger.getStatus(id)!.costUsd).toBeCloseTo(kept += h.booked[0]!.costUsd, 10);
     }
+    expect(kept).toBeGreaterThan(0);
     const ok = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     expect((await runBulkJudge(id, ok.deps)).status).toBe('done');
   });
@@ -454,6 +465,33 @@ describe('runBulkJudge over data-store rows', () => {
     expect(h.captured).toHaveLength(1);
     expect(h.captured[0]!.message).toBe('bulk_judge call failed: Error (HTTP 400)');
     expect(out.summary).not.toContain(MARK);
+    // A 4xx without a reply keeps its worst case too: whether it was billed is not visible here.
+    expect(h.booked).toHaveLength(1);
+    expect(h.booked[0]!.costUsd).toBeGreaterThan(0);
+    expect(ledger.getStatus(id)!.costUsd).toBeCloseTo(h.booked[0]!.costUsd, 10);
+  });
+
+  it('a call with no answer at all keeps its worst case in the run\'s and the day\'s spend; the control plane is not told', async () => {
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    // A timeout or a dropped connection: no status, no reply — the provider may have billed it.
+    const before = abortedCallCounts().notBilled['bulk_judge.unanswered'] ?? 0;
+    const h = harness(() => { throw Object.assign(new Error('Request timed out.'), { name: 'APIConnectionTimeoutError' }); });
+    expect((await runBulkJudge(id, h.deps)).status).toBe('halted');
+    expect(h.booked).toHaveLength(1);
+    expect(h.booked[0]!.costUsd).toBeGreaterThan(0);
+    expect(ledger.getStatus(id)!.costUsd).toBeCloseTo(h.booked[0]!.costUsd, 10);
+    expect(h.reports).toHaveLength(0);
+    expect(abortedCallCounts().notBilled['bulk_judge.unanswered']).toBe(before + 1);
+  });
+
+  it('a call the helper refuses before sending it is taken back', async () => {
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const h = harness(() => { throw new BudgetError('big', { estimatedInputTokens: 1, estimatedCostUsd: 1 }); });
+    await runBulkJudge(id, h.deps);
+    expect(ledger.getStatus(id)!.changes.invalid).toBe(1);
+    expect([ledger.getStatus(id)!.costUsd, h.booked.map((r) => r.costUsd), h.reports.length]).toEqual([0, [0], 0]);
   });
 
   it('counts a failed extraction against the run\'s limit: it stops on the booked spend of answers that were no verdict', async () => {
@@ -506,7 +544,7 @@ describe('runBulkJudge over data-store rows', () => {
     expect([ledger.getStatus(b)!.haltReason, credit.calls.length]).toEqual([BULK_HALT_REASONS.creditRefused, 0]);
   });
 
-  it('a booking that fails keeps the others and the verdict, and stops the run before its next paid call', async () => {
+  it('a provisional booking that cannot be written stops the run before the call: nothing is called, nothing stays counted', async () => {
     const id = await plan(['A', 'B']);
     expect(start(id).ok).toBe(true);
     const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }), {
@@ -514,19 +552,60 @@ describe('runBulkJudge over data-store rows', () => {
     });
     const out = await runBulkJudge(id, h.deps);
     expect(out.status).toBe('halted');
+    expect([h.calls.length, h.reports.length]).toEqual([0, 0]);
+    const s = ledger.getStatus(id)!;
+    // The run's own provisional booking, written first, is taken back; the target is free again.
+    expect([s.haltReason, s.costUsd, s.judge!.unjudged]).toEqual([BULK_HALT_REASONS.unavailable, 0, 2]);
+    expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge booking failed: Error']);
+    expect(start(id).ok).toBe(true);
+    const again = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
+    expect((await runBulkJudge(id, again.deps)).status).toBe('done');
+    expect(again.calls).toHaveLength(2);
+  });
+
+  it('a run booking that cannot be written takes nothing back: the calls paid before it stay counted', async () => {
+    const id = await plan(['A', 'B']);
+    expect(start(id).ok).toBe(true);
+    const real = ledger.addJudgeCost.bind(ledger);
+    let n = 0;
+    const spy = vi.spyOn(ledger, 'addJudgeCost').mockImplementation((runId, usd) => {
+      if (++n === 2) throw new Error('SQLITE_BUSY');
+      real(runId, usd);
+    });
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('halted');
+    spy.mockRestore();
+    expect(h.calls).toHaveLength(1);
+    const s = ledger.getStatus(id)!;
+    expect([s.haltReason, s.costUsd, s.judge!.unjudged]).toEqual([BULK_HALT_REASONS.unavailable, 0.01, 1]);
+  });
+
+  it('a settlement that fails keeps the others and the verdict, and stops the run before its next paid call', async () => {
+    const id = await plan(['A', 'B']);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }), {
+      settleSpend: () => { throw new Error(`SQLITE_BUSY ${MARK}`); },
+    });
+    const out = await runBulkJudge(id, h.deps);
+    expect(out.status).toBe('halted');
     expect(h.calls).toHaveLength(1);
     expect(h.reports).toHaveLength(1);
     const s = ledger.getStatus(id)!;
     expect([s.haltReason, s.costUsd, s.judge!.unjudged]).toEqual([BULK_HALT_REASONS.unavailable, 0.01, 1]);
+    // The day's row that could not be settled stays as it was booked: the call's worst case.
+    expect(h.booked).toHaveLength(1);
+    expect([h.booked[0]!.tokensIn, h.booked[0]!.tokensOut]).toEqual([0, 0]);
+    expect(h.booked[0]!.costUsd).toBeGreaterThan(0);
+    expect(h.booked[0]!.costUsd).not.toBe(0.01);
     expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge booking failed: Error']);
   });
 
-  it('a booking that fails on the last target still halts the run: it is not finished as judged', async () => {
+  it('a settlement that fails on the last target still halts the run: it is not finished as judged', async () => {
     const id = await plan(['A', 'B']);
     expect(start(id).ok).toBe(true);
     let n = 0;
     const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }), {
-      bookSpend: () => { if (++n === 2) throw new Error('SQLITE_BUSY'); },
+      settleSpend: () => { if (++n === 2) throw new Error('SQLITE_BUSY'); },
     });
     const out = await runBulkJudge(id, h.deps);
     expect(h.calls).toHaveLength(2);
@@ -722,6 +801,19 @@ describe('a run lost mid-judging', () => {
     // is called once more after that claim goes stale too.
     expect(users).toHaveLength(n + 1);
     for (const u of judgedBefore) expect(users.filter((x) => x === u)).toHaveLength(1);
+
+    // The call lost in flight was booked at its worst case before it was made, and that booking
+    // stays: the run's spend and the day's spend count all N + 1 calls, the lost one at its worst
+    // case. The control plane was told only of the N answered calls.
+    const lostRow = lost.booked[lostAt - 1]!;
+    expect(lost.booked).toHaveLength(lostAt);
+    expect([lostRow.tokensIn, lostRow.tokensOut]).toEqual([0, 0]);
+    expect(lostRow.costUsd).toBeGreaterThan(0);
+    expect(ledger.getStatus(id)!.costUsd).toBeCloseTo(n * 0.01 + lostRow.costUsd, 10);
+    const day = [...lost.booked, ...early.booked, ...late.booked];
+    expect(day).toHaveLength(n + 1);
+    expect(day.reduce((t, b) => t + b.costUsd, 0)).toBeCloseTo(n * 0.01 + lostRow.costUsd, 10);
+    expect([...lost.reports, ...early.reports, ...late.reports].map((r) => r.costUsd)).toEqual(Array(n).fill(0.01));
     expect(ledger.getPreview(id).map((t) => (t.after as { title: string }).title)).toEqual(skus.map((sku) => `new old ${sku.toLowerCase()}`));
   });
 });

@@ -2447,10 +2447,17 @@ export class RunHistory {
    * of its own, so this is the row the spend aggregates — and with them the daily and monthly
    * limits — count it from. Never counted as a run or a turn.
    */
-  recordBulkJudgeCost(entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }): void {
-    this.db.prepare(
+  recordBulkJudgeCost(entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }): number {
+    return Number(this.db.prepare(
       'INSERT INTO bulk_cost_days (run_id, model_id, tokens_in, tokens_out, cost_usd) VALUES (?, ?, ?, ?, ?)',
-    ).run(entry.runId, entry.modelId, entry.tokensIn, entry.tokensOut, entry.costUsd);
+    ).run(entry.runId, entry.modelId, entry.tokensIn, entry.tokensOut, entry.costUsd).lastInsertRowid);
+  }
+
+  /** Replace a call's provisional row (its worst case, booked before the call) by what the call
+   *  cost; a call that was never paid for settles at 0. The row keeps its day. */
+  settleBulkJudgeCost(id: number, entry: { tokensIn: number; tokensOut: number; costUsd: number }): void {
+    this.db.prepare('UPDATE bulk_cost_days SET tokens_in = ?, tokens_out = ?, cost_usd = ? WHERE id = ?')
+      .run(entry.tokensIn, entry.tokensOut, entry.costUsd, id);
   }
 
   /** `byModel` with the judge's spend added per model; its calls add no run. */

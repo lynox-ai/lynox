@@ -124,4 +124,21 @@ describe('RunHistory — the bulk judge\'s spend (bulk_cost_days)', () => {
     h.recordBulkJudgeCost({ runId: 'b2', modelId: 'm', tokensIn: 0, tokensOut: 0, costUsd: 0.6 });
     expect(checkPersistentBudget().allowed).toBe(false);
   });
+
+  it('settles a provisional row to what the call cost, and a row left unsettled counts at its worst case', () => {
+    const h = history();
+    configurePersistentBudget({ costProvider: h, dailyCapUSD: 1, monthlyCapUSD: 100 });
+    const answered = h.recordBulkJudgeCost({ runId: 'b1', modelId: 'm', tokensIn: 0, tokensOut: 0, costUsd: 0.6 });
+    const lost = h.recordBulkJudgeCost({ runId: 'b1', modelId: 'm', tokensIn: 0, tokensOut: 0, costUsd: 0.6 });
+    expect(answered).not.toBe(lost);
+    // Both provisional: the day is at 1.2, over its limit.
+    expect(checkPersistentBudget().allowed).toBe(false);
+    h.settleBulkJudgeCost(answered, { tokensIn: 700, tokensOut: 30, costUsd: 0.1 });
+    // The lost call keeps its worst case: 0.7, under the limit.
+    expect(checkPersistentBudget().allowed).toBe(true);
+    expect(h.getDb().prepare('SELECT id, tokens_in, tokens_out, cost_usd FROM bulk_cost_days ORDER BY id').all()).toEqual([
+      { id: answered, tokens_in: 700, tokens_out: 30, cost_usd: 0.1 },
+      { id: lost, tokens_in: 0, tokens_out: 0, cost_usd: 0.6 },
+    ]);
+  });
 });
