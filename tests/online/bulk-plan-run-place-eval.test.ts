@@ -2,10 +2,12 @@
  * Online eval: after a Shopify bulk run is planned, where does the model tell the user to find it?
  *
  * The run is reviewed and approved outside the chat, on the tab "Massenläufe" / "Bulk runs" under
- * "Aktivität & Kosten" / "Activity & Cost". bulk_plan's result does not give that path, so the model guesses: a walk
- * found it naming the tab by its English label in a German interface. This eval counts how often a
- * reply names a place, right or wrong, so the tool's text can be compared before and after a
- * change; whether a named place is the real one is judged by hand against that path:
+ * "Aktivität & Kosten" / "Activity & Cost". Before bulk_plan's result named that path, the model guessed: a walk
+ * found it naming the tab by its English label in a German interface. Now the result names it as fixed
+ * text (`RUN_PLACE_NOTE`). This eval counts how often a reply names a place, and of those how often it
+ * names the real one in the interface's language (RIGHT) and how often it also names something else —
+ * a link, an address, another menu (OTHER), so the tool's text can be compared before and after a
+ * change; every flagged reply is still read by hand against that path:
  * (p1) "set the SEO title of every product to one text" → form shopify, after.seo_title;
  * (p2) "write each product an SEO title from its name" → form shopify with a judge.
  *
@@ -77,6 +79,11 @@ const RECORDED = /^List dry run recorded/;
 // the hand judge, who reads every flagged reply in the dump; a word like "Seite" can be meant otherwise.
 const PLACE = /\b(Tab|Reiter|Registerkarte|Menü|Menüpunkt|Bereich|Seite|Dashboard|Übersicht|Navigation|Sidebar|Seitenleiste)\b|Bulk[ -]?Runs?|Massenläufe|Aktivität|\bklick|\blink\b|https?:\/\//i;
 
+// The real place in a German reply (the cases are German), menu and tab in either order of mention.
+const RIGHT = /Aktivität\s*&\s*Kosten[\s\S]{0,40}Massenläufe/;
+// What the note forbids beside it: a link or address, or a place word that is not part of the path.
+const OTHER = /https?:\/\/|\/app\b|\?tab=|\b(Dashboard|Sidebar|Seitenleiste|Einstellungen|Settings)\b|\bBulk[ -]?Runs?\b/i;
+
 const table: string[] = [];
 const dirs: string[] = [];
 let flagBefore: string | undefined;
@@ -123,9 +130,11 @@ async function runOnce(provider: string, make: (tools: ToolEntry[]) => Agent, la
   }
   const recorded = plans.some((p) => RECORDED.test(p.answer));
   const place = reply.match(PLACE)?.[0] ?? null;
+  const right = RIGHT.test(reply);
+  const other = reply.match(OTHER)?.[0] ?? null;
   const dump = process.env['PLACE_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, label, run: i, recorded, place, plans, reply })}\n`);
-  table.push(`${provider}\t${label}\t#${String(i)}\t${!recorded ? 'NO-PLAN' : place !== null ? `PLACE?(${place})` : 'none'}\t${reply.replace(/\s+/g, ' ').slice(0, 160)}`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, label, run: i, recorded, place, right, other, plans, reply })}\n`);
+  table.push(`${provider}\t${label}\t#${String(i)}\t${!recorded ? 'NO-PLAN' : place === null ? 'none' : `${right ? 'RIGHT' : 'PLACE?'}(${place})${other !== null ? ` OTHER(${other})` : ''}`}\t${reply.replace(/\s+/g, ' ').slice(0, 160)}`);
   expect(recorded, 'no plan was recorded').toBe(true);
 }
 

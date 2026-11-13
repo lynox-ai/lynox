@@ -3,7 +3,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync, statSync, mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { bulkPlanTool, bulkStatusTool, formatStatus, nothingToApprove, NOTHING_TO_APPROVE_NOTE, NO_PLACE_NOTE } from './bulk.js';
+import { BULK_RUNS_PLACE, bulkPlanTool, bulkStatusTool, formatStatus, nothingToApprove, NOTHING_TO_APPROVE_NOTE, RUN_PLACE_NOTE } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { DataStore } from '../../core/data-store.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
@@ -445,36 +445,62 @@ describe('bulk_plan over data-store rows', () => {
 });
 
 // A walk found the model sending the user to the run under a label and a menu the interface does
-// not show. The result the model writes its reply from asks it not to name a place: in every plan
-// the user is to start or approve, and in none with nothing to approve.
+// not show. The result the model writes its reply from names the real place, as fixed text: in every
+// plan the user is to start or approve, and in none with nothing to approve.
 describe('where the user finds a planned run', () => {
+  // The labels the note names are the web UI's, per language: a renamed menu or tab fails here.
+  const i18n = readFileSync(new URL('../../../packages/web-ui/src/lib/i18n.svelte.ts', import.meta.url), 'utf8');
+  const label = (key: string, lang: 'de' | 'en'): string => {
+    const line = i18n.split('\n').find((l) => l.trimStart().startsWith(`'${key}':`));
+    const m = line?.match(new RegExp(`${lang}: '((?:[^'\\\\]|\\\\.)*)'`));
+    if (!m) throw new Error(`no ${lang} label for ${key}`);
+    return m[1]!;
+  };
+
+  it('names the menu and the tab exactly as the web UI shows them, in each language', () => {
+    for (const lang of ['de', 'en'] as const) {
+      expect(BULK_RUNS_PLACE[lang].menu).toBe(label('nav.activity', lang));
+      expect(BULK_RUNS_PLACE[lang].tab).toBe(label('activity.tab.bulk', lang));
+      expect(RUN_PLACE_NOTE).toContain(`${BULK_RUNS_PLACE[lang].menu} › ${BULK_RUNS_PLACE[lang].tab}`);
+    }
+  });
+
+  it('gives no link, no advice to approve, and says only the owner can start or approve', () => {
+    expect(RUN_PLACE_NOTE).not.toMatch(/https?:|\/app\b|\?tab=|www\./i);
+    expect(RUN_PLACE_NOTE).not.toMatch(/\b(should|recommend|go ahead and)\b/i);
+    expect(RUN_PLACE_NOTE).not.toMatch(/\bapprove it there\b|\bthen approve\b/i);
+    expect(RUN_PLACE_NOTE).toContain('see each target\'s before and after and decide');
+    expect(RUN_PLACE_NOTE).toContain('Only the owner of this lynox can start or approve it.');
+    expect(RUN_PLACE_NOTE).toContain('make up no link or address');
+  });
+
   it('is not claimed to be nowhere: the description no longer says there is no screen for it', () => {
     expect(bulkPlanTool.definition.description).not.toMatch(/no screen or button/);
     expect(bulkPlanTool.definition.description).toContain('you cannot apply it.');
   });
 
-  it('is left unnamed in a local plan the user approves, and not mentioned where there is nothing to approve', async () => {
+  it('is named in a local plan the user approves, and not mentioned where there is nothing to approve', async () => {
     writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'inside.txt', after: 'y' }]));
-    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent())).toContain(NO_PLACE_NOTE);
+    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent())).toContain(RUN_PLACE_NOTE);
     writeFileSync(join(dir, 'outside.txt'), 'x');
     writeFileSync(join(ws, 'none.json'), JSON.stringify([{ target: '../outside.txt', after: 'y' }]));
-    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'none.json' }, agent())).not.toContain(NO_PLACE_NOTE);
+    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'none.json' }, agent())).not.toContain(RUN_PLACE_NOTE);
   });
 
-  it('is left unnamed in an external plan the user starts, and not mentioned where no target was valid', async () => {
+  it('is named in an external plan the user starts, and not mentioned where no target was valid', async () => {
     writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'https://shop.example.com/products/1', after: { price: '1' } }]));
     const started = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json' }, agent());
     expect(started).toContain('External dry run recorded');
-    expect(started).toContain(NO_PLACE_NOTE);
+    expect(started).toContain(RUN_PLACE_NOTE);
     writeFileSync(join(ws, 'bad.json'), JSON.stringify([{ target: 'not a url', after: { price: '1' } }]));
-    expect(await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'bad.json' }, agent())).not.toContain(NO_PLACE_NOTE);
+    expect(await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'bad.json' }, agent())).not.toContain(RUN_PLACE_NOTE);
   });
 });
 
 // 1223 (ux, 1130 eval run 4): with every target refused, the model told the owner that approving
 // would write. The status says in one line that there is nothing to approve, and only then.
 describe('a previewed run in which nothing can be written', () => {
-  const APPROVE = 'Only the user can approve and apply it';
+  const APPROVE = 'Only the owner can approve and apply it';
   const plan = async (entries: { target: string; after: string }[]): Promise<{ result: string; runId: string }> => {
     writeFileSync(join(ws, 'plan.json'), JSON.stringify(entries));
     const result = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent());
@@ -526,7 +552,7 @@ describe('a previewed run in which nothing can be written', () => {
     expect(result).toContain('no target was valid, so there is nothing to read');
     expect(result).toContain('invalid 1 (bad_url 1)');
     expect(result).toContain(NOTHING_TO_APPROVE_NOTE);
-    expect(result).not.toContain('Only the user can start and approve it');
+    expect(result).not.toContain('Only the owner can start and approve it');
     expect(result).not.toContain('Once the user has started it');
     // Nor that it writes with a method, one target first.
     expect(result).not.toMatch(/Writes with|applied to one target first/);

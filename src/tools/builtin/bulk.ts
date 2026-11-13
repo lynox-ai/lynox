@@ -291,7 +291,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     'Once started, the engine reads the list page by page with the host\'s stored API credential and stops, so the user sees how many targets it holds. ' +
       'Each target is read only after the user starts the run a second time; bulk_status shows phase previewed when that is done. ' +
       'What the list and the targets hold is in the run\'s ledger for the user to review; it is not shown to you.',
-    NO_PLACE_NOTE,
+    RUN_PLACE_NOTE,
   ].join('\n');
 }
 
@@ -305,11 +305,22 @@ const JUDGE_COLUMN_TYPES: Record<string, readonly string[]> = {
 };
 
 // A model asked where the run is guesses: a walk found it naming the tab by its English label in a
-// German interface, under a menu that does not exist; measured, it also made up URLs. Said with the
-// result, where the reply is written; it names no place, so it cannot go stale with the interface.
-// tests/online/bulk-plan-run-place-eval.test.ts: worded without the opening clause, one provider
-// still named places the hand judge found wrong.
-export const NO_PLACE_NOTE = 'This result does not tell you where in lynox the user finds this run: do not name a tab, page, menu, button or link for it, and do not make one up. When you say where it is, say only that they find it in lynox, outside this chat.';
+// German interface, under a menu that does not exist; measured, it also made up URLs. So the result
+// names the place itself, as fixed text: the menu and tab labels of the web UI in each of its
+// languages (a test holds them to the i18n source, so a renamed tab fails there, not in a reply),
+// never a link, which the model would learn to build. It says what the user does there (sees and
+// decides), not what to decide, and that only the owner can start or approve a run (the routes are
+// owner-only), so a chat acting for someone else does not send them to a page where they can do nothing.
+// tests/online/bulk-plan-run-place-eval.test.ts counts the places a reply names, right and wrong.
+export const BULK_RUNS_PLACE = {
+  en: { menu: 'Activity & Cost', tab: 'Bulk runs' },
+  de: { menu: 'Aktivität & Kosten', tab: 'Massenläufe' },
+} as const;
+
+export const RUN_PLACE_NOTE = `The user finds this run in lynox under ${BULK_RUNS_PLACE.en.menu} › ${BULK_RUNS_PLACE.en.tab} ` +
+  `(in a German interface: ${BULK_RUNS_PLACE.de.menu} › ${BULK_RUNS_PLACE.de.tab}). There they see each target's before and after and decide. ` +
+  'Only the owner of this lynox can start or approve it. ' +
+  'If you say where it is, use exactly these labels, in the language of the interface; name no other tab, page, menu, button or link, and make up no link or address.';
 
 /** What a planner is told about a judged run. Counts and rules only — never a verdict. */
 const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +
@@ -477,7 +488,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           ...(judge && !nothingToApprove(out.status) ? [JUDGE_NOTE] : []),
           ...(nothingToApprove(out.status) ? [] : ['Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
             'The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
-            'Only the user can start and approve it, outside this chat.', NO_PLACE_NOTE]),
+            'Only the owner can start and approve it, outside this chat.', RUN_PLACE_NOTE]),
         ].join('\n');
       } else {
         throw new BulkSourceError('target_system must be "workspace", "data_store" or "http".');
@@ -496,8 +507,8 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         nothingToApprove(status)
           ? 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you.'
           : 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +
-            'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
-        ...(nothingToApprove(status) ? [] : [NO_PLACE_NOTE]),
+            'Only the owner can approve and apply it, outside this chat; bulk_status shows how far it got.',
+        ...(nothingToApprove(status) ? [] : [RUN_PLACE_NOTE]),
       ].join('\n');
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return `Error: ${err.message}${shopifyHostHint(input, agent)}`;
