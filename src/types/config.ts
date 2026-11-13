@@ -123,6 +123,11 @@ export interface AgentConfig {
    *  add `unknown` to {@link conversationGrants}; a step or sub-agent turn is built from what
    *  the root already took in. */
   conversationRoot?: boolean | undefined;
+  /** True when {@link onStream} adds each `turn_end` event's usage into the run's own usage,
+   *  which the run's cost line and debit are priced from (the Session's handler does). A model
+   *  call ended after its `turn_end` then books no estimate on top. Default false: a consumer
+   *  that drops `turn_end` (a spawned child's stream) leaves that usage on no line. */
+  turnEndUsageCounted?: boolean | undefined;
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
   /** The `<secrets>` listing of the vault, given with the briefing but only to an owner's turn:

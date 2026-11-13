@@ -27,7 +27,7 @@ import {
   type BulkHostBudget, type ExternalClient, type ExternalImage, type ExternalRead,
 } from './bulk-external.js';
 import {
-  BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
+  BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isOfferedListPath, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
@@ -179,8 +179,10 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // and says why. Before the client is built: building it reads the list's form, and a form
   // that is no longer offered has no spec to read.
   if (list !== null && !isOfferedListSource(list.source)) {
-    // A filtered Shopify list fails on its filters (a key or value the rule no longer takes), not on a path.
-    const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST_FORM ? BULK_HALT_REASONS.listFilterWithdrawn : BULK_HALT_REASONS.listFormWithdrawn;
+    // A filtered Shopify list fails on its filters (a key or value the rule no longer takes), not on a
+    // path; so does any other list whose form and path are still offered.
+    const onFilters = list.source.form === SHOPIFY_FILTERED_LIST_FORM || isOfferedListPath(list.source);
+    const withdrawn = onFilters ? BULK_HALT_REASONS.listFilterWithdrawn : BULK_HALT_REASONS.listFormWithdrawn;
     ledger.halt(runId, withdrawn);
     return { status: 'halted', summary: summarize(ledger, runId, say.halted('preview', withdrawn), say) };
   }

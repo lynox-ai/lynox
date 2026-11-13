@@ -42,7 +42,7 @@ function agentWith(store: ApiStore): never {
   return {
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
-    secretStore: { extractSecretNames: (): string[] => [], resolveSecretRefs: (input: unknown): unknown => input },
+    secretStore: { resolve: (): string | null => null, extractSecretNames: (): string[] => [], resolveSecretRefs: (input: unknown): unknown => input },
     toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
   } as never;
 }
@@ -186,5 +186,18 @@ describe('the bexio API is reached only through the provider', () => {
     const { out, store } = await save('create', bearer('https://api.crm.example/v1'));
     expect(out).not.toContain('Invalid profile');
     expect(store.get('bexio-pat')).toBeDefined();
+  });
+});
+
+describe('what a helper walks into after the connect link', () => {
+  it('names the instance page and its button, on a read-only link too, and not what it says', async () => {
+    const { connectOpensLine } = await import('./api-setup.js');
+    expect(connectOpensLine('auth.bexio.com', [], true)).toBe('It first opens a page on this instance with a button that continues to auth.bexio.com');
+    expect(connectOpensLine('auth.bexio.com', ['kb_invoice_edit'], true)).toBe('It first opens a page on this instance with what lynox may do there and the write access this link asks for (kb_invoice_edit), and a button that continues to auth.bexio.com');
+  });
+  it('control: the owner\'s lines stay as they were', async () => {
+    const { connectOpensLine } = await import('./api-setup.js');
+    expect(connectOpensLine('auth.bexio.com', [], false)).toBe('It opens auth.bexio.com');
+    expect(connectOpensLine('auth.bexio.com', ['kb_invoice_edit'], false)).toBe('It first shows a page on this instance with what lynox may do there and the write access this link asks for (kb_invoice_edit); they read it and continue to auth.bexio.com');
   });
 });

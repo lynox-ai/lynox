@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { classifyRunFailure } from './session.js';
-import { RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
+import { RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } from './agent.js';
 import { InputRequiredError } from './input-required.js';
 
 /**
@@ -18,6 +18,7 @@ describe('classifyRunFailure', () => {
     expect(classifyRunFailure(new ContinuationLoopError('prefix'))).toEqual({ noteCode: 'continuation_loop', report: true });
     expect(classifyRunFailure(new ThinkingOnlyLoopError())).toEqual({ noteCode: 'thinking_loop', report: true });
     expect(classifyRunFailure(new ToolLoopBreakError('k'))).toEqual({ noteCode: 'tool_loop_break', report: true });
+    expect(classifyRunFailure(new ToolCallImitationError('http_request'))).toEqual({ noteCode: 'tool_call_imitation', report: true });
     expect(classifyRunFailure(new RunAbortedError())).toEqual({ noteCode: 'run_interrupted', report: true });
   });
 

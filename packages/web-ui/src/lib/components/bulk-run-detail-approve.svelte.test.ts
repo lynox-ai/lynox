@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t, tf } from '../i18n.svelte.js';
+import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // The approval of a preview: the owner sees every target, why lynox leaves one out, can take one
@@ -107,14 +107,45 @@ const buttonByText = (text: string): HTMLButtonElement | undefined =>
 	[...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === text);
 
 describe('approving a preview', () => {
+	it('folds a long filter list until asked, then shows it whole and moves focus to it (ux U-175)', async () => {
+		const groups = (n: number, name: string): string[] => Array.from({ length: n }, (_, i) => `${name} ${String(i + 1).padStart(2, '0')}`);
+		const before = getLocale();
+		setLocale('de');
+		onTestFinished(() => setLocale(before));
+		run = makeRun({ listFilters: { product_type: groups(50, 'Gruppe'), vendor: groups(7, 'Anbieter') } });
+		await render();
+		const folded = tf('bulk.list.filter_both', { type: `„Gruppe 01“, „Gruppe 02“, „Gruppe 03“ ${tf('bulk.list.more', { n: '47' })}`, vendor: `„Anbieter 01“, „Anbieter 02“, „Anbieter 03“ ${tf('bulk.list.more', { n: '4' })}` });
+		const line = (): HTMLParagraphElement | undefined => [...target.querySelectorAll('p')].find((p) => p.textContent?.startsWith(folded.slice(0, 30)));
+		expect(line()!.textContent).toBe(`${folded} ${tf('bulk.list.showAll', { n: '57' })}`);
+		buttonByText(tf('bulk.list.showAll', { n: '57' }))!.click();
+		await settle();
+		const full = tf('bulk.list.filter_both', {
+			type: `${groups(49, 'Gruppe').map((g) => `„${g}“`).join(', ')} ${t('bulk.list.or')} „Gruppe 50“`,
+			vendor: `${groups(6, 'Anbieter').map((g) => `„${g}“`).join(', ')} ${t('bulk.list.or')} „Anbieter 07“`,
+		});
+		expect(line()!.textContent).toBe(full);
+		expect(buttonByText(tf('bulk.list.showAll', { n: '57' }))).toBeUndefined();
+		expect(document.activeElement).toBe(line());
+	});
+
 	it('shows why lynox leaves a product out, and folds the unchanged one until asked', async () => {
 		await render();
 		expect(target.textContent).toContain(t('bulk.invalid.not_found'));
 		expect(target.textContent).toContain('Product/1');
 		expect(target.textContent).not.toContain('Product/2');
-		buttonByText(t('bulk.preview.show_unchanged').replace('{n}', '1'))!.click();
+		buttonByText(t('bulk.preview.show_unchanged_one'))!.click();
 		await settle();
 		expect(target.textContent).toContain('Product/2');
+	});
+
+	it('folds the one unchanged target of another host under a button in the singular', async () => {
+		run = makeRun({ targetSystem: 'http:api.example.com' });
+		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
+		await render();
+		expect(target.textContent).not.toContain('items/2');
+		buttonByText(t('bulk.preview.show_unchanged_targets_one'))!.click();
+		await settle();
+		expect(target.textContent).toContain('items/2');
 	});
 
 	it('shows a description lynox does not write for a shortcode, whole, under the reason (1130)', async () => {
@@ -141,24 +172,94 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('short_description:');
 	});
 
-	it('takes a product out against the checksum it showed, and then shuts an approval with nothing left', async () => {
+	it('approves a run of one target whole, takes the product out against the checksum it showed, and then keeps only why nothing is left', async () => {
 		await render();
-		const approve = buttonByText(t('bulk.approve.write_one'))!;
+		// One target to write: no probe first, the approval covers the whole run.
+		const approve = buttonByText(t('bulk.approve.write_only'))!;
 		expect(approve.disabled).toBe(false);
+		expect(target.textContent).toContain(t('bulk.approve.only_one'));
+		expect(target.textContent).not.toContain(t('bulk.approve.one_first'));
+		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
 		buttonByText(t('bulk.deselect.off'))!.click();
 		await settle();
 		expect(posts).toEqual([{ url: expect.stringMatching(/\/bulk\/runs\/r1\/targets\/1\/deselect$/) as unknown as string, body: { checksum: 'c1' } }]);
 		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
 		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
-		const shut = buttonByText(t('bulk.approve.write_one'))!;
-		expect(shut.disabled).toBe(true);
-		expect(shut.getAttribute('aria-describedby')).toBe('bulk-approve-nothing');
-		expect(target.querySelector('#bulk-approve-nothing')?.textContent).toBe(t('bulk.nothing.products'));
+		// Nothing left to write: the sentence and a way back, no button that cannot act and no note on a write.
+		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
+		expect(block.querySelector('#bulk-approve-nothing')?.textContent).toBe(t('bulk.nothing.products'));
+		expect([...block.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual([t('bulk.not_now')]);
+		for (const key of ['bulk.approve.only_one', 'bulk.approve.one_first', 'bulk.approve.shopify_visible']) expect(block.textContent).not.toContain(t(key));
+	});
+
+	it('keeps only why nothing is left on an unchecked filtered run: no note, no confirmation, no filter', async () => {
+		run = makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', listFilters: { product_type: 'Tee' }, total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'https://api.example.com/items/1', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false }];
+		await render();
+		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
+		expect(block.querySelector('#bulk-approve-nothing')).not.toBeNull();
+		expect(block.querySelectorAll('input')).toHaveLength(0);
+		for (const key of ['bulk.approve.unmeasured_note', 'bulk.approve.unmeasured_note_one', 'bulk.approve.unmeasured_confirm']) expect(block.textContent).not.toContain(t(key));
+		expect(block.textContent).not.toContain('Tee');
+	});
+
+	it('cuts the unchecked note to its first two sentences at one target to write, and keeps it whole at two', async () => {
+		const unchecked = (update: number): BulkRunDetailData => makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', changes: { update, create: 0, delete: 0, unchanged: 0, invalid: 3 - update } });
+		run = unchecked(1);
+		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note_one'));
+		expect(target.textContent).not.toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).toContain(t('bulk.approve.only_one'));
+		unmount(component!);
+		component = undefined;
+		run = unchecked(2);
+		targets = targets.map((x) => (x.seq === 2 ? { ...x, change: 'update', diff: TARGETS[0]!.diff } : x));
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+		// Every kind of write counts, as the write counts it: one update and one create are two.
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', changes: { update: 1, create: 1, delete: 0, unchanged: 0, invalid: 1 } });
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).not.toContain(t('bulk.approve.only_one'));
+	});
+
+	it('shows no probe step for a run of one target, and the run as the step it writes in', async () => {
+		const chips = (): string[] => [...target.querySelectorAll('ol li')].map((li) => li.textContent ?? '');
+		const current = (): string | null | undefined => target.querySelector('ol li[aria-current="step"]')?.textContent;
+		run = makeRun({ targetSystem: 'http:api.example.com' });
+		await render();
+		expect(chips()).not.toContain(t('bulk.step.probe'));
+		expect(current()).toBe(t('bulk.step.approval'));
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ targetSystem: 'http:api.example.com', phase: 'writing', probe: { key: 'https://api.example.com/items/1', fields: ['title'] }, haltReason: 'x', haltKey: 'maxTargets' });
+		await render();
+		expect(chips()).not.toContain(t('bulk.step.probe'));
+		expect(current()).toBe(t('bulk.step.run'));
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ targetSystem: 'http:api.example.com', changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		await render();
+		expect(chips()).toContain(t('bulk.step.probe'));
+	});
+
+	it('writes one target first and leaves the rest to approve when there are two', async () => {
+		run = makeRun({ changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = targets.map((x) => (x.seq === 2 ? { ...x, change: 'update', diff: TARGETS[0]!.diff } : x));
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+		expect(target.textContent).not.toContain(t('bulk.approve.only_one'));
+		expect(buttonByText(t('bulk.approve.write_one'))?.disabled).toBe(false);
+		expect(buttonByText(t('bulk.approve.write_only'))).toBeUndefined();
 	});
 
 	it('offers no way out on a product lynox leaves out, and none on an unchanged one', async () => {
 		await render();
-		buttonByText(t('bulk.preview.show_unchanged').replace('{n}', '1'))!.click();
+		buttonByText(t('bulk.preview.show_unchanged_one'))!.click();
 		await settle();
 		expect([...target.querySelectorAll('button')].filter((b) => b.textContent?.trim() === t('bulk.deselect.off'))).toHaveLength(1);
 	});
@@ -178,6 +279,7 @@ describe('approving a preview', () => {
 		await render();
 		expect(target.textContent).toContain(t('common.load_failed'));
 		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
+		expect(buttonByText(t('bulk.approve.write_only'))).toBeUndefined();
 		expect(target.textContent).not.toContain('Product/1');
 	});
 

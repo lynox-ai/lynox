@@ -426,9 +426,36 @@ function isNameOrLink(tok: string): boolean {
   return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok);
 }
 
-/** Long enough, letters and digits, spread: a key's value. */
+/** Every character a hex digit, in lower case: a key drawn from sixteen symbols. */
+const HEX_ONLY = /^[0-9a-f]+$/;
+
+/**
+ * How spread a key's characters must be. A key drawn from sixteen symbols spreads less than one
+ * drawn from letters and digits: at 3.3 bits, 1.8 % of random 32-character hex keys fell short.
+ */
+const KEY_SPREAD_BITS = 3.3;
+const HEX_KEY_SPREAD_BITS = 2.5;
+
+/** How often two capitals stand side by side: a random key's letters do so at one pair in four,
+ *  a camel-case name (`vaultKeyForAccount`) only at an acronym. */
+function capitalPairs(tok: string): number {
+  return (tok.match(/(?=[A-Z]{2})/g) ?? []).length;
+}
+
+/**
+ * Long enough, spread: a key's value. Letters and digits; or letters alone, changing case as
+ * often as a random key and with capitals side by side at least twice, since one key in sixty of
+ * 24 random letters and digits holds no digit. Most camel-case names have their capitals apart;
+ * one with capitals side by side twice (three in a row, as AIM in `getOpenAIModelMap`, or two
+ * acronyms apart) reads as a key.
+ */
 function keyShaped(tok: string): boolean {
-  return !isNameOrLink(tok) && tok.length >= 16 && /[A-Za-z]/.test(tok) && /[0-9]/.test(tok) && entropyBits(tok) >= 3.3;
+  if (isNameOrLink(tok) || tok.length < 16) return false;
+  if (/[A-Za-z]/.test(tok) && /[0-9]/.test(tok)) {
+    return entropyBits(tok) >= (HEX_ONLY.test(tok) ? HEX_KEY_SPREAD_BITS : KEY_SPREAD_BITS);
+  }
+  return /^[A-Za-z]+$/.test(tok) && capitalPairs(tok) >= 2
+    && classChangeRate(tok) >= 0.35 && entropyBits(tok) >= KEY_SPREAD_BITS;
 }
 
 /** A password's value: eight or more characters in three classes. */
@@ -847,7 +874,12 @@ export class SecretStore implements SecretStoreLike {
     return secret === undefined || secret.value === '' ? '' : hash(secret.value);
   }
 
-  resolve(name: string): string | null {
+  /**
+   * The value {@link resolve} would hand out for `name`, or `null`: stored, not expired, consented
+   * to, and let through by the resolve guard. The one place these four questions are asked, so
+   * {@link resolve} and {@link holds} cannot drift apart.
+   */
+  private usableValue(name: string): string | null {
     const secret = this.secrets.get(name);
     if (!secret) return null;
     if (this.isExpired(name)) return null;
@@ -859,9 +891,23 @@ export class SecretStore implements SecretStoreLike {
         return null;
       }
     }
-
-    channels.secretAccess.publish({ name, action: 'resolve' });
     return secret.value;
+  }
+
+  resolve(name: string): string | null {
+    const value = this.usableValue(name);
+    if (value === null) return null;
+    channels.secretAccess.publish({ name, action: 'resolve' });
+    return value;
+  }
+
+  /**
+   * Whether {@link resolve} would hand out a value for `name`, without reading it out: nothing is
+   * returned and no `secretAccess` event is published, so a check that only asks "is it there?"
+   * does not read in the audit trail as a credential read.
+   */
+  holds(name: string): boolean {
+    return this.usableValue(name) !== null;
   }
 
   listNames(): string[] {
