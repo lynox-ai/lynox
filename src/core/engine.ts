@@ -22,6 +22,7 @@ import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { loadConfig, getLynoxDir } from './config.js';
+import { resetProviderOffList } from './exchange-provider-reset.js';
 import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
@@ -521,6 +522,13 @@ export class Engine {
   private _modelDerivedFromDefaultTier = false;
 
   constructor(config: LynoxConfig) {
+    // Before the first load: with the Shopify exchange on, a Mistral pick goes back to Anthropic
+    // (`exchange-provider-reset.ts`). A failed write leaves the pick, which the provider list refuses.
+    try {
+      if (resetProviderOffList() !== null) process.stderr.write('[lynox] Shopify exchange is on: the provider pick went from Mistral back to Anthropic.\n');
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] Could not move the provider pick off Mistral: ${processErrorText(err)}\n`);
+    }
     this.userConfig = loadConfig();
     // Apply user config defaults if not already set in LynoxConfig. The
     // main-chat tier comes from `default_tier` (the "Main chat model" picker),

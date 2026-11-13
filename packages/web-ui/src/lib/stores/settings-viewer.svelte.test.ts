@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isOwnerSession, isMandateSession, isViewerUnavailable, loadSettingsViewer, resetSettingsViewer, viewerNote } from './settings-viewer.svelte.js';
+import { dismissProviderReset, isOwnerSession, isMandateSession, isViewerUnavailable, loadSettingsViewer, noteSettingsViewer, providerResetNotice, refreshProviderReset, resetSettingsViewer, viewerNote } from './settings-viewer.svelte.js';
 
 // Whose session the pages serve is asked once, when a page mounts. The owner's actions wait for the
 // answer, so a missing answer is asked again, a few times, and an answer without `viewer` is not.
@@ -165,5 +165,127 @@ describe('viewerNote, for a page that reads /config itself', () => {
 		const note = viewerNote();
 		note({ viewer: 'mandate' });
 		expect(isMandateSession()).toBe(true);
+	});
+});
+
+// The engine put the provider back on Anthropic while the Shopify exchange is on. The chat
+// and the LLM settings show a line until the owner clicks "Got it" or picks a provider.
+describe('the line about the provider the engine changed', () => {
+	it('is read from the body, and anything but a named provider reads as none', () => {
+		noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		expect(providerResetNotice()).toBe('Mistral');
+		for (const reset of [null, undefined, {}, { from: '' }, { from: 3 }, 'Mistral']) {
+			noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: reset });
+			expect(providerResetNotice(), JSON.stringify(reset)).toBeNull();
+		}
+	});
+
+	it('"Got it" asks the server, and the line goes only when it said yes', async () => {
+		noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		const refused = serve(json({ error: 'Only the owner of this instance can dismiss this notice.' }, 403));
+		expect(await dismissProviderReset()).toBe(false);
+		expect(providerResetNotice()).toBe('Mistral');
+		expect(refused).toHaveBeenCalledWith(expect.stringMatching(/\/config\/provider-reset\/dismiss$/), { method: 'POST' });
+
+		serve(new TypeError('network'));
+		expect(await dismissProviderReset()).toBe(false);
+		expect(providerResetNotice()).toBe('Mistral');
+
+		serve(json({ ok: true }));
+		expect(await dismissProviderReset()).toBe(true);
+		expect(providerResetNotice()).toBeNull();
+	});
+
+	it('goes with a new sign-in', () => {
+		noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		resetSettingsViewer();
+		expect(providerResetNotice()).toBeNull();
+	});
+
+	it('is read again on request: an engine that changed the provider at its start is seen without a reload', async () => {
+		serve(json({ viewer: 'owner', locks: {}, provider_reset: null }));
+		await loadSettingsViewer();
+		expect(providerResetNotice()).toBeNull();
+		const again = serve(json({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } }));
+		await loadSettingsViewer();
+		expect(again, 'the page load asks once').not.toHaveBeenCalled();
+		await refreshProviderReset();
+		expect(providerResetNotice()).toBe('Mistral');
+	});
+
+	it('keeps what it read when the second answer fails, and does not take an answer from before a sign-in', async () => {
+		noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		// A refused answer is not read, even one shaped like a config body.
+		serve(json({ viewer: 'owner', locks: {}, provider_reset: null }, 503));
+		await refreshProviderReset();
+		expect(providerResetNotice()).toBe('Mistral');
+		serve(new TypeError('network'));
+		await refreshProviderReset();
+		expect(providerResetNotice()).toBe('Mistral');
+
+		let release: (r: Response) => void = () => {};
+		vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((r) => { release = r; })));
+		const late = refreshProviderReset();
+		resetSettingsViewer();
+		release(json({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } }));
+		await late;
+		expect(providerResetNotice()).toBeNull();
+	});
+
+	it('does not bring the line back with an answer asked for before "Got it"', async () => {
+		noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		let release: (r: Response) => void = () => {};
+		vi.stubGlobal('fetch', vi.fn((url: string) => url.endsWith('/dismiss')
+			? Promise.resolve(json({ ok: true }))
+			: new Promise<Response>((r) => { release = r; })));
+		const early = refreshProviderReset();
+		expect(await dismissProviderReset()).toBe(true);
+		release(json({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } }));
+		await early;
+		expect(providerResetNotice()).toBeNull();
+	});
+
+	it('does not bring the line back with a page\'s own body asked for before "Got it", and still takes the rest of it', async () => {
+		noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		const note = viewerNote();
+		serve(json({ ok: true }));
+		expect(await dismissProviderReset()).toBe(true);
+		expect(note({ viewer: 'mandate', locks: {}, provider_reset: { from: 'Mistral' } })).toBe(true);
+		expect(providerResetNotice()).toBeNull();
+		expect(isMandateSession(), 'the rest of the body is still read').toBe(true);
+		// A body asked for after it is read in full.
+		viewerNote()({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		expect(providerResetNotice()).toBe('Mistral');
+	});
+
+	it('does not bring the line back with the page-load answer asked for before "Got it"', async () => {
+		let release: (r: Response) => void = () => {};
+		vi.stubGlobal('fetch', vi.fn((url: string) => url.endsWith('/dismiss')
+			? Promise.resolve(json({ ok: true }))
+			: new Promise<Response>((r) => { release = r; })));
+		const load = loadSettingsViewer();
+		noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		expect(await dismissProviderReset()).toBe(true);
+		release(json({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } }));
+		await load;
+		expect(providerResetNotice()).toBeNull();
+	});
+
+	it('asks anew after a provider save instead of sharing a request from before it', async () => {
+		noteSettingsViewer({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } });
+		const releases: Array<(r: Response) => void> = [];
+		const fetchMock = vi.fn(() => new Promise<Response>((r) => { releases.push(r); }));
+		vi.stubGlobal('fetch', fetchMock);
+		const before = refreshProviderReset();
+		expect(refreshProviderReset(), 'two lines share a request').toBe(before);
+		const after = refreshProviderReset(true);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		// The answer from before the save comes last and still names Mistral; the one after it is read.
+		releases[1]!(json({ viewer: 'owner', locks: {}, provider_reset: null }));
+		await after;
+		expect(providerResetNotice()).toBeNull();
+		releases[0]!(json({ viewer: 'owner', locks: {}, provider_reset: { from: 'Mistral' } }));
+		await before;
+		expect(providerResetNotice()).toBeNull();
 	});
 });

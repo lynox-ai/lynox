@@ -113,6 +113,7 @@
 	import ThreadModelControl from './ThreadModelControl.svelte';
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { canChooseModel, isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ProviderResetLine from './ProviderResetLine.svelte';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
@@ -3851,6 +3852,10 @@
 		     the same split — its full "Läuft auf: […]" row cost a composer line on
 		     every running thread, so on desktop it now renders compact in the header
 		     (AppShell) and only mobile keeps the row here. -->
+		<!-- The engine put the provider back on Anthropic while the Shopify exchange is on. -->
+		<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto empty:hidden mb-2">
+			<ProviderResetLine />
+		</div>
 		{#if currentSessionId === null}
 			<div class="sm:hidden">
 				<ComposerModelPicker />

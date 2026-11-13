@@ -936,7 +936,7 @@ export type PluginExport = (ctx: PluginContext) => { tools?: ToolEntry[] | undef
  *  shown for self-host → managed migration). `contact_cta` points to
  *  a quota-change channel (typical for managed → support@). */
 export interface CapabilityLock {
-  reason: 'managed-tier' | 'env-override' | 'capability-missing';
+  reason: 'managed-tier' | 'env-override' | 'capability-missing' | 'shopify-exchange';
   upgrade_cta?: { href: string; label: string } | undefined;
   contact_cta?: { href: string; label: string } | undefined;
 }
@@ -951,5 +951,8 @@ export interface CapabilityLock {
  *   providers (Anthropic, Mistral) stay switchable.
  * `custom_provider_endpoints`: free-text base_url tiles disabled (Managed).
  *   Mirror in code: catalog entries with `requires_base_url === true`.
+ * `mistral_provider`: the Mistral tile disabled, on an instance connected to a Shopify store
+ *   (`contained-providers.ts`: Mistral is off its provider list, and a pick of it goes back to
+ *   Anthropic at boot, `exchange-provider-reset.ts`).
  */
-export type CapabilityLocks = Partial<Record<'provider' | 'custom_provider_endpoints' | 'limits' | 'custom_endpoints' | 'context_window' | 'thinking_effort' | 'tier_preset', CapabilityLock>>;
+export type CapabilityLocks = Partial<Record<'provider' | 'custom_provider_endpoints' | 'mistral_provider' | 'limits' | 'custom_endpoints' | 'context_window' | 'thinking_effort' | 'tier_preset', CapabilityLock>>;

@@ -178,6 +178,11 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     why: 'this deployment\'s API bearer; a restore or a migration must not silently re-point existing clients at a new instance holding the old secret',
   },
   {
+    // The line that the engine put the provider back on Anthropic (`exchange-provider-reset.ts`).
+    name: 'provider-reset.json', kind: 'file', secret: false, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'), erase: REMOVE,
+    why: 'a notice about this instance\'s own boot (it moved the provider pick off Mistral), shown until the owner dismisses it; on another installation it would be false',
+  },
+  {
     name: '.cache-salt', kind: 'file', secret: false, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'), erase: keep('a random partition salt for the provider cache key, regenerated on demand; no user content'),
     why: 'per-tenant partition for a shared provider cache key — regenerated on demand, and MIGRATING it would be a defect: two instances sharing a salt collide in exactly the partition it exists to separate',
   },

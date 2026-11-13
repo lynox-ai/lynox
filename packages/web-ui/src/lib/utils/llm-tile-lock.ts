@@ -22,6 +22,12 @@ export interface TileLockInput {
 	isActive: boolean;
 	/** This tile needs a user-supplied base URL (OpenAI-/Anthropic-compatible). */
 	requiresBaseUrl: boolean;
+	/**
+	 * The provider list of a Shopify-connected instance leaves this tile's provider out
+	 * (`locks.mistral_provider`): the engine refuses it
+	 * and would put the pick back on Anthropic at its next start. Absent counts as on the list.
+	 */
+	offList?: boolean;
 }
 
 export function isProviderTileLocked(i: TileLockInput): boolean {
@@ -35,5 +41,7 @@ export function isProviderTileLocked(i: TileLockInput): boolean {
 	if (i.providerLocked && !i.isActive) return true;
 	// Managed: only free-text endpoint tiles are off-limits; curated tiles switch.
 	if (i.customEndpointsLocked && i.requiresBaseUrl) return true;
+	// Off the instance's provider list: locked even while active, so it cannot be picked again.
+	if (i.offList === true) return true;
 	return false;
 }
