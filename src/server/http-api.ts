@@ -5486,9 +5486,7 @@ export class LynoxHTTPApi {
         // streamTimeout.
         setTimeout(() => {
           const liveSlot = this.runningSessions.get(sessionId);
-          // Parked on its own question: a scheduled run's question beside a run that works on
-          // headless is not this run's, and taking the run over would let it lapse too.
-          if (liveSlot && !liveSlot.streamAlive && (liveSlot.parked?.() ?? true) && promptStore?.getPending(sessionId)) {
+          if (liveSlot && !liveSlot.streamAlive && promptStore?.getPending(sessionId)) {
             liveSlot.takeover('run_stopped');
           }
         }, ORPHAN_PROMPT_WATCHDOG_MS);
