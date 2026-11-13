@@ -4,7 +4,8 @@ import {
   MARKUP_MAX_BYTES, MARKUP_MAX_CARRIER_NESTING, MARKUP_MAX_DEPTH,
 } from './bulk-html.js';
 import { BULK_MAX_TARGET_BYTES } from './bulk-plan.js';
-import { html as p5 } from 'parse5';
+import { html as p5, parseFragment, defaultTreeAdapter } from 'parse5';
+import type { DefaultTreeAdapterTypes } from 'parse5';
 
 // The markup check reads a value's tree once per text carrier above each node. A value larger or
 // nested deeper than the bounds is refused before it is read, and the list the approval view shows
@@ -13,19 +14,29 @@ import { html as p5 } from 'parse5';
 const HOST = 'shop.example.com';
 const check = (after: string, before: string | null = null) => checkMarkup({ before, after, storeHost: HOST, startDomains: [] });
 
-/** The names this module treats as text carriers, and the contexts a value may open: the pair that
- *  nests is found by the check itself, so no test names it. */
+/** The names this module treats as text carriers, and the contexts a value may open. Which pair
+ *  nests is read off the parser's own tree, independent of the check, so no test names it. */
 const CARRIERS = ['script', 'style', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'plaintext', 'textarea', 'title'];
 const CONTEXTS = ['', ...Object.keys(p5.NS).map((ns) => `<${ns.toLowerCase()}>`)];
 const nested = (context: string, carrier: string, n: number): string => context + `<${carrier}>`.repeat(n);
+/** The most carriers of that name the parser puts above one another for a value. */
+const carrierNesting = (value: string, carrier: string): number => {
+  const div = defaultTreeAdapter.createElement('div', p5.NS.HTML, []);
+  let most = 0;
+  const stack: [DefaultTreeAdapterTypes.Node, number][] = [[parseFragment(div, value), 0]];
+  while (stack.length > 0) {
+    const [n, above] = stack.pop()!;
+    const here = above + ('tagName' in n && n.tagName === carrier ? 1 : 0);
+    most = Math.max(most, here);
+    for (const c of 'childNodes' in n ? n.childNodes : []) stack.push([c, here]);
+  }
+  return most;
+};
 const nesting = ((): [string, string] => {
   for (const context of CONTEXTS) {
-    for (const carrier of CARRIERS) {
-      if (withinReadingBounds(nested(context, carrier, MARKUP_MAX_CARRIER_NESTING))
-        && !withinReadingBounds(nested(context, carrier, MARKUP_MAX_CARRIER_NESTING + 1))) return [context, carrier];
-    }
+    for (const carrier of CARRIERS) if (carrierNesting(nested(context, carrier, 3), carrier) === 3) return [context, carrier];
   }
-  throw new Error('no carrier nests: the nesting bound is not exercised');
+  throw new Error('no carrier nests in the parser');
 })();
 const carriers = (n: number): string => nested(nesting[0], nesting[1], n);
 
@@ -100,6 +111,12 @@ describe('a value beyond the bounds', () => {
     expect(ms).toBeLessThan(1000);
     expect(markupAddedByHost({ sent: measured, back: '<p>a</p>', storeHost: HOST, startDomains: [] })).toMatchObject({ ok: false, reason: 'not_canonical' });
     expect(markupAddedByHost({ sent: '<p>a</p>', back: '<p>a</p>', storeHost: HOST, startDomains: [] })).toEqual({ ok: true });
+    // Closed and of allowed elements only, so nothing but the depth refuses it.
+    const pairs = MARKUP_MAX_DEPTH / 2 + 1;
+    const lists = '<ul><li>'.repeat(pairs) + 'x' + '</li></ul>'.repeat(pairs);
+    expect(markupAddedByHost({ sent: '<p>a</p>', back: lists, storeHost: HOST, startDomains: [] })).toEqual({
+      ok: false, reason: 'not_canonical', detail: 'The value read back or the value sent is larger or nested deeper than this check reads.',
+    });
   });
 });
 
