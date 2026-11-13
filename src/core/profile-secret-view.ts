@@ -1098,15 +1098,17 @@ export function connectionTokenAllowed(
 /**
  * The engine's resolve guard (`Engine.resolveGuard`), set as soon as the secret store exists.
  *
- * - A name the environment set, or one of the platform's own slots, always goes out: neither can
- *   hold a connection's token (a protected name is refused as a token's slot on every write path,
- *   and an environment value shadows any vault value of the same name).
- * - Every other name needs the profiles: before they are loaded, and for good when loading them
- *   failed (`apiStore` null), it does not go out.
- * - Loaded, it is {@link connectionTokenAllowed} over every stored profile, the ones the import
- *   still waits to write included, and no for a name a stored entry the boot could not read may
- *   hold: whose connection that is, and whether its mandate ended, cannot be told until the entry
- *   is repaired or removed.
+ * - Before the profiles are loaded, and for good when loading them failed (`apiStore` null), only a
+ *   name the environment set or one of the platform's own slots goes out. Nobody knows then which
+ *   other names hold a connection's token. A protected name is refused as a token's slot on every
+ *   write path; an environment name holds the environment's value at boot.
+ * - Loaded, every name is {@link connectionTokenAllowed} over every stored profile, the ones the
+ *   import still waits to write included. That covers an environment name too: a connection that
+ *   writes its token there (`set`) replaces the environment's value in the store.
+ * - Loaded, a name a stored entry the boot could not read may hold does not go out either: whose
+ *   connection that is, and whether its mandate ended, cannot be told until the entry is repaired
+ *   or removed. The environment's names and the platform's slots are exempt from this, so one
+ *   unreadable entry that may hold every name does not take the provider keys with it.
  */
 export function resolveGuardAllows(
   state: {
@@ -1117,10 +1119,10 @@ export function resolveGuardAllows(
   },
   name: string,
 ): boolean {
-  if (state.fromEnvironment(name) || isProtectedSecretWrite(name)) return true;
+  const own = state.fromEnvironment(name) || isProtectedSecretWrite(name);
   const apiStore = state.apiStore;
-  if (!state.profilesKnown || apiStore === null) return false;
-  if (apiStore.unreadableHolds(name)) return false;
+  if (!state.profilesKnown || apiStore === null) return own;
+  if (!own && apiStore.unreadableHolds(name)) return false;
   return connectionTokenAllowed({ knownProfiles: () => [...apiStore.knownProfiles(), ...apiStore.waitingProfiles()] }, state.ends, name);
 }
 

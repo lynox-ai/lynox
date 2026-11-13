@@ -260,6 +260,9 @@ describe('resolveGuardAllows (the engine\'s resolve guard)', () => {
     expect(allows({ apiStore: store({ unreadable: ['BROKEN_API_ACCESS_TOKEN'] }) }, 'BROKEN_API_ACCESS_TOKEN')).toBe(false);
     expect(allows({ apiStore: store({ unreadable: 'all' }) }, 'OWNER_OWN_KEY')).toBe(false);
   });
+  it('loaded: an environment name a connection of an ended mandate wrote its token to is withheld too', () => {
+    expect(allows({ apiStore: store({ known: [ended('env-api')] }), env: ['ENV_API_ACCESS_TOKEN'] }, 'ENV_API_ACCESS_TOKEN')).toBe(false);
+  });
   it('control: loaded, still withholds a loaded ended connection\'s token, and hands out a name nothing holds', () => {
     expect(allows({ apiStore: store({ known: [ended('loaded-api')] }) }, 'LOADED_API_ACCESS_TOKEN')).toBe(false);
     expect(allows({ apiStore: store({ known: [ended('loaded-api')], waiting: [ended('waits-api')], unreadable: ['BROKEN_API_ACCESS_TOKEN'] }) }, 'OWNER_OWN_KEY')).toBe(true);
