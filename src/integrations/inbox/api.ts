@@ -22,6 +22,7 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
+import { charCount, cutChars, ruleLine } from './rule-text.js';
 
 export interface InboxApiDeps {
   state: InboxStateDb;
@@ -81,7 +82,13 @@ const VALID_BUCKETS: ReadonlyArray<InboxBucket> = ['requires_user', 'draft_ready
 const VALID_USER_ACTIONS: ReadonlyArray<InboxUserAction> = ['archived', 'replied', 'snoozed', 'unhandled'];
 const VALID_MATCHER_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains', 'list_id'];
 const VALID_RULE_ACTIONS: ReadonlyArray<InboxRuleAction> = ['archive', 'mark_read', 'label', 'show'];
+// `agent` is not here: a rule with that source is proposed by the agent and waits for the owner;
+// the owner's route makes confirmed rules only.
 const VALID_RULE_SOURCES: ReadonlyArray<InboxRuleSource> = ['proactive_threshold', 'on_demand'];
+/** A rule's name is shown in the rule view and on the items it files; one line, short. */
+export const MAX_RULE_NAME_CHARS = 80;
+/** A rule id as `nextId('rul')` makes it — checked before it reaches a query. */
+const RULE_ID = /^rul_[A-Za-z0-9_-]{1,64}$/;
 const VALID_RULE_BUCKETS: ReadonlyArray<'requires_user' | 'auto_handled'> = ['requires_user', 'auto_handled'];
 
 function bad(message: string): ApiResponse {
@@ -108,6 +115,8 @@ export interface ListItemsQuery {
    * of their original classifier bucket.
    */
   snoozedOnly?: string | undefined;
+  /** Only the items this rule filed (`matched_rule_id`). */
+  ruleId?: string | undefined;
 }
 
 /** PRD §"Search-Bar" caps user input at 200 chars to keep one LIKE query bounded. */
@@ -140,6 +149,12 @@ export function handleListItems(deps: InboxApiDeps, query: ListItemsQuery): ApiR
       return bad(`q exceeds ${MAX_SEARCH_QUERY_LENGTH} chars`);
     }
     opts.q = query.q;
+  }
+  if (query.ruleId !== undefined && query.ruleId.length > 0) {
+    if (!RULE_ID.test(query.ruleId)) return bad('invalid ruleId');
+    // The snoozed list ignores every other filter; refuse rather than answer for all rules.
+    if (snoozedOnly) return bad('ruleId cannot be combined with snoozedOnly');
+    opts.ruleId = query.ruleId;
   }
   return { status: 200, body: { items: deps.state.listItems(opts) } };
 }
@@ -919,6 +934,13 @@ export interface CreateRuleBody {
   action: InboxRuleAction;
   source: InboxRuleSource;
   tenantId?: string | undefined;
+  /** What the rule is called; optional. */
+  name?: string | undefined;
+}
+
+function fallbackName(name: string, matcherValue: string): { name?: string } {
+  const chosen = name.length > 0 ? name : cutChars(ruleLine(matcherValue), MAX_RULE_NAME_CHARS);
+  return chosen.length > 0 ? { name: chosen } : {};
 }
 
 export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiResponse {
@@ -930,6 +952,9 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
   if (!VALID_RULE_BUCKETS.includes(body.bucket)) return bad('invalid bucket for rule');
   if (!VALID_RULE_ACTIONS.includes(body.action)) return bad('invalid action');
   if (!VALID_RULE_SOURCES.includes(body.source)) return bad('invalid source');
+  // One line, as the agent's proposals are cut: the name lands in audit rows the model can read.
+  const name = typeof body.name === 'string' ? ruleLine(body.name) : '';
+  if (charCount(name) > MAX_RULE_NAME_CHARS) return bad(`name exceeds ${MAX_RULE_NAME_CHARS} chars`);
   const id = deps.state.insertRule({
     accountId: body.accountId,
     matcherKind: body.matcherKind,
@@ -938,9 +963,19 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     action: body.action,
     source: body.source,
     tenantId: body.tenantId,
+    // Unnamed, a rule is called by what it matches (cut to the name's length); nothing left, no name.
+    ...(fallbackName(name, body.matcherValue)),
   });
   deps.rules?.invalidate(body.accountId, body.tenantId);
   return { status: 201, body: { id } };
+}
+
+/** The owner confirms a rule the agent proposed; from then on it applies. */
+export function handleConfirmRule(deps: InboxApiDeps, id: string): ApiResponse {
+  if (!deps.state.confirmRule(id)) return notFound('rule');
+  // Same coarse invalidation as delete: the rule's account is not known here.
+  deps.rules?.invalidateAll();
+  return { status: 200, body: { id } };
 }
 
 export function handleDeleteRule(deps: InboxApiDeps, id: string): ApiResponse {
