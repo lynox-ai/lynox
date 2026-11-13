@@ -28,6 +28,11 @@ import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-te
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
+/** The key history.db's encrypted columns are stored under, derived from the vault key (see `deriveEngineEncKey`). */
+export function deriveHistoryEncKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
+
 function getDefaultDbPath(): string {
   return join(getLynoxDir(), 'history.db');
 }
@@ -1695,7 +1700,7 @@ export class RunHistory {
     // Derive history encryption key via HKDF from vault key
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
-      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._encKey = deriveHistoryEncKey(vaultKey);
     } else {
       this._encKey = null;
     }

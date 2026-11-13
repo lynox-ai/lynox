@@ -7,6 +7,7 @@ import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolCallImitationError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
+import { copyToolContext } from '../../core/tool-context.js';
 import { loopGuardStopReason } from '../../core/loop-guard-stop.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
@@ -1802,7 +1803,9 @@ async function executeThinker(
     // also write-reachable — a child can mutate parent state through
     // dataStore / apiStore / runHistory (e.g. updateRun on the parent's
     // row). Acceptable because the child IS trusted code, but not hidden.
-    toolContext: { ...parentAgent.toolContext },
+    // `copyToolContext` keeps the mark of a context that does not carry the instance's network
+    // policy, so the provider-side web search stays withheld for the child as for its parent.
+    toolContext: copyToolContext(parentAgent.toolContext),
     // T2-X1 part 2: share the parent's SecretStore so `ask_secret`, vault
     // reads, and tool credential lookups work in the child. Documented
     // reach delta: a child's `http_request` will auto-inject `Bearer` tokens
