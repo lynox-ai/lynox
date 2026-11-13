@@ -2407,6 +2407,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'stamp.schedule': { de: 'Zeitplan', en: 'Schedule' },
 	'stamp.model': { de: 'Modellstufe', en: 'Model tier' },
 	'stamp.watch_selector': { de: 'Seitenbereich', en: 'Page section' },
+	'stamp.watch_stored': { de: 'Gespeichert ist mehr als diese Adresse. Der Lauf liest den ganzen Text darunter.', en: 'More than this address is stored. The run reads the full text below.' },
 	'stamp.close': { de: 'Schliessen', en: 'Close' },
 	'stamp.listed_heading': { de: 'Verbindungen dieses Plans', en: 'Connections of this plan' },
 	'stamp.ended_unpaused': { de: 'Der Zugang dieser Person ist beendet. Der Plan läuft deshalb nicht. Lösch ihn und beschreib lynox danach im Chat in eigenen Worten, was er tun soll. Der neue Plan läuft unter dir.', en: "This person's access has ended, so the plan does not run. Delete it, then describe to lynox in the chat, in your own words, what it should do. The new plan runs as you." },

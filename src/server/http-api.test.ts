@@ -597,6 +597,12 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
   return fetch(`${baseUrl}${path}`, { ...opts, headers });
 }
 
+/** The confirm body the view sends: the digest from the schedule's stamp preview. */
+async function confirmBody(id: string): Promise<string> {
+  const shown = await (await jsonFetch(`/api/tasks/${id}/stamp-preview`)).json() as { expect: string };
+  return JSON.stringify({ expect: shown.expect });
+}
+
 /**
  * Give the rate-limit window back when the calling test ends: every count goes back to
  * what it was at the call, never a `clear()`. The tests here share one loopback window
@@ -10696,7 +10702,7 @@ describe('LynoxHTTPApi', () => {
         ['/api/tasks/bulk-r/', 'PATCH', JSON.stringify({ schedule_cron: '1h' })],
         ['/api/tasks/bulk-r/complete', 'POST'],
         ['/api/tasks/bulk-r', 'PATCH', JSON.stringify({ enabled: false })],
-        ['/api/tasks/bulk-r/confirm', 'POST'],
+        ['/api/tasks/bulk-r/confirm', 'POST', await confirmBody('bulk-r')],
       ];
       for (const [path, method, body] of calls) {
         const res = await jsonFetch(path.replace(/\/$/, ''), { method, ...(body ? { body } : {}) });
@@ -10715,16 +10721,42 @@ describe('LynoxHTTPApi', () => {
 
     // triggers-consent — the human consent surface.
     it('POST /api/tasks/:id/confirm confirms a trigger (200)', async () => {
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' });
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') });
       expect(res.status).toBe(200);
       const body = await res.json() as { confirmed_at: string };
       expect(body.confirmed_at).toBeTruthy();
     });
 
-    it('POST /api/tasks/:id/confirm returns 404 for an unknown trigger', async () => {
+    it('POST /api/tasks/:id/confirm returns 404 for a trigger gone by the time it is stamped', async () => {
       mockConfirmTrigger.mockReturnValueOnce(undefined);
-      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST' });
+      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: await confirmBody('nope') });
       expect(res.status).toBe(404);
+    });
+
+    it('POST /api/tasks/:id/confirm returns 404 for a trigger the history does not hold, and stamps nothing', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = ref['getRunHistory'];
+      ref['getRunHistory'] = () => ({ getTrigger: () => undefined });
+      try {
+        mockConfirmTrigger.mockClear();
+        const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'any' }) });
+        expect(res.status).toBe(404);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
+      } finally {
+        ref['getRunHistory'] = saved;
+      }
+    });
+
+    it.each([
+      ['no body', undefined],
+      ['an empty object', '{}'],
+      ['a digest that is not a string', JSON.stringify({ expect: 1 })],
+    ])('POST /api/tasks/:id/confirm with %s stamps nothing (400): the owner confirms from the preview', async (_label, body) => {
+      mockConfirmTrigger.mockClear();
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', ...(body !== undefined ? { body } : {}) });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain('"expect" is required');
+      expect(mockConfirmTrigger).not.toHaveBeenCalled();
     });
 
     // ── Run now, and the two different 409s ──────────────────────────────────
@@ -21687,7 +21719,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     });
 
     it('confirms a schedule, recorded as the owner, and its changes leave no mark', async () => {
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockConfirmTrigger).toHaveBeenCalledWith('task-1', undefined, 'owner', undefined);
       await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
       expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
@@ -21745,9 +21777,10 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: null, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-secret-1' })] });
 
-        // Without the digest: stamped without a list, as every confirm was before.
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
-        expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+        // Without the digest: nothing is stamped, not even without a list.
+        mockConfirmTrigger.mockClear();
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(400);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
 
         // A mandate's backup or notice never uses a connection: nothing is listed or shown for it.
         for (const effect of ['backup', 'notify']) {
@@ -21822,7 +21855,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     it('confirming a workflow schedule never stamps the workflow, which every schedule naming it shares', async () => {
       mockConfirmTrigger.mockReturnValueOnce({ id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-sched', confirmed_at: '2026-10-08T00:00:00.000Z' });
       storeWf(); // an unstamped workflow
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
     });
 

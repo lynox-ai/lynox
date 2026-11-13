@@ -9443,8 +9443,8 @@ export class LynoxHTTPApi {
     // (an unconfirmed run_agent trigger is neither, closing the injection-
     // amplification hole). This user-scope HTTP action is the ONLY consent surface;
     // the agent `task_create` tool cannot reach it, so confirmation is always an
-    // explicit human step. A confirm of a confirmed schedule stamps it again: a new `confirmed_at`,
-    // and a list only when it is sent the preview's `expect` (without, a stamp lists none).
+    // explicit human step. A confirm of a confirmed schedule stamps it again: a new `confirmed_at`
+    // and the list the preview's `expect` was the digest of.
     // What the owner's stamp of this schedule would list: the connections the mandate its plan acts
     // for made with its own login (`plan-stamp.ts`). The confirm below writes the list only when
     // it is sent back the digest of exactly this list on exactly this schedule (`stampExpect`).
@@ -9475,24 +9475,23 @@ export class LynoxHTTPApi {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
-      // `expect`: the digest from the preview. Without it the stamp lists no connection, which is
-      // what every confirm did before the list existed.
+      // `expect`: the digest from the preview, required. The owner stamps the schedule they were
+      // shown, never whatever the trigger holds by the time the request arrives.
       const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
         ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm a schedule from its stamp preview (GET /api/tasks/:id/stamp-preview).'); return; }
       let connections: { wf: string | null; entries: readonly StampEntry[] } | undefined;
-      if (expected !== undefined) {
-        const current = engine.getRunHistory()?.getTrigger(params['id']!);
-        if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
-        const listed = await this.#stampListFor(current);
-        // Read again after the await, and stamp with no await in between: what is compared is
-        // what is stamped.
-        const now = engine.getRunHistory()?.getTrigger(params['id']!);
-        if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
-          errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
-          return;
-        }
-        if (listed !== null && listed.entries.length > 0) connections = listed;
+      const current = engine.getRunHistory()?.getTrigger(params['id']!);
+      if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
+      const listed = await this.#stampListFor(current);
+      // Read again after the await, and stamp with no await in between: what is compared is
+      // what is stamped.
+      const now = engine.getRunHistory()?.getTrigger(params['id']!);
+      if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
+        errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
+        return;
       }
+      if (listed !== null && listed.entries.length > 0) connections = listed;
       let trigger;
       try {
         trigger = taskManager.confirmTrigger(params['id']!, undefined, principalTag(this._principalOf(_req)), connections);
