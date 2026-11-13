@@ -1217,7 +1217,7 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
 /**
  * The way forward for a profile whose renewal would swap a user's authorization for an app token,
  * as one sentence: `fetch_token` ends with it, and so does the 401 reminder of a built-in
- * provider's profile, so the two never name different ways for the same profile (ux U-193).
+ * provider's profile, so the two never name different ways for the same profile.
  * `preset` is the profile's built-in provider, or undefined.
  */
 export function delegatedRenewalWay(profile: ApiProfile, preset: OAuthPreset | undefined, apiStore: Parameters<typeof sharesAnotherGrant>[0] | undefined): string {
@@ -1245,8 +1245,8 @@ function delegatedRenewalKind(profile: ApiProfile, preset: OAuthPreset | undefin
 }
 
 /**
- * The 401 reminder of a built-in provider's profile whose renewal would swap a user's grant (ux
- * U-193): the way {@link delegatedRenewalWay} names, and, where that way ends in connect, what to
+ * The 401 reminder of a built-in provider's profile whose renewal would swap a user's grant:
+ * the way {@link delegatedRenewalWay} names, and, where that way ends in connect, what to
  * make of connect calling the profile connected. Only here, not in fetch_token: fetch_token can be
  * called with no 401 before it, and "just refused" would be false there.
  */
@@ -4265,7 +4265,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             wrapped += oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpHeld)
               ? (swapPreset !== undefined
                 // A built-in provider's profile is told the way fetch_token would name, so the two
-                // never disagree; the profile may need the update that way names (ux U-193).
+                // never disagree; the profile may need the update that way names.
                 ? presetDelegatedReminder(matchedProfile, swapPreset, toolContext.apiStore)
                 : `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.`)
                 + `${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`

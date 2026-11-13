@@ -534,7 +534,7 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
   });
 });
 
-// register 1314: the connection lists name a profile's provider only when it goes through it.
+// The connection lists name a profile's provider only when it goes through it.
 describe('connectionShown', () => {
   const books = (auth: ApiProfile['auth']): ApiProfile => ({ id: 'books', name: 'Books', base_url: 'https://api.bexio.com/2.0', description: 'd', auth });
   it('names the built-in provider of a profile that goes through it', () => {

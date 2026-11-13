@@ -1376,7 +1376,7 @@ describe('connect refuses before the link what the route would refuse', () => {
   });
 });
 
-// register 1318: whether the client pair is stored is asked without reading it out, where the store
+// Whether the client pair is stored is asked without reading it out, where the store
 // can answer that way, so the check is not recorded as a credential read.
 describe('connect asks whether the client pair is there without reading it', () => {
   const KEYS = ['EXAMPLE_SHOP_CLIENT_ID', 'EXAMPLE_SHOP_CLIENT_SECRET'];

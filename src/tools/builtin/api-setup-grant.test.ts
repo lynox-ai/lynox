@@ -5139,7 +5139,7 @@ describe('fetch_token — only a revocation verdict writes a provider record (T2
   });
 });
 
-// ux U-193: fetch_token and the 401 reminder of a built-in provider's profile name the same way
+// fetch_token and the 401 reminder of a built-in provider's profile name the same way
 // forward, from one function, so the two cannot drift apart again.
 describe('the way forward: fetch_token and the 401 reminder say the same', () => {
   const WAYS = {
@@ -5148,7 +5148,7 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
     removeFirst: 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.',
     connect: 'Call api_setup with action "connect" for this profile and show the user the link.',
   };
-  /** What the 401 reminder alone adds after a way that ends in connect (ux U-193). */
+  /** What the 401 reminder alone adds after a way that ends in connect. */
   const AFTER_CONNECT = ' If connect answers that this profile is already connected, that is the token this API just refused: show the user the link from that answer. Do not offer to renew the token instead; fetch_token refuses for this profile.';
   const BEXIO_KEYS = presetClientKeys('bexio');
   /** A bexio profile as a connect leaves it: no token_url, no grant type. */
@@ -5246,7 +5246,7 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
   });
 });
 
-// register 1314: the refusal path of a renewal with a preset id the engine does not know was pinned
+// The refusal path of a renewal with a preset id the engine does not know was pinned
 // in 637; the success path too must never repeat that model-authored id.
 describe('the 401 reminders keep their own profiles', () => {
   it('a built-in provider\'s profile that renews by its refresh token and names no token_url gets neither reminder', async () => {

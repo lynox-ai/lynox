@@ -782,7 +782,7 @@ describe('an update that ends sharing empties the reader\'s token slots before i
     expect(result).toContain('None of them was emptied');
   });
 
-  // register 1318: after the delete, whether a value is still there is asked without reading it
+  // After the delete, whether a value is still there is asked without reading it
   // out where the store can (`holds`), and as before where it cannot.
   it.each([
     ['asks holds, and reads no slot out', true],

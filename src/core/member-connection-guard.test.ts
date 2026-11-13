@@ -15,19 +15,21 @@ import { join, relative } from 'node:path';
 const SRC = join(__dirname, '..');
 
 const BYPASS: readonly RegExp[] = [
-  // Each call also in its optional form (`?.resolve?.(`), which the first version of this list missed.
-  /\b(secretStore|store|vault|secrets|inner|target)\??!?\.resolve\??\.?\(/,
-  /getMasked\??\.?\(/,
-  /\.fingerprint\??\.?\(/,
-  /\bvault\??\.get\??\.?\(/,
+  // Each call also in its optional and non-null forms, on the receiver and on the call, in either
+  // order (`?.resolve?.(`, `!.get(`, `resolve!(`, `!?.`): the first version of this list missed the
+  // optional call, the second the non-null ones.
+  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.resolve[?!]?\.?\(/,
+  /getMasked[?!]?\.?\(/,
+  /\.fingerprint[?!]?\.?\(/,
+  /\bvault[?!]*\.get[?!]?\.?\(/,
   /principal: OWNER_PRINCIPAL/,
-  /resolveSecretRefs\??\.?\(/,
-  /\.getAll\??\.?\(\)/,
-  /getSecretStore\(\)\??\.resolve\??\.?\(/,
+  /resolveSecretRefs[?!]?\.?\(/,
+  /\.getAll[?!]?\.?\(\)/,
+  /getSecretStore[?!]?\.?\(\)[?!]*\.resolve[?!]?\.?\(/,
   // Gives nothing readable, but whether another member's or the owner's token exists is information too.
-  /\b(secretStore|store|vault|secrets|inner|target)\??!?\.holds[?!]?\.?\(/,
-  /\b(inner|target)\??\.holds\??\.bind\(/,
-  /getSecretStore\(\)\??\.holds\??\.?\(/,
+  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.holds[?!]?\.?\(/,
+  /\b(inner|target)[?!]*\.holds[?!]*\.bind\(/,
+  /getSecretStore[?!]?\.?\(\)[?!]*\.holds[?!]?\.?\(/,
 ];
 
 /** `file|line text` → why it may stand. Keyed by text, not line number, so an edit elsewhere in the file keeps it. */
@@ -163,6 +165,30 @@ describe('bypasses of the member-connection view', () => {
   it('mutant: a raw read in its optional-call form is caught', () => {
     const mutated = new Map(files);
     mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\nconst leaked = agent.secretStore?.resolve?.(refreshSlot);\n`);
+    expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
+  });
+
+  // One line per rule and form; each is a read that the list must not let through.
+  it.each([
+    'const a = store.resolve!(slot);',
+    'const a = secretStore!?.resolve(slot);',
+    'const a = vault!.get(name);',
+    'const a = vault?.get?.(name);',
+    'const a = vault!.getAll();',
+    'const a = agent.secretStore?.getMasked?.(name);',
+    'const a = view.fingerprint!(name);',
+    'const a = resolveSecretRefs?.(input, store);',
+    'const a = getSecretStore()!.resolve(x);',
+    'const a = getSecretStore?.()?.resolve(x);',
+    'const a = getSecretStore()!.holds(x);',
+    'const a = inner!.holds?.bind(inner);',
+    'const a = store.getMasked!(name);',
+    'const a = resolveSecretRefs!(input, store);',
+    'const a = vault.getAll!();',
+    'const a = store!?.holds(slot);',
+  ])('mutant: the raw read %s is caught', (read) => {
+    const mutated = new Map(files);
+    mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\n${read}\n`);
     expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
   });
 
