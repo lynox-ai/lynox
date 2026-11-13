@@ -389,6 +389,8 @@
 	const probeLabel = $derived(run?.probe
 		? bulkTargetLabel(run.targetSystem, targets.find((x) => x.key === run!.probe!.key) ?? { key: run.probe.key }, i18n)
 		: '');
+	// The probe's admin link: its target is often not among the targets the page shows.
+	const probeName = $derived(run?.probe ? bulkTargetName(run.targetSystem, { key: run.probe.key }) : null);
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
 	// With one target to write the note keeps its first two sentences, here and in the engine's own (EN).
 	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote
@@ -858,6 +860,9 @@
 					<p class="text-sm">{run.probe.fields.length > 0
 						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: probeLabel, provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
 						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider })}</p>
+					{#if probeName?.adminUrl}
+						<a class="text-xs text-text-subtle underline hover:text-text" href={probeName.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-probe-admin">{tf('bulk.target.product', { n: probeName.number ?? '' })}</a>
+					{/if}
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
 						<span>{tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>

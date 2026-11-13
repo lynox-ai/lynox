@@ -136,6 +136,26 @@ describe('a Shopify run\'s page', () => {
 		expect(target.textContent).not.toContain('gid://shopify/Product/1');
 	});
 
+	it('links the probe\'s product in the probe box, also when it is not among the shown targets', async () => {
+		run = makeRun({ phase: 'writing', undone: 0, undoneBy: null, targetSystem: SHOP, total: 17, applied: 1,
+			haltKey: 'probeRequired', haltReason: 'probeRequired', probe: { key: 'gid://shopify/Product/77', fields: ['seo_title'] } });
+		targets = [withTitle(1, 'Teekanne')];
+		await render();
+		const link = target.querySelector<HTMLAnchorElement>('[data-testid="bulk-probe-admin"]');
+		expect(link?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/77');
+		expect(link?.getAttribute('target')).toBe('_blank');
+		expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+		expect(link?.textContent).toContain('77');
+	});
+
+	it('gives the probe box no link for a key that is not a product gid', async () => {
+		run = makeRun({ phase: 'writing', undone: 0, undoneBy: null, targetSystem: SHOP, total: 17, applied: 1,
+			haltKey: 'probeRequired', haltReason: 'probeRequired', probe: { key: 'gid://shopify/ProductVariant/77', fields: ['seo_title'] } });
+		targets = [withTitle(1, 'Teekanne')];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-probe-admin"]')).toBeNull();
+	});
+
 	it('a local run keeps showing its keys', async () => {
 		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: 'workspace' });
 		targets = [written(1, false)];
