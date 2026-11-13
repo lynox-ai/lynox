@@ -463,25 +463,50 @@ export function bulkListFilterFolded(filters: Readonly<Record<string, string | r
 }
 
 /** The line naming a filtered Shopify list's group, where the run is started and approved. The
- *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter.
+ *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a group.
  *  `folded` shows each list of more than {@link BULK_LIST_FILTER_UNFOLDED_MAX} values folded. */
 export function bulkListFilterText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n, folded = false): string | null {
 	if (filters === null) return null;
-	// Every value in its own quotes: they are the scope the owner approves. Folded, a long list
-	// shows its first values and the count of the rest, so the line stays true (ux U-175).
-	const values = (v: string | readonly string[]): string => {
-		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
-		if (folded && quoted.length > BULK_LIST_FILTER_UNFOLDED_MAX) {
-			return `${quoted.slice(0, BULK_LIST_FILTER_FOLDED_SHOWN).join(', ')} ${i18n.tf('bulk.list.more', { n: String(quoted.length - BULK_LIST_FILTER_FOLDED_SHOWN) })}`;
-		}
-		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
-	};
+	const values = bulkFilterValues(i18n, folded);
 	const type = filters['product_type'];
 	const vendor = filters['vendor'];
 	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: values(type), vendor: values(vendor) });
 	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: values(type) });
 	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: values(vendor) });
 	return null;
+}
+
+/** A filter's values for its line: every value in its own quotes, they are the scope the owner
+ *  approves. Folded, a long list shows its first values and the count of the rest, so the line
+ *  stays true (U-175). */
+function bulkFilterValues(i18n: BulkI18n, folded: boolean): (v: string | readonly string[]) => string {
+	return (v) => {
+		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
+		if (folded && quoted.length > BULK_LIST_FILTER_UNFOLDED_MAX) {
+			return `${quoted.slice(0, BULK_LIST_FILTER_FOLDED_SHOWN).join(', ')} ${i18n.tf('bulk.list.more', { n: String(quoted.length - BULK_LIST_FILTER_FOLDED_SHOWN) })}`;
+		}
+		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
+	};
+}
+
+/** The line naming the statuses a Shopify product list reads, under the group's line; `{}` is a
+ *  list of every product. A store's search lists drafts, archived products and gift cards unless a
+ *  status narrows it, and the targets name none of them as such. Null for a list that is not a
+ *  store's products. */
+export function bulkListStatusText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n): string | null {
+	if (filters === null) return null;
+	const status = filters['status'];
+	if (status !== undefined) {
+		const names = (typeof status === 'string' ? [status] : status).map((s) => bulkStatusName(s, i18n));
+		return i18n.tf('bulk.list.filter_status', { status: bulkFilterValues(i18n, false)(names) });
+	}
+	const group = filters['product_type'] !== undefined || filters['vendor'] !== undefined;
+	return i18n.t(group ? 'bulk.list.any_status' : 'bulk.list.all_status');
+}
+
+/** A Shopify product status by its name in the page's language; one no store has, as it came. */
+function bulkStatusName(status: string, i18n: BulkI18n): string {
+	return status === 'active' || status === 'draft' || status === 'archived' || status === 'unlisted' ? i18n.t(`bulk.list.status.${status}`) : status;
 }
 
 /** The provider that serves a judge call, by name. */
