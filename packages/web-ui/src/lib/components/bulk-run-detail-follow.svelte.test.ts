@@ -39,6 +39,8 @@ let posts: string[];
 // What the next ask for the run is answered with: 200 with the run, or a refusal.
 let runStatus: number;
 let retryAfter: string | null;
+// Statuses for the next asks, one each, before `runStatus` applies again.
+let nextStatuses: number[];
 
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -50,6 +52,7 @@ beforeEach(() => {
 	posts = [];
 	runStatus = 200;
 	retryAfter = null;
+	nextStatuses = [];
 	Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
@@ -58,7 +61,8 @@ beforeEach(() => {
 		if (init?.method === 'POST') { posts.push(u); return reply({}); }
 		if (/\/targets\?/.test(u)) { targetAsks++; return reply({ targets: [] as BulkTarget[] }); }
 		runAsks++;
-		if (runStatus !== 200) return new Response(JSON.stringify({ error: 'Too many requests' }), { status: runStatus, headers: { 'Content-Type': 'application/json', ...(retryAfter !== null ? { 'Retry-After': retryAfter } : {}) } });
+		const status = nextStatuses.shift() ?? runStatus;
+		if (status !== 200) return new Response(JSON.stringify({ error: 'Too many requests' }), { status, headers: { 'Content-Type': 'application/json', ...(retryAfter !== null ? { 'Retry-After': retryAfter } : {}) } });
 		return reply(run);
 	}));
 });
@@ -212,6 +216,20 @@ describe('the page of a run the engine is moving on', () => {
 		// Asked again once the wait was over; the run moved, so the page loaded it whole.
 		expect(runAsks).toBeGreaterThan(refused);
 		expect(shown()).toContain('17');
+	});
+});
+
+describe('a follow ask whose load is refused', () => {
+	it('keeps the page as it was when the load after a moved run gets a 429', async () => {
+		await render();
+		// The ask finds the run moved; the load that follows it is refused.
+		run = makeRun({ total: 17, changes: { update: 17, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		nextStatuses = [200, 429];
+		retryAfter = '4';
+		await pass(BULK_FOLLOW_MS);
+		expect(runAsks).toBe(3);
+		expect(shown()).not.toMatch(/Laden fehlgeschlagen|Failed to load/);
+		expect(target.querySelector('[aria-current="step"]')).not.toBeNull();
 	});
 });
 
