@@ -34,8 +34,8 @@ const NOT_IDENTIFYING = new Set([
   'code', 'state', 'error',
   // Read outside a mandate's GET routes, or not naming an object: usage period (a helper of
   // the usage routes), a memory delete's pattern, an admin cleanup's preview, an admin window,
-  // the scopes a connect confirmation was shown (read on the POST only).
-  'period', 'pattern', 'dryRun', 'hours', 'shown_scopes',
+  // the scopes and the helper's note a connect confirmation was shown (read on the POST only).
+  'period', 'pattern', 'dryRun', 'hours', 'shown_scopes', 'shown_note',
 ]);
 const IDENTIFYING = new Set([...READ_IDENTIFIERS.values()].flat());
 /** Routes that read the query through a helper taking a variable name; each says which names. */
