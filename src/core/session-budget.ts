@@ -228,15 +228,28 @@ export function reservePersistentBudget(estimatedCostUSD: number): PersistentBud
  * tick cannot both be granted the same headroom.
  */
 export function persistentBudgetHeadroom(): number | null {
+  return persistentBudgetRoom()?.usd ?? null;
+}
+
+/** The persistent caps a run's headroom can come from. */
+export type BudgetCapName = 'daily' | 'monthly';
+
+/**
+ * {@link persistentBudgetHeadroom} together with the cap that sets it: one name when that
+ * cap leaves strictly less room, both when the two leave the same. A run stopped on this
+ * room can say which budget to wait for (the next day, the next month).
+ */
+export function persistentBudgetRoom(): { readonly usd: number; readonly caps: readonly BudgetCapName[] } | null {
   const spend = computeRecordedSpend();
   if (!spend) return null;
-  const remaining: number[] = [];
-  if (_dailyCapUSD < Infinity) remaining.push(_dailyCapUSD - spend.todayCost - _reservedInFlightUSD);
-  if (_monthlyCapUSD < Infinity) remaining.push(_monthlyCapUSD - spend.monthCost - _reservedInFlightUSD);
-  if (remaining.length === 0) return null;
+  const left: Array<readonly [BudgetCapName, number]> = [];
+  if (_dailyCapUSD < Infinity) left.push(['daily', _dailyCapUSD - spend.todayCost - _reservedInFlightUSD]);
+  if (_monthlyCapUSD < Infinity) left.push(['monthly', _monthlyCapUSD - spend.monthCost - _reservedInFlightUSD]);
+  if (left.length === 0) return null;
+  const least = Math.min(...left.map(([, usd]) => usd));
   // Never negative: spend can exceed a cap that was lowered mid-month, and a negative
   // headroom would read as "owes money" to every caller that compares it.
-  return Math.max(0, Math.min(...remaining));
+  return { usd: Math.max(0, least), caps: left.filter(([, usd]) => usd === least).map(([name]) => name) };
 }
 
 /** Release a reservation held by {@link reservePersistentBudget}. */

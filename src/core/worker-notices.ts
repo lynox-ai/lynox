@@ -14,6 +14,7 @@
  * before, or by an instance in the other language, is said in the owner's language too.
  */
 import type { NoticeLanguage } from './notice-language.js';
+import type { BudgetCapName } from './session-budget.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON } from '../server/webhook-receiver.js';
@@ -135,6 +136,13 @@ export interface WorkerNotices {
    * room of the result (web push cuts at 240; ux U-099).
    */
   readonly budgetCutWayOut: string;
+  /**
+   * The way out when the room left in the daily or monthly AI budget set the run's grant:
+   * waiting helps there, splitting does not. `caps` names the cap that set it (both when
+   * they tied); `canRaise`: the owner can raise it under Settings → Limits (not on a plan
+   * whose budget lynox sets).
+   */
+  budgetCutWaitWayOut(caps: readonly BudgetCapName[], canRaise: boolean): string;
   /** The ids the agent needs to diagnose the run when the owner replies. */
   workflowRef(runId: string | undefined, workflowId: string | undefined): string;
   workflowReply(ref: string): string;
@@ -205,6 +213,12 @@ const EN: WorkerNotices = Object.freeze({
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
   budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
+  budgetCutWaitWayOut: (caps: readonly BudgetCapName[], canRaise: boolean) => {
+    const raise = canRaise ? ', or once you raise it under Settings → Limits.' : '.';
+    if (caps.length === 1 && caps[0] === 'daily') return `The daily AI budget was nearly used up. Start the run again tomorrow${raise}`;
+    if (caps.length === 1 && caps[0] === 'monthly') return `The monthly AI budget was nearly used up. Start the run again next month${raise}`;
+    return `The daily or monthly AI budget was nearly used up. Start the run again once the budget allows it: the daily budget the next day, the monthly budget the next month${raise}`;
+  },
   errorLabel: 'Error:',
   failedStepsLabel: 'Failed steps:',
   writesLabel: 'Writes:',
@@ -301,6 +315,12 @@ const DE: WorkerNotices = Object.freeze({
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `${kind === 'cost' ? `Gestoppt an der Kostengrenze (${value})` : `Gestoppt am Rundenlimit (${value})`}, obwohl noch Arbeit offen war.`,
   budgetCutWayOut: 'Ein Neustart kann wieder an derselben Stelle stoppen. Bitte lynox im Chat, die Aufgabe in kleinere Pläne aufzuteilen.',
+  budgetCutWaitWayOut: (caps: readonly BudgetCapName[], canRaise: boolean) => {
+    const raise = canRaise ? ', oder wenn du es unter Einstellungen → Limits anhebst.' : '.';
+    if (caps.length === 1 && caps[0] === 'daily') return `Das Tagesbudget für KI war fast aufgebraucht. Starte den Lauf morgen neu${raise}`;
+    if (caps.length === 1 && caps[0] === 'monthly') return `Das Monatsbudget für KI war fast aufgebraucht. Starte den Lauf im nächsten Monat neu${raise}`;
+    return `Das Tages- oder Monatsbudget für KI war fast aufgebraucht. Starte den Lauf neu, sobald es wieder reicht: das Tagesbudget am nächsten Tag, das Monatsbudget im nächsten Monat${raise}`;
+  },
   errorLabel: 'Fehler:',
   failedStepsLabel: 'Fehlgeschlagene Schritte:',
   writesLabel: 'Schreibvorgänge:',
