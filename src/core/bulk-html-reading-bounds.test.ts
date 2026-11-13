@@ -88,6 +88,15 @@ describe('a value beyond the bounds', () => {
     expect(ms).toBeLessThan(1000);
   });
 
+  it('is listed as unread where carriers nest within the depth, before the quadratic read', () => {
+    // Within the element depth, each carrier would read all the text below it again: measured
+    // without the nesting bound, 1.9 s and 400 MB; with it, under 50 ms.
+    const value = carriers(MARKUP_MAX_DEPTH - 12) + 'x'.repeat(256 * 1024);
+    const [change, ms] = timed(() => markupChangesOf('description', null, value));
+    expect(change.unread).toBe(true);
+    expect(ms).toBeLessThan(500);
+  });
+
   it('is refused by the check, within the same bound', () => {
     const [result, ms] = timed(() => check(measured));
     expect(result).toEqual({ ok: false, reason: 'not_canonical', detail: 'The value or its before-image is larger or nested deeper than this check reads.' });
