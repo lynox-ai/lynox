@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,9 @@ import type Database from 'better-sqlite3';
 import { LynoxHTTPApi } from './http-api.js';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { reloadConfig } from '../core/config.js';
+import { acquireSlot, readSlot } from '../core/export-slot.js';
+import { ARCHIVE_DIR_PREFIX } from '../core/export-archive.js';
+import { EXPORT_STAGING_DIR } from '../core/workspace-export.js';
 import { EngineDb } from '../core/engine-db.js';
 import type { KnowledgeStore } from '../core/knowledge-store.js';
 import type { KnowledgeLayer } from '../core/knowledge-layer.js';
@@ -188,6 +191,65 @@ describe('person erasure routes (real engine)', () => {
     }
     expect(subjectExists(p.subjectId)).toBe(true);
     expect(auditRows(p.subjectId)).toEqual([]);
+  });
+
+  it('refuses while an export holds the slot (also the export command in another process), and erases nothing', async () => {
+    const p = seedPerson();
+    const { body: pv } = await preview(p.subjectId);
+    const taken = acquireSlot(dir, 'export', 'command');
+    if (!taken.ok) throw new Error('fixture: slot held');
+    try {
+      const r = await erase({ subjectId: p.subjectId, plan: pv['plan'] });
+      expect(r.status).toBe(409);
+      expect(r.body['code']).toBe('export_running');
+    } finally {
+      taken.slot.release();
+    }
+    expect(subjectExists(p.subjectId)).toBe(true);
+    expect(auditRows(p.subjectId)).toEqual([]);
+  });
+
+  it('removes a staged archive whose holder is gone before it erases, so the person does not stay in it', async () => {
+    const p = seedPerson();
+    const { body: pv } = await preview(p.subjectId);
+    const left = join(dir, EXPORT_STAGING_DIR, `${ARCHIVE_DIR_PREFIX}left-${randomBytes(3).toString('hex')}`);
+    mkdirSync(left, { recursive: true, mode: 0o700 });
+    try {
+      const r = await erase({ subjectId: p.subjectId, plan: pv['plan'] });
+      expect(r.status).toBe(200);
+      expect(existsSync(left)).toBe(false);
+    } finally {
+      rmSync(left, { recursive: true, force: true });
+    }
+    expect(subjectExists(p.subjectId)).toBe(false);
+  });
+
+  it('holds the slot while it erases, so the export command (another process) cannot snapshot the stores halfway', async () => {
+    const p = seedPerson();
+    const { body: pv } = await preview(p.subjectId);
+    // The attempt row is written inside the erasure, after its checks and before the first step.
+    const log = (api as unknown as { engine: { getAuditLog: () => { record: (...a: unknown[]) => unknown } } }).engine.getAuditLog();
+    const record = log.record;
+    let heldDuring: string | null = null;
+    let commandRefused: boolean | null = null;
+    log.record = function (this: unknown, ...a: unknown[]) {
+      if (heldDuring === null) {
+        heldDuring = readSlot(dir)?.kind ?? 'free';
+        const attempt = acquireSlot(dir, 'export', 'command');
+        commandRefused = !attempt.ok;
+        if (attempt.ok) attempt.slot.release();
+      }
+      return record.apply(this, a);
+    };
+    try {
+      const r = await erase({ subjectId: p.subjectId, plan: pv['plan'] });
+      expect(r.status).toBe(200);
+    } finally {
+      log.record = record;
+    }
+    expect(heldDuring).toBe('erasure');
+    expect(commandRefused).toBe(true);
+    expect(readSlot(dir)).toBeNull();
   });
 
   it('refuses without the confirmation word, on a changed set and on an id it did not find', async () => {
