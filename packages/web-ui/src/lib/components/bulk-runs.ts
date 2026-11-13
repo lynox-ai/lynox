@@ -492,21 +492,32 @@ function bulkFilterValues(i18n: BulkI18n, folded: boolean): (v: string | readonl
 /** The line naming the statuses a Shopify product list reads, under the group's line; `{}` is a
  *  list of every product. A store's search lists drafts, archived products and gift cards unless a
  *  status narrows it, and the targets name none of them as such. Null for a list that is not a
- *  store's products. */
+ *  store's products. A status filter naming every status narrows nothing, so it reads as no status
+ *  filter: a planner asked for every product often lists all of them, and "only" beside the whole
+ *  set would promise a narrowing there is not. */
 export function bulkListStatusText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n): string | null {
 	if (filters === null) return null;
 	const status = filters['status'];
 	if (status !== undefined) {
-		const names = (typeof status === 'string' ? [status] : status).map((s) => bulkStatusName(s, i18n));
-		return i18n.tf('bulk.list.filter_status', { status: bulkFilterValues(i18n, false)(names) });
+		const values = typeof status === 'string' ? [status] : status;
+		// Exactly the four (four entries holding all four repeat none): a stored list with another
+		// value or a repeat is one the engine reads nothing for, and its line names the values as they came.
+		const everyStatus = values.length === BULK_STORE_STATUSES.length && BULK_STORE_STATUSES.every((s) => values.includes(s));
+		if (!everyStatus) {
+			const names = values.map((s) => bulkStatusName(s, i18n));
+			return i18n.tf('bulk.list.filter_status', { status: bulkFilterValues(i18n, false)(names) });
+		}
 	}
 	const group = filters['product_type'] !== undefined || filters['vendor'] !== undefined;
 	return i18n.t(group ? 'bulk.list.any_status' : 'bulk.list.all_status');
 }
 
+/** Every status a Shopify product can have, as the store's search spells them. */
+const BULK_STORE_STATUSES: readonly string[] = ['active', 'draft', 'archived', 'unlisted'];
+
 /** A Shopify product status by its name in the page's language; one no store has, as it came. */
 function bulkStatusName(status: string, i18n: BulkI18n): string {
-	return status === 'active' || status === 'draft' || status === 'archived' || status === 'unlisted' ? i18n.t(`bulk.list.status.${status}`) : status;
+	return BULK_STORE_STATUSES.includes(status) ? i18n.t(`bulk.list.status.${status}`) : status;
 }
 
 /** The provider that serves a judge call, by name. */

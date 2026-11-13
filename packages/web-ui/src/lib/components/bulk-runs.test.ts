@@ -223,6 +223,24 @@ describe('a Shopify run\'s field names and note', () => {
 		expect(bulkListStatusText({ product_type: 'Tee', status: ['draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
 		// A status no store has stays as it came, its hidden characters shown.
 		expect(bulkListStatusText({ status: 'pub\u200Blished' }, t)).toBe('bulk.list.filter_status{"status":"[pub⟨U+200B⟩lished]"}');
+		expect(bulkListStatusText({ status: 'unlisted' }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.unlisted>]"}');
+	});
+
+	it('reads a status filter naming every status as none: no "only" beside the whole set', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		const every = ['active', 'draft', 'archived', 'unlisted'];
+		expect(bulkListStatusText({ status: every }, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ status: [...every].reverse() }, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ product_type: 'Tee', status: every }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ vendor: 'Acme', status: every }, t)).toBe('<bulk.list.any_status>');
+		// A stored list the engine reads nothing for (another value, or one twice) is named as it came.
+		expect(bulkListStatusText({ status: [...every, 'published'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>], [<bulk.list.status.unlisted>] <bulk.list.or> [published]"}');
+		expect(bulkListStatusText({ status: ['active', ...every] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>] <bulk.list.or> [<bulk.list.status.unlisted>]"}');
+		// Four entries that are not the four: one unknown, or one twice.
+		expect(bulkListStatusText({ status: ['active', 'draft', 'archived', 'published'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>] <bulk.list.or> [published]"}');
+		expect(bulkListStatusText({ status: ['active', 'active', 'draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.active>], [<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
+		// Three of the four still narrow: the line names them.
+		expect(bulkListStatusText({ status: ['active', 'draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
 	});
 
 	it('names every value of a list, each in its own quotes and with its hidden characters shown, the last after "or"', () => {
