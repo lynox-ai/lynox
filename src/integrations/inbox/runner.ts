@@ -161,7 +161,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           gate.capReached === 'daily' ? 'Tägliches KI-Budget erreicht — manuell prüfen.'
             : gate.capReached === 'monthly' ? 'Monatliches KI-Budget erreicht — manuell prüfen.'
               : gate.capReached === 'unknown' ? 'KI-Ausgaben gerade unbekannt — manuell prüfen.'
-                : 'AI-Guthaben erschöpft — manuell prüfen.');
+                : 'KI-Guthaben erschöpft — manuell prüfen.');
       }
       return classifyMail(payload.classifierInput, llm, {
         signal: ctx.signal,

@@ -390,7 +390,7 @@ describe('buildInboxRunner — the instance spending caps', () => {
     await queue.drain();
 
     expect(llm).not.toHaveBeenCalled();
-    expect(inbox.listItems()[0]?.reasonDe).toBe('AI-Guthaben erschöpft — manuell prüfen.');
+    expect(inbox.listItems()[0]?.reasonDe).toBe('KI-Guthaben erschöpft — manuell prüfen.');
   });
 });
 
