@@ -71,7 +71,6 @@ const line = (keys: string[]): string[] => keys.map((k) => t(k));
 const ENGINE = 'status.boot_store_missing_engine';
 const ENGINE_MEMORY = 'status.boot_store_missing_engine_memory';
 const HISTORY = 'status.boot_store_missing_history';
-const HISTORY_MANAGED = 'status.boot_store_missing_history_managed';
 const SELF = 'status.boot_store_missing_selfhost';
 const MANAGED = 'status.boot_store_missing_managed';
 
@@ -97,7 +96,7 @@ describe('the status bar line for a boot store that did not open', () => {
 	it('names both stores in one line, a paragraph each, the close once, and the managed close when alerted', async () => {
 		stubFetch({ boot_stores_missing: ['history.db', 'engine.db'], boot_stores_alerted: true });
 		await render();
-		expect(alerts()).toEqual([line([ENGINE, HISTORY_MANAGED, MANAGED])]);
+		expect(alerts()).toEqual([line([ENGINE, HISTORY, MANAGED])]);
 	});
 
 	it("shows nothing without the field (a mandate's poll never carries it), even when health says degraded", async () => {
