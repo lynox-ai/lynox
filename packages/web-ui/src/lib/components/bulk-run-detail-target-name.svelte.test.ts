@@ -125,7 +125,7 @@ describe('a Shopify run\'s page', () => {
 		expect(target.textContent).not.toContain('gid://shopify/Product/1');
 	});
 
-	it('shows no old title on a run that rewrites the title: the diff shows old and new already', async () => {
+	it('shows no old title on a run that rewrites the title', async () => {
 		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1 });
 		targets = [titleTarget(1, 'Alte Teekanne')];
 		await render();
