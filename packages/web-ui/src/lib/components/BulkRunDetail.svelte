@@ -114,9 +114,6 @@
 		}
 		try {
 			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(runId)}`);
-			// Read after the first await: read before it, `run` would become a dependency of the
-			// effect that loads the page, and every load would start the next.
-			const before = run === null ? null : `${run.phase}|${run.haltKey}|${run.checksum}`;
 			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
@@ -136,14 +133,11 @@
 			run = r.body;
 			targets = shown;
 			creates = deleted;
-			// What the owner set for the next act starts over only when the run moved to another
-			// step: a follow ask that finds it where it was leaves the owner's input alone.
-			if (!quiet || before !== `${run.phase}|${run.haltKey}|${run.checksum}`) {
-				maxTargets = Math.max(1, bulkWriting(run));
-				unmeasuredOk = false;
-				probeOk = false;
-				supersedable = null;
-			}
+			// A follow ask runs only while the engine works, when the page offers the owner no input.
+			maxTargets = Math.max(1, bulkWriting(run));
+			unmeasuredOk = false;
+			probeOk = false;
+			supersedable = null;
 		} catch {
 			if (!quiet) error = t('common.load_failed');
 		}
