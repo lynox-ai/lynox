@@ -487,10 +487,11 @@ describe('where the user finds a planned run', () => {
     expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'none.json' }, agent())).not.toContain(RUN_PLACE_NOTE);
   });
 
-  it('is named in an external plan the user starts, and not mentioned where no target was valid', async () => {
+  it('is named in an external plan the owner starts, and not mentioned where no target was valid', async () => {
     writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'https://shop.example.com/products/1', after: { price: '1' } }]));
     const started = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json' }, agent());
     expect(started).toContain('External dry run recorded');
+    expect(started).toContain('Only the owner can start and approve it, outside this chat.');
     expect(started).toContain(RUN_PLACE_NOTE);
     writeFileSync(join(ws, 'bad.json'), JSON.stringify([{ target: 'not a url', after: { price: '1' } }]));
     expect(await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'bad.json' }, agent())).not.toContain(RUN_PLACE_NOTE);
