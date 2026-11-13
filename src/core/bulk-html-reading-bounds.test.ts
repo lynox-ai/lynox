@@ -70,6 +70,10 @@ describe('the bounds the markup check reads within', () => {
     expect(withinReadingBounds('<!---->'.repeat(own + 1))).toBe(false);
     expect(withinReadingBounds('x<br>'.repeat(own / 2))).toBe(true);
     expect(withinReadingBounds('x<br>'.repeat(own / 2) + 'x')).toBe(false);
+    // Text the parser moves in front of a table is inserted, not appended, and counts the same.
+    const moved = '<table>' + '<br>x'.repeat((own - 2) / 2) + '<br>';
+    expect(withinReadingBounds(moved)).toBe(true);
+    expect(withinReadingBounds(`${moved}x`)).toBe(false);
   });
 
   it('end at the element depth, not one level earlier', () => {
