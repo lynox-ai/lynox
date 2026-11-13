@@ -75,9 +75,12 @@ describe('the bounds the markup check reads within', () => {
     const inserted = '<table>' + '<br>x'.repeat((own - 2) / 2) + '<br>';
     expect(withinReadingBounds(inserted, bound)).toBe(true);
     expect(withinReadingBounds(`${inserted}x`, bound)).toBe(false);
-    // The default is the constant.
-    expect(withinReadingBounds('<br>'.repeat(MARKUP_MAX_NODES - 1))).toBe(false);
   });
+
+  it('end at the constant node bound by default', () => {
+    // One parse of the bound's size; on a loaded machine it may take seconds.
+    expect(withinReadingBounds('<br>'.repeat(MARKUP_MAX_NODES - 1))).toBe(false);
+  }, 60_000);
 
   it('count a run of words as the one text node it is', () => {
     // The tokenizer hands words and spaces over one by one; they build one node.
