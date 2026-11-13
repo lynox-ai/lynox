@@ -652,8 +652,8 @@ export function bulkTargetName(targetSystem: string, target: { key: string; befo
 	const m = bulkIsShopifyHost(host) ? SHOPIFY_PRODUCT_GID.exec(target.key) : null;
 	if (m === null) return { title: null, number: null, adminUrl: null };
 	const before = target.before;
-	const value = before !== null && typeof before === 'object' && (before as { absent?: unknown }).absent === false
-		? (before as { value?: unknown }).value : null;
+	// An absent before-image (`{ absent: true }`) holds no value, so it names no title.
+	const value = before !== null && typeof before === 'object' ? (before as { value?: unknown }).value ?? null : null;
 	const raw = value !== null && typeof value === 'object' ? (value as Record<string, unknown>)['title'] : null;
 	const title = typeof raw === 'string' && raw.trim() !== '' ? bulkVisibleText(raw) : null;
 	return { title, number: m[1]!, adminUrl: `https://${host}/admin/products/${m[1]}` };
