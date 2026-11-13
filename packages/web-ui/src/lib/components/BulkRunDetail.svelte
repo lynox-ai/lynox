@@ -386,9 +386,7 @@
 	const undoneText = $derived(run ? bulkUndoneText(run, getLocale(), i18n) : null);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
 	// The probe's target by its title where the loaded targets hold its before-image.
-	const probeLabel = $derived(run?.probe
-		? bulkTargetLabel(run.targetSystem, targets.find((x) => x.key === run!.probe!.key) ?? { key: run.probe.key }, i18n)
-		: '');
+	const probeLabel = $derived(run?.probe ? bulkTargetLabel(run.targetSystem, { key: run.probe.key }, i18n) : '');
 	// The probe's admin link: its target is often not among the targets the page shows.
 	const probeName = $derived(run?.probe ? bulkTargetName(run.targetSystem, { key: run.probe.key }) : null);
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
@@ -458,14 +456,12 @@
 <!-- The markup a target's new value adds and removes in an HTML field (1010), as code text with
      every attribute whole (sec-core M3): set as text, never rendered, and wrapped so a long value
      stays in view. On an undo it says what the undo writes back and takes out. -->
-{#snippet targetName(target: { key: string; before?: unknown })}
+{#snippet targetName(target: { key: string })}
 	{@const name = bulkTargetName(run?.targetSystem ?? '', target)}
-	{#if name.number === null}
+	{#if name.adminUrl === null}
 		<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
 	{:else}
-		<!-- The title is the shop's text: shown as text, its hidden characters as marks. -->
-		{#if name.title !== null}<span class="block text-sm line-clamp-2 break-words" title={name.title} data-testid="bulk-target-title">{name.title}</span>{/if}
-		<a class="{name.title !== null ? 'text-xs text-text-subtle' : 'text-sm'} underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{tf('bulk.target.product', { n: name.number })}</a>
+		<a class="text-sm underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{tf('bulk.target.product', { n: name.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
 	{/if}
 {/snippet}
 
@@ -861,7 +857,7 @@
 						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: probeLabel, provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
 						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider })}</p>
 					{#if probeName?.adminUrl}
-						<a class="text-xs text-text-subtle underline hover:text-text" href={probeName.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-probe-admin">{tf('bulk.target.product', { n: probeName.number ?? '' })}</a>
+						<a class="text-sm underline hover:text-text" href={probeName.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-probe-admin">{tf('bulk.target.product', { n: probeName.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
 					{/if}
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
@@ -892,7 +888,7 @@
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
 							<ul class="list-disc pl-5 mt-1">
-								{#each creates as c (c.seq)}<li><code class="text-xs break-all">{bulkVisibleText(c.key)}</code></li>{/each}
+								{#each creates as c (c.seq)}<li>{@render targetName(c)}</li>{/each}
 							</ul>
 						</div>
 					{/if}

@@ -5,8 +5,9 @@ import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 import { bulkTargetName, bulkTargetLabel } from './bulk-runs.js';
 
-// A Shopify target is named by its product's title from its before-image, with its number linked to
-// the store's admin. Before, the page showed the raw key `gid://shopify/Product/…`.
+// A Shopify target is named „Produkt <Zahl>“, linked to the product in the store's admin. Before,
+// the page showed the raw key `gid://shopify/Product/…`. No title: the engine keeps only the fields
+// a run writes in a target's before-image, so a run that writes SEO fields holds no title at all.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -74,72 +75,69 @@ async function render(): Promise<void> {
 	}
 }
 
-const withTitle = (seq: number, title: unknown): BulkTarget =>
-	({ ...written(seq, false), before: { absent: false, value: { title, seo_title: '' } } }) as BulkTarget;
+// The shapes the engine stores (bulk-preview `beforeOverFields`): the before-image holds only the
+// fields the run writes. A SEO run holds no title; a run that rewrites the title holds the OLD one.
+const seoTarget = (seq: number): BulkTarget =>
+	({ ...written(seq, false), before: { absent: false, value: { seo_title: `SEO ${seq}`, seo_description: '' } } }) as unknown as BulkTarget;
+const titleTarget = (seq: number, oldTitle: string): BulkTarget =>
+	({ ...written(seq, false), diff: fieldsDiff(oldTitle, `Neu ${seq}`), before: { absent: false, value: { title: oldTitle } } }) as unknown as BulkTarget;
 const SHOP = 'http:demo.myshopify.com';
 const i18nStub = { tf: (k: string, v: Record<string, string>) => `${k}:${v['n']}` };
+const adminLinks = (): HTMLAnchorElement[] => [...target.querySelectorAll<HTMLAnchorElement>('[data-testid="bulk-target-admin"]')];
 
 describe('bulkTargetName', () => {
-	it('names a Shopify product by its title, its number and the admin link on the run\'s host', () => {
-		const n = bulkTargetName(SHOP, { key: 'gid://shopify/Product/42', before: { absent: false, value: { title: 'Teekanne' } } });
-		expect(n).toEqual({ title: 'Teekanne', number: '42', adminUrl: 'https://demo.myshopify.com/admin/products/42' });
+	it('names a Shopify product by its number and the admin link on the run\'s host', () => {
+		expect(bulkTargetName(SHOP, { key: 'gid://shopify/Product/42' })).toEqual({ number: '42', adminUrl: 'https://demo.myshopify.com/admin/products/42' });
 	});
 
 	it('gives no link and no number to a key that is not exactly a product gid', () => {
 		for (const key of ['gid://shopify/Product/42?x=1', 'gid://shopify/ProductVariant/42', 'gid://shopify/Product/', 'gid://shopify/Product/4a2',
 			' gid://shopify/Product/42', 'gid://shopify/Product/42\n', 'https://evil.example/gid://shopify/Product/42', 'gid://shopify/Collection/42']) {
-			expect(bulkTargetName(SHOP, { key, before: { absent: false, value: { title: 'X' } } })).toEqual({ title: null, number: null, adminUrl: null });
+			expect(bulkTargetName(SHOP, { key })).toEqual({ number: null, adminUrl: null });
 		}
 	});
 
-	it('takes the host from the run and only a Shopify store host; the shop\'s data never sets it', () => {
+	it('takes the host from the run and only a Shopify store host', () => {
 		expect(bulkTargetName('http:evil.example', { key: 'gid://shopify/Product/42' }).adminUrl).toBeNull();
 		expect(bulkTargetName('local', { key: 'gid://shopify/Product/42' }).adminUrl).toBeNull();
-		const n = bulkTargetName(SHOP, { key: 'gid://shopify/Product/42', before: { absent: false, value: { title: 'X', onlineStoreUrl: 'https://evil.example', host: 'evil.example' } } });
-		expect(n.adminUrl).toBe('https://demo.myshopify.com/admin/products/42');
 	});
 
-	it('shows the title as text with its hidden characters as marks', () => {
-		const n = bulkTargetName(SHOP, { key: 'gid://shopify/Product/42', before: { absent: false, value: { title: '<b>Tee</b>\u200bkanne\u202e' } } });
-		expect(n.title).toContain('<b>Tee</b>');
-		expect(n.title).not.toContain('\u200b');
-		expect(n.title).not.toContain('\u202e');
-	});
-
-	it('falls back to the number where the run holds no title, and fetches it from nowhere else', () => {
-		for (const before of [undefined, null, { absent: true }, { absent: false, value: null }, { absent: false, value: { title: '' } }, { absent: false, value: { title: '  ' } }, { absent: false, value: { title: 7 } }]) {
-			const n = bulkTargetName(SHOP, { key: 'gid://shopify/Product/42', before });
-			expect(n.title).toBeNull();
-			expect(n.number).toBe('42');
-		}
+	it('names it in a sentence as „Produkt <Zahl>“, anything else by its key', () => {
 		expect(bulkTargetLabel(SHOP, { key: 'gid://shopify/Product/42' }, i18nStub)).toBe('bulk.target.product:42');
 		expect(bulkTargetLabel('local', { key: 'a/b.md' }, i18nStub)).toBe('a/b.md');
 	});
 });
 
 describe('a Shopify run\'s page', () => {
-	it('shows the title as text (no markup rendered) and links the number to the admin in a new tab', async () => {
+	it('names each target of a SEO run „Produkt <Zahl>“ with its admin link, in a new tab, and no raw key', async () => {
 		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: SHOP, total: 2 });
-		targets = [withTitle(1, '<b>Tee</b>\u200bkanne'), withTitle(2, '')];
+		targets = [seoTarget(1), seoTarget(2)];
 		await render();
-		const titles = [...target.querySelectorAll<HTMLElement>('[data-testid="bulk-target-title"]')];
-		expect(titles).toHaveLength(1);
-		expect(titles[0]!.querySelector('b')).toBeNull();
-		expect(titles[0]!.textContent).toContain('<b>Tee</b>');
-		expect(titles[0]!.textContent).not.toContain('\u200b');
-		const links = [...target.querySelectorAll<HTMLAnchorElement>('[data-testid="bulk-target-admin"]')];
+		const links = adminLinks();
 		expect(links.map((a) => a.getAttribute('href'))).toEqual(['https://demo.myshopify.com/admin/products/1', 'https://demo.myshopify.com/admin/products/2']);
 		for (const a of links) {
 			expect(a.getAttribute('target')).toBe('_blank');
 			expect(a.getAttribute('rel')).toBe('noopener noreferrer');
+			// The arrow is not read out; the link reads „Produkt <Zahl>“.
+			expect(a.querySelector('[aria-hidden="true"]')?.textContent?.trim()).toBe('↗');
 		}
+		expect(links[0]!.textContent).toContain(tf('bulk.target.product', { n: '1' }));
 		expect(target.textContent).not.toContain('gid://shopify/Product/1');
+	});
+
+	it('shows no old title on a run that rewrites the title: the diff shows old and new already', async () => {
+		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1 });
+		targets = [titleTarget(1, 'Alte Teekanne')];
+		await render();
+		const cell = adminLinks()[0]!.closest('td')!;
+		expect(cell.textContent).not.toContain('Alte Teekanne');
+		expect(adminLinks()).toHaveLength(1);
 	});
 
 	it('links the probe\'s product in the probe box, also when it is not among the shown targets', async () => {
 		run = makeRun({ phase: 'writing', undone: 0, undoneBy: null, targetSystem: SHOP, total: 17, applied: 1,
 			haltKey: 'probeRequired', haltReason: 'probeRequired', probe: { key: 'gid://shopify/Product/77', fields: ['seo_title'] } });
-		targets = [withTitle(1, 'Teekanne')];
+		targets = [seoTarget(1)];
 		await render();
 		const link = target.querySelector<HTMLAnchorElement>('[data-testid="bulk-probe-admin"]');
 		expect(link?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/77');
@@ -151,9 +149,18 @@ describe('a Shopify run\'s page', () => {
 	it('gives the probe box no link for a key that is not a product gid', async () => {
 		run = makeRun({ phase: 'writing', undone: 0, undoneBy: null, targetSystem: SHOP, total: 17, applied: 1,
 			haltKey: 'probeRequired', haltReason: 'probeRequired', probe: { key: 'gid://shopify/ProductVariant/77', fields: ['seo_title'] } });
-		targets = [withTitle(1, 'Teekanne')];
+		targets = [seoTarget(1)];
 		await render();
 		expect(target.querySelector('[data-testid="bulk-probe-admin"]')).toBeNull();
+	});
+
+	it('names the products an undo deletes by their admin link too', async () => {
+		run = makeRun({ kind: 'undo', phase: 'previewed', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1, applied: 0,
+			changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/9', change: 'delete', diff: { kind: 'none' }, error: null, deselected: false } as unknown as BulkTarget];
+		await render();
+		expect(adminLinks().map((a) => a.getAttribute('href'))).toContain('https://demo.myshopify.com/admin/products/9');
+		expect(target.textContent).not.toContain('gid://shopify/Product/9');
 	});
 
 	it('a local run keeps showing its keys', async () => {
