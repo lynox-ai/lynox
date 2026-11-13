@@ -556,6 +556,9 @@ export interface BulkFieldMarkupChange {
 	/** An added item lies outside what a write may add (the engine's allowlist): on an undo, markup
 	 *  from before the run that it writes back. Optional: an older engine sends none. */
 	addsOutsideAllowlist?: boolean | undefined;
+	/** The value or its before-image is larger or nested deeper than the engine reads: nothing is
+	 *  listed, and the note says so instead of calling the list complete. */
+	unread?: boolean | undefined;
 }
 
 /** An element or comment as code text, every attribute with its whole value (sec-core M3: a
@@ -599,7 +602,7 @@ export function bulkMarkupList(
 			...change.added.map(line(undo ? 'bulk.markup.restores' : 'bulk.markup.added')),
 			...change.removed.map(line(undo ? 'bulk.markup.removes' : 'bulk.markup.removed')),
 		],
-		note: i18n.t('bulk.markup.plain_note'),
+		note: i18n.t(change.unread === true ? 'bulk.markup.unread_note' : 'bulk.markup.plain_note'),
 	};
 }
 

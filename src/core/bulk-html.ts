@@ -193,6 +193,29 @@ function* descendants(n: Node, inTemplate: boolean): Generator<[Node, boolean]> 
   }
 }
 
+/** The size and nesting a value may have for this module to read it. A text carrier's occurrence
+ *  holds the text and layout of everything below it, so each carrier above a node reads that node
+ *  again: the cost grows with the bytes times the carriers nested above them, and the element depth
+ *  bounds the parser's own serialising. Far above product descriptions as shops write them; a value
+ *  beyond them is refused, never cut. */
+export const MARKUP_MAX_BYTES = 1024 * 1024;
+export const MARKUP_MAX_DEPTH = 512;
+export const MARKUP_MAX_CARRIER_NESTING = 8;
+
+/** Whether a value stays within {@link MARKUP_MAX_BYTES}, {@link MARKUP_MAX_DEPTH} and
+ *  {@link MARKUP_MAX_CARRIER_NESTING}: one parse and one pass, linear in the value. */
+export function withinReadingBounds(value: string): boolean {
+  if (Buffer.byteLength(value, 'utf8') > MARKUP_MAX_BYTES) return false;
+  const stack: [Node, number, number][] = [[parseHtmlFragment(value), 0, 0]];
+  while (stack.length > 0) {
+    const [n, depth, above] = stack.pop()!;
+    const carriers = above + (isElement(n) && TEXT_CARRIERS.has(n.tagName) ? 1 : 0);
+    if (depth > MARKUP_MAX_DEPTH || carriers > MARKUP_MAX_CARRIER_NESTING) return false;
+    for (const c of childrenOf(n)) stack.push([c, depth + 1, carriers]);
+  }
+  return true;
+}
+
 function textBelow(n: Node): string {
   let out = '';
   for (const [c] of descendants(n, false)) if (c.nodeName === '#text') out += (c as DefaultTreeAdapterTypes.TextNode).value;
@@ -517,6 +540,9 @@ export function shortcodeRefusalOf(after: string, before: string | null): string
 /** Whether a verdict's or a plan's value for an HTML field adds markup the owner does not read. */
 export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
   try {
+    if (!withinReadingBounds(input.after) || (input.before !== null && !withinReadingBounds(input.before))) {
+      return refused('not_canonical', 'The value or its before-image is larger or nested deeper than this check reads.');
+    }
     const canonical = canonicalHtml(input.after);
     if (canonicalHtml(canonical) !== canonical) {
       return refused('not_canonical', 'The value parses to another tree once serialised.');
@@ -575,6 +601,9 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
  */
 export function markupAddedByHost(input: { sent: string; back: string; storeHost: string; startDomains: readonly string[] }): MarkupCheckResult {
   try {
+    if (!withinReadingBounds(input.sent) || !withinReadingBounds(input.back)) {
+      return refused('not_canonical', 'The value read back or the value sent is larger or nested deeper than this check reads.');
+    }
     // A tag, comment or attribute value left open at the end falls away from the fragment's tree,
     // so no tree check sees it, nor what the host writes into it; the theme's next `>` closes it,
     // live. A value read back open counts as added unless it is the bytes sent: a before-image an
@@ -1114,6 +1143,9 @@ export interface FieldMarkupChange {
    *  element) counts as outside here. It does not judge a link's domain, which depends on what
    *  the product pointed to before: a link to a domain new to the product counts as within. */
   addsOutsideAllowlist: boolean;
+  /** Set where the value or its before-image lies beyond {@link withinReadingBounds}: nothing is
+   *  listed, and the page says the field's markup could not be listed. */
+  unread?: true;
 }
 
 /** A base for resolving a relative `href`: the scheme and character checks do not read the host. */
@@ -1143,7 +1175,10 @@ function toItem(o: Occurrence): MarkupItem {
 /** The elements and comments the after-state of one field adds and removes, over the tree of
  *  the bytes sent (sec-core M3: a rewrite to the allowlist must not delete an image unseen). */
 export function markupChangesOf(field: string, before: string | null, after: string): FieldMarkupChange {
-  const b = markupOf(parseHtmlFragment(before ?? '')).occurrences.filter(named);
+  if (!withinReadingBounds(after) || (before !== null && !withinReadingBounds(before))) {
+    return { field, added: [], removed: [], addsOutsideAllowlist: false, unread: true };
+  }
+  const b =markupOf(parseHtmlFragment(before ?? '')).occurrences.filter(named);
   const a = markupOf(parseHtmlFragment(after)).occurrences.filter(named);
   const added = multisetMinus(a, b).map(toItem);
   return { field, added, removed: multisetMinus(b, a).map(toItem), addsOutsideAllowlist: added.some((i) => !withinAllowlist(i)) };

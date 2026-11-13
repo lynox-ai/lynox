@@ -622,6 +622,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.markup.removes': { de: 'Nimmt wieder heraus:', en: 'Takes out again:' },
 	'bulk.markup.in_template': { de: '(in einem <template>-Block)', en: '(inside a <template> block)' },
 	'bulk.markup.plain_note': { de: 'Einfache Formatierung wie Absätze, Fettschrift oder Listen ist nicht aufgeführt.', en: 'Plain formatting such as paragraphs, bold text or lists is not listed.' },
+	'bulk.markup.unread_note': { de: 'Das Markup dieses Felds ist zu groß oder zu tief verschachtelt, um hier aufgelistet zu werden.', en: 'The markup of this field is too large or nested too deeply to be listed here.' },
 	'bulk.markup.restores_note': { de: 'Dieses Markup war vor dem Lauf schon in deinem Shop. Die Rücknahme schreibt es wieder hinein, auch ein Skript.', en: 'This markup was in your shop before the run. The undo writes it back, a script included.' },
 	'bulk.markup.restores_note_mandate': { de: 'Dieses Markup war vor dem Lauf schon im Shop. Die Rücknahme schreibt es wieder hinein, auch ein Skript.', en: 'This markup was in the shop before the run. The undo writes it back, a script included.' },
 	'bulk.target.host_rewrote': { de: 'Im Shop anders gespeichert', en: 'Stored differently in the shop' },

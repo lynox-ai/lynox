@@ -82,4 +82,12 @@ describe('getPreview: markupChanges', () => {
     expect(t!.change).toBe('update');
     expect(t!.markupChanges).toBeUndefined();
   });
+
+  it('names a field it cannot read for its depth instead of leaving it out', () => {
+    const deep = '<span>'.repeat(600) + 'x' + '</span>'.repeat(600);
+    const id = previewOne({ description: deep }, { description: '<p>Alt</p>' });
+    const [t] = ledger.getPreview(id);
+    expect(t!.change).toBe('update');
+    expect(t!.markupChanges).toEqual([{ field: 'description', added: [], removed: [], addsOutsideAllowlist: false, unread: true }]);
+  });
 });

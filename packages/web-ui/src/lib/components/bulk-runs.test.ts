@@ -1275,6 +1275,16 @@ describe('the markup list of a target (1010)', () => {
 		]);
 	});
 
+	it('says a field it could not read was not listed, instead of calling the list complete', () => {
+		const de = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: false, unread: true }, false, 'Beschreibung', DE);
+		expect([de.head, de.lines, de.note]).toEqual([
+			'Geändertes Markup in Beschreibung:', [],
+			'Das Markup dieses Felds ist zu groß oder zu tief verschachtelt, um hier aufgelistet zu werden.',
+		]);
+		const en = bulkMarkupList({ field: 'description', added: [], removed: [], unread: true }, true, 'Description', EN);
+		expect([en.head, en.note]).toEqual([null, 'The markup of this field is too large or nested too deeply to be listed here.']);
+	});
+
 	it('lists an undo without a head, as what it restores and takes out', () => {
 		const de = bulkMarkupList({ field: 'description', added: [link], removed: [image], addsOutsideAllowlist: false }, true, 'Beschreibung', DE);
 		expect([de.head, de.restoresNote, de.lines.map((l) => l.label), de.note]).toEqual([
