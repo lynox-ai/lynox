@@ -163,7 +163,7 @@ function routeOf(node: ts.Node): string | undefined {
 
 /**
  * The calls of the gates in one source text, and every other use of their names. Another use (an
- * alias, the function handed on as a value, a call by a computed name) would ask without a call
+ * alias, the function handed on as a value, a call through a literal name like `x['name']`) would ask without a call
  * this scan can name, so it is reported, not skipped.
  */
 function scan(file: string, text: string): { sites: Site[]; otherUses: string[] } {
@@ -212,10 +212,19 @@ const isBlock = (e: ts.Expression): boolean => ts.isIdentifier(e) && (e.text ===
 
 /** `describe.skip(…)`, `it.todo(…)`, `describe.skipIf(c)(…)`, `describe.runIf(c)(…)`: what is inside may not run. */
 function mayNotRun(call: ts.CallExpression): boolean {
-  const e = call.expression;
-  if (ts.isPropertyAccessExpression(e) && isBlock(e.expression) && ['skip', 'todo'].includes(e.name.text)) return true;
-  return ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && isBlock(e.expression.expression)
-    && ['skipIf', 'runIf'].includes(e.expression.name.text);
+  // The modifiers between `describe`/`it`/`test` and the call, also through `.each(…)` and `.skipIf(c)`.
+  let e: ts.Expression = call.expression;
+  const modifiers: string[] = [];
+  for (;;) {
+    if (ts.isCallExpression(e)) e = e.expression;
+    else if (ts.isPropertyAccessExpression(e)) { modifiers.push(e.name.text); e = e.expression; } else break;
+  }
+  if (!isBlock(e)) return false;
+  if (modifiers.some((m) => ['skip', 'todo', 'skipIf', 'runIf'].includes(m))) return true;
+  // `it('t', { skip: true }, fn)`: the options form.
+  const options = call.arguments[1];
+  return options !== undefined && ts.isObjectLiteralExpression(options) && options.properties.some((p) =>
+    ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && ['skip', 'todo'].includes(p.name.text) && p.initializer.kind !== ts.SyntaxKind.FalseKeyword);
 }
 const literal = (e: ts.Expression | undefined): string | undefined =>
   e && (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) ? e.text : undefined;
@@ -279,7 +288,7 @@ function scanTree(): { sites: Site[]; otherUses: string[]; files: number } {
   return { sites, otherUses, files };
 }
 
-describe('every place that asks whether an access has ended', () => {
+describe('every call that asks whether an access has ended', () => {
   it('is named in the list, and every name in the list is still a place', () => {
     const { sites, otherUses } = scanTree();
     const keys = sites.map((s) => s.key);
@@ -348,7 +357,10 @@ describe('the scan the list is held against', () => {
       "describe.skipIf(ci)('maybe', () => { it('skipped by a condition', () => {}); });",
       "it.skip('skipped itself', () => {});",
       "it.todo('not written');",
-    ].join('\n'))).toEqual(['runs']);
+      "describe.skip.each([['a']])('row %s', () => { it('skipped in a table block', () => {}); });",
+      "it('skipped by its options', { skip: true }, () => {});",
+      "it('runs with options', { timeout: 5 }, () => {});",
+    ].join('\n'))).toEqual(['runs', 'runs with options']);
   });
 
   it('reports a gate used other than by a call: an alias, a value handed on, a computed name, a call not on this', () => {
