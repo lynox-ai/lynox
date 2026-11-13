@@ -1531,7 +1531,7 @@ export class Engine {
           try {
             promptStore.expireEndedMandates(mandateLive);
           } catch (err: unknown) {
-            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${processErrorText(err)}\n`);
           }
         };
         sweepEnded();
@@ -2932,7 +2932,7 @@ export class Engine {
       try {
         end();
       } catch (err: unknown) {
-        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${processErrorText(err)}\n`);
       }
     }
   }
