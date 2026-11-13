@@ -174,6 +174,8 @@ describe('a key typed by a mandate\'s helper (real engine)', () => {
     expect(res.status).toBe(422);
     const body = JSON.parse(res.text) as { error?: string; code?: string };
     expect(body.code).toBe(MANDATE_KEY_INPUT_CODE);
+    // The web UI picks its sentence by this exact code (stores/chat.svelte.ts `isKeyInputRefusal`).
+    expect(body.code).toBe('mandate_key_input');
     expect(body.error).toBe(MANDATE_KEY_INPUT_REFUSAL);
     // The model's input: never reached.
     expect(run).not.toHaveBeenCalled();

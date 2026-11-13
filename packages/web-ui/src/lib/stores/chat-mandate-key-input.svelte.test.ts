@@ -208,3 +208,69 @@ describe('a helper\'s answer refused as carrying a key', () => {
 		expect(store.getChatError()).toBe(text.returned);
 	});
 });
+
+// ux U-150, held where the page picks it: the code the server sends maps to the sentence, and the
+// branch (could the text go back into the field or not) picks which one, verbatim in both languages.
+const SENTENCE = {
+	de: {
+		left: 'Deine Eingabe wurde nicht gesendet, weil sie etwas enthält, das wie ein Schlüssel, ein Token oder ein Passwort aussieht. In diesem Chat nimmt lynox keine entgegen. Nur der Inhaber dieser Instanz speichert Schlüssel, in einem eigenen Chat; bitte den Inhaber, ihn dort zu speichern. War es kein Schlüssel, schick die Eingabe ohne den Teil, der wie einer aussieht.',
+		returned: 'Deine Eingabe wurde nicht gesendet, weil sie etwas enthält, das wie ein Schlüssel, ein Token oder ein Passwort aussieht. In diesem Chat nimmt lynox keine entgegen. Nur der Inhaber dieser Instanz speichert Schlüssel, in einem eigenen Chat; bitte den Inhaber, ihn dort zu speichern. War es kein Schlüssel, entferne den Teil, der wie einer aussieht, und schick die Eingabe noch einmal.',
+	},
+	en: {
+		left: 'Your input was not sent because it contains something that looks like a key, token or password. lynox does not take any in this chat. Only the owner of this instance stores keys, in a chat of their own; ask the owner to store it there. If it was not a key, send your input again without the part that looks like one.',
+		returned: 'Your input was not sent because it contains something that looks like a key, token or password. lynox does not take any in this chat. Only the owner of this instance stores keys, in a chat of their own; ask the owner to store it there. If it was not a key, remove the part that looks like one and send your input again.',
+	},
+} as const;
+
+describe('the sentence the page shows for the refusal, verbatim', () => {
+	for (const lang of ['de', 'en'] as const) {
+		for (const takenBack of [true, false]) {
+			const which = takenBack ? 'returned' : 'left';
+			it(`message, ${lang}, text ${takenBack ? 'back in the field' : 'not taken back'}: the ${which} sentence`, async () => {
+				const { setLocale } = await import('../i18n.svelte.js');
+				setLocale(lang);
+				serve((url) => (url.endsWith('/run') ? refused() : undefined));
+				store.registerComposerDraft(() => takenBack);
+
+				await store.sendMessage(TYPED);
+				await settle();
+
+				expect(store.getChatError()).toBe(SENTENCE[lang][which]);
+			});
+
+			it(`answer, ${lang}, text ${takenBack ? 'back in the field' : 'not taken back'}: the ${which} sentence`, async () => {
+				const { setLocale } = await import('../i18n.svelte.js');
+				setLocale(lang);
+				serve((url) => {
+					if (url.endsWith('/reply')) return refused();
+					if (url.endsWith('/pending-prompt')) return json({ pending: true, promptType: 'ask_user', promptId: 'p-1', question: 'Token?', timeoutMs: 86_400_000 });
+					return undefined;
+				});
+				await store.resumeThread('t1');
+				await settle();
+				await store.checkPendingPrompt();
+				store.registerComposerDraft(() => takenBack);
+
+				await store.replyPermission(KEY);
+				await settle();
+
+				expect(store.getChatError()).toBe(SENTENCE[lang][which]);
+			});
+		}
+	}
+});
+
+describe('the code the page reads is the one the server sends', () => {
+	it('isKeyInputRefusal compares against the engine\'s MANDATE_KEY_INPUT_CODE', async () => {
+		const { readFileSync } = await import('node:fs');
+		const { join } = await import('node:path');
+		const server = readFileSync(join(__dirname, '../../../../../src/server/http-api.ts'), 'utf8');
+		const page = readFileSync(join(__dirname, 'chat.svelte.ts'), 'utf8');
+		const sent = /export const MANDATE_KEY_INPUT_CODE = '([^']+)';/.exec(server)?.[1];
+		const fn = /function isKeyInputRefusal\([\s\S]*?\n\}/.exec(page)?.[0] ?? '';
+		const read = /\?\.code === '([^']+)'/.exec(fn)?.[1];
+		expect(sent, 'the engine declares the code').toBeTruthy();
+		expect(read, 'the page compares against a literal').toBeTruthy();
+		expect(read).toBe(sent);
+	});
+});
