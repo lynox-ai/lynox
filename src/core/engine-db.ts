@@ -1621,6 +1621,12 @@ const MIGRATIONS: string[] = [
   // target: its page keeps the sentence without the domain.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
    ALTER TABLE bulk_targets ADD COLUMN link_domain TEXT;`,
+  // v69: the phase a run stood in when an undo took it back (`done`, `aborted`, or `writing` with
+  // a halt), so an undo of that undo puts it back exactly there. NULL on every run taken back
+  // before this version: one without a halt reason stood done, one with a reason cannot be told
+  // halted from aborted, and an undo that would put it back is refused (`phase_not_kept`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (69);
+   ALTER TABLE bulk_runs ADD COLUMN phase_before_undo TEXT;`,
 ];
 
 export interface EngineDbOptions {

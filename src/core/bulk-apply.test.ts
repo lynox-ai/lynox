@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
-import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HALT_REASONS, bulkFailureLimit } from './bulk-ledger.js';
+import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HALT_REASONS, BULK_PHASE_NOT_KEPT, bulkFailureLimit } from './bulk-ledger.js';
 import type { PlannedTarget } from './bulk-ledger.js';
 import { BulkSecretError, bulkWriterFor, runBulkEffect, workspaceWriter, type BulkRunTrail, type TargetWriter } from './bulk-apply.js';
 import { TriggerStore } from './trigger-store.js';
@@ -1145,8 +1145,206 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     const redo = ledger.planUndo(undo.status.id);
     if (!redo.ok) throw new Error(redo.reason);
     approve(redo.status.id);
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 3 });
     expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
     expect([...state.values()]).toEqual(['w0', 'w1', 'w2']);
+    // The run's writes stand again: it reads done, none of its targets is taken back, and no
+    // undo is named for it. The first undo is the one taken back now.
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', undone: 0 });
+    const left = engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND undone_at IS NOT NULL').get(runId) as { n: number };
+    expect(left.n).toBe(0);
+    expect(ledger.undoneBy(runId)).toBeNull();
+    expect(ledger.getStatus(undo.status.id)!.phase).toBe('undone');
+    expect(ledger.undoneBy(undo.status.id)!.runId).toBe(redo.status.id);
+    // Done again, so it can be taken back again: that undo covers all three, is planned after the
+    // values were written back, and so is approved and takes them back.
+    const again = ledger.planUndo(runId);
+    if (!again.ok) throw new Error(again.reason);
+    expect(again.status.total).toBe(3);
+    approve(again.status.id);
+    expect((await runBulkEffect(again.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2']);
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 3 });
+  });
+
+  it('an undo of the undo that writes nothing back leaves the run undone', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id);
+    // Someone else changed every target since: each is a conflict, none is written back.
+    for (const k of state.keys()) state.set(k, 'someone else');
+    await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer));
+    expect(ledger.getStatus(redo.status.id)!.conflicts).toBe(3);
+    expect(ledger.getStatus(undo.status.id)!.phase).toBe('done');
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 3 });
+  });
+
+  it('an undo of the undo of a run halted at its maximum puts it back halted where it stopped', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId, { maxTargets: 2 });
+    const { writer, state } = memory(initial);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('halted');
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    expect(ledger.getStatus(runId)!.phase).toBe('undone');
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id);
+    expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([...state.values()]).toEqual(['w0', 'w1', 'v2', 'v3']);
+    // Its two writes stand again, and it is back in the phase the undo took it from: halted at its
+    // maximum, so the owner can resume it for the two it never wrote.
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'writing', haltReason: BULK_HALT_REASONS.maxTargets, undone: 0 });
+    const kept = engineDb.getDb().prepare('SELECT phase_before_undo AS p FROM bulk_runs WHERE id = ?').get(runId) as { p: string | null };
+    expect(kept.p).toBeNull();
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 4 }).ok).toBe(true);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    expect([...state.values()]).toEqual(['w0', 'w1', 'w2', 'w3']);
+  });
+
+  /** A run taken back before v69 kept no phase: as an older engine left it. */
+  const forgetPhase = (runId: string): void => {
+    engineDb.getDb().prepare('UPDATE bulk_runs SET phase_before_undo = NULL WHERE id = ?').run(runId);
+  };
+
+  it('an undo of the undo of a run taken back before its phase was kept puts a finished run back done', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    forgetPhase(runId);
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id);
+    expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([...state.values()]).toEqual(['w0', 'w1', 'w2']);
+    // No halt reason: it stood done, the only phase a run without one is taken back from.
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', haltReason: null, undone: 0 });
+  });
+
+  it('refuses an undo of the undo of a halted run taken back before its phase was kept, at plan and at approval', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId, { maxTargets: 2 });
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    // One planned while the phase was still kept, then the run is as an older engine left it.
+    const early = ledger.planUndo(undo.status.id);
+    if (!early.ok) throw new Error(early.reason);
+    forgetPhase(runId);
+    expect(ledger.planUndo(undo.status.id)).toEqual({ ok: false, reason: 'phase_not_kept' });
+    expect(ledger.approve(early.status.id, { checksum: ledger.computeChecksum(early.status.id)! })).toEqual({ ok: false, reason: 'phase_not_kept' });
+    // Nothing was written, and the run still reads taken back.
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 2 });
+    // The run itself reads taken back, so it has nothing left to undo.
+    expect(ledger.planUndo(runId)).toEqual({ ok: false, reason: 'not_undoable' });
+  });
+
+  it('refuses to resume an undo of the undo that halted before the run lost its phase', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId, { maxTargets: 2 });
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id, { maxTargets: 1 });
+    expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('halted');
+    forgetPhase(runId);
+    expect(ledger.resume(redo.status.id, { checksum: ledger.computeChecksum(redo.status.id)!, maxTargets: 2 })).toEqual({ ok: false, reason: 'phase_not_kept' });
+    // The one it wrote stays, as a halt leaves it; the other is not written.
+    expect([...state.values()].filter((v) => v.startsWith('w'))).toHaveLength(1);
+  });
+
+  it('says why such an undo is refused, word for word', () => {
+    expect(BULK_PHASE_NOT_KEPT).toBe('This run was undone before lynox kept the phase a run had before its undo, so it cannot be reapplied. Nothing was written. To write its values again, plan a new bulk run with the same targets and values; it needs its own approval.');
+  });
+
+  it('an undo of the undo of the undo takes the run back again', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const chain = [runId];
+    for (let i = 0; i < 3; i++) {
+      const u = ledger.planUndo(chain[i]!);
+      if (!u.ok) throw new Error(u.reason);
+      approve(u.status.id);
+      expect((await runBulkEffect(u.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+      chain.push(u.status.id);
+    }
+    const [, u1, u2, u3] = chain as [string, string, string, string];
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2']);
+    // The values alternate down the chain, and so does what each run reads.
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 3 });
+    expect(ledger.getStatus(u1)).toMatchObject({ phase: 'done', undone: 0 });
+    expect(ledger.getStatus(u2)).toMatchObject({ phase: 'undone', undone: 3 });
+    expect(ledger.getStatus(u3)).toMatchObject({ phase: 'done', undone: 0 });
+    // The undo that took the run back is the first one, in force again.
+    expect(ledger.undoneBy(runId)!.runId).toBe(u1);
+  });
+
+  it('an undo whose chain loops back on itself still writes and finishes', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id);
+    // No run of the product links like this: the run now names the undo of its undo as its
+    // source, target by target, so every walk up the chain comes back to where it started.
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_runs SET source_run_id = ? WHERE id = ?').run(redo.status.id, runId);
+    db.prepare('UPDATE bulk_targets SET source_seq = seq WHERE run_id = ?').run(runId);
+    expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([...state.values()]).toEqual(['w0', 'w1', 'w2']);
+    expect(ledger.getStatus(redo.status.id)!.phase).toBe('done');
+  });
+
+  it('an atomic undo of the undo that rolls back leaves the run taken back', async () => {
+    const { runId, initial } = recordMemoryRun(3, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer));
+    const redo = ledger.planUndo(undo.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    approve(redo.status.id);
+    // It writes k002 and k001 back, then meets someone else's value on k000 and rolls back.
+    state.set('k000', 'someone else');
+    expect((await runBulkEffect(redo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(['someone else', 'v1', 'v2']);
+    expect(ledger.getStatus(undo.status.id)).toMatchObject({ phase: 'done', undone: 0 });
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'undone', undone: 3 });
   });
 });
 
