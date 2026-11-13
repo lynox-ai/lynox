@@ -1919,6 +1919,9 @@ export class Engine {
         // Degraded (engine.db unavailable): fall back to the flat-JSON directory,
         // exactly as before S4b.
         loaded = this._apiStore.loadFromDirectory(apisDir);
+        // What a person changes from here on would land only in those files, which the next boot
+        // with engine.db does not read: refused with a plain reason instead.
+        this._apiStore.refuseChangesWithoutStore();
       }
       // Wire the in-memory store into tool context unconditionally — otherwise
       // a fresh install (zero profiles) leaves toolContext.apiStore undefined, so

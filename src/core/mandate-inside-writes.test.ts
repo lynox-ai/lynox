@@ -355,7 +355,7 @@ function apiStoreOnDb(seed: ApiProfile | null): { store: InstanceType<typeof Api
   }
   return { store, engine };
 }
-const API_READS = ['get', 'storedProfile', 'knownProfiles', 'saveRefusal', 'deleteRefusal', 'unreadableSourceOf', 'unreadableClearedByHand', 'trailIdOf', 'newTrailId',
+const API_READS = ['get', 'storedProfile', 'knownProfiles', 'saveRefusal', 'deleteRefusal', 'engineLessRefusal', 'unreadableSourceOf', 'unreadableClearedByHand', 'trailIdOf', 'newTrailId',
   'getProfiles', 'getAll', 'list', 'heldBackProfiles', 'hostOwners', 'profileForHost', 'isHeldBack', 'waitingConnections', 'heldBack'] as const;
 
 // ── the fixtures: one per site and branch ───────────────────────────────────

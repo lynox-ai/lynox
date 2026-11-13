@@ -95,7 +95,13 @@
 		left = [];
 		try {
 			const res = await fetch(`${getApiBase()}/api-profiles/${encodeURIComponent(profile.id)}`, { method: 'DELETE' });
-			if (!res.ok) throw new Error();
+			if (!res.ok) {
+				// An engine that started without engine.db refuses every delete; it says so with a code.
+				const body = (await res.json().catch(() => null)) as { code?: unknown } | null;
+				error = t(body?.code === 'engine_less' ? 'apis.delete_engine_less' : 'apis.delete_failed');
+				deleting = null;
+				return;
+			}
 			left = apiDeleteNotice(await res.json().catch(() => null), tf);
 			profiles = profiles.filter(p => p.id !== profile.id);
 			if (expanded === profile.id) expanded = null;

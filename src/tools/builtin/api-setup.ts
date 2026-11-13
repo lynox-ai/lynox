@@ -2052,6 +2052,8 @@ ${draftJson}
       if (!input.refine) return 'Error: "refine" patch is required for refine action.';
       const apiStore = agent.toolContext?.apiStore;
       if (!apiStore) return 'No API profiles registered.';
+      const engineLess = apiStore.engineLessRefusal('save', 'model');
+      if (engineLess !== null) return `Error: ${engineLess}`;
       const existing = apiStore.get(input.id);
       if (!existing) return `API profile "${input.id}" not found.`;
       const foreignRefine = foreignProfileRefusal(agent, existing, input.id);
@@ -2112,6 +2114,9 @@ ${draftJson}
       if (!input.profile) {
         return 'Error: "profile" object is required for create/update action.';
       }
+      // Without engine.db, before anything is asked, fetched or written (see `engineLessRefusal`).
+      const engineLess = agent.toolContext?.apiStore?.engineLessRefusal('save', 'model') ?? null;
+      if (engineLess !== null) return `Error: ${engineLess}`;
 
       // Shallow-copy the input: the ack-stamping below assigns/strips the
       // top-level `custom_endpoint_ack` field, and mutating the caller's object
@@ -2558,6 +2563,8 @@ ${draftJson}
       if (!id) return 'Error: "id" is required for connect action.';
       const apiStore = agent.toolContext?.apiStore;
       if (!apiStore) return 'Error: API store unavailable — cannot build a connect link. Restart the engine and retry.';
+      const engineLess = apiStore.engineLessRefusal('connect', 'model');
+      if (engineLess !== null) return `Error: ${engineLess}`;
       const profile = apiStore.get(id);
       if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
       // A session under a mandate connects a profile it set up itself (PRD §3.13): the consent
@@ -2740,6 +2747,9 @@ ${draftJson}
       if (!apiStore) {
         return 'Error: API store unavailable — cannot delete the profile. Restart the engine and retry.';
       }
+      // Before the profile is read: the refusal is the same whether the id exists.
+      const engineLess = apiStore.engineLessRefusal('remove', 'model');
+      if (engineLess !== null) return `Error: ${engineLess}`;
       // Read before the delete: what the vault holds for this profile is decided
       // by the profile, and afterwards there is no profile to ask. The stored
       // profile, registered or held back by the boot: a held-back profile's
@@ -2869,6 +2879,14 @@ ${draftJson}
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${input.id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
       }
+      // Without engine.db, before anything is read or sent. An exchange writes tokens into the vault
+      // and records them on the profile, and that record would land only in the flat files the next
+      // boot with engine.db does not read: the tokens would stay behind, which a later delete does not
+      // take. The record the files hold for a renewal predates the grant ledger as a rule, so no
+      // renewal is told apart from a first connection; every exchange waits for the restart.
+      // `?.()` on the method: suites hand this branch a partial store double.
+      const engineLessRenew = apiStore.engineLessRefusal?.('renew', 'model') ?? null;
+      if (engineLessRenew !== null) return `Error: ${engineLessRenew}`;
       // A connection someone else made with their own login is theirs to renew; said with who and
       // which, before anything is read, not as a slot this profile "may not write".
       const memberRefusal = refuseMemberConnection(profile, agent.principal, agent.toolContext?.mandateEnds ?? null, 'write');
@@ -3585,6 +3603,8 @@ ${draftJson}
       }
       const apiStore = agent.toolContext?.apiStore;
       if (!apiStore) return 'Error: API store unavailable — cannot adopt the connection. Restart the engine and retry.';
+      const engineLess = apiStore.engineLessRefusal('save', 'model');
+      if (engineLess !== null) return `Error: ${engineLess}`;
       const asked = apiStore.get(id);
       if (!asked) return `Error: API profile "${id}" not found.`;
       if (!isMandateConnection(asked)) {

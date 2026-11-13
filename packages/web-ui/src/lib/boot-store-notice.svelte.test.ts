@@ -9,13 +9,13 @@ import { t, setLocale, getLocale } from './i18n.svelte.js';
  */
 
 const ENGINE = {
-	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; was du an ihnen änderst, kann verloren gehen, sobald die Engine engine.db wieder öffnet.',
-	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed. API connections such as bexio or Shopify come from an older copy; what you change in them can be lost once the engine opens engine.db again.',
+	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; anlegen, ändern oder löschen lässt sich keine, und läuft der Zugang einer Verbindung ab, wird er nicht erneuert.',
+	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed. API connections such as bexio or Shopify come from an older copy; none can be added, changed or removed, and when a connection\'s access expires, it is not renewed.',
 };
 // With durable memory on and not loaded for want of engine.db: memory is an old state, access cannot sign in.
 const ENGINE_MEMORY = {
-	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern, lynox kennt nur einen alten Stand seines Gedächtnisses, und Personen, denen du Zugang gegeben hast, können sich nicht anmelden. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; was du an ihnen änderst, kann verloren gehen, sobald die Engine engine.db wieder öffnet.',
-	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed, lynox only knows an old state of its memory, and people you gave access cannot sign in. API connections such as bexio or Shopify come from an older copy; what you change in them can be lost once the engine opens engine.db again.',
+	de: 'Die Engine ist ohne engine.db gestartet: Trigger und Workflows laufen nicht und lassen sich nicht ändern, lynox kennt nur einen alten Stand seines Gedächtnisses, und Personen, denen du Zugang gegeben hast, können sich nicht anmelden. API-Verbindungen wie bexio oder Shopify stammen aus einer älteren Kopie; anlegen, ändern oder löschen lässt sich keine, und läuft der Zugang einer Verbindung ab, wird er nicht erneuert.',
+	en: 'The engine started without engine.db: triggers and workflows do not run and cannot be changed, lynox only knows an old state of its memory, and people you gave access cannot sign in. API connections such as bexio or Shopify come from an older copy; none can be added, changed or removed, and when a connection\'s access expires, it is not renewed.',
 };
 const HISTORY = {
 	de: 'Die Engine ist ohne history.db gestartet: Verlauf, Threads, Aufgaben, Trigger und Workflows sind nicht verfügbar, und der Agent läuft gar nicht, auch nicht im Chat.',

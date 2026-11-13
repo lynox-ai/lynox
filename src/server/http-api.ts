@@ -40,7 +40,7 @@ import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
-import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
+import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
@@ -1671,6 +1671,15 @@ function escapeHtml(v: string): string {
 }
 
 /**
+ * A control plane sets this id on every instance it runs, and its health monitor alerts on a degraded
+ * engine. The status bar and the OAuth pages of an engine without engine.db both ask here, so they
+ * name the same closing paragraph.
+ */
+function controlPlaneRunsThis(): boolean {
+  return (process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '') !== '';
+}
+
+/**
  * The one page both halves of the profile OAuth flow render.
  *
  * Plain HTML, no inline script: the engine API sends
@@ -1680,7 +1689,7 @@ function escapeHtml(v: string): string {
  * `no-store` because these pages are reached with a code or an error in the
  * query string, and a cached one would replay it from history.
  */
-function sendOAuthHtml(res: ServerResponse, status: number, text: OAuthText, back: OAuthBack): void {
+function sendOAuthHtml(res: ServerResponse, status: number, text: OAuthText | readonly OAuthText[], back: OAuthBack): void {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': OAUTH_PAGE_CSP });
   res.end(oauthResultHtml(oauthPageLang(), status, text, back));
 }
@@ -3816,7 +3825,7 @@ export class LynoxHTTPApi {
     if (missing.length === 0) return {};
     // A control plane sets this id on every instance it runs, and its health monitor alerts on a
     // degraded engine: the UI then says the team is told, not "read the log".
-    const alerted = (process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '') !== '';
+    const alerted = controlPlaneRunsThis();
     // Durable memory was switched on and did not load because engine.db is missing: the engine runs
     // on the old memory files, and a mandate cannot sign in. With durable memory off both are the
     // normal state, so the UI says neither. The engine.db check matters only if the knowledge store
@@ -11894,7 +11903,14 @@ export class LynoxHTTPApi {
       //     where there is no dispatch to have done it.
       // `mayStartConnect`. One answer whether the id exists or not, so the session learns nothing
       // about which ids do.
+      // Without engine.db, before the profile is looked up (the answer is the same for every id)
+      // and before anything goes to the provider.
       const principal = this._principalOf(req);
+      const engineLessConnect = engine.getApiStore()?.engineLessRefusal('connect', 'client') ?? null;
+      if (engineLessConnect !== null) {
+        sendOAuthHtml(res, 409, engineLessPageText('connect', controlPlaneRunsThis(), isOwnerPrincipal(principal)), 'app');
+        return;
+      }
       const profile = engine.getApiStore()?.get(id);
       if (!mayStartConnect(principal, profile)) {
         sendOAuthHtml(res, 403, OAUTH_RESULT_TEXTS.ownProfileOnly, 'app');
@@ -12108,6 +12124,15 @@ export class LynoxHTTPApi {
       LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
       if (!spendProfileOAuthState(signed.state, Math.floor(Date.now() / 1000))) {
         sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.linkExpired, 'app');
+        return;
+      }
+
+      // Without engine.db the connect start refuses, so a callback here began before a restart.
+      // After the state check, so only the holder of a valid cookie learns why; before the code is
+      // spent at the provider, so no token is fetched or stored that the profile could not record.
+      const engineLessSave = engine.getApiStore()?.engineLessRefusal('save', 'client') ?? null;
+      if (engineLessSave !== null) {
+        sendOAuthHtml(res, 409, engineLessPageText('save', controlPlaneRunsThis(), isOwnerPrincipal(principalFromTag(signed.by.tag))), 'app');
         return;
       }
 
@@ -13516,8 +13541,12 @@ export class LynoxHTTPApi {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const { getLynoxDir } = await import('../core/config.js');
-      const { ApiProfileUnlinkError, purgeRecordedTokens } = await import('../core/api-store.js');
+      const { ApiProfileUnlinkError, SaveRefused, purgeRecordedTokens } = await import('../core/api-store.js');
       const apisDir = join(getLynoxDir(), 'apis');
+      // Without engine.db, before the profile is read: the same answer whether it exists.
+      const engineLess = store.engineLessRefusal('remove', 'client');
+      // The code lets the settings page say it in its own language.
+      if (engineLess !== null) { errorResponse(res, 409, engineLess, 'engine_less'); return; }
       // Read before the delete: the tokens to purge are named on the profile, registered or held
       // back by the boot.
       const existing = store.storedProfile(params['id']!);
@@ -13529,6 +13558,8 @@ export class LynoxHTTPApi {
         const removed = store.remove(params['id']!, apisDir, { record: 'closing' });
         if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }
       } catch (err) {
+        // The store refuses a remove without engine.db by throwing; asked above, so not reached.
+        if (err instanceof SaveRefused) { errorResponse(res, 409, store.engineLessRefusal('remove', 'client') ?? err.reason, 'engine_less'); return; }
         if (err instanceof ApiProfileUnlinkError) {
           // The in-memory side already happened; report the partial state
           // so the operator sees a 500 instead of a misleading 404 + a
