@@ -257,6 +257,15 @@ describe('PrivacyDataSettings', () => {
 		expect(links.map((a) => [a.textContent?.trim(), a.getAttribute('target'), a.getAttribute('rel')])).toEqual([[t('privacy.export_link'), '_blank', 'noopener']]);
 	});
 
+	it('says nothing about the export until the config has loaded, so neither sentence is a guess', async () => {
+		await render(load, { '/config': async () => Response.json({ error: 'down' }, { status: 503 }) });
+		expect(target.textContent).not.toContain(t('privacy.export_subtitle_selfhost'));
+		expect(target.textContent).not.toContain(t('privacy.export_subtitle_managed'));
+		expect(accountLinks()).toEqual([]);
+		// The control: the section that does not depend on the config is there.
+		expect(logLinks()).toHaveLength(1);
+	});
+
 	it('gives a mandate no link to the instance log, which refuses its session', async () => {
 		await render(load, config('mandate'));
 		expect(logLinks()).toEqual([]);

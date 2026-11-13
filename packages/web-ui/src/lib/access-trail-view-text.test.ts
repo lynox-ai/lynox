@@ -6,9 +6,11 @@ import { fileURLToPath } from 'node:url';
 // called. A sentence that says how much the log holds, how long it is kept, that it cannot be
 // changed, or what lynox itself sees would be a promise, and those are not decided here. This
 // reads the strings as written in the source, both languages, so a new key is covered too.
+// The privacy page's section that points to the log (`privacy.audit_*`) describes it too, so it is
+// held to the same words.
 
 const SOURCE = readFileSync(fileURLToPath(new URL('./i18n.svelte.ts', import.meta.url)), 'utf8');
-const KEY = /^\s*'((?:access_trail\.|settings\.account\.access_trail)[^']*)':\s*\{\s*de:\s*'((?:[^'\\]|\\.)*)',\s*en:\s*'((?:[^'\\]|\\.)*)'\s*\},?\s*$/;
+const KEY = /^\s*'((?:access_trail\.|settings\.account\.access_trail|privacy\.audit_)[^']*)':\s*\{\s*de:\s*'((?:[^'\\]|\\.)*)',\s*en:\s*'((?:[^'\\]|\\.)*)'\s*\},?\s*$/;
 
 const FORBIDDEN: ReadonlyArray<[string, RegExp]> = [
 	['complete', /vollständig|lückenlos|\bcomplete\b|\bfull record\b/i],
@@ -29,7 +31,7 @@ const hits = (text: string): string[] => FORBIDDEN.filter(([, re]) => re.test(te
 describe('the access log says no more than it shows', () => {
 	it('reads every one of its keys from the source', () => {
 		// Every key line of the block must parse, or a key would slip past the check below.
-		const lines = SOURCE.split('\n').filter((l) => /^\s*'(?:access_trail\.|settings\.account\.access_trail)/.test(l));
+		const lines = SOURCE.split('\n').filter((l) => /^\s*'(?:access_trail\.|settings\.account\.access_trail|privacy\.audit_)/.test(l));
 		expect(lines.length).toBeGreaterThan(40);
 		expect(strings()).toHaveLength(lines.length * 2);
 	});
