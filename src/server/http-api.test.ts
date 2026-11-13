@@ -1290,7 +1290,7 @@ describe('LynoxHTTPApi', () => {
       expect(((await asOwner.json()) as { error: string }).error).toBe('Missing provider');
     });
 
-    // The search endpoint check is the owner's (register 1400): it makes this instance send a
+    // The search endpoint check is the owner's: it makes this instance send a
     // request to an address the caller names, and setting up search is the owner's business.
     it('refuses a mandate the search endpoint check, and lets the owner through', async () => {
       repayRateWindow();
@@ -1306,7 +1306,7 @@ describe('LynoxHTTPApi', () => {
       expect(((await asOwner.json()) as { error: string }).error).toBe('Missing url');
     });
 
-    // On a provisioned instance a private address is the tenant host's network (register 1401):
+    // On a provisioned instance a private address is the tenant host's network:
     // the check answers only for the configured endpoint or a public address there. A self-hosted
     // owner keeps checking a LAN endpoint.
     it('checks a private search endpoint on a provisioned instance only when it is the configured one', async () => {
