@@ -828,6 +828,9 @@ export class TriggerStore {
     waitingUntil?: string | null | undefined;
     /** The model tier the user chose for this trigger's runs; null clears the choice. */
     modelTier?: ModelTier | null | undefined;
+    /** What the turn that edits the instruction had taken in (`describeTurnUntrusted`), or
+     *  null/absent for a clean one. Read only with a title/description edit; it only ever adds. */
+    editedUntrusted?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     const sets: string[] = [];
     const values: unknown[] = [];
@@ -846,6 +849,11 @@ export class TriggerStore {
     // pins the set of files that may name the setter, so a new one shows up red.
     if (params.title !== undefined || params.description !== undefined) {
       sets.push('confirmed_at = NULL', 'confirmed_by = NULL', `consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}`);
+      // An instruction rewritten in a turn that had read outside content carries that mark, as
+      // one created there does (task_create). Add-only: a clean edit leaves a mark standing, or
+      // creating clean and editing later would shed it.
+      sets.push('created_untrusted = COALESCE(?, created_untrusted)');
+      values.push(params.editedUntrusted ?? null);
     }
     if (params.status !== undefined) {
       sets.push('status = ?');

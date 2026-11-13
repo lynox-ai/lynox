@@ -16,8 +16,8 @@
  */
 import { isPlainObject, type ExternalClient, type ExternalRead, type TargetIo } from './bulk-external.js';
 import type { BulkInvalidReason, BulkRunStatus, ListPageItem } from './bulk-ledger.js';
-import type { BulkNotices } from './bulk-notices.js';
-import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, asciiLower, isShopifyFilterValues, mediaImageGidNumber, productGidNumber, shopifyFilterValues, type ShopifyListFilterValue, type ShopifyWriteForm } from './shopify-graphql.js';
+import type { BulkNotices, ShopifyFilterKind } from './bulk-notices.js';
+import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, asciiLower, isShopifyFilterValues, isShopifyStatusValues, mediaImageGidNumber, productGidNumber, shopifyFilterValues, type ShopifyListFilterValue, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
 import { presetStoreHost } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
@@ -175,21 +175,27 @@ export function shopifyBeforeImage(data: unknown, gid: string): { value: Record<
  */
 export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, ShopifyListFilterValue>>): boolean {
   const product = isPlainObject(data) && isPlainObject(data['product']) ? data['product'] : {};
-  const field: Readonly<Record<string, string>> = { product_type: 'productType', vendor: 'vendor' };
+  // `status` is answered in capitals (`ACTIVE`) and searched in small letters: ASCII case folds them.
+  const field: Readonly<Record<string, string>> = { product_type: 'productType', vendor: 'vendor', status: 'status' };
   return Object.entries(filters).every(([key, value]) => {
     const name = Object.hasOwn(field, key) ? field[key]! : null;
     const held = name === null ? undefined : product[name];
     // A value the rule does not take (a stored source no parse built) holds no product.
-    if (!isShopifyFilterValues(value)) return false;
+    if (!(key === 'status' ? isShopifyStatusValues(value) : isShopifyFilterValues(value))) return false;
     return typeof held === 'string' && shopifyFilterValues(value).some((v) => asciiLower(held) === asciiLower(v));
   });
 }
 
 /** Which filters a Shopify list has, for the sentences below; null for a list without filters. */
-function filterKind(filters: Readonly<Record<string, ShopifyListFilterValue>>): 'product_type' | 'vendor' | 'both' | null {
+function filterKind(filters: Readonly<Record<string, ShopifyListFilterValue>>): ShopifyFilterKind | null {
   const type = filters['product_type'] !== undefined;
   const vendor = filters['vendor'] !== undefined;
-  if (!type && !vendor) return null;
+  const status = filters['status'] !== undefined;
+  // A status alone: the group is the whole store, so only the status can be to blame.
+  if (!type && !vendor) return status ? 'status' : null;
+  // A group read among one status may match none for either reason: neither is named as the one,
+  // and its sentence is the same for one value or several.
+  if (status) return 'group_status';
   // With both, each value may match products while the pair matches none: no value is to blame.
   return type && vendor ? 'both' : type ? 'product_type' : 'vendor';
 }

@@ -75,8 +75,11 @@ export const PERSON_ERASURE_REACH: Readonly<Record<string, ReadonlyArray<'covere
   'workspace': ['files'],
   'sweeps': ['files'],
   'backups': ['backups'],
-  // A copy of the workspace files on its way out: removed when its download ends, or at the next start.
-  'export-staging': ['files'],
+  // An export on its way out: a staged archive (decrypted stores, files) or a workspace copy. The
+  // person erasure refuses while an export holds the slot, removes staged exports whose holder is
+  // gone (`sweepStaleExports`), and holds the slot itself while it runs (`export-slot.ts`), so the
+  // person is never left in a staged copy behind an "erased" answer.
+  'export-staging': { none: 'empty whenever the person erasure runs: it refuses while an export holds the slot and removes staged exports whose holder is gone' },
   'wire-sink': ['debug_capture'],
   'wire-sink-raw': ['debug_capture'],
   'batch-index.json': ['debug_capture'],

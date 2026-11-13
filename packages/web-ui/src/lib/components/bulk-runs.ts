@@ -463,25 +463,50 @@ export function bulkListFilterFolded(filters: Readonly<Record<string, string | r
 }
 
 /** The line naming a filtered Shopify list's group, where the run is started and approved. The
- *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter.
+ *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a group.
  *  `folded` shows each list of more than {@link BULK_LIST_FILTER_UNFOLDED_MAX} values folded. */
 export function bulkListFilterText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n, folded = false): string | null {
 	if (filters === null) return null;
-	// Every value in its own quotes: they are the scope the owner approves. Folded, a long list
-	// shows its first values and the count of the rest, so the line stays true (ux U-175).
-	const values = (v: string | readonly string[]): string => {
-		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
-		if (folded && quoted.length > BULK_LIST_FILTER_UNFOLDED_MAX) {
-			return `${quoted.slice(0, BULK_LIST_FILTER_FOLDED_SHOWN).join(', ')} ${i18n.tf('bulk.list.more', { n: String(quoted.length - BULK_LIST_FILTER_FOLDED_SHOWN) })}`;
-		}
-		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
-	};
+	const values = bulkFilterValues(i18n, folded);
 	const type = filters['product_type'];
 	const vendor = filters['vendor'];
 	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: values(type), vendor: values(vendor) });
 	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: values(type) });
 	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: values(vendor) });
 	return null;
+}
+
+/** A filter's values for its line: every value in its own quotes, they are the scope the owner
+ *  approves. Folded, a long list shows its first values and the count of the rest, so the line
+ *  stays true (U-175). */
+function bulkFilterValues(i18n: BulkI18n, folded: boolean): (v: string | readonly string[]) => string {
+	return (v) => {
+		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
+		if (folded && quoted.length > BULK_LIST_FILTER_UNFOLDED_MAX) {
+			return `${quoted.slice(0, BULK_LIST_FILTER_FOLDED_SHOWN).join(', ')} ${i18n.tf('bulk.list.more', { n: String(quoted.length - BULK_LIST_FILTER_FOLDED_SHOWN) })}`;
+		}
+		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
+	};
+}
+
+/** The line naming the statuses a Shopify product list reads, under the group's line; `{}` is a
+ *  list of every product. A store's search lists drafts, archived products and gift cards unless a
+ *  status narrows it, and the targets name none of them as such. Null for a list that is not a
+ *  store's products. */
+export function bulkListStatusText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n): string | null {
+	if (filters === null) return null;
+	const status = filters['status'];
+	if (status !== undefined) {
+		const names = (typeof status === 'string' ? [status] : status).map((s) => bulkStatusName(s, i18n));
+		return i18n.tf('bulk.list.filter_status', { status: bulkFilterValues(i18n, false)(names) });
+	}
+	const group = filters['product_type'] !== undefined || filters['vendor'] !== undefined;
+	return i18n.t(group ? 'bulk.list.any_status' : 'bulk.list.all_status');
+}
+
+/** A Shopify product status by its name in the page's language; one no store has, as it came. */
+function bulkStatusName(status: string, i18n: BulkI18n): string {
+	return status === 'active' || status === 'draft' || status === 'archived' || status === 'unlisted' ? i18n.t(`bulk.list.status.${status}`) : status;
 }
 
 /** The provider that serves a judge call, by name. */
@@ -692,6 +717,34 @@ export function bulkAtProbe(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' 
 /** Whether a planned run waits for the owner to start it, rather than having halted on a failure. */
 export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
 	return run.phase === 'planned' && (run.haltKey === 'awaitingStart' || run.haltKey === 'listed');
+}
+
+/** Whether the engine is moving the run on by itself right now: reading its list or judging it
+ *  (planned, no halt), or writing it (approved, or writing without a halt). Every other state
+ *  waits for the owner or has ended, so the page has nothing to wait for there. */
+export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason'>): boolean {
+	// Any halt, by its key or by a reason this page does not know (an engine newer than the page).
+	if (run.haltKey !== null || run.haltReason !== null) return false;
+	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
+}
+
+/** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`
+ *  while the tab is visible, loads it whole once the run stopped working, and gives up after
+ *  `BULK_FOLLOW_MAX_MS` (a run still working then is reloaded by the owner). The engine allows a
+ *  client (by IP) 120 requests a minute, and an idle tab already asks about 28 (active runs every
+ *  4 s, the status bar every 30 s): one ask every 5 s adds 12. A refused ask (429 or any failure)
+ *  waits longer each time — twice as long, at least as long as Retry-After says, at most
+ *  `BULK_FOLLOW_BACKOFF_MAX_MS` — and never turns the page into an error. */
+export const BULK_FOLLOW_MS = 5000;
+export const BULK_FOLLOW_MAX_MS = 10 * 60 * 1000;
+export const BULK_FOLLOW_BACKOFF_MAX_MS = 60_000;
+
+/** The next wait of a follow loop after an ask: back to the base after a good answer, longer
+ *  after a refused one (`retryAfterS` from a 429's Retry-After, when it names seconds). */
+export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number | null): number {
+	if (ok) return BULK_FOLLOW_MS;
+	const asked = retryAfterS !== null && Number.isFinite(retryAfterS) && retryAfterS > 0 ? retryAfterS * 1000 : 0;
+	return Math.min(Math.max(prev * 2, asked), BULK_FOLLOW_BACKOFF_MAX_MS);
 }
 
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo

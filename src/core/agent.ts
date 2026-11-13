@@ -30,7 +30,7 @@ import type {
 import { headlessRefusalNote } from './write-notes.js';
 import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS, MISTRAL_EU_HOST, MISTRAL_GLOBAL_HOST } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
-import { createToolContext } from './tool-context.js';
+import { createToolContext, isPolicyUnread, markPolicyUnread } from './tool-context.js';
 import { StreamProcessor, type PartialReply } from './stream.js';
 import { StreamIncompleteError } from './stream-incomplete.js';
 import { ToolCallImitationDetector, imitationToolsFrom } from './tool-call-imitation.js';
@@ -442,6 +442,21 @@ export function raceRunAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<
 /** The input field the review saves before a write_file/edit_file and records after it. */
 const REVIEWED_PATH_FIELD = 'path';
 
+/**
+ * Whether `network_policy` leaves web search open, so the provider-side `web_search` may be
+ * offered. That tool runs at the provider, past every egress check this instance makes, so it
+ * stands in for `web_research` only where `web_research` itself could search: no policy,
+ * `allow-all`, or `guarded` (which lets discovery through). `deny-all` refuses every search, and
+ * an `allow-list` cannot bound the hosts the provider reaches, so both withhold it. A policy this
+ * code does not know, or a context that does not carry the instance's policy (`isPolicyUnread`),
+ * withholds it too (fail-closed).
+ */
+export function providerSearchAdmitted(ctx: ToolContext | undefined): boolean {
+  if (ctx === undefined || isPolicyUnread(ctx)) return false;
+  const policy: string | undefined = ctx.networkPolicy;
+  return policy === undefined || policy === 'allow-all' || policy === 'guarded';
+}
+
 export class Agent implements IAgent {
   readonly name: string;
   /** The agents this agent's chain may abort — see `AbortScope`. Inherited by children. */
@@ -562,6 +577,8 @@ export class Agent implements IAgent {
     const runId = this.currentRunId ?? '';
     let result;
     try {
+      const runUntrusted = filing.kind === 'mail_reply' || this._sawUntrustedData || this._conversationSawUntrusted;
+      const instructionUntrusted = ctx.createdUntrusted === true;
       result = ctx.store.file({
         filing,
         origin: {
@@ -575,8 +592,10 @@ export class Agent implements IAgent {
           // taint is set only after the handler returns, so a reply counts as after foreign
           // content by its kind (PRD §4.5 fact 14). A trigger marked as set up after foreign
           // content passes that on to everything its run files.
-          afterUntrusted: filing.kind === 'mail_reply' || ctx.createdUntrusted === true
-            || this._sawUntrustedData || this._conversationSawUntrusted,
+          afterUntrusted: runUntrusted || instructionUntrusted,
+          // The card names which (U-209): the instruction, the run, or both.
+          ...(instructionUntrusted ? { instructionUntrusted: true } : {}),
+          ...(runUntrusted ? { runUntrusted: true } : {}),
         },
         createdBy: ctx.createdBy,
         mandateId: ctx.mandateId,
@@ -1588,7 +1607,8 @@ export class Agent implements IAgent {
     this.inheritedOpenaiModelId = config.openaiModelId;
     this.modelPinnedByProfile = config.modelPinnedByProfile === true;
     this.inheritedOpenaiAuth = config.openaiAuth;
-    this.toolContext = config.toolContext ?? createToolContext({});
+    // One built here carries no `network_policy`: marked, so the provider-side search stays withheld.
+    this.toolContext = config.toolContext ?? markPolicyUnread(createToolContext({}));
     this.sessionCounters = config.sessionCounters ?? {
       httpRequests: 0,
       writeBytes: 0,
@@ -3536,7 +3556,10 @@ export class Agent implements IAgent {
     // A provider-side tool runs at the provider, past the dispatch check that holds a contained
     // chat to its list (`containment.ts`), so such a chat is offered none.
     const contained = chatIsContained(this);
-    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools && !contained
+    // The provider-side search runs at the provider, outside `network_policy`: it is offered only
+    // when the policy leaves search open, never because `web_research` happens to be missing.
+    const searchAdmitted = providerSearchAdmitted(this.toolContext);
+    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools && !contained && searchAdmitted
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
     // Lazy-tools: OPT-IN (dormant by default). Anthropic-direct only, never on the

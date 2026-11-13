@@ -14,7 +14,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -47,6 +47,7 @@
 
 	async function json<T>(path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; body: T }> {
 		const res = await fetch(`${getApiBase()}${path}`, init);
+		if (res.status === 429) lastRetryAfter = Number(res.headers.get('Retry-After'));
 		const body = (await res.json().catch(() => ({}))) as T;
 		return { ok: res.ok, status: res.status, body };
 	}
@@ -88,12 +89,59 @@
 		return out;
 	}
 
-	async function load(): Promise<void> {
-		loading = true;
-		error = '';
+	// The run a follow loop (below) belongs to: a new load for another run, or the page going
+	// away, ends the loop of the one before.
+	let following = 0;
+	// What the engine's last 429 said to wait (Retry-After, seconds), for a follow loop's next wait.
+	let lastRetryAfter: number | null = null;
+
+	/** Ask for the run again while the engine moves it on by itself (a list read, a judging, a
+	 *  write the owner started), so the page shows the next step without a reload. Only while the
+	 *  tab is visible, one request an ask. While the run still works the page keeps what it shows:
+	 *  its counts and the marks on its targets come from one load and agree. Once the run stopped
+	 *  working, the page loads it once as on opening. A refused or failed ask or load leaves the
+	 *  page as it is and waits longer ({@link bulkFollowDelay}); the loop ends once that load
+	 *  succeeded, after `BULK_FOLLOW_MAX_MS`, or when the page shows another run. */
+	async function follow(): Promise<void> {
+		const mine = ++following;
+		const until = Date.now() + BULK_FOLLOW_MAX_MS;
+		let delay = BULK_FOLLOW_MS;
+		while (mine === following && run !== null && bulkEngineWorking(run) && Date.now() < until) {
+			await new Promise((r) => setTimeout(r, delay));
+			if (mine !== following) return;
+			if (busy || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) continue;
+			let res: Response | null = null;
+			try {
+				res = await fetch(`${getApiBase()}/bulk/runs/${encodeURIComponent(runId)}`);
+			} catch {
+				res = null;
+			}
+			if (mine !== following) return;
+			const body = res?.ok ? ((await res.json().catch(() => null)) as BulkRunDetailData | null) : null;
+			let retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
+			let ok = body !== null;
+			if (body !== null && !bulkEngineWorking(body)) {
+				lastRetryAfter = null;
+				ok = await load({ quiet: true });
+				if (!ok) retryAfter = lastRetryAfter;
+			}
+			delay = bulkFollowDelay(delay, ok, retryAfter);
+		}
+	}
+
+	/** Load the run and its targets. True when the page now shows them; false when the load
+	 *  failed (a quiet load leaves the page as it was) or the page moved on to another run. */
+	async function load(opts: { quiet?: boolean } = {}): Promise<boolean> {
+		const quiet = opts.quiet === true;
+		const id = runId;
+		if (!quiet) {
+			loading = true;
+			error = '';
+		}
 		try {
-			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(runId)}`);
-			if (!r.ok) { error = t('common.load_failed'); loading = false; return; }
+			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
+			if (id !== runId) return false;
+			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
@@ -107,19 +155,28 @@
 			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
-			if (whole && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
+			if (id !== runId) return false;
+			if (whole && shown.length !== r.body.total) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
 			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
+			// A load for a run the page no longer shows writes nothing: the newer load owns the page.
+			if (id !== runId) return false;
 			run = r.body;
 			targets = shown;
 			creates = deleted;
+			// A follow ask runs only while the engine works, when the page offers the owner no input.
 			maxTargets = Math.max(1, bulkWriting(run));
 			unmeasuredOk = false;
 			probeOk = false;
 			supersedable = null;
 		} catch {
-			error = t('common.load_failed');
+			if (id !== runId) return false;
+			if (!quiet) error = t('common.load_failed');
+			loading = false;
+			return false;
 		}
 		loading = false;
+		if (!quiet && run !== null && bulkEngineWorking(run)) void follow();
+		return true;
 	}
 
 	async function showMore(): Promise<void> {
@@ -307,7 +364,9 @@
 		return d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 	}
 
-	$effect(() => { void runId; void load(); });
+	$effect(() => { void runId; following++; void load(); });
+	// The page going away ends a follow loop.
+	$effect(() => () => { following++; });
 	$effect(() => {
 		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
@@ -350,6 +409,8 @@
 	let filtersShownFor = $state<string | null>(null);
 	const filtersFolded = $derived(run !== null && filtersShownFor !== run.id ? bulkListFilterFolded(run.listFilters) : 0);
 	const listFilterText = $derived(run ? bulkListFilterText(run.listFilters, i18n, filtersFolded > 0) : null);
+	// Which statuses a store's product list reads: drafts, archived products and gift cards unless a status narrows it.
+	const listStatusText = $derived(run ? bulkListStatusText(run.listFilters, i18n) : null);
 	let filterLine = $state<HTMLParagraphElement | null>(null);
 	async function showAllFilters(): Promise<void> {
 		if (run === null) return;
@@ -574,7 +635,7 @@
 			{:else if startKind === 'list' && run.listFirstPage}
 				<div class="space-y-3 border-t border-border pt-4">
 					<p class="text-sm">{tf('bulk.start.list_explain', { provider, address: bulkVisibleText(run.listFirstPage) })}</p>
-					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}
+					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}{#if listStatusText}<p class="text-sm">{listStatusText}</p>{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t(startButton ?? 'bulk.start.list')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
@@ -743,7 +804,7 @@
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
 					{:else}
-					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}
+					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}{#if listStatusText}<p class="text-sm">{listStatusText}</p>{/if}
 					{#if run.writeForm === 'unmeasured'}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{unmeasuredNote}</p>
 						<label class="flex gap-2 items-start text-sm">
