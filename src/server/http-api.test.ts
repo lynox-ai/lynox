@@ -3963,8 +3963,8 @@ describe('LynoxHTTPApi', () => {
 
     // The stream is marked dead by hand, as in the takeover test above: the server does not see
     // the connection close on this route today, so no test can drop it for real.
-    // Only the question is ruled out as a reason: a run silent past the stale window is still
-    // taken over, and the scheduled question then stays open too.
+    // Only the question is ruled out as a reason. That a run silent past the stale window is still
+    // taken over, with the scheduled question left open, is read from the code, not tested here.
     it('a scheduled question does not let a second message take over a working run', async () => {
       repayRateWindow();
       await withRunBesideQuestion('second-beside-1', async ({ prompts, slots, questionId }) => {
