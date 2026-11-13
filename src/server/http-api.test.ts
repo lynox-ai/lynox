@@ -8,6 +8,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
+import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
@@ -329,6 +330,12 @@ vi.mock('../core/engine.js', () => ({
       deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
       getWorkflowAuthorship: mockHistoryGetWorkflowAuthorship,
       setWorkflowConfirmedAt: mockSetWorkflowConfirmedAt,
+      // The owner's stamp on a workflow (`workflow-stamp.ts`): by default a workflow here is the
+      // owner's, and stamped when it carries `confirmedAt`; the stamp tests override these.
+      workflowStampState: vi.fn((p: { confirmedAt?: string }) => (p.confirmedAt ? 'holds' : 'unconfirmed')),
+      workflowMandateShaped: vi.fn().mockReturnValue(false),
+      workflowStampDigest: vi.fn().mockReturnValue('digest-1'),
+      getWorkflowExact: vi.fn().mockReturnValue(undefined),
       getTask: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
@@ -588,6 +595,11 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
     headers['Content-Type'] = 'application/json';
   }
   return fetch(`${baseUrl}${path}`, { ...opts, headers });
+}
+
+/** The digest a schedule's preview shows, which its confirm must send back. */
+async function shownExpect(id: string): Promise<string> {
+  return ((await (await jsonFetch(`/api/tasks/${id}/stamp-preview`)).json()) as { expect: string }).expect;
 }
 
 /**
@@ -1924,7 +1936,7 @@ describe('LynoxHTTPApi', () => {
         body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 1 * *', params: { month: '2026-06' } }),
       });
       expect(res.status).toBe(201);
-      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String), 'digest-1');
       // Evicts the in-memory pipeline cache so the WorkerLoop reads the
       // now-confirmed blob at fire time (else the confirmedAt gate breaks it).
       expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
@@ -2023,7 +2035,7 @@ describe('LynoxHTTPApi', () => {
       storeWf({ mode: 'interactive', steps: [{ id: 'pick', task: 'ask_user which month' }] });
       const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *', params: { month: '2026-06' } }) });
       expect(res.status).toBe(201);
-      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String), 'digest-1');
       expect(mockTaskCreatePipeline).toHaveBeenCalledWith(expect.objectContaining({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }));
     });
 
@@ -2122,7 +2134,7 @@ describe('LynoxHTTPApi', () => {
           await withGrantServices(async () => {
             const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES }) });
             expect(res.status).toBe(201);
-            expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+            expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String), 'digest-1');
             expect(setGrant).not.toHaveBeenCalled();
           });
         });
@@ -2168,7 +2180,7 @@ describe('LynoxHTTPApi', () => {
               contractJson: expect.stringContaining('"origin":"reviewed"'),
             }), expect.objectContaining({
               triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String), grantId,
-            }), expect.any(String));
+            }), expect.any(String), expect.objectContaining({ id: 'wf-sched' }));
             expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled(); // the grant write carries the confirm
             expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
           });
@@ -10656,11 +10668,12 @@ describe('LynoxHTTPApi', () => {
       mockTaskComplete.mockImplementationOnce(locked);
       mockTaskSetEnabled.mockImplementationOnce(locked);
       mockConfirmTrigger.mockImplementationOnce(locked);
+      const shown = await shownExpect('bulk-r');
       const calls: [string, string, string?][] = [
         ['/api/tasks/bulk-r/', 'PATCH', JSON.stringify({ schedule_cron: '1h' })],
         ['/api/tasks/bulk-r/complete', 'POST'],
         ['/api/tasks/bulk-r', 'PATCH', JSON.stringify({ enabled: false })],
-        ['/api/tasks/bulk-r/confirm', 'POST'],
+        ['/api/tasks/bulk-r/confirm', 'POST', JSON.stringify({ expect: shown })],
       ];
       for (const [path, method, body] of calls) {
         const res = await jsonFetch(path.replace(/\/$/, ''), { method, ...(body ? { body } : {}) });
@@ -10679,7 +10692,7 @@ describe('LynoxHTTPApi', () => {
 
     // triggers-consent — the human consent surface.
     it('POST /api/tasks/:id/confirm confirms a trigger (200)', async () => {
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' });
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: await shownExpect('task-1') }) });
       expect(res.status).toBe(200);
       const body = await res.json() as { confirmed_at: string };
       expect(body.confirmed_at).toBeTruthy();
@@ -10687,8 +10700,17 @@ describe('LynoxHTTPApi', () => {
 
     it('POST /api/tasks/:id/confirm returns 404 for an unknown trigger', async () => {
       mockConfirmTrigger.mockReturnValueOnce(undefined);
-      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST' });
+      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: await shownExpect('nope') }) });
       expect(res.status).toBe(404);
+    });
+
+    // A confirm stamps only what its preview showed.
+    it('POST /api/tasks/:id/confirm without the preview\'s digest is refused, and stamps nothing', async () => {
+      mockConfirmTrigger.mockClear();
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code: string }).code).toBe('expect_required');
+      expect(mockConfirmTrigger).not.toHaveBeenCalled();
     });
 
     // ── Run now, and the two different 409s ──────────────────────────────────
@@ -11125,6 +11147,9 @@ describe('LynoxHTTPApi', () => {
       const history = {
         getTriggerStampConnections: () => ({ confirmedAt: AT, stampConnections: raw }),
         getPlannedPipeline: () => undefined,
+        // The list also says whether a plan's workflow waits for the owner's stamp; not the subject here.
+        getWorkflowExact: (id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', goal: '', steps: [], reasoning: '', estimatedCost: 0, createdAt: AT, executed: false } : undefined),
+        workflowStampState: () => 'holds',
         getWorkflowAuthorship: () => ({ createdBy: 'mandate:eva@kanzlei.example', createdMandateId: MID, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-10-01 00:00:00' }),
       };
       const onWorkflow = { id: 'trg-wf', title: 'w', effect: 'run_workflow', pipeline_id: 'wf-eva', created_by: 'owner', confirmed_at: AT };
@@ -11157,13 +11182,13 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('GET /api/triggers adds the two flags, and the pause\'s, and nothing else to a row', async () => {
+    it('GET /api/triggers adds the two flags, the pause\'s, and whether its workflow waits for a stamp, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
       // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's
       // (`triggerForRoute`), on by default since the takeover is in the view.
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
-        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'running', 'stoppable', 'title']);
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'running', 'stoppable', 'title', 'workflow_awaits_stamp']);
       });
     });
 
@@ -13584,6 +13609,8 @@ describe('LynoxHTTPApi', () => {
       beforeEach(() => {
         claimDir = mkdtempSync(join(tmpdir(), 'lynox-route-claim-'));
         claimHistory = new RunHistory(join(claimDir, 'history.db'));
+        // The workflow the claims are taken for is the owner's, stamped (`workflow-stamp.ts`).
+        vi.spyOn(claimHistory, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
         // clearAllMocks (global beforeEach) clears CALLS, not implementations — an
         // implementation left standing here would reach every sibling describe.
         mockRunSavedWorkflow.mockReset();
@@ -21642,11 +21669,198 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       storeWf();
       const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
       expect(res.status).toBe(201);
-      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+      // Stamped over the definition the schedule's checks judged, and no other.
+      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String), 'digest-1');
+    });
+
+    // The owner stamps a workflow a mandate shaped in its own
+    // act, after seeing its steps; scheduling it does not, and nothing runs it before.
+    describe('the owner\'s stamp on a workflow a mandate shaped', () => {
+      type Hist = Record<string, ReturnType<typeof vi.fn>>;
+      const hist = (): Hist => (api as unknown as { engine: { getRunHistory: () => Hist } }).engine.getRunHistory();
+      const MANDATE_WF = {
+        id: 'wf-sched', name: 'Report', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+        executed: false, template: true, mode: 'autonomous', on_failure: 'stop', parameters: [{ name: 'month', description: '', type: 'string', source: 'user_input', defaultValue: 'May' }],
+        steps: [
+          { id: 's1', task: 'look up the report', tools: ['memory_recall'] },
+          { id: 's2', task: 'post it', tool: 'http_request', input_template: { url: 'https://api.example.com/{{params.month}}', headers: { Authorization: 'secret:CRM_TOKEN' } } },
+        ],
+      };
+      function shaped(state: 'holds' | 'awaits_owner_stamp' = 'awaits_owner_stamp'): () => void {
+        const h = hist();
+        const saved = { s: h['workflowStampState']!.getMockImplementation(), m: h['workflowMandateShaped']!.getMockImplementation(), g: h['getWorkflowExact']!.getMockImplementation() };
+        h['workflowStampState']!.mockImplementation(() => state);
+        h['workflowMandateShaped']!.mockImplementation(() => true);
+        h['getWorkflowExact']!.mockImplementation((id: string) => (id === 'wf-sched' ? structuredClone(MANDATE_WF) : undefined));
+        return () => {
+          h['workflowStampState']!.mockImplementation(saved.s ?? (() => 'holds'));
+          h['workflowMandateShaped']!.mockImplementation(saved.m ?? (() => false));
+          h['getWorkflowExact']!.mockImplementation(saved.g ?? (() => undefined));
+        };
+      }
+
+      it('scheduling it is refused with the code and the id, and stamps nothing', async () => {
+        storeWf();
+        const restore = shaped();
+        try {
+          mockSetWorkflowConfirmedAt.mockClear();
+          const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
+          expect(res.status).toBe(409);
+          expect(await res.json()).toMatchObject({ code: 'workflow_awaits_stamp', pipelineId: 'wf-sched' });
+          expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+        } finally { restore(); }
+      });
+
+      it('scheduling the owner\'s own workflow whose steps changed after its stamp is refused too, and stamps nothing', async () => {
+        storeWf();
+        const restore = shaped();
+        hist()['workflowMandateShaped']!.mockImplementation(() => false);
+        try {
+          mockSetWorkflowConfirmedAt.mockClear();
+          mockTaskCreatePipeline.mockClear();
+          const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { code: string }).code).toBe('workflow_awaits_stamp');
+          expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+          expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+        } finally { restore(); }
+      });
+
+      it('a stamp refused because the steps changed meanwhile makes no schedule', async () => {
+        storeWf();
+        mockTaskCreatePipeline.mockClear();
+        mockSetWorkflowConfirmedAt.mockReturnValueOnce(false);
+        const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'steps_changed', pipelineId: 'wf-sched' });
+        expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+      });
+
+      it('the confirm counts the one-shots the wait switched off, and switches none on', async () => {
+        const restore = shaped();
+        const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const orig = engineRef['getTaskManager'];
+        const setEnabled = vi.fn();
+        const waited = `${workflowAwaitsStampResult('wf-sched')} It was switched off; switch it on again once its steps are stamped.`;
+        const hook = `${workflowAwaitsStampResult('wf-sched')} The trigger was switched off; switch it on again once its steps are stamped.`;
+        const row = (over: Record<string, unknown>): Record<string, unknown> => ({ pipeline_id: 'wf-sched', enabled: 0, schedule_cron: null, watch_config: null, last_run_status: 'halted', last_run_result: waited, ...over });
+        engineRef['getTaskManager'] = () => ({ setEnabled, listTriggers: () => [
+          row({}), row({ id: 'b' }),
+          // A webhook the wait switched off: still off too.
+          row({ source: 'webhook', last_run_status: 'failed', last_run_result: hook }),
+          row({ enabled: 1 }), row({ enabled: undefined }), row({ pipeline_id: 'wf-other' }),
+          // Off for another reason (a bulk run at its maximum, switched off by hand): not the wait's.
+          row({ last_run_result: 'Bulk run halted at its approved maximum.' }),
+        ] });
+        try {
+          const ok = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+          expect(ok.status).toBe(200);
+          expect(((await ok.json()) as { stillOff: number }).stillOff).toBe(3);
+          expect(setEnabled).not.toHaveBeenCalled();
+        } finally { engineRef['getTaskManager'] = orig; restore(); }
+      });
+
+      it('CONTROL: once the owner\'s stamp holds, scheduling it goes ahead', async () => {
+        storeWf();
+        const restore = shaped('holds');
+        try {
+          expect((await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) })).status).toBe(201);
+        } finally { restore(); }
+      });
+
+      it('the library\'s Run is refused with the code and the id', async () => {
+        storeWf();
+        const restore = shaped();
+        try {
+          const res = await jsonFetch('/api/workflows/wf-sched/run', { method: 'POST', body: '{}' });
+          expect(res.status).toBe(409);
+          expect(await res.json()).toMatchObject({ code: 'workflow_awaits_stamp', pipelineId: 'wf-sched' });
+        } finally { restore(); }
+      });
+
+      it('the preview shows each step as it runs, with the captured call and the tools it gets, and no secret', async () => {
+        const restore = shaped();
+        try {
+          const res = await jsonFetch('/api/workflows/wf-sched/stamp-preview');
+          expect(res.status).toBe(200);
+          const shown = await res.json() as Record<string, unknown> & { steps: Array<Record<string, unknown>> };
+          expect(shown).toMatchObject({ expect: 'digest-1', stampedAt: null, changedBy: 'mandate', awaitsStamp: true, mode: 'autonomous', onFailure: 'stop', limits: null, contract: null });
+          expect(shown['parameters']).toEqual([{ name: 'month', required: false, default: 'May' }]);
+          expect(shown.steps[0]).toEqual({ id: 's1', task: 'look up the report', tool: null, inputTemplate: null, tools: ['memory_recall'], model: null, role: null, roleGrant: null, effort: null, thinking: null, timeoutMs: null, inputFrom: null });
+          expect(shown.steps[1]).toMatchObject({ id: 's2', tool: 'http_request', inputTemplate: MANDATE_WF.steps[1]!.input_template });
+          // A step that names no tools gets the inline pool, and the replayed tool with it; never bash silently.
+          expect(shown.steps[1]!['tools']).toContain('http_request');
+          expect(shown.steps[1]!['tools']).not.toContain('bash');
+          // A secret reference stays its name.
+          expect(JSON.stringify(shown)).toContain('secret:CRM_TOKEN');
+          // Exact id only: a prefix is no workflow.
+          expect((await jsonFetch('/api/workflows/wf-sch/stamp-preview')).status).toBe(404);
+        } finally { restore(); }
+      });
+
+      it('the confirm needs the preview\'s digest, stamps only that, and a changed one is refused', async () => {
+        const restore = shaped();
+        try {
+          mockSetWorkflowConfirmedAt.mockClear();
+          const none = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: '{}' });
+          expect(none.status).toBe(400);
+          expect(((await none.json()) as { code: string }).code).toBe('expect_required');
+          expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+          mockSetWorkflowConfirmedAt.mockReturnValueOnce(false);
+          const stale = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-0' }) });
+          expect(stale.status).toBe(409);
+          expect(((await stale.json()) as { code: string }).code).toBe('steps_changed');
+          const ok = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+          expect(ok.status).toBe(200);
+          expect(mockSetWorkflowConfirmedAt).toHaveBeenLastCalledWith('wf-sched', expect.any(String), 'digest-1');
+          expect((await jsonFetch('/api/workflows/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) })).status).toBe(404);
+        } finally { restore(); }
+      });
+
+      it('the library marks the workflow and says who reads', async () => {
+        const restore = shaped();
+        mockHistoryGetPlannedPipelines.mockReturnValueOnce([{ id: 'wf-sched', manifest_name: 'Report', manifest_json: JSON.stringify(MANDATE_WF), step_count: 2, started_at: '2026-01-01' }]);
+        try {
+          const body = await (await jsonFetch('/api/workflows/library')).json() as { viewer: string; workflows: Array<{ id: string; awaitsStamp: boolean }> };
+          expect(body.viewer).toBe('owner');
+          expect(body.workflows.find((w) => w.id === 'wf-sched')?.awaitsStamp).toBe(true);
+        } finally { restore(); }
+      });
+
+      it('the library and the preview mark the owner\'s own workflow whose steps changed after its stamp, as the run does', async () => {
+        const restore = shaped();
+        const h = hist();
+        h['workflowMandateShaped']!.mockImplementation(() => false);
+        mockHistoryGetPlannedPipelines.mockReturnValueOnce([{ id: 'wf-sched', manifest_name: 'Report', manifest_json: JSON.stringify(MANDATE_WF), step_count: 2, started_at: '2026-01-01' }]);
+        try {
+          const lib = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; awaitsStamp: boolean }> };
+          expect(lib.workflows.find((w) => w.id === 'wf-sched')?.awaitsStamp).toBe(true);
+          const shown = await (await jsonFetch('/api/workflows/wf-sched/stamp-preview')).json() as { awaitsStamp: boolean; changedBy: string };
+          expect(shown).toMatchObject({ awaitsStamp: true, changedBy: 'owner' });
+        } finally { restore(); }
+      });
+
+      it('the preview names a step\'s role, effort, thinking and time limit, and takes a definition without steps', async () => {
+        const restore = shaped();
+        const h = hist();
+        h['getWorkflowExact']!.mockImplementation(() => ({ ...structuredClone(MANDATE_WF), steps: [{ id: 's1', task: 't', role: 'researcher', effort: 'high', thinking: 'deep', timeout_ms: 5000 }] }));
+        try {
+          const shown = await (await jsonFetch('/api/workflows/wf-sched/stamp-preview')).json() as { steps: Array<Record<string, unknown>> };
+          expect(shown.steps[0]).toMatchObject({ role: 'researcher', effort: 'high', thinking: 'deep', timeoutMs: 5000 });
+          // The role's own grant, as the built-in role states it.
+          const { getRole } = await import('../core/roles.js');
+          const researcher = getRole('researcher')!;
+          expect(shown.steps[0]!['roleGrant']).toEqual({ model: researcher.model, effort: researcher.effort, allowTools: researcher.allowTools ? [...researcher.allowTools] : null, denyTools: researcher.denyTools ? [...researcher.denyTools] : null, readOnly: researcher.readOnly === true });
+          h['getWorkflowExact']!.mockImplementation(() => ({ ...structuredClone(MANDATE_WF), steps: undefined }));
+          const empty = await jsonFetch('/api/workflows/wf-sched/stamp-preview');
+          expect(empty.status).toBe(200);
+          expect(((await empty.json()) as { steps: unknown[] }).steps).toEqual([]);
+        } finally { restore(); }
+      });
     });
 
     it('confirms a schedule, recorded as the owner, and its changes leave no mark', async () => {
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: await shownExpect('task-1') }) })).status).toBe(200);
       expect(mockConfirmTrigger).toHaveBeenCalledWith('task-1', undefined, 'owner', undefined);
       await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
       expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
@@ -21704,9 +21918,10 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: null, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-secret-1' })] });
 
-        // Without the digest: stamped without a list, as every confirm was before.
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
-        expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+        // Without the digest: refused, nothing stamped (it stamped without a list before).
+        const calls = mockConfirmTrigger.mock.calls.length;
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(400);
+        expect(mockConfirmTrigger.mock.calls.length).toBe(calls);
 
         // A mandate's backup or notice never uses a connection: nothing is listed or shown for it.
         for (const effect of ['backup', 'notify']) {
@@ -21781,7 +21996,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     it('confirming a workflow schedule never stamps the workflow, which every schedule naming it shares', async () => {
       mockConfirmTrigger.mockReturnValueOnce({ id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-sched', confirmed_at: '2026-10-08T00:00:00.000Z' });
       storeWf(); // an unstamped workflow
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: await shownExpect('task-1') }) })).status).toBe(200);
       expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
     });
 
@@ -22310,7 +22525,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });

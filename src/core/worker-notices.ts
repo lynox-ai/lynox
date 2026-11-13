@@ -60,6 +60,22 @@ function firstRunUnconfirmedId(stored: string): string | undefined {
   return stored.slice(FIRST_RUN_HEAD.length, stored.length - FIRST_RUN_TAIL.length);
 }
 /**
+ * A webhook trigger switched off because its workflow waits for the owner to review its steps
+ * (`workflow-stamp.ts`): the event's stored reason, with the workflow's id in it. Writer and
+ * reader share the parts, as above.
+ */
+const AWAITS_STAMP_HEAD = 'Workflow "';
+const AWAITS_STAMP_TAIL = '" waits for its owner to review its steps, so this trigger was switched off and refuses deliveries. Review its steps under Automation → Workflows and stamp them, then switch the trigger on again.';
+export function webhookAwaitsStampReason(workflowId: string): string {
+  return `${AWAITS_STAMP_HEAD}${workflowId}${AWAITS_STAMP_TAIL}`;
+}
+/** The workflow id of a stored {@link webhookAwaitsStampReason}, or undefined for any other text. */
+function webhookAwaitsStampId(stored: string): string | undefined {
+  if (stored.length <= AWAITS_STAMP_HEAD.length + AWAITS_STAMP_TAIL.length) return undefined;
+  if (!stored.startsWith(AWAITS_STAMP_HEAD) || !stored.endsWith(AWAITS_STAMP_TAIL)) return undefined;
+  return stored.slice(AWAITS_STAMP_HEAD.length, stored.length - AWAITS_STAMP_TAIL.length);
+}
+/**
  * An event run by a workflow whose mode lets it ask for more than an answer: the event's stored
  * reason, with the workflow's id and mode in it. Writer and reader share the parts, as above; the
  * mode is one of the planner's words and never holds `MODE_MID`, so the reader splits at its last
@@ -292,6 +308,10 @@ function deEventReason(stored: string): string {
   const workflowId = firstRunUnconfirmedId(stored);
   if (workflowId !== undefined) {
     return `Workflow „${saidWorkflowId(workflowId)}“ ist vor dem ersten Lauf noch nicht bestätigt; der Auslöser ist darum aus. Plane den Workflow in der Bibliothek ein und schalte den Auslöser wieder ein.`;
+  }
+  const stampId = webhookAwaitsStampId(stored);
+  if (stampId !== undefined) {
+    return `Workflow „${saidWorkflowId(stampId)}“ wartet darauf, dass du seine Schritte prüfst; der Auslöser ist darum aus. Prüf die Schritte unter Automation → Workflows, bestätige sie und schalte den Auslöser wieder ein.`;
   }
   const modeId = eventModeRefusedId(stored);
   if (modeId !== undefined) {

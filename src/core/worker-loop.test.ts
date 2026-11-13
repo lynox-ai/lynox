@@ -62,6 +62,10 @@ import type { Session } from './session.js';
 import type { RunState, AgentOutput } from '../types/orchestration.js';
 import { configurePersistentBudget, resetPersistentBudget, getReservedInFlight } from './session-budget.js';
 
+/** A workflow in these tests counts as stamped when it carries `confirmedAt`, as before the stamp
+ *  bound its steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts. */
+const STAMPED_IF_CONFIRMED = (p: { confirmedAt?: string }): 'holds' | 'unconfirmed' => (p.confirmedAt ? 'holds' : 'unconfirmed');
+
 function makeRunState(overrides?: Partial<RunState>): RunState {
   return {
     runId: 'fresh-run-id',
@@ -1033,7 +1037,7 @@ describe('WorkerLoop', () => {
       const seen: unknown[] = [];
       const run = async (task: TriggerRecord, row: { confirmedAt: string | null; stampConnections: string | null } | undefined): Promise<void> => {
         const { loop, session, engine } = setup(task);
-        (engine as unknown as Record<string, unknown>)['getRunHistory'] = () => ({ getTriggerStampConnections: (id: string) => (id === task.id ? row : undefined) });
+        (engine as unknown as Record<string, unknown>)['getRunHistory'] = () => ({ workflowStampState: STAMPED_IF_CONFIRMED, getTriggerStampConnections: (id: string) => (id === task.id ? row : undefined) });
         vi.mocked(session.run).mockImplementationOnce(async () => { seen.push(currentPlanStamp()); return 'ran'; });
         await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null) => Promise<void> }).executeTask(task, null);
       };
@@ -1067,6 +1071,7 @@ describe('WorkerLoop', () => {
         const task = makeTask({ id: 'po-wf', effect: 'run_workflow', pipeline_id: 'wf-eva', confirmed_at: AT, created_by: 'owner' });
         const { loop, engine } = setup(task);
         (engine as unknown as Record<string, unknown>)['getRunHistory'] = () => ({
+      workflowStampState: STAMPED_IF_CONFIRMED,
           getPlannedPipeline: () => ({ id: 'wf-eva', manifest_json: JSON.stringify(template) }),
           getWorkflowAuthorship: () => EVA_WF,
           getTriggerStampConnections: () => ({ confirmedAt: AT, stampConnections: encodeStamp(AT, stampWf, ENTRIES) }),
@@ -2683,6 +2688,9 @@ describe('WorkerLoop', () => {
     vi.useRealTimers();
     const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-stop-'));
     const history = new RunHistory(join(dir, 'history.db'));
+    // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+    // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+    vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
     const store = new PromptStore(history.getDb());
     try {
       let answer: string | undefined;
@@ -2743,6 +2751,9 @@ describe('WorkerLoop', () => {
     vi.useRealTimers();
     const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-onbox-'));
     const history = new RunHistory(join(dir, 'history.db'));
+    // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+    // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+    vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
     const store = new PromptStore(history.getDb());
     try {
       const asked = pv`⚠ http_request: POST to h.example /v1/x (fields "name") — Allow outbound data?${onBoxBlock('{\n  "name": "CANARY-VALUE"\n}')}`;
@@ -2781,6 +2792,9 @@ describe('WorkerLoop', () => {
     vi.useRealTimers();
     const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-hardblock-'));
     const history = new RunHistory(join(dir, 'history.db'));
+    // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+    // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+    vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
     const store = new PromptStore(history.getDb());
     try {
       const answers: string[] = [];
@@ -2843,6 +2857,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         // No saved-workflow row, no in-memory entry — getPipeline returns
         // undefined and executePipeline records a benign skip via
         // recordAndNotify without throwing (so it doesn't land in Bugsink).
@@ -2942,6 +2957,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-not-template', manifest_json: nonTemplatePlanned })),
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
@@ -2981,6 +2997,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-hidden', manifest_json: planned })),
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
@@ -3021,6 +3038,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-hidden-name', manifest_json: planned })),
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
@@ -3069,6 +3087,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'saved-seeded', manifest_json: JSON.stringify(template) })),
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
@@ -3130,6 +3149,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'saved-monthly-report', manifest_json: stored.manifest_json })),
         // 2a: the fresh pipeline_runs row is written by runManifest (mocked in
         // this suite); the tool-layer keeps only the step-results batch. Neither
@@ -3227,6 +3247,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'recurring-wf', manifest_json: templateJson })),
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
@@ -3297,6 +3318,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'partial-wf', manifest_json: templateJson })),
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
@@ -3350,6 +3372,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
@@ -3444,6 +3467,7 @@ describe('WorkerLoop', () => {
       getMemory: vi.fn(() => null),
       getToolContext: vi.fn(() => ({ tools: [], containment: null })),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'hv-wf', manifest_json: JSON.stringify(template) })),
         getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(),
@@ -3480,6 +3504,7 @@ describe('WorkerLoop', () => {
       getMemory: vi.fn(() => null),
       escalateToUser: escalateSpy,
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'b2-wf', manifest_json: templateJson })),
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
@@ -3653,6 +3678,7 @@ describe('WorkerLoop', () => {
       getToolContext: vi.fn(() => ({ tools: [] })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         // Pipeline lookup goes through getPlannedPipeline (manifest_json blob).
         getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-interactive', manifest_json: interactivePlanned })),
         getPipelineRunManifest: vi.fn(() => null),
@@ -3687,6 +3713,7 @@ describe('WorkerLoop', () => {
       getSecretStore: vi.fn(() => null), getContext: vi.fn(() => null), getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })), getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-asks', manifest_json: planned })),
         getPipelineRunManifest: vi.fn(() => null),
       })),
@@ -4010,7 +4037,7 @@ describe('WorkerLoop', () => {
       const updateTrigger = vi.fn();
       const engine = Object.assign(makeEngine({ taskManager: tm }), {
         getPromptStore: vi.fn(() => ({ getAnsweredForTrigger: () => ({ id: 'p', session_id: 's' }) })),
-        getRunHistory: vi.fn(() => ({ updateTrigger })),
+        getRunHistory: vi.fn(() => ({ updateTrigger, workflowStampState: STAMPED_IF_CONFIRMED })),
       }) as unknown as Engine;
       const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
       await loop.tick();
@@ -4089,6 +4116,7 @@ describe('WorkerLoop', () => {
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
         getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
@@ -4120,6 +4148,7 @@ describe('WorkerLoop', () => {
       getSecretStore: vi.fn(() => null),
       getMandateEnds: vi.fn(() => ({ isLive: () => true })),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
         getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
@@ -4261,6 +4290,9 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-prompt-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
+    // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+    // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+    vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
     closers.push(() => { history.close(); });
     lastDb = history.getDb();
     return new PromptStore(lastDb);
@@ -4835,6 +4867,9 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-wl-handrun-'));
     history = new RunHistory(join(dir, 'history.db'));
+    // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+    // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+    vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
     engineDb = new EngineDb(join(dir, 'engine.db'));
     history.setVerbGraph(engineDb);
     tm = new RealTaskManager(history);
@@ -5609,6 +5644,7 @@ describe('hand runs carry the starter\'s principal', () => {
       getToolContext: vi.fn(() => ({ tools })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
         getPlannedPipeline: vi.fn(() => ({ id: 'rf1-wf', manifest_json: JSON.stringify(template) })),
         getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
@@ -5693,6 +5729,7 @@ describe('a plan a mandate shaped runs only while its mandates are live', () => 
     const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
     (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive });
     (engine as unknown as { getRunHistory: () => unknown }).getRunHistory = () => ({
+      workflowStampState: STAMPED_IF_CONFIRMED,
       getPlannedPipeline: vi.fn(() => ({ id: WF_TEMPLATE.id, manifest_json: JSON.stringify(WF_TEMPLATE) })),
       getWorkflowAuthorship: vi.fn(() => {
         if (workflow === 'throws') throw new Error('engine.db is gone');
@@ -5808,6 +5845,7 @@ describe('a plan a mandate shaped runs only while its mandates are live', () => 
     const task = makeTask({ id: 'p-gone', effect: 'run_workflow', pipeline_id: 'no-such-workflow', created_by: 'owner', ...STAMPED });
     const { loop, engine } = await loopFor(task, () => true, 'throws');
     (engine as unknown as { getRunHistory: () => unknown }).getRunHistory = () => ({
+      workflowStampState: STAMPED_IF_CONFIRMED,
       getPlannedPipeline: vi.fn(() => undefined),
       getWorkflowAuthorship: vi.fn(() => { throw new Error('not asked'); }),
     });

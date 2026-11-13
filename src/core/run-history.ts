@@ -9,7 +9,8 @@ import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './str
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type { CallApiCost, CallContract, CallFiled, GrantLift } from './call-connection.js';
-import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier, PlannedPipeline } from '../types/index.js';
+import { workflowStampState, type WorkflowStampState } from './workflow-stamp.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
@@ -3489,9 +3490,38 @@ export class RunHistory {
     return this._requireWorkflowStore().rename(id, name, author);
   }
 
-  /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */
-  setWorkflowConfirmedAt(id: string, confirmedAt: string): boolean {
-    return this._requireWorkflowStore().setConfirmedAt(id, confirmedAt);
+  /** The owner's stamp on the workflow as it stands (`WorkflowStore.stampCurrent`): exact id,
+   *  with the digest of what runs, and a no-op when its stamp already holds. `expectDigest`:
+   *  only if the definition still has the digest the owner's preview showed. */
+  setWorkflowConfirmedAt(id: string, confirmedAt: string, expectDigest?: string | undefined): boolean {
+    return this._requireWorkflowStore().stampCurrent(id, confirmedAt, expectDigest);
+  }
+
+  /** The once-only boot pass over the stamps from before the digest (`WorkflowStore.stampExistingWorkflows`). */
+  stampExistingWorkflows(): number | null {
+    return this._requireWorkflowStore().stampExistingWorkflows();
+  }
+
+  /** Where `planned` stands for an unattended run (`workflow-stamp.ts`): its stamp against the
+   *  engine's hash, and the workflow's own marks. Without the verb graph nothing holds. */
+  workflowStampState(planned: PlannedPipeline): WorkflowStampState {
+    return this._workflowStore ? this._workflowStore.stampState(planned) : workflowStampState(null, planned, undefined);
+  }
+
+  /** The stored definition of exactly `id`, read from the database, never the pipeline cache. */
+  getWorkflowExact(id: string): PlannedPipeline | undefined {
+    return this._workflowStore?.definitionExact(id);
+  }
+
+  /** Whether a mandate ever set up or changed the workflow, taken over or not. Without the
+   *  verb graph: true, so a caller that gates on it refuses. */
+  workflowMandateShaped(id: string): boolean {
+    return this._workflowStore ? this._workflowStore.mandateShaped(id) : true;
+  }
+
+  /** The digest of `planned` as the owner's stamp would bind it, or null without the verb graph. */
+  workflowStampDigest(planned: PlannedPipeline): string | null {
+    return this._workflowStore ? this._workflowStore.stampDigest(planned) : null;
   }
 
   /**
@@ -3499,8 +3529,8 @@ export class RunHistory {
    * confirm, in one engine.db transaction (`WorkflowStore.acceptReviewedGrant`). `false` when
    * the workflow is gone; nothing is written then.
    */
-  acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string): boolean {
-    return this._requireWorkflowStore().acceptReviewedGrant(row, JSON.stringify(stamp), confirmedAt);
+  acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string, seen: PlannedPipeline): boolean {
+    return this._requireWorkflowStore().acceptReviewedGrant(row, JSON.stringify(stamp), confirmedAt, seen);
   }
 
   /**

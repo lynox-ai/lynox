@@ -83,7 +83,9 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       services: { about: 'your services' },
       artifacts: { about: 'documents and pages the assistant made for you' },
       tasks: { about: 'your tasks and to-dos' },
-      workflows: { about: 'your saved workflows', stripJson: { definition_json: ['$.reviewedGrant'] } },
+      // The owner's stamp digest is keyed like the grant's: it never leaves the instance, and an
+      // imported workflow waits for its owner's stamp there (`workflow-stamp.ts`).
+      workflows: { about: 'your saved workflows', stripJson: { definition_json: ['$.reviewedGrant', '$.stamp'] } },
       workflow_grants: { about: 'what each saved workflow is allowed to do', strip: ['checksum'] },
       triggers: { about: 'your schedules and automatic triggers' },
       pending_prompts: { about: 'questions the assistant asked you and is waiting on' },
@@ -112,6 +114,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       contained: MARKER,
       exact_marker: MARKER,
       verb_backfill_marker: MARKER,
+      workflow_stamp_marker: MARKER,
       vault_name_binding_migration: MARKER,
       profile_seed_backfill: MARKER,
       schema_version: MARKER,
@@ -212,5 +215,6 @@ export const KEYED_COLUMNS: ReadonlyArray<{ readonly store: ExportedStore; reado
   { store: 'engine.db', table: 'bulk_runs', column: 'approval_checksum' },
   { store: 'engine.db', table: 'workflow_grants', column: 'checksum' },
   { store: 'engine.db', table: 'workflows', column: 'definition_json', jsonPath: '$.reviewedGrant' },
+  { store: 'engine.db', table: 'workflows', column: 'definition_json', jsonPath: '$.stamp' },
   ...GRANT_RECORD_PATHS.map(jsonPath => ({ store: 'engine.db' as const, table: 'connections', column: 'config_json', jsonPath })),
 ];

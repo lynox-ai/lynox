@@ -88,6 +88,9 @@ function boot(): { loop: WorkerLoop; history: RunHistory; db: ReturnType<EngineD
     confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: `mandate:${EMAIL}`, createdMandateId: GRANT,
   });
   ends.record({ kind: 'mandate', email: EMAIL, mandateId: GRANT, mandateExp: nowS() + H }, nowS() - H);
+  // The owner stamped the mandate's steps as they are (`workflow-stamp.ts`): without it the run
+  // waits for that stamp and never reaches the runner, and the stop under test is not reached.
+  vi.spyOn(history, 'workflowStampState').mockReturnValue('holds');
   return { loop, history, db: engineDb.getDb(), ends };
 }
 

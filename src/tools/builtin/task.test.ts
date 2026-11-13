@@ -464,6 +464,23 @@ describe('Task Tools', () => {
       expect(tm.listTriggers().find((t) => t.title === 'Nightly digest')).toBeUndefined();
     });
 
+    it('refuses a workflow whose stamp no longer holds over its steps, and points to the stamp, not to scheduling again', async () => {
+      // A `confirmedAt` without a digest over these steps (a raw write, a restored file): the
+      // owner's stamp does not hold, and the workflow waits for the owner to review it.
+      history.insertPlannedPipeline({
+        id: 'wf-changed', name: 'Changed', goal: 'g', steps: [{ id: 's1', task: 'post' }],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+        confirmedAt: '2026-07-02T00:00:00.000Z',
+      } as Parameters<typeof history.insertPlannedPipeline>[0], null);
+      const result = await taskCreateTool.handler(
+        { title: 'Changed', assignee: 'lynox', workflow_id: 'wf-changed', schedule: '0 2 * * *' },
+        makeAgent(),
+      );
+      expect(result).toMatch(/^Error: workflow wf-changed waits for its owner to review its steps/);
+      expect(result).toContain('Automation → Workflows');
+      expect(tm.listTriggers().find((t) => t.title === 'Changed')).toBeUndefined();
+    });
+
     it('refuses an interactive workflow before it ever reaches the confirmation advice', async () => {
       // The worker only runs autonomous workflows, and the library route refuses
       // to schedule an interactive one — so "confirm it in the library" would be

@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
+import { workflowStampState } from '../../core/workflow-stamp.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
@@ -471,6 +472,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           if (refusal !== null) return `Error: workflow ${planned?.id ?? input.workflow_id}: ${refusal}`;
         }
         if (planned) {
+          const stampState = agent.toolContext.runHistory?.workflowStampState(planned) ?? workflowStampState(null, planned, undefined);
           const unschedulable = !isSchedulableWorkflow(planned)
             ? `is '${planned.mode}' and may ask for something other than an answer from its owner; a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user. Remove its ask_secret / ask_human steps before scheduling it.`
             : planned.template !== true
@@ -480,7 +482,11 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
               // owner saw them (an old template carries one from its content migration).
               : planned.mode === 'interactive'
                 ? 'asks its owner while it runs. Ask the user to schedule it from the workflow library: its confirmation names the steps that ask, and it creates the task. Do not create it here.'
-              : !planned.confirmedAt
+              // The owner's stamp is bound to the steps (`workflow-stamp.ts`): one over other steps,
+              // or a workflow someone the owner let in shaped, waits for the owner to review it.
+              : stampState === 'awaits_owner_stamp'
+                ? 'waits for its owner to review its steps: they were set up or changed by someone the owner let in, or changed after the owner stamped them. Ask the user to review its steps under Automation → Workflows and stamp them; then schedule it there. Do not create the task here.'
+              : stampState === 'unconfirmed'
                 ? 'has not been confirmed for unattended runs, so a task for it would be disabled at its first run. Ask the user to schedule it from the workflow library: that confirms it and creates the task. Do not create it again here.'
                 : null;
           if (unschedulable !== null) return `Error: workflow ${planned.id} ${unschedulable}`;

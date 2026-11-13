@@ -1077,8 +1077,10 @@ export class TaskManager {
    *   per request"). A retry carries no request, so it would run as the schedule's run, not
    *   the request's.
    * @param opts.keepSchedule Record the run and leave the schedule as it is: no status, no next
-   *   run, no retry. Only for a run the plan's pause ended (`plan-pause.ts`): a paused plan keeps
-   *   its due time for when it is taken over, and is not in `getDue` meanwhile.
+   *   run, no retry. For a run the plan's pause ended (`plan-pause.ts`): a paused plan keeps
+   *   its due time for when it is taken over, and is not in `getDue` meanwhile. And for a
+   *   one-shot whose workflow waits for the owner's stamp, switched off with its time kept
+   *   (`worker-loop.ts`), so switching it on again makes it due.
    * @returns Whether this scheduled a retry of the run. The caller reports a failure only
    *   when it did not, so this is the one place that decides — a second copy of the retry
    *   conditions drifted from it (a cron or watch with retries set was never retried here,

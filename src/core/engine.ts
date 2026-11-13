@@ -1473,6 +1473,17 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] workflow content-schema migration failed: ${err instanceof Error ? err.message : String(err)} — retry next boot\n`);
       }
+
+      // The workflow stamps from before the digest get theirs, once per engine.db (marker v69),
+      // AFTER the backfill and the content migration so it sees the definitions as they run.
+      // A failure leaves the marker at 0 and every stamp without a digest not holding: those
+      // workflows wait for the owner (fail closed) until a later boot passes.
+      try {
+        const stamped = this.runHistory.stampExistingWorkflows();
+        if (stamped !== null && stamped > 0) process.stderr.write(`[lynox] workflow stamps: ${stamped} definition(s) bound to their steps\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] workflow stamp pass failed: ${processErrorText(err)} — retry next boot\n`);
+      }
     }
 
     // Initialize thread store (shares DB connection with RunHistory)
