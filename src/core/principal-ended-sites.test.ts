@@ -8,13 +8,8 @@ import ts from 'typescript';
  * Every place that asks whether an access has ended (`principalHasEnded`) is named here, and each
  * name carries the tests that show it at work: live → let through, ended → stopped or refused.
  *
- * Why a list: each place is tested on its own, but nothing counted them. A new place that asks
- * without a test, or a place whose question is dropped in a refactor, failed nothing. The list
- * turns both into a failure: a call the list does not name fails the first test, and a named call
- * that is gone fails it too.
- *
- * What it does not see: a place that decides on an access without this predicate (for example by
- * asking the mandate store directly). It counts the predicate's callers, not every liveness check.
+ * A call the list does not name fails the first test, and so does a named call that is gone. A
+ * new place that asks is added here with its two tests.
  */
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
