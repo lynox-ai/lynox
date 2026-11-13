@@ -1338,7 +1338,13 @@ describe('LynoxHTTPApi', () => {
       expect(await check(lanUrl)).toEqual({ status: 400, body: { error: 'On this instance, a search endpoint must be the configured one or a public address' } });
       expect(hits).toEqual(['/healthz']);
 
-      // Provisioned, configured (trailing slash on either side does not matter): checked.
+      // Provisioned, named only in the config file, which the owner writes: still refused.
+      mockGetUserConfig.mockReturnValue({ searxng_url: lanUrl });
+      onTestFinished(() => { mockGetUserConfig.mockReturnValue({}); });
+      expect(await check(lanUrl)).toEqual({ status: 400, body: { error: 'On this instance, a search endpoint must be the configured one or a public address' } });
+      expect(hits).toEqual(['/healthz']);
+
+      // Provisioned, the control plane's endpoint (trailing slash on either side does not matter): checked.
       process.env['SEARXNG_URL'] = `${lanUrl}/`;
       expect(await check(lanUrl)).toEqual({ status: 200, body: { healthy: true } });
       expect(hits).toEqual(['/healthz', '/healthz']);

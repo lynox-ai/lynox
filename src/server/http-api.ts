@@ -7452,15 +7452,15 @@ export class LynoxHTTPApi {
       }
       // On an instance the control plane provisions, a private address is the tenant host's
       // network, not the owner's LAN: answering "reachable?" for any of them makes this route a
-      // probe into it. There the URL is either the search endpoint this instance is configured
-      // with, or a public address fetched through the guarded transport (each redirect hop
-      // re-checked, the resolved address pinned). A self-hosted owner keeps checking a LAN or
-      // Docker endpoint, which is what the route is for.
+      // probe into it. There the URL is either the search endpoint the control plane gave this
+      // instance (`SEARXNG_URL`, set for every provisioned instance), or a public address fetched
+      // through the guarded transport (each redirect hop re-checked, the resolved address
+      // pinned). The config file's `searxng_url` does not count: the owner writes it, so it
+      // would reopen the probe. A self-hosted owner keeps checking a LAN or Docker endpoint,
+      // which is what the route is for.
       if (isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER'))) {
-        const configured = [process.env['SEARXNG_URL'], engine.getUserConfig().searxng_url]
-          .filter((v): v is string => typeof v === 'string' && v.length > 0)
-          .map(v => v.replace(/\/+$/, ''));
-        if (!configured.includes(url)) {
+        const provisioned = (process.env['SEARXNG_URL'] ?? '').replace(/\/+$/, '');
+        if (url !== provisioned) {
           const { assertPublicUrl, fetchWithPublicRedirects } = await import('../core/network-guard.js');
           try {
             await assertPublicUrl(url);
