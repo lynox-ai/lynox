@@ -46,6 +46,7 @@ let targetStatuses: number[];
 let targetLimits: number[];
 // The run's targets as the engine serves them, page by page.
 let allTargets: BulkTarget[];
+let r1Fails = false;
 
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -61,6 +62,7 @@ beforeEach(() => {
 	targetStatuses = [];
 	targetLimits = [];
 	allTargets = [];
+	r1Fails = false;
 	Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
@@ -204,6 +206,15 @@ describe('the page of a run the engine is moving on', () => {
 		expect(targetAsks).toBeGreaterThan(targetsAtStart);
 	});
 
+	it('takes a run whose only change is when it resumes as moved', async () => {
+		run = makeRun({ phase: 'writing', total: 3, applied: 1 });
+		await render();
+		const targetsAtStart = targetAsks;
+		run = makeRun({ phase: 'writing', total: 3, applied: 1, resumesAt: '2026-11-13T16:00:00Z' });
+		await pass(BULK_FOLLOW_MS);
+		expect(targetAsks).toBe(targetsAtStart + 1);
+	});
+
 	it('does not ask while the tab is hidden', async () => {
 		await render();
 		Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
@@ -315,7 +326,7 @@ describe('a load for a run the page no longer shows', () => {
 			const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 			if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
 			if (/\/targets\?/.test(u)) return reply({ targets: [] });
-			if (u.includes('/bulk/runs/r1')) { await held; return reply(r1); }
+			if (u.includes('/bulk/runs/r1')) { await held; return r1Fails ? new Response('{}', { status: 500 }) : reply(r1); }
 			return reply(r2);
 		}));
 		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
@@ -329,6 +340,33 @@ describe('a load for a run the page no longer shows', () => {
 		await settle();
 		expect(shown()).toContain('42');
 		expect(shown()).not.toContain('17');
+	});
+	it('shows no error of it once the page shows another run', async () => {
+		r1Fails = true;
+		// r1 answers only when released; r2 at once.
+		let release: () => void = () => {};
+		const held = new Promise<void>((r) => { release = r; });
+		const r1 = makeRun({ id: 'r1', phase: 'done', total: 17 });
+		const r2 = makeRun({ id: 'r2', phase: 'done', total: 42 });
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+			const u = String(url);
+			const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
+			if (/\/targets\?/.test(u)) return reply({ targets: [] });
+			if (u.includes('/bulk/runs/r1')) { await held; return r1Fails ? new Response('{}', { status: 500 }) : reply(r1); }
+			return reply(r2);
+		}));
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		props.runId = 'r2';
+		await settle();
+		expect(shown()).toContain('42');
+		release();
+		await settle();
+		expect(shown()).toContain('42');
+		expect(shown()).not.toMatch(/Laden fehlgeschlagen|Failed to load/);
 	});
 });
 
