@@ -630,6 +630,32 @@ export function bulkIsShopifyHost(host: string | null): boolean {
 	return host !== null && SHOPIFY_STORE_HOST.test(host);
 }
 
+/** A Shopify product's key, exactly: the number is taken from nothing else (a key in any other
+ *  form gets no link). */
+const SHOPIFY_PRODUCT_GID = /^gid:\/\/shopify\/Product\/(\d+)$/;
+
+/** How a target is named to the owner. On a Shopify run with a product key: its number and the
+ *  link to it in the store's admin (https, the run's own host). Anything else is named by its key
+ *  alone. No product title: the before-image holds only the fields a run writes, so a title is
+ *  there only on a run that rewrites it — and then it is the old one, which the diff already shows. */
+export interface BulkTargetName {
+	number: string | null;
+	adminUrl: string | null;
+}
+
+export function bulkTargetName(targetSystem: string, target: { key: string }): BulkTargetName {
+	const host = bulkHostOf(targetSystem);
+	const m = bulkIsShopifyHost(host) ? SHOPIFY_PRODUCT_GID.exec(target.key) : null;
+	if (m === null) return { number: null, adminUrl: null };
+	return { number: m[1]!, adminUrl: `https://${host}/admin/products/${m[1]}` };
+}
+
+/** A target's name in a sentence: „Produkt <Zahl>“ for a Shopify product, else its key. */
+export function bulkTargetLabel(targetSystem: string, target: { key: string }, i18n: Pick<BulkI18n, 'tf'>): string {
+	const name = bulkTargetName(targetSystem, target);
+	return name.number !== null ? i18n.tf('bulk.target.product', { n: name.number }) : bulkVisibleText(target.key);
+}
+
 /** The fields a Shopify run writes or its judge reads (U-140), each with the i18n key of its readable name. */
 const SHOPIFY_FIELD_KEYS: Readonly<Record<string, string>> = {
 	title: 'bulk.field.shopify.title',

@@ -103,7 +103,7 @@ const buttonByText = (text: string): HTMLButtonElement | undefined =>
 describe('a run\'s page as a mandate sees it', () => {
 	it('shows a preview without approving or taking a target out, and says who can act', async () => {
 		await renderDetail();
-		expect(target.textContent).toContain('Product/1');
+		expect(target.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
 		expect(buttonByText(t('bulk.approve.approve'))).toBeUndefined();
 		expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
 		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
@@ -176,7 +176,7 @@ describe('a session whose reader the server has not named as the owner', () => {
 		it(`offers no act and says nothing about the owner on ${name}`, async () => {
 			viewer = answer;
 			await renderDetail();
-			expect(target.textContent).toContain('Product/1');
+			expect(target.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
 			expect(buttonByText(t('bulk.approve.approve'))).toBeUndefined();
 			expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
 			expect(target.textContent).not.toContain(t('bulk.owner_only_notice'));
