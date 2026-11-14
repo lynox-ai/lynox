@@ -612,6 +612,16 @@ describe('a plan bulk_plan refuses is a failed call', () => {
       .rejects.toThrow(new BulkPlanRefusal('Error: the dry run failed: disk full'));
   });
 
+  it('throws while another external dry run reads its targets', async () => {
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'https://shop.example.com/products/1', after: { price: '1' } }]));
+    const plan = { target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json' } as const;
+    const first = runIdOf(await bulkPlanTool.handler(plan, agent()));
+    expect(ledger.resumePreview(first).ok).toBe(true);
+    await expect(bulkPlanTool.handler(plan, agent())).rejects.toThrow(new BulkPlanRefusal(
+      'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.'));
+    expect(ledger.listRuns()).toHaveLength(1);
+  });
+
   it('gives a caller that reads the answer the refusal\'s text, and throws anything else on', async () => {
     expect(await bulkPlanAnswer({ target_system: 'workspace' }, agent()))
       .toBe('Error: Give exactly one of source_file, source_collection or source_list.');
