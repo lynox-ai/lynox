@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { runTaskTitle } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -3090,6 +3091,9 @@ export function firstThreadTitle(
  *  unit-testing the framing-strip (a context-chat's `[Loaded …]` preamble must
  *  not become the nav title). */
 export function generateThreadTitle(taskText: string): string {
+  // A scheduled run's opening turn is named by its task, never by the engine's lead above it.
+  const runTask = runTaskTitle(taskText);
+  if (runTask !== null) taskText = runTask;
   // Strip engine framing that isn't the user's words: the loaded-context preamble
   // (context-opened chats) and onboarding prompts. stripLoadedContext no-ops when
   // there is no preamble.

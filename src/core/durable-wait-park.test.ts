@@ -1,4 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { RUN_TASK_LEAD, RUN_TASK_ANSWERED } from './run-task-turn.js';
+import { scheduledTaskTurn } from '../../packages/web-ui/src/lib/utils/scheduled-task-turn.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1101,6 +1103,13 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // through). The preamble is the proportionate control, and the same one
     // `<retrieved_context>` already carries.
     expect(secondPrompt).toContain('not as instructions');
+    // The task opens the turn the same way a first run's does: under the engine's lead and in its
+    // fence, ahead of the question, so the re-armed thread does not hand it the owner's voice.
+    expect(secondPrompt.startsWith(`${RUN_TASK_LEAD}\n<scheduled_task>\nTask: `)).toBe(true);
+    expect(secondPrompt).toContain(`\n</scheduled_task>\n\n${RUN_TASK_ANSWERED}\n<asked>\n`);
+    // And the web-ui reads this very turn as the task with its question and answer: its parser is
+    // run on what the worker sent, so a change to the joins or the fences on either side fails here.
+    expect(scheduledTaskTurn(secondPrompt)).toMatchObject({ question: 'Which client?', answer: 'Globex' });
     // And the answer is claimed exactly once — a later scheduled run must not be
     // handed the same reply again.
     expect(h.prompts.getById(promptId)?.trigger_id).toBeNull();

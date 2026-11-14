@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { sanitizeLLMTitle, generateThreadTitle } from './session.js';
 import { closeLoadedContext } from './chat-context.js';
+import { compose } from './data-boundary.js';
+import { runTaskPrompt, RUN_TASK_LEAD } from './run-task-turn.js';
 
 describe('sanitizeLLMTitle', () => {
   it('passes a clean title through unchanged', () => {
@@ -78,5 +80,17 @@ describe('generateThreadTitle', () => {
 
   it('falls back to "New Chat" for an empty message', () => {
     expect(generateThreadTitle('')).toBe('New Chat');
+  });
+});
+
+describe('generateThreadTitle on a scheduled run\'s opening turn', () => {
+  it('names the thread by the task, never by the engine\'s lead', () => {
+    const turn = compose(runTaskPrompt('Daily Report', 'Generate the daily report'), '\n');
+    expect(generateThreadTitle(turn)).toBe('Daily Report');
+    expect(generateThreadTitle(turn)).not.toContain('Carry out');
+    // The answered (re-armed) turn opens the same way.
+    expect(generateThreadTitle(`${turn}\n\nA question you asked earlier has been answered.`)).toBe('Daily Report');
+    // Control: an owner's message that merely quotes the lead is titled as written.
+    expect(generateThreadTitle(`Why does it say: ${RUN_TASK_LEAD}`)).toBe(`Why does it say: ${RUN_TASK_LEAD}`.slice(0, 77) + '...');
   });
 });
