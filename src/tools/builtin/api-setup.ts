@@ -19,11 +19,11 @@ import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { builtInPresetOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { connectCallText, builtInPresetOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
@@ -41,7 +41,7 @@ import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../cor
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -1786,7 +1786,7 @@ export function notConnectedNote(agent: Pick<IAgent, 'secretStore'>, profile: Ap
   // read the token out and log it as a read only to compare it with nothing.
   if (store.holds === undefined) return '';
   if (slots.some((name) => store.holds!(name))) return '';
-  return `\n\nConnection: not connected yet. When the user wants it connected, call api_setup with action "connect" and id "${profile.id}"; that call returns the sign-in link for the user, or says why there is none. A link or a tool call written into your reply connects nothing.`;
+  return `\n\nConnection: not connected yet. When the user wants it connected, ${connectCallText(profile.id)} A link or a tool call written into your reply connects nothing.`;
 }
 
 /**
@@ -2202,13 +2202,28 @@ ${draftJson}
       // profile, and a retry after a connect whose save failed, go through as before.
       // Not for an id whose slots this instance guards (`protectedDerivedSlot`): the save refuses
       // that id anyway, and the answer must not depend on whether the guarded name holds a value.
-      if (!isOwnerPrincipal(agent.principal) && profile.auth?.type === 'oauth2' && prior?.auth?.type !== 'oauth2' && protectedDerivedSlot(profile) === null) {
+      // The owner too, whenever a profile comes onto a built-in provider (created, or changed from a
+      // static or an OAuth sign-in of its own): its tokens come only from the provider's sign-in, and
+      // a value already under its names (collected before, or written by the earlier sign-in) would be
+      // sent as its token without one. In a session that cannot see every slot this refuses the
+      // owner as well. Not covered: a refresh slot such a profile configures (`refresh_token_key`) —
+      // filled on purpose where it shares another profile's grant, and exchanged only with the
+      // provider's app.
+      const becomesOAuth = profile.auth?.type === 'oauth2' && prior?.auth?.type !== 'oauth2';
+      const becomesPreset = builtInPresetOf(profile) !== undefined && (prior === undefined || builtInPresetOf(prior) === undefined);
+      if ((isOwnerPrincipal(agent.principal) ? becomesPreset : becomesOAuth || becomesPreset) && protectedDerivedSlot(profile) === null) {
+        // A step without a store (a saved workflow's) cannot see the slots either: refused, the owner's too.
         const occupied = agent.secretStore ? occupiedTokenSlots(agent.secretStore, profile.id) : null;
         if (occupied === null) {
           return `Error: the token slots of "${profile.id}" cannot be checked from here, so the OAuth profile was not saved. Nothing was saved. This session does not see the whole store of secrets, as in a sub-agent or a workflow step.`;
         }
         if (occupied.length > 0) {
-          return `Error: ${occupied.map((n) => `"${n}"`).join(' and ')}, where the tokens of "${profile.id}" would go, already ${occupied.length === 1 ? 'holds' : 'hold'} a value. Nothing was saved. Save the profile under a different id, so its tokens get names of their own.`;
+          const where = `${occupied.map((n) => `"${n}"`).join(' and ')}, where the tokens of "${profile.id}" would go, already ${occupied.length === 1 ? 'holds' : 'hold'} a value`;
+          // On a built-in provider another id is no way out: the profile already on its host keeps it.
+          const preset = becomesPreset ? builtInPresetOf(profile) : undefined;
+          return preset !== undefined
+            ? `Error: ${where} that did not come from the sign-in of the built-in "${preset.id}" provider. Nothing was saved. A profile on that provider takes its tokens only from that sign-in. Do not ask the user for a token. Tell the user that the stored value has to go first: they can delete it in Settings → API Keys, and then this profile can be saved and connected.`
+            : `Error: ${where}. Nothing was saved. Save the profile under a different id, so its tokens get names of their own.`;
         }
       }
       // The owner's save of a mandate's profile makes it the owner's, and the answer says what
@@ -2976,8 +2991,8 @@ ${draftJson}
           : ownReadSlot && apiStore !== undefined && sharesAnotherGrant(apiStore, profile)
             ? 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.'
           : ownReadSlot
-            ? 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.'
-            : 'Call api_setup with action "connect" for this profile and show the user the link.';
+            ? `Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, ${connectCallText(input.id)} While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.`
+            : `To connect it, ${connectCallText(input.id)}`;
         return `Error: profile "${input.id}" ${subject} ${next}`;
       }
       // A preset's token endpoint takes the body its provider documents, whatever the profile says.
@@ -3072,11 +3087,25 @@ ${draftJson}
         const withheld = agent.secretStore && apiStore ? withheldFrom(agent.secretStore, profile, apiStore, missing, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${input.id}": ${withheldText(withheld)} Nothing was sent.`;
         const appOfProvider = builtInPresetOf(profile);
-        const askable = missing.filter((n) => !isPresetClientSecretName(n) && !isAppIdOf(appOfProvider, n));
+        // On a built-in provider a token slot is filled by its sign-in, never collected (`ask_secret` refuses it).
+        const presetSlots = appOfProvider === undefined ? new Set<string>() : tokenSlotNames(profile);
+        const askable = missing.filter((n) => !isPresetClientSecretName(n) && !isAppIdOf(appOfProvider, n) && !presetSlots.has(n));
         const settled = missing.filter((n) => isPresetClientSecretName(n)).map(presetClientSecretGuidance)
           .concat(missing.filter((n) => isAppIdOf(appOfProvider, n)).map(presetClientIdGuidance));
+        const slotFromSignIn = appOfProvider !== undefined && missing.some((n) => presetSlots.has(n));
+        if (slotFromSignIn) {
+          // A profile that reads the refresh slot of another one it shares the grant with is signed
+          // in through that one: connecting it on its own would end the sharing.
+          const sharing = readersRefreshSlot(profile) !== refreshTokenKey(input.id) && apiStore !== undefined && sharesAnotherGrant(apiStore, profile);
+          // The profile whose own refresh slot this one reads holds the grant; named when it is one.
+          const holderId: unknown = sharing ? sharedGrantOwner(apiStore!, profile)?.id : undefined;
+          settled.push(sharing
+            ? `The tokens of a profile on the built-in "${appOfProvider.id}" provider come only from its sign-in, and this profile shares the connection of another profile through this provider: do not connect this one on its own; ${connectCallText(typeof holderId === 'string' ? holderId : undefined)} Do not ask the user for a token.`
+            : `The tokens of a profile on the built-in "${appOfProvider.id}" provider come only from its sign-in: to connect it, ${connectCallText(input.id)} Do not ask the user for a token.`);
+        }
         const ask = askable.length > 0 ? ` Call \`ask_secret\` for ${askable.map((n) => `"${shownSlot(n)}"`).join(', ')} first.` : '';
-        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then retry fetch_token.`;
+        const retry = slotFromSignIn ? '' : ' Then retry fetch_token.';
+        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}.${ask}${settled.map((g) => ` ${g}`).join('')}${retry}`;
       }
       // Past this point every slot name has resolved, and `resolveOne` resolves only a
       // name that is, as a whole, an identifier (`SECRET_REF_PATTERN`): a name that
@@ -3168,9 +3197,12 @@ ${draftJson}
       // that very name — because there, following "leave it out" walks into the
       // next refusal. (An id whose derived names are protected was refused above.)
       // The answer for that shape, shared with the client-slot refusal below.
-      const refreshOnDerivedAdvice = `Leaving output_secret_name out does not help: this profile reads its refresh token from "${refreshKey}", the name its access token needs. ${grantType === 'refresh_token'
-        ? `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`
-        : `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`}`;
+      const refreshOnDerivedAdvice = `Leaving output_secret_name out does not help: this profile reads its refresh token from "${refreshKey}", the name its access token needs. ${grantType !== 'refresh_token'
+        ? `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`
+        // On a built-in provider the refresh token comes from its sign-in, so no slot is filled by hand.
+        : builtInPresetOf(profile) !== undefined
+          ? `Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, ${connectCallText(input.id)}`
+          : `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`}`;
       if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
         const clash = `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it.`;
         const derivedAccess = accessTokenKey(input.id);

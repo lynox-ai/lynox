@@ -1,8 +1,10 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
-import { isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
+import { builtInPresetOf, connectCallText, isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
+import { tokenSlotNames, type ApiProfile } from '../../core/api-store.js';
+import { apiSetupTool } from './api-setup.js';
 import { toolLockFor } from '../../core/mandate-tool-lock.js';
-import { connectionTokenHolderName, connectionTokenHolders, describeConnectionTokens, FORGING_CHARS } from '../../core/profile-secret-view.js';
+import { connectionTokenHolderName, connectionTokenHolders, describeConnectionTokens, FORGING_CHARS, sharedGrantOwner } from '../../core/profile-secret-view.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -61,6 +63,45 @@ export const MANDATE_SECRET_REFUSAL =
 function tokenHoldersFor(agent: IAgent): (name: string) => ReturnType<typeof connectionTokenHolders> {
   const apiStore = agent.toolContext?.apiStore;
   return (name) => (apiStore ? connectionTokenHolders(apiStore, name) : []);
+}
+
+/**
+ * The stored profile connected through a built-in provider that holds `name` as one of its token
+ * slots, stored or empty. Such a slot is filled only by that provider's sign-in, where the user
+ * sees what lynox may do there before it is granted: a value collected into it (a token the
+ * provider issued for something else, or a key of the user's own) would be sent as that
+ * connection's token past that screen, the reach `api_setup` refuses a profile with another
+ * sign-in on the provider's host for. Asked of the profiles, not of the vault, so the answer is
+ * the same whether the slot holds a value. A store that throws counts as holding it: the
+ * collect is refused rather than let through.
+ */
+function presetSlotHolder(agent: IAgent, name: string): ApiProfile | 'unknown' | undefined {
+  const apiStore = agent.toolContext?.apiStore;
+  if (!apiStore) return undefined;
+  try {
+    return apiStore.knownProfiles().find((p) => builtInPresetOf(p) !== undefined && tokenSlotNames(p).has(name));
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * What `api_setup` action "connect" answers for profile `id`, word for word, run as this agent would
+ * run it: the same principal, scope and tool context, and only when this agent has `api_setup`
+ * itself. Connect writes nothing (it reads the profile and the vault and builds a link to this
+ * instance; the sign-in state is made by the route when the link is opened), so asking it here
+ * leaves nothing behind. Null when the agent has no `api_setup`, or connect throws or answers
+ * nothing.
+ */
+async function connectAnswer(agent: IAgent, id: string): Promise<string | null> {
+  if (typeof agent.getAvailableTools !== 'function') return null;
+  if (!agent.getAvailableTools().some((t) => t.definition.name === apiSetupTool.definition.name)) return null;
+  try {
+    const out: unknown = await apiSetupTool.handler({ action: 'connect', id }, agent);
+    return typeof out === 'string' && out.trim() !== '' ? out : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Collapse to one line and bound the length, ellipsising when it had to cut. */
@@ -202,6 +243,38 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       return `"${input.name}" is a connection's token slot outside this agent's vault scope, so it is not ` +
         `collected here. This is a scope decision — whether the vault holds it is not something this agent ` +
         `is told. Either proceed without it, or report back that this task needs secret_scope: "${input.name}".`;
+    }
+    // A token slot of a profile on a built-in provider comes only from that provider's sign-in.
+    const presetHolder = presetSlotHolder(agent, input.name);
+    // A store that cannot list its profiles cannot say whether the name is such a slot: refused,
+    // and the answer says that it could not be checked, not that it is one.
+    if (presetHolder === 'unknown') {
+      return `Whether "${input.name}" is the token slot of a connection cannot be checked right now, so ask_secret ` +
+        `did not collect it and opened no input. Do not ask the user for it in the chat instead. Tell the user that ` +
+        `the API profiles could not be read just now and that this step can be tried again later.`;
+    }
+    if (presetHolder !== undefined) {
+      const provider = builtInPresetOf(presetHolder);
+      const via = provider === undefined ? 'a built-in provider' : `the built-in "${provider.id}" provider`;
+      // A profile sharing another one's grant is signed in through that one: connecting it on its own
+      // would split it off, so the connect is asked for the profile that holds the grant.
+      const apiStore = agent.toolContext?.apiStore;
+      const signsIn = (apiStore ? sharedGrantOwner(apiStore, presetHolder) : undefined) ?? presetHolder;
+      const id: unknown = signsIn.id;
+      const head = `"${input.name}" is a token slot of a profile connected through ${via}, so it is not collected ` +
+        `through ask_secret: its tokens come only from the provider's sign-in, where the user sees what lynox may ` +
+        `do there.`;
+      // Asked here rather than left to the model, which wrote a link of its own instead (measured, U-195).
+      const answer = typeof id === 'string' ? await connectAnswer(agent, id) : null;
+      if (answer !== null) {
+        // "Act on", not "pass on": the answer is written to the model, and may make the link
+        // conditional (a profile already connected) — U-195.
+        return `${head} lynox has already asked api_setup to connect profile "${id}"; its answer follows. Act on its ` +
+          `answer: give the user the sign-in link it contains, on the condition it states if it states one, or the ` +
+          `reason it gives. Do not ask the user for a token, and write no other link.` +
+          `\n\napi_setup connect answered: ${answer}`;
+      }
+      return `${head} To connect or reconnect, ${connectCallText(typeof id === 'string' ? id : undefined)} Do not ask the user for a token.`;
     }
     // `findNameMatches` leaves out the requested name itself. A token STORED under exactly that
     // name is the case that matters most (collecting it would overwrite the connection's token), so

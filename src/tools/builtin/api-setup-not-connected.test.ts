@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { apiSetupTool, notConnectedNote } from './api-setup.js';
+import { presetClientKeys } from '../../core/oauth-presets.js';
 import { ApiStore, accessTokenKey, refreshTokenKey, type ApiProfile } from '../../core/api-store.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { scopeSecretStore } from '../../core/secret-scope.js';
@@ -109,5 +110,23 @@ describe('view says a built-in provider\'s profile is not connected yet', () => 
 
   it('leaves it out when there is no vault to ask', async () => {
     expect(await view(bexio(), undefined)).not.toContain('Connection:');
+  });
+});
+
+describe('fetch_token sends a profile sharing another one\'s grant to that one\'s sign-in', () => {
+  it('names no connect of its own, and no ask_secret', async () => {
+    const keys = presetClientKeys('bexio');
+    const store = new ApiStore();
+    const oauth = { grant_type: 'refresh_token' as const, client_id_key: keys.id, client_secret_key: keys.secret };
+    // Accepted as a save would have: the refusal for an unaccepted token host comes first otherwise.
+    const ack = { custom_endpoint_ack: { accepted: true, hosts: ['auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-11-08T00:00:00.000Z' } } as Partial<ApiProfile>;
+    store.register({ ...bexio(oauth), base_url: 'https://api.bexio.com/2.0', ...ack });
+    store.register({ ...bexio({ ...oauth, refresh_token_key: refreshTokenKey('books') }), id: 'books-three', name: 'bexio 3', base_url: 'https://api.bexio.com/3.0', ...ack });
+    const held: Record<string, string> = { [keys.id]: 'not-a-real-client-id', [keys.secret]: 'not-a-real-client-secret' };
+    const secretStore = { ...vault(held), resolve: (name: string) => held[name] ?? null, listNames: () => Object.keys(held) };
+    const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'books-three' }, agentWith(store, secretStore as never)) as string;
+    expect(out).toContain('this profile shares the connection of another profile through this provider: do not connect this one on its own; call api_setup with action "connect" and id "books"; that call returns the sign-in link for the user, or says why there is none.');
+    expect(out).not.toContain('id "books-three"');
+    expect(out).not.toContain('ask_secret` for');
   });
 });

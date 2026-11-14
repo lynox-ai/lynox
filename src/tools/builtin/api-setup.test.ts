@@ -73,6 +73,8 @@ const SAMPLE_PROFILE: ApiProfile = {
   avoid: ['No GET for mutations'],
 };
 
+const EMPTY_VAULT = { listNames: (): string[] => [], resolve: (): null => null };
+
 function createMockAgent(
   apiStore?: ApiStore | null,
   secretStore?: unknown,
@@ -863,7 +865,8 @@ describe('api_setup tool', () => {
       auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, ...oauth } },
     });
     const save = (store: ApiStore, profile: ApiProfile): Promise<string> =>
-      apiSetupTool.handler({ action: 'create', profile }, createMockAgent(store, undefined, async () => 'Allow')) as Promise<string>;
+      // An empty vault the slot check can read: a step without one is refused a built-in provider's profile.
+      apiSetupTool.handler({ action: 'create', profile }, createMockAgent(store, EMPTY_VAULT, async () => 'Allow')) as Promise<string>;
 
     it.each([
       ['client_secret_key', 'MY_SECRET'],
@@ -904,7 +907,7 @@ describe('api_setup tool', () => {
     it('stores it in lower case on an update too', async () => {
       const store = new ApiStore();
       expect(await save(store, shopify())).toContain('Created API profile');
-      const result = await apiSetupTool.handler({ action: 'update', profile: shopify({ preset_params: { shop: 'ACME' } }) }, createMockAgent(store, undefined, async () => 'Allow')) as string;
+      const result = await apiSetupTool.handler({ action: 'update', profile: shopify({ preset_params: { shop: 'ACME' } }) }, createMockAgent(store, EMPTY_VAULT, async () => 'Allow')) as string;
       expect(result).not.toContain('Error');
       expect(store.get('shop-admin')?.auth?.oauth?.preset_params).toEqual({ shop: 'acme' });
     });
