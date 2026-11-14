@@ -1756,9 +1756,10 @@ export class ApiStore {
   private _othersWatching(id: string, names: readonly string[]): void {
     if (names.length === 0) return;
     // Registered profiles only, as in `secretWritten` and `_followRenewal`: a profile the boot
-    // held back has no grant in use, and it comes back only through a save, which mints it as
-    // new (it is not in `profiles`, so `prev` is undefined), or through the next boot, whose
-    // fingerprint comparison reads the vault as it is then.
+    // held back has no grant in use, and it comes back only through a save, which reads its
+    // stored grant as a registered one's and mints for the same reasons (a new consent, other
+    // credentials, an exchange on a credential its fingerprints do not know), or through the
+    // next boot, whose fingerprint comparison reads the vault as it is then.
     for (const p of [...this.profiles.values()]) {
       if (p.id !== id && watchedNames(p).some((n) => names.includes(n))) this._reissue(p.id, 'engine-write');
     }
@@ -1874,19 +1875,40 @@ export class ApiStore {
     if (!this.grantLedger || this.fingerprinter === null) return 0;
     let minted = 0;
     for (const p of [...this.profiles.values()]) {
-      const stored = storedFingerprints(p);
-      const check: unknown = p.oauth_grant?.fingerprint_check;
-      let reason: GrantMintReason | null = stored === undefined || typeof check !== 'string' ? 'baseline'
-        : check !== this.fingerprinter.keyCheck ? 'rekey'
-        : null;
-      for (const [name, fp] of Object.entries(this._credentialsOf(p)?.fingerprints ?? {})) {
-        if (reason !== null) break;
-        if (!Object.hasOwn(stored!, name)) reason = 'baseline';
-        else if (stored![name] !== fp) reason = 'secret-changed';
-      }
+      const reason = this._fingerprintDrift(p);
       if (reason !== null && this._reissue(p.id, reason)) minted++;
     }
     return minted;
+  }
+
+  /** Why the boot comparison ({@link checkFingerprints}) would mint for `p`, or null where the
+   *  vault holds what its grant recorded. Null without a fingerprinter: nothing to compare with. */
+  private _fingerprintDrift(p: ApiProfile): GrantMintReason | null {
+    if (this.fingerprinter === null) return null;
+    const stored = storedFingerprints(p);
+    const check: unknown = p.oauth_grant?.fingerprint_check;
+    let reason: GrantMintReason | null = stored === undefined || typeof check !== 'string' ? 'baseline'
+      : check !== this.fingerprinter.keyCheck ? 'rekey'
+      : null;
+    for (const [name, fp] of Object.entries(this._credentialsOf(p)?.fingerprints ?? {})) {
+      if (reason !== null) break;
+      if (!Object.hasOwn(stored!, name)) reason = 'baseline';
+      else if (stored![name] !== fp) reason = 'secret-changed';
+    }
+    return reason;
+  }
+
+  /** `held`, a profile the boot held back, where its grant is one {@link backfillGrants} would
+   *  keep: recorded for this connection and its latest. The boot backfills registered profiles
+   *  only, so a held-back one may carry no grant, an unknown one or another connection's; a save
+   *  that brings it back then starts the connection's line (`new`), as it did before it read the
+   *  held-back grant at all. */
+  private _heldBackGrantKept(held: ApiProfile | undefined): ApiProfile | undefined {
+    const g = held?.oauth_grant?.grant_id;
+    const ledger = this.grantLedger;
+    if (held === undefined || ledger === null || typeof g !== 'string' || g === '') return undefined;
+    // The latest grant the ledger records for this id is this connection's by construction.
+    return ledger.latest(held.id)?.grant_id === g ? held : undefined;
   }
 
   /**
@@ -2719,6 +2741,11 @@ export class ApiStore {
     const prev = this.profiles.get(profile.id);
     const heldBefore = this.heldBack.get(profile.id);
     const isNew = prev === undefined;
+    // What the grant decisions read: the registered profile, or the one the boot held back. A
+    // held-back profile is out of service, not new: where its grant is still the connection's,
+    // a save that brings it back keeps it, or mints for the same reasons a registered one would —
+    // and a new consent then ends a provider's erasure still held on it, as it does there.
+    const stored = prev ?? this._heldBackGrantKept(heldBefore);
     const ledger = this.grantLedger;
     const exchange = options?.exchange;
     // The grant is the engine's, never the caller's: a save mints when it creates the
@@ -2726,10 +2753,13 @@ export class ApiStore {
     // that ran on a credential this epoch did not record, and otherwise keeps the stored grant
     // and its fingerprints — whatever the passed profile says.
     const mintReason: GrantMintReason | null = ledger === null ? null
-      : isNew ? 'new'
+      : stored === undefined ? 'new'
       : options?.newConsent === true ? 'consent'
-      : credentialTuple(prev) !== credentialTuple(profile) ? 'credentials'
-      : exchange !== undefined && this.fingerprinter !== null && !exchangeKnown(prev, exchange) ? 'exchange'
+      : credentialTuple(stored) !== credentialTuple(profile) ? 'credentials'
+      : exchange !== undefined && this.fingerprinter !== null && !exchangeKnown(stored, exchange) ? 'exchange'
+      // A held-back profile coming back: the writes, renewals and boot comparison it missed
+      // while held back, made up for here as the boot would.
+      : prev === undefined ? this._fingerprintDrift(stored)
       : null;
     // What the engine itself just wrote into the vault for this connection, which any other
     // connection reading the same name must treat as a new credential.
@@ -2741,20 +2771,20 @@ export class ApiStore {
       // A known exchange moves the fingerprints of the watched names it wrote, read back now:
       // the new values are this epoch's, so neither the next exchange nor the boot reads them as
       // a change. The foreign tokens stay as they are; the next mint keeps those still held.
-      const fps = storedFingerprints(prev);
-      const check: unknown = prev?.oauth_grant?.fingerprint_check;
-      let kept: GrantCredentials = { fingerprints: fps, foreign: storedForeign(prev), check: typeof check === 'string' ? check : undefined };
+      const fps = storedFingerprints(stored);
+      const check: unknown = stored?.oauth_grant?.fingerprint_check;
+      let kept: GrantCredentials = { fingerprints: fps, foreign: storedForeign(stored), check: typeof check === 'string' ? check : undefined };
       const f = this.fingerprinter;
       if (fps !== undefined && exchange !== undefined && f !== null) {
         const moved = { ...fps };
         for (const name of exchange.wrote) if (Object.hasOwn(moved, name)) moved[name] = keyedOf(f, name);
         kept = { ...kept, fingerprints: moved };
       }
-      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew, options?.trailId);
+      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, stored?.oauth_grant?.grant_id, kept), apisDir, isNew, options?.trailId);
       // A save that clears a revocation from the grant it keeps (an exchange that worked again with
       // the same token) lifts it: a provider's erasure of that grant still held is cancelled with it,
       // whoever saves, since the same grant works again. A save that names no actor cancels nothing.
-      const liftedGrant = prev?.oauth_grant?.state === 'revoked' && profile.oauth_grant?.state !== 'revoked' ? prev.oauth_grant.grant_id : undefined;
+      const liftedGrant = stored?.oauth_grant?.state === 'revoked' && profile.oauth_grant?.state !== 'revoked' ? stored.oauth_grant.grant_id : undefined;
       const conn = this.connStore;
       const actor = options?.actor;
       let saved: ReturnType<ApiStore['save']>;
@@ -2786,7 +2816,7 @@ export class ApiStore {
     try {
       const saved = ledger.transaction(() => {
         const minted = withGrant(profile, ledger.mint(profile.id, 'api', mintReason), this._credentialsOf(profile, {
-          prevForeign: storedForeign(prev),
+          prevForeign: storedForeign(stored),
           consentRefresh: options?.newConsent === true ? options.consentRefresh : undefined,
           adopt: mintReason === 'exchange' ? exchange?.presentedRefreshTokenFp ?? undefined : undefined,
         }));
@@ -2801,7 +2831,7 @@ export class ApiStore {
         // never reaches an erasure of a grant someone else connected. A `credentials` mint (a
         // configuration change) does not count.
         const actor = options?.actor;
-        const refused = prev?.oauth_grant;
+        const refused = stored?.oauth_grant;
         if ((mintReason === 'consent' || mintReason === 'exchange') && this.connStore !== null && mayCancelProviderErasure(actor, refused)) {
           const onlyGrant = actor.kind === 'owner' ? undefined : refused?.grant_id;
           if (actor.kind === 'owner' || onlyGrant !== undefined) {
