@@ -1291,9 +1291,12 @@ describe('api_setup tool', () => {
     // The guard's sentences are matched whole: a host that holds the word of another refusal
     // (`enforce_https.…`) is not read as that refusal, and a hop's refusal does not say that
     // nothing was sent.
-    it('does not read a refused hop to a host named like another refusal as that refusal', async () => {
+    it.each([
+      ['enforce_https.example.com', 'plain HTTP'],
+      ['network_policy=deny-all.example.com', 'network access is denied'],
+    ])('does not read a refused hop to %s as another refusal', async (host, wrong) => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-        new Response(null, { status: 302, headers: { location: 'https://enforce_https.example.com/graphql?query=mutation%7Bx%7D' } }),
+        new Response(null, { status: 302, headers: { location: `https://${host}/graphql?query=mutation%7Bx%7D` } }),
       );
       try {
         const result = await apiSetupTool.handler(
@@ -1301,9 +1304,9 @@ describe('api_setup tool', () => {
           createMockAgent(new ApiStore()),
         );
         expect(result).toContain('blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered');
-        expect(result).not.toContain('plain HTTP');
+        expect(result).not.toContain(wrong);
         expect(result).not.toContain('refused before it was sent');
-        expect(result).not.toContain('enforce_https.example');
+        expect(result).not.toContain(host);
       } finally {
         fetchSpy.mockRestore();
       }

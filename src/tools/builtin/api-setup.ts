@@ -648,21 +648,21 @@ const BOOTSTRAP_DRAFT_PREAMBLE =
  * the hostname, and on a redirect that is the hostname the REMOTE server chose (a WHATWG
  * hostname keeps `_ , ; ! "` and more, enough for a sentence). So a refusal is reported by its
  * kind, never its text; any other failure by its error class and code only. Each kind is matched
- * on the guard's whole sentence, anchored at both ends: a hostname has no space, so it cannot
- * supply the fixed words around it, and a host such as `enforce_https.example` in another refusal
- * is not read as that kind.
+ * on words with a space between them: a hostname has none, so a host such as
+ * `enforce_https.example` or `network_policy=deny-all.example` in another refusal is not read
+ * as that kind.
  */
 const GUARD_REFUSALS: ReadonlyArray<[RegExp, string]> = [
-  [/^Blocked: hostname ".*" not in network allow-list$/, 'the address or a redirect target is not in the network allow-list'],
-  [/^Blocked: hostname ".*" not permitted under guarded egress policy$/, 'the address or a redirect target is not permitted under the guarded egress policy'],
-  [/^Blocked: (?:private IP address ".*"|".*" resolves to private IP ".*")$/, 'the address or a redirect target is a private IP address'],
-  [/^Blocked: (?:hostname ".*" did not resolve to any IP|DNS returned a record without an address for ".*")$/, 'the address or a redirect target did not resolve'],
-  [/^Blocked: HTTP not allowed — enforce_https is enabled\. Use HTTPS\.$/, 'plain HTTP is not allowed (enforce_https)'],
-  [/^Blocked: unsupported protocol ".*"$/, 'the address or a redirect target uses an unsupported protocol'],
-  [/^Blocked: network access denied (?:for this tool \(network_policy=deny-all\)|\(unrecognised egress (?:surface|policy)\))$/, 'network access is denied for this tool'],
-  [/^Blocked: redirect without location header \(\d+\)$/, 'the server answered with a redirect that names no target'],
-  [/^Blocked: too many redirects \(>\d+\)$/, 'the server redirected too many times'],
-  [/^Blocked: redirect handling failed$/, 'the redirect could not be followed'],
+  [/not in network allow-list/, 'the address or a redirect target is not in the network allow-list'],
+  [/not permitted under guarded egress policy/, 'the address or a redirect target is not permitted under the guarded egress policy'],
+  [/private IP/, 'the address or a redirect target is a private IP address'],
+  [/did not resolve|without an address/, 'the address or a redirect target did not resolve'],
+  [/HTTP not allowed — enforce_https is enabled/, 'plain HTTP is not allowed (enforce_https)'],
+  [/unsupported protocol/, 'the address or a redirect target uses an unsupported protocol'],
+  [/network access denied/, 'network access is denied for this tool'],
+  [/redirect without location header/, 'the server answered with a redirect that names no target'],
+  [/too many redirects/, 'the server redirected too many times'],
+  [/redirect handling failed/, 'the redirect could not be followed'],
 ];
 
 /**
