@@ -59,6 +59,8 @@ import {
   DEVELOPER_PROMPT_SUFFIX,
   NO_WEB_SEARCH_PROMPT_SUFFIX,
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
+  policyBlocksSearchPromptSuffix,
+  webSearchFallbackSearxngRefusedPromptSuffix,
   DURABLE_MEMORY_PROMPT_SUFFIX,
   currentDateContext,
   modelIdentityContext,
@@ -92,6 +94,8 @@ import type { PluginManager } from './plugins.js';
 import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { ConversationGrants } from './conversation-grants.js';
+import { webSearchPromptCase } from './web-search-prompt.js';
+import { isProvisionedInstance } from './wire-capture.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -2801,10 +2805,16 @@ export class Session {
     //  - 'fallback'  → DDG HTML-scrape registered. Tool works but is
     //                  best-effort; warn the agent to caveat findings.
     //  - 'configured'→ SearXNG wired. No suffix needed.
-    const webSearchStatus = engine.getWebSearchStatus();
-    if (webSearchStatus === 'none') {
+    //  Under network settings that refuse the fallback, or a SearXNG the boot refused by an egress
+    //  rule, the suffix names those settings instead of SearXNG.
+    const searchCase = webSearchPromptCase(engine.getWebSearchStatus(), engine.getSearxngBootRefusal(), engine.getToolContext());
+    if (searchCase?.kind === 'none') {
       basePrompt += NO_WEB_SEARCH_PROMPT_SUFFIX;
-    } else if (webSearchStatus === 'fallback') {
+    } else if (searchCase?.kind === 'policy-blocks-search') {
+      basePrompt += policyBlocksSearchPromptSuffix(isProvisionedInstance());
+    } else if (searchCase?.kind === 'fallback-searxng-refused') {
+      basePrompt += webSearchFallbackSearxngRefusedPromptSuffix(searchCase.rule, isProvisionedInstance());
+    } else if (searchCase?.kind === 'fallback') {
       basePrompt += WEB_SEARCH_FALLBACK_PROMPT_SUFFIX;
     }
     // DK.1: re-point the capture/recall duty onto remember/recall/memory_block_edit when the

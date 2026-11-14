@@ -6694,6 +6694,21 @@ describe('LynoxHTTPApi', () => {
       expect((await res.json() as { code?: string }).code).toBe(code);
     });
 
+    // A URL the network settings refuse for every search answers its health check but is
+    // never searched, so the check refuses it with the rule (the page shows the rule's text), read now.
+    it.each([
+      ['enforce_https', { networkPolicy: undefined, enforceHttps: true }, 'http://searxng:8080', 'searxng-policy-https'],
+      ['allow-list without it', { networkPolicy: 'allow-list', enforceHttps: false, allowedHosts: new Set(['api.example.com']) }, 'http://searxng:8080', 'searxng-policy-allowlist'],
+      ['deny-all', { networkPolicy: 'deny-all', enforceHttps: false }, 'http://searxng:8080', 'searxng-policy-deny'],
+    ] as const)('refuses a URL the network settings refuse (%s) with %s', async (_name, egress, url, code) => {
+      repayRateWindow();
+      const engineRef = (api as unknown as { engine: { getToolContext: ReturnType<typeof vi.fn> } }).engine;
+      engineRef.getToolContext.mockReturnValueOnce({ tools: [], allowedWildcards: [], ...egress });
+      const res = await jsonFetch('/api/searxng/check', { method: 'POST', body: JSON.stringify({ url }) });
+      expect(res.status).toBe(400);
+      expect((await res.json() as { code?: string }).code).toBe(code);
+    });
+
     it('refuses a metadata host name without a code: the page\'s metadata text names the 169.254 range', async () => {
       repayRateWindow();
       const res = await jsonFetch('/api/searxng/check', { method: 'POST', body: JSON.stringify({ url: 'http://metadata.google.internal' }) });

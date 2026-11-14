@@ -138,6 +138,9 @@ The \`web_research\` tool is **not available** in this session. No SearXNG sidec
  *  results, but they're noisier than SearXNG — surface the limitation so
  *  the agent knows to caveat findings and to suggest configuring SearXNG
  *  for higher-stakes research. */
+/** The improvement line of the fallback suffix, which a SearXNG refused by policy replaces. */
+const WEB_SEARCH_FALLBACK_IMPROVEMENT = '- For high-stakes research (citations, specs, current pricing), tell the user the search backend is the fallback and suggest enabling SearXNG (`docker compose up`, or set `SEARXNG_URL`) for higher-quality results.\n';
+
 export const WEB_SEARCH_FALLBACK_PROMPT_SUFFIX = `
 
 ## Web search is running on a fallback provider (best-effort)
@@ -147,6 +150,62 @@ export const WEB_SEARCH_FALLBACK_PROMPT_SUFFIX = `
 **Guidance:**
 - For high-stakes research (citations, specs, current pricing), tell the user the search backend is the fallback and suggest enabling SearXNG (\`docker compose up\`, or set \`SEARXNG_URL\`) for higher-quality results.
 - If a \`web_research\` call returns 0 results, **try one reformulation**, then either fall back to training-data with the cutoff caveat or tell the user the fallback didn't find anything — do NOT fabricate to fill the gap.`;
+
+/**
+ * Who can change the network settings, for {@link POLICY_BLOCKS_SEARCH_PROMPT_SUFFIX}:
+ * on a hosted instance lynox sets them, so the owner is pointed at support, not at a setting they
+ * do not have.
+ */
+function networkSettingsOwner(provisioned: boolean): string {
+  return provisioned
+    ? '; on this hosted instance lynox sets them, and the owner of this instance can ask lynox support about it at support@lynox.ai'
+    : '; only the owner of this instance can change them';
+}
+
+/**
+ * Appended when \`web_research\` is registered but this instance's network settings refuse every
+ * search provider, so each call ends with "Blocked: …". The way out is the
+ * network settings, so it names neither SearXNG nor docker.
+ */
+export function policyBlocksSearchPromptSuffix(provisioned: boolean): string {
+  return `
+
+## Web search is blocked by the network settings of this instance
+
+\`web_research\` is registered, but the network settings of this instance allow no search provider, so every search ends with "Blocked: …". This is a setting, not a fault, and nothing in this session can change it.
+
+**HARD RULES:**
+- **Never fabricate web search results.** Do not invent paper ids, headlines, prices, citations, URLs or any external fact you did not retrieve.
+- **Name the cause.** Whenever you cannot look something up on the web, say so with this reason, in the user's language:
+  > "Web search is blocked by the network settings of this instance${networkSettingsOwner(provisioned)}."
+  Then offer to answer from what you already know, and say that this may be out of date.
+- Fetch a URL the user names with \`http_request\` only when the network settings allow its host. A result that starts with "Blocked:" means they do not; do not retry it.
+- Do not suggest SearXNG, \`docker compose\` or \`SEARXNG_URL\`: they do not change this setting.`;
+}
+
+/** The rule that refused the SearXNG URL at boot, by its code, in the model's words. */
+const SEARXNG_REFUSED_RULE: Readonly<Record<string, string>> = {
+  'policy-https': 'they allow only https, and the SearXNG address uses http',
+  'policy-allowlist': 'the SearXNG host is not on the network allow-list',
+};
+
+/**
+ * {@link WEB_SEARCH_FALLBACK_PROMPT_SUFFIX} for a boot that refused the SearXNG URL by an egress
+ * rule (\`code\`: \`policy-https\`, \`policy-allowlist\`, \`policy\`) while the fallback searches: the
+ * improvement points at that rule, not at setting SearXNG up; on a hosted instance at lynox support,
+ * which sets those settings.
+ */
+export function webSearchFallbackSearxngRefusedPromptSuffix(code: string, provisioned: boolean): string {
+  const rule = SEARXNG_REFUSED_RULE[code] ?? 'they do not allow the SearXNG address';
+  // On a hosted instance lynox sets the network settings and the page shows no setting for them.
+  const way = provisioned
+    ? 'that on this hosted instance lynox sets these settings; the owner of this instance can ask lynox support about it at support@lynox.ai'
+    : 'that the owner of this instance can allow SearXNG in the network settings; the integrations page shows where that setting is';
+  return WEB_SEARCH_FALLBACK_PROMPT_SUFFIX.replace(
+    WEB_SEARCH_FALLBACK_IMPROVEMENT,
+    `- SearXNG is set up for this instance, but its network settings do not allow it: ${rule}, so searches run on the fallback. If the user asks why results are few or how search could be better, tell them this, and ${way}. Do not suggest \`docker compose\` or \`SEARXNG_URL\`.\n`,
+  );
+}
 
 /**
  * Durable Knowledge Substrate (DK.1) — appended when `durable_memory_enabled` is on. Re-points
