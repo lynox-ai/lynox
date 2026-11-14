@@ -224,6 +224,54 @@ describe('PrivacyDataSettings', () => {
 		expectOwnerView();
 		expect(buttonTexts()).toContain(t('privacy.delete_button'));
 	});
+
+	const logLinks = () => [...target.querySelectorAll('a')].filter((a) => a.getAttribute('href') === '/app/settings/account/access-log');
+
+	it('sends the owner to the instance log instead of promising a viewer', async () => {
+		await render(load, config('owner'));
+		expect(logLinks().map((a) => a.textContent?.trim())).toEqual([t('privacy.audit_open')]);
+		expect(target.textContent).toContain(t('privacy.audit_heading'));
+		expect(target.textContent).not.toContain('Audit-Viewer');
+		expect(target.textContent).not.toContain('Audit viewer');
+	});
+
+	const accountLinks = () => [...target.querySelectorAll('a')].filter((a) => a.getAttribute('href') === 'https://lynox.ai/managed/account');
+	const ownerConfig = (managed: string) => ({ '/config': { managed, bugsink_enabled: false, bugsink_dsn_configured: true, debug_wire_capture: false, viewer: 'owner' } });
+
+	it('tells a self-host owner there is no export in the app, instead of "coming soon"', async () => {
+		await render(load, ownerConfig(SELF_HOST));
+		expect(target.textContent).toContain(t('privacy.export_subtitle_selfhost'));
+		expect(target.textContent).not.toContain(t('privacy.export_subtitle_managed'));
+		expect(accountLinks()).toEqual([]);
+		expect(target.textContent).not.toContain('Bald verfügbar');
+		expect(target.textContent).not.toContain('Coming soon');
+	});
+
+	// `hosted` is the BYOK tier: the control plane does not supply the key, but the instance is
+	// CP-provisioned and has the account page. It must not get the self-host sentence.
+	it.each(['hosted', 'managed', 'managed_pro'])('sends a %s owner to the account page for the export, in a new tab', async (tier) => {
+		await render(load, ownerConfig(tier));
+		expect(target.textContent).toContain(t('privacy.export_subtitle_managed'));
+		expect(target.textContent).not.toContain(t('privacy.export_subtitle_selfhost'));
+		const links = accountLinks();
+		expect(links.map((a) => [a.textContent?.trim(), a.getAttribute('target'), a.getAttribute('rel')])).toEqual([[t('privacy.export_link'), '_blank', 'noopener']]);
+	});
+
+	it('says nothing about the export until the config has loaded, so neither sentence is a guess', async () => {
+		await render(load, { '/config': async () => Response.json({ error: 'down' }, { status: 503 }) });
+		expect(target.textContent).not.toContain(t('privacy.export_subtitle_selfhost'));
+		expect(target.textContent).not.toContain(t('privacy.export_subtitle_managed'));
+		expect(accountLinks()).toEqual([]);
+		// The control: the section that does not depend on the config is there.
+		expect(logLinks()).toHaveLength(1);
+	});
+
+	it('gives a mandate no link to the instance log, which refuses its session', async () => {
+		await render(load, config('mandate'));
+		expect(logLinks()).toEqual([]);
+		// The control: the same page mounted for the owner carries it (test above).
+		expect(notice()).not.toBeNull();
+	});
 });
 
 describe('ToolToggles', () => {
