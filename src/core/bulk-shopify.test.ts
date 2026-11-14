@@ -1651,11 +1651,12 @@ describe('approving a Shopify run', () => {
     return id;
   };
 
-  /** Replaces one writing target's change and approved after-state, as a planner could have stored them. */
-  const plantTarget = (id: string, change: string, after: Record<string, unknown>): void => {
+  /** Replaces one writing target's change and approved after-state, as a planner could have stored them; its seq. */
+  const plantTarget = (id: string, change: string, after: Record<string, unknown>): number => {
     const seq = (engineDb.getDb().prepare("SELECT seq FROM bulk_targets WHERE run_id = ? AND change = 'update' ORDER BY seq LIMIT 1").get(id) as { seq: number }).seq;
     engineDb.getDb().prepare('UPDATE bulk_targets SET change = ?, after_planned = ? WHERE run_id = ? AND seq = ?')
       .run(change, engineDb.enc(JSON.stringify(after)), id, seq);
+    return seq;
   };
 
   it('writes a measured form without a confirmation, and still one target before its own probe', async () => {
@@ -1674,10 +1675,20 @@ describe('approving a Shopify run', () => {
   it('writes an unmeasured form, a target that clears the title, only when confirmed by name', async () => {
     const id = await previewed();
     plantTarget(id, 'update', { title: null });
+    // One unmeasured target makes the run unmeasured, though the other target is a measured write.
+    expect(ledger.getStatus(id)!.total).toBe(2);
     expect(ledger.getStatus(id)!.writeForm).toBe('unmeasured');
     const checksum = ledger.computeChecksum(id)!;
     expect(ledger.approve(id, { checksum, maxTargets: 1 })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
     expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+  });
+
+  it('leaves out a target the owner took out: the run is measured again', async () => {
+    const id = await previewed();
+    const seq = plantTarget(id, 'update', { title: null });
+    expect(ledger.getStatus(id)!.writeForm).toBe('unmeasured');
+    expect(ledger.deselectTarget(id, seq, { checksum: ledger.computeChecksum(id)! }).ok).toBe(true);
+    expect(ledger.getStatus(id)!.writeForm).toBe('measured');
   });
 
   it('counts a target to create as unmeasured: the form only updates', async () => {
