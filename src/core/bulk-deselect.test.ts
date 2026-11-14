@@ -7,7 +7,7 @@ import { EngineDb } from './engine-db.js';
 import { BulkLedger } from './bulk-ledger.js';
 import { runBulkEffect, workspaceWriter } from './bulk-apply.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
-import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkStatusTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 import type { IAgent } from '../types/index.js';
 
 /**
@@ -27,7 +27,7 @@ function agent(): IAgent {
 
 async function planFiles(rows: { target: string; after: string }[], atomic = false): Promise<string> {
   writeFileSync(join(ws, 'src.json'), JSON.stringify(rows));
-  const out = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json', atomic }, agent());
+  const out = await bulkPlanAnswer({ target_system: 'workspace', source_file: 'src.json', atomic }, agent());
   const m = /Bulk run ([0-9a-f-]{36})/.exec(out);
   if (!m) throw new Error(`no run id in: ${out}`);
   return m[1]!;

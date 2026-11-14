@@ -14,7 +14,7 @@ import { BULK_NOTICES } from './bulk-notices.js';
 import { deriveSourceEffect } from './task-manager.js';
 import { WorkerLoop } from './worker-loop.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
-import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkStatusTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 import { taskListTool } from '../tools/builtin/task.js';
 import { recallToolResultTool } from '../tools/builtin/recall-tool-result.js';
 import { ToolResultBlobStore } from './tool-result-blob-store.js';
@@ -58,7 +58,7 @@ function runIdOf(result: string): string {
 /** Plan workspace targets through the model-facing tool, the way a run starts. */
 async function planFiles(rows: { target: string; after: string }[], atomic = false): Promise<string> {
   writeFileSync(join(ws, 'src.json'), JSON.stringify(rows));
-  const out = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json', atomic }, agent());
+  const out = await bulkPlanAnswer({ target_system: 'workspace', source_file: 'src.json', atomic }, agent());
   return runIdOf(out);
 }
 
@@ -1759,7 +1759,7 @@ describe('data-store runs', () => {
     const rows = [];
     for (let i = 0; i < 210; i++) rows.push({ target: `S${String(i)}`, price: 1000 + i });
     writeFileSync(join(ws, 'prices.json'), JSON.stringify(rows));
-    const runId = runIdOf(await bulkPlanTool.handler(
+    const runId = runIdOf(await bulkPlanAnswer(
       { target_system: 'data_store', target_collection: 'products', source_file: 'prices.json' }, agent()));
     approve(runId);
     const writerFor = (run: Parameters<typeof bulkWriterFor>[0]) => bulkWriterFor(run, store);
@@ -1787,7 +1787,7 @@ describe('data-store runs', () => {
   it('a data-store run whose collection is gone halts as unavailable', async () => {
     seedStore();
     writeFileSync(join(ws, 'p.json'), JSON.stringify([{ target: 'S1', price: 5 }]));
-    const runId = runIdOf(await bulkPlanTool.handler(
+    const runId = runIdOf(await bulkPlanAnswer(
       { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, agent()));
     approve(runId);
     store.dropCollection('products');
@@ -1799,7 +1799,7 @@ describe('data-store runs', () => {
   it('tells a German owner of a run with no writer in German, lead and counts alike (ux U-105)', async () => {
     seedStore();
     writeFileSync(join(ws, 'p.json'), JSON.stringify([{ target: 'S1', price: 5 }]));
-    const runId = runIdOf(await bulkPlanTool.handler(
+    const runId = runIdOf(await bulkPlanAnswer(
       { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, agent()));
     approve(runId);
     const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => null, notices: BULK_NOTICES.de });
@@ -1831,7 +1831,7 @@ describe('§7(i) before-images reach no model context', () => {
     rows.push({ target: `pages/${IN_KEY}-bad.md`, after: 42 as unknown as string });
     const seen: string[] = [];
     writeFileSync(join(ws, 'src.json'), JSON.stringify(rows));
-    const planned = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json' }, agent());
+    const planned = await bulkPlanAnswer({ target_system: 'workspace', source_file: 'src.json' }, agent());
     seen.push(planned);
     const runId = runIdOf(planned);
     approve(runId);
@@ -1865,7 +1865,7 @@ describe('§7(i) before-images reach no model context', () => {
     // the trigger's last result — the failed-run detail line is where a result shows.
     rmSync(join(ws, 'src.json'));
     writeFileSync(join(ws, 'src2.json'), JSON.stringify(rows.map((r) => ({ ...r, after: `${r.after}${IN_AFTER}-2` }))));
-    const planned2 = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src2.json' }, agent());
+    const planned2 = await bulkPlanAnswer({ target_system: 'workspace', source_file: 'src2.json' }, agent());
     seen.push(planned2);
     const runId2 = runIdOf(planned2);
     approve(runId2, { now: Date.now() - 2 * 24 * 60 * 60_000 });

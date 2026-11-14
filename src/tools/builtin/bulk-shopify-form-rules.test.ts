@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { bulkPlanTool } from './bulk.js';
+import { bulkPlanTool, bulkPlanAnswer } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
@@ -48,7 +48,7 @@ afterEach(() => {
 
 const agent = (): IAgent => ({ toolContext: { bulkLedger: ledger, apiStore: IMAGE_WRITING_STORE }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent;
 const plan = (input: Record<string, unknown>): Promise<string> =>
-  bulkPlanTool.handler({ target_system: 'http', target_host: HOST, ...input } as Parameters<typeof bulkPlanTool.handler>[0], agent());
+  bulkPlanAnswer({ target_system: 'http', target_host: HOST, ...input } as Parameters<typeof bulkPlanTool.handler>[0], agent());
 
 describe('a refused bulk_plan in a Shopify form', () => {
   it.each([
@@ -203,7 +203,7 @@ describe('an image plan on a store connection that may not write image alt texts
   const NOTE = "Image alt texts: a bulk run cannot change them in this store, because its Shopify connection may not write files. If the user asks to change alt texts for many images, tell them so in one sentence and offer to write alt texts in this chat from the product names and what the user says about the images, so they can enter them in Shopify themselves.";
   const connection = (profile: unknown) => ({ getByHostname: (h: string) => h === HOST ? profile : undefined });
   const planOn = (store: unknown, input: Record<string, unknown>): Promise<string> =>
-    bulkPlanTool.handler({ target_system: 'http', target_host: HOST, ...input } as Parameters<typeof bulkPlanTool.handler>[0],
+    bulkPlanAnswer({ target_system: 'http', target_host: HOST, ...input } as Parameters<typeof bulkPlanTool.handler>[0],
       ({ toolContext: { bulkLedger: ledger, apiStore: store }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent);
   const runs = (): unknown => engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get();
   // The engine's own Shopify connection to HOST, as `api_setup` saves it.
@@ -230,7 +230,7 @@ describe('an image plan on a store connection that may not write image alt texts
 
   // A host that is no store is refused for that: the scope reason would send the user the wrong way.
   it('refuses an image plan on a host that is no store for the host, not for the scope', async () => {
-    const answer = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.acme.ch', source_list: { form: 'shopify_media', after: { alt: 'x' } } } as Parameters<typeof bulkPlanTool.handler>[0],
+    const answer = await bulkPlanAnswer({ target_system: 'http', target_host: 'shop.acme.ch', source_list: { form: 'shopify_media', after: { alt: 'x' } } } as Parameters<typeof bulkPlanTool.handler>[0],
       ({ toolContext: { bulkLedger: ledger, apiStore: connection(null) }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent);
     expect(answer.startsWith('Error: source_list.form shopify_media reads a store: target_host must be <store>.myshopify.com.'), answer).toBe(true);
     expect(answer).not.toContain('write_files');

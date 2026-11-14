@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { bulkPlanTool } from './bulk.js';
+import { bulkPlanTool, bulkPlanAnswer } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
@@ -21,7 +21,7 @@ function agent(): IAgent {
   return { toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL } as unknown as IAgent;
 }
 
-const plan = (rule: string): Promise<string> => bulkPlanTool.handler({
+const plan = (rule: string): Promise<string> => bulkPlanAnswer({
   target_system: 'http', target_host: 'shop.example.com',
   source_list: { path: '/wp-json/wc/v3/products' },
   judge: { rule, schema: { description: { type: 'string', maxLength: 2000 } } },

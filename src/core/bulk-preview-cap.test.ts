@@ -9,7 +9,7 @@ import { parseListSource } from './bulk-list.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
-import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkPlanAnswer, BulkPlanRefusal } from '../tools/builtin/bulk.js';
 import type { IAgent } from '../types/index.js';
 
 // 660b: the cap of unapproved runs. The owner's planning drops the oldest over it, whoever
@@ -158,9 +158,10 @@ describe('the planner is told by bulk_plan', () => {
     writeFileSync(join(ws, 'a.md'), 'old\n');
     writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'a.md', after: 'new\n' }]));
     const agent = { toolContext: { bulkLedger: ledger, dataStore: null }, currentThreadId: 'thread-1', principal: HELPER } as unknown as IAgent;
-    const out = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json' }, agent);
+    const out = await bulkPlanAnswer({ target_system: 'workspace', source_file: 'src.json' }, agent);
     expect(out).toBe('Error: 10 previews are already waiting for approval. A new one is possible only once the owner approves some. Tell the user that in one sentence; do not try again in this run.');
     for (const id of owners) expect(out).not.toContain(id);
+    await expect(bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json' }, agent)).rejects.toBeInstanceOf(BulkPlanRefusal);
     expect(runs()).toHaveLength(BULK_MAX_PREVIEWED_RUNS);
   });
 });

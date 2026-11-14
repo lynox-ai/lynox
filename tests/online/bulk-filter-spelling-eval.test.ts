@@ -28,6 +28,7 @@ import { BulkLedger } from '../../src/core/bulk-ledger.js';
 import { BULK_NOTICES } from '../../src/core/bulk-notices.js';
 import { OWNER_PRINCIPAL } from '../../src/core/request-principal.js';
 import { askUserTool, bulkPlanTool, bulkStatusTool, httpRequestTool } from '../../src/tools/builtin/index.js';
+import { BulkPlanRefusal } from '../../src/tools/builtin/bulk.js';
 import type { IAgent, ToolEntry } from '../../src/types/index.js';
 import { HAIKU } from './setup.js';
 
@@ -118,8 +119,19 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   const owner = { toolContext: { bulkLedger: ledger }, currentThreadId: 'spell-eval', principal: OWNER_PRINCIPAL } as unknown as IAgent;
   const agent = make([
     { ...(bulkPlanTool as ToolEntry), handler: async (input: unknown) => {
-      const answer = await (bulkPlanTool as ToolEntry).handler(input, owner);
+      // A refused plan is recorded with its text, then thrown on as the tool throws it: the model
+      // reads it as a failed call, as in the chat.
+      let answer: string;
+      let refusal: BulkPlanRefusal | null = null;
+      try {
+        answer = await (bulkPlanTool as ToolEntry).handler(input, owner);
+      } catch (err: unknown) {
+        if (!(err instanceof BulkPlanRefusal)) throw err;
+        refusal = err;
+        answer = err.message;
+      }
       run.plans.push({ input: (typeof input === 'object' && input !== null ? input : {}) as Record<string, unknown>, answer });
+      if (refusal !== null) throw refusal;
       return answer;
     } } as ToolEntry,
     { ...(httpRequestTool as ToolEntry), handler: async () => { run.reads++; return PRODUCTS; } } as ToolEntry,

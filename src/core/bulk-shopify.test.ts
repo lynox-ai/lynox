@@ -34,7 +34,7 @@ import { SecretStore } from './secret-store.js';
 import { REMINDER_BODY_MAX, WorkerLoop } from './worker-loop.js';
 import { mintStorePass } from './store-pass.js';
 import { withListQuery, withShopifyApply, withShopifyRead, type ListQueryConstraints, type ShopifyReadPhase } from '../tools/permission-guard.js';
-import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import { runBulkJudge, type BulkJudgeDeps } from './bulk-judge.js';
 import { SHOPIFY_CONTEXT_FIELDS, judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
@@ -896,7 +896,7 @@ describe('the switch', () => {
 
 describe('bulk_plan with a Shopify source', () => {
   const agent = (): IAgent => ({ toolContext: { bulkLedger: ledger, apiStore: IMAGE_WRITING_STORE }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent;
-  const plan = (input: Record<string, unknown>): Promise<string> => bulkPlanTool.handler(
+  const plan = (input: Record<string, unknown>): Promise<string> => bulkPlanAnswer(
     { target_system: 'http', target_host: HOST, source_list: { form: 'shopify', after: { title: 'x' } }, ...input } as Parameters<typeof bulkPlanTool.handler>[0], agent(),
   );
 

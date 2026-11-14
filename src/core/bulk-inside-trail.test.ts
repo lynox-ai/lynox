@@ -10,7 +10,7 @@ import { namedTarget, newCorrelationId, type AuditEntry } from './audit-log.js';
 import { TriggerStore } from './trigger-store.js';
 import { WorkerLoop, bulkRunTrail } from './worker-loop.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
-import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
@@ -75,14 +75,14 @@ async function planFiles(): Promise<string> {
   mkdirSync(join(ws, 'pages'));
   writeFileSync(join(ws, 'pages/a.md'), 'old a\n');
   writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'pages/a.md', after: 'new a\n' }, { target: 'pages/b.md', after: 'new b\n' }]));
-  return runIdOf(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json' }, agent()));
+  return runIdOf(await bulkPlanAnswer({ target_system: 'workspace', source_file: 'src.json' }, agent()));
 }
 
 async function planRows(): Promise<string> {
   store.createCollection({ name: COLLECTION, scope, uniqueKey: ['sku'], columns: [{ name: 'sku', type: 'string' }, { name: 'price', type: 'number' }] });
   store.insertRecords({ collection: COLLECTION, records: [{ sku: 'S1', price: 1 }, { sku: 'S2', price: 2 }], stamp: TEST_STAMP });
   writeFileSync(join(ws, 'prices.json'), JSON.stringify([{ target: 'S1', price: 10 }, { target: 'S2', price: 20 }]));
-  return runIdOf(await bulkPlanTool.handler({ target_system: 'data_store', target_collection: COLLECTION, source_file: 'prices.json' }, agent()));
+  return runIdOf(await bulkPlanAnswer({ target_system: 'data_store', target_collection: COLLECTION, source_file: 'prices.json' }, agent()));
 }
 
 interface Recorded { rows: AuditEntry[]; getAuditLog: ReturnType<typeof vi.fn> }

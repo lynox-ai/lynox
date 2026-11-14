@@ -7,7 +7,7 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
 import { BulkLedger } from './bulk-ledger.js';
-import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { dataStoreColumns } from './bulk-plan.js';
 import { JUDGE_MAX_FIELDS, normalizeJudgeRule } from './bulk-judge-rule.js';
@@ -75,7 +75,7 @@ afterEach(() => {
 
 async function plan(skus: string[], judge: unknown): Promise<string> {
   writeFileSync(join(dir, 'workspace', 'skus.csv'), ['target', ...skus].join('\n'));
-  const out = await bulkPlanTool.handler(
+  const out = await bulkPlanAnswer(
     { target_system: 'data_store', target_collection: 'products', source_file: 'skus.csv', judge }, agent(),
   );
   const m = /Bulk run ([0-9a-f-]{36})/.exec(out);

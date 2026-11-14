@@ -16,7 +16,7 @@ import { runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { Containment, chatIsContained, containedRefusal, containedThreadStates, threadIsContained } from './containment.js';
 import { createToolContext } from './tool-context.js';
-import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 
 const CP_ENV = {
   LYNOX_MANAGED_CONTROL_PLANE_URL: 'https://cp.example.invalid',
@@ -318,7 +318,7 @@ describe('a bulk run is contained at its insert', () => {
     toolContext.containment = containment;
     toolContext.bulkLedger = ledger;
     const child = { currentThreadId: undefined, originThreadId: 't1', toolContext, principal: OWNER_PRINCIPAL };
-    const answer = await bulkPlanTool.handler({
+    const answer = await bulkPlanAnswer({
       // The list form the planner knows today; the host does not matter to the containment.
       target_system: 'http', target_host: 'shop.commerce.example',
       source_list: { path: '/wp-json/wc/v3/products', after: { status: 'draft' } },

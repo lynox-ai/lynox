@@ -9,7 +9,7 @@ import { DataStore } from './data-store.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_JUDGED_RETENTION_MS, BULK_MAX_PREVIEWED_RUNS } from './bulk-ledger.js';
 import { BULK_NOTICES } from './bulk-notices.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
-import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkStatusTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { dataStoreColumns } from './bulk-plan.js';
 import { judgeCallSchema, judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
@@ -82,7 +82,7 @@ afterEach(() => {
 async function plan(skus: string[], judge: unknown = RULE): Promise<string> {
   const ws = join(dir, 'workspace');
   writeFileSync(join(ws, 'skus.csv'), ['target', ...skus].join('\n'));
-  const out = await bulkPlanTool.handler(
+  const out = await bulkPlanAnswer(
     { target_system: 'data_store', target_collection: 'products', source_file: 'skus.csv', judge }, agent(),
   );
   return runIdOf(out);
@@ -156,8 +156,8 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
   it('refuses a workspace target and an atomic run', async () => {
     const ws = join(dir, 'workspace');
     writeFileSync(join(ws, 'f.csv'), 'target\na.md');
-    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'f.csv', judge: RULE }, agent())).toMatch(/judge needs target_system/);
-    expect(await bulkPlanTool.handler(
+    expect(await bulkPlanAnswer({ target_system: 'workspace', source_file: 'f.csv', judge: RULE }, agent())).toMatch(/judge needs target_system/);
+    expect(await bulkPlanAnswer(
       { target_system: 'data_store', target_collection: 'products', source_file: 'f.csv', judge: RULE, atomic: true }, agent(),
     )).toMatch(/cannot be atomic/);
     expect(ledger.listRuns()).toEqual([]);
@@ -165,7 +165,7 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
 
   it('refuses a rule with a character the owner does not see, and plans none', async () => {
     writeFileSync(join(dir, 'workspace', 'skus.csv'), 'target\nA');
-    const planRule = (rule: string): Promise<string> => bulkPlanTool.handler(
+    const planRule = (rule: string): Promise<string> => bulkPlanAnswer(
       { target_system: 'data_store', target_collection: 'products', source_file: 'skus.csv', judge: { ...RULE, rule } }, agent(),
     );
     for (const cp of [0xe0041, 0x202e, 0x200b]) {
@@ -186,7 +186,7 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
     });
     store.insertRecords({ collection: 'stock', records: [{ sku: 'A', qty: 1, live: true }], stamp: TEST_STAMP });
     writeFileSync(join(dir, 'workspace', 's.csv'), 'target\nA');
-    const planStock = (schema: Record<string, unknown>): Promise<string> => bulkPlanTool.handler(
+    const planStock = (schema: Record<string, unknown>): Promise<string> => bulkPlanAnswer(
       { target_system: 'data_store', target_collection: 'stock', source_file: 's.csv', judge: { rule: 'x', schema } }, agent(),
     );
     expect(await planStock({ qty: { type: 'string', maxLength: 5 } })).toMatch(/qty the type string, which its number column does not take/);
@@ -366,7 +366,7 @@ describe('runBulkJudge over data-store rows', () => {
       { sku: 'D', meta: '['.repeat(100) + ']'.repeat(100) },
     ], stamp: TEST_STAMP });
     writeFileSync(join(dir, 'workspace', 'd.csv'), 'target\nN\nK\nC\nS\nB\nD');
-    const id = runIdOf(await bulkPlanTool.handler(
+    const id = runIdOf(await bulkPlanAnswer(
       { target_system: 'data_store', target_collection: 'docs', source_file: 'd.csv', judge: { rule: 'x', schema: { meta: { type: 'string', maxLength: 20 } } } }, agent(),
     ));
     expect(start(id).ok).toBe(true);
@@ -752,7 +752,7 @@ describe('a column named keep', () => {
 
   it('is judged like any other field, inside after', async () => {
     writeFileSync(join(dir, 'workspace', 'f.csv'), 'target\nA');
-    const out = await bulkPlanTool.handler(
+    const out = await bulkPlanAnswer(
       { target_system: 'data_store', target_collection: 'flags', source_file: 'f.csv', judge: { rule: 'x', schema: { keep: { type: 'string', maxLength: 10 } } } }, agent(),
     );
     const id = runIdOf(out);

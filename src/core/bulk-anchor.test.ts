@@ -10,7 +10,7 @@ import type { PlannedTarget } from './bulk-ledger.js';
 import { runBulkEffect, workspaceWriter } from './bulk-apply.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { closeWorkspaceBase } from './workspace-rel.js';
-import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 import type { IAgent } from '../types/index.js';
 
 /**
@@ -36,7 +36,7 @@ const runIdOf = (result: string): string => {
 
 async function plan(rows: { target: string; after: string }[]): Promise<string> {
   writeFileSync(join(ws, 'src.json'), JSON.stringify(rows));
-  return bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json' }, agent());
+  return bulkPlanAnswer({ target_system: 'workspace', source_file: 'src.json' }, agent());
 }
 
 function approve(runId: string): void {
@@ -118,7 +118,7 @@ describe('bulk keys name the file in the workspace the run was planned in', () =
 
   it('refuses a run planned in another workspace, and writes nothing in this one', async () => {
     writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'a.txt', after: 'from the first workspace' }]));
-    const runId = runIdOf(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json' }, agent()));
+    const runId = runIdOf(await bulkPlanAnswer({ target_system: 'workspace', source_file: 'src.json' }, agent()));
     approve(runId);
     const other = join(dir, 'other');
     mkdirSync(other);
@@ -213,7 +213,7 @@ describe('bulk_plan does not follow links', () => {
   it('refuses a source file behind a link', async () => {
     writeFileSync(join(outside, 'src.json'), JSON.stringify([{ target: 'a.txt', after: 'x' }]));
     symlinkSync(join(outside, 'src.json'), join(ws, 'linked.json'));
-    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'linked.json' }, agent()))
+    expect(await bulkPlanAnswer({ target_system: 'workspace', source_file: 'linked.json' }, agent()))
       .toBe('Error: The source file is not a readable file.');
   });
 });
