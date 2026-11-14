@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
 import { WORKER_NOTICES } from './worker-notices.js';
+import { currentWorkerRunStart, type WorkerRunStart } from './worker-run-start.js';
 import { PLAN_ENDED_RESULT } from './plan-pause.js';
 import { onBoxBlock, pv } from './prompt-value.js';
 import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js';
@@ -4314,6 +4315,94 @@ describe('WorkerLoop', () => {
     vi.mocked(tm.getTrigger).mockReturnValue(ordinary);
     await exec.executeTask(ordinary, null);
     expect(updateWatchConfig).toHaveBeenCalledTimes(1);
+  });
+});
+
+// How the worker run was started is held for its session, where `run_workflow` reads it.
+describe('the worker holds how its run was started for the run', () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(`${FIXED_DAY}T12:00:00Z`)); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  function sessionSeeing(seen: Array<WorkerRunStart | undefined>): Session {
+    const session = makeSession('Done.');
+    vi.mocked(session.run).mockImplementation(async () => { seen.push(currentWorkerRunStart()); return 'Done.'; });
+    return session;
+  }
+
+  it('a trigger that came due runs as its schedule', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask()]), session }), makeNotificationRouter(false), 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toEqual(['schedule']);
+  });
+
+  it('"Run now" runs as a hand', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    const task = makeTask({ id: 'hand-1', effect: 'run_agent', schedule_cron: undefined, next_run_at: undefined });
+    const loop = new WorkerLoop(makeEngine({ taskManager: makeTaskManager([task]), session }), makeNotificationRouter(false), 60_000);
+    expect(await loop.runTriggerNow('hand-1')).toEqual({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toEqual(['hand']);
+  });
+
+  it('a due trigger that picks up an answered question runs as answered, not as its schedule', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    const promptStore = { getAnsweredForTrigger: vi.fn(() => ({ id: 'prompt-1', session_id: 'thread-parked', question: 'Send the report?', answer: 'Yes.', hand_run: 0 })), releaseTrigger: vi.fn() } as unknown as PromptStore;
+    await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask()]), session, promptStore }), makeNotificationRouter(false), 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toEqual(['answered']);
+  });
+
+  it('a question store that cannot be read throws nothing out of the frame and never reaches its session', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    const read = vi.fn(() => { throw new Error('engine.db busy'); });
+    const promptStore = { getAnsweredForTrigger: read, releaseTrigger: vi.fn() } as unknown as PromptStore;
+    const rejections: unknown[] = [];
+    const onRejection = (r: unknown): void => { rejections.push(r); };
+    process.on('unhandledRejection', onRejection);
+    try {
+      await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask()]), session, promptStore }), makeNotificationRouter(false), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+    expect(read, 'positive control: the store was asked').toHaveBeenCalled();
+    expect(rejections).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+
+  it('"Run now" on a trigger with an answered question waiting runs as a hand, not as answered', async () => {
+    const seen: Array<WorkerRunStart | undefined> = [];
+    const session = sessionSeeing(seen);
+    const read = vi.fn(() => ({ id: 'prompt-1', session_id: 'thread-parked', question: 'Send the report?', answer: 'Yes.', hand_run: 0 }));
+    const promptStore = { getAnsweredForTrigger: read, getPendingForTrigger: vi.fn(() => undefined), releaseTrigger: vi.fn() } as unknown as PromptStore;
+    const task = makeTask({ id: 'hand-1', effect: 'run_agent', schedule_cron: undefined, next_run_at: undefined });
+    const loop = new WorkerLoop(makeEngine({ taskManager: makeTaskManager([task]), session, promptStore }), makeNotificationRouter(false), 60_000);
+    expect(await loop.runTriggerNow('hand-1')).toEqual({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(read, 'positive control: the run picked the answer up').toHaveBeenCalled();
+    expect(seen).toEqual(['hand']);
+  });
+
+  it('a due trigger of another effect does not ask the question store at its start', async () => {
+    const read = vi.fn(() => ({ id: 'prompt-1', session_id: 'thread-parked', question: 'Send the report?', answer: 'Yes.', hand_run: 0 }));
+    const promptStore = { getAnsweredForTrigger: read, releaseTrigger: vi.fn() } as unknown as PromptStore;
+    const control = { getAnsweredForTrigger: vi.fn(() => undefined), releaseTrigger: vi.fn() } as unknown as PromptStore;
+    await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask({ effect: 'notify' })]), session: makeSession('Done.'), promptStore }), makeNotificationRouter(false), 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+    await new WorkerLoop(makeEngine({ taskManager: makeTaskManager([makeTask()]), session: makeSession('Done.'), promptStore: control }), makeNotificationRouter(false), 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(control.getAnsweredForTrigger, 'positive control: a run_agent dispatch asks it').toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('outside a worker run there is none', () => {
+    expect(currentWorkerRunStart()).toBeUndefined();
   });
 });
 

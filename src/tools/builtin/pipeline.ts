@@ -33,6 +33,7 @@ import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '.
 import { isOwnerPrincipal, mandateIdOf, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import type { WorkflowAuthorship } from '../../core/workflow-store.js';
 import { currentPlanRun, runAsPlanOf, runAsWorkflowRun } from '../../core/plan-run-context.js';
+import { currentWorkerRunStart } from '../../core/worker-run-start.js';
 import { isEngineRowId } from '../../core/instance-trail.js';
 
 const MAX_PLANS = 10;
@@ -1015,6 +1016,33 @@ export interface WorkflowRunTrail {
 }
 
 /**
+ * Where the owner's start of a mandate's workflow came from: the library's Run, the owner's chat or
+ * session, or a run of the owner's own worker (`worker-run-start.ts`) — by "Run now", by its
+ * schedule, or in a way the record does not name (an event, a pickup after an answered question).
+ */
+export type OwnerStart = 'library' | 'owner-chat' | 'owner-run-now' | 'owner-schedule' | 'owner-unsaid';
+
+/** The `started=` word of each: the trail view knows `hand` and `schedule` (`startedBy`). An event
+ *  has no word there, and a pickup after an answer does not know how the run that asked was
+ *  started, so their rows name no start. */
+const OWNER_START_WORD: Readonly<Record<OwnerStart, 'hand' | 'schedule' | undefined>> = {
+  'library': 'hand',
+  'owner-chat': 'hand',
+  'owner-run-now': 'hand',
+  'owner-schedule': 'schedule',
+  'owner-unsaid': undefined,
+};
+
+/** The owner's start of a `run_workflow` call, read from the worker run it runs in, if any. */
+export function ownerStartOfCall(): OwnerStart {
+  const start = currentWorkerRunStart();
+  if (start === undefined) return 'owner-chat';
+  if (start === 'hand') return 'owner-run-now';
+  if (start === 'schedule') return 'owner-schedule';
+  return 'owner-unsaid';
+}
+
+/**
  * The trail of a stored workflow that someone other than the owner runs from a chat (660b): one
  * row before its first step, one after it, in that person's name. Its steps write their own rows
  * under its key. The run's bookkeeping is in its end row: whether the definition of a one-shot was
@@ -1025,7 +1053,7 @@ export interface WorkflowRunTrail {
 export function workflowRunTrail(
   principal: RequestPrincipal,
   auditLog: AuditLog | null,
-  run: { workflowId: string; oneShot: boolean; retry: boolean; startedBy?: 'library' | 'owner-chat' | undefined },
+  run: { workflowId: string; oneShot: boolean; retry: boolean; startedBy?: OwnerStart | undefined },
 ): WorkflowRunTrail | null {
   const p = principal;
   if (isOwnerPrincipal(p) || currentPlanRun(p) !== undefined) return null;
@@ -1036,8 +1064,9 @@ export function workflowRunTrail(
     ['retry', run.retry ? 'yes' : undefined],
     // The owner pressed Run in the library (1055): the run is the mandate's, the start the owner's,
     // in the words a plan's run started by hand uses, which the trail view shows (`started_hand`).
-    // The same words for the owner's chat or session running a mandate's workflow (1100).
-    ['started', run.startedBy !== undefined ? 'hand' : undefined],
+    // The same words for the owner's chat or session running a mandate's workflow. A run of the
+    // owner's own worker says how that run was started: its schedule is not a hand.
+    ['started', run.startedBy === undefined ? undefined : OWNER_START_WORD[run.startedBy]],
     ['by', run.startedBy !== undefined ? 'owner' : undefined],
   ];
   const write = (phase: AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
@@ -1208,7 +1237,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }
     }
 
-    const retryTrail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true, ...(runFor.asPlan ? { startedBy: 'owner-chat' as const } : {}) });
+    const retryTrail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true, ...(runFor.asPlan ? { startedBy: ownerStartOfCall() } : {}) });
     if (retryTrail !== null) {
       try { retryTrail.begin(); } catch { return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1365,7 +1394,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     validateManifest(manifest);
     // Before the run is marked run, with no await since the executed-guard above: a one-shot whose
     // start cannot be recorded stays unrun, and a second call cannot slip in between (660b).
-    trail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false, ...(runFor.asPlan ? { startedBy: 'owner-chat' as const } : {}) });
+    trail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false, ...(runFor.asPlan ? { startedBy: ownerStartOfCall() } : {}) });
     if (trail !== null) {
       try { trail.begin(); } catch { trail = null; return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }

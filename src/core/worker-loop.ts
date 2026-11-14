@@ -34,6 +34,7 @@ import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
 import { planOfTrigger, stampFromRow } from './plan-stamp.js';
 import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, claimAdvanceWarnings, claimPauseNotices, markWarningsDelivered, pausePlanNow, pausedAtNow, planPauseOn } from './plan-pause.js';
 import { filingContextFor } from './approval-filing.js';
+import { runAsWorkerRun, type WorkerRunStart } from './worker-run-start.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
@@ -1951,8 +1952,33 @@ export class WorkerLoop {
    * heartbeat, the gates, the dispatch, the recorded end, and the lease given up last. A run of
    * a due trigger and a webhook run share it whole ({@link SlotEvent} says where they differ),
    * so a gate or a stop added here holds for both.
+   *
+   * How the run was started is decided here, once, for everything the run does
+   * (`worker-run-start.ts`): a workflow the run's session starts records it. A hand run of
+   * a mandate's proposal (`handRun`) always comes through `runTriggerNow`, inside the hand scope.
    */
-  async #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
+  #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
+    const start: WorkerRunStart = isStartedByHand(task.id) ? 'hand'
+      : event !== undefined ? 'event'
+        : task.effect === 'run_agent' && this.#picksUpAnswer(task.id) ? 'answered' : 'schedule';
+    return runAsWorkerRun(start, () => this.#runFramed(task, capUSD, handRun, starter, event));
+  }
+
+  /** Whether this run picks up an answered question: then how the run that asked was started is
+   *  not known here (`worker-run-start.ts`). Read only for `run_agent`, the one effect whose run
+   *  asks a question under its trigger and picks the answer up (`executeStandard`), so the other
+   *  effects' dispatch reads nothing more than before. A store that cannot be read must not throw out of
+   *  here, before the frame exists; the frame's own read of the question then ends the run as it
+   *  did before. */
+  #picksUpAnswer(triggerId: string): boolean {
+    try {
+      return this.engine.getPromptStore()?.getAnsweredForTrigger(triggerId) !== undefined;
+    } catch {
+      return true;
+    }
+  }
+
+  async #runFramed(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
