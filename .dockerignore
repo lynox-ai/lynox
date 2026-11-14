@@ -21,6 +21,8 @@ docs/
 scripts/
 # The whisper-build stage runs this one (bind-mounted, not copied into the image).
 !scripts/fetch-pinned.sh
+# The production stage runs this one on a canary build (bind-mounted, not copied).
+!scripts/stamp-canary-version.mjs
 *.png
 *.pem
 *.key

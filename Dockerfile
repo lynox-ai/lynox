@@ -222,6 +222,15 @@ COPY --from=build-webui /app/packages/web-ui/package.json /app/web-ui/package.js
 COPY entrypoint-webui.sh /entrypoint-webui.sh
 RUN chmod 0755 /entrypoint-webui.sh
 
+# A canary build (canary-build.yml) names its image with a semver and must report the same
+# version, because the control plane compares the two on a rollout. It passes that version
+# here; every other build passes nothing and the step changes nothing. Only the canary shape
+# `<x.y.z>-canary.<sha8>` is accepted (scripts/stamp-canary-version.mjs). Placed after the last
+# COPY so a new version rebuilds only the layers below.
+ARG CANARY_VERSION=
+RUN --mount=type=bind,source=scripts/stamp-canary-version.mjs,target=/tmp/stamp-canary-version.mjs \
+    node /tmp/stamp-canary-version.mjs /app/package.json "$CANARY_VERSION"
+
 # Every program in the image is execute-only for the runtime user, so no
 # process in the container is dumpable. The kernel marks a process started from
 # a binary its user cannot read as not dumpable, and another process of the
