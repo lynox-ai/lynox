@@ -71,6 +71,25 @@ import { timingSafeEqual } from 'node:crypto';
 /** After `Blocked: redirect to <url>`: a hop to a GraphQL URL that carries a mutation, with the way out. */
 export const GRAPHQL_REDIRECT_REFUSAL = 'carries a GraphQL mutation in its URL; the redirect was not followed. To run the mutation, send it as a POST with a JSON body directly to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation.';
 
+/**
+ * After `Blocked: redirect to <address>`: a redirect of a read whose target a server may read as a
+ * write (`?_method=DELETE` and its kin, as `effectiveWriteMethod` reads them), on a call no guard
+ * admits that write for. The read itself was sent and answered; the hop was not requested.
+ */
+export const OVERRIDE_REDIRECT_REFUSAL = 'carries a method override (such as `_method=DELETE`) that a server may run as a write; the redirect was not followed. The first request was sent and answered as a read. To make that write, send it directly with its own method, so it goes through the same check as any write.';
+
+/**
+ * A read's redirect hop refused because a server may run its target as a write
+ * ({@link OVERRIDE_REDIRECT_REFUSAL}). Its own class, so the read that was sent and answered is
+ * counted, and the text reaches the model as it is.
+ */
+export class OverrideHopRefused extends Error {
+  constructor(nextUrl: string) {
+    super(`Blocked: redirect to ${urlForNote(nextUrl)} ${OVERRIDE_REDIRECT_REFUSAL}`);
+    this.name = 'OverrideHopRefused';
+  }
+}
+
 /** After `Blocked: <write> to <service>`: a JSON object that cannot be a GraphQL request at a
  *  GraphQL-looking address, as a write to a file named `graphql.*` sends (`jsonObjectNotGraphql`). */
 export const GRAPHQL_NOT_A_REQUEST_REFUSAL = 'looks like a GraphQL address to this check, and the body is not a GraphQL request, so it was not sent. If this writes or changes a file whose name contains graphql, lynox cannot send it this way: tell the user which file it is and that they need to change it themselves. Otherwise send one JSON object with a query string and Content-Type: application/json.';
@@ -623,6 +642,16 @@ export async function fetchWithValidatedRedirects(
       // not a move, and is not followed at all. A method this file cannot read counts as a write.
       const hopWrite = effectiveWriteMethod(method, headers, nextUrl, typeof body === 'string' ? body : undefined);
       if (hopWrite === null || isWriteMethod(hopWrite)) {
+        // A read turns into a write on this hop only where a guard admitted it (a contract that
+        // grants it). Without one nobody was asked, so the hop is not requested: following it
+        // would send the write without a question. A method this file cannot read counts as one.
+        // The caller's own hop check speaks first, with its own words (a delegated session's, a
+        // discovery read's); nothing was sent on this call but the read, so its refusal is passed
+        // on as it is.
+        if (ownWrite === undefined && redirectGuard === undefined) {
+          onRedirect?.(nextUrl, method, headers);
+          throw new OverrideHopRefused(nextUrl);
+        }
         if (writeSentAgain || sameTarget(currentUrl, nextUrl)) {
           // "The same" against the last write sent, as a server reads it (overrides included).
           throw new RedirectRefusedAfterWrite(sent ?? { method: originalMethod, url }, nextUrl, hopWrite === lastWrite ? 'repeat' : 'another');
@@ -4271,7 +4300,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // The request went out and was answered, so it counts even though reading the answer failed.
       if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
       // So does a write whose redirect hop was refused: it was sent and answered before the hop.
-      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused) {
+      // And a read whose override hop was refused: the read went out and was answered.
+      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused) {
         const sentTo = apiProfileOfUrl(input.url, toolContext);
         if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
       }
@@ -4294,6 +4324,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // refusal: here the write was sent and answered, and only its redirect was refused or failed.
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
       if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
+      if (err instanceof OverrideHopRefused) blockedVerbatim(err.message);
       if (timedOut === 'stopped') {
         throw new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite, againWrite) + repairNote);
       }
