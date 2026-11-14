@@ -7301,7 +7301,15 @@ export class LynoxHTTPApi {
         llmConfigured = !!anthropicKey;
       }
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
-      const searxngProblem = searxngUrl ? searxngUrlProblem(searxngUrl) : undefined;
+      // The boot's two rules: the URL itself (read live, so a stored URL's own problem shows at
+      // once), then the egress settings, as the boot found them: until a
+      // restart the engine keeps that decision, and the page says what the engine does.
+      // The boot's code holds only for the URL it was found for: a URL saved since is not judged by it.
+      const bootRefusal = typeof engine.getSearxngBootRefusal === 'function' ? engine.getSearxngBootRefusal() : null;
+      const searxngProblem = searxngUrl
+        ? searxngUrlProblem(searxngUrl)
+          ?? (bootRefusal !== null && bootRefusal.url === searxngUrl && bootRefusal.code.startsWith('policy') ? { code: bootRefusal.code } : undefined)
+        : undefined;
       jsonResponse(res, 200, {
         provider,
         // Emit the CANONICAL billing tier (hosted/managed/managed_pro/managed_max). Legacy

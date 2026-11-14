@@ -15,12 +15,12 @@ import type { LynoxConfig } from '../types/index.js';
 describe('Engine boot — a SearXNG URL every search would be refused for', () => {
   const dirs: string[] = [];
   const engines: Engine[] = [];
-  const prev = { dataDir: process.env['LYNOX_DATA_DIR'], searxng: process.env['SEARXNG_URL'] };
+  const prev = { dataDir: process.env['LYNOX_DATA_DIR'], searxng: process.env['SEARXNG_URL'], policy: process.env['LYNOX_NETWORK_POLICY'], hosts: process.env['LYNOX_NETWORK_ALLOWED_HOSTS'] };
 
   afterEach(async () => {
     for (const e of engines) { try { await e.shutdown(); } catch { /* best effort */ } }
     engines.length = 0;
-    for (const [k, v] of [['LYNOX_DATA_DIR', prev.dataDir], ['SEARXNG_URL', prev.searxng]] as const) {
+    for (const [k, v] of [['LYNOX_DATA_DIR', prev.dataDir], ['SEARXNG_URL', prev.searxng], ['LYNOX_NETWORK_POLICY', prev.policy], ['LYNOX_NETWORK_ALLOWED_HOSTS', prev.hosts]] as const) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -51,6 +51,7 @@ describe('Engine boot — a SearXNG URL every search would be refused for', () =
   it('does not count a loopback IP as set up, and tells the operator the hostname way', async () => {
     const { engine, stderr } = await boot('http://127.0.0.1:18080');
     expect(engine.getWebSearchStatus()).toBe('fallback');
+    expect(engine.getSearxngBootRefusal()).toEqual({ url: 'http://127.0.0.1:18080', code: 'private-ip' });
     expect(stderr).toContain('[lynox] SearXNG init failed: SearXNG URL http://127.0.0.1:18080 names the IP address 127.0.0.1');
     expect(stderr).toContain('Name the host instead: http://localhost:<port>');
     expect(stderr).toContain('[lynox] SearXNG URL refused, using DuckDuckGo HTML-scrape fallback (best-effort).');
@@ -74,6 +75,50 @@ describe('Engine boot — a SearXNG URL every search would be refused for', () =
 
   it('counts the same SearXNG named by a hostname as set up', async () => {
     const { engine } = await boot('http://localhost:18080');
+    expect(engine.getWebSearchStatus()).toBe('configured');
+  });
+
+  // The egress settings every search runs under refuse it too.
+  it('does not count a SearXNG every search is refused for by the allow-list as set up', async () => {
+    process.env['LYNOX_NETWORK_POLICY'] = 'allow-list';
+    // The fallback's host is on the list: search falls back to it.
+    process.env['LYNOX_NETWORK_ALLOWED_HOSTS'] = 'api.example.com,html.duckduckgo.com';
+    const { engine, stderr } = await boot('http://searxng:8080');
+    expect(engine.getWebSearchStatus()).toBe('fallback');
+    expect(stderr).toContain('[lynox] SearXNG init failed: SearXNG URL http://searxng:8080 is refused for every search by this instance\'s network settings: Blocked: hostname "searxng" not in network allow-list');
+    expect(stderr).toContain('[lynox] SearXNG URL refused, using DuckDuckGo HTML-scrape fallback (best-effort).');
+    expect(engine.getSearxngBootRefusal()).toEqual({ url: 'http://searxng:8080', code: 'policy-allowlist' });
+  });
+
+  // The fallback stays registered under deny-all, each call refused with its reason: without
+  // `web_research` the agent would offer the provider-side web_search, which runs outside
+  // `network_policy`.
+  it('keeps web_research registered under deny-all, so no search runs outside the policy', async () => {
+    process.env['LYNOX_NETWORK_POLICY'] = 'deny-all';
+    const { engine } = await boot('http://searxng:8080');
+    expect(engine.getWebSearchStatus()).toBe('fallback');
+    expect(engine.getRegistry().find('web_research')).toBeDefined();
+    expect(engine.getSearxngBootRefusal()).toEqual({ url: 'http://searxng:8080', code: 'policy-deny' });
+  });
+
+  it('keeps web_research registered under an allow-list that names neither host', async () => {
+    process.env['LYNOX_NETWORK_POLICY'] = 'allow-list';
+    process.env['LYNOX_NETWORK_ALLOWED_HOSTS'] = 'api.example.com';
+    const { engine } = await boot('http://searxng:8080');
+    expect(engine.getWebSearchStatus()).toBe('fallback');
+    expect(engine.getRegistry().find('web_research')).toBeDefined();
+    expect(engine.getSearxngBootRefusal()).toEqual({ url: 'http://searxng:8080', code: 'policy-allowlist' });
+  });
+
+  it('records no refusal when the URL is used', async () => {
+    const { engine } = await boot('http://localhost:18080');
+    expect(engine.getSearxngBootRefusal()).toBeNull();
+  });
+
+  it('counts the same SearXNG as set up once the allow-list names it', async () => {
+    process.env['LYNOX_NETWORK_POLICY'] = 'allow-list';
+    process.env['LYNOX_NETWORK_ALLOWED_HOSTS'] = 'api.example.com,searxng';
+    const { engine } = await boot('http://searxng:8080');
     expect(engine.getWebSearchStatus()).toBe('configured');
   });
 });

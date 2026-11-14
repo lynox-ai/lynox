@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SearXNGProvider, DuckDuckGoProvider, parseDdgHtml, createSearchProvider, searxngUrlProblem } from './search-provider.js';
+import { SearXNGProvider, DuckDuckGoProvider, parseDdgHtml, createSearchProvider, searxngUrlProblem, searxngPolicyRefusal } from './search-provider.js';
 import type { WebSearchEvent } from './search-provider.js';
 import { channels } from '../../core/observability.js';
 import { runInCallSlot } from '../../core/call-connection.js';
-import { createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
+import { createToolContext, applyNetworkPolicy, applyEnforceHttps } from '../../core/tool-context.js';
 
 // Mock global fetch
 const mockFetch = vi.fn();
@@ -167,6 +167,34 @@ describe('SearXNGProvider', () => {
 
   it('allows http:// localhost (self-hosted)', () => {
     expect(() => new SearXNGProvider('http://localhost:8888')).not.toThrow();
+  });
+
+  // The egress settings refuse some URLs for every search; the boot asks the same.
+  describe('a URL the egress settings refuse for every search', () => {
+    const ctx = (setup: (c: ReturnType<typeof createToolContext>) => void) => { const c = createToolContext({}); setup(c); return c; };
+    const cases: Array<[string, string, ReturnType<typeof createToolContext>, string | null]> = [
+      ['enforce_https, http to a service name', 'http://searxng:8080', ctx((c) => applyEnforceHttps(c, true)), 'https'],
+      ['enforce_https, http to localhost', 'http://localhost:8888', ctx((c) => applyEnforceHttps(c, true)), null],
+      ['enforce_https, https', 'https://search.example', ctx((c) => applyEnforceHttps(c, true)), null],
+      ['allow-list without the host', 'http://searxng:8080', ctx((c) => applyNetworkPolicy(c, 'allow-list', ['api.example.com'])), 'allowlist'],
+      ['allow-list with the host', 'http://searxng:8080', ctx((c) => applyNetworkPolicy(c, 'allow-list', ['searxng'])), null],
+      ['deny-all', 'http://searxng:8080', ctx((c) => applyNetworkPolicy(c, 'deny-all', [])), 'deny'],
+      ['enforce_https and deny-all: https is checked first', 'http://searxng:8080', ctx((c) => { applyEnforceHttps(c, true); applyNetworkPolicy(c, 'deny-all', []); }), 'https'],
+      ['enforce_https and deny-all, http to localhost: deny-all refuses it', 'http://localhost:8888', ctx((c) => { applyEnforceHttps(c, true); applyNetworkPolicy(c, 'deny-all', []); }), 'deny'],
+      ['guarded (search is discovery)', 'http://searxng:8080', ctx((c) => applyNetworkPolicy(c, 'guarded', [])), null],
+      ['allow-all', 'http://searxng:8080', ctx(() => {}), null],
+    ];
+
+    it.each(cases)('%s: refused at boot exactly when its search is, by the rule %s', async (_name, url, c, rule) => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+      const refusal = searxngPolicyRefusal(url, c);
+      expect(refusal?.rule ?? null).toBe(rule);
+      const searched = await new SearXNGProvider(url).search('q', undefined, c).then(() => true, (e: unknown) => {
+        expect(refusal?.message).toBe((e as Error).message);
+        return false;
+      });
+      expect(searched).toBe(rule === null);
+    });
   });
 
   // A literal private IP was accepted here while every search to it was refused by the egress

@@ -129,3 +129,21 @@ describe('the check of a typed URL', () => {
 		expect(target.textContent).not.toContain('Nicht erreichbar');
 	});
 });
+
+// A URL the boot found refused by the network settings, by rule. About the settings, not
+// where the URL comes from, so one text whatever its source.
+const POLICY_TEXT: Record<string, string> = {
+	'policy-https': 'Diese Adresse beginnt mit http://, und die Netzwerk-Einstellungen dieser Instanz erlauben http nur für localhost (enforce_https in ~/.lynox/config.json). Trag die Adresse mit https:// ein, oder schalte enforce_https dort aus und starte lynox danach neu.',
+	'policy-allowlist': 'Der Host dieser Adresse steht nicht auf der Liste erlaubter Hosts dieser Instanz (network_policy: allow-list). Nimm ihn in network_allowed_hosts auf, in ~/.lynox/config.json oder in der Umgebungsvariable LYNOX_NETWORK_ALLOWED_HOSTS, die Vorrang hat, und starte lynox danach neu.',
+	'policy-deny': 'Die Netzwerk-Einstellungen dieser Instanz sperren jede Suche im Netz (network_policy: deny-all), auch über SearXNG. Soll lynox im Netz suchen, stell network_policy um, in ~/.lynox/config.json oder in der Umgebungsvariable LYNOX_NETWORK_POLICY, die Vorrang hat, und starte lynox danach neu.',
+	policy: 'Die Netzwerk-Einstellungen dieser Instanz lassen keine Suche an diese Adresse zu. Prüf enforce_https und network_policy und starte lynox nach einer Änderung neu.',
+};
+
+describe('a stored SearXNG URL the network settings refuse', () => {
+	it.each(Object.keys(POLICY_TEXT).flatMap((code) => [[code, false], [code, true]] as const))('names %s with its way out (from the environment: %s)', async (code, fromEnv) => {
+		await render(stored(code, fromEnv));
+		expect(alerts()).toEqual([POLICY_TEXT[code]]);
+		expect(target.textContent).toContain('Nicht verwendet');
+		expect(target.textContent).not.toContain('Verbunden');
+	});
+});

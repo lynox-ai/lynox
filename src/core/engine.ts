@@ -376,6 +376,13 @@ export class Engine {
    *  so the agent doesn't silently fabricate search results when search
    *  is unavailable. */
   private _webSearchStatus: 'configured' | 'fallback' | 'none' = 'none';
+  /**
+   * Why the boot did not use the configured SearXNG URL, by its code (`searxngUrlProblem`) or the
+   * egress rule that refused it (`policy-<rule>`), with the URL it was found for, or null. The
+   * settings status reads this, not a live check: until a restart the engine keeps what the boot
+   * decided, and only for that URL.
+   */
+  private _searxngBootRefusal: { readonly url: string; readonly code: string } | null = null;
   /** The web-search provider that landed in the registry (SearXNG or the DDG
    *  fallback), kept for direct non-agent callers (e.g. onboarding domain derive). */
   private _searchProvider: import('../integrations/search/index.js').SearchProvider | null = null;
@@ -2224,9 +2231,19 @@ export class Engine {
     let searxngRefused = false;
     if (searxngUrl) {
       try {
-        const { SearXNGProvider, createWebSearchTool, searxngUrlProblem } = await import('../integrations/search/index.js');
-        searxngRefused = searxngUrlProblem(searxngUrl) !== undefined;
+        const { SearXNGProvider, createWebSearchTool, searxngUrlProblem, searxngPolicyRefusal } = await import('../integrations/search/index.js');
+        const problem = searxngUrlProblem(searxngUrl);
+        searxngRefused = problem !== undefined;
+        this._searxngBootRefusal = problem === undefined ? null : { url: searxngUrl, code: problem.code };
         const searxng = new SearXNGProvider(searxngUrl);
+        // The egress settings every `web_research` runs under (set above, `configureBudgetAndRateLimits`):
+        // a URL they refuse for every search is not search set up either.
+        const policy = searxngPolicyRefusal(searxngUrl, this._toolContext);
+        if (policy !== undefined) {
+          searxngRefused = true;
+          this._searxngBootRefusal = { url: searxngUrl, code: policy.rule === 'policy' ? 'policy' : `policy-${policy.rule}` };
+          throw new Error(`SearXNG URL ${new URL(searxngUrl).origin} is refused for every search by this instance's network settings: ${policy.message}`);
+        }
         let healthy = await searxng.healthCheck();
         if (!healthy) {
           // SearXNG may still be starting (Docker Compose race) — retry with backoff
@@ -2257,6 +2274,10 @@ export class Engine {
     if (this._webSearchStatus === 'none') {
       try {
         const { DuckDuckGoProvider, createWebSearchTool } = await import('../integrations/search/index.js');
+        // Registered even when the egress settings refuse it too (deny-all, an allow-list without
+        // it): each call is then refused with the reason. Leaving `web_research` out instead would
+        // hand the agent the provider-side web_search, which runs outside `network_policy`
+        // (agent.ts, `builtinTools`).
         const ddg = new DuckDuckGoProvider();
         this.registry.register(createWebSearchTool(ddg));
         this._searchProvider = ddg;
@@ -3347,6 +3368,8 @@ export class Engine {
    *                   told to refuse search and ask for SEARXNG_URL.
    *  Drives the honesty-fallback / fallback-quality prompt suffixes. */
   getWebSearchStatus(): 'configured' | 'fallback' | 'none' { return this._webSearchStatus; }
+  /** Why the boot did not use the configured SearXNG URL (`_searxngBootRefusal`), or null. */
+  getSearxngBootRefusal(): { readonly url: string; readonly code: string } | null { return this._searxngBootRefusal; }
   /** The web-search provider (SearXNG or DDG fallback), or null if none landed.
    *  For direct non-agent search (onboarding domain derive). */
   getSearchProvider(): import('../integrations/search/index.js').SearchProvider | null { return this._searchProvider; }
