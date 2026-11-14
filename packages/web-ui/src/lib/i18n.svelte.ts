@@ -2767,7 +2767,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'memory.erase_pattern_confirm': { de: 'Alle Einträge mit „{pattern}“ löschen? Sie verschwinden aus dieser Liste, auch importierte Inhalte. Was lynox daraus abgeleitet hat, und Sicherungen bleiben bestehen.', en: 'Delete every entry containing "{pattern}"? They disappear from this list, including imported content. What lynox derived from them, and backups, are kept.' },
 
 	// History
-	'history.title': { de: 'Run History', en: 'Run History' },
+	'history.title': { de: 'Verlauf der Läufe', en: 'Run history' },
 	'history.archived': { de: 'Archiviert', en: 'Archived' },
 	'history.ungrouped': { de: 'Einzelne Runs', en: 'Ungrouped runs' },
 	'history.runs': { de: 'Runs', en: 'Runs' },
