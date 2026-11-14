@@ -12,6 +12,7 @@ import {
 import { contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
 import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_STATUS_VALUES, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
+import { scanToolResult } from '../../core/output-guard.js';
 
 /**
  * The model-facing half of a bulk run's dry run (PRD bulk-changes-reversible §3.2,
@@ -529,8 +530,9 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       // The cap refuses a planner who is not the owner; its text is ux's and names no run.
       if (err instanceof BulkPreviewCapError) throw new BulkPlanRefusal(`Error: ${err.message}`);
       // Data-store errors name the collection or filter column the caller passed —
-      // the caller's own strings, not a target's content.
-      throw new BulkPlanRefusal(`Error: the dry run failed: ${err instanceof Error ? err.message : String(err)}`);
+      // the caller's own strings, not a target's content. A failure no branch above foresaw may
+      // quote anything, and a thrown refusal skips the scan a returned result gets: scanned here.
+      throw new BulkPlanRefusal(scanToolResult(`Error: the dry run failed: ${err instanceof Error ? err.message : String(err)}`, 'bulk_plan'));
     }
   },
 };
