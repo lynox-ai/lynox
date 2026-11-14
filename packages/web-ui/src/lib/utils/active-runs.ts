@@ -12,6 +12,8 @@
  * status, a malformed row) is dropped rather than trusted.
  */
 
+import { stripNowMarker, stripLoadedContext } from './now-marker.js';
+
 /** The run states the UI surfaces. `awaiting_input` is derived server-side from
  * a pending prompt; `interrupted` is a run the engine restart killed. */
 export type ActiveRunStatus = 'running' | 'awaiting_input' | 'interrupted';
@@ -250,6 +252,34 @@ export function trailingTurnNote(body: unknown, localUserTurns: number): TurnNot
 	}).length;
 	if (userRows !== localUserTurns) return null;
 	return typeof detail === 'string' ? { code, detail } : { code };
+}
+
+/**
+ * Whether a message marked failed while offline reached the server after all, read from the
+ * `/threads/:id/messages` body.
+ *
+ * `localUserTurns` counts the user messages this client shows that the server holds too, as for
+ * `trailingTurnNote` (queued, failed and blank ones left out), so it does not count `text`. The
+ * message arrived only when the server holds exactly one user row more AND that last row carries
+ * `text` (the engine's `[Now: …]` marker and a loaded-context preamble removed). Equal text alone
+ * does not say it: an earlier message with the same words is one of the rows the client already
+ * counts, so the counts are equal. A count that is off in either direction (another tab sent
+ * meanwhile, an earlier message the client never got confirmed) is not guessed either: it reads
+ * as not arrived, which keeps the message failed, as before. Never throws.
+ */
+export function offlineTurnArrived(body: unknown, localUserTurns: number, text: string): boolean {
+	if (typeof body !== 'object' || body === null) return false;
+	const rows = (body as { messages?: unknown }).messages;
+	if (!Array.isArray(rows)) return false;
+	const userTexts: string[] = [];
+	for (const r of rows) {
+		if (typeof r !== 'object' || r === null) continue;
+		const { role, content } = r as { role?: unknown; content?: unknown };
+		if (role === 'user' && typeof content === 'string' && content.trim().length > 0) userTexts.push(content);
+	}
+	if (userTexts.length !== localUserTurns + 1) return false;
+	const last = stripLoadedContext(stripNowMarker(userTexts[userTexts.length - 1]));
+	return text.trim().length > 0 && last.trim() === text.trim();
 }
 
 /**

@@ -500,3 +500,56 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 		expect(field).toBe('my answer');
 	});
 });
+
+describe('the card of a prompt that is already open', () => {
+	// A reconnect re-attaches the run, which replays its events and asks for the pending prompt
+	// again. The card the user is typing into stays as it is: its generation bumps only for a
+	// different prompt, since a bump clears the secret field and the mail password in ChatView.
+	const SECRET = { name: 'API_KEY', prompt: 'key?', promptId: 'p1' };
+	const MAIL = { promptId: 'm1', id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom' };
+
+	it('stays when the run replays it, and is set anew for a different prompt', async () => {
+		const run = openRun(() => json({}));
+		void store.sendMessage('go');
+		await settle();
+		run.send('secret_prompt', SECRET);
+		run.send('mail_connect_prompt', MAIL);
+		await settle();
+		const secretGen = store.getSecretPromptGeneration();
+		const mailGen = store.getMailConnectGeneration();
+		run.send('secret_prompt', SECRET);
+		run.send('mail_connect_prompt', MAIL);
+		await settle();
+		expect([store.getSecretPromptGeneration(), store.getMailConnectGeneration()]).toEqual([secretGen, mailGen]);
+		run.send('secret_prompt', { ...SECRET, promptId: 'p2' });
+		run.send('mail_connect_prompt', { ...MAIL, promptId: 'm2' });
+		await settle();
+		expect([store.getSecretPromptGeneration(), store.getMailConnectGeneration()]).toEqual([secretGen + 1, mailGen + 1]);
+		expect([store.getPendingSecretPrompt()?.promptId, store.getPendingMailConnect()?.promptId]).toEqual(['p2', 'm2']);
+	});
+
+	it('stays when the pending prompt is asked for again, and is set anew for a different one', async () => {
+		let pending: unknown = { pending: true, promptType: 'ask_secret', promptId: 'p1', secretName: 'API_KEY', question: 'key?' };
+		const run = openRun((url) => (url.endsWith('/pending-prompt') ? json(pending) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('secret_prompt', SECRET);
+		await settle();
+		const secretGen = store.getSecretPromptGeneration();
+		await expect(store.checkPendingPrompt()).resolves.toBe('other');
+		expect(store.getSecretPromptGeneration()).toBe(secretGen);
+		pending = { pending: true, promptType: 'ask_secret', promptId: 'p2', secretName: 'API_KEY', question: 'key?' };
+		await store.checkPendingPrompt();
+		expect(store.getSecretPromptGeneration()).toBe(secretGen + 1);
+
+		run.send('mail_connect_prompt', MAIL);
+		await settle();
+		const mailGen = store.getMailConnectGeneration();
+		pending = { pending: true, promptType: 'connect_mail', promptId: 'm1', mailConnect: { id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom', type: 'personal' } };
+		await expect(store.checkPendingPrompt()).resolves.toBe('other');
+		expect(store.getMailConnectGeneration()).toBe(mailGen);
+		pending = { ...pending as object, promptId: 'm2' };
+		await store.checkPendingPrompt();
+		expect(store.getMailConnectGeneration()).toBe(mailGen + 1);
+	});
+});
