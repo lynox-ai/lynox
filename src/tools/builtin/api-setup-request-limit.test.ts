@@ -209,7 +209,10 @@ describe('api_setup and the request limit', () => {
   it('api-setup.ts charges the budget only through reserveRequest, once per fetch site', () => {
     const src = readFileSync(join(__dirname, 'api-setup.ts'), 'utf-8');
     expect(src.match(/sessionCounters\.httpRequests\+\+/g) ?? []).toHaveLength(1);
-    const fetches = src.match(/\b(?:fetchWithValidatedRedirects|exchangeToken)\(/g) ?? [];
+    // The discovery reads go through `fetchForDiscovery`, the one place that calls
+    // `fetchWithValidatedRedirects`; each call of it, and the token exchange, is a fetch site.
+    expect(src.match(/\bfetchWithValidatedRedirects\(/g) ?? []).toHaveLength(1);
+    const fetches = src.match(/(?<!function )\b(?:fetchForDiscovery|exchangeToken)\(/g) ?? [];
     const reservations = src.match(/reserveRequest\(agent\)/g) ?? [];
     expect(fetches).toHaveLength(4);
     expect(reservations).toHaveLength(fetches.length);
