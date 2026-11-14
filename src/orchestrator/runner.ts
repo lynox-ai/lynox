@@ -14,12 +14,12 @@ import type { IMemory } from '../types/memory.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, contextForEventRun, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin, type StepSpawnResult } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import { currentRunGroup, openRunGroup } from '../core/run-group.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
-import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
+import { GateRejectedError, GateExpiredError, StepReportedFailureError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
@@ -1198,7 +1198,7 @@ async function executeStep(
         }
       : undefined;
 
-    let r: { result: string; tokensIn: number; tokensOut: number; durationMs: number };
+    let r: StepSpawnResult;
 
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
@@ -1251,6 +1251,11 @@ async function executeStep(
     stepTokensIn = r.tokensIn;
     stepTokensOut = r.tokensOut;
     stepDurationMs = r.durationMs;
+
+    // The step's agent reported that it could not complete its task (`fail_step`). Thrown here,
+    // after its spend is stamped like a gate rejection's, so the catch records what it cost and
+    // `on_failure` decides what follows — as for any step that failed.
+    if (r.reportedFailure !== undefined) throw new StepReportedFailureError(step.id, r.reportedFailure);
 
     // Gate point check after step completes (real and mock paths)
     if (manifest.gate_points.includes(step.id) && options.gateAdapter) {
@@ -1364,9 +1369,11 @@ async function executeStep(
       return 'halt';
     }
 
+    const reported = err instanceof StepReportedFailureError;
     if (manifest.on_failure === 'stop') {
       state.status = 'failed';
       state.error = error.message;
+      state.errorReportedBy = reported ? { stepId: step.id, reason: error.message } : undefined;
       state.completedAt = new Date().toISOString();
       return 'halt';
     }
@@ -1383,6 +1390,7 @@ async function executeStep(
       costUsd: 0,
       skipped: false,
       error: error.message,
+      ...(reported ? { reportedFailure: true as const } : {}),
     });
 
     // 'notify' = continue + notification

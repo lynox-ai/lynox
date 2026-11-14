@@ -158,6 +158,16 @@ export interface WorkerNotices {
   readonly failedStepsLabel: string;
   readonly writesLabel: string;
   /**
+   * A step that reported it could not complete its task (`fail_step`), in lynox's own words: its
+   * reason is model text and stays out of the thread (U-192). `stepReported` is the run's error
+   * line, `stepReportedItem` its line under the failed steps, and `reportedReasonWhere` follows once
+   * when a step reported. The id goes in as the thread shows any id (`escalateToUser` strips what
+   * renders as nothing from the whole body).
+   */
+  stepReported(stepId: string): string;
+  stepReportedItem(stepId: string): string;
+  readonly reportedReasonWhere: string;
+  /**
    * A run that stopped at its cost ceiling (`value` like `$0.50`) or turn limit (`value` the
    * count) with work still pending: the sentence the push leads with.
    */
@@ -251,6 +261,9 @@ const EN: WorkerNotices = Object.freeze({
   errorLabel: 'Error:',
   failedStepsLabel: 'Failed steps:',
   writesLabel: 'Writes:',
+  stepReported: (stepId: string) => `Step "${stepId}" reported that it could not complete its task.`,
+  stepReportedItem: (stepId: string) => `• ${stepId}: reported that it could not complete its task.`,
+  reportedReasonWhere: 'You can ask here for the reason the step gave; it is kept in the run\'s record.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(run ${runId}${workflowId ? ` · workflow ${workflowId}` : ''})`
     : (workflowId ? `(workflow ${workflowId})` : ''),
@@ -363,6 +376,9 @@ const DE: WorkerNotices = Object.freeze({
   errorLabel: 'Fehler:',
   failedStepsLabel: 'Fehlgeschlagene Schritte:',
   writesLabel: 'Schreibvorgänge:',
+  stepReported: (stepId: string) => `Schritt „${stepId}“ hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  stepReportedItem: (stepId: string) => `• ${stepId}: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  reportedReasonWhere: 'Den Grund, den der Schritt angegeben hat, kannst du hier erfragen; er steht im Protokoll des Laufs.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(Lauf ${runId}${workflowId ? ` · Workflow ${workflowId}` : ''})`
     : (workflowId ? `(Workflow ${workflowId})` : ''),

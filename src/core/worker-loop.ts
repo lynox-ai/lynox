@@ -3678,14 +3678,21 @@ export class WorkerLoop {
     // its error can carry a third party's text, which a thread would hand the owner's next
     // turn as the assistant's own.
     if (event !== undefined) return;
-    const stepDetail = (result.stepErrors ?? [])
-      .filter(s => s.error)
-      .map(s => `• ${s.stepId}: ${s.error}`)
+    // A reported failure's reason (`fail_step`) is the model's text, often written after reading
+    // untrusted content; the thread hands its body to the owner's next turn in the assistant's
+    // voice. So the body names the step in lynox's own words, and the reason stays in the run's
+    // record, readable through diagnose_workflow_run.
+    const notices = this.#notices();
+    const failedSteps = (result.stepErrors ?? []).filter(s => s.error);
+    const stepDetail = failedSteps
+      .map(s => (s.reported === true ? notices.stepReportedItem(s.stepId) : `• ${s.stepId}: ${s.error}`))
       .join('\n');
+    const runError = result.errorReportedBy !== undefined ? notices.stepReported(result.errorReportedBy) : result.error;
+    // Said once, after the steps, when a step reported: the owner learns the reason is there to ask for (U-192).
+    const reported = result.errorReportedBy !== undefined || failedSteps.some(s => s.reported === true);
     // The run + workflow ids ride in the seeded body so the agent, when the user
     // replies, can diagnose the run (diagnose_workflow_run), edit the workflow
     // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
-    const notices = this.#notices();
     const ref = notices.workflowRef(result.runId, task.pipeline_id ?? undefined);
     // A plan someone the owner let in set up or changed: its title and errors stay out of the
     // thread, where they would read as lynox's own words (PRD B6). The ids stay for the diagnosis.
@@ -3701,8 +3708,9 @@ export class WorkerLoop {
       body: othersPlan
         ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
         : `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
-        (result.error ? `${notices.errorLabel} ${result.error}\n\n` : '') +
+        (runError ? `${notices.errorLabel} ${runError}\n\n` : '') +
         (stepDetail ? `${notices.failedStepsLabel}\n${stepDetail}\n\n` : '') +
+        (reported ? `${notices.reportedReasonWhere}\n\n` : '') +
         (grantLines.length > 0 ? `${notices.writesLabel}\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
         notices.workflowReply(ref),
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },

@@ -100,6 +100,15 @@ export interface AgentConfig {
    */
   principal?:          import('../core/request-principal.js').RequestPrincipal | undefined;
   /**
+   * A workflow step's own `fail_step` tool (runtime-adapter.ts, `createFailStepTool`), when this
+   * agent runs a step. Matched by IDENTITY of this entry, never by its name: it passes the
+   * mandate lock (it has no effect beyond ending its own step), it runs alone in the model
+   * response that calls it (the other calls of that response are skipped, not run), and it is
+   * not handed on to children (`getAvailableTools`). A different tool that happens to carry the
+   * same name gets none of the three. Absent for every agent that is not a step agent.
+   */
+  stepFailTool?:       import('./tools.js').ToolEntry | undefined;
+  /**
    * Sink for this agent's own tool calls — the ONE owner of tool-call
    * persistence. The agent calls it with the run id it is currently working
    * under, so a spawned child (which carries its OWN `currentRunId`) books onto
