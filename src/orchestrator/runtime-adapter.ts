@@ -12,7 +12,7 @@ import type { AbortScope, ChangesetWriter } from '../types/config.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
-import { GateRejectedError } from '../types/orchestration.js';
+import { GateRejectedError, StepReportedFailureError, reportedFailureNotice, reportedErrorStep } from '../types/orchestration.js';
 import { getRole, getRoleNames, roleToolProfile, statedToolGrant } from '../core/roles.js';
 import { resolveRunModel, resolveCrossProviderSlotCreds } from '../core/tier-resolver.js';
 import { resolveProviderApiKey } from '../core/llm/provider-keys.js';
@@ -23,7 +23,7 @@ import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.j
 import { describeTurnUntrusted } from '../core/untrusted-signals.js';
 import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
 import { ConversationGrants } from '../core/conversation-grants.js';
-import { escapeHiddenInJson } from '../core/hidden-text.js';
+import { escapeHiddenInJson, stripHidden } from '../core/hidden-text.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -823,6 +823,16 @@ export function resolveStepSlotCreds(config: LynoxUserConfig, tier: ModelTier): 
   return resolveCrossProviderSlotCreds(tier, baseProvider, resolveKey);
 }
 
+/** What a step spawn returns. `reportedFailure`: the step's agent called its `fail_step`, with
+ *  this (sanitised) reason — the runner fails the step after stamping its cost. */
+export interface StepSpawnResult {
+  result: string;
+  tokensIn: number;
+  tokensOut: number;
+  durationMs: number;
+  reportedFailure?: string | undefined;
+}
+
 /**
  * Spawn a real agent for a manifest step and capture token usage.
  */
@@ -856,7 +866,7 @@ export async function spawnViaAgent(
   chatOrigin?: ChatOrigin | undefined,
   /** The review of the chat run that started the workflow, as its writer view; absent = none. */
   parentChangeset?: ChangesetWriter | undefined,
-): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
+): Promise<StepSpawnResult> {
   let tokensIn = 0;
   let tokensOut = 0;
   const startTime = Date.now();
@@ -957,6 +967,13 @@ export async function spawnViaAgent(
     tools = tools.filter(t => !disabled.has(t.definition.name));
   }
 
+  // The step's own fail_step, after every filter above, on this step's list only: `tools` is a new
+  // array built from the definition, which is shared by every run that loads it and stays as it is.
+  // A definition tool of the same name is refused, not shadowed.
+  refuseFailStepCollision(step.id, tools.map(t => t.definition.name));
+  const failStep = createFailStepTool();
+  tools = [...tools, failStep.entry];
+
   // Resolve thinking from step hint, fallback to adaptive. The legacy
   // `'enabled'` hint maps to adaptive: the manual `{type:'enabled',
   // budget_tokens}` shape 400s on Sonnet 5 / Opus 4.7+ (manual extended
@@ -979,10 +996,11 @@ export async function spawnViaAgent(
     modelPinnedByProfile: pinnedModel !== undefined,
     // A2: ground the named-agent pipeline path too. Prepend the block to the
     // agent definition's prompt (or use it standalone when none is defined).
-    systemPrompt: agentDef.systemPrompt
+    systemPrompt: `${agentDef.systemPrompt
       ? `${GROUNDING_PROMPT_BLOCK}\n\n${agentDef.systemPrompt}`
-      : GROUNDING_PROMPT_BLOCK,
+      : GROUNDING_PROMPT_BLOCK}\n\n${FAIL_STEP_PROMPT}`,
     tools,
+    stepFailTool: failStep.entry,
     thinking,
     // Default 'high' matches agent.ts:271 main-agent default (non-Haiku,
     // non-custom-proxy). Pre-2026-05-24 the orchestrator defaulted to 'medium'
@@ -1043,6 +1061,7 @@ export async function spawnViaAgent(
     }),
   });
 
+  failStep.attach(agent);
   // Register as a LIVE peer so a same-phase parallel sibling's external read
   // arms this agent mid-run (the spawn-time seed below covers only taint that
   // existed BEFORE this step spawned).
@@ -1070,11 +1089,21 @@ export async function spawnViaAgent(
     // so a pipeline step that schedules "in 5 min" via run_at lands at
     // wallclock + 5 min, not session-start + 5 min.
     const result = await agent.send(withCurrentTimePrefix(JSON.stringify(stepContext), userTimezone));
+    const reportedFailure = failStep.reported();
+    if (reportedFailure !== undefined) {
+      return { result: '', tokensIn, tokensOut, durationMs: Date.now() - startTime, reportedFailure };
+    }
     if (stepTimeout.fired) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
     return { result, tokensIn, tokensOut, durationMs: Date.now() - startTime };
   } catch (err) {
+    // The step's fail_step aborted its agent: the abort is the report, not an error. Read before
+    // the timeout, since a report that came first is what the step said.
+    const reportedFailure = failStep.reported();
+    if (reportedFailure !== undefined) {
+      return { result: '', tokensIn, tokensOut, durationMs: Date.now() - startTime, reportedFailure };
+    }
     // A timeout aborts the agent mid-send → send() now THROWS RunAbortedError
     // instead of returning ''; surface the clearer "timed out" message. Any
     // other abort/error (e.g. the parent workflow was stopped) propagates as-is
@@ -1093,6 +1122,101 @@ export async function spawnViaAgent(
     // the mid-run one as the backstop for arming sources that emit no tool
     // event (e.g. spawn's child hand-off).
     taintWiring.release(agent);
+  }
+}
+
+/** The name of a workflow step's own tool for reporting that it could not complete its task. */
+export const FAIL_STEP_TOOL_NAME = 'fail_step';
+/** Longest reason kept from a `fail_step` call, in characters. */
+export const FAIL_STEP_REASON_MAX = 500;
+/**
+ * The text both step runtimes append to the step agent's system prompt. The line between a
+ * finding and a failure is the task's goal: a check's negative answer completes it, a fetch that
+ * did not succeed does not (eval r4). The verify check wins over the negative answer.
+ */
+export const FAIL_STEP_PROMPT = `If you could not complete the task, or its "verify" check is not met, call ${FAIL_STEP_TOOL_NAME} with a short reason: that ends this step as failed, and nothing else you call in the same response runs. Judge by the task's goal. If it asks you to find out or check something, the finding completes it, even a negative one ("no results", "0 orders", or "not reachable" when it asks whether something is reachable): report it and do not call ${FAIL_STEP_TOOL_NAME}, unless its verify check is not met. If it needs something to succeed (fetch data to use or report, send, write, create) and that did not succeed when it was needed, call ${FAIL_STEP_TOOL_NAME}, even if you can describe the failure. Do not call it when an error was expected and you handled it the way the task intends.`;
+
+/**
+ * The reason of a `fail_step` call, as it is stored: model text, so control characters become
+ * spaces, invisible characters are removed, runs of whitespace collapse, and it is cut to
+ * {@link FAIL_STEP_REASON_MAX} characters (whole code points). Empty → a fixed placeholder.
+ */
+export function sanitizeFailStepReason(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw : '';
+  // eslint-disable-next-line no-control-regex
+  const cleaned = stripHidden(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')).replace(/\s+/g, ' ').trim();
+  if (cleaned === '') return 'No reason given.';
+  const points = [...cleaned];
+  return points.length > FAIL_STEP_REASON_MAX ? `${points.slice(0, FAIL_STEP_REASON_MAX).join('')}…` : cleaned;
+}
+
+/** A step's own `fail_step` tool: one per step spawn, never registered anywhere else. */
+export interface FailStepTool {
+  /** The entry handed to the step agent, and to it as `stepFailTool` — matched by identity. */
+  readonly entry: ToolEntry;
+  /** Bind the agent this tool ends. A call from any other agent is refused and ends nothing. */
+  attach(agent: Agent): void;
+  /** The reported reason, once the step's agent called the tool; undefined until then. */
+  reported(): string | undefined;
+}
+
+/**
+ * Build a fresh `fail_step` for one step spawn. The handler records the reason (first call wins)
+ * and aborts the step's agent, so the call is the step's last word: the spawn reads the reason
+ * back after the abort and returns it as `reportedFailure`; the runner then fails the step.
+ */
+export function createFailStepTool(): FailStepTool {
+  let reason: string | undefined;
+  let owner: Agent | undefined;
+  const entry: ToolEntry = {
+    definition: {
+      name: FAIL_STEP_TOOL_NAME,
+      description: 'Report that this workflow step could not complete its task (or its verify check is not met). Ends the step as failed. Not for an error the task expected and you handled as it intends.',
+      input_schema: {
+        type: 'object' as const,
+        properties: {
+          reason: { type: 'string', description: 'One or two sentences: what could not be done, and why.' },
+        },
+        required: ['reason'],
+      },
+    },
+    handler: async (input: unknown, agent: IAgent): Promise<string> => {
+      // The agent must be the one this tool is bound to, and it must hold this entry as its own:
+      // only then does the call end the step (the agent's flag is set here, before the abort).
+      if (owner === undefined || agent !== owner || !owner.markStepFailReported(entry)) {
+        return 'Error: fail_step is not available to this agent.';
+      }
+      if (reason === undefined) {
+        const raw = input !== null && typeof input === 'object' ? (input as { reason?: unknown }).reason : undefined;
+        reason = sanitizeFailStepReason(raw);
+      }
+      owner.abort();
+      return 'Recorded: this step is reported as failed. Stop here.';
+    },
+    // The reason is stored (errorText, the run's error): a `secret:NAME` in it stays the
+    // reference, never the value it would resolve to.
+    secretRefs: 'verbatim',
+  };
+  return {
+    entry,
+    attach: (agent) => { owner = agent; },
+    reported: () => reason,
+  };
+}
+
+/**
+ * A step's tools must not already hold a tool named `fail_step` (a plugin's, an MCP server's, a
+ * profile's): the step's own would be shadowed by it, or shadow it. Refused, never resolved
+ * silently.
+ */
+function refuseFailStepCollision(stepId: string, names: Iterable<string>): void {
+  for (const name of names) {
+    if (name === FAIL_STEP_TOOL_NAME) {
+      throw new Error(
+        `Step "${stepId}" has a tool named "${FAIL_STEP_TOOL_NAME}" from its tool set, which is the `
+        + `name of the step's own tool for reporting a failure. Rename or remove that tool for this step.`,
+      );
+    }
   }
 }
 
@@ -1167,7 +1291,7 @@ export async function spawnInline(
   chatOrigin?: ChatOrigin | undefined,
   /** The review of the chat run that started the workflow, as its writer view; absent = none. */
   parentChangeset?: ChangesetWriter | undefined,
-): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
+): Promise<StepSpawnResult> {
   let tokensIn = 0;
   let tokensOut = 0;
   const startTime = Date.now();
@@ -1336,6 +1460,17 @@ export async function spawnInline(
     const disabledSet = new Set(disabledToolsInline);
     tools = tools.filter(t => !disabledSet.has(t.definition.name));
   }
+  // A captured step replays its one call and calls nothing else, so it gets no fail_step: its
+  // outcome is the call's. Decided on the same terms as the replay instruction below.
+  const replays = step.tool !== undefined
+    && step.input_template !== undefined
+    && tools.some(t => t.definition.name === step.tool);
+  // The step's own fail_step, after every filter above (role, declared set, `tools: []`, human in
+  // the loop, disabled), so none of them drops it. A tool of the same name already among the
+  // step's tools — from a plugin, an MCP server, a profile — is refused, not shadowed.
+  if (!replays) refuseFailStepCollision(step.id, tools.map(t => t.definition.name));
+  const failStep = replays ? undefined : createFailStepTool();
+  if (failStep !== undefined) tools = [...tools, failStep.entry];
   // Resolve thinking: step hint > adaptive default. Haiku 4.5 has no
   // extended-thinking support — force disabled regardless of step hint to
   // avoid Anthropic 400 "model does not support" errors. Keyed on the EFFECTIVE
@@ -1370,8 +1505,9 @@ export async function spawnInline(
     changesetManager: parentChangeset,
     model: agentModel,
     modelPinnedByProfile: pinnedModel !== undefined,
-    systemPrompt,
+    systemPrompt: failStep !== undefined ? `${systemPrompt}\n\n${FAIL_STEP_PROMPT}` : systemPrompt,
     tools,
+    stepFailTool: failStep?.entry,
     thinking,
     effort,
     excludeTools: disabledToolsInline,
@@ -1430,6 +1566,7 @@ export async function spawnInline(
     }),
   });
 
+  failStep?.attach(agent);
   // Register as a LIVE peer so a same-phase parallel sibling's external read
   // arms this agent mid-run — see spawnViaAgent.
   taintWiring.register(agent);
@@ -1454,9 +1591,7 @@ export async function spawnInline(
   // agent to call a tool it doesn't have. No sandbox widening — the inline
   // allowlist stays the security boundary. `step.task` / `step.input_template`
   // are already param-substituted by the runner before spawn.
-  const task = (step.tool !== undefined
-      && step.input_template !== undefined
-      && tools.some(t => t.definition.name === step.tool))
+  const task = (replays && step.tool !== undefined && step.input_template !== undefined)
     ? buildReplayInstruction(step.tool, step.input_template, step.task)
     : step.task;
 
@@ -1464,11 +1599,20 @@ export async function spawnInline(
     // See `spawnViaAgent`: inside the try that releases it, so add and delete are paired.
     abortScope?.members.add(agent);
     const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task, context: stepContext }), userTimezone));
+    const reportedFailure = failStep?.reported();
+    if (reportedFailure !== undefined) {
+      return { result: '', tokensIn, tokensOut, durationMs: Date.now() - startTime, reportedFailure };
+    }
     if (stepTimeout.fired) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
     return { result, tokensIn, tokensOut, durationMs: Date.now() - startTime };
   } catch (err) {
+    // The step's fail_step aborted its agent: the abort is the report — see spawnViaAgent.
+    const reportedFailure = failStep?.reported();
+    if (reportedFailure !== undefined) {
+      return { result: '', tokensIn, tokensOut, durationMs: Date.now() - startTime, reportedFailure };
+    }
     // A timeout aborts the agent mid-send → send() now THROWS RunAbortedError
     // instead of returning ''; surface the clearer "timed out" message. Any
     // other abort/error (e.g. the parent workflow was stopped) propagates as-is
@@ -1677,6 +1821,11 @@ export async function spawnPipeline(
   // nested run keeps a failed step out of `state.outputs`). A rejected nested run stays
   // rejected, since readers of the outer run's status tell the two apart.
   if (state.status === 'rejected') throw new GateRejectedError(step.id, state.error);
+  // A sub-step that reported its own failure fails this step the same way, so the reason stays
+  // marked as model text one level up (kept out of the escalation thread, `reportedFailureNotice`).
+  if (state.status === 'failed' && reportedErrorStep(state) !== undefined) {
+    throw new StepReportedFailureError(step.id, state.error ?? '');
+  }
   // A sub-run stopped for its makers' access: the outer run ends with the same cause (1184).
   if (state.status === 'failed' && isAuthorStop(state.error)) {
     throw new NestedRunEndedError(state.error, `Nested pipeline "${step.id}" failed: ${state.error}`);
@@ -1697,7 +1846,10 @@ export async function spawnPipeline(
       result: output.result,
       costUsd: output.costUsd,
       skipped: output.skipped,
-      error: output.error,
+      // A reported failure's reason is model text: this result is the next steps' input, so the
+      // fixed sentence stands in for it, without the pointer to diagnose_workflow_run the chat model
+      // reads (U-192 1c): a step has no use for it (the sub-run's own records keep the reason).
+      error: output.reportedFailure === true ? reportedFailureNotice(id) : output.error,
     };
   }
 

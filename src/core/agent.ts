@@ -705,8 +705,9 @@ export class Agent implements IAgent {
    * disabled tools cannot be re-introduced by descending the agent tree.
    */
   getAvailableTools(): ToolEntry[] {
-    if (this._excludeSet.size === 0 && this._toolLock === null) return this.tools;
-    return this.tools.filter(t => !this._withheld(t.definition.name));
+    if (this._excludeSet.size === 0 && this._toolLock === null && this._stepFailTool === undefined) return this.tools;
+    // The step's own fail_step is never handed on: in a child it would end the PARENT's step.
+    return this.tools.filter(t => !this._isStepFailTool(t) && !this._withheld(t.definition.name));
   }
   /** Snapshot of the parent's excludeTools — propagated to spawned children. */
   getExcludedToolNames(): readonly string[] {
@@ -1281,6 +1282,47 @@ export class Agent implements IAgent {
     return this._excludeSet.has(name) || (this._toolLock !== null && !this._toolLock.has(name));
   }
 
+  /**
+   * The step's own `fail_step` entry (`AgentConfig.stepFailTool`), or undefined. Every use below
+   * compares the ENTRY, never the name: a foreign tool called `fail_step` is an ordinary tool.
+   */
+  private _stepFailTool: ToolEntry | undefined;
+  /** Set once the handler of the step's own fail_step ACCEPTED its call (`markStepFailReported`); read by the loop and `_dispatchTools`. */
+  private _stepFailRan = false;
+
+  /** Whether `entry` is this step's own `fail_step` — by identity. */
+  private _isStepFailTool(entry: ToolEntry | undefined): boolean {
+    return entry !== undefined && this._stepFailTool !== undefined && entry === this._stepFailTool;
+  }
+
+  /**
+   * Called by the step's own `fail_step` handler when it accepts a call, before it aborts this
+   * agent: from here on the step has ended. Set by the handler, not at dispatch, because the
+   * handler can still refuse (a call from an agent it is not bound to), and a refused call ends
+   * nothing. Returns false, and changes nothing, for any entry but this agent's own.
+   */
+  markStepFailReported(entry: ToolEntry): boolean {
+    if (!this._isStepFailTool(entry)) return false;
+    this._stepFailRan = true;
+    return true;
+  }
+
+  /**
+   * `_withheld` for a tool ENTRY. The step's own `fail_step` passes the mandate lock: it ends its
+   * own step and does nothing else, and a mandate's unattended run is the run that most needs to
+   * say it failed. A user's disable still applies. Only this entry is exempt, so a tool of the
+   * same name from a plugin or an MCP server stays locked out.
+   */
+  private _withheldEntry(entry: ToolEntry): boolean {
+    if (this._isStepFailTool(entry)) return this._excludeSet.has(entry.definition.name);
+    return this._withheld(entry.definition.name);
+  }
+
+  /** The entry a call by `name` dispatches to: the first of that name, as `_executeOneInner` does. */
+  private _entryFor(name: string): ToolEntry | undefined {
+    return this.tools.find(t => t.definition.name === name);
+  }
+
   /** Override effort for the next run without recreating the agent. */
   setEffort(level: EffortLevel | undefined): void { this.effort = level; }
   getEffort(): EffortLevel | undefined { return this.effort; }
@@ -1581,6 +1623,7 @@ export class Agent implements IAgent {
     this.nativeContextWindow = config.nativeContextWindow;
     this.currentRunId = config.currentRunId;
     if (config.principal !== undefined) this.principal = config.principal;
+    this._stepFailTool = config.stepFailTool;
     this.recordToolCall = config.recordToolCall;
     this.conversationGrants = config.conversationGrants;
     this.conversationRoot = config.conversationRoot === true;
@@ -3205,6 +3248,10 @@ export class Agent implements IAgent {
         // silently downgrade the note to a generic run_interrupted.
         const breakKey = this._repeatGuard.breakLatched();
         if (breakKey !== null) throw new ToolLoopBreakError(breakKey);
+        // The step's own fail_step ran in this batch and aborted the run: end here, before another
+        // model call is paid for and before the model can call anything after it (send()'s abort
+        // branch turns this into RunAbortedError; the spawn reads the report from its closure).
+        if (this._stepFailRan && this.abortController?.signal.aborted === true) throw new RunAbortedError();
         if (endsTurn) {
           // Mirror the end_turn path exactly: return this turn's text and run the
           // same memory-extraction gate (skipped for untrusted/internal/durable).
@@ -3589,7 +3636,7 @@ export class Agent implements IAgent {
     // sub-agents byte-identical, so the flag only reshapes the prefix where it
     // pays — full-tool tenants carrying mail_*/google_*/api_setup/etc.
     const lazyToolsActive = lazyEnabled
-      && this.tools.some(t => !this._withheld(t.definition.name)
+      && this.tools.some(t => !this._withheldEntry(t)
         && LAZY_DEFERRED_TOOLS.has(t.definition.name));
     // Tenant tool definitions. Deterministically SORTED by name (code-point) — a
     // cheap cache-safety pin: order today is registration order, so a future
@@ -3608,7 +3655,7 @@ export class Agent implements IAgent {
     const mappedTenantTools: BetaTool[] = this._suppressTools
       ? []
       : this.tools
-          .filter(t => !this._withheld(t.definition.name))
+          .filter(t => !this._withheldEntry(t))
           .map(t => (lazyToolsActive && LAZY_DEFERRED_TOOLS.has(t.definition.name)
             ? { ...t.definition, defer_loading: true }
             : t.definition));
@@ -4596,10 +4643,20 @@ export class Agent implements IAgent {
     this._taintBeforeBatch = this._sawUntrustedData || this._conversationSawUntrusted;
     this._batch = {};
 
+    // A step's own fail_step has the last word in the response that calls it: it runs ALONE, and
+    // every other call of the same response is skipped, not run (fail-closed). Run beside it, a
+    // write would land in a step that is reported failed, and possibly be run again by a retry.
+    // Matched by the entry the call dispatches to (identity), so a foreign tool named fail_step
+    // gets nothing of this. Whether the step ended is known only once its handler accepted the call
+    // (a gate, the input check or the handler itself may refuse it): `_stepFailRan` is set there
+    // (`markStepFailReported`), not here.
+    const failCall = toolCalls.find(tc => this._isStepFailTool(this._entryFor(tc.name)));
+    const failSkipped = failCall === undefined ? [] : toolCalls.filter(tc => tc !== failCall);
+
     // Enforce fan-out limit: execute first N in parallel, truncate excess
     const limit = Agent.MAX_PARALLEL_TOOL_CALLS;
-    const toExecute = toolCalls.slice(0, limit);
-    const truncated = toolCalls.slice(limit);
+    const toExecute = failCall !== undefined ? [failCall] : toolCalls.slice(0, limit);
+    const truncated = failCall !== undefined ? [] : toolCalls.slice(limit);
     // How many calls of the batch are the same call: the same tool with the same input as the
     // model wrote it, before any secret is resolved. Counted before the first call starts, so the
     // number a write approval names does not depend on which call reaches its question first.
@@ -4662,6 +4719,19 @@ export class Agent implements IAgent {
         is_error: true,
       };
     });
+
+    // The calls beside the step's fail_step: answered, never run. What they are told depends on
+    // whether fail_step's handler ran: a refused fail_step ended nothing, and the step goes on.
+    for (const tc of failSkipped) {
+      results.push({
+        type: 'tool_result' as const,
+        tool_use_id: tc.id,
+        content: this._stepFailRan
+          ? annotateNonRetryable('Not run: fail_step in the same response ended this step.')
+          : 'Not run: it was called in the same response as fail_step, which did not run (see its result). Call it again if it is still needed.',
+        is_error: true,
+      });
+    }
 
     // Return error results for truncated tool calls
     for (const tc of truncated) {
@@ -4947,7 +5017,9 @@ export class Agent implements IAgent {
         is_error: true,
       };
     }
-    if (this._withheld(tc.name)) {
+    // By the entry the call dispatches to, so only the step's own fail_step passes the lock.
+    const lockEntry = this._entryFor(tc.name);
+    if (lockEntry !== undefined ? this._withheldEntry(lockEntry) : this._withheld(tc.name)) {
       return {
         type: 'tool_result',
         tool_use_id: tc.id,
@@ -4961,7 +5033,9 @@ export class Agent implements IAgent {
     // user is never asked about a call that would not run. The tenant tools stay advertised;
     // only the provider-side web_search drops out of the list (`_callAPI`), so the cached prefix
     // changes once, on the first call after the chat becomes contained.
-    const containedRefusal = chatIsContained(this) ? containedCallRefusal(tc.name, tc.input) : null;
+    // The step's own fail_step (by identity) is exempt: it ends its own step and reaches nothing,
+    // and refusing it would let a contained step that cannot do its task end `completed`.
+    const containedRefusal = chatIsContained(this) && !this._isStepFailTool(lockEntry) ? containedCallRefusal(tc.name, tc.input) : null;
     if (containedRefusal !== null) {
       // Streamed with its reason, so the chat's view can offer the way out under it.
       if (this.onStream) {
@@ -5343,6 +5417,8 @@ export class Agent implements IAgent {
       // A non-spawn tool never offers downgrade (downgradeDecision undefined) and
       // never reads the field, so this is a no-op for it.
       this._pendingDowngradeTier = downgradeDecision;
+      // The step's own fail_step passed every gate; its handler marks the step ended if it accepts
+      // the call (`markStepFailReported`), before it aborts the run.
       // Resolved ONCE: the trail and the timeout race below read the same promise, so a
       // thenable's `then` runs once, not once per reader.
       const rawResult = Promise.resolve(runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)

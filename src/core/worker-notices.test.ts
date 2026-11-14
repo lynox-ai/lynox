@@ -48,6 +48,7 @@ function workerSamples(n: WorkerNotices): Record<string, string> {
     containedResult: n.containedResult, containedQuestion: n.containedQuestion, containedQuestionInquiry: n.containedQuestionInquiry,
     workflowIncomplete: n.workflowIncomplete('Wochenbericht', 'failed'), errorLabel: n.errorLabel,
     failedStepsLabel: n.failedStepsLabel, writesLabel: n.writesLabel, workflowRef: n.workflowRef('r-1', 'w-1'),
+    stepReported: n.stepReported('fetch'), stepReportedItem: n.stepReportedItem('fetch'), reportedReasonWhere: n.reportedReasonWhere,
     workflowReply: n.workflowReply('(x)'), reminderTitle: n.reminderTitle, interrupted: n.interrupted,
     confirmationSkipped: n.confirmationSkipped, workflowCompleted: n.workflowCompleted('r-1'),
     workflowGone: n.workflowGone(undefined), workflowGoneId: n.workflowGone('w-1'), eventRunFailed: n.eventRunFailed,
@@ -68,6 +69,10 @@ const STORED_EVENT_REASONS = {
 } as const;
 /** The German of each worker sentence, as ux wrote it (Rest-P), compared whole. */
 const DE_WORKER: Readonly<Record<string, string>> = {
+  // U-192: a step that reported it could not complete its task, in the escalation thread.
+  stepReported: 'Schritt „fetch“ hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.',
+  stepReportedItem: '• fetch: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.',
+  reportedReasonWhere: 'Den Grund, den der Schritt angegeben hat, kannst du hier erfragen; er steht im Protokoll des Laufs.',
   'eventReason.noReason': 'kein Grund festgehalten',
   'eventReason.runFailed': 'Der Lauf zu einem Ereignis wurde nicht fertig. lynox führt dieses Ereignis nicht noch einmal aus; spätere Ereignisse laufen wie gewohnt. Sollte es etwas ändern, prüf, ob das fehlt, und erledige es von Hand oder bitte lynox im Chat darum.',
   'eventReason.triggerNotLive': 'Sein Auslöser nimmt keine Ereignisse an, darum laufen sie nicht. Sieh dir den Auslöser unter Automation → Trigger an.',
@@ -232,6 +237,12 @@ describe('the notice tables', () => {
     expect(Object.fromEntries(Object.keys(DE_BULK).map((k) => [k, bulk[k]]))).toEqual(DE_BULK);
     const worker = workerSamples(WORKER_NOTICES.de);
     expect(Object.fromEntries(Object.keys(DE_WORKER).map((k) => [k, worker[k]]))).toEqual(DE_WORKER);
+    // The English of U-192.
+    expect([WORKER_NOTICES.en.stepReported('fetch'), WORKER_NOTICES.en.stepReportedItem('fetch'), WORKER_NOTICES.en.reportedReasonWhere]).toEqual([
+      'Step "fetch" reported that it could not complete its task.',
+      '• fetch: reported that it could not complete its task.',
+      'You can ask here for the reason the step gave; it is kept in the run\'s record.',
+    ]);
     // English says a stored reason as it is stored.
     for (const r of Object.values(STORED_EVENT_REASONS)) expect(WORKER_NOTICES.en.eventReason(r)).toBe(r);
   });
