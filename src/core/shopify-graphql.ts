@@ -75,8 +75,8 @@ export function mediaImageGidNumber(gid: string): number | null {
 
 /** The store's Admin GraphQL endpoint at the preset's pinned version, or null without a pin or for a host that is not exactly a store's. */
 export function shopifyGraphqlEndpoint(host: string): string | null {
-  const version = OAUTH_PRESETS.get('shopify')?.adminApiVersion;
-  if (version === undefined || !isShopifyStoreHostName(host)) return null;
+  const version = shopifyAdminApiVersion();
+  if (version === null || !isShopifyStoreHostName(host)) return null;
   return `https://${host}/admin/api/${version}/graphql.json`;
 }
 
@@ -316,7 +316,8 @@ export function shopifyProductWriteVariables(after: Readonly<Record<string, unkn
 
 /** The Admin API version the engine sends every store request at, or null without a pin. */
 export function shopifyAdminApiVersion(): string | null {
-  return OAUTH_PRESETS.get('shopify')?.adminApiVersion ?? null;
+  const version = OAUTH_PRESETS.get('shopify')?.adminApiVersion;
+  return version ?? null;
 }
 
 /** The image fields a media run may set: the one the write document names. */
