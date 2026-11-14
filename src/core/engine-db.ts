@@ -1621,6 +1621,16 @@ const MIGRATIONS: string[] = [
   // target: its page keeps the sentence without the domain.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
    ALTER TABLE bulk_targets ADD COLUMN link_domain TEXT;`,
+  // v69: the once-only pass that gave every workflow stamp from before the digest its digest
+  // (`workflow-stamp.ts`, `stampExistingWorkflows`). After it a stamp without a digest does not
+  // hold, so a definition a backfill or a restored file brings back waits for the owner instead
+  // of running on a stamp nobody took over its steps. `done=0` until the pass has run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (69);
+   CREATE TABLE IF NOT EXISTS workflow_stamp_marker (
+     id   INTEGER PRIMARY KEY CHECK (id = 1),
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   INSERT OR IGNORE INTO workflow_stamp_marker (id, done) VALUES (1, 0);`,
 ];
 
 export interface EngineDbOptions {
@@ -1689,6 +1699,12 @@ export class EngineDb {
   /** Mark the boot-time verb-graph backfill complete (idempotent). */
   markVerbBackfillDone(): void {
     this.db.prepare('UPDATE verb_backfill_marker SET done = 1 WHERE id = 1').run();
+  }
+
+  /** True once the boot pass that gave the workflow stamps from before the digest theirs has run (v69). */
+  isWorkflowStampPassDone(): boolean {
+    const row = this.db.prepare('SELECT done FROM workflow_stamp_marker WHERE id = 1').get() as { done: number } | undefined;
+    return row?.done === 1;
   }
 
   /** Drop the free pages and empty the WAL; see `scrubFreedPages` in `sqlite-constants.ts`. */

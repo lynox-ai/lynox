@@ -60,6 +60,7 @@ import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '
 import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
+import { WEBHOOK_AWAITS_STAMP_REASON, workflowAwaitsStampResult, workflowStampStateOf } from './workflow-stamp.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
 import { openRunGroup } from './run-group.js';
 import { collectingMemberNotes, currentMemberNotes, memberNotesRepeat, runCollectingMemberNotes, withMemberNotes } from './member-connection-notes.js';
@@ -711,6 +712,8 @@ export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
   private readonly activeTasks = new Map<string, ActiveTask>();
+  /** Per schedule, the steps' digest it last told the owner it waits on (`#tellAwaitsStampOnce`). */
+  readonly #awaitsStampTold = new Map<string, string>();
   /** The one-time door for a mandate's hand run. Private: its minter goes out once. */
   readonly #handRunDoor = new HandRunDoor();
   /**
@@ -873,6 +876,20 @@ export class WorkerLoop {
    * its context, so a shutdown that cleared the map does not turn a mandate's run into the
    * owner's. Outside a run (the tick's sweeps) the map, which is all there is.
    */
+  /**
+   * Tell the owner once that a schedule waits for its workflow's stamp: again only when the
+   * steps changed since (a new digest), so a schedule that meets the same wait at every run is
+   * recorded each time, not pushed each time. Kept in memory: after a restart it is told once more.
+   */
+  #tellAwaitsStampOnce(task: TriggerRecord, planned: PlannedPipeline): void {
+    const key = this.engine.getRunHistory()?.workflowStampDigest(planned) ?? 'no-hash';
+    if (this.#awaitsStampTold.get(task.id) === key) return;
+    if (this.#awaitsStampTold.size >= 1024) this.#awaitsStampTold.clear();
+    this.#awaitsStampTold.set(task.id, key);
+    if (!this.notificationRouter.hasChannels()) return;
+    void this.notificationRouter.notify({ title: `${RUN_END_LOOK.halted.mark} ${task.title}`, body: workflowAwaitsStampResult(planned.id), taskId: task.id, priority: RUN_END_LOOK.halted.priority });
+  }
+
   #runSlotOf(id: string): RunStarterSlot | undefined {
     const ctx = workerTaskStorage.getStore();
     return ctx?.taskId === id && ctx.run !== undefined ? ctx.run : this.activeTasks.get(id);
@@ -3425,7 +3442,41 @@ export class WorkerLoop {
     // synced task can't put an un-consented workflow on a cron. (No back-compat
     // carve-out for un-confirmed legacy schedules — pre-product there are none,
     // and the uniform gate is the correct foundation.)
-    if (!planned.confirmedAt) {
+    // The stamp is bound to the steps (`workflow-stamp.ts`): a workflow a mandate shaped, or
+    // whose steps changed after its stamp, waits for the owner to look at them. Asked again by
+    // the runner on the copy it runs; this is where the schedule hears it first.
+    const stamp = workflowStampStateOf(this.engine, planned);
+    if (stamp === 'awaits_owner_stamp') {
+      const tm = this.engine.getTaskManager();
+      if (isHandRunOf(task.id)) {
+        this.#recordRun(tm, task.id, workflowAwaitsStampResult(planned.id), 'failed');
+        return;
+      }
+      if (event !== undefined) {
+        // A webhook trigger left on would take every delivery and drop it. Switched off, the
+        // provider's deliveries are refused and the owner is told once, as for an unconfirmed one.
+        tm?.setEnabled?.(task.id, false);
+        endEvent(this.#runSlotOf(task.id), { state: 'dropped', reason: WEBHOOK_AWAITS_STAMP_REASON(planned.id) });
+        this.#recordRun(tm, task.id, `${workflowAwaitsStampResult(planned.id)} The trigger was switched off; switch it on again once its steps are stamped.`, 'failed');
+        return;
+      }
+      if (!task.schedule_cron && !task.watch_config) {
+        // A one-shot has no next run: recorded as halted it would be written `completed` and
+        // never run. Switched off with its time kept, it runs once the owner stamps the steps
+        // and switches it on again; told once, like a schedule.
+        tm?.setEnabled?.(task.id, false);
+        this.#recordRun(tm, task.id, `${workflowAwaitsStampResult(planned.id)} It was switched off; switch it on again once its steps are stamped.`, 'halted', undefined, { keepSchedule: true });
+        this.#tellAwaitsStampOnce(task, planned);
+        return;
+      }
+      // A schedule stays on: it waits like a halted run (no retry, the next run stays due) and
+      // runs once the owner stamps the steps, without being switched on again. Told once per
+      // state of the steps, not at every run.
+      this.#recordRun(tm, task.id, workflowAwaitsStampResult(planned.id), 'halted');
+      this.#tellAwaitsStampOnce(task, planned);
+      return;
+    }
+    if (stamp === 'unconfirmed') {
       // Not confirmed for unattended execution — e.g. an agent-/sync-created
       // cron that skipped the consent flow (the product schedule flow always
       // confirms). Disable the schedule so it stops re-firing every tick and

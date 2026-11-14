@@ -36,6 +36,7 @@ import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
+import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
@@ -93,7 +94,7 @@ import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
-import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord } from '../types/index.js';
+import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord, PlannedPipeline } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { acquireSlot, readSlot, sweepSlot, type HeldSlot } from '../core/export-slot.js';
 import { sweepStaleExports } from '../core/export-archive.js';
@@ -8426,7 +8427,7 @@ export class LynoxHTTPApi {
       // library agrees with the schedule handler on cron-eligibility (otherwise a
       // legacy autonomous workflow with no stored mode hides its Schedule button).
       const { inferPipelineMode, stepsThatAsk } = await import('../orchestrator/human-in-the-loop.js');
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind; awaitsStamp: boolean }> = [];
       // Whom the Run button runs each one as, for the owner only: a mandate's email is not another
       // mandate's to read (1055, ux U-063). Absent for the owner's own workflows.
       const viewer = this._principalOf(req);
@@ -8502,6 +8503,10 @@ export class LynoxHTTPApi {
           askingSteps: mode === 'interactive' ? stepsThatAsk(fullSteps) : [],
           ...(typeof parsed.confirmedAt === 'string' ? { confirmedAt: parsed.confirmedAt } : {}),
           ...(parsed.capabilityContract !== undefined ? { capabilityContract: parsed.capabilityContract } : {}),
+          // A workflow a mandate shaped, or whose steps changed after its stamp, runs only after the
+          // owner stamped its steps as they are (`workflow-stamp.ts`): the same state the run and
+          // the trigger list read, so every surface that points here finds the stamp to give.
+          awaitsStamp: history.workflowStampState({ ...(parsed as object), id: row.id } as PlannedPipeline) === 'awaits_owner_stamp',
           ...(() => {
             if (!ownerViews) {
               // A mandate learns that a workflow is not its to schedule (UX-058, ux U-085), never whose it is.
@@ -8517,7 +8522,8 @@ export class LynoxHTTPApi {
       }
       // Whether the schedule dialog may offer a write grant at all (the feature switch).
       const { workflowGrantEnabled } = await import('../core/workflow-grant.js');
-      jsonResponse(res, 200, { workflows: workflows.slice(0, limit), grantEnabled: workflowGrantEnabled() });
+      // Who reads: only the owner gets the button to the stamp view, whose routes are the owner's.
+      jsonResponse(res, 200, { workflows: workflows.slice(0, limit), grantEnabled: workflowGrantEnabled(), viewer: ownerViews ? 'owner' : 'mandate' });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params, body) => {
@@ -8584,7 +8590,16 @@ export class LynoxHTTPApi {
         errorResponse(res, 403, 'This workflow asks questions while it runs, so it runs only on its schedule.');
         return;
       }
-      if (plannedForRun && !plannedForRun.confirmedAt) {
+      // The owner's stamp is bound to the steps (`workflow-stamp.ts`): a workflow a mandate shaped,
+      // or whose steps changed after the stamp, waits for the owner to review them. The client
+      // opens that workflow's stamp view from the code and the id. The runner asks again on the
+      // copy it runs; this answer is the early one.
+      const stampState = plannedForRun ? history.workflowStampState(plannedForRun) : 'holds';
+      if (plannedForRun && stampState === 'awaits_owner_stamp') {
+        errorResponse(res, 409, workflowAwaitsStampResult(plannedForRun.id), 'workflow_awaits_stamp', { pipelineId: plannedForRun.id });
+        return;
+      }
+      if (plannedForRun && stampState === 'unconfirmed') {
         // The remedy depends on the MODE, because only a schedulable workflow can
         // reach the PRODUCT route the autonomous branch names: this same file's
         // `POST /api/tasks` refuses any other (`isSchedulableWorkflow`), and the
@@ -8988,6 +9003,83 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { deleted: true });
     }, ownerOnly('delete a workflow')));
 
+    // The owner's own stamp on a workflow: the preview shows
+    // what a run of it does, step by step, with the digest of exactly that; the confirm stamps
+    // only that digest. Exact id only, read from the database: a prefix or a cached copy could
+    // show one definition and stamp another. A schedule's confirm never stamps its workflow.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/stamp-preview', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const planned = history.getWorkflowExact(params['id']!);
+      const expect = planned === undefined ? null : history.workflowStampDigest(planned);
+      if (planned === undefined || expect === null) { errorResponse(res, 404, 'Workflow not found'); return; }
+      const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
+      const { getRole } = await import('../core/roles.js');
+      const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
+        const r = name === undefined ? undefined : getRole(name);
+        return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
+      };
+      const state = history.workflowStampState(planned);
+      const shaped = history.workflowMandateShaped(planned.id);
+      const contract = planned.capabilityContract;
+      jsonResponse(res, 200, {
+        expect,
+        stampedAt: state === 'holds' ? planned.confirmedAt ?? null : null,
+        changedBy: shaped ? 'mandate' : 'owner',
+        awaitsStamp: state === 'awaits_owner_stamp',
+        mode: planned.mode,
+        onFailure: planned.on_failure ?? 'stop',
+        limits: planned.limits ?? null,
+        // What the contract lets the run write, as the grant's preview words it.
+        contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
+        parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
+        // Each step as it runs: a captured step's literal call beside its task, and the tools it
+        // gets, worked out the way the runtime does (a step that names none gets the pool).
+        // `secret:` references stay names; no value is resolved here.
+        // A role can widen the tools and change the model at run time: it is shown by name.
+        steps: (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
+          id: st.id,
+          task: st.task,
+          tool: st.tool ?? null,
+          inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
+          tools: [...inlineStepToolNames(st)],
+          model: st.model ?? null,
+          role: st.role ?? null,
+          // A role is built in (`roles.ts`), not stored: what it grants is shown beside its name.
+          roleGrant: roleGrantOf(st.role),
+          effort: st.effort ?? null,
+          thinking: st.thinking ?? null,
+          timeoutMs: st.timeout_ms ?? null,
+          inputFrom: st.input_from ?? null,
+        })),
+      });
+    }, ownerOnly('see what stamping a workflow would confirm')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/confirm', async (_req, res, params, body) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: stamp the workflow from its preview.', 'expect_required'); return; }
+      const id = params['id']!;
+      if (history.getWorkflowExact(id) === undefined) { errorResponse(res, 404, 'Workflow not found'); return; }
+      // Compared and written in one transaction (`WorkflowStore.stampCurrent`): what is stamped is
+      // what was compared. A stamp over the same steps moves nothing.
+      if (!history.setWorkflowConfirmedAt(id, new Date().toISOString(), expected)) {
+        errorResponse(res, 409, 'The steps of this workflow changed since you looked. Look at them again, then stamp.', 'steps_changed');
+        return;
+      }
+      const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
+      forgetPipeline(id);
+      const now = history.getWorkflowExact(id);
+      // Triggers of this workflow the wait switched off (`worker-loop.ts`: a one-shot, a webhook)
+      // and still off: they run once switched on again, which the stamp does not do for the owner.
+      // Counted so the page can say so; a schedule (cron, watch) stayed on and needs nothing.
+      const stillOff = (engine.getTaskManager()?.listTriggers?.() ?? [])
+        .filter((t) => t.pipeline_id === id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(id))).length;
+      jsonResponse(res, 200, { stampedAt: now?.confirmedAt ?? null, awaitsStamp: false, stillOff });
+    }, ownerOnly('stamp a workflow')));
+
     // ── Tasks ──
     this.addStatic('user', 'GET /api/tasks', async (req, res) => {
       const taskManager = engine.getTaskManager();
@@ -9019,6 +9111,7 @@ export class LynoxHTTPApi {
       // started a run is not added to the row either way.
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
+      const history = engine.getRunHistory();
       // `paused` is no status value: it reads `paused_at` (`plan-pause.ts`).
       const pausedFilter = (status as string | undefined) === 'paused';
       const rows = pausedFilter
@@ -9028,10 +9121,15 @@ export class LynoxHTTPApi {
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
           const visible = starter !== undefined && mayStopRun(principal, starter, loop?.runningPlanTag(trigger.id));
+          // A workflow schedule whose workflow waits for the owner's stamp: it stays on and does
+          // not run (a webhook's is switched off), and the view says so instead of a next run.
+          // The same state the run refusal reads (`workflow-stamp.ts`).
+          const workflow = trigger.effect === 'run_workflow' && trigger.pipeline_id ? history?.getWorkflowExact(trigger.pipeline_id) : undefined;
           return {
             ...triggerForRoute(trigger, principal),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
+            workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -9125,6 +9223,16 @@ export class LynoxHTTPApi {
         if (!isSchedulableWorkflow(planned)) {
           errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled — remove its ask_secret / ask_human steps first.`); return;
         }
+        // A workflow that waits for the owner's stamp (a mandate shaped it, or its steps changed
+        // after its stamp) is not stamped by scheduling it: the owner stamps it in its own act,
+        // after seeing its steps (`POST /api/workflows/:id/confirm`). Until then neither a schedule
+        // nor a write grant is made on it, so no schedule shows a next run that never comes. The
+        // client opens the stamp view of `pipelineId`. Only the owner's own never-stamped workflow
+        // is stamped by scheduling, as before.
+        if (byOwner && history.workflowStampState(planned) === 'awaits_owner_stamp') {
+          errorResponse(res, 409, workflowAwaitsStampResult(planned.id), 'workflow_awaits_stamp', { pipelineId: planned.id });
+          return;
+        }
         // The acceptance of a write grant, after its preview. Closed with the feature switch
         // like the preview: this is where the contract is written, and without a vault key
         // its checksum is a SHA-256 over inputs any signed-in caller can read, so closing
@@ -9171,7 +9279,13 @@ export class LynoxHTTPApi {
           // Only the owner's scheduling stamps the workflow. A mandate's schedule is
           // recorded with its creator and waits for the owner's stamp ON THE SCHEDULE,
           // even when the workflow itself is already stamped (the due query's mandate gate).
-          if (byOwner) history.setWorkflowConfirmedAt(planned.id, new Date().toISOString());
+          // Stamped only over the definition the checks above judged: a copy that changed in
+          // between is not stamped (`stampCurrent`), and no schedule is made on it.
+          if (byOwner && !history.setWorkflowConfirmedAt(planned.id, new Date().toISOString(), history.workflowStampDigest(planned) ?? undefined)) {
+            forgetPipeline(planned.id);
+            errorResponse(res, 409, 'The workflow\'s steps changed while it was being scheduled. Look at them again and schedule it once more.', 'steps_changed', { pipelineId: planned.id });
+            return;
+          }
           forgetPipeline(planned.id);
           const task = taskManager.createPipelineTask({
             title: title ?? `Scheduled: ${planned.name}`,
@@ -9488,7 +9602,7 @@ export class LynoxHTTPApi {
       // shown, never whatever the trigger holds by the time the request arrives.
       const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
         ? (body as { expect: string }).expect : undefined;
-      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm a schedule from its stamp preview (GET /api/tasks/:id/stamp-preview).'); return; }
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm a schedule from its stamp preview (GET /api/tasks/:id/stamp-preview).', 'expect_required'); return; }
       let connections: { wf: string | null; entries: readonly StampEntry[] } | undefined;
       const current = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }

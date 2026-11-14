@@ -57,6 +57,9 @@ async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: str
   const dir = mkdtempSync(join(tmpdir(), 'lynox-escal-'));
   dirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
+  // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+  // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+  vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
   const engineDb = new EngineDb(join(dir, 'engine.db'));
   history.setVerbGraph(engineDb);
   closers.push(() => { try { history.close(); } catch { /* twice is fine */ } });
@@ -163,6 +166,9 @@ describe('a failed scheduled workflow records whether its escalation reached any
     const dir = mkdtempSync(join(tmpdir(), 'lynox-escal-read-'));
     dirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
+    // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+    // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+    vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
     const engineDb = new EngineDb(join(dir, 'engine.db'));
     history.setVerbGraph(engineDb);
     closers.push(() => { try { history.close(); } catch { /* twice is fine */ } });

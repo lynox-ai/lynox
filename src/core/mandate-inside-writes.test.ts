@@ -576,7 +576,7 @@ const FIXTURES: Fixture[] = [
       // The mandate's own workflow: it may schedule only those and the owner's.
       history.insertPlannedPipeline({ id: 'wf-own', name: 'Own', goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, MANDATE);
       history.setWorkflowConfirmedAt('wf-own', '2026-07-01T00:00:00.000Z');
-      return { ctx: { taskManager: { obj: tm, reads: [] }, runHistory: { obj: history, reads: ['getPlannedPipeline', 'getWorkflowAuthorship'] } }, spy: 'ctx.taskManager.createPipelineTask' };
+      return { ctx: { taskManager: { obj: tm, reads: [] }, runHistory: { obj: history, reads: ['getPlannedPipeline', 'getWorkflowAuthorship', 'workflowStampState'] } }, spy: 'ctx.taskManager.createPipelineTask' };
     } },
   { site: 'task_create#scheduled', branch: 'scheduled', created: true, row: { verb: 'create', target: 'tasks type=scheduled' }, tool: taskCreateTool as ToolEntry, input: { title: 'Bericht', schedule: '0 9 * * 1' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.createScheduled' }; } },
