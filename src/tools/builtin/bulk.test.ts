@@ -472,10 +472,11 @@ describe('where the user finds a planned run', () => {
     // A list or external plan has read no target yet, so the before and after come only once read.
     expect(RUN_PLACE_NOTE).toContain('once its targets are read, they see each target\'s before and after, can take single targets out of the run and approve the rest.');
     // Measured: a bare "decide" was filled with editing values, discarding or rejecting the run.
-    expect(RUN_PLACE_NOTE).toContain('They cannot change a value on that page');
-    // True only while the run page has no way to discard a planned run. The change that adds one
-    // drops this clause from RUN_PLACE_NOTE and this line with it.
-    expect(RUN_PLACE_NOTE).toContain('and cannot discard the run.');
+    expect(RUN_PLACE_NOTE).toContain('They cannot change a value');
+    // True only while the run's own page has no way to discard a planned run (starting another
+    // judged run ends one from that run's page, hence "on that page"). The change that adds a way
+    // drops "or discard the run" from RUN_PLACE_NOTE and this line with it.
+    expect(RUN_PLACE_NOTE).toContain('or discard the run on that page.');
     expect(RUN_PLACE_NOTE).toContain('Only the owner of this lynox can start or approve it.');
     expect(RUN_PLACE_NOTE).toContain('make up no link or address');
     // Measured: a model still built a URL to the run and named buttons the page does not have.

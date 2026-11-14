@@ -312,9 +312,11 @@ const JUDGE_COLUMN_TYPES: Record<string, readonly string[]> = {
 // takes targets out and approves, once the targets are read: a list plan or an external plan has read none yet), not what to decide, and that only the owner can start or approve a run (the routes are
 // owner-only), so a chat acting for someone else does not send them to a page where they can do nothing.
 // It names what the page offers and what it does not: measured, a model filled a bare "decide" with
-// editing a value, discarding or rejecting the run, and all-or-nothing writing, none of which the page does.
-// "cannot discard the run" holds only while the page has no way to discard a planned run; the test that
-// pins it says so, and the change that adds one has to drop the clause there and here.
+// editing a value and discarding or rejecting the run, which the run's page does not offer, and with
+// all-or-nothing writing, which a list plan does not do. "discard the run on that page" is bounded to
+// the run's own page on purpose: starting another judged run ends a started one from that run's page.
+// It holds only while the run's page has no way to discard a planned run; the test that pins it says
+// so, and the change that adds one has to drop the clause there and here.
 // tests/online/bulk-plan-run-place-eval.test.ts counts the places a reply names, right and wrong.
 export const BULK_RUNS_PLACE = {
   en: { menu: 'Activity & Cost', tab: 'Bulk runs' },
@@ -323,7 +325,7 @@ export const BULK_RUNS_PLACE = {
 
 export const RUN_PLACE_NOTE = `The user finds this run in lynox under ${BULK_RUNS_PLACE.en.menu} › ${BULK_RUNS_PLACE.en.tab} ` +
   `(in a German interface: ${BULK_RUNS_PLACE.de.menu} › ${BULK_RUNS_PLACE.de.tab}). There they follow it: once its targets are read, they see each target's before and after, can take single targets out of the run and approve the rest. ` +
-  'They cannot change a value on that page and cannot discard the run. ' +
+  'They cannot change a value or discard the run on that page. ' +
   'Only the owner of this lynox can start or approve it. ' +
   'If you say where it is, use exactly these labels, in the language of the interface; name no other tab, page, menu, button or link, and make up no link or address. ' +
   'You do not know the run\'s address or what its page shows step by step, so give no URL and no button names or steps beyond this.';

@@ -140,7 +140,8 @@ async function runOnce(provider: string, make: (tools: ToolEntry[]) => Agent, la
   const recorded = plans.some((p) => RECORDED.test(p.answer));
   const place = reply.match(PLACE)?.[0] ?? null;
   const right = RIGHT.test(reply);
-  const other = reply.match(OTHER)?.[0] ?? null;
+  // The case names its store; a reply repeating it is no link to the run.
+  const other = reply.split(STORE).join('').match(OTHER)?.[0] ?? null;
   const button = reply.match(BUTTON)?.[0] ?? null;
   const promise = reply.match(PROMISE)?.[0] ?? null;
   const second = SECOND.test(reply);
