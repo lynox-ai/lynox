@@ -38,6 +38,34 @@ const KEYCAP_BASE = /[0-9#*]/;
 const LETTER = /[\p{L}\p{M}]/u;
 const AFTER_MARK = /[\p{L}\p{M}\p{N}\p{P}\p{Zs}]/u;
 
+/** The hidden characters real text may carry in a place of its own, as listed above. One of
+ *  them is not shown where it stands in such a place, so a bulk page marks it where a run adds
+ *  one (`bulk-hidden-adds.ts`). */
+export const IN_PLACE_CHARS: ReadonlySet<number> = new Set([ZWJ, VS16, ...BETWEEN_LETTERS, ...DIRECTION_MARKS]);
+
+/** HTML's names for the characters above that have one; the soft hyphen's is also read without
+ *  its `;`, as a browser reads it. */
+const IN_PLACE_NAMES: Readonly<Record<string, number>> = { shy: 0x00ad, zwnj: 0x200c, zwj: 0x200d, lrm: 0x200e, rlm: 0x200f };
+// Leading zeros are read in any number, as a browser reads them; a number left over after them that
+// is longer than these bounds is above U+10FFFF, which a browser reads as U+FFFD.
+const REFERENCE = /&(?:#[xX]0*([0-9a-fA-F]{1,8});?|#0*([0-9]{1,10});?|(shy|zwnj|zwj|lrm|rlm);|(shy))/g;
+
+/** In HTML source, every character reference that a browser may turn into one of
+ *  {@link IN_PLACE_CHARS} — `&shy;`, `&#173;`, `&#xAD;` and the like — by its place in `text`
+ *  (UTF-16 offsets, `end` exclusive). The source shows such a reference as text, but the page it
+ *  renders carries the character, so a bulk page marks it with the rest. It errs toward more: a
+ *  bare `&shy` in an attribute, which a browser leaves as it is, is found too. Counting is the
+ *  engine's, over the parsed value. */
+export function inPlaceReferences(text: string): { start: number; end: number; cp: number }[] {
+  const out: { start: number; end: number; cp: number }[] = [];
+  for (const m of text.matchAll(REFERENCE)) {
+    const name = m[3] ?? m[4];
+    const cp = name !== undefined ? IN_PLACE_NAMES[name]! : parseInt(m[1] ?? m[2]!, m[1] !== undefined ? 16 : 10);
+    if (IN_PLACE_CHARS.has(cp)) out.push({ start: m.index, end: m.index + m[0].length, cp });
+  }
+  return out;
+}
+
 /** The most hidden characters one text may carry in the places it may carry one. */
 export const HIDDEN_ALLOWED_MAX = 32;
 

@@ -12610,7 +12610,8 @@ describe('LynoxHTTPApi', () => {
       const host = 'shop.example.com';
       const key = `https://${host}/products/1`;
       const planned = bulkLedger.recordExternalPlan({
-        createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]),
+        // The title gains a soft hyphen between letters: counted where the run is approved.
+        createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { price: '1', title: 'Wasser\u00adfilter' } }], contract: mintBulkContract(host, [key]),
       });
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
@@ -12625,7 +12626,7 @@ describe('LynoxHTTPApi', () => {
       // Not halted any more: nothing to resume.
       expect((await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' })).status).toBe(409);
 
-      bulkLedger.recordRead(id, 0, { before: { price: '2' } });
+      bulkLedger.recordRead(id, 0, { before: { price: '2', title: 'Wasserfilter' } });
       expect(bulkLedger.finishPreview(id)).toBe(true);
       // The fixture shop's `/products/<id>` is not a measured write form.
       const approve = (extra: Record<string, unknown> = { unmeasuredConfirmed: true }): Promise<Response> =>
@@ -12654,6 +12655,8 @@ describe('LynoxHTTPApi', () => {
         const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
         // One target to write: the note keeps its first two sentences.
         expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+        // Counted where the run is approved: its one target adds a soft hyphen.
+        expect(shown['hiddenAddsTargets']).toBe(1);
         for (const extra of [{}, { unmeasuredConfirmed: 'true' }, { unmeasuredConfirmed: 1 }]) {
           const unconfirmed = await approve(extra);
           expect(unconfirmed.status, JSON.stringify(extra)).toBe(409);
@@ -12729,6 +12732,8 @@ describe('LynoxHTTPApi', () => {
     it('shows the unmeasured-form note with an external apply run only — not with a local run, not with an undo', async () => {
       const local = await (await jsonFetch(`/api/bulk/runs/${planRun()}`)).json() as Record<string, unknown>;
       expect(local).toMatchObject({ writeForm: null, writeFormNote: null, writeFormConfirmation: null });
+      // A run awaiting approval whose targets add no hidden character: counted, as none.
+      expect(local['hiddenAddsTargets']).toBe(0);
 
       const host = 'shop.example.com';
       const key = `https://${host}/products/1`;
@@ -12737,6 +12742,8 @@ describe('LynoxHTTPApi', () => {
       const id = planned.status.id;
       const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
       expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+      // Planned, not read yet: neither approved nor confirmed here, so not counted.
+      expect(shown).toMatchObject({ phase: 'planned', hiddenAddsTargets: null });
       // The same run read as an undo: it restores under its source's confirmation, and does
       // not write one target first, so neither the note nor the statement applies.
       bulkDb.getDb().prepare(`UPDATE bulk_runs SET kind = 'undo' WHERE id = ?`).run(id);
