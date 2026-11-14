@@ -9406,6 +9406,26 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    // A path too costly to read may hide a `%3F_method=…`: refused with its own text, not as a
+    // method that is not one, for a read and a write, owner and mandate alike.
+    it('a path too costly to check for an override is refused with its own text', async () => {
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockClear();
+      const piece = (i: number): string => `p%u0025${i % 90 + 10}%E9%80%2541%u0041`;
+      const url = `https://h.example/${Array.from({ length: 2400 }, (_, i) => piece(i)).join('/')}/x%3F_method=DELETE`;
+      for (const method of ['GET', 'POST'] as const) {
+        const text = `Blocked: the path of this ${method} to h.example is too long to check for a method override. Nothing was sent. Send it with a shorter path or with fewer percent-encoded characters in it.`;
+        for (const principal of [undefined, MANDATE]) {
+          const { agent, prompt } = agent270(principal === undefined ? {} : { principal });
+          const out = await visible({ url, method, ...(method === 'POST' ? { body: '{}' } : {}) }, agent);
+          expect(out).toContain(text);
+          expect(out).not.toContain('is not an HTTP method');
+          expect(prompt).not.toHaveBeenCalled();
+        }
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it('control: the owner is asked about a stored secret written plainly in the query, shown masked, with the sentence', async () => {
       const mask = (t: string) => t.replaceAll('sk-live-canary', '***nary');
       const { agent, prompt } = agent270({ mask });

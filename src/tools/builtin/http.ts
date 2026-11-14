@@ -43,7 +43,7 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, pathReadable, URL_MAX_BYTES, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, overrideUnreadInPath, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, pathReadable, URL_MAX_BYTES, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
@@ -3194,11 +3194,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // request carries (`outbound-write.ts`). It is what is sent that stays `method`; every gate
     // below that asks "is this a write, and which one" reads `gatedMethod`.
     const effective = effectiveWriteMethod(method, headers, input.url, gateBodyReadings(input.body, headers));
-    if (effective === null) {
-      // The value is not repeated: it is whatever the request put there.
-      blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header, or a `_method` query parameter or body field), is not an HTTP method. Send the request with a method name, or without the override.');
-    }
-    const gatedMethod = effective;
     // The write as the refusals below name it: with every write an override names, not only the
     // one it is gated as (`writeForNote`).
     // The service these refusals name, as the question and the gate's refusals do (`approvalOrigin`):
@@ -3217,6 +3212,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false);
     };
     const service = (): string => (hostHoldsSecret() ? 'this service' : approvalOrigin(new URL(input.url)));
+    if (effective === null) {
+      // A path too costly to read may hide an override: named as such, since the request may carry
+      // none. The method is named only when it is one (`overrideUnreadInPath`), and the URL then parses.
+      if (overrideUnreadInPath(method, input.url)) {
+        blockedVerbatim(`Blocked: the path of this ${method.trim().toUpperCase()} to ${service()} is too long to check for a method override. Nothing was sent. Send it with a shorter path or with fewer percent-encoded characters in it.`);
+      }
+      // The value is not repeated: it is whatever the request put there.
+      blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header, or a `_method` query parameter or body field), is not an HTTP method. Send the request with a method name, or without the override.');
+    }
+    const gatedMethod = effective;
     const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
     // The approval and the outbound-effect table are keyed by the URL's host. A header a
     // server or proxy routes on instead (`Host`, `X-Forwarded-Host`, `X-Original-URL`, …)

@@ -531,6 +531,15 @@ export function urlQueryStrings(url: string): string[] {
 /** The query string `urlQueryStrings` names for a path it could not read every way. */
 const UNREAD_QUERY = '(unread)';
 
+/**
+ * Why `effectiveWriteMethod` gave `null` for a request sent with a known method, when the reason
+ * is the path: too costly to read every way, it may hide an override that cannot be ruled out.
+ * The caller names this reason on its own; a method that is not a method keeps the other text.
+ */
+export function overrideUnreadInPath(method: string, url: string): boolean {
+  return KNOWN_METHODS.has(method.trim().toUpperCase()) && urlQueryStrings(url).includes(UNREAD_QUERY);
+}
+
 /** An operation that writes: `mutation` or `subscription` as a GraphQL name anywhere in the document. */
 const GRAPHQL_WRITE_OPERATION = /\b(?:mutation|subscription)\b/i;
 

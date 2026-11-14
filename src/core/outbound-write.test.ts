@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { SecretStore } from './secret-store.js';
 import {
-  GATE_READ_MAX_BYTES, URL_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, pathReadable, pathHoldsSecret, queryForQuestion, urlQueryStrings, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
+  GATE_READ_MAX_BYTES, URL_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, pathReadable, pathHoldsSecret, queryForQuestion, urlQueryStrings, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, overrideUnreadInPath, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -972,6 +972,11 @@ describe('a part too costly to read every way', () => {
     expect(effectiveWriteMethod('GET', {}, hidden)).toBeNull();
     expect(effectiveWriteMethod('POST', {}, hidden)).toBeNull();
     expect(writeMethodsNamed('POST', {}, hidden)).toEqual(['POST']);
+    // The reason is named on its own, and only for a method that is one: any other value keeps
+    // the text that does not repeat it.
+    expect(overrideUnreadInPath('GET', hidden)).toBe(true);
+    expect(overrideUnreadInPath('nope', hidden)).toBe(false);
+    expect(overrideUnreadInPath('GET', 'https://h.example/x%3F_method=DELETE')).toBe(false);
     // The same override behind a short path is read and gated as the DELETE it names.
     expect(effectiveWriteMethod('POST', {}, 'https://h.example/x%3F_method=DELETE')).toBe('DELETE');
   });
