@@ -225,7 +225,8 @@
 		const id = runId;
 		const before = run;
 		const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
-		if (id !== runId || run !== before || before === null || !r.ok || r.body.phase !== 'previewed' || r.body.total !== before.total) return false;
+		// A refused or failed ask carries no run, so no phase `previewed`.
+		if (id !== runId || run !== before || before === null || r.body.phase !== 'previewed' || r.body.total !== before.total) return false;
 		if (r.body.deselected !== before.deselected + (deselected ? 1 : -1)) return false;
 		run = r.body;
 		targets = targets.map((x) => (x.seq === seq ? { ...x, deselected } : x));
