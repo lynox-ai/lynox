@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { SecretStore } from './secret-store.js';
 import {
-  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
+  bodyFieldNames, bodyForQuestion, bodyMayWriteGraphql, urlMayWriteGraphql, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
   readAddressWrites,
 } from './outbound-write.js';
 
@@ -785,6 +785,117 @@ describe('graphqlWrite', () => {
   it('a body nested far deeper than any request needs is read without throwing', () => {
     const deep = `{"query":"{ a }","variables":{"v":${'['.repeat(200_000)}${']'.repeat(200_000)}}}`;
     expect(graphqlWrite(JSON_CT, deep)).toEqual({ mutates: false });
+  });
+});
+
+describe('bodyMayWriteGraphql — a body a GraphQL server on any path may run as a write', () => {
+  const JSON_CT = { 'Content-Type': 'application/json' };
+  it.each([
+    ['a mutation under query', '{"query":"mutation{a}"}'],
+    ['a named mutation with variables', '{"query":"mutation M($a:Int){a(x:$a)}"}'],
+    ['a subscription', '{"query":"subscription{a}"}'],
+    ['a comma after the word', '{"query":"mutation,{a}"}'],
+    ['a comment after the word', '{"query":"mutation #c\\n{a}"}'],
+    ['a directive', '{"query":"mutation @live {a}"}'],
+    ['a # inside a string before it', '{"query":"query{a(s:\\"#\\")} mutation{b}"}'],
+    ['the word escaped in JSON', '{"query":"\\u006dutation{a}"}'],
+    ['the key in another case', '{"QUERY":"mutation{a}"}'],
+    ['the word in another case (read wider than GraphQL)', '{"query":"MUTATION{a}"}'],
+    ['a batch', '[{"query":"{a}"},{"query":"mutation{b}"}]'],
+    ['a key named twice (a server may keep the first)', '{"query":"mutation{b}","query":"{a}"}'],
+    ['a persisted query by documentId', '{"documentId":"abc","variables":{}}'],
+    ['a persisted query by doc_id', '{"doc_id":"1"}'],
+    ['a persisted query by queryId', '{"queryId":"1"}'],
+    ['an Apollo persisted query', '{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"x"}}}'],
+  ])('JSON: %s', (_k, body) => {
+    expect(bodyMayWriteGraphql(body, JSON_CT)).toBe(true);
+  });
+
+  it.each([
+    ['a form pair', 'query=mutation%7Ba%7D'],
+    ['a form pair after ;', 'x=1;query=mutation%7Ba%7D'],
+    ['a form pair with %u', 'query=%u006Dutation%7Ba%7D'],
+    ['a form key as PHP names it', 'query%5B%5D=mutation%7Ba%7D'],
+    ['a persisted query in a form', 'documentId=abc'],
+    ['a document as the whole body (application/graphql)', 'mutation { a }'],
+  ])('other bodies: %s', (_k, body) => {
+    expect(bodyMayWriteGraphql(body, { 'Content-Type': 'application/x-www-form-urlencoded' })).toBe(true);
+  });
+
+  it('reads every body as a form as well, one that parses as JSON included', () => {
+    const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    expect(bodyMayWriteGraphql('{"a":"&query=%6Dutation%7Bx%7D&"}', FORM)).toBe(true);
+    expect(bodyMayWriteGraphql('{"a":"&documentId=x&"}', FORM)).toBe(true);
+    // CONTROL: the same JSON without the pair.
+    expect(bodyMayWriteGraphql('{"a":"query mutation x"}', FORM)).toBe(false);
+  });
+
+  it('refuses a body a lenient server reads as JSON and JSON.parse does not', () => {
+    // The word escaped, so only a JSON reading would see it.
+    expect(bodyMayWriteGraphql('\ufeff{"query":"\\u006dutation{x}"}', {})).toBe(true);
+    expect(bodyMayWriteGraphql('{"query":"\\u006dutation{x}"} x', {})).toBe(true);
+    expect(bodyMayWriteGraphql('  [{"query":"\\u006dutation{x}"}]{}', {})).toBe(true);
+    expect(bodyMayWriteGraphql('not json', { 'Content-Type': 'application/json' })).toBe(true);
+    // CONTROL: a text body that is no JSON and names no write.
+    expect(bodyMayWriteGraphql('Hallo, neue Mutation geplant', { 'Content-Type': 'text/plain' })).toBe(false);
+  });
+
+  it('a multipart body with an operations part, and a body that is not a string', () => {
+    const multipart = '--b\r\nContent-Disposition: form-data; name="operations"\r\n\r\n{"query":"\\u006dutation{a}"}\r\n--b--';
+    expect(bodyMayWriteGraphql(multipart, { 'content-type': 'multipart/form-data; boundary=b' })).toBe(true);
+    expect(bodyMayWriteGraphql({ query: 'mutation{a}' }, JSON_CT)).toBe(true);
+  });
+
+  it.each([
+    ['no body', undefined],
+    ['an empty body', ''],
+    ['a read under query', '{"query":"query{a}"}'],
+    ['a read with a field named mutation', '{"query":"{ mutation }"}'],
+    ['a REST body with the word as a key (the regression of an earlier cut)', '{"subscription":"premium"}'],
+    ['a description that says Mutation (…)', '{"description":"Mutation (Variante) {neu}"}'],
+    ['a longer word', '{"query":"mutations {a}"}'],
+    ['a word that ends in it', '{"query":"{ remutation { a } }"}'],
+    ['a search API whose query is an object', '{"query":{"match":{"text":"mutation{a}"}}}'],
+    ['a form pair under another key', 'text=mutation%7Ba%7D&x=1'],
+    ['a multipart upload without an operations part', '--b\r\nContent-Disposition: form-data; name="file"\r\n\r\nabc\r\n--b--'],
+  ])('CONTROL, no write: %s', (_k, body) => {
+    const type = body?.startsWith('--b') ? 'multipart/form-data; boundary=b' : body?.startsWith('{') ? 'application/json' : 'application/x-www-form-urlencoded';
+    expect(bodyMayWriteGraphql(body, { 'content-type': type })).toBe(false);
+  });
+
+  it('reads in linear time: a long run of blanks after the word, and the word many times', () => {
+    const started = Date.now();
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: `mutation${' '.repeat(200_000)}x` }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: 'mutation '.repeat(50_000) }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: `mutation #${'#'.repeat(100_000)}` }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql(`mutation${' ,'.repeat(100_000)}`, {})).toBe(false);
+    // A comment with no line break after it, at each of many words.
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: 'mutation#'.repeat(50_000) }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql('mutation#'.repeat(50_000), {})).toBe(false);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('walks a deeply nested body without a stack', () => {
+    // Escaped, so only the walk of the parsed body reads the word; the text as a whole does not.
+    const deep = `${'['.repeat(100_000)}{"query":"\\u006dutation{a}"}${']'.repeat(100_000)}`;
+    expect(bodyMayWriteGraphql(deep, JSON_CT)).toBe(true);
+    expect(bodyMayWriteGraphql(`${'['.repeat(100_000)}{"query":"{a}"}${']'.repeat(100_000)}`, JSON_CT)).toBe(false);
+  });
+});
+
+describe('urlMayWriteGraphql — a URL a GraphQL server on any path may run as a write', () => {
+  it.each([
+    ['https://api.x.example/api?query=mutation%7Bx%7D', true],
+    ['https://api.x.example/api?x=1;query=mutation%7Bx%7D', true],
+    ['https://api.x.example/api?QUERY%5B%5D=mutation%7Bx%7D', true],
+    ['https://api.x.example/api?documentId=abc', true],
+    ['https://api.x.example/api%3Fquery=mutation%7Bx%7D', true],
+    // CONTROL: a read, a search for the word, another key.
+    ['https://api.x.example/api?query=%7Bx%7D', false],
+    ['https://api.x.example/api?query=mutation', false],
+    ['https://api.x.example/api?q=mutation%7Bx%7D', false],
+  ] as const)('%s → %s', (url, want) => {
+    expect(urlMayWriteGraphql(url)).toBe(want);
   });
 });
 
