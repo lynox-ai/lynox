@@ -1651,12 +1651,39 @@ describe('approving a Shopify run', () => {
     return id;
   };
 
-  it('writes an unmeasured form: confirmed by name, one target before its own probe', async () => {
+  /** Replaces one writing target's change and approved after-state, as a planner could have stored them. */
+  const plantTarget = (id: string, change: string, after: Record<string, unknown>): void => {
+    const seq = (engineDb.getDb().prepare("SELECT seq FROM bulk_targets WHERE run_id = ? AND change = 'update' ORDER BY seq LIMIT 1").get(id) as { seq: number }).seq;
+    engineDb.getDb().prepare('UPDATE bulk_targets SET change = ?, after_planned = ? WHERE run_id = ? AND seq = ?')
+      .run(change, engineDb.enc(JSON.stringify(after)), id, seq);
+  };
+
+  it('writes a measured form without a confirmation, and still one target before its own probe', async () => {
     const id = await previewed();
+    // The run changes only the SEO title; the unchanged description goes with it as the pair the body sends.
+    const afters = (engineDb.getDb().prepare("SELECT after_planned FROM bulk_targets WHERE run_id = ? AND change = 'update'").all(id) as { after_planned: string }[])
+      .map((r) => JSON.parse(engineDb.dec(r.after_planned)) as Record<string, unknown>);
+    expect(afters.length).toBeGreaterThan(0);
+    for (const a of afters) expect(Object.keys(a).sort()).toEqual(['seo_description', 'seo_title']);
+    expect(ledger.getStatus(id)!.writeForm).toBe('measured');
     const checksum = ledger.computeChecksum(id)!;
-    expect(ledger.approve(id, { checksum })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
-    expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_product', cause: 'own_missing' }], step: null } });
+    expect(ledger.approve(id, { checksum, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_product', cause: 'own_missing' }], step: null } });
+    expect(ledger.approve(id, { checksum, maxTargets: 1 })).toMatchObject({ ok: true });
+  });
+
+  it('writes an unmeasured form, a target that clears the title, only when confirmed by name', async () => {
+    const id = await previewed();
+    plantTarget(id, 'update', { title: null });
+    expect(ledger.getStatus(id)!.writeForm).toBe('unmeasured');
+    const checksum = ledger.computeChecksum(id)!;
+    expect(ledger.approve(id, { checksum, maxTargets: 1 })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
     expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+  });
+
+  it('counts a target to create as unmeasured: the form only updates', async () => {
+    const id = await previewed();
+    plantTarget(id, 'create', { seo_title: 'Neu', seo_description: 'D1' });
+    expect(ledger.getStatus(id)!.writeForm).toBe('unmeasured');
   });
 
   it('is neither approved nor resumed while the store reads are switched off', async () => {

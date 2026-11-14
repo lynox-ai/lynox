@@ -6,8 +6,11 @@
  *
  * A run whose every target is a measured form needs one confirmed probe per host, verb and
  * kind of resource, once. A run with any other target is unmeasured: approving it takes an
- * explicit confirmation, and it writes one target first in every run.
+ * explicit confirmation, and it writes one target first in every run. A Shopify run is judged by
+ * {@link MEASURED_SHOPIFY_FORMS} instead; its probe stays its own in every run.
  */
+
+import { SHOPIFY_WRITE_DOCUMENTS, shopifyAdminApiVersion, shopifyProductWriteVariables, type ShopifyWriteForm } from './shopify-graphql.js';
 
 export interface MeasuredWriteForm {
   /** Exact host, or `null` for any host — the path is fixed by software the customer runs on their own host. */
@@ -40,6 +43,62 @@ export const MEASURED_WRITE_FORMS: readonly MeasuredWriteForm[] = [
 export function isMeasuredWriteForm(host: string, path: string, method: string): boolean {
   return MEASURED_WRITE_FORMS.some((f) =>
     (f.host === null || f.host === host) && f.path.test(path) && f.methods.includes(method));
+}
+
+/**
+ * A Shopify write form whose effect on unsent fields has been measured. Every product write goes
+ * to the one GraphQL path of the store, so the path cannot tell forms apart: a form is the write
+ * document itself, the Admin API version it is sent at, and the exact set of variables it sets.
+ * It holds on any store host — the form is Shopify's, and what a single store adds (an app or a
+ * webhook that reacts to a product update) is outside any measurement and is what the probe of
+ * every Shopify run still checks.
+ */
+export interface MeasuredShopifyForm {
+  form: ShopifyWriteForm;
+  /** The write document as it was measured, byte for byte. A changed document is not measured. */
+  document: string;
+  /** The Admin API version it was measured at. Another version is not measured. */
+  apiVersion: string;
+  /** Each set of variables measured, sorted. Only these exact sets count. */
+  variableSets: readonly (readonly string[])[];
+  /** When and how it was measured. */
+  measured: string;
+}
+
+export const MEASURED_SHOPIFY_FORMS: readonly MeasuredShopifyForm[] = [
+  {
+    form: 'shopify_product',
+    document: 'mutation($id: ID!, $title: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
+    apiVersion: '2026-10',
+    variableSets: [['seoDescription', 'seoTitle'], ['title'], ['seoDescription', 'seoTitle', 'title']],
+    measured: '2026-11-14 on a partner development store, API 2026-10: a raw read of every product field after each write; '
+      + 'unsent fields unchanged for each set, with values and with the seo pair cleared (null or ""); an empty title is refused',
+  },
+];
+
+/**
+ * Whether one Shopify write — its form and its approved after-state — is a measured form: the
+ * engine's document and API version are the measured ones, and the variables the body sets
+ * ({@link shopifyProductWriteVariables}, the same function the body is built from) are exactly a
+ * measured set. A title is measured only as text: Shopify refuses an empty one, and clearing it
+ * with `null` was not measured.
+ */
+export function isMeasuredShopifyWrite(form: ShopifyWriteForm, after: Readonly<Record<string, unknown>>): boolean {
+  if (form !== 'shopify_product') return false;
+  const variables = shopifyProductWriteVariables(after);
+  return variables !== null && isMeasuredShopifySend(form, variables, SHOPIFY_WRITE_DOCUMENTS[form], shopifyAdminApiVersion());
+}
+
+/** {@link isMeasuredShopifyWrite} over what is sent: the variables, the document and the API version. */
+export function isMeasuredShopifySend(
+  form: ShopifyWriteForm, variables: Readonly<Record<string, string | null>>, document: string, version: string | null,
+): boolean {
+  if (Object.hasOwn(variables, 'title') && (typeof variables['title'] !== 'string' || variables['title'] === '')) return false;
+  const sent = Object.keys(variables).sort();
+  return MEASURED_SHOPIFY_FORMS.some((f) => f.form === form
+    && f.document === document
+    && f.apiVersion === version
+    && f.variableSets.some((set) => set.length === sent.length && set.every((v, i) => v === sent[i])));
 }
 
 /** `measured` when every path is a measured form; an empty path list is `unmeasured`. */
