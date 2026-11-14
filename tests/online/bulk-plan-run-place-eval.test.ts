@@ -75,6 +75,7 @@ function realBulkPlan(owner: IAgent, plans: Plan[]): ToolEntry {
 }
 
 const RECORDED = /^List dry run recorded/;
+const STORE_NAME = new RegExp(`${STORE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!/)`, 'g');
 // A place in the app the reply points to, the real one included. Wide on purpose: it is a count for
 // the hand judge, who reads every flagged reply in the dump; a word like "Seite" can be meant otherwise.
 const PLACE = /\b(Tab|Reiter|Registerkarte|Menü|Menüpunkt|Bereich|Seite|Dashboard|Übersicht|Navigation|Sidebar|Seitenleiste)\b|Bulk[ -]?Runs?|Massenläufe|Aktivität|\bklick|\blink\b|https?:\/\//i;
@@ -140,8 +141,9 @@ async function runOnce(provider: string, make: (tools: ToolEntry[]) => Agent, la
   const recorded = plans.some((p) => RECORDED.test(p.answer));
   const place = reply.match(PLACE)?.[0] ?? null;
   const right = RIGHT.test(reply);
-  // The case names its store; a reply repeating it is no link to the run.
-  const other = reply.split(STORE).join('').match(OTHER)?.[0] ?? null;
+  // The case names its store; a reply repeating it is no link to the run. With a path after it, it
+  // is an address the note forbids, so it stays.
+  const other = reply.replace(STORE_NAME, '').match(OTHER)?.[0] ?? null;
   const button = reply.match(BUTTON)?.[0] ?? null;
   const promise = reply.match(PROMISE)?.[0] ?? null;
   const second = SECOND.test(reply);
