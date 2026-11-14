@@ -597,12 +597,12 @@ describe('going on from a run that halted', () => {
 			}
 		}
 		// A step that does not promise going on still stands without a button.
-		expect(bulkHaltText(at('credential', noModel), true, DE)?.before).toContain('Einstellungen → APIs');
+		expect(bulkHaltText(at('credential', noModel), true, DE)?.before).toContain('Einstellungen → API-Verbindungen');
 	});
 
 	it('gives a refused access the step to reconnect it, and a missing model the start\'s own sentence', () => {
-		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden.';
-		expect(bulkHaltText(at('credential'), true, DE)?.before).toBe(`${reconnect} Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.`);
+		const reconnect = 'Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden.';
+		expect(bulkHaltText(at('credential'), true, DE)?.before).toBe(`${reconnect} Gibt es dort keine, bitte lynox im Chat, den Zugang einzurichten.`);
 		// A refused access has a stored one, so no "no profile" clause, and the run continues after (ux U-105).
 		expect(bulkHaltText(at('unauthorized'), true, DE)?.before).toBe(`${reconnect} Danach kannst du fortsetzen.`);
 		expect(bulkHaltText(at('judgeModel'), true, DE)).toEqual({ cause: de['bulk.start.no_judge_model'], before: null });
@@ -678,7 +678,7 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('maxTargets', unclear), true, DE)?.check).toBe(one);
 		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN)?.check).toBe('Check again looks in shop.example.invalid whether the changes are there; nothing is sent.');
 		// A halt's own step still comes first.
-		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.';
+		const reconnect = 'Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort keine, bitte lynox im Chat, den Zugang einzurichten.';
 		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(reconnect);
 		// Anything left to send: writing on, as before.
 		expect(bulkResumeKind(w('failureRate', { ...unclear, resumeSends: 1 }))).toBe('write');
@@ -764,8 +764,8 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN)?.cause).toBe('The run reached the approved maximum: 40 targets.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
-		expect(bulkResumeText(w('unauthorized'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. Then you can continue.');
-		expect(bulkResumeText(w('credential'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
+		expect(bulkResumeText(w('unauthorized'), true, EN)?.before).toBe('Open Settings → API connections and tap the chat icon next to the connection for shop.example.invalid to reconnect the access. Then you can continue.');
+		expect(bulkResumeText(w('credential'), true, EN)?.before).toBe('Open Settings → API connections and tap the chat icon next to the connection for shop.example.invalid to reconnect the access. If there is no connection, ask lynox in the chat to set up the access.');
 		expect(bulkResumeText(w('unavailable'), true, EN)?.before).toBe('You can continue. If the run halts again right away, shop.example.invalid is not reachable yet; try again later.');
 		expect(bulkResumeText(w('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
 		expect(bulkResumeText(w('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);

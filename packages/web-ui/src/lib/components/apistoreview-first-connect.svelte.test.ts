@@ -125,6 +125,15 @@ describe('the first connect of a profile on a built-in provider', () => {
 		expect(q('api-connect-first-link')).toBeNull();
 	});
 
+	it('the owner, an erasure past its hold and no grant left: the first connect is the way back', async () => {
+		const notice = { recordId: 1, connectionId: 'shop', revokedAt: new Date(Date.now() - 20 * DAY).toISOString(), holdUntil: new Date(Date.now() - 6 * DAY).toISOString(), deadline: new Date(Date.now() + 9 * DAY).toISOString(), reconnected: false };
+		serve('owner', [shop], true, [notice]);
+		await render();
+		expect(q('api-revoked')).not.toBeNull();
+		expect(q('api-reconnect')).toBeNull();
+		expect(q('api-connect-first-link')?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+	});
+
 	it('a session the server lets not connect it, profile revoked: the reconnect refusal only, not the first-connect sentence', async () => {
 		serve('mandate', [{ ...shop, reader_may_connect: false, oauth_grant: { state: 'revoked', revoked_at: new Date(Date.now() - DAY).toISOString() } }]);
 		await render();

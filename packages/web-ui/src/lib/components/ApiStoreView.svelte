@@ -33,11 +33,17 @@
 		return p.auth?.type === 'oauth2' && typeof p.auth.oauth?.preset_id === 'string' && p.auth.oauth.preset_id !== '';
 	}
 
-	// Never connected and nothing revoked to show: the first connect is still to make. A revocation
-	// view brings its own reconnect link, so the two never show together.
+	// Whether the revocation view of this profile shows its own reconnect link (the markup below).
+	function viewLinks(view: ReturnType<typeof revocationView>): boolean {
+		return view !== null && (view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable));
+	}
+
+	// Never connected: the first connect is still to make, unless a revocation view already offers
+	// its own reconnect link, so the two never show together. An erasure past its hold shows no
+	// link of its own, and the first connect is then the way back.
 	function notYetConnected(p: ApiProfile): boolean {
 		return onBuiltInProvider(p) && (p.oauth_grant === undefined || p.oauth_grant === null)
-			&& revocationView(p.oauth_grant, notices.get(p.id), now) === null;
+			&& !viewLinks(revocationView(p.oauth_grant, notices.get(p.id), now));
 	}
 
 	// A file the import of the earlier profiles waits on (`ApiStore.importWaitsOn`).
@@ -185,7 +191,7 @@
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
 					<div class="flex items-stretch">
 						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
-							class="flex-1 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
+							class="flex-1 min-w-0 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
 							<div class="flex items-center gap-2">
 								<span class="text-sm font-medium">{profile.name}</span>
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
@@ -197,14 +203,14 @@
 						<button onclick={() => manageInChat(profile)}
 							aria-label={t('apis.manage_in_chat')}
 							title={t('apis.manage_in_chat')}
-							class="px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
+							class="shrink-0 px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
 							<Icon name="chat" size="xs" />
 						</button>
 						{#if isOwnerSession()}
 						<button onclick={() => deleteProfile(profile)}
 							disabled={deleting === profile.id}
 							aria-label={t('apis.delete')}
-							class="px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
+							class="shrink-0 px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
 							{t('apis.delete')}
 						</button>
 						{/if}
@@ -227,7 +233,7 @@
 									<p data-testid="api-erasure-avert">{t('apis.erasure_connected_again_avert')}</p>
 								{/if}
 							{/if}
-							{#if view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
+							{#if viewLinks(view)}
 								{#if profile.reader_may_connect !== false}
 									<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 									<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"

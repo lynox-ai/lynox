@@ -192,8 +192,8 @@ function deHaltReason(reason: string): string | undefined {
     // ux U-105: the words of the run page (`bulk.halt.*`), so push and page say the same; neutral
     // as to person, since a mandate gets the same summary and only the owner resumes a run.
     [BULK_HALT_REASONS.unavailable]: 'Zielsystem nicht erreichbar oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.',
-    [BULK_HALT_REASONS.credential]: 'lynox findet keinen gespeicherten Zugang zum Zielsystem. Verbinde ihn unter Einstellungen → APIs neu oder bitte lynox im Chat darum.',
-    [BULK_HALT_REASONS.unauthorized]: 'Das Zielsystem hat den gespeicherten Zugang abgelehnt. Ist er unter Einstellungen → APIs neu verbunden, lässt sich der Lauf fortsetzen.',
+    [BULK_HALT_REASONS.credential]: 'lynox findet keinen gespeicherten Zugang zum Zielsystem. Verbinde ihn unter Einstellungen → API-Verbindungen neu oder bitte lynox im Chat darum.',
+    [BULK_HALT_REASONS.unauthorized]: 'Das Zielsystem hat den gespeicherten Zugang abgelehnt. Ist er unter Einstellungen → API-Verbindungen neu verbunden, lässt sich der Lauf fortsetzen.',
     [BULK_HALT_REASONS.blocked]: 'Die Instanz darf dieses Zielsystem nicht erreichen.',
     [BULK_HALT_REASONS.contract]: 'Ein Ziel liegt ausserhalb dessen, was der Lauf schreiben darf.',
     [BULK_HALT_REASONS.costCap]: 'Der Lauf hat seine KI-Kostengrenze erreicht.',

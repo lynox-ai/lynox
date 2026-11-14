@@ -65,8 +65,8 @@ describe('the owner\'s line for a plan\'s refusal of a member\'s connection (UX-
     expect(r.de).toEqual([`Der Plan „${PLAN}“ hat ${CONN_DE} nicht genutzt. ${P} hat die Verbindung mit eigenem Login eingerichtet, und deine Bestätigung dieses Plans enthält sie nicht, oder sie hat sich seit deiner Bestätigung geändert. Soll der Plan sie nutzen, öffne Automation → Trigger und wähle bei diesem Plan „Verbindungen prüfen“. Sonst kann der Plan diesen Schritt nicht ausführen.`]);
   });
 
-  const TWO_WAYS_EN = `If the plan should use this service, there are two ways: once ${P}'s access has ended, ask in a chat to take over the connection and confirm with “Allow”; or delete the profile under Settings → APIs and connect the service yourself, which disconnects ${P}. Otherwise the plan cannot run this step.`;
-  const TWO_WAYS_DE = `Soll der Plan diesen Dienst nutzen, gibt es zwei Wege: Sobald der Zugang von ${P} beendet ist, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit „Erlauben“. Oder lösche das Profil unter Einstellungen → APIs und verbinde den Dienst selbst; das trennt ${P}. Sonst kann der Plan diesen Schritt nicht ausführen.`;
+  const TWO_WAYS_EN = `If the plan should use this service, there are two ways: once ${P}'s access has ended, ask in a chat to take over the connection and confirm with “Allow”; or delete the connection under Settings → API connections and connect the service yourself, which disconnects ${P}. Otherwise the plan cannot run this step.`;
+  const TWO_WAYS_DE = `Soll der Plan diesen Dienst nutzen, gibt es zwei Wege: Sobald der Zugang von ${P} beendet ist, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit „Erlauben“. Oder lösche die Verbindung unter Einstellungen → API-Verbindungen und verbinde den Dienst selbst; das trennt ${P}. Sonst kann der Plan diesen Schritt nicht ausführen.`;
   const ENDED_EN = `The plan "${PLAN}" did not use ${CONN_EN}. ${P} set it up with their own login, and the access ${P} set it up under has ended. If the plan should use it, ask in a chat to take over the connection and confirm with “Allow”. Otherwise the plan cannot run this step.`;
   const ENDED_DE = `Der Plan „${PLAN}“ hat ${CONN_DE} nicht genutzt. ${P} hat die Verbindung mit eigenem Login eingerichtet, und der Zugang, unter dem ${P} sie eingerichtet hat, ist beendet. Soll der Plan sie nutzen, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit „Erlauben“. Sonst kann der Plan diesen Schritt nicht ausführen.`;
 
@@ -169,14 +169,14 @@ describe('the owner\'s own trigger, outside a plan (UX-065)', () => {
     const collected = runCollectingMemberNotes(async () => { line = refuseMemberConnection(crm(), OWNER_PRINCIPAL, ends(['M-1'])); en = currentMemberNotes(); de = currentMemberNotesIn('de'); }, PLAN);
     await collected.done;
     expect(en).toEqual([line]);
-    expect(de).toEqual([`${P} hat diese Verbindung (api.crm.example, Profil "CRM" (id crm-api)) mit eigenem Login eingerichtet, deshalb nutzt lynox sie nicht für dich. Übernimm sie im Chat, sobald der Zugang von ${P} beendet ist, oder lösche dieses Profil unter Einstellungen → APIs und verbinde den Dienst selbst (das trennt ${P}).`]);
+    expect(de).toEqual([`${P} hat diese Verbindung (api.crm.example, "CRM" (id crm-api)) mit eigenem Login eingerichtet, deshalb nutzt lynox sie nicht für dich. Übernimm sie im Chat, sobald der Zugang von ${P} beendet ist, oder lösche diese Verbindung unter Einstellungen → API-Verbindungen und verbinde den Dienst selbst (das trennt ${P}).`]);
   });
 
   it('access ended: the takeover, with the button\'s label', async () => {
     let de: readonly string[] = [];
     const collected = runCollectingMemberNotes(async () => { refuseMemberConnection(crm(), OWNER_PRINCIPAL, ends([])); de = currentMemberNotesIn('de'); }, PLAN);
     await collected.done;
-    expect(de).toEqual([`${P} hat diese Verbindung (api.crm.example, Profil "CRM" (id crm-api)) mit eigenem Login eingerichtet. Damit lynox sie für dich nutzt, übernimm sie: Bitte im Chat darum, die Verbindung "CRM" (id crm-api) zu übernehmen, und bestätige mit „Erlauben“.`]);
+    expect(de).toEqual([`${P} hat diese Verbindung (api.crm.example, "CRM" (id crm-api)) mit eigenem Login eingerichtet. Damit lynox sie für dich nutzt, übernimm sie: Bitte im Chat darum, die Verbindung "CRM" (id crm-api) zu übernehmen, und bestätige mit „Erlauben“.`]);
   });
 });
 

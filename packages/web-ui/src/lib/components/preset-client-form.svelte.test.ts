@@ -428,6 +428,22 @@ describe('PresetClientForm, the first connect', () => {
 		expect(link()?.getAttribute('href')).toBe(HREF);
 	});
 
+	it('offers no connect while another app is being entered', async () => {
+		getExtra = { client_id: 'client-1', client_secret_set: true };
+		await open('shop-admin', HREF);
+		expect(link()).not.toBeNull();
+		button('Replace Client Secret')!.click();
+		flushSync();
+		expect(link()).toBeNull();
+	});
+
+	it('offers no connect while the Client ID names another app', async () => {
+		getExtra = { client_id: 'client-1', client_secret_set: true };
+		await open('shop-admin', HREF);
+		type(idInput(), 'client-2');
+		expect(link()).toBeNull();
+	});
+
 	it('offers no connect when the page gives no route, and says only saved', async () => {
 		getExtra = { client_id: 'client-1', client_secret_set: true };
 		await open('shop-admin', null);
