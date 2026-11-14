@@ -1318,7 +1318,7 @@ describe('api_setup tool', () => {
           createMockAgent(new ApiStore()),
         );
         expect(result).toContain('blocked: the server answered with a redirect to an address that carries a method override');
-        expect(result).toContain('the first request was sent and answered');
+        expect(result).toContain('the first request was sent and answered; ask the user for the spec as a file or for another address of it');
         expect(fetchSpy).toHaveBeenCalledTimes(1);
       } finally {
         fetchSpy.mockRestore();
@@ -1340,7 +1340,7 @@ describe('api_setup tool', () => {
           { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
           createMockAgent(new ApiStore()),
         );
-        expect(result).toContain('blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered');
+        expect(result).toContain('blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered; ask the user for the spec as a file or for another address of it');
         expect(result).not.toContain(wrong);
         expect(result).not.toContain('refused before it was sent');
         expect(result).not.toContain(host);

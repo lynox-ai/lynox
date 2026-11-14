@@ -675,7 +675,7 @@ const GUARD_REFUSALS: ReadonlyArray<[RegExp, string]> = [
 class DiscoveryOverrideRefused extends Error {
   constructor(kind: 'address' | 'hop' | 'graphql') {
     super(kind === 'hop'
-      ? 'blocked: the server answered with a redirect to an address that carries a method override (such as `_method=DELETE`), which a server may run as a write, so the redirect was not followed; the first request was sent and answered'
+      ? 'blocked: the server answered with a redirect to an address that carries a method override (such as `_method=DELETE`), which a server may run as a write, so the redirect was not followed; the first request was sent and answered; ask the user for the spec as a file or for another address of it'
       : kind === 'graphql'
         ? 'blocked: the address is a GraphQL endpoint whose query names a mutation or subscription, which may ask the server to change data, so it was not requested. Pass the plain address of the spec or docs page'
         : 'blocked: the address carries a method override (such as `_method=DELETE`), which a server may run as a write, so it was not requested. Pass the plain address of the spec or docs page');
@@ -717,7 +717,7 @@ function fetchFailureForModel(err: unknown): string {
     // A hop the redirect handling refused (a GraphQL mutation in its address): the first request
     // went out and was answered with that redirect.
     if (message.startsWith('Blocked: redirect to ')) {
-      return 'blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered';
+      return 'blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered; ask the user for the spec as a file or for another address of it';
     }
     return 'the request was refused before it was sent';
   }
