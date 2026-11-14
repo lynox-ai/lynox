@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SearXNGProvider, DuckDuckGoProvider, parseDdgHtml, createSearchProvider } from './search-provider.js';
+import { SearXNGProvider, DuckDuckGoProvider, parseDdgHtml, createSearchProvider, searxngUrlProblem } from './search-provider.js';
 import type { WebSearchEvent } from './search-provider.js';
 import { channels } from '../../core/observability.js';
 import { runInCallSlot } from '../../core/call-connection.js';
@@ -169,8 +169,47 @@ describe('SearXNGProvider', () => {
     expect(() => new SearXNGProvider('http://localhost:8888')).not.toThrow();
   });
 
-  it('allows http:// private IP (self-hosted)', () => {
-    expect(() => new SearXNGProvider('http://192.168.1.100:8888')).not.toThrow();
+  // A literal private IP was accepted here while every search to it was refused by the egress
+  // check, so the engine reported search as set up and the model was told nothing.
+  describe('a URL every search would be refused for', () => {
+    const hostnameWay = 'Name the host instead: http://localhost:<port> for a SearXNG on this machine, the service name for one in Docker Compose (http://searxng:8080), or a hostname for one on your network. If enforce_https is on, any host other than localhost needs https; if network_policy is allow-list, the host has to be on that list.';
+
+    it.each([
+      ['http://127.0.0.1:18080', '127.0.0.1'],
+      ['http://10.0.0.5:8080', '10.0.0.5'],
+      ['http://192.168.1.100:8888', '192.168.1.100'],
+      ['http://172.16.0.2', '172.16.0.2'],
+      ['http://[::1]:8888', '::1'],
+      ['http://0x7f.1:8888', '127.0.0.1'],
+      ['http://2130706433/', '127.0.0.1'],
+      ['http://127.0.0.1.:8888', '127.0.0.1'],
+      ['http://[::ffff:127.0.0.1]:8888', '::ffff:7f00:1'],
+    ])('refuses %s at construction and names the hostname way', (url, ip) => {
+      expect(() => new SearXNGProvider(url)).toThrow(`names the IP address ${ip}, and lynox sends no search to a private, loopback or reserved IP written as a number. ${hostnameWay}`);
+      expect(searxngUrlProblem(url)).toEqual({ code: 'private-ip', message: expect.stringContaining(hostnameWay) as string });
+    });
+
+    it.each(['http://localhost:8888', 'http://searxng:8080', 'https://search.example.com', 'http://8.8.8.8:8080'])('accepts %s', (url) => {
+      expect(searxngUrlProblem(url)).toBeUndefined();
+      expect(() => new SearXNGProvider(url)).not.toThrow();
+    });
+
+    // The verify-done test: boot accepts a URL exactly when a search to it is let out.
+    it.each([
+      'http://127.0.0.1:18080', 'http://10.0.0.5', 'http://192.168.1.100:8888', 'http://[::1]:8888', 'http://[fd00::1]',
+      'http://100.64.0.1', 'http://0.0.0.0:8080', 'http://localhost:8888', 'http://searxng:8080', 'http://8.8.8.8',
+    ])('accepts %s at boot exactly when its search goes out', async (url) => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+      const accepted = searxngUrlProblem(url) === undefined;
+      // A provider is built past the boot check here, to ask the search what it would do.
+      const provider = Object.create(SearXNGProvider.prototype) as SearXNGProvider;
+      Object.assign(provider, { baseUrl: url });
+      const searched = await provider.search('q').then(() => true, (e: unknown) => {
+        expect(String(e)).toContain('private IP');
+        return false;
+      });
+      expect(accepted).toBe(searched);
+    });
   });
 
   it('allows https:// URL', () => {
@@ -609,8 +648,8 @@ describe('SearXNGProvider', () => {
     expect(() => new SearXNGProvider('http://localhost:0')).not.toThrow();
   });
 
-  it('handles IPv6 localhost', () => {
-    expect(() => new SearXNGProvider('http://[::1]:8888')).not.toThrow();
+  it('handles IPv6 localhost by refusing it: every search to it is refused (the hostname form works)', () => {
+    expect(() => new SearXNGProvider('http://[::1]:8888')).toThrow('names the IP address ::1');
   });
 
   it('maxResults of 0 returns empty', async () => {

@@ -2220,9 +2220,12 @@ export class Engine {
     // fallback-quality prompt suffix so the agent never silently
     // fabricates search results when search is unavailable.
     this._webSearchStatus = 'none';
+    // A URL the boot refuses (`searxngUrlProblem`), as against one that is not reachable.
+    let searxngRefused = false;
     if (searxngUrl) {
       try {
-        const { SearXNGProvider, createWebSearchTool } = await import('../integrations/search/index.js');
+        const { SearXNGProvider, createWebSearchTool, searxngUrlProblem } = await import('../integrations/search/index.js');
+        searxngRefused = searxngUrlProblem(searxngUrl) !== undefined;
         const searxng = new SearXNGProvider(searxngUrl);
         let healthy = await searxng.healthCheck();
         if (!healthy) {
@@ -2258,7 +2261,9 @@ export class Engine {
         this.registry.register(createWebSearchTool(ddg));
         this._searchProvider = ddg;
         this._webSearchStatus = 'fallback';
-        process.stderr.write('[lynox] No SearXNG configured — using DuckDuckGo HTML-scrape fallback (best-effort). Set SEARXNG_URL or run via `docker compose up` for higher-quality results.\n');
+        // A URL the boot refused is configured, just not usable, so the line says so.
+        const lead = searxngRefused ? '[lynox] SearXNG URL refused, using' : '[lynox] No SearXNG configured — using';
+        process.stderr.write(`${lead} DuckDuckGo HTML-scrape fallback (best-effort). Set SEARXNG_URL or run via \`docker compose up\` for higher-quality results.\n`);
       } catch (err) {
         process.stderr.write(`[lynox] DuckDuckGo fallback init failed: ${err instanceof Error ? err.message : String(err)}\n`);
         process.stderr.write('[lynox] No web search configured. Use docker-compose for built-in SearXNG, or set SEARXNG_URL.\n');

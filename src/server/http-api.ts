@@ -70,6 +70,7 @@ import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
+import { searxngUrlProblem } from '../integrations/search/search-provider.js';
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
@@ -7300,6 +7301,7 @@ export class LynoxHTTPApi {
         llmConfigured = !!anthropicKey;
       }
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
+      const searxngProblem = searxngUrl ? searxngUrlProblem(searxngUrl) : undefined;
       jsonResponse(res, 200, {
         provider,
         // Emit the CANONICAL billing tier (hosted/managed/managed_pro/managed_max). Legacy
@@ -7330,7 +7332,9 @@ export class LynoxHTTPApi {
           // when SearXNG is wired (full quality). The DDG HTML-scrape
           // fallback always provides a `web_research` tool but counts as
           // best-effort, not configured.
-          search: !!searxngUrl,
+          // A URL the boot refuses (`searxngUrlProblem`) is not search set up: the engine runs on
+          // the fallback. It is still the stored URL (`searxng`), shown with its problem.
+          search: !!searxngUrl && searxngProblem === undefined,
           searxng: !!searxngUrl,
           // A PAIR or nothing. The `||` this replaces reported configured on a
           // half-filled vault, while the resolver builds nothing from half a pair —
@@ -7340,6 +7344,9 @@ export class LynoxHTTPApi {
         },
         ...(ownerAsks ? { count: names.size } : {}),
         searxng_url: searxngUrl ?? null,
+        searxng_problem: searxngProblem?.code ?? null,
+        // The environment's URL wins at boot (config.ts), so the page cannot replace it.
+        searxng_from_env: !!process.env['SEARXNG_URL'],
       });
     }, READS);
 
@@ -7503,19 +7510,15 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const url = b && typeof b['url'] === 'string' ? b['url'].replace(/\/+$/, '') : '';
       if (!url) { errorResponse(res, 400, 'Missing url'); return; }
-      // Validate scheme (http/https only) and block cloud metadata endpoints
-      let parsed: URL;
-      try { parsed = new URL(url); } catch { errorResponse(res, 400, 'Invalid URL'); return; }
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        errorResponse(res, 400, 'URL must use http:// or https://');
-        return;
-      }
-      const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
-      // Block cloud metadata endpoints (AWS/GCP/Azure all use 169.254.169.254)
-      // Private IPs intentionally allowed — SearXNG typically runs on Docker network or LAN
-      if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')
-          || hostname === 'metadata.google.internal'
-          || hostname === 'metadata.internal') {
+      // The boot's own rule first (`searxngUrlProblem`), each refusal with its code so the page
+      // names the reason. A private IP written as a number answers this check
+      // but every search to it is refused, so it is refused here too, with the hostname way.
+      const problem = searxngUrlProblem(url);
+      if (problem !== undefined) { errorResponse(res, 400, problem.message, `searxng-${problem.code}`); return; }
+      // Two metadata hostnames on top: a name, not an address, so the boot does not see them. No
+      // code: the page's metadata text names the 169.254 range, which these are not.
+      const hostname = new URL(url).hostname;
+      if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') {
         errorResponse(res, 400, 'Blocked: cloud metadata endpoint');
         return;
       }

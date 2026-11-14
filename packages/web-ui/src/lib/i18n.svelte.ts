@@ -4,6 +4,10 @@ export type Locale = 'de' | 'en';
 
 let current = $state<Locale>('de');
 
+/** The one sentence every SearXNG text from the environment shares (`*_env` keys). */
+const SEARXNG_ENV_DE = 'Sie kommt aus der Umgebungsvariable SEARXNG_URL, die Vorrang vor dieser Seite hat.';
+const SEARXNG_ENV_EN = 'It comes from the SEARXNG_URL environment variable, which takes precedence over this page.';
+
 const translations: Record<string, Record<Locale, string>> = {
 	// Nav
 	'nav.chat': { de: 'Chat', en: 'Chat' },
@@ -2736,6 +2740,20 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.searxng_checking': { de: 'Prüfe...', en: 'Checking...' },
 	'integrations.searxng_healthy': { de: 'Erreichbar', en: 'Reachable' },
 	'integrations.searxng_check_failed': { de: 'Nicht erreichbar — URL prüfen', en: 'Unreachable — check URL' },
+	// A stored URL the engine refuses at boot; without a URL it stays searxng_not_configured.
+	// A stored URL from the environment, which wins over the page. The ENV sentence is
+	// one piece per language (SEARXNG_ENV_DE / _EN above the table), shared by all four.
+	'integrations.searxng_private_ip_env': { de: `Diese Adresse nennt eine private IP-Adresse als Zahl, dorthin schickt lynox keine Suche. ${SEARXNG_ENV_DE} Setz dort stattdessen den Hostnamen, etwa http://localhost:<Port> oder den Dienstnamen in Docker Compose (http://searxng:8080), und starte lynox danach neu.`, en: `This address names a private IP address as a number, and lynox sends no search there. ${SEARXNG_ENV_EN} Set the host name there instead, such as http://localhost:<port> or the service name in Docker Compose (http://searxng:8080), then restart lynox.` },
+	'integrations.searxng_invalid_env': { de: `Diese Adresse lässt sich nicht als URL lesen. ${SEARXNG_ENV_DE} Trag sie dort vollständig ein, mit http:// oder https:// am Anfang, etwa http://localhost:8888, und starte lynox danach neu.`, en: `This address cannot be read as a URL. ${SEARXNG_ENV_EN} Enter it there in full, starting with http:// or https://, such as http://localhost:8888, then restart lynox.` },
+	'integrations.searxng_protocol_env': { de: `Diese Adresse beginnt nicht mit http:// oder https://, und lynox sucht nur über diese beiden. ${SEARXNG_ENV_DE} Setz dort eines davon an den Anfang, etwa http://localhost:8888, und starte lynox danach neu.`, en: `This address does not start with http:// or https://, and lynox searches only over those two. ${SEARXNG_ENV_EN} Put one of them at the start there, such as http://localhost:8888, then restart lynox.` },
+	'integrations.searxng_metadata_env': { de: `Diese Adresse liegt im Bereich 169.254.…, in dem Cloud-Server unter anderem ihre internen Zugangsdaten bereitstellen; dorthin schickt lynox keine Suche. ${SEARXNG_ENV_DE} Trag dort die Adresse deiner SearXNG-Instanz ein, etwa http://localhost:8888 oder den Dienstnamen in Docker Compose, und starte lynox danach neu.`, en: `This address is in the 169.254.… range, where cloud servers provide, among other things, their internal credentials; lynox sends no search there. ${SEARXNG_ENV_EN} Enter the address of your SearXNG instance there, such as http://localhost:8888 or the service name in Docker Compose, then restart lynox.` },
+	// The other refusals of a SearXNG URL, each with its reason and way out.
+	'integrations.searxng_invalid': { de: 'Diese Adresse lässt sich nicht als URL lesen. Trag sie vollständig ein, mit http:// oder https:// am Anfang, etwa http://localhost:8888.', en: 'This address cannot be read as a URL. Enter it in full, starting with http:// or https://, such as http://localhost:8888.' },
+	'integrations.searxng_protocol': { de: 'Diese Adresse beginnt nicht mit http:// oder https://, und lynox sucht nur über diese beiden. Setz eines davon an den Anfang, etwa http://localhost:8888.', en: 'This address does not start with http:// or https://, and lynox searches only over those two. Put one of them at the start, such as http://localhost:8888.' },
+	'integrations.searxng_metadata': { de: 'Diese Adresse liegt im Bereich 169.254.…, in dem Cloud-Server unter anderem ihre internen Zugangsdaten bereitstellen; dorthin schickt lynox keine Suche. Trag die Adresse deiner SearXNG-Instanz ein, etwa http://localhost:8888 oder den Dienstnamen in Docker Compose.', en: 'This address is in the 169.254.… range, where cloud servers provide, among other things, their internal credentials; lynox sends no search there. Enter the address of your SearXNG instance, such as http://localhost:8888 or the service name in Docker Compose.' },
+	'integrations.searxng_refused': { de: 'Nicht verwendet', en: 'Not in use' },
+	// The engine sends no search to a private IP written as a number; the hostname way is meant.
+	'integrations.searxng_private_ip': { de: 'Diese Adresse nennt eine private IP-Adresse als Zahl, dorthin schickt lynox keine Suche. Trag stattdessen den Hostnamen ein: http://localhost:<Port> für SearXNG auf diesem Rechner oder den Dienstnamen in Docker Compose, etwa http://searxng:8080.', en: 'This address names a private IP address as a number, and lynox sends no search there. Enter the host name instead: http://localhost:<port> for SearXNG on this machine, or the service name in Docker Compose, such as http://searxng:8080.' },
 	'integrations.searxng_remove': { de: 'Entfernen', en: 'Remove' },
 
 	// Reranker (post-search relevance scorer; Anthropic-only today)
