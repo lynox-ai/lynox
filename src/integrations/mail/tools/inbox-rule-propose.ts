@@ -12,15 +12,15 @@
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import type { MailHooks } from '../context.js';
 import type { MailRegistry } from './registry.js';
-import { charCount, ruleLine, ruleValue } from '../../inbox/rule-text.js';
+import { charCount, DESCRIPTION_MAX, DESCRIPTION_MIN, descriptionProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine, ruleValue } from '../../inbox/rule-text.js';
 
 export const INBOX_RULE_NAME_MAX = 80;
 export const INBOX_RULE_VALUE_MAX = 200;
 /** A subject fragment shorter than this would file almost every mail. */
 export const INBOX_RULE_SUBJECT_MIN = 3;
 
-type ProposeKind = 'from' | 'subject_contains';
-const KINDS: readonly ProposeKind[] = ['from', 'subject_contains'];
+type ProposeKind = 'from' | 'subject_contains' | 'matches_description';
+const KINDS: readonly ProposeKind[] = ['from', 'subject_contains', 'matches_description'];
 
 export interface InboxRuleProposeInput {
   account: string;
@@ -42,15 +42,15 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
     definition: {
       name: 'inbox_rule_propose',
       description:
-        'Propose an inbox rule for the owner to confirm: mail from one sender address ("from"), or mail whose subject contains a phrase ("subject_contains"), always goes to "requires_user". ' +
+        'Propose an inbox rule for the owner to confirm: mail from one sender address ("from"), mail whose subject contains a phrase ("subject_contains"), or mail a short description in words fits ("matches_description", e.g. "Mahnungen von Lieferanten"; a model checks it) always goes to "requires_user". ' +
         'The rule does nothing until the owner confirms it in the inbox rule view. Use it when the user asks for such a rule, or when you notice mail the user keeps having to look at. ' +
         'Give the rule a short name — the topic it stands for.',
       input_schema: {
         type: 'object' as const,
         properties: {
           account: { type: 'string', description: 'The mail account id the rule is for.' },
-          matcher_kind: { type: 'string', enum: [...KINDS], description: '"from" = one exact sender address; "subject_contains" = a phrase in the subject.' },
-          matcher_value: { type: 'string', description: `The sender address, or the subject phrase (at least ${String(INBOX_RULE_SUBJECT_MIN)} characters). At most ${String(INBOX_RULE_VALUE_MAX)} characters.` },
+          matcher_kind: { type: 'string', enum: [...KINDS], description: '"from" = one exact sender address; "subject_contains" = a phrase in the subject; "matches_description" = which mail is meant, in words.' },
+          matcher_value: { type: 'string', description: `The sender address, or the subject phrase (at least ${String(INBOX_RULE_SUBJECT_MIN)}, at most ${String(INBOX_RULE_VALUE_MAX)} characters), or the description (one line, ${String(DESCRIPTION_MIN)} to ${String(DESCRIPTION_MAX)} characters).` },
           name: { type: 'string', description: `What the rule is called, e.g. "Retoure". At most ${String(INBOX_RULE_NAME_MAX)} characters.` },
         },
         required: ['account', 'matcher_kind', 'matcher_value', 'name'],
@@ -64,31 +64,44 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
         return Promise.resolve('inbox_rule_propose: no mail account with that id. The accounts are listed by mail_triage or the inbox.');
       }
       if (!KINDS.includes(input.matcher_kind)) {
-        return Promise.resolve('inbox_rule_propose: matcher_kind must be "from" or "subject_contains".');
+        return Promise.resolve('inbox_rule_propose: matcher_kind must be "from", "subject_contains" or "matches_description".');
       }
       const name = oneLine(input.name);
       if (name.length === 0 || charCount(name) > INBOX_RULE_NAME_MAX) {
         return Promise.resolve(`inbox_rule_propose: name must be 1 to ${String(INBOX_RULE_NAME_MAX)} characters.`);
       }
-      const checked = ruleValue(typeof input.matcher_value === 'string' ? input.matcher_value : '');
-      if (checked.hidden) {
-        return Promise.resolve('inbox_rule_propose: matcher_value holds characters a reader does not see. Give the sender or the phrase as it reads.');
+      // The name sits next to the description in the rule check's prompt.
+      if (input.matcher_kind === 'matches_description' && namesRuleLabel(name)) {
+        return Promise.resolve('inbox_rule_propose: the name must not name a rule label such as R1.');
       }
-      if (checked.multiline) {
-        return Promise.resolve('inbox_rule_propose: matcher_value must be one line, as the sender or the subject reads.');
-      }
-      let value = checked.value;
-      if (charCount(value) > INBOX_RULE_VALUE_MAX) {
-        return Promise.resolve(`inbox_rule_propose: matcher_value is longer than ${String(INBOX_RULE_VALUE_MAX)} characters.`);
-      }
-      if (input.matcher_kind === 'from') {
-        value = value.toLowerCase();
-        // A bare address: brackets, a scheme or a list would never equal a sender and only hold a place.
-        if (!/^[^\s@<>()[\]{},;:"`]+@[^\s@<>()[\]{},;:"`]+$/.test(value)) {
-          return Promise.resolve('inbox_rule_propose: for "from", matcher_value must be one sender address.');
+      const rawValue = typeof input.matcher_value === 'string' ? input.matcher_value : '';
+      let value: string;
+      if (input.matcher_kind === 'matches_description') {
+        // A description is read by a model in the runner; it must read as the owner reads it.
+        const problem = descriptionProblem(rawValue);
+        if (problem !== null) return Promise.resolve(`inbox_rule_propose: the description ${problem}.`);
+        value = rawValue.trim();
+      } else {
+        const checked = ruleValue(rawValue);
+        if (checked.hidden) {
+          return Promise.resolve('inbox_rule_propose: matcher_value holds characters a reader does not see. Give the sender or the phrase as it reads.');
         }
-      } else if (value.length < INBOX_RULE_SUBJECT_MIN) {
-        return Promise.resolve(`inbox_rule_propose: a subject phrase needs at least ${String(INBOX_RULE_SUBJECT_MIN)} characters.`);
+        if (checked.multiline) {
+          return Promise.resolve('inbox_rule_propose: matcher_value must be one line, as the sender or the subject reads.');
+        }
+        value = checked.value;
+        if (charCount(value) > INBOX_RULE_VALUE_MAX) {
+          return Promise.resolve(`inbox_rule_propose: matcher_value is longer than ${String(INBOX_RULE_VALUE_MAX)} characters.`);
+        }
+        if (input.matcher_kind === 'from') {
+          value = value.toLowerCase();
+          // A bare address: brackets, a scheme or a list would never equal a sender and only hold a place.
+          if (!/^[^\s@<>()[\]{},;:"`]+@[^\s@<>()[\]{},;:"`]+$/.test(value)) {
+            return Promise.resolve('inbox_rule_propose: for "from", matcher_value must be one sender address.');
+          }
+        } else if (value.length < INBOX_RULE_SUBJECT_MIN) {
+          return Promise.resolve(`inbox_rule_propose: a subject phrase needs at least ${String(INBOX_RULE_SUBJECT_MIN)} characters.`);
+        }
       }
       const result = proposer.propose({
         accountId: account,
@@ -97,6 +110,12 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
         name,
         runId: agent.currentRunId,
       });
+      if (!result.ok && result.reason === 'description_limit') {
+        return Promise.resolve(
+          `Not proposed: this account already has ${String(result.descriptions)} description rules (at most ${String(MAX_DESCRIPTION_RULES)}). ` +
+          'The owner has to delete one in the inbox rule view first.',
+        );
+      }
       if (!result.ok) {
         return Promise.resolve(
           `Not proposed: ${String(result.pending)} rules for this account already wait for the owner (at most ${String(proposer.maxPending)}). ` +

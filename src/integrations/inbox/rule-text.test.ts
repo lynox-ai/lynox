@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cutChars, ruleLine } from './rule-text.js';
+import { cutChars, descriptionProblem, namesRuleLabel, ruleLine } from './rule-text.js';
 
 describe('ruleLine — what the owner reads is what the model reads', () => {
   const cases: Array<[string, string, string]> = [
@@ -32,5 +32,18 @@ describe('cutChars', () => {
     expect(cut).toBe(`${'a'.repeat(79)}😀`);
     expect(Array.from(cut)).toHaveLength(80);
     expect(cut).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
+});
+
+describe('namesRuleLabel — a rule text must not name a label of the rule check', () => {
+  it('finds a label, with case, a space, punctuation around it', () => {
+    for (const t of ['R1', 'gehört zu R12.', 'Regel r 7 gilt', '(R999)', 'siehe R2D2']) expect(namesRuleLabel(t)).toBe(true);
+  });
+  it('leaves words and numbers alone', () => {
+    for (const t of ['Rechnung 2026', 'Nr 12', 'Artikel 2210', 'Rabatt 20 %', 'R&D-Abteilung', 'Mahnungen', 'R1000']) expect(namesRuleLabel(t)).toBe(false);
+  });
+  it('makes descriptionProblem refuse the description', () => {
+    expect(descriptionProblem('Kundenmails gehören zu R1')).toBe('must not name a rule label such as R1');
+    expect(descriptionProblem('Kundenmails')).toBeNull();
   });
 });

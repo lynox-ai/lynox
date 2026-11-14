@@ -22,7 +22,8 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
-import { charCount, cutChars, ruleLine } from './rule-text.js';
+import { charCount, cutChars, descriptionProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
+import { isFeatureEnabled } from '../../core/features.js';
 
 export interface InboxApiDeps {
   state: InboxStateDb;
@@ -80,7 +81,7 @@ export interface ApiResponse<T = unknown> {
 
 const VALID_BUCKETS: ReadonlyArray<InboxBucket> = ['requires_user', 'draft_ready', 'auto_handled'];
 const VALID_USER_ACTIONS: ReadonlyArray<InboxUserAction> = ['archived', 'replied', 'snoozed', 'unhandled'];
-const VALID_MATCHER_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains', 'list_id'];
+const VALID_MATCHER_KINDS: ReadonlyArray<InboxRuleMatcherKind> = ['from', 'subject_contains', 'list_id', 'matches_description'];
 const VALID_RULE_ACTIONS: ReadonlyArray<InboxRuleAction> = ['archive', 'mark_read', 'label', 'show'];
 // `agent` is not here: a rule with that source is proposed by the agent and waits for the owner;
 // the owner's route makes confirmed rules only.
@@ -952,9 +953,20 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
   if (!VALID_RULE_BUCKETS.includes(body.bucket)) return bad('invalid bucket for rule');
   if (!VALID_RULE_ACTIONS.includes(body.action)) return bad('invalid action');
   if (!VALID_RULE_SOURCES.includes(body.source)) return bad('invalid source');
+  if (body.matcherKind === 'matches_description') {
+    // A description is checked by a model; with the flag off nothing would show or check it.
+    if (!isFeatureEnabled('inbox-user-rules')) return bad('invalid matcherKind');
+    const problem = descriptionProblem(body.matcherValue);
+    if (problem !== null) return bad(`description ${problem}`);
+    if (deps.state.countRulesOfKind(body.accountId, 'matches_description', body.tenantId) >= MAX_DESCRIPTION_RULES) {
+      return bad(`at most ${String(MAX_DESCRIPTION_RULES)} description rules per account`);
+    }
+  }
   // One line, as the agent's proposals are cut: the name lands in audit rows the model can read.
   const name = typeof body.name === 'string' ? ruleLine(body.name) : '';
   if (charCount(name) > MAX_RULE_NAME_CHARS) return bad(`name exceeds ${MAX_RULE_NAME_CHARS} chars`);
+  // The name sits next to the description in the rule check's prompt.
+  if (body.matcherKind === 'matches_description' && namesRuleLabel(name)) return bad('name must not name a rule label such as R1');
   const id = deps.state.insertRule({
     accountId: body.accountId,
     matcherKind: body.matcherKind,
