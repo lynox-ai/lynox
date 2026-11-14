@@ -25,11 +25,11 @@ const shop = { id: 'shop', name: 'Shop', base_url: 'https://shop.example', descr
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 
-function serve(viewer: 'owner' | 'mandate', profiles: unknown[], secretSet = true): void {
+function serve(viewer: 'owner' | 'mandate', profiles: unknown[], secretSet = true, notices: unknown[] = []): void {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		if (u.endsWith('/config')) return Response.json({ viewer });
-		if (u.endsWith('/connections/records')) return viewer === 'owner' ? Response.json({ notices: [] }) : Response.json({ error: 'owner only' }, { status: 403 });
+		if (u.endsWith('/connections/records')) return viewer === 'owner' ? Response.json({ notices }) : Response.json({ error: 'owner only' }, { status: 403 });
 		if (u.endsWith('/client')) {
 			if (viewer !== 'owner') return Response.json({ error: 'owner only' }, { status: 403 });
 			return Response.json({ preset: 'shopify', client_id_key: 'K', client_secret_key: 'S', client_id: secretSet ? 'client-1' : null, client_secret_set: secretSet, redirect_uri: 'https://tenant.example/api/oauth/callback', reads_other_names: false });
@@ -101,6 +101,21 @@ describe('the first connect of a profile on a built-in provider', () => {
 		serve('mandate', [{ ...shop, reader_may_connect: false }]);
 		await render();
 		expect(q('api-connect-first-not-yours')?.textContent).toBe('Verbinden kann diese Verbindung nur, wer sie eingerichtet hat. Brauchst du sie, wende dich an den Inhaber.');
+		expect(q('api-connect-first-link')).toBeNull();
+	});
+
+	it('a mandate the server lets connect it (its own profile): no refusal sentence', async () => {
+		serve('mandate', [{ ...shop, reader_may_connect: true }]);
+		await render();
+		expect(q('api-connect-first-not-yours')).toBeNull();
+	});
+
+	it('the owner, an erasure still held but no grant left: the revocation view\'s link only, no second one', async () => {
+		const notice = { recordId: 1, connectionId: 'shop', revokedAt: new Date(Date.now() - DAY).toISOString(), holdUntil: new Date(Date.now() + 13 * DAY).toISOString(), deadline: new Date(Date.now() + 29 * DAY).toISOString(), reconnected: false };
+		serve('owner', [shop], true, [notice]);
+		await render();
+		expect(q('api-revoked')).not.toBeNull();
+		expect(all('api-reconnect')).toBe(1);
 		expect(q('api-connect-first-link')).toBeNull();
 	});
 
