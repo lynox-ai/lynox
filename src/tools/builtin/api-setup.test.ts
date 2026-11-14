@@ -1271,6 +1271,34 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('does not request a spec address that carries a GraphQL mutation', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://api.example.com/graphql?query=mutation%7BdeleteAll%7D' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the address carries a GraphQL mutation');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('does not request a docs address that carries a method override', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com/api?_method=DELETE' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the address carries a method override');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('does not follow a redirect whose target carries a method override, and says the first request was sent', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(null, { status: 302, headers: { location: 'https://example.com/items/5?_method=DELETE' } }),
@@ -2944,6 +2972,26 @@ describe('api_setup tool', () => {
         const phases = events.filter(e => e.type === 'tool_progress').map(e => e.phase);
         // fetching_docs is emitted before the fetch; extracting + finalizing never fire on a 404.
         expect(phases).toEqual(['fetching_docs']);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // The docs page chooses its links: one that carries a method override is not requested.
+    it('does not request a linked section whose address carries a method override', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === 'https://docs.example.com/api') {
+          return new Response('<html><body><a href="/v3/rate-limits?_method=DELETE">Rate limits</a><a href="/v3/pricing">Pricing details</a></body></html>', { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } });
+        }
+        return new Response('SECTION', { status: 200, statusText: 'OK' });
+      });
+      stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+      try {
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/api' }, createMockAgent(new ApiStore()));
+        const fetchedUrls = fetchSpy.mock.calls.map(c => String(c[0]));
+        expect(fetchedUrls).toContain('https://docs.example.com/v3/pricing');
+        expect(fetchedUrls.some(u => u.includes('_method'))).toBe(false);
       } finally {
         fetchSpy.mockRestore();
       }

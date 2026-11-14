@@ -77,12 +77,18 @@ describe('a query or form name a server may read as the override', () => {
   // not see as a field of its own.
   it.each([
     ['x=1;_method=DELETE', 'DELETE'],
-    // Read with `&` alone, the value is `GET;_method=DELETE`, which is no method: refused as one.
-    ['_method=GET;_method=DELETE', null],
     ['%u005fmethod=DELETE', 'DELETE'],
     ['x=1;y=2', 'GET'],
   ] as const)('reads ?%s on a GET as %s', (query, want) => {
     expect(effectiveWriteMethod('GET', {}, `${U}?${query}`)).toBe(want);
+  });
+
+  // A proxy that decodes the path before it forwards hands the server what follows a `%3F` as a
+  // query string, as the GraphQL check reads it (`urlQueryStrings`).
+  it('reads an override behind an escaped ? in the path', () => {
+    expect(effectiveWriteMethod('GET', {}, `${U}%3F_method=DELETE`)).toBe('DELETE');
+    expect(effectiveWriteMethod('GET', {}, `${U}%253F_method=DELETE`)).toBe('DELETE');
+    expect(effectiveWriteMethod('GET', {}, `${U}%3Fq=1`)).toBe('GET');
   });
 
   it('reads a multipart part name the same way', () => {

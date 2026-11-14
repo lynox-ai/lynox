@@ -46,7 +46,7 @@ import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-b
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
-import { effectiveWriteMethod, isReadMethod, isRequestShapingHeaderName } from '../../core/outbound-write.js';
+import { effectiveWriteMethod, graphqlUrlWrites, isGraphqlEndpoint, isReadMethod, isRequestShapingHeaderName } from '../../core/outbound-write.js';
 import { ifEmptiedAny, ifOk, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -668,14 +668,17 @@ const GUARD_REFUSALS: ReadonlyArray<[RegExp, string]> = [
 /**
  * A discovery read refused before it was requested: its address, or the target of a redirect the
  * server answered with, carries a method override (`?_method=DELETE` and its kin, read as every
- * write gate reads them). A spec or docs page is read, never written, and a server that runs the
- * override would act on a GET as on a DELETE. The text is fixed and names no part of the address.
+ * write gate reads them), or its address a GraphQL mutation. A spec or docs page is read, never
+ * written, and a server that runs either would act on the GET as on a write. The text is fixed and
+ * names no part of the address.
  */
 class DiscoveryOverrideRefused extends Error {
-  constructor(hop: boolean) {
-    super(hop
+  constructor(kind: 'address' | 'hop' | 'graphql') {
+    super(kind === 'hop'
       ? 'blocked: the server answered with a redirect to an address that carries a method override (such as `_method=DELETE`), which a server may run as a write, so the redirect was not followed; the first request was sent and answered'
-      : 'blocked: the address carries a method override (such as `_method=DELETE`), which a server may run as a write, so it was not requested. Pass the plain address of the spec or docs page');
+      : kind === 'graphql'
+        ? 'blocked: the address carries a GraphQL mutation, which asks the server to change data, so it was not requested. Pass the plain address of the spec or docs page'
+        : 'blocked: the address carries a method override (such as `_method=DELETE`), which a server may run as a write, so it was not requested. Pass the plain address of the spec or docs page');
     this.name = 'DiscoveryOverrideRefused';
   }
 }
@@ -691,11 +694,14 @@ function sendsWrite(method: string, headers: Record<string, string>, url: string
  * records each hop it follows (`delegatedRedirects`).
  */
 function fetchForDiscovery(url: string, signal: AbortSignal, agent: IAgent): ReturnType<typeof fetchWithValidatedRedirects> {
-  if (sendsWrite('GET', {}, url)) return Promise.reject(new DiscoveryOverrideRefused(false));
+  if (sendsWrite('GET', {}, url)) return Promise.reject(new DiscoveryOverrideRefused('address'));
+  // A GraphQL endpoint runs a mutation it finds in the URL's `query` for a GET as well; a hop is
+  // held to that inside `fetchWithValidatedRedirects`, the first request here.
+  if (isGraphqlEndpoint(url) && graphqlUrlWrites(url)) return Promise.reject(new DiscoveryOverrideRefused('graphql'));
   const delegated = delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'));
   return fetchWithValidatedRedirects(url, { signal }, { surface: 'discovery' }, agent.toolContext,
     undefined, undefined, undefined, (nextUrl, method, headers) => {
-      if (sendsWrite(method, headers, nextUrl)) throw new DiscoveryOverrideRefused(true);
+      if (sendsWrite(method, headers, nextUrl)) throw new DiscoveryOverrideRefused('hop');
       delegated?.(nextUrl, method, headers);
     });
 }
