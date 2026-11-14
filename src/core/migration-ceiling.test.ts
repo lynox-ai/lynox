@@ -81,6 +81,23 @@ describe('readImportLimitMb', () => {
     expect(readImportLimitMb(read, 4 * GIB)).toBe(1024);
   });
 
+  it('reads the mount root inside a private namespace', () => {
+    const read = files({
+      '/proc/self/cgroup': '0::/\n',
+      '/sys/fs/cgroup/memory.max': '1610612736',
+    });
+    expect(readImportLimitMb(read, 4 * GIB)).toBe(1536);
+  });
+
+  it('stays under the mount for a path that leaves the namespace root', () => {
+    const read = files({
+      '/proc/self/cgroup': '0::/../x\n',
+      '/sys/fs/cgroup/x/memory.max': '1073741824',
+      '/sys/fs/cgroup/../x/memory.max': '536870912',
+    });
+    expect(readImportLimitMb(read, 4 * GIB)).toBe(1024);
+  });
+
   it('ignores a limit that reads as 0', () => {
     expect(readImportLimitMb(files({ '/sys/fs/cgroup/memory.max': '0' }), 4 * GIB)).toBe(4096);
   });
