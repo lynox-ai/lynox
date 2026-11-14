@@ -119,6 +119,45 @@ export function searxngUrlProblem(url: string): SearxngUrlProblem | undefined {
   return undefined;
 }
 
+/** The URL a search sends to: one place, so the boot's policy check reads what a search sends. */
+function searxngSearchUrl(baseUrl: string, params: URLSearchParams): string {
+  return `${baseUrl.replace(/\/+$/, '')}/search?${params.toString()}`;
+}
+
+/**
+ * Why every search to this SearXNG URL would be refused under `ctx`'s egress settings
+ * (`enforce_https`, `network_policy`), or undefined when a search would go out. The request
+ * host policy reads the host and scheme only, so one search URL answers for all.
+ * `searxngUrlProblem` comes first: this assumes a URL that parses.
+ */
+export function searxngPolicyRefusal(baseUrl: string, ctx: ToolContext | undefined): PolicyRefusal | undefined {
+  return policyRefusal(searxngSearchUrl(baseUrl, new URLSearchParams({ q: 'lynox', format: 'json' })), ctx);
+}
+
+/**
+ * Which egress rule refuses a search, for the settings page to name its way out:
+ * `https` (enforce_https, http to a host other than localhost), `deny` (network_policy deny-all),
+ * `allowlist` (the host not on the allow-list), `policy` for any other refusal. Read in the order
+ * `assertHostPolicy` checks them; `message` is its own refusal.
+ */
+export interface PolicyRefusal { rule: 'https' | 'deny' | 'allowlist' | 'policy'; message: string }
+
+function policyRefusal(url: string, ctx: ToolContext | undefined): PolicyRefusal | undefined {
+  try {
+    assertEgressAllowed(url, ctx);
+    return undefined;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^\[|\]$/g, '');
+    const rule = ctx?.enforceHttps === true && parsed.protocol === 'http:' && host !== 'localhost' && host !== '127.0.0.1' && host !== '::1' ? 'https'
+      : ctx?.networkPolicy === 'deny-all' ? 'deny'
+        : ctx?.networkPolicy === 'allow-list' ? 'allowlist'
+          : 'policy';
+    return { rule, message };
+  }
+}
+
 function validateSearxngUrl(url: string): void {
   const problem = searxngUrlProblem(url);
   if (problem !== undefined) throw new Error(problem.message);
@@ -156,7 +195,7 @@ export class SearXNGProvider implements SearchProvider {
       params.set('categories', categoryMap[opts.topic]!);
     }
 
-    const url = `${this.baseUrl.replace(/\/+$/, '')}/search?${params.toString()}`;
+    const url = searxngSearchUrl(this.baseUrl, params);
     assertEgressAllowed(url, ctx);
     // Bound the request — a hung SearXNG socket would otherwise stall the run
     // indefinitely (Node fetch has no default timeout). Matches the DDG fallback

@@ -6718,6 +6718,32 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // A URL the egress settings refuse for every search is not search set up.
+    it('names a stored URL the network settings refuse for every search', async () => {
+      repayRateWindow();
+      // The boot's decision, not a live check: the engine keeps it until a restart.
+      const engineRef = (api as unknown as { engine: { getSearxngBootRefusal?: () => { url: string; code: string } | null } }).engine;
+      const before = engineRef.getSearxngBootRefusal;
+      const shown = 'http://searxng:8080';
+      try {
+        for (const [boot, problem] of [
+          [{ url: shown, code: 'policy-allowlist' }, 'policy-allowlist'],
+          [{ url: shown, code: 'policy' }, 'policy'],
+          // Found for another URL (the one before a save): it says nothing about this one.
+          [{ url: 'http://old.example:8080', code: 'policy-https' }, null],
+          [null, null],
+        ] as const) {
+          engineRef.getSearxngBootRefusal = () => boot;
+          mockGetUserConfig.mockReturnValueOnce({ searxng_url: shown });
+          const body = await (await jsonFetch('/api/secrets/status')).json() as { configured: { search: boolean }; searxng_problem: string | null };
+          expect(body.searxng_problem).toBe(problem);
+          expect(body.configured.search).toBe(problem === null);
+        }
+      } finally {
+        engineRef.getSearxngBootRefusal = before;
+      }
+    });
+
     // The hostname way the refusal names reaches a private address on purpose, which holds only
     // while the search base is the operator's: env, or the owner's settings, never a mandate's.
     it('lets only the owner set the search base', () => {

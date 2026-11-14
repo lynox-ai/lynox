@@ -74,11 +74,19 @@
 		invalid: 'integrations.searxng_invalid',
 		protocol: 'integrations.searxng_protocol',
 		metadata: 'integrations.searxng_metadata',
+		// Refused by the network settings, by rule; about the settings, not where the URL
+		// comes from, so these have no `_env` text.
+		'policy-https': 'integrations.searxng_policy_https',
+		'policy-allowlist': 'integrations.searxng_policy_allowlist',
+		'policy-deny': 'integrations.searxng_policy_deny',
+		policy: 'integrations.searxng_policy',
 	};
+	/** The codes about the URL itself, which have an `_env` text for a URL from `SEARXNG_URL`. */
+	const URL_CODES: ReadonlySet<string> = new Set(['private-ip', 'invalid', 'protocol', 'metadata']);
 	/** `fromEnv`: the URL is `SEARXNG_URL`'s, which this page cannot replace (the `_env` text). */
 	function problemText(code: string | null, fromEnv: boolean): string | null {
 		const key = code === null ? undefined : PROBLEM_TEXT[code];
-		return key === undefined ? null : t(fromEnv ? `${key}_env` : key);
+		return key === undefined ? null : t(fromEnv && URL_CODES.has(code!) ? `${key}_env` : key);
 	}
 	// The stored URL: what the boot refuses, else what its last check refused. A typed URL's check
 	// is about what the person enters here, never the environment's.
