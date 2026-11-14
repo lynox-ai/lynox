@@ -125,7 +125,7 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     expect(check('<p>[button url="/a?x=1&y=2"]Kaufen[/button]</p>')).toEqual({ ok: false, reason: 'shortcode_changed', detail: 'Writing would change the shortcode text: [button url="/a?x=1&y=2"]' });
     expect(check('[x a="b>c"]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
     expect(check('[x a="1 < 2"]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
-    expect(check('[embed]https://youtu.be/abc?t=1&list=x[/embed]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    expect(check(`[embed]https://${HOST}/v?t=1&list=x[/embed]`)).toMatchObject({ ok: false, reason: 'shortcode_changed' });
     expect(shortcodeChangedBy('[embed]a&b[/embed]', canonicalHtml('[embed]a&b[/embed]'))).toBe('a&b');
   });
 
@@ -546,5 +546,213 @@ describe('a write sends what the ledger stored, and never raw HTML (1130)', () =
     const out = await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: () => s.writer });
     expect(out.status).toBe('done');
     expect(s.sent).toEqual([{ description: '<p>a<br>b</p>' }, { description: own }]);
+  });
+});
+
+// To the HTML trees a shortcode is text, but the shop's server prints its attributes and what
+// it encloses into embeds, buttons and frames. Its links are held to the same domains as an HTML link.
+describe('a link inside a shortcode is held to the run\'s domains', () => {
+  // The host as written (`hostWritten`) has its own tests; these hold the domain a link is read as.
+  const check = (after: string, before: string | null = null, startDomains: string[] = []) => {
+    const result = checkMarkup({ before, after, storeHost: HOST, startDomains });
+    if (!('hostWritten' in result)) return result;
+    const { hostWritten: _written, ...rest } = result;
+    return rest;
+  };
+  const foreign = { ok: false, reason: 'new_link_domain', detail: 'evil.example' };
+
+  it('refuses a foreign domain in every form WordPress reads an attribute', () => {
+    for (const after of [
+      '[video src="https://evil.example/a.mp4"]',
+      "[video src='https://evil.example/a.mp4']",
+      '[video src=https://evil.example/a.mp4]',
+      '[video "https://evil.example/a.mp4"]',
+      '[video https://evil.example/a.mp4]',
+      '[iframe src="//evil.example/x" /]',
+      '<p>Text [audio mp3="https://Evil.Example./a.mp3"] mehr</p>',
+      '[video\u00a0src="https://evil.example/a.mp4"]',
+    ]) expect(check(after), after).toEqual(foreign);
+    // A zero-width space ends the name as WordPress reads it. Held once by the before-image, so the
+    // hidden-character rule passes it and the link is what is read.
+    expect(check('<p>[video\u200bsrc="https://evil.example/a.mp4"]</p>', '<p>[video\u200bsrc="/a.mp4"]</p>')).toEqual(foreign);
+    // Read on the raw tag, the name would run on through the domain to the `/`, leaving `/a.mp4`,
+    // a path on the store; WordPress reads `video` and a value `evil.example/a.mp4`.
+    expect(check('<p>[video\u200bevil.example/a.mp4]</p>', '<p>[video\u200b/a.mp4]</p>')).toEqual(foreign);
+  });
+
+  it('refuses a foreign domain in the text a pair encloses', () => {
+    expect(check('[embed]https://evil.example/x[/embed]')).toEqual(foreign);
+    expect(check('<p>[embed] <strong>//evil.example/x</strong> [/embed]</p>')).toEqual(foreign);
+    // The whole text, as `[embed]` takes it and `esc_url` prints it: a space is `%20`, a nested
+    // shortcode stays text in the path.
+    expect(check('[embed]evil.example/a b[/embed]')).toEqual(foreign);
+    expect(check('[embed]https://evil.example/a b[/embed]')).toEqual(foreign);
+    expect(check('[embed]evil.example/[x][/embed]')).toEqual(foreign);
+    // A web scheme without `//` keeps its link: on an https page, `http:evil.example` is that host.
+    expect(check('[embed]http:evil.example/a b[/embed]')).toEqual(foreign);
+    expect(check('[embed]http:/evil.example/a[/embed]')).toEqual(foreign);
+    // Twin: words in a pair are a label, not a link, even with a colon or a URL among them.
+    for (const after of ['[b]Hinweis:[/b]', '[b]Hinweis: neu[/b]', '[b]<em>Neu:</em>[/b]', '[box]Mehr unter javascript:alert(1) hier[/box]', '[box]Infos auf www.hersteller.example[/box]', '[b]1.5kg[/b]', '[b]ca.30cm[/b]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('refuses every scheme but a web or mail one as written, in a pair or an attribute, a space after it or not', () => {
+    // A page follows these printed as written; none is a web link.
+    for (const after of [
+      '[link]ms-msdt:/id[/link]', '[link]file://evil.example/x[/link]', '[link]file:///etc/passwd[/link]',
+      '[link]blob:https://evil.example/x[/link]', '[link]filesystem:https://evil.example/x[/link]',
+      '[link]search-ms:query=x[/link]', '[link]intent://evil.example#Intent;scheme=https;end[/link]',
+      '[x url="ms-msdt:/id PCWDiagnostic /skip force"]', '[x url="file:///C:/Program Files/x.exe"]',
+      // A colon with a letter after it reads as a scheme, a label's too: the owner writes it by hand.
+      '[caption]Foto:Max[/caption]', '[b]Zeit:12h[/b]', '[x a="a:b"]',
+      // A scheme that runs something is read in a label's form too.
+      '[x url="ms-settings: x"]', '[b]search-ms: x[/b]', '[x url="MS-Msdt: /id"]', '[x url="file: //evil.example"]',
+    ]) expect(check(after), after).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // Twin: a label, a colon and then a space or nothing, is no link as written.
+    for (const after of ['[b]Hinweis: neu[/b]', '[b]Hinweis:[/b]', '[x title="Kontakt: Anfrage"]', '[x title="Neu:"]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('refuses a scheme a link may not have, as written and as the page decodes it', () => {
+    expect(check('[button url="javascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[button url="  javascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[button url="&#x6a;avascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[link]javascript:alert(1)[/link]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // A tab is dropped as the URL parser drops it, so this is `javascript:`.
+    expect(check('[button url="java\tscript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // A control character is refused as hidden first; the replacement character is visible, and
+    // the link check refuses it.
+    expect(check('[button url="java\ufffdscript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_control_char' });
+  });
+
+  it('reads a value as esc_url prints it: http:// in front of a host, a backslash dropped, ;// as ://', () => {
+    for (const [after, detail] of [
+      ['[video src="evil.example/a.mp4"]', 'evil.example'],
+      ['[audio mp3=evil.example/a.mp3]', 'evil.example'],
+      ['[button link="www.evil.example"]', 'www.evil.example'],
+      // esc_url drops the backslash; the page then reads the store's name as a user name.
+      [`[embed]https://${HOST}\\@evil.example/[/embed]`, 'evil.example'],
+      [`[video src="${HOST}\\@evil.example/a.mp4"]`, 'evil.example'],
+      ['[video src="https;//evil.example/a.mp4"]', 'evil.example'],
+      ['[video src="evil.example./a.mp4"]', 'evil.example'],
+      ['[video src="evil%2Eexample/a.mp4"]', 'evil.example'],
+      ['[video src="evil\u3002example/a.mp4"]', 'evil.example'],
+      ['[video src="203.0.113.7"]', '203.0.113.7'],
+      ['[video src="3405803783/a.mp4"]', '203.0.113.7'],
+      ['[video src="203.0.28935/a.mp4"]', '203.0.113.7'],
+      ['[button url="3405803783"]', '203.0.113.7'],
+      ['[embed]0xcb007107[/embed]', '203.0.113.7'],
+      ['[video src="evil.exa%0D%0ample/a.mp4"]', 'evil.example'],
+      // Removed until none is left: taking one out can join the rest into another.
+      ['[video src="evil.exa%0%0aample/a.mp4"]', 'evil.example'],
+      // esc_url trims the start, so leading spaces do not turn the host into a path.
+      ['[video src="  evil.example/a.mp4"]', 'evil.example'],
+    ] as const) expect(check(after), after).toEqual({ ok: false, reason: 'new_link_domain', detail });
+    // Printed as written, a backslash is a `/` to the page: the host is the name before it.
+    expect(check(`[video src="https://evil.example\\@${HOST}/a.mp4"]`)).toMatchObject({ ok: false, reason: 'url_control_char' });
+    expect(check(`[embed]https://evil.example\\@${HOST}/x[/embed]`)).toMatchObject({ ok: false, reason: 'url_control_char' });
+    // esc_url keeps a web scheme it allows and drops the backslash, so the host is read: the
+    // domain is named, not only the backslash.
+    expect(check('[embed]http:\\evil.example/x[/embed]')).toEqual({ ok: false, reason: 'new_link_domain', detail: 'evil.example' });
+    // In a `mailto:` esc_url keeps an encoded line break, so the address is refused for it.
+    expect(check('[x m="mailto:a@evil.exa%0Ample"]')).toMatchObject({ ok: false, reason: 'url_control_char' });
+    // A file name is a domain to `esc_url` as well.
+    expect(check('[video src="a.mp4"]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'a.mp4' });
+    // Twin: a value that names no host stays a word or a path on the store: a relative path, a
+    // word, a number, a fraction, a one-label name, a space in the host, an abbreviation.
+    for (const after of ['[video src="/media/a.mp4"]', '[button size=large]Go[/button]', '[x version=3.5]', '[x file=index.php?a=b.example]', '[x ratio=16/9]', '[x w=1.5]', '[x label="ja/nein"]', '[x src="media/a.mp4"]', '[button link="evil .example"]', '[x title="Gr.M"]', '[x title="Hinweis:"]', '[video src="/cdn.example/a.mp4"]', '[contact-form-7 id="12" title="Kontakt: Anfrage"]', '[button text="Jetzt: 20% Rabatt"]', '[x id=12345678]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('reads the text a pair encloses at any depth, and a single token as a link', () => {
+    expect(check('[foo][embed]https://evil.example/x[/embed][/foo]')).toEqual(foreign);
+    expect(check('[row][column][video]https://evil.example/a.mp4[/video][/column][/row]')).toEqual(foreign);
+    expect(check('[embed]evil.example/x[/embed]')).toEqual(foreign);
+    expect(check('[embed] <em>www.evil.example</em> [/embed]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'www.evil.example' });
+    expect(check('[link]javascript:alert(1)[/link]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // A nested pair whose text holds a shortcode: no closing tag follows its link directly.
+    expect(check('[foo][embed]evil.example/[x][/embed][/foo]')).toEqual(foreign);
+    // Deeper than the whole texts are read, the text before a closing tag still is.
+    const wraps = Array.from({ length: 9 }, (_, i) => `w${String(i)}`);
+    const deep = `${wraps.map((w) => `[${w}]`).join('')}[embed]evil.example/x[/embed]${[...wraps].reverse().map((w) => `[/${w}]`).join('')}`;
+    expect(check(deep)).toEqual(foreign);
+  });
+
+  it('reads a URL WordPress embeds: alone on its line or alone in a paragraph', () => {
+    expect(check('<p>https://evil.example/x</p>')).toEqual(foreign);
+    expect(check('<p> https://evil.example/x </p>')).toEqual(foreign);
+    expect(check('Neu\nhttps://evil.example/x\nmehr')).toEqual(foreign);
+    // WordPress's pattern reads `\s` as ASCII: a wider space inside the URL does not end it.
+    for (const space of ['\u3000', '\u2003', '\u202f']) {
+      expect(check(`<p>https://evil.example/a${space}b</p>`), space).toMatchObject({ ok: false, reason: 'new_link_domain' });
+      expect(check(`<p>x</p>\nhttps://evil.example/a${space}b\n<p>y</p>`), space).toMatchObject({ ok: false, reason: 'new_link_domain' });
+    }
+    // Twin: a URL among words is not embedded, nor one WordPress's pattern does not read (an
+    // encoded scheme); the store's own address and a URL the before-image holds pass.
+    for (const after of ['<p>Mehr auf www.evil.example</p>', '<p>Mehr auf https://evil.example/x</p>', '<p>&#104;ttps://evil.example/x</p>', `<p>https://${HOST}/sale</p>`]) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+    expect(check('<p>Neu</p><p>https://evil.example/x</p>', '<p>https://evil.example/x</p>')).toEqual({ ok: true });
+  });
+
+  it('takes no domain from a URL the before-image only names among words', () => {
+    const before = '<p>Mehr beim Hersteller unter https://evil.example/ und im Fachhandel.</p>';
+    expect(check(`${before}[video src="https://evil.example/a.mp4"]`, before)).toEqual(foreign);
+    // Twin: a link or an embed of the before-image does lend its domain.
+    expect(check('[video src="https://evil.example/a.mp4"]', '<p><a href="https://evil.example/">x</a></p>')).toEqual({ ok: true });
+    expect(check('[video src="https://evil.example/a.mp4"]', '<p>https://evil.example/x</p>')).toEqual({ ok: true });
+    // Nor does a name in a pair or an attribute that does not name its host as a link does.
+    for (const held of ['<p>Hersteller: [b]evil.example[/b]</p>', '<p>[x title="evil.example"]</p>', '<p>[b]https://evil.example/ ist Partner[/b]</p>']) {
+      expect(check(`${held}[embed]https://evil.example/x[/embed]`, held), held).toEqual(foreign);
+    }
+    // Nor a value with a control character in it; its twin without one lends.
+    expect(check('[embed]https://evil.example/x[/embed]', '<p>[x u="https://evil.example\u0001"]</p>')).toEqual(foreign);
+    expect(check('[embed]https://evil.example/x[/embed]', '<p>[x u="https://evil.example"]</p>')).toEqual({ ok: true });
+  });
+
+  it('asks before shortcode_changed, so a value offered to copy carries no foreign link', () => {
+    expect(check('[button url="https://evil.example/?a=1&b=2"]Go[/button]')).toEqual(foreign);
+    // Twin: the same shortcode on the store's own domain is refused for its `&` alone.
+    expect(check(`[button url="https://${HOST}/?a=1&b=2"]Go[/button]`)).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+  });
+
+  it('passes the store, a relative path, a start domain, and what the before-image already links to', () => {
+    expect(check(`[video src="https://${HOST}/a.mp4"]`)).toEqual({ ok: true });
+    expect(check(`[video src="https://cdn.${HOST}/a.mp4"]`)).toEqual({ ok: true });
+    expect(check('[button url="/sale/tee"]Zum Angebot[/button]')).toEqual({ ok: true });
+    expect(check('[video src="https://evil.example/a.mp4"]', null, ['evil.example'])).toEqual({ ok: true });
+    expect(check('<p>x [video src="https://evil.example/b.mp4"]</p>', '<p><a href="https://evil.example/">x</a></p>')).toEqual({ ok: true });
+    expect(check('<p>[embed]https://evil.example/b[/embed]</p>', '<p>[video src="https://evil.example/a.mp4"]</p>')).toEqual({ ok: true });
+    // Prose in brackets is not a link.
+    // A closing tag takes no attributes, so what follows its name is not read as one.
+    for (const after of ['<p>[Hinweis: neu]</p>', '<p>[siehe unten] und [Preis 20 CHF]</p>', '[button size=large]Zum Angebot[/button]', '[b]x[/b note:y]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('passes a value the before-image\'s shortcodes hold as often, and not one copy more', () => {
+    const own = '[x a="note:b"]';
+    expect(check(`<p>${own}</p>`, `<p>${own}</p>`)).toEqual({ ok: true });
+    expect(check(`<p>${own}${own}</p>`, `<p>${own}</p>`)).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // Twin: without the before-image the one copy is refused.
+    expect(check(`<p>${own}</p>`)).toMatchObject({ ok: false, reason: 'url_scheme' });
+  });
+
+  it('reads values of many attributes, quotes and colons in linear time', () => {
+    for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`, `${'\n'.repeat(100_000)}x`, `${' \n'.repeat(60_000)}x`, `${'\r'.repeat(100_000)}x`, `${' \r'.repeat(60_000)}x`, `[e]${'%'.repeat(30_000)}${'0a'.repeat(30_000)}[/e]`, `[x a="${'%'.repeat(30_000)}${'0a'.repeat(30_000)}"]`]) {
+      const start = performance.now();
+      check(value);
+      expect(performance.now() - start, `${value.slice(0, 12)}… of ${value.length}`).toBeLessThan(3000);
+    }
+    // A value the tree check refuses never reaches the links; a before-image is read for them all the
+    // same, so the shapes that would refuse go there.
+    for (const before of ['<p '.repeat(80_000), '<p a'.repeat(60_000), `${'\r'.repeat(100_000)}x`]) {
+      const start = performance.now();
+      check('<p>x</p>', before);
+      expect(performance.now() - start, `before ${before.slice(0, 12)}… of ${before.length}`).toBeLessThan(3000);
+    }
   });
 });

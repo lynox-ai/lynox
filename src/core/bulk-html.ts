@@ -544,6 +544,11 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     if (!raw.ok) return raw;
     const tree = checkTrees(parseHtmlFragment(canonicalHtml(before)), parseHtmlFragment(canonical), input);
     if (!tree.ok) return tree;
+    // A link inside a shortcode is text to the trees above, but the shop's server turns it into an
+    // embed, a button or a frame: held to the same domains as an HTML link. Before
+    // `shortcode_changed`, so a value offered to copy never carries one.
+    const shortcodeLinks = checkShortcodeLinks(input);
+    if (!shortcodeLinks.ok) return shortcodeLinks;
     // A shortcode (`[name attr="…"]…[/name]`) is read by the shop's server from the stored string,
     // not by an HTML parser: the canonical form the run sends turns its `&`, `<` and `>` into
     // entities or cuts it at a `<`, so the shop would read another shortcode. Refused, not
@@ -822,6 +827,229 @@ function hostAsWritten(value: string): string | undefined {
   const host = authority.slice(authority.lastIndexOf('@') + 1);
   if (host.startsWith('[')) return host.slice(0, host.indexOf(']') + 1);
   return host.replace(/:\d*$/, '');
+}
+
+// --- Links inside shortcodes.
+
+/** WordPress's own reading of a shortcode's attributes (`get_shortcode_atts_regex`): a named value
+ *  in double, single or no quotes, or a positional one. */
+const SHORTCODE_ATTRIBUTE = /([\w-]+)\s*=\s*"([^"]*)"(?:\s|$)|([\w-]+)\s*=\s*'([^']*)'(?:\s|$)|([\w-]+)\s*=\s*([^\s'"]+)(?:\s|$)|"([^"]*)"(?:\s|$)|'([^']*)'(?:\s|$)|(\S+)(?:\s|$)/g;
+
+/** A pair's enclosed text is read down to this depth of nested pairs; deeper, only the text right
+ *  before a closing tag is read. Each level reads the text once more, so the cost stays linear. */
+const ENCLOSED_DEPTH = 8;
+
+/** The text right before a closing tag, after the tag before it: what a pair such as
+ *  `[embed]…[/embed]` hands its handler, at whatever depth it sits. */
+const BEFORE_CLOSER = /\]([^[\]]*)\[\//g;
+
+/** WordPress's `autoembed`: a URL on its own line, or alone in a paragraph, which it embeds — by
+ *  oEmbed discovery for any site, so an unknown host can still put a frame on the page. A URL
+ *  among words is not embedded and, as text, not checked (as in HTML). Its patterns run without
+ *  `/u`, where `\s` is ASCII only: a no-break or an ideographic space inside a URL does not end it,
+ *  so here only the six ASCII spaces do. The space before a URL on its line holds no line break
+ *  (`\n`, nor `\r`, at which a JavaScript line starts too), so a run of empty lines is read once. */
+const OWN_LINE_URL = /^[ \t\v\f]*(https?:\/\/[^ \t\n\v\f\r<>"]+)[ \t\v\f\r]*$/gim;
+const OWN_PARAGRAPH_URL = /<p(?: [^<>]*)?>[ \t\n\v\f\r]*(https?:\/\/[^ \t\n\v\f\r<>"]+)[ \t\n\v\f\r]*<\/p>/gi;
+
+/** A shortcode's text in a link's place: its tags dropped and trimmed. */
+function enclosedText(text: string): string {
+  return text.replace(/<[^<>]*>/g, '').trim();
+}
+
+/** The text a pair encloses, at each depth down to `ENCLOSED_DEPTH`. */
+function enclosedTextsOf(value: string, depth: number, out: string[]): void {
+  if (depth === 0) return;
+  for (const enclosed of shortcodeEnclosedOf(value)) {
+    out.push(enclosedText(enclosed));
+    if (enclosed.includes('[')) enclosedTextsOf(enclosed, depth - 1, out);
+  }
+}
+
+/** A value of a shortcode or of the page that the shop may print as a link: an attribute's value,
+ *  or a text (what a pair encloses, a URL `autoembed` reads). Both are read the same way. */
+type LinkCandidate = { value: string };
+
+/** The values a shortcode or a page may turn into a link: every attribute value of an opening
+ *  shortcode tag, the text each pair encloses and the text before each closing tag, and each URL
+ *  `autoembed` embeds. */
+function linkCandidatesOf(value: string): LinkCandidate[] {
+  const out: LinkCandidate[] = [];
+  const add = (v: string): void => { if (v !== '') out.push({ value: v }); };
+  for (const tag of shortcodeTagsOf(value)) {
+    // WordPress reads a no-break and a zero-width space as a space, the name included: in
+    // `[video\u200bsrc="…"]` the name is `video` and `src` an attribute.
+    const spaced = tag.replace(/[\u00a0\u200b]/g, ' ');
+    if (spaced.startsWith('[/')) continue;
+    const rest = spaced.slice(1 + nameRunAt(spaced, 0, spaced.length - 1), -1).replace(/\/\s*$/, '');
+    for (const m of rest.matchAll(SHORTCODE_ATTRIBUTE)) {
+      const v = m[2] ?? m[4] ?? m[6] ?? m[7] ?? m[8] ?? m[9];
+      if (v !== undefined && v.trim() !== '') add(v);
+    }
+  }
+  const texts: string[] = [];
+  enclosedTextsOf(value, ENCLOSED_DEPTH, texts);
+  for (const m of value.matchAll(BEFORE_CLOSER)) texts.push(enclosedText(m[1]!));
+  for (const t of texts) add(t);
+  for (const m of value.matchAll(OWN_LINE_URL)) add(m[1]!);
+  for (const m of value.matchAll(OWN_PARAGRAPH_URL)) add(m[1]!);
+  return out;
+}
+
+/** WordPress's default `wp_allowed_protocols()`: a link `esc_url` prints keeps one of these schemes;
+ *  with any other, `wp_kses_bad_protocol` changes it and `esc_url` prints nothing. */
+const WP_ALLOWED_PROTOCOLS = new Set(['http', 'https', 'ftp', 'ftps', 'mailto', 'news', 'irc', 'irc6', 'ircs', 'gopher', 'nntp', 'feed', 'telnet', 'mms', 'rtsp', 'sms', 'svn', 'tel', 'fax', 'xmpp', 'webcal', 'urn']);
+
+/** The scheme of a value as a URL parser reads it, lower case, or null for none. */
+function schemeOf(value: string): string | null {
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(value);
+  return m === null ? null : m[1]!.toLowerCase();
+}
+
+/** Schemes that run something when a page follows them, refused wherever a value is read as a link,
+ *  a label's form included (`ms-settings: x`): these, a local file, Windows's `search-ms`, and every `ms-` one. */
+const RUNNING_SCHEMES = new Set(['javascript', 'vbscript', 'data', 'file', 'search-ms']);
+
+function runsSomething(scheme: string): boolean {
+  return RUNNING_SCHEMES.has(scheme) || scheme.startsWith('ms-');
+}
+
+/** `_deep_replace(['%0d', '%0a', '%0D', '%0A'], …)` in one pass: each removal can join what is left
+ *  into another (`%0%0aa`), so a kept character is taken back as soon as it ends one. */
+function withoutEncodedLineBreaks(url: string): string {
+  const out: string[] = [];
+  for (const ch of url) {
+    out.push(ch);
+    const n = out.length;
+    if (n >= 3 && out[n - 3] === '%' && out[n - 2] === '0' && /^[adAD]$/.test(out[n - 1]!)) out.length = n - 3;
+  }
+  return out.join('');
+}
+
+/** The characters `esc_url` keeps (`a-z0-9-~+_.?#=!&;,/:%@$|*'()[]` and every byte from 0x80). */
+const ESC_URL_DROPS = /[^a-z0-9\-~+_.?#=!&;,/:%@$|*'()[\]\u0080-\uffff]/gi;
+
+/**
+ * WordPress's `esc_url` up to its scheme check, step by step (wp-includes/formatting.php): leading
+ * whitespace trimmed and a space made `%20`; every character outside its set dropped — a backslash
+ * too, so `shop.example\@evil.example` reaches the page as `shop.example@evil.example`; an encoded
+ * CR or LF removed until none is left (but in a `mailto:`); `;//` read as `://`; and `http://` in
+ * front of a value with no `:` that starts with none of `/`, `#`, `?` and is no `name.php`.
+ */
+function escUrl(value: string): { url: string; prefixed: boolean } {
+  let url = value.replace(/^[ \t\n\r\0\x0B]+/, '').replace(/ /g, '%20').replace(ESC_URL_DROPS, '');
+  if (url === '') return { url, prefixed: false };
+  if (!/^mailto:/i.test(url)) url = withoutEncodedLineBreaks(url);
+  url = url.replace(/;\/\//g, '://');
+  if (url === '' || url.includes(':') || '/#?'.includes(url[0]!) || /^[a-z0-9-]+?\.php/i.test(url)) return { url, prefixed: false };
+  return { url: `http://${url}`, prefixed: true };
+}
+
+/**
+ * Whether a value `esc_url` gave `http://` reads as a link to a host, rather than a word an
+ * attribute holds (`large`, `1.5`, `1.5kg`, `ja/nein`): its host as the URL parser reads it — `%2E`
+ * and `。` as dots, a trailing dot dropped — is a name of at least two labels whose last starts with
+ * a letter and has two characters or more, as every top-level domain does; or an IPv4 address
+ * outside 0.0.0.0/8 written as one number (`16843009` is 1.1.1.1), as four, or followed by a path.
+ * Not counted, and so not checked: a host of one label (`localhost`, `media/a.mp4`), which names
+ * no foreign domain, and an address of two or three numbers without a path (`1.5`, `2.1.3`),
+ * which counting would refuse as sizes and versions.
+ */
+function readsAsHost(prefixed: string): boolean {
+  let host: string;
+  try {
+    host = new URL(prefixed).hostname.replace(/\.$/, '');
+  } catch {
+    return false;
+  }
+  const written = prefixed.slice('http://'.length);
+  const hostPart = written.split(/[/?#]/)[0]!.replace(/\.$/, '');
+  const ipv4 = /^(\d+)\.\d+\.\d+\.\d+$/.exec(host);
+  if (ipv4 !== null) {
+    const parts = hostPart.split('.').length;
+    return ipv4[1] !== '0' && (parts === 1 || parts === 4 || hostPart.length < written.length);
+  }
+  const labels = host.split('.');
+  const last = labels[labels.length - 1]!;
+  return labels.length >= 2 && last.length >= 2 && /^[a-z]/.test(last);
+}
+
+/**
+ * A value read as a link the way it reaches a browser.
+ *
+ * As `esc_url` prints it, for a shortcode that escapes it: with `http://` in front where that
+ * names a host; with a scheme of `wp_allowed_protocols` (any other makes `esc_url` print nothing);
+ * or relative.
+ *
+ * As written, for a shortcode that prints it as it is, with any scheme: a page follows an unknown
+ * one too, so only a web or a mail link passes, and `a:b` or `Zeit:12h` is refused. A label — a
+ * word with a colon and then a space or nothing (`Hinweis: neu`, `Kontakt: Anfrage`, `Neu:`) — is
+ * no link as written, unless its scheme runs something (`javascript: alert(1)`).
+ */
+function printedForms(candidate: LinkCandidate): string[] {
+  const { value } = candidate;
+  const out: string[] = [];
+  const escaped = escUrl(value);
+  const escapedScheme = schemeOf(escaped.url);
+  if (escaped.url !== '' && (escaped.prefixed ? readsAsHost(escaped.url) : escapedScheme === null || WP_ALLOWED_PROTOCOLS.has(escapedScheme))) {
+    out.push(escaped.url);
+  }
+  // The URL parser drops tab and newline and trims C0 and space at both ends.
+  const parsed = value.replace(/[\t\n\r]/g, '').replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '');
+  const scheme = schemeOf(parsed);
+  if (scheme !== null && runsSomething(scheme)) {
+    out.push(parsed);
+  } else if (!/^[A-Za-z][A-Za-z0-9+.-]*:(?:\s|$)/.test(parsed)) {
+    // Every scheme but a label's is read, an unknown one too: a page follows `ms-msdt:` or
+    // `file:` printed as written, so anything but a web or mail link is refused.
+    out.push(value);
+  }
+  return out;
+}
+
+/** A value that names its host itself (`https://…`, `//…`) and holds no space: what a before-image
+ *  holds so is a link it already makes, and lends its domain; a bare `evil.example` in a pair, or
+ *  `https://evil.example/ ist Partner`, may be only words. */
+const ABSOLUTE_LINK = /^[\u0000-\u0020]*(?:https?:)?[/\\]{2}/i;
+
+/** A value as a browser reads it once the shop prints it into an attribute, with its character
+ *  references decoded (`&#x6a;avascript:` is `javascript:`), and as written: each as printed. */
+function linkForms(candidate: LinkCandidate): string[] {
+  const forms = printedForms(candidate);
+  if (candidate.value.includes('&')) {
+    const decoded = textBelow(parseHtmlFragment(candidate.value.replace(/</g, '&lt;')));
+    forms.push(...printedForms({ value: decoded }));
+  }
+  return [...new Set(forms)];
+}
+
+/**
+ * Whether every link a shortcode of the value may print points where an HTML link may: the store,
+ * a start domain, or a domain the before-image already links to, in HTML, in a shortcode or as a URL
+ * WordPress embeds, each naming its host itself. A value the before-image's shortcodes hold as
+ * often is the owner's own and passes as it stands.
+ */
+function checkShortcodeLinks(input: MarkupCheckInput): MarkupCheckResult {
+  const before = input.before ?? '';
+  const beforeCandidates = linkCandidatesOf(before);
+  const held = counts(beforeCandidates.map((c) => c.value));
+  const linked = linkedDomains(markupOf(parseHtmlFragment(before)).triples, input.storeHost);
+  for (const c of beforeCandidates) {
+    if (!ABSOLUTE_LINK.test(c.value) || /[\s\u0000-\u001f]/.test(c.value.trim())) continue;
+    for (const form of linkForms(c)) {
+      const target = linkTarget(form, input.storeHost);
+      if (target.ok) linked.add(`${target.kind}:${target.domain}`);
+    }
+  }
+  for (const c of linkCandidatesOf(input.after)) {
+    const n = held.get(c.value) ?? 0;
+    if (n > 0) { held.set(c.value, n - 1); continue; }
+    for (const form of linkForms(c)) {
+      const link = checkLink(form, input, linked);
+      if (!link.ok) return link;
+    }
+  }
+  return { ok: true };
 }
 
 // --- Plain-text fields.
