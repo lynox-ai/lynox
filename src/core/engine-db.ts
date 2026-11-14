@@ -43,6 +43,15 @@ import { epochStartByTimeSql } from './grant-ledger.js';
  */
 
 const ENGINE_HKDF_INFO = 'lynox-engine-encryption';
+
+/**
+ * The key engine.db's encrypted columns are stored under, derived from the vault key. Exported for
+ * the data export, which reads a snapshot by raw SQL and must not open the live store (the
+ * constructor migrates or recreates it).
+ */
+export function deriveEngineEncKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
 /** Separate label for the keyed-digest subkey: the MAC never shares a key with AES-GCM. */
 const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
 /**
@@ -1607,6 +1616,21 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (67);
    ALTER TABLE bulk_targets ADD COLUMN context TEXT;
    ALTER TABLE bulk_targets ADD COLUMN context_secret_field INTEGER;`,
+  // v68 (1010, PRD shopify-preset §20.2 item 5): with `new_link_domain`, the domain the refused link
+  // points to, encrypted like `before`, so the owner is told which one. NULL for every existing
+  // target: its page keeps the sentence without the domain.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
+   ALTER TABLE bulk_targets ADD COLUMN link_domain TEXT;`,
+  // v69: the once-only pass that gave every workflow stamp from before the digest its digest
+  // (`workflow-stamp.ts`, `stampExistingWorkflows`). After it a stamp without a digest does not
+  // hold, so a definition a backfill or a restored file brings back waits for the owner instead
+  // of running on a stamp nobody took over its steps. `done=0` until the pass has run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (69);
+   CREATE TABLE IF NOT EXISTS workflow_stamp_marker (
+     id   INTEGER PRIMARY KEY CHECK (id = 1),
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   INSERT OR IGNORE INTO workflow_stamp_marker (id, done) VALUES (1, 0);`,
 ];
 
 export interface EngineDbOptions {
@@ -1647,7 +1671,7 @@ export class EngineDb {
     // share a derived key.
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
-      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._encKey = deriveEngineEncKey(vaultKey);
       this._hashKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HASH_HKDF_INFO, CRYPTO_KEY_LENGTH));
       this._bindKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', STORE_BINDING_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
@@ -1675,6 +1699,12 @@ export class EngineDb {
   /** Mark the boot-time verb-graph backfill complete (idempotent). */
   markVerbBackfillDone(): void {
     this.db.prepare('UPDATE verb_backfill_marker SET done = 1 WHERE id = 1').run();
+  }
+
+  /** True once the boot pass that gave the workflow stamps from before the digest theirs has run (v69). */
+  isWorkflowStampPassDone(): boolean {
+    const row = this.db.prepare('SELECT done FROM workflow_stamp_marker WHERE id = 1').get() as { done: number } | undefined;
+    return row?.done === 1;
   }
 
   /** Drop the free pages and empty the WAL; see `scrubFreedPages` in `sqlite-constants.ts`. */

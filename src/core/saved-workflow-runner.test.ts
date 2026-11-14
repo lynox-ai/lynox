@@ -2,6 +2,8 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import type { Engine, LynoxHooks } from './engine.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
+import { withOwnerStamp, workflowStampState } from './workflow-stamp.js';
 
 const { mockCheckPersistentBudget, mockRunSavedWorkflow } = vi.hoisted(() => ({
   mockCheckPersistentBudget: vi.fn(),
@@ -87,11 +89,26 @@ describe('runGuardedSavedWorkflow — the stop seam', () => {
   });
 
   // The webhook run's mapping check reaches the runner, which asks it of the workflow it read.
-  it('hands the caller\'s check of the workflow to the run, by identity', async () => {
-    const checkWorkflow = (): string | null => null;
-    await runGuardedSavedWorkflow(makeEngine([]), 'wf-check', undefined, { principal: OWNER_PRINCIPAL, checkWorkflow });
-    const opts = mockRunSavedWorkflow.mock.calls[0]![4] as { checkWorkflow?: unknown };
-    expect(opts.checkWorkflow).toBe(checkWorkflow);
+  // The run's own check is the owner's stamp, asked of the copy the runner reads (after every
+  // await of this path); the caller's check comes after it and only for a workflow that may run.
+  it('asks the owner\'s stamp of the workflow as the runner reads it, then the caller\'s check', async () => {
+    const hasher = { keyedHash: (parts: Iterable<string>) => [...parts].join('|'), hashIsKeyed: false };
+    const engine = { ...makeEngine([]), getRunHistory: () => ({ workflowStampState: (p: PlannedPipeline) => workflowStampState(hasher, p, undefined) }) } as unknown as Engine;
+    const callerSaw: PlannedPipeline[] = [];
+    const checkWorkflow = (p: PlannedPipeline): string | null => { callerSaw.push(p); return 'caller says no'; };
+    await runGuardedSavedWorkflow(engine, 'wf-check', undefined, { principal: OWNER_PRINCIPAL, checkWorkflow });
+    const check = (mockRunSavedWorkflow.mock.calls[0]![4] as { checkWorkflow: (p: PlannedPipeline) => string | null }).checkWorkflow;
+    const base = { id: 'wf-check', name: 'W', mode: 'autonomous', steps: [{ id: 's1', task: 'post the report' }], parameters: [] } as unknown as PlannedPipeline;
+    const stamped = withOwnerStamp(hasher, base, '2026-10-29T00:00:00.000Z');
+    // Stamped over these steps: the caller decides.
+    expect(check(stamped)).toBe('caller says no');
+    expect(callerSaw).toEqual([stamped]);
+    // Never stamped: refused before the caller is asked.
+    expect(check(base)).toMatch(/needs first-run confirmation/);
+    // Stamped, then the steps changed: the stamp does not hold, the run waits for the owner.
+    const edited = { ...stamped, steps: [{ id: 's1', task: 'post somewhere else' }] } as PlannedPipeline;
+    expect(check(edited)).toMatch(/waits for its owner to review its steps/);
+    expect(callerSaw).toHaveLength(1);
   });
 });
 

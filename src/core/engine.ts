@@ -3,6 +3,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider, getActiveProvider } from './llm-client.js';
 import type { RunFailure } from './provider-failure.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
+import { pinTlsFloor } from './tls-floor.js';
 import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds, poolSuppliesLLMKeys } from './llm/provider-keys.js';
 import { resolveInboxMistralKey } from '../integrations/inbox/mistral-key.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
@@ -37,9 +38,10 @@ import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
+import { fireBeforeRunGate } from './metered-request.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenAllowed, connectionTokenHolders } from './profile-secret-view.js';
+import { connectionTokenHolders, resolveGuardAllows } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -148,6 +150,7 @@ import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type Client
 import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
 import { DEFAULT_PER_JOB_TIMEOUT_MS } from '../integrations/inbox/classifier/queue.js';
 import { inboxDisabledAccounts } from '../integrations/inbox/disabled-accounts.js';
+import { InboundMailDeferred } from '../integrations/mail/inbound-deferred.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -227,6 +230,29 @@ export const RESTORE_HOOKS_BOUND_MS = 50_000;
  */
 export const SHUTDOWN_INBOX_CLASSIFY_MS = 5_000;
 export const SHUTDOWN_INBOX_CUTOFF_MS = 8_000;
+
+/**
+ * The inbox rebootstrap on a region switch (`_rebootstrapInboxOnProviderSwitch`) lets the old
+ * runtime drain for at most `REBOOTSTRAP_INBOX_DRAIN_MS`, twice the classifier's per-job timeout,
+ * while new mail is held back. Then the new runtime takes over: the old one's waiting jobs go to
+ * it at once, and its running jobs get `REBOOTSTRAP_INBOX_HANDOVER_MS` more before they are cut
+ * off and go to it too. After both, nothing is classified in the old region any more.
+ */
+export const REBOOTSTRAP_INBOX_DRAIN_MS = 2 * DEFAULT_PER_JOB_TIMEOUT_MS;
+export const REBOOTSTRAP_INBOX_HANDOVER_MS = 5_000;
+
+/** Await `work` for at most `ms`; true when it settled in time. */
+async function settlesWithinMs(work: Promise<void>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // run-group-starter: a single timeout, cleared below whichever way this ends; its callback
+  // only settles a local promise and reports no spend.
+  const timedOut = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), ms); });
+  try {
+    return await Promise.race([work.then(() => true as const), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Await `work` for at most `ms`; running out of time throws. */
 async function settleWithin(work: Promise<void>, ms: number, what: string): Promise<void> {
@@ -413,10 +439,27 @@ export class Engine {
    * GDPR Art. 44+ transfer if the user explicitly switched to EU
    * residency. Suspension flips on BEFORE the shutdown await and clears
    * AFTER the new runtime is wired (or in the `finally` on bootstrap
-   * failure). Mail server keeps mails unread so the next polling cycle
-   * picks them up via the NEW runtime.
+   * failure). While it is on, the hook throws `InboundMailDeferred`, so the
+   * watcher leaves the mail unseen and the next polling cycle hands it to the
+   * NEW runtime. (Returning instead would count as handled: the watcher would
+   * mark the mail seen, and it would never be classified.)
    */
   private _inboxClassifierSuspended: boolean = false;
+  /**
+   * Provider switches waiting for a running rebootstrap (`_propagateProviderSwitch`). While one
+   * waits, new mail is held back as under the suspension: the region it leaves is the one the
+   * live runtime classifies in. The waiting run counts itself off when it starts, in the same
+   * turn in which it sets the suspension.
+   */
+  private _inboxSwitchesWaiting = 0;
+  /** Set when `shutdown` begins, never cleared: a rebootstrap that starts afterwards does nothing. */
+  private _inboxShutdownBegun = false;
+  /**
+   * Set when a migration restore's shutdown begins, never cleared: the process ends next. From
+   * then on every inbound mail is deferred, so a rebootstrap still finishing behind a restore
+   * that gave up on it cannot hand a mail to a runtime the exit then kills.
+   */
+  private _inboxIntakeClosed: boolean = false;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
   private _notificationRouter = new NotificationRouter();
@@ -434,6 +477,8 @@ export class Engine {
     driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
   } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
+  /** Set once every stored API profile is loaded; until then {@link resolveGuard} cannot tell which vault names hold a connection's token. */
+  private _profilesKnown = false;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _subjectStore: import('./subject-store.js').SubjectStore | null = null;
@@ -840,10 +885,24 @@ export class Engine {
     // path (constructor's _recreateClient via _initContextAndIdentity) is a
     // no-op. Once initialised, defer to the async helper so the await chain
     // doesn't leak into this sync method's signature.
-    if (this._inboxRuntime) {
-      this._inboxRebootstrapInflight = this
-        ._rebootstrapInboxOnProviderSwitch()
-        .finally(() => { this._inboxRebootstrapInflight = null; });
+    // One rebootstrap at a time: a switch while one runs (its drain, or its handover, when the new
+    // runtime is already live) waits for it and then reads the region again. Two at once would
+    // each lift the suspension and clear the in-flight mark the other still needs.
+    const prev = this._inboxRebootstrapInflight;
+    if (this._inboxRuntime || prev) {
+      if (prev) this._inboxSwitchesWaiting += 1;
+      const run = prev
+        ? prev.catch(() => { /* logged by the rebootstrap */ }).then(() => {
+          this._inboxSwitchesWaiting -= 1;
+          return this._rebootstrapInboxOnProviderSwitch();
+        })
+        : this._rebootstrapInboxOnProviderSwitch();
+      // run-group-starter: only clears the in-flight mark and reports no spend; the classifier
+      // jobs a rebootstrap starts run outside any group (`ClassifierQueue._tryStart`).
+      const inflight: Promise<void> = run.finally(() => {
+        if (this._inboxRebootstrapInflight === inflight) this._inboxRebootstrapInflight = null;
+      });
+      this._inboxRebootstrapInflight = inflight;
     }
   }
 
@@ -893,7 +952,27 @@ export class Engine {
    * runtime rather than crashing the whole engine — matching the
    * `_initIntegrations` posture for the cold-boot path.
    */
+  /**
+   * The inbound-mail hook around an inbox runtime. While a rebootstrap has the classifier
+   * suspended, or a restore has closed the intake, it defers the mail instead of handing it to
+   * the runtime (`InboundMailDeferred`): the watcher leaves it unseen for the next tick.
+   */
+  private _inboundMailHook(
+    runtime: import('../integrations/inbox/bootstrap.js').InboxRuntime,
+  ): (accountId: string, envelope: import('../integrations/mail/provider.js').MailEnvelope) => Promise<void> {
+    return async (accountId, envelope) => {
+      if (this._inboxIntakeClosed) throw new InboundMailDeferred('the engine is shutting down for a restore');
+      if (this._inboxClassifierSuspended || this._inboxSwitchesWaiting > 0) throw new InboundMailDeferred('the inbox classifier is switching regions');
+      // Discard the hook's outcome — the MailContext contract is
+      // Promise<void>; only the inbox-internal cold-start path reads it.
+      await runtime.hook(accountId, envelope);
+    };
+  }
+
   private async _rebootstrapInboxOnProviderSwitch(): Promise<void> {
+    // A switch that waited for an earlier rebootstrap can start after a shutdown began: the
+    // shutdown drains what it found, and a new runtime now would outlive it.
+    if (this._inboxShutdownBegun) return;
     if (!this._inboxRuntime || !this._mailStateDb) return;
     const newRegion = resolveInboxLlmRegion({
       envOverride: process.env['LYNOX_INBOX_LLM_REGION'],
@@ -904,24 +983,31 @@ export class Engine {
     // Privacy guard: suspend classification BEFORE we touch the old
     // runtime so any mail that lands during `await old.shutdown()` is
     // not fired into the US-bound closure. The wrapper installed below
-    // (and in `_initIntegrations`) honors this flag — mail stays unread
-    // on the server and gets picked up by the next polling cycle via
-    // the NEW EU-bound runtime.
+    // (and in `_initIntegrations`) honors this flag by deferring the mail:
+    // it stays unseen and the next polling cycle hands it to the NEW
+    // EU-bound runtime.
     this._inboxClassifierSuspended = true;
+    const old = this._inboxRuntime;
+    // Whether the old runtime finished its drain within `REBOOTSTRAP_INBOX_DRAIN_MS`. If not, what
+    // it still holds goes to the new runtime once that is wired (`_retireInboxRuntime`).
+    let drained = false;
     try {
-      const old = this._inboxRuntime;
       // Detach the live runtime first so any concurrent mail arrival
       // doesn't see a half-disposed instance.
       this._inboxRuntime = null;
       this._inboxRetiringRuntime = old;
-      try { await old.shutdown(); } catch { /* best-effort drain */ }
-      this._inboxRetiringRuntime = null;
+      drained = await settlesWithinMs(old.shutdown().catch(() => { /* best-effort drain */ }), REBOOTSTRAP_INBOX_DRAIN_MS);
+      if (drained) this._inboxRetiringRuntime = null;
       // Re-wire the MailContext hook (only present when a vault exists)
       // — without this, the watcher would keep firing into the disposed
       // runtime's hook closure. exactOptionalPropertyTypes forbids `=
       // undefined`, so `delete` is the correct idiom here.
+      // The inbound hook is not removed but replaced by one that defers: without any hook the
+      // watcher would count a mail arriving now as handled and mark it seen.
       if (this._mailContext) {
-        delete this._mailContext.hooks.onInboundMail;
+        this._mailContext.hooks.onInboundMail = async () => {
+          throw new InboundMailDeferred('the inbox classifier is being replaced');
+        };
         delete this._mailContext.hooks.onAccountAdded;
       }
       const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
@@ -950,16 +1036,7 @@ export class Engine {
       this._applyInboxMailLookups(bootOpts);
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
-        // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
-        // true (e.g. during a future drain window) the hook short-
-        // circuits without touching the runtime closure. Preserves the
-        // `Promise<void>` return type the MailContext awaits.
-        this._mailContext.hooks.onInboundMail = async (accountId, envelope) => {
-          if (this._inboxClassifierSuspended) return;
-          // Discard the hook's outcome — the MailContext contract is
-          // Promise<void>; only the inbox-internal cold-start path reads it.
-          await runtime.hook(accountId, envelope);
-        };
+        this._mailContext.hooks.onInboundMail = this._inboundMailHook(runtime);
         this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
         // Mark an inbox item `replied` when the user answers it in chat.
         this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
@@ -967,16 +1044,27 @@ export class Engine {
         this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
         // The store as the inbox view reads it, for inbox_read.
         this._mailContext.hooks.inboxReader = runtime.inboxReader;
+        // Waiting rules for inbox_rule_propose.
+        this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
+      // New mail goes to the new runtime from here on; what the old one still holds follows it.
+      this._inboxClassifierSuspended = false;
+      if (!drained) await this._retireInboxRuntime(old, (payload) => runtime.queue.enqueue(payload));
     } catch (err) {
-      // Same posture as the cold-boot path — surface but don't crash.
+      // Same posture as the cold-boot path — surface but don't crash. Without a runtime there is
+      // no hook, as on a cold boot whose inbox failed: the deferring one would hold the mail back
+      // until the next restart.
+      if (this._mailContext) delete this._mailContext.hooks.onInboundMail;
       console.error(
         '[lynox] Inbox classifier rebootstrap on provider-switch failed — '
         + 'classifier disabled until next restart:',
-        err,
+        processErrorText(err, true),
       );
+      // No runtime to hand over to: what the old one still holds is surfaced as a failed
+      // classification, still within the bound.
+      if (!drained) await this._retireInboxRuntime(old, () => false);
     } finally {
       // Always clear: a mid-flight bootstrap failure must not leave the
       // engine with suspension stuck on (mail would silently pile up).
@@ -984,8 +1072,27 @@ export class Engine {
     }
   }
 
+  /**
+   * End a runtime the rebootstrap replaced that did not finish its drain in time: its waiting jobs
+   * go to `handOver` at once, its running jobs get `REBOOTSTRAP_INBOX_HANDOVER_MS` and are then
+   * cut off and go there too (`HandedOverError`). A shutdown meanwhile finds it as the retiring
+   * runtime and drains it its own way.
+   */
+  private async _retireInboxRuntime(
+    old: import('../integrations/inbox/bootstrap.js').InboxRuntime,
+    handOver: (payload: import('../integrations/inbox/runner.js').InboxQueuePayload) => boolean,
+  ): Promise<void> {
+    const now = Date.now();
+    try {
+      await old.shutdown({ within: { classifyUntil: now, cutOffAt: now + REBOOTSTRAP_INBOX_HANDOVER_MS }, handOver });
+    } catch { /* best-effort */ }
+    if (this._inboxRetiringRuntime === old) this._inboxRetiringRuntime = null;
+  }
+
   async init(): Promise<this> {
     this._startedAt = Date.now();
+    // Before anything opens a connection: no launch flag may lower the TLS floor (tls-floor.ts).
+    pinTlsFloor();
     await this._initBootstrap();
     await this._initPersistence();
     await this._initContextAndIdentity();
@@ -1371,6 +1478,17 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] workflow content-schema migration failed: ${err instanceof Error ? err.message : String(err)} — retry next boot\n`);
       }
+
+      // The workflow stamps from before the digest get theirs, once per engine.db (marker v69),
+      // AFTER the backfill and the content migration so it sees the definitions as they run.
+      // A failure leaves the marker at 0 and every stamp without a digest not holding: those
+      // workflows wait for the owner (fail closed) until a later boot passes.
+      try {
+        const stamped = this.runHistory.stampExistingWorkflows();
+        if (stamped !== null && stamped > 0) process.stderr.write(`[lynox] workflow stamps: ${stamped} definition(s) bound to their steps\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] workflow stamp pass failed: ${processErrorText(err)} — retry next boot\n`);
+      }
     }
 
     // Initialize thread store (shares DB connection with RunHistory)
@@ -1429,7 +1547,7 @@ export class Engine {
           try {
             promptStore.expireEndedMandates(mandateLive);
           } catch (err: unknown) {
-            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${processErrorText(err)}\n`);
           }
         };
         sweepEnded();
@@ -1587,8 +1705,9 @@ export class Engine {
     }
 
     // Configure persistent budget caps, HTTP rate limits and the egress policy.
-    // Called with or without RunHistory: the limits that count against it are
-    // skipped when it failed to open, the egress policy is applied regardless.
+    // Called with or without RunHistory. Without it the daily/monthly caps cannot be
+    // checked and refuse every run (session-budget.ts), and the send-rate limits that
+    // count against it refuse rather than send uncounted; the egress policy is applied regardless.
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
     configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
   }
@@ -1623,6 +1742,10 @@ export class Engine {
     const secretResult = initSecrets(this.userConfig);
     this.secretVault = secretResult.vault;
     this.secretStore = secretResult.store;
+    // From the moment the store exists, a token of a connection whose mandate has ended is not
+    // handed out, to anyone. Set here, not after the profiles load: a guard set at the end of that
+    // block is never set when the block throws.
+    this.secretStore?.setResolveGuard((name) => this.resolveGuard(name));
     this.secretsBriefing = secretResult.secretsBriefing;
     for (const part of secretResult.briefingParts) {
       this.briefing = compose(
@@ -1814,6 +1937,9 @@ export class Engine {
         // Degraded (engine.db unavailable): fall back to the flat-JSON directory,
         // exactly as before S4b.
         loaded = this._apiStore.loadFromDirectory(apisDir);
+        // What a person changes from here on would land only in those files, which the next boot
+        // with engine.db does not read: refused with a plain reason instead.
+        this._apiStore.refuseChangesWithoutStore();
       }
       // Wire the in-memory store into tool context unconditionally — otherwise
       // a fresh install (zero profiles) leaves toolContext.apiStore undefined, so
@@ -1838,8 +1964,12 @@ export class Engine {
           process.stderr.write(`[lynox:vault-bindings] Migration failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }
-      // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
-      this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
+      // The stored profiles are loaded: the guard set with the secret store answers by them, and by
+      // the entries it could not read (`resolveGuardAllows`).
+      this._profilesKnown = true;
+      // The LLM client was built before this, when the guard handed out only the environment's and
+      // the platform's names: a Vertex project id kept in the vault is read now.
+      if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();
       if (loaded > 0) {
         const store = this._apiStore;
         const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
@@ -1863,8 +1993,11 @@ export class Engine {
       if (suggestedContext) {
         this.briefing = this.briefing ? `${this.briefing}\n\n${suggestedContext}` : suggestedContext;
       }
-    } catch {
+    } catch (err: unknown) {
       this._apiStore = null;
+      // From here on the guard hands out no vault name that could hold a connection's token: say so,
+      // or the owner's own secrets look missing with no cause anywhere.
+      process.stderr.write(`[lynox:api-store] API profiles could not be loaded; until the next start only the environment's and the platform's own secrets are handed out: ${processErrorText(err)}\n`);
     }
 
     // Register builtin tools
@@ -2297,16 +2430,8 @@ export class Engine {
         // the MailContext is null — the runtime is still alive and the
         // hook can be invoked manually by other inbound-channel adapters.
         if (this._mailContext) {
-          // Suspension-aware wrapper — symmetric with the rebootstrap
-          // path. The flag is only set during cross-region rebootstrap;
-          // on the cold-boot path it is permanently false, so the
-          // wrapper is a zero-cost passthrough until the first switch.
-          this._mailContext.hooks.onInboundMail = async (accountId, envelope) => {
-            if (this._inboxClassifierSuspended) return;
-            // Discard the hook's outcome — the MailContext contract is
-            // Promise<void>; only the inbox-internal cold-start path reads it.
-            await runtime.hook(accountId, envelope);
-          };
+          // Suspension-aware wrapper, the same one the rebootstrap installs.
+          this._mailContext.hooks.onInboundMail = this._inboundMailHook(runtime);
           // Auto-trigger backfill on account-connect. The adapter gates
           // re-runs via `state.hasAnyItemForAccount`, so a re-credential
           // does not pull provider.list() again.
@@ -2317,6 +2442,8 @@ export class Engine {
           this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
           // The store as the inbox view reads it, for inbox_read.
           this._mailContext.hooks.inboxReader = runtime.inboxReader;
+          // Waiting rules for inbox_rule_propose.
+          this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —
@@ -2340,7 +2467,7 @@ export class Engine {
       } catch (err) {
         // Surface the failure so a silently-disabled feature does not
         // become a debugging black hole. Mail integration still works.
-        console.error('[lynox] Inbox bootstrap failed — feature disabled:', err);
+        console.error('[lynox] Inbox bootstrap failed — feature disabled:', processErrorText(err, true));
       }
     }
 
@@ -2838,7 +2965,7 @@ export class Engine {
       try {
         end();
       } catch (err: unknown) {
-        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${processErrorText(err)}\n`);
       }
     }
   }
@@ -2873,6 +3000,16 @@ export class Engine {
   getLegacyMemoryReason(): LegacyMemoryReason | null { return this._legacyMemory; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
+
+  /** The secret store's resolve guard: {@link resolveGuardAllows} over this engine's state. */
+  private resolveGuard(name: string): boolean {
+    return resolveGuardAllows({
+      profilesKnown: this._profilesKnown,
+      apiStore: this._apiStore,
+      ends: this._mandateEnds,
+      fromEnvironment: (n) => this.secretStore?.isEnvironmentSecret(n) === true,
+    }, name);
+  }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 
   /**
@@ -3276,10 +3413,15 @@ export class Engine {
   // ── Batch ──
 
   async batch(reqs: BatchRequest[], sessionConfig?: { systemPromptSuffix?: string | undefined }): Promise<string> {
+    const modelTier = this.config.model ?? 'deep';
+    // A batch is a paid model call outside `Session.run()`: the same admission as
+    // every other one — the daily and monthly spending caps, then the hooks.
+    const gate = await fireBeforeRunGate(this, modelTier);
+    if (gate.blockedReason !== null) throw new Error(gate.blockedReason);
     const result = await submitBatch(
       this.client, reqs,
       {
-        modelTier: this.config.model ?? 'deep',
+        modelTier,
         maxTokens: this.config.maxTokens ?? 8192,
         systemPrompt: this.config.systemPrompt,
         systemPromptSuffix: sessionConfig?.systemPromptSuffix,
@@ -3380,6 +3522,7 @@ export class Engine {
    */
   async shutdown(options: { inboxBacklog?: 'classify' | 'dead-letter' | 'bounded' | undefined } = {}): Promise<void> {
     const forRestore = options.inboxBacklog === 'dead-letter';
+    this._inboxShutdownBegun = true;
     const startedAt = Date.now();
     const within = options.inboxBacklog === 'bounded'
       ? { classifyUntil: startedAt + SHUTDOWN_INBOX_CLASSIFY_MS, cutOffAt: startedAt + SHUTDOWN_INBOX_CUTOFF_MS }
@@ -3398,6 +3541,9 @@ export class Engine {
     // provider-switch) so we don't dispose a runtime that is about to be
     // replaced and then forgotten.
     if (forRestore) {
+      // A mail arriving from here on is not handed to a runtime the exit then kills. It stays
+      // unseen, but only IMAP lists it again after the restart; Gmail and Graph do not.
+      this._inboxIntakeClosed = true;
       try {
         await settleWithin(this._drainInboxForRestore(), RESTORE_INBOX_BOUND_MS, 'inbox shutdown');
       } catch (err: unknown) {

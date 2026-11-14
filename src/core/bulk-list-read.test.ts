@@ -258,6 +258,14 @@ describe('what stops a list read — each with a fixed reason, nothing of the pr
     expect(s.requests).toEqual([]);
   });
 
+  it('a list whose stored filters were changed past what a parse takes: stopped on its filter, nothing is sent', async () => {
+    const s = shop(3);
+    await stopsWith(s, BULK_HALT_REASONS.listFilterWithdrawn, (id) => {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(engineDb.enc(JSON.stringify({ ...source, filters: { category: ['12', '13'] } })), id);
+    });
+    expect(s.requests).toEqual([]);
+  });
+
   it('(016) a list whose path is no longer one a run may read, after it is read: no target is read', async () => {
     const s = shop(3);
     const restore = serve(s);
@@ -527,6 +535,34 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
   it('leaves a product out where the plan adds an image its description did not hold', async () => {
     const id = await previewed({ description: '<p>New</p><img src="/a.png">' });
     expect(ledger.getPreview(id).map((t) => [t.change, t.error])).toEqual([['invalid', 'new_img'], ['invalid', 'new_img']]);
+  });
+
+  it('names the domain of a link the plan adds and the run may not link to (1010)', async () => {
+    const id = await previewed({ description: '<p>New <a href="https://Evil.Example./x">deal</a></p>' });
+    // The host as the check read it: lower case, the trailing dot dropped.
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', 'evil.example'], ['new_link_domain', 'evil.example']]);
+  });
+
+  it('keeps no domain a plan spells only percent-encoded (1010)', async () => {
+    // The run's plan-time scan reads the text, where `%2D` breaks a credential's shape; the link
+    // check decodes the host to `sk-ant-api03-…`. A host the link does not spell as it is gets no
+    // domain at all, before any scanner is asked (the scanner itself: the upper-case test below).
+    const href = 'https://sk%2Dant%2Dapi03%2Dabcdefghijklmnopqrstuvwxyz0123456789ABCD.evil.example/';
+    const id = await previewed({ description: `<p>New <a href="${href}">deal</a></p>` });
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', undefined], ['new_link_domain', undefined]]);
+  });
+
+  it('keeps no domain a plan spells in upper case that is a credential\'s shape once lower case (1010)', async () => {
+    // The plan-time scan reads the text, where the shape is upper case and is not one; the link
+    // check reads the host in lower case, which the scanner names. Built at run time.
+    const host = `${'SK-ANT-API03-'}ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCD.EVIL.EXAMPLE`;
+    const id = await previewed({ description: `<p>New <a href="https://${host}/">deal</a></p>` });
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', undefined], ['new_link_domain', undefined]]);
+  });
+
+  it('keeps no domain with another markup refusal (twin)', async () => {
+    const id = await previewed({ description: '<p>New</p><img src="https://evil.example/a.png">' });
+    expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_img', undefined], ['new_img', undefined]]);
   });
 
   it('leaves a product out where the plan adds markup to a field that is not HTML', async () => {

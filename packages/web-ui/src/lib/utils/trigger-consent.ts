@@ -59,6 +59,21 @@ export function showsWatchTarget(trigger: {
 }
 
 /**
+ * The address a CONFIRMED watch fetches, shown on its row (PRD customer-granted-operator-access
+ * B6): the escalation of a watch someone the owner let in set up leaves the address out
+ * and points to this page, so the page must name it. A waiting watch shows it in its consent
+ * block instead (`showsWatchTarget`), never twice; an unreadable config shows nothing.
+ */
+export function showsWatchAddress(trigger: {
+	effect?: string | undefined;
+	source?: string | undefined;
+	confirmed_at?: string | null | undefined;
+	watch_config?: string | undefined;
+}): boolean {
+	return trigger.source === 'watch' && !awaitsConfirmation(trigger) && watchOf(trigger) !== undefined;
+}
+
+/**
  * Whether the block may offer the button at all — ONE gate, so the button
  * cannot outlive the thing it consents to. Each side has its own display and
  * its own test; this is where they meet.
@@ -109,6 +124,24 @@ const FORGING_CHARS = /[\u00AD\u061C\u180E\u200B\u202A-\u202E\u2060-\u2064\u2066
  */
 // eslint-disable-next-line no-control-regex -- removing them is the point
 const CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029]/g;
+
+const MARKED = new RegExp(`${FORGING_CHARS.source}|${CONTROL_CHARS.source}`, 'gu');
+
+/** Pasted text carries these often and they cannot hold a clause: a soft hyphen, and the CR of CRLF. */
+const DROPPED_SILENTLY = /[\u00AD\r]/gu;
+
+/**
+ * `displaySafe`, but each character it would take out is printed as its code point (`⟨U+202E⟩`)
+ * instead, so a reader sees WHERE text was hidden. `DROPPED_SILENTLY` still goes without a mark.
+ */
+export function markHidden(text: string): string {
+	return text.replace(MARKED, (c) => (c === '\u00AD' || c === '\r' ? '' : `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`));
+}
+
+/** Whether `markHidden` marks anything in this text. */
+export function marksHidden(text: string): boolean {
+	return markHidden(text) !== text.replace(DROPPED_SILENTLY, '');
+}
 
 /**
  * What a person reads before they allow a run: strip what forges rather than

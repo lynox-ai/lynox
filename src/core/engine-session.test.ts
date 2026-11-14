@@ -96,6 +96,12 @@ vi.mock('./agent.js', () => {
     ToolLoopBreakError: MockToolLoopBreakError,
     ContinuationLoopError: MockContinuationLoopError,
     ThinkingOnlyLoopError: class MockThinkingOnlyLoopError extends MockContinuationLoopError {},
+    ToolCallImitationError: class MockToolCallImitationError extends MockRunAbortedError {
+      constructor() {
+        super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+        this.name = 'ToolCallImitationError';
+      }
+    },
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;
@@ -438,6 +444,9 @@ vi.mock('./run-history.js', () => ({
     this.insertToolCall = vi.fn();
     // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
     this.getDescendantCostUsd = mockGetDescendantCostUsd;
+    // @ts-expect-error mock constructor — the cost record the daily/monthly caps read. A
+    // history without it is treated as no cost record, and every run is refused.
+    this.getCostByDay = vi.fn().mockReturnValue([]);
     this.getApiCallsOfRun = mockGetApiCallsOfRun;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);
@@ -863,8 +872,9 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     it('a run a loop guard stopped is recorded aborted with the guard as the reason and its message; a stop has neither', async () => {
-      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } = await import('./agent.js');
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } = await import('./agent.js');
       const cases: Array<[Error, string | undefined]> = [
+        [new ToolCallImitationError('http_request'), 'tool_call_imitation'],
         [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
         [new ContinuationLoopError('prefix'), 'continuation_loop'],
         [new (ThinkingOnlyLoopError as unknown as new (p: string) => Error)(''), 'thinking_loop'],
@@ -2713,6 +2723,40 @@ describe('Engine + Session (Orchestrator)', () => {
         'default',
         expect.any(String),
       );
+    });
+
+    it('rejects with the cap reason and submits nothing when the daily cap is reached (no host)', async () => {
+      const { engine } = await createEngineAndSession();
+      mockBatchCreate.mockClear();
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        await expect(engine.batch([{ id: 'r1', task: 'hello' }]))
+          .rejects.toThrow('Daily spending cap ($5) reached. Today: $5.00.');
+        expect(mockBatchCreate).not.toHaveBeenCalled();
+      } finally {
+        resetPersistentBudget();
+      }
+    });
+
+    it('submits the batch when spend is under the cap (no host)', async () => {
+      const { engine } = await createEngineAndSession();
+      mockBatchCreate.mockClear();
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 4.99, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        const batchId = await engine.batch([{ id: 'r1', task: 'hello' }]);
+        expect(mockBatchCreate).toHaveBeenCalledOnce();
+        expect(batchId).toBe('batch-abc');
+      } finally {
+        resetPersistentBudget();
+      }
     });
 
     it('inserts promptHash on child runs', async () => {

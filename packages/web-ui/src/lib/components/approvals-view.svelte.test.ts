@@ -836,3 +836,27 @@ describe('a chat note leads to its entry', () => {
 		expect(q('[data-entry-focused]')).toBeNull();
 	});
 });
+
+describe('the note on a mail filed after outside content names which (U-209)', () => {
+	const KEYS = { run: 'approvals.after_untrusted', instruction: 'approvals.after_untrusted_instruction', both: 'approvals.after_untrusted_both' } as const;
+	it.each([
+		['the run had read it', 'run'],
+		['only the instruction was written after it', 'instruction'],
+		['both', 'both'],
+	] as const)('%s: its own sentence, and none of the others', async (_label, by) => {
+		const { t } = await import('../i18n.svelte.js');
+		lists.open = { entries: [card({ afterUntrusted: true, afterUntrustedBy: by })], pending: 1, viewer: 'owner' };
+		await render();
+		const note = q('[data-note="after-untrusted"]')?.textContent?.trim();
+		expect(note).toBe(t(KEYS[by]));
+		for (const other of Object.values(KEYS).filter((k) => k !== KEYS[by])) expect(note).not.toBe(t(other));
+	});
+
+	it('an engine from before it (no side named) keeps the run\'s sentence; a clean mail has no note', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		lists.open = { entries: [card({ afterUntrusted: true }), card({ id: 'e-2' })], pending: 2, viewer: 'owner' };
+		await render();
+		const notes = [...target.querySelectorAll('[data-note="after-untrusted"]')].map((n) => n.textContent?.trim());
+		expect(notes).toEqual([t('approvals.after_untrusted')]);
+	});
+});

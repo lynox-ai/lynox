@@ -280,11 +280,17 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
   for (const [name, value] of Object.entries(headers)) {
     if (OVERRIDE_HEADERS.has(headerKey(name))) candidates.push(value);
   }
-  try {
-    for (const [name, value] of new URL(url).searchParams) {
-      if (isOverrideFieldName(name)) candidates.push(value);
+  // Every query a receiving server may read (`urlQueryStrings`: a `%3F` in the path that a proxy
+  // decodes included), each split every way a server may split it (`queryReadings`): one that
+  // also splits on `;` reads `?x=1;_method=DELETE` as an override, where `searchParams` sees a
+  // single field `x`. An unparsable URL gives none, and is refused before it is sent.
+  for (const search of urlQueryStrings(url)) {
+    for (const params of queryReadings(search)) {
+      for (const [name, value] of params) {
+        if (isOverrideFieldName(name)) candidates.push(value);
+      }
     }
-  } catch { /* an unparsable URL is refused before it is sent */ }
+  }
   // A GET or HEAD sends no body, so nothing in one can override it.
   if (body !== undefined && !isReadMethod(method.trim().toUpperCase())) {
     for (const reading of typeof body === 'string' ? [body] : body) {
@@ -1282,3 +1288,14 @@ export function queryForQuestion(search: string, mask: (text: string) => string)
 
 /** The form media type alone, parameters allowed; a list of two types is not one form. */
 const FORM_CONTENT_TYPE = /^\s*application\/x-www-form-urlencoded\s*(?:;[^,]*)?$/i;
+
+/**
+ * Whether a server may run a GET of this address as a write, for an address read with no one
+ * asked (a watch, a calendar feed): a method override in it as every write gate reads it
+ * (`effectiveWriteMethod`; a value that is no method counts), or, at an address that parses as a
+ * GraphQL endpoint, a mutation in its query (`graphqlUrlWrites`).
+ */
+export function readAddressWrites(url: string): boolean {
+  if (!isReadMethod(effectiveWriteMethod('GET', {}, url))) return true;
+  return URL.canParse(url) && isGraphqlEndpoint(url) && graphqlUrlWrites(url);
+}

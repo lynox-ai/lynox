@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
 import { TaskManager } from './task-manager.js';
 import { WorkflowStore } from './workflow-store.js';
 import { ConnectionStore } from './connection-store.js';
@@ -25,6 +26,10 @@ const runner = vi.hoisted(() => ({
   mode: { value: 'autonomous' as string },
   steps: { value: [] as unknown[] },
   confirmedAt: { value: '2026-10-01T00:00:00.000Z' as string | undefined },
+  // The engine's hash, so a confirmed workflow carries a stamp that holds (`workflow-stamp.ts`).
+  hasher: { value: null as EngineDb | null },
+  // The stamp was taken over other steps than the ones the workflow has now.
+  staleStamp: { value: false },
 }));
 const budget = vi.hoisted(() => ({ refuse: false, released: 0 }));
 vi.mock('./session-budget.js', async (importOriginal) => {
@@ -36,10 +41,19 @@ vi.mock('./session-budget.js', async (importOriginal) => {
   };
 });
 vi.mock('./saved-workflow-runner.js', () => ({ runGuardedSavedWorkflow: (...args: unknown[]) => runner.run(...args) }));
-vi.mock('../tools/builtin/pipeline.js', async (importOriginal) => ({
+vi.mock('../tools/builtin/pipeline.js', async (importOriginal) => {
+  const { withOwnerStamp } = await import('./workflow-stamp.js');
+  return {
   ...(await importOriginal<object>()),
-  getPipeline: (id: string) => ({ id, name: 'Orders', mode: runner.mode.value, steps: runner.steps.value, confirmedAt: runner.confirmedAt.value }),
-}));
+  getPipeline: (id: string) => {
+    const planned = { id, name: 'Orders', mode: runner.mode.value, steps: runner.steps.value } as unknown as PlannedPipeline;
+    const at = runner.confirmedAt.value;
+    if (at === undefined || runner.hasher.value === null) return planned;
+    const stamped = withOwnerStamp(runner.hasher.value, planned, at);
+    return runner.staleStamp.value ? { ...stamped, steps: [{ id: 'later', task: 'changed after the stamp' }] } : stamped;
+  },
+  };
+});
 
 const SHOP = 'demo-store.myshopify.com';
 
@@ -61,11 +75,13 @@ describe('the webhook drain', () => {
     runner.mode.value = 'autonomous';
     runner.steps.value = [];
     runner.confirmedAt.value = '2026-10-01T00:00:00.000Z';
+    runner.staleStamp.value = false;
     budget.refuse = false;
     budget.released = 0;
     dir = mkdtempSync(join(tmpdir(), 'lynox-webhook-drain-'));
     history = new RunHistory(join(dir, 'history.db'));
     engineDb = new EngineDb(join(dir, 'engine.db'));
+    runner.hasher.value = engineDb;
     history.setVerbGraph(engineDb);
     tm = new TaskManager(history);
     ledger = new InboundEventStore(engineDb);
@@ -200,6 +216,67 @@ describe('the webhook drain', () => {
     expect(pushes(EVENT_RUN_FAILED)).toBe(0);
   });
 
+  // ux Rest-P rule 1: a reason is stored in English and said in the owner's language, rows stored
+  // before included; one the table has no sentence for is quoted as stored.
+  it('tells a German owner of dropped events stored in English in German, one reason at a time', async () => {
+    (engine as unknown as { config: { language: string } }).config = { language: 'de' };
+    const t = sharedTrigger();
+    const stored = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
+    ledger.record({ triggerId: t, dedupKey: 'old-1', headers: {}, state: 'dropped', reason: stored });
+    ledger.record({ triggerId: t, dedupKey: 'old-2', headers: {}, state: 'dropped', reason: stored });
+    ledger.record({ triggerId: t, dedupKey: 'old-3', headers: {}, state: 'dropped', reason: 'misdelivered' });
+    ledger.record({ triggerId: t, dedupKey: 'old-4', headers: {}, state: 'dropped' });
+    await loop.tick();
+    const bodies = notify.mock.calls.map((c) => (c[0] as { body: string }).body).sort();
+    expect(bodies).toEqual([
+      '2 Ereignisse wurden nicht ausgeführt: Sein Auslöser nimmt keine Ereignisse an, darum laufen sie nicht. Sieh dir den Auslöser unter Automation → Trigger an.',
+      'Ein Ereignis wurde nicht ausgeführt: kein Grund festgehalten',
+      'Ein Ereignis wurde nicht ausgeführt: misdelivered',
+    ]);
+    // What is stored stays as it was.
+    expect(ledger.listByTrigger(t).map((e) => e.reason).sort()).toEqual([null, 'misdelivered', stored, stored].sort());
+  });
+
+  it('tells a German owner of a workflow nobody confirmed in German, naming it, and stores the reason in English', async () => {
+    (engine as unknown as { config: { language: string } }).config = { language: 'de' };
+    runner.confirmedAt.value = undefined;
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'dropped');
+    expect(eventOf(t, id).reason).toBe('Workflow "wf-orders" needs first-run confirmation, so this trigger was switched off and refuses deliveries. Schedule it from the workflow library to confirm it, then switch the trigger on again.');
+    await loop.tick();
+    expect(notify.mock.calls.map((c) => (c[0] as { body: string }).body)).toEqual([
+      'Ein Ereignis wurde nicht ausgeführt: Workflow „wf-orders“ ist vor dem ersten Lauf noch nicht bestätigt; der Auslöser ist darum aus. Plane den Workflow in der Bibliothek ein und schalte den Auslöser wieder ein.',
+    ]);
+  });
+
+  it('tells a German owner of a failed event of a workflow that asks in German, and stores the reason in English', async () => {
+    (engine as unknown as { config: { language: string } }).config = { language: 'de' };
+    runner.mode.value = 'interactive';
+    runner.steps.value = [{ id: 's1', task: 'ask', tools: ['ask_user'] }];
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'failed');
+    expect(eventOf(t, id).reason).toBe(WEBHOOK_ASKS_RESULT);
+    await loop.tick();
+    expect(notify.mock.calls.map((c) => (c[0] as { body: string }).body)).toEqual([
+      'Nicht ausgeführt: Dieser Workflow stellt beim Laufen eine Frage, und ein Lauf durch ein Webhook-Ereignis kann nicht auf eine Antwort warten. Ändere den Workflow, damit er nicht fragt; dann laufen spätere Ereignisse, dieses nicht mehr.',
+    ]);
+  });
+
+  it('tells a German owner of an event a lost process left running in German', async () => {
+    (engine as unknown as { config: { language: string } }).config = { language: 'de' };
+    const t = sharedTrigger();
+    const id = deliver(t);
+    expect(ledger.begin(id, 'attempt-of-a-lost-process')).toBe(true);
+    await loop.tick();
+    expect(notify.mock.calls.map((c) => (c[0] as { body: string }).body)).toEqual([
+      'Ein Ereignis lief gerade, als die Engine anhielt. Es kann gewirkt haben und läuft nicht von selbst noch einmal. Prüf, ob es gewirkt hat, bevor du dasselbe von Hand tust.',
+    ]);
+  });
+
   it('CONTROL: with the switch off it reads nothing and runs nothing', async () => {
     vi.stubEnv('LYNOX_FEATURE_INBOUND_WEBHOOKS', '');
     const t = sharedTrigger();
@@ -253,6 +330,20 @@ describe('the webhook drain', () => {
   });
 
   // A refusal before the run that holds until the owner acts drops the event.
+  it('drops an event of a workflow whose steps changed after its stamp, switches the trigger off, and says so once', async () => {
+    runner.staleStamp.value = true;
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'dropped');
+    expect(runner.run).not.toHaveBeenCalled();
+    expect(eventOf(t, id).reason).toContain('waits for its owner to review its steps');
+    expect(Boolean(tm.getTrigger(t)!.enabled)).toBe(false);
+    await loop.tick();
+    await loop.tick();
+    expect(pushes('waits for its owner to review its steps')).toBe(1);
+  });
+
   it('drops an event of a workflow nobody confirmed, switches the trigger off, and says so once', async () => {
     runner.confirmedAt.value = undefined;
     const t = sharedTrigger();
@@ -884,7 +975,7 @@ describe('the ledger\'s moves', () => {
   it('gets the index on a database that ran the drain columns before it existed', () => {
     const db = engineDb.getDb();
     // Every later version goes too: the migrations run from the highest one recorded.
-    db.exec('ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62;');
+    db.exec('ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62;');
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'));
     expect(engineDb.getDb().prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbound_events_state_received'`).get()).toBeDefined();

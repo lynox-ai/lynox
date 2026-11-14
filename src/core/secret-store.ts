@@ -354,6 +354,181 @@ export function withoutTypedCredentials(text: string): string {
 }
 
 /**
+ * What a mandate's helper is told when a message or an answer they typed reads as carrying a key
+ * (`mandateCredentialInput`). Fixed: it names no part of what they typed, and nothing of it is
+ * kept. The web UI shows its own wording by the code `mandate_key_input` (`chat.mandate_key_input`,
+ * or `…_returned` when it put the text back into the message field); this is its English
+ * variant without the text put back, for any other client.
+ */
+// One literal, not joined: the web UI's wording test finds it verbatim in this file (ux U-150).
+export const MANDATE_KEY_INPUT_REFUSAL = 'Your input was not sent because it contains something that looks like a key, token or password. lynox does not take any in this chat. Only the owner of this instance stores keys, in a chat of their own; ask the owner to store it there. If it was not a key, send your input again without the part that looks like one.';
+
+/** Thrown where a mandate's typed answer reads as carrying a key; nothing of it was stored. */
+export class MandateKeyInputError extends Error {
+  constructor() { super(MANDATE_KEY_INPUT_REFUSAL); this.name = 'MandateKeyInputError'; }
+}
+
+/** The shapes that mark a credential by their context (a bearer header, user:pass in a URL). */
+const CONTEXT_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = SECRET_SHAPES
+  .filter((s) => s.kind === 'contextual')
+  .map((s) => ({ label: s.label, pattern: s.pattern as RegExp }));
+
+/** A word a person writes before a credential's value, German or English. */
+const CREDENTIAL_CUE = /(?<![\p{L}\p{N}])(?:api[-_ ]?key|access[-_ ]?key|client[-_ ]?secret|secret|token|key|schlüssel|passwor[dt]|kennwort|zugangsdaten|credentials?)(?![\p{L}\p{N}])/giu;
+const PASSWORD_CUE = /^(?:passwor[dt]|kennwort)$/i;
+const PASSWORD_LINK = /^(?:ist|lautet|heisst|heißt|is|=)$/i;
+/** How many words after a cue are read: on the cue's own line, or on the next line when a colon
+ *  or an equals sign ends the cue's line ("Der Key:\n<key>"). */
+const CUE_WINDOW = 4;
+
+/**
+ * Keys a helper of a small business is likely to paste whose form the run route's mask does not
+ * know, each with a prefix or a fixed layout that ordinary text does not have.
+ */
+const MANDATE_EXTRA_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = [
+  { label: 'HubSpot private app token', pattern: /(?<![\w-])pat-(?:na|eu|ap)\d-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\w-])/i },
+  { label: 'WooCommerce key', pattern: /(?<!\w)c[ks]_[0-9a-f]{40}(?!\w)/ },
+  { label: 'Mailchimp API key', pattern: /(?<![\w.-])[0-9a-f]{32}-us\d{1,2}(?![\w.-])/ },
+  { label: 'SendGrid API key', pattern: /(?<![\w.])SG\.[\w-]{20,24}\.[\w-]{40,46}(?![\w-])/ },
+  { label: 'Twilio API key', pattern: /(?<!\w)SK[0-9a-f]{32}(?!\w)/ },
+];
+
+/** A Stripe object's id (payment, customer, charge …), which is no secret: never a key on its own.
+ *  The whole word in Stripe's form, so a vendor's key with a short prefix of its own is not let through. */
+const NON_SECRET_ID = /^(?:pi|pm|cus|ch|prod|price|sub|evt|acct|txn|seti)_[A-Za-z0-9]{14,30}$/;
+
+function entropyBits(s: string): number {
+  const freq = new Map<string, number>();
+  for (const ch of s) freq.set(ch, (freq.get(ch) ?? 0) + 1);
+  let bits = 0;
+  for (const n of freq.values()) { const p = n / s.length; bits -= p * Math.log2(p); }
+  return bits;
+}
+
+function charClasses(s: string): number {
+  return [/[A-Z]/, /[a-z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(s)).length;
+}
+
+/**
+ * How often neighbouring characters change class (upper, lower, digit), per character. A random
+ * key changes class at about every second character; a word joined with a number or a camel-case
+ * name (`Rechnung2024November05Final`, `meinshop2024Zuerich`) at a quarter or fewer.
+ */
+function classChangeRate(run: string): number {
+  const cls = (c: string): number => (/[A-Z]/.test(c) ? 0 : /[a-z]/.test(c) ? 1 : 2);
+  let changes = 0;
+  for (let i = 1; i < run.length; i++) if (cls(run[i]!) !== cls(run[i - 1]!)) changes++;
+  return run.length > 1 ? changes / (run.length - 1) : 0;
+}
+
+/** A vault or env name (`SHOPIFY_ADMIN_TOKEN`), a link or an address names a credential; it is not one. */
+function isNameOrLink(tok: string): boolean {
+  return /^[A-Z0-9_]+$/.test(tok) || /:\/\//.test(tok) || /^(?:secret|env):/i.test(tok);
+}
+
+/** Every character a hex digit, in lower case: a key drawn from sixteen symbols. */
+const HEX_ONLY = /^[0-9a-f]+$/;
+
+/**
+ * How spread a key's characters must be. A key drawn from sixteen symbols spreads less than one
+ * drawn from letters and digits: at 3.3 bits, 1.8 % of random 32-character hex keys fell short.
+ */
+const KEY_SPREAD_BITS = 3.3;
+const HEX_KEY_SPREAD_BITS = 2.5;
+
+/** How often two capitals stand side by side: a random key's letters do so at one pair in four,
+ *  a camel-case name (`vaultKeyForAccount`) only at an acronym. */
+function capitalPairs(tok: string): number {
+  return (tok.match(/(?=[A-Z]{2})/g) ?? []).length;
+}
+
+/**
+ * Long enough, spread: a key's value. Letters and digits; or letters alone, changing case as
+ * often as a random key and with capitals side by side at least twice, since one key in sixty of
+ * 24 random letters and digits holds no digit. Most camel-case names have their capitals apart;
+ * one with capitals side by side twice (three in a row, as AIM in `getOpenAIModelMap`, or two
+ * acronyms apart) reads as a key.
+ */
+function keyShaped(tok: string): boolean {
+  if (isNameOrLink(tok) || tok.length < 16) return false;
+  if (/[A-Za-z]/.test(tok) && /[0-9]/.test(tok)) {
+    return entropyBits(tok) >= (HEX_ONLY.test(tok) ? HEX_KEY_SPREAD_BITS : KEY_SPREAD_BITS);
+  }
+  return /^[A-Za-z]+$/.test(tok) && capitalPairs(tok) >= 2
+    && classChangeRate(tok) >= 0.35 && entropyBits(tok) >= KEY_SPREAD_BITS;
+}
+
+/** A password's value: eight or more characters in three classes. */
+function passwordShaped(tok: string): boolean {
+  return !isNameOrLink(tok) && tok.length >= 8 && charClasses(tok) >= 3;
+}
+
+/**
+ * The words after `from`, at most `CUE_WINDOW`, quotes, markdown emphasis and leading and trailing
+ * punctuation stripped: those on the same line, or, when a colon or an equals sign and nothing
+ * else follows the cue on its line, those on the next line that holds any.
+ */
+function wordsAfter(text: string, from: number): string[] {
+  const rest = text.slice(from);
+  const lines = rest.split('\n');
+  const own = lines[0]!;
+  const line = /^[*_\s]*[:=][*_\s]*$/.test(own) ? (lines.slice(1).find((l) => l.trim().length > 0) ?? '') : own;
+  return line.split(/[\s"'`„“”]+/)
+    .map((w) => w.replace(/^[*_:=(<[]+|[*_.,;:!?)>\]]+$/g, ''))
+    .filter((w) => w.length > 0)
+    .slice(0, CUE_WINDOW);
+}
+
+/**
+ * Why a message a mandate's helper typed reads as carrying a credential, or `null` when it does
+ * not. Wider than `maskCredentialInput`, which the run route applies to every message: in a
+ * mandate's turn no key is taken at all, so a key without a vendor's prefix is caught as well,
+ * from its context. In order:
+ *   1. a vendor shape or a JWT (`maskCredentialInput`), a private key block, and the further vendor
+ *      shapes in `MANDATE_EXTRA_SHAPES`;
+ *   2. a bearer header or user:pass in a URL;
+ *   3. a cue word (key, token, secret …) followed, within the next four words on its line (or on
+ *      the next line, when a colon ends the cue's line), by a key-shaped word; a password cue
+ *      (Passwort, Kennwort, password, not as the first part of a compound such as
+ *      "Passwort-Manager") followed by a password- or key-shaped word that is the next word or
+ *      comes after one linking word;
+ *   4. a message that is one word (a code fence around it allowed), at least 20 characters, with an
+ *      unbroken letter-and-digit run of 16 or more holding upper case, lower case and digits that
+ *      change class as often as a random key does, and that is not a Stripe object's id — a key
+ *      pasted on its own. A random-looking id pasted alone, such as a Google Drive file id, reads
+ *      as one too; a link to it does not.
+ * Returns a fixed label, never any part of the text.
+ */
+export function mandateCredentialInput(text: string): string | null {
+  const shaped = maskCredentialInput(text).labels[0];
+  if (shaped !== undefined) return shaped;
+  for (const { label, pattern } of [...MANDATE_EXTRA_SHAPES, ...CONTEXT_SHAPES]) if (pattern.test(text)) return label;
+  for (const cue of text.matchAll(CREDENTIAL_CUE)) {
+    const end = (cue.index ?? 0) + cue[0].length;
+    const words = wordsAfter(text, end);
+    if (PASSWORD_CUE.test(cue[0])) {
+      // "Passwort-Manager", "Kennwort-Hinweis": a compound word, not a password cue. Only here — a
+      // key cue joined by a hyphen ("Token-Wert: <key>", "key-<key>") still counts.
+      if (text[end] === '-') continue;
+      // A password is short and word-like: it counts only where it is plainly the value (the next
+      // word, or after one linking word).
+      const plain = PASSWORD_LINK.test(words[0] ?? '') ? words[1] : words[0];
+      if (plain !== undefined && (passwordShaped(plain) || keyShaped(plain))) return 'password';
+      continue;
+    }
+    if (words.some(keyShaped)) return 'credential after a cue word';
+  }
+  const lone = text.trim().replace(/^```[\w-]*\s*/, '').replace(/\s*```$/, '');
+  if (
+    !/\s/.test(lone) && lone.length >= 20 && !isNameOrLink(lone) && !/^sha(?:256|384|512)-/.test(lone)
+    && !NON_SECRET_ID.test(lone)
+    && (lone.match(/[A-Za-z0-9]{16,}/g) ?? []).some((run) =>
+      /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run) && classChangeRate(run) >= 0.35)
+  ) return 'credential on its own';
+  return null;
+}
+
+/**
  * Mask known SHAPES and known VALUES in one pass, over the ORIGINAL text.
  *
  * Running the two maskers in sequence is unsafe in BOTH orders, and that is
@@ -372,6 +547,72 @@ export function withoutTypedCredentials(text: string): string {
  * exact pass could not hide a shape. It does not: a value of four characters or
  * fewer becomes `***` (today every value under 16), so `xx ab yy` grows by one.)
  */
+/** Shortest JSON-blob leaf the export masker hides on its own: below it a leaf is a label, not a credential. */
+const EXPORT_MASK_LEAF_MIN = 12;
+/** The shortest form the export's byte scan of non-text files looks for. */
+export const EXPORT_SCAN_MIN = 8;
+
+/**
+ * The values the data export masks, derived from the stored ones. A secret is not only written
+ * down whole: an OAuth or app-password secret is a JSON blob whose refresh token can appear on its
+ * own, and any value can appear JSON-escaped (once or twice: a tool result inside a JSON column),
+ * base64-encoded or URL-encoded. Each stored value contributes itself, the string leaves of its
+ * JSON (at least `EXPORT_MASK_LEAF_MIN` characters), and those forms of each. Named remainder:
+ * base64 is matched only at the alignment it starts on, and other encodings are not derived.
+ */
+/** Shortest value whose base64 is also derived at a shifted offset: below it the run is too short to tell. */
+const EXPORT_SHIFT_MIN = 12;
+
+/**
+ * The base64 characters a value's bytes decide alone when `k` (0, 1, 2) other bytes come before it
+ * and an unknown number after it: the full groups of the padded buffer, without the first group
+ * when something precedes the value (it mixes in those bytes) and without the trailing partial group.
+ */
+export function shiftedBase64(bytes: Buffer): string[] {
+  const out: string[] = [];
+  for (let k = 0; k < 3; k++) {
+    const enc = Buffer.concat([Buffer.alloc(k), bytes]).toString('base64');
+    const start = k === 0 ? 0 : 4;
+    const end = Math.floor((k + bytes.length) / 3) * 4;
+    if (end - start >= 8) out.push(enc.slice(start, end));
+  }
+  return out;
+}
+
+export function exportMaskValues(values: readonly string[]): string[] {
+  const out = new Set<string>();
+  const leaves = (v: unknown, into: string[]): void => {
+    if (typeof v === 'string') { if (v.length >= EXPORT_MASK_LEAF_MIN) into.push(v); return; }
+    if (Array.isArray(v)) { for (const x of v) leaves(x, into); return; }
+    if (v !== null && typeof v === 'object') for (const x of Object.values(v as Record<string, unknown>)) leaves(x, into);
+  };
+  for (const value of values) {
+    if (value.length < 2) continue;
+    const base = [value];
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed !== null && typeof parsed === 'object') leaves(parsed, base);
+    } catch { /* not JSON: the value alone */ }
+    for (const c of base) {
+      out.add(c);
+      const once = JSON.stringify(c).slice(1, -1);
+      out.add(once);
+      out.add(JSON.stringify(once).slice(1, -1));
+      out.add(Buffer.from(c, 'utf8').toString('base64'));
+      out.add(Buffer.from(c, 'utf8').toString('base64url'));
+      out.add(encodeURIComponent(c));
+      // base64 of a value inside a longer text (`user:` + a password in Basic auth) does not start
+      // on the value's own alignment and does not end on it: for each of the three offsets, the
+      // run of full groups that only the value's bytes decide.
+      if (c.length >= EXPORT_SHIFT_MIN) for (const shifted of shiftedBase64(Buffer.from(c, 'utf8'))) {
+        out.add(shifted);
+        out.add(shifted.replace(/\+/g, '-').replace(/\//g, '_'));
+      }
+    }
+  }
+  return [...out];
+}
+
 export function maskSecretsAndPatterns(
   text: string,
   values: readonly string[],
@@ -674,9 +915,10 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
-   * A check every {@link resolve} asks before it hands a value out, set by the engine once the
-   * stores it reads exist (`connectionTokenAllowed`: a token of a connection whose mandate has
-   * ended). A guard that throws withholds the value.
+   * A check every {@link resolve} asks before it hands a value out, set by the engine as soon as
+   * this store exists (`Engine.resolveGuard`: a token of a connection whose mandate has ended, and,
+   * while the API profiles are not known, every vault name that could hold one). A guard that
+   * throws withholds the value.
    */
   private resolveGuard: ((name: string) => boolean) | null = null;
 
@@ -699,7 +941,12 @@ export class SecretStore implements SecretStoreLike {
     return secret === undefined || secret.value === '' ? '' : hash(secret.value);
   }
 
-  resolve(name: string): string | null {
+  /**
+   * The value {@link resolve} would hand out for `name`, or `null`: stored, not expired, consented
+   * to, and let through by the resolve guard. The one place these four questions are asked, so
+   * {@link resolve} and {@link holds} cannot drift apart.
+   */
+  private usableValue(name: string): string | null {
     const secret = this.secrets.get(name);
     if (!secret) return null;
     if (this.isExpired(name)) return null;
@@ -711,9 +958,23 @@ export class SecretStore implements SecretStoreLike {
         return null;
       }
     }
-
-    channels.secretAccess.publish({ name, action: 'resolve' });
     return secret.value;
+  }
+
+  resolve(name: string): string | null {
+    const value = this.usableValue(name);
+    if (value === null) return null;
+    channels.secretAccess.publish({ name, action: 'resolve' });
+    return value;
+  }
+
+  /**
+   * Whether {@link resolve} would hand out a value for `name`, without reading it out: nothing is
+   * returned and no `secretAccess` event is published, so a check that only asks "is it there?"
+   * does not read in the audit trail as a credential read.
+   */
+  holds(name: string): boolean {
+    return this.usableValue(name) !== null;
   }
 
   listNames(): string[] {
@@ -811,6 +1072,31 @@ export class SecretStore implements SecretStoreLike {
 
   maskSecrets(text: string): string {
     return maskValuesIn(text, this._maskedValues());
+  }
+
+  /**
+   * The data export's masker: {@link maskAll} over the stored values AND the forms they take once
+   * written down elsewhere ({@link exportMaskValues}). The values never leave this object.
+   */
+  maskForExport(text: string): string {
+    return maskSecretsAndPatterns(text, exportMaskValues(this._maskedValues()));
+  }
+
+  /**
+   * The data export's guard for file bytes: masks text with {@link maskForExport}, and says
+   * whether raw bytes hold any of the export's forms of a stored value. Built once per export;
+   * the values stay inside the closure, never in what it returns.
+   */
+  exportGuard(): { mask: (text: string) => string; holds: (bytes: Buffer) => boolean; readonly maxNeedle: number } {
+    const values = exportMaskValues(this._maskedValues());
+    // Shorter forms would occur by chance in almost any binary file and withhold it: the scan
+    // looks for forms of at least EXPORT_SCAN_MIN characters (a named remainder below that).
+    const needles = values.filter(v => v.length >= EXPORT_SCAN_MIN).map(v => Buffer.from(v, 'utf8'));
+    return {
+      mask: (text) => maskSecretsAndPatterns(text, values),
+      holds: (bytes) => needles.some(n => bytes.includes(n)),
+      maxNeedle: needles.reduce((m, n) => Math.max(m, n.length), 0),
+    };
   }
 
   recordConsent(name: string): void {

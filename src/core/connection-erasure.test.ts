@@ -419,7 +419,7 @@ describe('T2 — the covered set is the connection\'s epoch, from the grant its 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('a `new` grant minted in the middle of the connection\'s life does not start an epoch', () => {
+  it('a held-back profile\'s corrected save stays in the connection\'s epoch', () => {
     // G1 (`new`) and G2 (`consent`) on one connection row.
     const oauth = (clientSecretKey: string): ApiProfile => ({
       id: 'shop-api', name: 'shop-api', base_url: 'https://api.shop.example/v1', description: 'd',
@@ -445,10 +445,11 @@ describe('T2 — the covered set is the connection\'s epoch, from the grant its 
     expect(booted.get('shop-api')).toBeUndefined();
     expect(booted.knownProfiles().map((p) => p.id)).toEqual(['shop-api']);
 
-    // Its corrected save is a create to the store, so it mints `new` — on the same row.
+    // Its corrected save is a create to the store, but it reads the held-back grant: a change of
+    // credentials, not a `new` one (it minted `new` until a held-back profile counted as new).
     expect(booted.save(oauth('SHOP_API_CSECRET'))).toEqual({ ok: true, isNew: true });
     const g3 = booted.get('shop-api')!.oauth_grant!.grant_id!;
-    expect(ledger.get(g3)?.reason).toBe('new');
+    expect(ledger.get(g3)?.reason).toBe('credentials');
     expect(conn.get('shop-api')!.createdAt).toBe(row.createdAt);
 
     expect([...(coveredGrantSet(db.getDb(), 'shop-api') ?? [])].sort()).toEqual([g1, g2, g3].sort());
@@ -774,7 +775,7 @@ describe('the migration that adds where an epoch starts', () => {
       const backfill = ledger.mint('shop', 'api', 'backfill');
       db.getDb().prepare("UPDATE connection_grants SET minted_at = '2026-03-01 00:00:05' WHERE grant_id = ?").run(backfill);
       db.getDb().prepare("UPDATE connections SET config_json = json_set(config_json, '$.oauth_grant.grant_id', ?) WHERE id = 'shop'").run(backfill);
-      db.getDb().exec('DROP INDEX IF EXISTS idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; ALTER TABLE inbound_events DROP COLUMN attempt_id; ALTER TABLE inbound_events DROP COLUMN reported_at; ALTER TABLE inbound_events DROP COLUMN unknown_reported_at; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; ALTER TABLE bulk_targets DROP COLUMN deselected_at; ALTER TABLE triggers DROP COLUMN paused_db_at; ALTER TABLE triggers DROP COLUMN covered_created_by; ALTER TABLE triggers DROP COLUMN covered_created_id; ALTER TABLE triggers DROP COLUMN covered_created_at; ALTER TABLE triggers DROP COLUMN covered_edited_by; ALTER TABLE triggers DROP COLUMN covered_edited_id; ALTER TABLE triggers DROP COLUMN covered_edited_at; ALTER TABLE triggers DROP COLUMN covered_at; ALTER TABLE workflows DROP COLUMN covered_created_by; ALTER TABLE workflows DROP COLUMN covered_created_id; ALTER TABLE workflows DROP COLUMN covered_created_at; ALTER TABLE workflows DROP COLUMN covered_edited_by; ALTER TABLE workflows DROP COLUMN covered_edited_id; ALTER TABLE workflows DROP COLUMN covered_edited_at; ALTER TABLE workflows DROP COLUMN covered_at; ALTER TABLE bulk_runs DROP COLUMN start_domains; ALTER TABLE triggers DROP COLUMN paused_at; ALTER TABLE triggers DROP COLUMN paused_due_at; ALTER TABLE triggers DROP COLUMN paused_for; ALTER TABLE triggers DROP COLUMN pause_noticed_at; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
+      db.getDb().exec('DROP INDEX IF EXISTS idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; ALTER TABLE inbound_events DROP COLUMN attempt_id; ALTER TABLE inbound_events DROP COLUMN reported_at; ALTER TABLE inbound_events DROP COLUMN unknown_reported_at; ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; ALTER TABLE bulk_targets DROP COLUMN deselected_at; ALTER TABLE triggers DROP COLUMN paused_db_at; ALTER TABLE triggers DROP COLUMN covered_created_by; ALTER TABLE triggers DROP COLUMN covered_created_id; ALTER TABLE triggers DROP COLUMN covered_created_at; ALTER TABLE triggers DROP COLUMN covered_edited_by; ALTER TABLE triggers DROP COLUMN covered_edited_id; ALTER TABLE triggers DROP COLUMN covered_edited_at; ALTER TABLE triggers DROP COLUMN covered_at; ALTER TABLE workflows DROP COLUMN covered_created_by; ALTER TABLE workflows DROP COLUMN covered_created_id; ALTER TABLE workflows DROP COLUMN covered_created_at; ALTER TABLE workflows DROP COLUMN covered_edited_by; ALTER TABLE workflows DROP COLUMN covered_edited_id; ALTER TABLE workflows DROP COLUMN covered_edited_at; ALTER TABLE workflows DROP COLUMN covered_at; ALTER TABLE bulk_runs DROP COLUMN start_domains; ALTER TABLE triggers DROP COLUMN paused_at; ALTER TABLE triggers DROP COLUMN paused_due_at; ALTER TABLE triggers DROP COLUMN paused_for; ALTER TABLE triggers DROP COLUMN pause_noticed_at; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
       db.close();
 
       const migrated = new EngineDb(path);

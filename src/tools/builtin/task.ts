@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
+import { workflowStampState } from '../../core/workflow-stamp.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
@@ -8,6 +9,8 @@ import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
+import { readAddressWrites } from '../../core/outbound-write.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -391,6 +394,11 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     }
 
     try {
+      // What the turn had taken in, on every trigger it files, not only a workflow one: the
+      // reminder to confirm it says so (worker-loop `consentOneBody`), and what its run files for
+      // approval counts as after outside content (`executeStandard` → `afterUntrusted`). Only a
+      // workflow run is also seeded tainted (`executePipeline`); a run_agent run is not.
+      const createdUntrusted = describeTurnUntrusted(agent);
       const baseParams = {
         title: input.title,
         description: input.description,
@@ -405,6 +413,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // owner's stamp exactly as it does when created over HTTP (PRD customer-granted-operator-
         // access §3.12, H2). The owner's turns leave it absent, as before.
         ...(isOwnerPrincipal(agent.principal) ? {} : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
+        ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
       };
 
       if (input.workflow_id) {
@@ -465,6 +474,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           if (refusal !== null) return `Error: workflow ${planned?.id ?? input.workflow_id}: ${refusal}`;
         }
         if (planned) {
+          const stampState = agent.toolContext.runHistory?.workflowStampState(planned) ?? workflowStampState(null, planned, undefined);
           const unschedulable = !isSchedulableWorkflow(planned)
             ? `is '${planned.mode}' and may ask for something other than an answer from its owner; a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user. Remove its ask_secret / ask_human steps before scheduling it.`
             : planned.template !== true
@@ -474,12 +484,15 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
               // owner saw them (an old template carries one from its content migration).
               : planned.mode === 'interactive'
                 ? 'asks its owner while it runs. Ask the user to schedule it from the workflow library: its confirmation names the steps that ask, and it creates the task. Do not create it here.'
-              : !planned.confirmedAt
+              // The owner's stamp is bound to the steps (`workflow-stamp.ts`): one over other steps,
+              // or a workflow someone the owner let in shaped, waits for the owner to review it.
+              : stampState === 'awaits_owner_stamp'
+                ? 'waits for its owner to review its steps: they were set up or changed by someone the owner let in, or changed after the owner stamped them. Ask the user to review its steps under Automation → Workflows and stamp them; then schedule it there. Do not create the task here.'
+              : stampState === 'unconfirmed'
                 ? 'has not been confirmed for unattended runs, so a task for it would be disabled at its first run. Ask the user to schedule it from the workflow library: that confirms it and creates the task. Do not create it again here.'
                 : null;
           if (unschedulable !== null) return `Error: workflow ${planned.id} ${unschedulable}`;
         }
-        const createdUntrusted = describeTurnUntrusted(agent);
         const plannedId = planned?.id;
         const workflowId = input.workflow_id;
         return withInstanceWrite(agent, { site: 'task_create#workflow', kind: 'create', store: 'tasks', target: () => [['type', 'workflow'], ['workflow', plannedId]], main: ['create'] }, (w) => {
@@ -489,9 +502,8 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             pipelineId: plannedId ?? workflowId,
             scheduleCron: input.schedule,
             ...(pipelineParams !== undefined ? { pipelineParams } : {}),
-            // The run this task starts has no session of its own; it inherits what this one
-            // had taken in, so a step's durable write carries the trust it would carry here.
-            ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
+            // `createdUntrusted` rides in `baseParams`: the run this task starts has no session of
+            // its own, it inherits what this one had taken in.
           }), ifReturned);
           w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
@@ -514,6 +526,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       }
 
       if (input.watch_url) {
+        // A watch only reads its page, unattended and again and again: an address a server may
+        // run as a write (`?_method=DELETE`, a GraphQL mutation) would send that write on every check.
+        if (readAddressWrites(input.watch_url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);
@@ -654,6 +669,9 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
           tags: input.tags,
           nextRunAt: input.run_at,
           scheduleCron: input.schedule,
+          // A trigger's instruction rewritten here carries what this turn had taken in, as one
+          // created here does; the manager records it only with a title or description change.
+          untrusted: describeTurnUntrusted(agent),
         }, scopeFilter, agent.principal), ifNonNull);
         if (!task) return `Task not found: ${input.task_id}`;
         // Surface the new schedule when it changed so the agent can confirm

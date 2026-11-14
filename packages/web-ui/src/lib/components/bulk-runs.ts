@@ -18,13 +18,24 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.intro', 'bulk.deselect.taken_out',
 	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
 	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
-	'bulk.halt.mandateEnded', 'bulk.halt.checksum',
+	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note',
 ]);
 
-/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form. */
+/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form, a key's
+ *  singular (`_one`, {@link bulkOne}) in its `_mandate_one` form. */
 export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
-	const key = (k: string): string => (BULK_MANDATE_KEYS.has(k) ? `${k}_mandate` : k);
+	const key = (k: string): string => {
+		if (BULK_MANDATE_KEYS.has(k)) return `${k}_mandate`;
+		const base = k.endsWith('_one') ? k.slice(0, -'_one'.length) : null;
+		return base !== null && BULK_MANDATE_KEYS.has(base) ? `${base}_mandate_one` : k;
+	};
 	return { t: (k) => i18n.t(key(k)), tf: (k, vars) => i18n.tf(key(k), vars) };
+}
+
+/** A count's sentence at one: the key's `_one` form, which says "1 product", not "1 products".
+ *  Only for the keys that have a worded singular. */
+export function bulkOne(key: string, n: number): string {
+	return n === 1 ? `${key}_one` : key;
 }
 
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
@@ -86,13 +97,18 @@ export interface BulkRunDetailData extends BulkRun {
 	/** The target the run waits on as its probe. `found`: lynox sent to it without a clear answer
 	 *  and then found it as planned, so it cannot say it wrote it; absent reads as written. */
 	probe: { key: string; fields: string[]; found?: boolean } | null;
+	/** Whether this run confirmed a probe of its own: it stays a step the run went through once
+	 *  the probe holds. Absent reads as false. */
+	probeOwn?: boolean;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
 	listFirstPage: string | null;
 	/** A Shopify list narrowed to a product type and/or vendor: the values as the planner gave them (supplied text). */
-	listFilters: Readonly<Record<string, string>> | null;
+	listFilters: Readonly<Record<string, string | readonly string[]>> | null;
 	listStartChecksum: string | null;
+	/** An undone run: the undo that took it back and when its last target was taken back. Absent on an older engine. */
+	undoneBy?: { runId: string; at: string } | null | undefined;
 	/** The engine's note on a list read page by page (English). */
 	listNote: string | null;
 	/** A judged run's rule as the owner starts it (owner only), and its hash the start presents. */
@@ -434,16 +450,74 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
+/** A list of more values than this is folded until the owner shows it all (ux U-175). */
+export const BULK_LIST_FILTER_UNFOLDED_MAX = 5;
+/** How many values a folded list shows before the count of the rest. */
+const BULK_LIST_FILTER_FOLDED_SHOWN = 3;
+
+/** How many values the folded filter line leaves out a click would show: every value of each
+ *  list longer than {@link BULK_LIST_FILTER_UNFOLDED_MAX}, together. 0 when nothing folds. */
+export function bulkListFilterFolded(filters: Readonly<Record<string, string | readonly string[]>> | null): number {
+	if (filters === null) return 0;
+	return Object.values(filters).reduce((n, v) => (typeof v !== 'string' && v.length > BULK_LIST_FILTER_UNFOLDED_MAX ? n + v.length : n), 0);
+}
+
 /** The line naming a filtered Shopify list's group, where the run is started and approved. The
- *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter. */
-export function bulkListFilterText(filters: Readonly<Record<string, string>> | null, i18n: BulkI18n): string | null {
+ *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a group.
+ *  `folded` shows each list of more than {@link BULK_LIST_FILTER_UNFOLDED_MAX} values folded. */
+export function bulkListFilterText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n, folded = false): string | null {
 	if (filters === null) return null;
+	const values = bulkFilterValues(i18n, folded);
 	const type = filters['product_type'];
 	const vendor = filters['vendor'];
-	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: bulkVisibleText(type), vendor: bulkVisibleText(vendor) });
-	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: bulkVisibleText(type) });
-	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: bulkVisibleText(vendor) });
+	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: values(type), vendor: values(vendor) });
+	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: values(type) });
+	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: values(vendor) });
 	return null;
+}
+
+/** A filter's values for its line: every value in its own quotes, they are the scope the owner
+ *  approves. Folded, a long list shows its first values and the count of the rest, so the line
+ *  stays true (U-175). */
+function bulkFilterValues(i18n: BulkI18n, folded: boolean): (v: string | readonly string[]) => string {
+	return (v) => {
+		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
+		if (folded && quoted.length > BULK_LIST_FILTER_UNFOLDED_MAX) {
+			return `${quoted.slice(0, BULK_LIST_FILTER_FOLDED_SHOWN).join(', ')} ${i18n.tf('bulk.list.more', { n: String(quoted.length - BULK_LIST_FILTER_FOLDED_SHOWN) })}`;
+		}
+		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
+	};
+}
+
+/** The line naming the statuses a Shopify product list reads, under the group's line; `{}` is a
+ *  list of every product. A store's search lists drafts, archived products and gift cards unless a
+ *  status narrows it, and the targets name none of them as such. Null for a list that is not a
+ *  store's products. A status filter naming every status narrows nothing, so it reads as no status
+ *  filter: a planner asked for every product often lists all of them, and "only" beside the whole
+ *  set would promise a narrowing there is not. */
+export function bulkListStatusText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n): string | null {
+	if (filters === null) return null;
+	const status = filters['status'];
+	if (status !== undefined) {
+		const values = typeof status === 'string' ? [status] : status;
+		// Exactly the four (four entries holding all four repeat none): a stored list with another
+		// value or a repeat is one the engine reads nothing for, and its line names the values as they came.
+		const everyStatus = values.length === BULK_STORE_STATUSES.length && BULK_STORE_STATUSES.every((s) => values.includes(s));
+		if (!everyStatus) {
+			const names = values.map((s) => bulkStatusName(s, i18n));
+			return i18n.tf('bulk.list.filter_status', { status: bulkFilterValues(i18n, false)(names) });
+		}
+	}
+	const group = filters['product_type'] !== undefined || filters['vendor'] !== undefined;
+	return i18n.t(group ? 'bulk.list.any_status' : 'bulk.list.all_status');
+}
+
+/** Every status a Shopify product can have, as the store's search spells them. */
+const BULK_STORE_STATUSES: readonly string[] = ['active', 'draft', 'archived', 'unlisted'];
+
+/** A Shopify product status by its name in the page's language; one no store has, as it came. */
+function bulkStatusName(status: string, i18n: BulkI18n): string {
+	return BULK_STORE_STATUSES.includes(status) ? i18n.t(`bulk.list.status.${status}`) : status;
 }
 
 /** The provider that serves a judge call, by name. */
@@ -493,6 +567,76 @@ export interface BulkTarget {
 	refusedValues?: { field: string; value: string }[] | undefined;
 	/** With `secret_in_context`: the field the judge only reads that held it, by its name. */
 	contextField?: string | undefined;
+	/** Per HTML field an `update` target changes: the elements and comments its new value adds and
+	 *  removes, each with its full value (PRD shopify-preset §20.2 item 5, sec-core M3). Computed by
+	 *  the engine from the parser's tree; the page only lists it, as text. */
+	markupChanges?: BulkFieldMarkupChange[] | undefined;
+}
+
+/** One element or comment a new value adds or removes, as the engine's parser read it. */
+export interface BulkMarkupItem {
+	kind: 'element' | 'comment';
+	namespace: string;
+	element: string;
+	attributes: (readonly [name: string, value: string])[];
+	/** The raw text of an element that holds it (a `script`, a `style`), or a comment's text. */
+	text: string | null;
+	/** Inside a `template`'s content. */
+	inTemplate: boolean;
+}
+
+export interface BulkFieldMarkupChange {
+	field: string;
+	added: BulkMarkupItem[];
+	removed: BulkMarkupItem[];
+	/** An added item lies outside what a write may add (the engine's allowlist): on an undo, markup
+	 *  from before the run that it writes back. Optional: an older engine sends none. */
+	addsOutsideAllowlist?: boolean | undefined;
+}
+
+/** An element or comment as code text, every attribute with its whole value (sec-core M3: a
+ *  rewrite must not hide what a link points to). Never markup: the page sets it as text. Hidden
+ *  characters show as their marks (`bulkVisibleText`). A `"` in a value shows as `&quot;`, so a
+ *  value cannot close its quote and seem to set a second attribute; an element outside HTML
+ *  carries its namespace (`svg:a`), so an SVG link does not read as an HTML one. */
+export function bulkMarkupItemText(item: BulkMarkupItem): string {
+	if (item.kind === 'comment') return bulkVisibleText(`<!--${item.text ?? ''}-->`);
+	const attrs = item.attributes.map(([name, value]) => ` ${name}="${value.replaceAll('"', '&quot;')}"`).join('');
+	const name = item.namespace === 'html' ? item.element : `${item.namespace}:${item.element}`;
+	const open = `<${name}${attrs}>`;
+	return bulkVisibleText(item.text === null ? open : `${open}${item.text}</${name}>`);
+}
+
+/** One line of a target's markup list. */
+export interface BulkMarkupLine {
+	/** `added` or `removed`, by the run's kind: a write's „neu/entfernt“, an undo's „stellt wieder
+	 *  her / nimmt wieder heraus“ (ux U-151). */
+	label: string;
+	code: string;
+	/** Set where the element sits inside a `template`'s content. */
+	template: string | null;
+}
+
+/** What the page lists for one field's markup change (ux U-151): a head naming the field on a
+ *  write (none on an undo, whose lines say what it restores); on an undo that writes back markup
+ *  outside the allowlist, the sentence that it was in the shop before the run (U-092, in a
+ *  mandate's words through `i18n`); the lines; and the note that plain formatting is left out,
+ *  without which the list would read as complete. */
+export function bulkMarkupList(
+	change: BulkFieldMarkupChange, undo: boolean, fieldName: string, i18n: BulkI18n,
+): { head: string | null; restoresNote: string | null; lines: BulkMarkupLine[]; note: string } {
+	const template = i18n.t('bulk.markup.in_template');
+	const line = (key: string) => (item: BulkMarkupItem): BulkMarkupLine =>
+		({ label: i18n.t(key), code: bulkMarkupItemText(item), template: item.inTemplate ? template : null });
+	return {
+		head: undo ? null : i18n.tf('bulk.markup.head', { field: fieldName }),
+		restoresNote: undo && change.addsOutsideAllowlist === true ? i18n.t('bulk.markup.restores_note') : null,
+		lines: [
+			...change.added.map(line(undo ? 'bulk.markup.restores' : 'bulk.markup.added')),
+			...change.removed.map(line(undo ? 'bulk.markup.removes' : 'bulk.markup.removed')),
+		],
+		note: i18n.t('bulk.markup.plain_note'),
+	};
 }
 
 /** How much of a long value the preview shows before „show the whole text“ (ux U-103). */
@@ -513,12 +657,39 @@ export function bulkHostOf(targetSystem: string): string | null {
 	return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
 }
 
-/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`). */
-const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`):
+ *  one label of at most 63 characters. */
+const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$/;
 
 /** Whether an external run writes to a Shopify store. */
 export function bulkIsShopifyHost(host: string | null): boolean {
 	return host !== null && SHOPIFY_STORE_HOST.test(host);
+}
+
+/** A Shopify product's key, exactly: the number is taken from nothing else (a key in any other
+ *  form gets no link). */
+const SHOPIFY_PRODUCT_GID = /^gid:\/\/shopify\/Product\/(\d+)$/;
+
+/** How a target is named to the owner. On a Shopify run with a product key: its number and the
+ *  link to it in the store's admin (https, the run's own host). Anything else is named by its key
+ *  alone. No product title: the before-image holds only the fields a run writes, so a title is
+ *  there only on a run that rewrites it — and then it is the old one, which the diff already shows. */
+export interface BulkTargetName {
+	number: string | null;
+	adminUrl: string | null;
+}
+
+export function bulkTargetName(targetSystem: string, target: { key: string }): BulkTargetName {
+	const host = bulkHostOf(targetSystem);
+	const m = bulkIsShopifyHost(host) ? SHOPIFY_PRODUCT_GID.exec(target.key) : null;
+	if (m === null) return { number: null, adminUrl: null };
+	return { number: m[1]!, adminUrl: `https://${host}/admin/products/${m[1]}` };
+}
+
+/** A target's name in a sentence: „Produkt <Zahl>“ for a Shopify product, else its key. */
+export function bulkTargetLabel(targetSystem: string, target: { key: string }, i18n: Pick<BulkI18n, 'tf'>): string {
+	const name = bulkTargetName(targetSystem, target);
+	return name.number !== null ? i18n.tf('bulk.target.product', { n: name.number }) : bulkVisibleText(target.key);
 }
 
 /** The fields a Shopify run writes or its judge reads (U-140), each with the i18n key of its readable name. */
@@ -583,6 +754,34 @@ export function bulkAtProbe(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' 
 /** Whether a planned run waits for the owner to start it, rather than having halted on a failure. */
 export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
 	return run.phase === 'planned' && (run.haltKey === 'awaitingStart' || run.haltKey === 'listed');
+}
+
+/** Whether the engine is moving the run on by itself right now: reading its list or judging it
+ *  (planned, no halt), or writing it (approved, or writing without a halt). Every other state
+ *  waits for the owner or has ended, so the page has nothing to wait for there. */
+export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason'>): boolean {
+	// Any halt, by its key or by a reason this page does not know (an engine newer than the page).
+	if (run.haltKey !== null || run.haltReason !== null) return false;
+	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
+}
+
+/** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`
+ *  while the tab is visible, loads it whole once the run stopped working, and gives up after
+ *  `BULK_FOLLOW_MAX_MS` (a run still working then is reloaded by the owner). The engine allows a
+ *  client (by IP) 120 requests a minute, and an idle tab already asks about 28 (active runs every
+ *  4 s, the status bar every 30 s): one ask every 5 s adds 12. A refused ask (429 or any failure)
+ *  waits longer each time — twice as long, at least as long as Retry-After says, at most
+ *  `BULK_FOLLOW_BACKOFF_MAX_MS` — and never turns the page into an error. */
+export const BULK_FOLLOW_MS = 5000;
+export const BULK_FOLLOW_MAX_MS = 10 * 60 * 1000;
+export const BULK_FOLLOW_BACKOFF_MAX_MS = 60_000;
+
+/** The next wait of a follow loop after an ask: back to the base after a good answer, longer
+ *  after a refused one (`retryAfterS` from a 429's Retry-After, when it names seconds). */
+export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number | null): number {
+	if (ok) return BULK_FOLLOW_MS;
+	const asked = retryAfterS !== null && Number.isFinite(retryAfterS) && retryAfterS > 0 ? retryAfterS * 1000 : 0;
+	return Math.min(Math.max(prev * 2, asked), BULK_FOLLOW_BACKOFF_MAX_MS);
 }
 
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo
@@ -711,7 +910,7 @@ export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>):
 }
 
 /** Whether the page marks this target: the run's rollback did not complete, and this is a
- *  target it wrote and did not take back. */
+ *  target it wrote, or sent to without recording it, and did not take back. */
 export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
@@ -723,14 +922,60 @@ export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntity
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
+export type BulkStepName = (typeof BULK_STEPS)[number];
 
-/** Which of {@link BULK_STEPS} the run is at. */
-export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase'>): number {
-	if (run.phase === 'planned') return 0;
-	if (run.phase === 'previewed') return 2;
-	if (bulkAtProbe(run)) return 3;
-	if (run.phase === 'approved' || run.phase === 'writing') return 4;
-	return 5;
+type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>;
+
+/** Whether the run has a probe step: two or more targets to write (counted as the write counts
+ *  them), and its probe does not hold yet or it confirmed one of its own. A run at its probe is
+ *  the first: the server names a probe only for an external run whose probe does not hold.
+ *  With one target the one write is the whole run, also where the engine files it as a probe. */
+export function bulkHasProbeStep(run: BulkStepRun): boolean {
+	if (bulkWriting(run) < 2) return false;
+	return (bulkHostOf(run.targetSystem) !== null && !run.probeConfirmed) || run.probeOwn === true;
+}
+
+/** The steps the run shows: {@link BULK_STEPS}, without the probe where it has none. */
+export function bulkSteps(run: BulkStepRun): readonly BulkStepName[] {
+	return bulkHasProbeStep(run) ? BULK_STEPS : BULK_STEPS.filter((s) => s !== 'probe');
+}
+
+/** Which of {@link BULK_STEPS} the run is at. A run without a probe step writes its one target
+ *  under "run", though the engine may hold it there as at a probe. */
+export function bulkStep(run: BulkStepRun): BulkStepName {
+	if (run.phase === 'planned') return 'planned';
+	if (run.phase === 'previewed') return 'approval';
+	if (bulkAtProbe(run) && bulkHasProbeStep(run)) return 'probe';
+	if (run.phase === 'approved' || run.phase === 'writing') return 'run';
+	return 'done';
+}
+
+/** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
+ *  („zurückgenommen“), not „fertig“: its values are no longer live. */
+export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'>, step: BulkStepName): string {
+	return step === 'done' && run.phase === 'undone' ? 'bulk.phase.undone' : `bulk.step.${step}`;
+}
+
+/** Whether a target's after-value is shown as not live: an undo or a rollback took it back, or, on
+ *  a run taken back, the owner took it out before the write, so it never was. */
+export function bulkAfterTakenBack(run: Pick<BulkRun, 'phase'>, target: Pick<BulkTarget, 'undone' | 'deselected'>): boolean {
+	return target.undone === true || (run.phase === 'undone' && target.deselected === true);
+}
+
+/** The sentence over an undone run: when it was taken back and how many targets have their value
+ *  back. Null for a run that is not undone, or an engine that does not name its undo. */
+export function bulkUndoneText(
+	run: Pick<BulkRunDetailData, 'phase' | 'undone' | 'undoneBy'>, locale: string, i18n: BulkI18n,
+): string | null {
+	if (run.phase !== 'undone' || !run.undoneBy) return null;
+	const d = new Date(run.undoneBy.at);
+	if (Number.isNaN(d.getTime())) return null;
+	const loc = locale === 'de' ? 'de-CH' : 'en-US';
+	const date = d.toLocaleDateString(loc, { day: '2-digit', month: '2-digit', year: 'numeric' });
+	const time = d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' });
+	return run.undone === 1
+		? i18n.tf('bulk.undone.sentence_one', { date, time })
+		: i18n.tf('bulk.undone.sentence', { date, time, n: String(run.undone) });
 }
 
 /** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),
@@ -805,11 +1050,11 @@ export function bulkSkippedHead(
 	const judged = n > 0 && run.judge !== null ? ` ${i18n.t(shopify ? 'bulk.skipped.judged' : 'bulk.skipped.judged_targets')}` : '';
 	if (bulkWriting(run) === 0) {
 		// "All" holds only where every target is one lynox leaves out.
-		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(`bulk.nothing.all_skipped_${noun}`, { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
+		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(bulkOne(`bulk.nothing.all_skipped_${noun}`, n), { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
 		return { text: text + judged, nothing: true };
 	}
-	if (n > 0 && m > 0) return { text: i18n.tf(`bulk.skipped.both_${noun}`, { n: String(n), m: String(m) }) + judged, nothing: false };
-	if (n > 0) return { text: i18n.tf(`bulk.skipped.${noun}`, { n: String(n) }) + judged, nothing: false };
+	if (n > 0 && m > 0) return { text: i18n.tf(bulkOne(`bulk.skipped.both_${noun}`, n), { n: String(n), m: String(m) }) + judged, nothing: false };
+	if (n > 0) return { text: i18n.tf(bulkOne(`bulk.skipped.${noun}`, n), { n: String(n) }) + judged, nothing: false };
 	if (m > 0) return { text: i18n.tf('bulk.skipped.taken_out', { m: String(m) }), nothing: false };
 	return { text: null, nothing: false };
 }

@@ -146,7 +146,8 @@ describe('the compaction result is wired from engine to marker', () => {
 		const footer = VIEW.slice(VIEW.indexOf('overflow-x-auto scrollbar-none whitespace-nowrap'));
 		const line = footer.slice(0, footer.indexOf('</div>'));
 		const chipAt = line.indexOf("t('chat.ctx_occupancy_label')");
-		const sumAt = line.indexOf('formatTurnTokens(usage)');
+		// The token sum is the stats part flagged `tokens` (footerStatParts).
+		const sumAt = line.indexOf('statParts.filter((p) => p.tokens)');
 		expect(chipAt).toBeGreaterThan(-1);
 		expect(sumAt).toBeGreaterThan(-1);
 		expect(chipAt).toBeLessThan(sumAt);

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FetchMessageObject, SearchObject } from 'imapflow';
-import { sanitizeFilename, htmlToTextSnippet, isAutoSubmittedHeader } from './imap-smtp.js';
+import { sanitizeFilename, htmlToTextSnippet, isAutoRepliedHeader, isAutoSubmittedHeader } from './imap-smtp.js';
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 //
@@ -295,6 +295,31 @@ describe('ImapSmtpProvider — LYNOX_MAIL_INSECURE_TLS opt-in', () => {
     probe.search.mockResolvedValue([]);
     await new ImapSmtpProvider(ACCOUNT, credResolver).list();
     expect(imapReject()).toBe(true);
+  });
+});
+
+describe('ImapSmtpProvider — list: automatic mail', () => {
+  it('marks an out-of-office reply as isAutoReplied, other automatic mail only as isAutoReply', async () => {
+    probe.search.mockResolvedValue([1, 2, 3]);
+    const msg = (uid: number, header: string | undefined) => ({
+      ...makeFetchMessage({ uid, envelope: { date: new Date(`2026-04-1${String(uid)}T08:00:00Z`), subject: `m${String(uid)}`, messageId: `<m${String(uid)}@example.com>`, from: [{ address: 'a@example.com' }], to: [{ address: 'me@example.com' }], cc: [] } }),
+      ...(header !== undefined ? { headers: Buffer.from(`Auto-Submitted: ${header}\r\n\r\n`) } : {}),
+    });
+    probe.fetch.mockImplementation(() => asyncIterFrom([msg(1, 'auto-replied'), msg(2, 'auto-generated'), msg(3, undefined)]));
+    const byUid = new Map((await new ImapSmtpProvider(ACCOUNT, credResolver).list({ folder: 'INBOX', limit: 10 })).map((e) => [e.uid, e]));
+    expect(byUid.get(1)).toMatchObject({ isAutoReply: true, isAutoReplied: true });
+    expect(byUid.get(2)).toMatchObject({ isAutoReply: true, isAutoReplied: false });
+    expect(byUid.get(3)).toMatchObject({ isAutoReply: false, isAutoReplied: false });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers, 'list() asks the server for the header, or every listed mail reads as not automatic').toContain('auto-submitted');
+  });
+
+  it('asks for the auto-submitted header when it searches too', async () => {
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([makeFetchMessage({ uid: 1 })]));
+    await new ImapSmtpProvider(ACCOUNT, credResolver).search({ text: 'x' });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers).toContain('auto-submitted');
   });
 });
 
@@ -1081,6 +1106,15 @@ describe('htmlToTextSnippet — hidden-content stripping', () => {
     expect(out).not.toContain('noscript-payload');
     expect(out).not.toContain('template-payload');
     expect(out).not.toContain('title');
+  });
+});
+
+describe('isAutoRepliedHeader (an out-of-office reply, nothing else machine-sent)', () => {
+  it('is true for auto-replied, with case, spaces and parameters', () => {
+    for (const v of ['auto-replied', 'Auto-Replied', ' auto-replied ', 'auto-replied; owner-email="a@b"']) expect(isAutoRepliedHeader(v)).toBe(true);
+  });
+  it('is false for other machine-sent mail, for no, and when absent', () => {
+    for (const v of ['auto-generated', 'auto-notified', 'no', '', undefined, 'auto-repliedx']) expect(isAutoRepliedHeader(v)).toBe(false);
   });
 });
 

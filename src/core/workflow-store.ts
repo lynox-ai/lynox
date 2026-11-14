@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import { isMandateTag, isOwnerPrincipal, principalTag, type RequestPrincipal } from './request-principal.js';
+import { isMandateTag, isOwnerPrincipal, planAuthorshipOfWorkflow, principalTag, type RequestPrincipal } from './request-principal.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
+import { mandateTouched, nextWorkflowStamp, stampOf, withWorkflowDefaults, workflowStampDigest, workflowStampState, type WorkflowStamp, type WorkflowStampState } from './workflow-stamp.js';
 
 /**
  * Escape LIKE metacharacters so a `%`/`_` in a (possibly client-supplied) id
@@ -28,7 +30,7 @@ function likePrefix(id: string): string {
  *
  * `definition_json` is stored PLAINTEXT — a faithful 1:1 relocation of the legacy
  * `pipeline_runs.manifest_json`, which is also plaintext. This lets the patch ops
- * (rename/setConfirmedAt) use surgical SQL `json_set` exactly like the legacy
+ * (rename/stampCurrent) use surgical SQL `json_set` exactly like the legacy
  * path (no read-modify-write, no encrypt/re-encrypt divergence). At-rest
  * encryption of verb-definition free-text is a real hardening but belongs in a
  * deliberate slice (legacy manifest_json parity + a key-loss-safe read path) —
@@ -129,9 +131,12 @@ export interface ContentMigrationCounts {
 
 export class WorkflowStore {
   private readonly db: Database.Database;
+  /** The keyed hash the workflow stamp's digest is taken with. */
+  private readonly engine: EngineDb;
 
   constructor(engine: EngineDb) {
     this.db = engine.getDb();
+    this.engine = engine;
   }
 
   /**
@@ -259,6 +264,33 @@ export class WorkflowStore {
 
   /** Who made the workflow with exactly this id and which mandate changed it last, or
    *  `undefined` when there is none. */
+  /** Where `planned` stands for an unattended run: its stamp against this engine's hash and the
+   *  workflow's own marks, as {@link authorship} reads them (`workflow-stamp.ts`). */
+  stampState(planned: PlannedPipeline): WorkflowStampState {
+    const marks = this.authorship(planned.id);
+    return workflowStampState(this.engine, planned, marks === undefined ? undefined : planAuthorshipOfWorkflow(marks));
+  }
+
+  /** The stored definition of exactly `id` (no prefix), parsed with the defaults every reader
+   *  fills (`withWorkflowDefaults`); undefined when missing or unreadable. */
+  definitionExact(id: string): PlannedPipeline | undefined {
+    if (id === '') return undefined;
+    const row = this.db.prepare('SELECT definition_json FROM workflows WHERE id = ?').get(id) as { definition_json: string } | undefined;
+    if (row === undefined) return undefined;
+    try { return withWorkflowDefaults(JSON.parse(row.definition_json) as PlannedPipeline); } catch { return undefined; }
+  }
+
+  /** Whether a mandate ever set up or changed the workflow, taken over or not (`mandateTouched`). */
+  mandateShaped(id: string): boolean {
+    const marks = this.authorship(id);
+    return marks !== undefined && mandateTouched(planAuthorshipOfWorkflow(marks));
+  }
+
+  /** The digest the owner's stamp of `planned` would carry, with this engine's hash. */
+  stampDigest(planned: PlannedPipeline): string {
+    return workflowStampDigest(this.engine, planned).digest;
+  }
+
   authorship(id: string): WorkflowAuthorship | undefined {
     const r = this.db.prepare(
       `SELECT created_by, created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, created_at,
@@ -279,31 +311,86 @@ export class WorkflowStore {
     };
   }
 
-  /** Stamp `definition_json.$.confirmedAt` (the human's first-run-confirm).
-   *  Like {@link rename}, does NOT bump `updated_at` — the legacy
-   *  `setWorkflowConfirmedAt` leaves `started_at` untouched (no list reorder). */
-  setConfirmedAt(id: string, confirmedAt: string): boolean {
-    const target = this._resolveWriteId(id);
-    if (target === null) return false;
-    const res = this.db.prepare(
-      "UPDATE workflows SET definition_json = json_set(definition_json, '$.confirmedAt', ?) WHERE id = ?",
-    ).run(confirmedAt, target);
-    return res.changes > 0;
+  /**
+   * The owner's stamp on the definition as it stands now (`workflow-stamp.ts`): `confirmedAt`
+   * and the stamp with the digest of what runs, in one statement. Exact id only: a prefix would
+   * move the stamp of a second row. When the stamp it carries already holds, nothing is written
+   * and `confirmedAt` keeps its time, so the lists of its schedules stay valid. Like
+   * {@link rename}, does NOT bump `updated_at` (no list reorder). `expectDigest`: write only if
+   * the definition still has that digest (the owner's stamp act, against what its preview showed).
+   * Returns false when the row is missing, unreadable, or no longer has `expectDigest`.
+   */
+  stampCurrent(id: string, at: string, expectDigest?: string | undefined): boolean {
+    if (id === '') return false;
+    return this.db.transaction((): boolean => {
+      const row = this.db.prepare('SELECT definition_json FROM workflows WHERE id = ?').get(id) as { definition_json: string } | undefined;
+      if (row === undefined) return false;
+      let planned: PlannedPipeline;
+      try { planned = JSON.parse(row.definition_json) as PlannedPipeline; } catch { return false; }
+      if (expectDigest !== undefined && workflowStampDigest(this.engine, planned).digest !== expectDigest) return false;
+      const stamp = nextWorkflowStamp(this.engine, planned, at);
+      if (stamp === null) return true;
+      this.db.prepare(
+        "UPDATE workflows SET definition_json = json_set(definition_json, '$.confirmedAt', ?, '$.stamp', json(?)) WHERE id = ?",
+      ).run(stamp.at, JSON.stringify(stamp), id);
+      return true;
+    })();
+  }
+
+  /**
+   * Once per engine.db (marker v69): give every stamp from before the digest its digest, over
+   * the definition as it stands at that boot, except on a workflow a mandate set up or changed.
+   * The schedule lists stay bound to the stamp's time, which the stamp keeps (`plan-stamp.ts`);
+   * the stamp that holds is what makes that time mean these steps. It writes the inferred mode into a blob that has
+   * none, so a later change to the inference cannot unstamp it. Runs after the verb backfill and
+   * the content-schema migration. Afterwards a stamp without a digest does not hold: a backfill
+   * or a restored file that brings one back leaves the workflow waiting for the owner.
+   * Returns how many definitions got a stamp, or null when the pass had already run.
+   */
+  stampExistingWorkflows(): number | null {
+    return this.db.transaction((): number | null => {
+      if (this.engine.isWorkflowStampPassDone()) return null;
+      const rows = this.db.prepare('SELECT id, definition_json FROM workflows').all() as Array<{ id: string; definition_json: string }>;
+      const write = this.db.prepare('UPDATE workflows SET definition_json = ? WHERE id = ?');
+      let stamped = 0;
+      for (const row of rows) {
+        let blob: PlannedPipeline;
+        try { blob = JSON.parse(row.definition_json) as PlannedPipeline; } catch { continue; }
+        const at = blob.confirmedAt;
+        if (typeof at !== 'string' || at === '' || stampOf(blob) !== null) continue;
+        // A workflow a mandate set up or changed gets no stamp here: its `confirmedAt` was most
+        // likely written by a schedule that never showed the owner the steps, the gap the digest
+        // closes. It waits for the owner's own stamp act; its schedules stay on.
+        if (this.mandateShaped(row.id)) continue;
+        blob.mode ??= withWorkflowDefaults(structuredClone(blob)).mode;
+        const { digest, binding } = workflowStampDigest(this.engine, blob);
+        const stamp: WorkflowStamp = { at, digest, binding };
+        write.run(JSON.stringify({ ...blob, stamp }), row.id);
+        stamped++;
+      }
+      this.db.prepare('UPDATE workflow_stamp_marker SET done = 1 WHERE id = 1').run();
+      return stamped;
+    })();
   }
 
   /**
    * Write a reviewed grant: the contract, its stamp and the first-run-confirm, in ONE
    * statement, so no reader sees a stamp without its contract or a confirm without
    * either. Exact id only, not even an unambiguous prefix like the writers above: this one
-   * must land on exactly the row its caller read. Does not bump `updated_at` (same as {@link setConfirmedAt}).
+   * must land on exactly the row its caller read. Does not bump `updated_at` (same as {@link stampCurrent}).
    * A concurrent edit between the caller's read and this write is not lost silently: the
    * stamp's checksum covers the steps, so the run check refuses the mismatch.
    */
-  setReviewedGrant(id: string, contractJson: string, stampJson: string, confirmedAt: string): boolean {
+  setReviewedGrant(id: string, contractJson: string, stampJson: string, confirmedAt: string, seen: PlannedPipeline): boolean {
     if (id === '') return false;
+    // The owner's stamp goes with the grant, over the definition the acceptance checked
+    // (`seen`, with the contract it writes), not over whatever the row holds by now: an edit in
+    // between leaves a stamp that does not hold, as it leaves a grant whose checksum does not.
+    const { digest, binding } = workflowStampDigest(this.engine, { ...seen, capabilityContract: JSON.parse(contractJson) as PlannedPipeline['capabilityContract'] });
+    const stamp: WorkflowStamp = { at: confirmedAt, digest, binding };
     const res = this.db.prepare(
-      "UPDATE workflows SET definition_json = json_set(definition_json, '$.capabilityContract', json(?), '$.reviewedGrant', json(?), '$.confirmedAt', ?) WHERE id = ?",
-    ).run(contractJson, stampJson, confirmedAt, id);
+      "UPDATE workflows SET definition_json = json_set(definition_json, '$.capabilityContract', json(?), '$.reviewedGrant', json(?), '$.confirmedAt', ?, '$.stamp', json(?)) WHERE id = ?",
+    ).run(contractJson, stampJson, confirmedAt, JSON.stringify(stamp), id);
     return res.changes === 1;
   }
 
@@ -318,7 +405,7 @@ export class WorkflowStore {
    * it: otherwise the row would commit for a workflow deleted between the caller's read and
    * this write. Returns `false` in that case, after the rollback; any other failure throws.
    */
-  acceptReviewedGrant(row: WorkflowGrantRow, stampJson: string, confirmedAt: string): boolean {
+  acceptReviewedGrant(row: WorkflowGrantRow, stampJson: string, confirmedAt: string, seen: PlannedPipeline): boolean {
     const missing = new Error('workflow-grant: the workflow is gone');
     try {
       this.db.transaction(() => {
@@ -329,7 +416,7 @@ export class WorkflowStore {
           row.grantId, row.workflowId, row.contractJson, row.by, row.name, row.at,
           row.checksum, row.binding, row.triggerId, row.cron, row.boundParamsJson, row.afterUntrusted ? 1 : 0,
         );
-        if (!this.setReviewedGrant(row.workflowId, row.contractJson, stampJson, confirmedAt)) throw missing;
+        if (!this.setReviewedGrant(row.workflowId, row.contractJson, stampJson, confirmedAt, seen)) throw missing;
       })();
     } catch (err) {
       if (err === missing) return false;
@@ -399,7 +486,7 @@ export class WorkflowStore {
    *     row K leaves 1..K migrated and the next boot resumes at K+1;
    *   - forward-only — `transform` never downgrades.
    *
-   * Preserves `updated_at` (like {@link rename}/{@link setConfirmedAt}): a
+   * Preserves `updated_at` (like {@link rename}/{@link stampCurrent}): a
    * migration is NOT a user re-save and must not reorder the library list.
    * `transform` returns the re-serialized blob when it changed, or `null` to skip
    * (already-current OR malformed — a row we can't parse is left untouched).
@@ -433,7 +520,7 @@ export class WorkflowStore {
   /**
    * List workflow definitions, most-recently-SAVED first. Orders by `updated_at`,
    * which the store bumps only on a full save (insert/re-save via {@link upsert}),
-   * NOT on rename/setConfirmedAt — so it matches the legacy `getPlannedPipelines`
+   * NOT on rename/stampCurrent — so it matches the legacy `getPlannedPipelines`
    * `ORDER BY started_at DESC` (started_at is likewise reset only on re-save).
    */
   list(limit = 100): StoredWorkflow[] {

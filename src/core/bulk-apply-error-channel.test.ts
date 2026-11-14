@@ -25,7 +25,11 @@ vi.mock('./bulk-apply.js', async (orig) => ({
 
 afterEach(() => { vi.restoreAllMocks(); captured.length = 0; });
 
-it('a bulk write that throws: the run result and the notification carry a fixed text, the tracker the class', async () => {
+// The fixed text is the owner's language's (ux Rest-P W15), in the failure's frame.
+it.each([
+  [undefined, 'The bulk write stopped on an error inside lynox.', 'Task failed: The bulk write stopped on an error inside lynox.'],
+  ['de', 'Das Schreiben des Massenlaufs hat wegen eines Fehlers in lynox angehalten.', 'Aufgabe fehlgeschlagen: Das Schreiben des Massenlaufs hat wegen eines Fehlers in lynox angehalten.'],
+] as const)('a bulk write that throws (language %s): the run result and the notification carry a fixed text, the tracker the class', async (language, fixed, pushed) => {
   const records: string[] = [];
   const notes: string[] = [];
   const task = {
@@ -49,6 +53,7 @@ it('a bulk write that throws: the run result and the notification carry a fixed 
     getBulkLedger: () => ({ getRunForApply: () => ({ targetSystem: 'data_store' }) }),
     getEngineDb: () => null,
     getMandateEnds: () => null,
+    config: { language },
   } as unknown as Engine;
   const router = {
     hasChannels: () => true,
@@ -57,12 +62,13 @@ it('a bulk write that throws: the run result and the notification carry a fixed 
   const loop = new WorkerLoop(engine, router, 60_000);
   try {
     await loop.tick();
-    await vi.waitFor(() => { if (records.length === 0 || captured.length === 0) throw new Error('not yet'); }, { timeout: 5_000, interval: 10 });
+    await vi.waitFor(() => { if (records.length === 0 || captured.length === 0 || notes.length === 0) throw new Error('not yet'); }, { timeout: 5_000, interval: 10 });
   } finally {
     loop.stop();
   }
   // Positive control: the write did fail, and its record says so.
-  expect(records.join('\n')).toContain('The bulk write stopped on an error inside lynox.');
+  expect(records.join('\n')).toContain(fixed);
+  expect(notes).toEqual([`\u2717 Apply\n${pushed}`]);
   expect(captured.some((e) => e.message === 'bulk_apply failed: Error')).toBe(true);
   for (const text of [...records, ...notes, ...captured.map((e) => `${e.message} ${String(e.stack)}`)]) {
     expect(text).not.toContain(MARK);

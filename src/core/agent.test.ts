@@ -22,11 +22,14 @@ vi.mock('@anthropic-ai/sdk', () => {
     status: number;
     error: unknown;
     headers: unknown;
-    constructor(status: number, error: unknown, message: string | undefined, headers: unknown) {
+    type: string | null;
+    // The real SDK's signature, `type` included: the SDK sets it from the body's `error.type`.
+    constructor(status: number, error: unknown, message: string | undefined, headers: unknown, type?: string | null) {
       super(message ?? String(error));
       this.status = status;
       this.error = error;
       this.headers = headers;
+      this.type = type ?? null;
       this.name = 'APIError';
     }
   }
@@ -36,8 +39,12 @@ vi.mock('@anthropic-ai/sdk', () => {
 const mockProcess = vi.fn();
 
 vi.mock('./stream.js', () => ({
-  StreamProcessor: vi.fn().mockImplementation(function (this: { process: typeof mockProcess }) {
+  StreamProcessor: vi.fn().mockImplementation(function (this: { process: typeof mockProcess; answered: () => boolean; turnEnded: () => boolean; partial: () => unknown }) {
     this.process = mockProcess;
+    // The mock delivers no events of its own: a failure it raises came before any answer.
+    this.answered = () => false;
+    this.turnEnded = () => false;
+    this.partial = () => ({ usage: undefined, content: [] });
   }),
 }));
 
@@ -96,7 +103,7 @@ import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-pr
 import { getBetasForProvider } from '../types/index.js';
 import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
-import { createToolContext } from './tool-context.js';
+import { createToolContext, applyNetworkPolicy, isPolicyUnread } from './tool-context.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
@@ -2070,15 +2077,41 @@ describe('Agent', () => {
       const { APIError: MockAPIError } = await import('@anthropic-ai/sdk');
       (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 1;
 
-      // SSE stream errors arrive with status=undefined and error body
+      // The shape the SDK's stream parser throws for an `error` event: status undefined, the
+      // whole event as the body, and its error type as `type`. A body of the flat form
+      // `{ type: 'overloaded_error' }` is not one the SDK produces.
       mockProcess
-        .mockRejectedValueOnce(new MockAPIError(undefined as unknown as number, { type: 'overloaded_error', message: 'Overloaded' }, undefined, undefined))
+        .mockRejectedValueOnce(new MockAPIError(
+          undefined as unknown as number,
+          { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+          undefined, undefined, 'overloaded_error',
+        ))
         .mockResolvedValueOnce(endTurnResponse('Recovered'));
 
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
       const result = await agent.send('Hello');
       expect(result).toBe('Recovered');
       expect(mockProcess).toHaveBeenCalledTimes(2);
+      (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 2000;
+    });
+
+    it('a stream processor that fails to say what it saw still leaves the bound on the caps, and the call error still reaches the retry decision', async () => {
+      const { StreamProcessor } = await import('./stream.js');
+      (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 1;
+      vi.mocked(StreamProcessor).mockImplementationOnce(function (this: { process: typeof mockProcess; answered: () => boolean; turnEnded: () => boolean; partial: () => unknown }) {
+        this.process = mockProcess;
+        this.answered = () => { throw new Error('reader failed'); };
+        this.turnEnded = () => false;
+        this.partial = () => ({ usage: undefined, content: [] });
+      } as never);
+      mockProcess
+        .mockRejectedValueOnce(Object.assign(new Error('x'), { name: 'TransformError' }))
+        .mockResolvedValueOnce(endTurnResponse('Recovered'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', costGuard: { maxBudgetUSD: 100 } });
+      expect(await agent.send('Hello')).toBe('Recovered');
+      expect(mockProcess).toHaveBeenCalledTimes(2);
+      expect((agent as unknown as { costGuard: { capOnlyUSD: number } }).costGuard.capOnlyUSD).toBeGreaterThan(0);
+      expect(agent.getHelperCostUsd()).toBe(0);
       (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 2000;
     });
 
@@ -7453,6 +7486,89 @@ describe('server tools a mandate\'s session is offered', () => {
     }
     // The filter sees server tools at all: the owner's request carries one.
     expect((await send(undefined, false)).filter(t => t.input_schema === undefined).map(t => t.type)).toContain('web_search_20250305');
+  });
+});
+
+// The provider-side web_search runs at the provider, outside `network_policy`. It is offered by
+// the policy, never because `web_research` happens to be missing: a boot whose search init failed
+// leaves no `web_research`, and under deny-all that must not turn on a search past the policy.
+describe('the provider-side web_search under the network policy', () => {
+  interface StreamToolLike { name?: string; type?: string }
+  const toolsSent = (agent: Agent): StreamToolLike[] => {
+    const stream = (agent as unknown as { client: { beta: { messages: { stream: { mock: { calls: unknown[][] } } } } } }).client.beta.messages.stream;
+    const call = stream.mock.calls.at(-1);
+    if (!call) throw new Error('client.beta.messages.stream was not called');
+    return (call[0] as { tools: StreamToolLike[] }).tools;
+  };
+  /** The types sent, with no `web_research` registered (the failed-init case). */
+  const sent = async (toolContext: ReturnType<typeof createToolContext> | undefined): Promise<Array<string | undefined>> => {
+    vi.clearAllMocks();
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [makeTool('http_request')],
+      ...(toolContext !== undefined ? { toolContext } : {}),
+    });
+    await agent.send('hi');
+    return toolsSent(agent).map((t) => t.type);
+  };
+  const under = (policy: Parameters<typeof applyNetworkPolicy>[1], hosts: string[] = []): ReturnType<typeof createToolContext> => {
+    const ctx = createToolContext({ lazy_tools_enabled: false });
+    applyNetworkPolicy(ctx, policy, hosts);
+    return ctx;
+  };
+
+  it.each([
+    ['deny-all', under('deny-all')],
+    ['allow-list, even one naming search hosts', under('allow-list', ['html.duckduckgo.com', 'searxng'])],
+  ] as const)('is withheld under %s, though web_research is missing', async (_name, ctx) => {
+    expect(await sent(ctx)).not.toContain('web_search_20250305');
+  });
+
+  it.each([
+    ['no policy', under(undefined)],
+    ['allow-all', under('allow-all')],
+    ['guarded (search is discovery)', under('guarded')],
+  ] as const)('is offered under %s (control)', async (_name, ctx) => {
+    expect(await sent(ctx)).toContain('web_search_20250305');
+  });
+
+  it('is withheld under a policy it does not know, and from an agent given no context', async () => {
+    const odd = createToolContext({ lazy_tools_enabled: false });
+    (odd as { networkPolicy: string | undefined }).networkPolicy = 'open-ish';
+    expect(await sent(odd)).not.toContain('web_search_20250305');
+    expect(await sent(undefined)).not.toContain('web_search_20250305');
+  });
+
+  it('follows a change of the policy on its context from one call to the next', async () => {
+    vi.clearAllMocks();
+    const ctx = under('allow-all');
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [makeTool('http_request')], toolContext: ctx });
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    await agent.send('hi');
+    expect(toolsSent(agent).map((t) => t.type)).toContain('web_search_20250305');
+    applyNetworkPolicy(ctx, 'deny-all', []);
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    await agent.send('again');
+    expect(toolsSent(agent).map((t) => t.type)).not.toContain('web_search_20250305');
+  });
+
+  // The mark is a registered symbol: a second copy of tool-context.js reads the same key, and any
+  // object spread of a marked context (not only `copyToolContext`) keeps it.
+  it('keeps the mark across a plain spread and under the registered key', () => {
+    const own = new Agent({ name: 'library', model: 'claude-sonnet-4-6', provider: 'anthropic' }).toolContext;
+    expect((own as unknown as Record<symbol, unknown>)[Symbol.for('lynox.toolContext.policyUnread')]).toBe(true);
+    expect(isPolicyUnread({ ...own })).toBe(true);
+    expect(isPolicyUnread(createToolContext({}))).toBe(false);
+  });
+
+  // A workflow step is handed its parent's context as the same object (pipeline.ts): a parent built
+  // with no context of its own hands on one that does not carry the policy, and the step stays withheld.
+  it('withholds it from an agent handed the context of one built with none', async () => {
+    const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [makeTool('http_request')] });
+    expect(isPolicyUnread(parent.toolContext)).toBe(true);
+    expect(await sent(parent.toolContext)).not.toContain('web_search_20250305');
+    // Control: the same shape of context, not built by an agent for itself, is offered it.
+    expect(await sent(createToolContext({ lazy_tools_enabled: false }))).toContain('web_search_20250305');
   });
 });
 

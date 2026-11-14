@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   checkMarkup, droppedTagsOf, htmlFieldsOfListForm, markupChangesOf, markupOf, plainTextMarkupOf,
-  type MarkupCheckInput, type MarkupRefusal,
+  withinAllowlist, type MarkupCheckInput, type MarkupItem, type MarkupRefusal,
 } from './bulk-html.js';
 import { parseFragment, defaultTreeAdapter, html as p5 } from 'parse5';
 import { canonicalHtml } from './html-tree.js';
@@ -483,8 +483,44 @@ describe('markupChangesOf', () => {
   });
 
   it('leaves out a bare p that comes or goes', () => {
-    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [] });
-    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [] });
+    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false });
+    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false });
+  });
+
+  it('says whether an added item lies outside what a write may add (1010, ux U-092)', () => {
+    const outside = (before: string, after: string): boolean => markupChangesOf('d', before, after).addsOutsideAllowlist;
+    // Within: a link with its href only.
+    expect(outside('<p>a</p>', '<p>a <a href="/x">b</a></p>')).toBe(false);
+    // Outside, one condition each: an element off the list, a second attribute on a link, an
+    // attribute on another allowlisted element, raw text, a comment, an allowlisted element in a template.
+    expect(outside('<p>a</p>', '<p>a</p><img src="/i.jpg">')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="/x" target="_blank">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p class="x">a</p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><script>x()</script>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><!-- c -->')).toBe(true);
+    expect(outside('<p>a</p><template></template>', '<p>a</p><template><p>b</p></template>')).toBe(true);
+    // A bare element off the list, which fails on the list alone; a link in SVG, which fails on
+    // its namespace alone; an href on an element that is not a link.
+    expect(outside('<p>a</p>', '<p>a</p><div>b</div>')).toBe(true);
+    expect(outside('<p>a</p><svg></svg>', '<p>a</p><svg><a href="/x">b</a></svg>')).toBe(true);
+    expect(outside('<p>a</p>', '<p href="/x">a</p>')).toBe(true);
+    // A link whose href the link check refuses: a script scheme, a mail link with a second recipient.
+    expect(outside('<p>a</p>', '<p>a <a href="javascript:steal()">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example?bcc=x@evil.example">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example">b</a></p>')).toBe(false);
+    // A comment fails on its kind, its namespace and its name at once, and raw text lies only in
+    // elements off the list: parsed markup reaches neither condition alone (the next test does).
+    // Only what is added counts: a removed image does not.
+    expect(outside('<p>a</p><img src="/i.jpg">', '<p>a</p>')).toBe(false);
+  });
+
+  it('holds its kind and raw-text conditions alone, for an item no parse yields', () => {
+    // The kind and the raw text guard against an item that breaks the parser's invariants: a
+    // comment carrying an element's namespace and name, an allowlisted element carrying raw text.
+    const p: MarkupItem = { kind: 'element', namespace: 'html', element: 'p', attributes: [], text: null, inTemplate: false };
+    expect(withinAllowlist(p)).toBe(true);
+    expect(withinAllowlist({ ...p, kind: 'comment' })).toBe(false);
+    expect(withinAllowlist({ ...p, text: 'x' })).toBe(false);
   });
 
   it('names an allowlisted element with an attribute, and one inside a template', () => {

@@ -27,11 +27,11 @@ import {
   type BulkHostBudget, type ExternalClient, type ExternalImage, type ExternalRead,
 } from './bulk-external.js';
 import {
-  BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
+  BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isOfferedListPath, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
-import { verdictTextRefusal } from './bulk-judge.js';
+import { shownLinkDomain, verdictTextRefusalOf } from './bulk-judge.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { shopifyBulkReadEnabled, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { productTitleOf } from './shopify-saved-form.js';
@@ -52,9 +52,14 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
  */
 function planMarkupRefusal(
   after: unknown, before: unknown, list: BulkListRun | null, host: string, startDomains: readonly string[],
-): BulkInvalidReason | null {
+  holdsSecret: (text: string) => boolean,
+): { invalid: BulkInvalidReason; linkDomain?: string | undefined } | null {
   if (!isRecord(after)) return null;
-  return verdictTextRefusal(after, isRecord(before) ? before : {}, { listForm: list?.source.form ?? null, storeHost: host, startDomains });
+  // With `new_link_domain` the refused link's domain goes with the reason (1010). The run was
+  // scanned for credentials as planned, as text; the domain is checked again as the link check
+  // read it, which decodes percent-escapes and folds case (`shownLinkDomain`).
+  const refusal = verdictTextRefusalOf(after, isRecord(before) ? before : {}, { listForm: list?.source.form ?? null, storeHost: host, startDomains });
+  return refusal === null ? null : { invalid: refusal.reason, linkDomain: shownLinkDomain(refusal, holdsSecret) };
 }
 
 export interface BulkPreviewOutcome {
@@ -153,12 +158,15 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? defaultSleep;
   const budget = deps.budget ?? BULK_HOST_BUDGET;
+  // Imported here as the other callers do: `http.ts` reaches back into core at load.
+  const { detectSecretInContent } = await import('../tools/builtin/http.js');
+  const holdsSecret = (text: string): boolean => detectSecretInContent(text) !== null;
   const run = ledger.getRunForPreview(runId);
-  if (!run) return { status: 'refused', summary: 'No bulk run with this id.' };
+  if (!run) return { status: 'refused', summary: say.noRun };
   const host = externalHostOf(run.targetSystem);
-  if (host === null || run.kind !== 'apply') return { status: 'refused', summary: 'The bulk run has no external targets to read.' };
+  if (host === null || run.kind !== 'apply') return { status: 'refused', summary: say.noExternalTargets };
   if (run.phase !== 'planned' || run.haltReason !== null) {
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run is ${run.phase}${run.haltReason !== null ? ' and halted' : ''} — nothing read.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.notReadyToRead(run.phase, run.haltReason !== null), say) };
   }
   // Declared before the first halt: `costed` reads both.
   let client: ExternalClient | null = null;
@@ -171,8 +179,10 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // and says why. Before the client is built: building it reads the list's form, and a form
   // that is no longer offered has no spec to read.
   if (list !== null && !isOfferedListSource(list.source)) {
-    // A filtered Shopify list fails on its filters (a key or value the rule no longer takes), not on a path.
-    const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST_FORM ? BULK_HALT_REASONS.listFilterWithdrawn : BULK_HALT_REASONS.listFormWithdrawn;
+    // A filtered Shopify list fails on its filters (a key or value the rule no longer takes), not on a
+    // path; so does any other list whose form and path are still offered.
+    const onFilters = list.source.form === SHOPIFY_FILTERED_LIST_FORM || isOfferedListPath(list.source);
+    const withdrawn = onFilters ? BULK_HALT_REASONS.listFilterWithdrawn : BULK_HALT_REASONS.listFormWithdrawn;
     ledger.halt(runId, withdrawn);
     return { status: 'halted', summary: summarize(ledger, runId, say.halted('preview', withdrawn), say) };
   }
@@ -259,8 +269,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       } else {
         // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
         const after = shopifyPairedAfter(target.after, image.value);
-        const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId));
-        if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+        const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId), holdsSecret);
+        if (markup !== null) ledger.recordRead(runId, seq, markup);
         else ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after,
           shopifyForm === 'shopify_media_alt' ? undefined : productTitleOf(image.value), contextOf(read.value));
       }
@@ -276,8 +286,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         consecutive = 0;
         continue;
       }
-      const markup = planMarkupRefusal(target.after, read.value, list, host, ledger.startDomainsOf(runId));
-      if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+      const markup = planMarkupRefusal(target.after, read.value, list, host, ledger.startDomainsOf(runId), holdsSecret);
+      if (markup !== null) ledger.recordRead(runId, seq, markup);
       else ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried(), undefined, undefined, contextOf(read.value));
       consecutive = 0;
       continue;

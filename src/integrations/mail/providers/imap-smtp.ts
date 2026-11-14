@@ -33,6 +33,7 @@ import {
   type MailWatchOptions,
 } from '../provider.js';
 import { currentCallSignal } from '../../../core/call-connection.js';
+import { processErrorText } from '../../../core/error-egress.js';
 
 // ── Credentials ────────────────────────────────────────────────────────────
 //
@@ -317,6 +318,13 @@ export function isAutoSubmittedHeader(rawHeader: string | undefined): boolean {
   if (value.startsWith('no')) return false;
   // Anything else (auto-generated, auto-replied, auto-notified, ...) is automated
   return true;
+}
+
+/** RFC 3834 `Auto-Submitted: auto-replied` — a reply sent automatically to a message, such as an
+ *  out-of-office note. Narrower than {@link isAutoSubmittedHeader}. */
+export function isAutoRepliedHeader(rawHeader: string | undefined): boolean {
+  if (!rawHeader) return false;
+  return /^auto-replied\b/.test(rawHeader.toLowerCase().trim());
 }
 
 function isAuthError(err: unknown): boolean {
@@ -721,6 +729,8 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+            // The watcher lists new mail; without this header no listed mail is ever automatic.
+            headers: ['auto-submitted'],
           },
           { uid: true },
         )) {
@@ -886,6 +896,8 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+            // The watcher lists new mail; without this header no listed mail is ever automatic.
+            headers: ['auto-submitted'],
           },
           { uid: true },
         )) {
@@ -966,7 +978,7 @@ export class ImapSmtpProvider implements MailProvider {
               setTimeout(() => reject(new Error('sent-copy append timed out')), SENT_APPEND_TIMEOUT_MS).unref()),
           ]);
         } catch (err) {
-          console.warn('[mail] sent-copy append failed (mail is delivered):', err instanceof Error ? err.message : String(err));
+          console.warn('[mail] sent-copy append failed (mail is delivered):', processErrorText(err));
         }
       }
 
@@ -1137,6 +1149,7 @@ export class ImapSmtpProvider implements MailProvider {
     // Auto-Submitted header detection — must never auto-reply to these
     const headers = msg.headers ? parseHeaders(msg.headers.toString('utf-8')) : new Map<string, string>();
     const isAutoReply = isAutoSubmittedHeader(headers.get('auto-submitted'));
+    const isAutoReplied = isAutoRepliedHeader(headers.get('auto-submitted'));
 
     return {
       uid: msg.uid,
@@ -1156,6 +1169,7 @@ export class ImapSmtpProvider implements MailProvider {
       attachmentCount: countAttachments(msg.bodyStructure),
       sizeBytes: msg.size,
       isAutoReply,
+      isAutoReplied,
     };
   }
 }

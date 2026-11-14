@@ -9,7 +9,8 @@ import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './str
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type { CallApiCost, CallContract, CallFiled, GrantLift } from './call-connection.js';
-import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier, PlannedPipeline } from '../types/index.js';
+import { workflowStampState, type WorkflowStampState } from './workflow-stamp.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
@@ -27,6 +28,11 @@ import { HISTORY_MARKERS_DDL } from './history-markers.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
+
+/** The key history.db's encrypted columns are stored under, derived from the vault key (see `deriveEngineEncKey`). */
+export function deriveHistoryEncKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
 
 function getDefaultDbPath(): string {
   return join(getLynoxDir(), 'history.db');
@@ -1695,7 +1701,7 @@ export class RunHistory {
     // Derive history encryption key via HKDF from vault key
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
-      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._encKey = deriveHistoryEncKey(vaultKey);
     } else {
       this._encKey = null;
     }
@@ -2447,10 +2453,17 @@ export class RunHistory {
    * of its own, so this is the row the spend aggregates — and with them the daily and monthly
    * limits — count it from. Never counted as a run or a turn.
    */
-  recordBulkJudgeCost(entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }): void {
-    this.db.prepare(
+  recordBulkJudgeCost(entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }): number {
+    return Number(this.db.prepare(
       'INSERT INTO bulk_cost_days (run_id, model_id, tokens_in, tokens_out, cost_usd) VALUES (?, ?, ?, ?, ?)',
-    ).run(entry.runId, entry.modelId, entry.tokensIn, entry.tokensOut, entry.costUsd);
+    ).run(entry.runId, entry.modelId, entry.tokensIn, entry.tokensOut, entry.costUsd).lastInsertRowid);
+  }
+
+  /** Replace a call's provisional row (its worst case, booked before the call) by what the call
+   *  cost; a call that was never paid for settles at 0. The row keeps its day. */
+  settleBulkJudgeCost(id: number, entry: { tokensIn: number; tokensOut: number; costUsd: number }): void {
+    this.db.prepare('UPDATE bulk_cost_days SET tokens_in = ?, tokens_out = ?, cost_usd = ? WHERE id = ?')
+      .run(entry.tokensIn, entry.tokensOut, entry.costUsd, id);
   }
 
   /** `byModel` with the judge's spend added per model; its calls add no run. */
@@ -3477,9 +3490,38 @@ export class RunHistory {
     return this._requireWorkflowStore().rename(id, name, author);
   }
 
-  /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */
-  setWorkflowConfirmedAt(id: string, confirmedAt: string): boolean {
-    return this._requireWorkflowStore().setConfirmedAt(id, confirmedAt);
+  /** The owner's stamp on the workflow as it stands (`WorkflowStore.stampCurrent`): exact id,
+   *  with the digest of what runs, and a no-op when its stamp already holds. `expectDigest`:
+   *  only if the definition still has the digest the owner's preview showed. */
+  setWorkflowConfirmedAt(id: string, confirmedAt: string, expectDigest?: string | undefined): boolean {
+    return this._requireWorkflowStore().stampCurrent(id, confirmedAt, expectDigest);
+  }
+
+  /** The once-only boot pass over the stamps from before the digest (`WorkflowStore.stampExistingWorkflows`). */
+  stampExistingWorkflows(): number | null {
+    return this._requireWorkflowStore().stampExistingWorkflows();
+  }
+
+  /** Where `planned` stands for an unattended run (`workflow-stamp.ts`): its stamp against the
+   *  engine's hash, and the workflow's own marks. Without the verb graph nothing holds. */
+  workflowStampState(planned: PlannedPipeline): WorkflowStampState {
+    return this._workflowStore ? this._workflowStore.stampState(planned) : workflowStampState(null, planned, undefined);
+  }
+
+  /** The stored definition of exactly `id`, read from the database, never the pipeline cache. */
+  getWorkflowExact(id: string): PlannedPipeline | undefined {
+    return this._workflowStore?.definitionExact(id);
+  }
+
+  /** Whether a mandate ever set up or changed the workflow, taken over or not. Without the
+   *  verb graph: true, so a caller that gates on it refuses. */
+  workflowMandateShaped(id: string): boolean {
+    return this._workflowStore ? this._workflowStore.mandateShaped(id) : true;
+  }
+
+  /** The digest of `planned` as the owner's stamp would bind it, or null without the verb graph. */
+  workflowStampDigest(planned: PlannedPipeline): string | null {
+    return this._workflowStore ? this._workflowStore.stampDigest(planned) : null;
   }
 
   /**
@@ -3487,8 +3529,8 @@ export class RunHistory {
    * confirm, in one engine.db transaction (`WorkflowStore.acceptReviewedGrant`). `false` when
    * the workflow is gone; nothing is written then.
    */
-  acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string): boolean {
-    return this._requireWorkflowStore().acceptReviewedGrant(row, JSON.stringify(stamp), confirmedAt);
+  acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string, seen: PlannedPipeline): boolean {
+    return this._requireWorkflowStore().acceptReviewedGrant(row, JSON.stringify(stamp), confirmedAt, seen);
   }
 
   /**
@@ -3639,6 +3681,8 @@ export class RunHistory {
     waitingUntil?: string | null | undefined;
     /** The model tier the user chose for this trigger's runs; null clears the choice. */
     modelTier?: ModelTier | null | undefined;
+    /** See `TriggerStore.updateFields`: the mark of the turn that edits the instruction. */
+    editedUntrusted?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     return this._requireTriggerStore().updateFields(id, params, opts);
   }
