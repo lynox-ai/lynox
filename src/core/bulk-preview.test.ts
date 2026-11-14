@@ -24,7 +24,7 @@ import { WorkerLoop } from './worker-loop.js';
 import { ApiStore } from './api-store.js';
 import { createToolContext, applyNetworkPolicy } from './tool-context.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
-import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkStatusTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 import { detectSecretInContent } from '../tools/builtin/http.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
@@ -825,7 +825,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
     writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: url(0), after: { price: '15.00' } }]));
     const grant = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
     const agent = { toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1', principal: grant } as unknown as IAgent;
-    const planned = await bulkPlanTool.handler({ target_system: 'http', target_host: HOST, source_file: 'src.json' }, agent);
+    const planned = await bulkPlanAnswer({ target_system: 'http', target_host: HOST, source_file: 'src.json' }, agent);
     const runId = /Bulk run ([0-9a-f-]{36})/.exec(planned)![1]!;
     expect(engineDb.getDb().prepare('SELECT created_by, principal, mandate_id FROM bulk_runs WHERE id = ?').get(runId))
       .toEqual({ created_by: 'thread-1', principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1' });
@@ -843,7 +843,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
         { target: url(1), after: { price: '12.00' } },
       ]));
       const agent = { toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL } as unknown as IAgent;
-      const planned = await bulkPlanTool.handler({ target_system: 'http', target_host: 'SHOP.example.com.', source_file: 'src.json' }, agent);
+      const planned = await bulkPlanAnswer({ target_system: 'http', target_host: 'SHOP.example.com.', source_file: 'src.json' }, agent);
       expect(planned).toContain('Nothing is read either until the user starts it outside this chat.');
       expect(planned).toContain('phase planned');
       expect(planned).toContain(`Halted: ${BULK_HALT_REASONS.awaitingStart}.`);
@@ -851,11 +851,11 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       expect(s.requests).toEqual([]);
       const runId = /Bulk run ([0-9a-f-]{36})/.exec(planned)![1]!;
       // An external host has no rollback: an atomic external plan is refused.
-      expect(await bulkPlanTool.handler({ target_system: 'http', target_host: HOST, source_file: 'src.json', atomic: true }, agent))
+      expect(await bulkPlanAnswer({ target_system: 'http', target_host: HOST, source_file: 'src.json', atomic: true }, agent))
         .toMatch(/cannot be atomic/);
       // The owner starts it; while it reads, a second external plan is refused.
       expect(ledger.resumePreview(runId).ok).toBe(true);
-      expect(await bulkPlanTool.handler({ target_system: 'http', target_host: HOST, source_file: 'src.json' }, agent)).toMatch(/another external dry run/);
+      expect(await bulkPlanAnswer({ target_system: 'http', target_host: HOST, source_file: 'src.json' }, agent)).toMatch(/another external dry run/);
 
       const apiStore = new ApiStore();
       apiStore.register({

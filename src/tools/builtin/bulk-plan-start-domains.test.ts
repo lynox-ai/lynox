@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { bulkPlanTool } from './bulk.js';
+import { bulkPlanTool, bulkPlanAnswer } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
@@ -27,7 +27,7 @@ function agent(): IAgent {
 }
 
 const plan = (input: Record<string, unknown>): Promise<string> =>
-  bulkPlanTool.handler(input as Parameters<typeof bulkPlanTool.handler>[0], agent());
+  bulkPlanAnswer(input as Parameters<typeof bulkPlanTool.handler>[0], agent());
 
 const base = (): Record<string, unknown> => ({
   target_system: 'http', target_host: HOST,

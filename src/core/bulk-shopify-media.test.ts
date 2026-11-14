@@ -31,7 +31,7 @@ import {
 import { createToolContext } from './tool-context.js';
 import { mintStorePass } from './store-pass.js';
 import { withShopifyApply, withShopifyRead, type ListQueryConstraints, type ShopifyReadPhase } from '../tools/permission-guard.js';
-import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkPlanAnswer } from '../tools/builtin/bulk.js';
 import { BULK_MAX_TARGETS } from './bulk-plan.js';
 import type { IAgent } from '../types/index.js';
 
@@ -520,7 +520,7 @@ describe('applying a media run', () => {
 
 describe('bulk_plan with a Shopify media source', () => {
   const agent = (): IAgent => ({ toolContext: { bulkLedger: ledger, apiStore: IMAGE_WRITING_STORE }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent;
-  const plan = (input: Record<string, unknown>): Promise<string> => bulkPlanTool.handler(
+  const plan = (input: Record<string, unknown>): Promise<string> => bulkPlanAnswer(
     { target_system: 'http', target_host: HOST, source_list: { form: 'shopify_media', after: { alt: 'x' } }, ...input } as Parameters<typeof bulkPlanTool.handler>[0], agent(),
   );
 

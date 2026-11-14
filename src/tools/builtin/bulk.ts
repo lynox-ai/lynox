@@ -23,7 +23,7 @@ import { chatThreadOf } from './private-thread.js';
  * context. What the model gets is counts and a fixed vocabulary of reasons.
  */
 
-interface BulkPlanInput {
+export interface BulkPlanInput {
   target_system: BulkTargetSystem | 'http';
   target_collection?: string | undefined;
   target_host?: string | undefined;
@@ -282,7 +282,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     createdBy: agent.currentThreadId, planningThread: chatThreadOf(agent), principal: agent.principal, host, source, readContract: listReadContract(host, source), judge,
   });
   if (!out.ok) {
-    return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
+    throw new BulkPlanRefusal('Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.');
   }
   return [
     'List dry run recorded — nothing was sent, read or written. Nothing is read until the user starts it outside this chat.',
@@ -315,6 +315,30 @@ export const NO_PLACE_NOTE = 'This result does not tell you where in lynox the u
 const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +
   'Then a model decides each target\'s new values with your rule, one target at a time, without tools. ' +
   'The user reviews every verdict before anything is written.';
+
+/**
+ * A plan `bulk_plan` refuses. Thrown, not returned: a returned text is a result the chat marks as
+ * done, and a refused plan showed a check mark where nothing was planned. Thrown, the call is a
+ * failed one — for the chat's tool line, for the thread as it is reloaded and for the call ledger —
+ * and the model reads the same words, now marked as an error, to correct its plan.
+ */
+export class BulkPlanRefusal extends Error {
+  constructor(text: string) {
+    super(text);
+    this.name = 'BulkPlanRefusal';
+  }
+}
+
+/** What a `bulk_plan` call answers, as the model reads it: its result, or a refusal's text. For the
+ *  callers that read the answer itself (tests, evals); anything else is thrown on. */
+export async function bulkPlanAnswer(input: BulkPlanInput, agent: IAgent): Promise<string> {
+  try {
+    return await bulkPlanTool.handler(input, agent);
+  } catch (err: unknown) {
+    if (err instanceof BulkPlanRefusal) return err.message;
+    throw err;
+  }
+}
 
 export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
   // Writes only the ledger — but recording a run also drops the oldest unapproved
@@ -380,7 +404,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
   },
   handler: async (input: BulkPlanInput, agent: IAgent): Promise<string> => {
     const ledger = agent.toolContext.bulkLedger;
-    if (!ledger) return 'Bulk runs are not available on this instance.';
+    if (!ledger) throw new BulkPlanRefusal('Bulk runs are not available on this instance.');
     try {
       refusePlannerStartDomains(input);
       const sources = [input.source_file, input.source_collection, input.source_list].filter((v) => v !== undefined).length;
@@ -466,7 +490,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           createdBy: agent.currentThreadId, planningThread: chatThreadOf(agent), principal: agent.principal, host, targets: external, contract: mintBulkContract(host, keys, method), judge,
         });
         if (!out.ok) {
-          return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
+          throw new BulkPlanRefusal('Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.');
         }
         return [
           out.status.phase === 'planned'
@@ -500,12 +524,13 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         ...(nothingToApprove(status) ? [] : [NO_PLACE_NOTE]),
       ].join('\n');
     } catch (err: unknown) {
-      if (err instanceof BulkSourceError) return `Error: ${err.message}${shopifyHostHint(input, agent)}`;
+      if (err instanceof BulkPlanRefusal) throw err;
+      if (err instanceof BulkSourceError) throw new BulkPlanRefusal(`Error: ${err.message}${shopifyHostHint(input, agent)}`);
       // The cap refuses a planner who is not the owner; its text is ux's and names no run.
-      if (err instanceof BulkPreviewCapError) return `Error: ${err.message}`;
+      if (err instanceof BulkPreviewCapError) throw new BulkPlanRefusal(`Error: ${err.message}`);
       // Data-store errors name the collection or filter column the caller passed —
       // the caller's own strings, not a target's content.
-      return `Error: the dry run failed: ${err instanceof Error ? err.message : String(err)}`;
+      throw new BulkPlanRefusal(`Error: the dry run failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 };

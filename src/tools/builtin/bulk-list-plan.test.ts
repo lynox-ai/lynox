@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { bulkPlanTool, bulkStatusTool, NO_PLACE_NOTE } from './bulk.js';
+import { bulkPlanTool, bulkStatusTool, NO_PLACE_NOTE, bulkPlanAnswer, BulkPlanRefusal } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS } from '../../core/bulk-ledger.js';
 import { mintBulkContract, parseBulkContract } from '../../core/bulk-external.js';
@@ -31,7 +31,7 @@ function runIdOf(result: string): string {
   return m[1]!;
 }
 
-const plan = (extra: Record<string, unknown> = {}): Promise<string> => bulkPlanTool.handler({
+const plan = (extra: Record<string, unknown> = {}): Promise<string> => bulkPlanAnswer({
   target_system: 'http', target_host: HOST,
   source_list: { path: PATH, filters: { category: 12 }, after: { status: 'draft' } },
   ...extra,
@@ -98,6 +98,9 @@ describe('bulk_plan with source_list', () => {
     const first = runIdOf(await plan());
     ledger.resumePreview(first, Date.now(), { listChecksum: ledger.listStartChecksum(first)! });
     expect(await plan()).toBe('Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.');
+    await expect(bulkPlanTool.handler({
+      target_system: 'http', target_host: HOST, source_list: { path: PATH, filters: { category: 12 }, after: { status: 'draft' } },
+    } as Parameters<typeof bulkPlanTool.handler>[0], agent())).rejects.toBeInstanceOf(BulkPlanRefusal);
     expect(ledger.listRuns()).toHaveLength(1);
   });
 
@@ -116,7 +119,7 @@ describe('bulk_plan with source_list', () => {
 
 describe('bulk_plan with source_list and judge', () => {
   const judge = { rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } };
-  const judged = (list: Record<string, unknown>): Promise<string> => bulkPlanTool.handler({
+  const judged = (list: Record<string, unknown>): Promise<string> => bulkPlanAnswer({
     target_system: 'http', target_host: HOST, source_list: { path: PATH, filters: { category: 12 }, ...list }, judge,
   } as Parameters<typeof bulkPlanTool.handler>[0], agent());
 
@@ -128,7 +131,7 @@ describe('bulk_plan with source_list and judge', () => {
 
   it('refuses "after" beside judge, and a rule that decides the id field', async () => {
     expect(await judged({ after: { status: 'draft' } })).toMatch(/takes no "after"/);
-    expect(await bulkPlanTool.handler({
+    expect(await bulkPlanAnswer({
       target_system: 'http', target_host: HOST, source_list: { path: PATH, filters: {} },
       judge: { rule: 'x', schema: { id: { type: 'integer' } } },
     } as Parameters<typeof bulkPlanTool.handler>[0], agent())).toMatch(/id field/);
