@@ -282,6 +282,9 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.halt.unavailable_before_check')).toBe(entry('bulk.halt.unavailable_before_check',
 			'Hält das Nachprüfen gleich wieder an, ist {provider} noch nicht erreichbar; versuch es später noch einmal.',
 			'If checking halts again right away, {provider} is not reachable yet; try again later.'));
+		expect(line('bulk.halt.shopifyWriteOff_check')).toBe(entry('bulk.halt.shopifyWriteOff_check',
+			'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten.',
+			'Bulk changes to Shopify stores are not enabled on this instance. The run is stopped.'));
 		expect(line('bulk.halt.shopifyWriteOff_before_check_managed')).toBe(entry('bulk.halt.shopifyWriteOff_before_check_managed',
 			'Nachprüfen geht schon jetzt. Soll lynox danach weiter in Shopify-Shops schreiben, schreib an support@lynox.ai.',
 			'You can check again now. If lynox should then write on to Shopify stores, write to support@lynox.ai.'));
@@ -737,9 +740,9 @@ describe('going on from a run that halted', () => {
 			for (const managed of [true, false]) {
 				const text = bulkResumeText(w(key, unclear), managed, DE);
 				expect(bulkResumeKind(w(key, unclear)), key).toBe('check');
-				expect([text?.before, text?.check, text?.after].join(' '), `${key} ${String(managed)}`).not.toMatch(/fortsetzen/);
+				expect([text?.cause, text?.before, text?.check, text?.after].join(' '), `${key} ${String(managed)}`).not.toMatch(/fortsetzen/);
 				const en = bulkResumeText(w(key, unclear), managed, EN);
-				expect([en?.before, en?.check, en?.after].join(' '), `${key} ${String(managed)} en`).not.toMatch(/can continue\./);
+				expect([en?.cause, en?.before, en?.check, en?.after].join(' '), `${key} ${String(managed)} en`).not.toMatch(/can continue\.|continue it/);
 				expect(text?.check, key).toBe(check);
 			}
 		}

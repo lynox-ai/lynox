@@ -281,6 +281,8 @@ export function bulkResumeText(
 		: key === 'consecutiveFailures' ? i18n.t('bulk.halt.consecutiveFailures_write')
 		: key === 'unrecorded' ? i18n.tf('bulk.halt.unrecorded_write', vars)
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
+		// Going on by checking: the cause leaves out "continue it here", the way follows the check.
+		: key === 'shopifyWriteOff' && kind === 'check' ? i18n.t('bulk.halt.shopifyWriteOff_check')
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'credential' ? 'bulk.halt.credential_before'

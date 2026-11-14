@@ -118,4 +118,17 @@ describe('going on by checking', () => {
 		expect(lines.indexOf(t('bulk.halt.support_mail'))).toBe(lines.indexOf(later) + 1);
 		expect(lines.filter((l) => l === t('bulk.halt.support_mail'))).toHaveLength(1);
 	});
+
+	it('writing switched off: the halt says nothing about continuing, managed and self-hosted', async () => {
+		for (const tier of [true, false]) {
+			managed = tier;
+			run = makeRun({ haltKey: 'shopifyWriteOff', haltReason: 'shopifyWriteOff' });
+			await render();
+			expect(target.textContent, String(tier)).toContain('Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten.');
+			expect(target.textContent, String(tier)).not.toContain('fortsetzen');
+			if (component) unmount(component);
+			component = undefined;
+			target.innerHTML = '';
+		}
+	});
 });
