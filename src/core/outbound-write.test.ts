@@ -72,6 +72,25 @@ describe('a query or form name a server may read as the override', () => {
     expect(effectiveWriteMethod('POST', FORM, U, `${name}=DELETE`)).toBe(want);
   });
 
+  // A server that splits the query on `;` too (Rack before 3, Python's `parse_qs` before 3.9.2,
+  // servlet containers on request) or decodes `%uXXXX` (IIS) reads an override `searchParams` does
+  // not see as a field of its own.
+  it.each([
+    ['x=1;_method=DELETE', 'DELETE'],
+    ['%u005fmethod=DELETE', 'DELETE'],
+    ['x=1;y=2', 'GET'],
+  ] as const)('reads ?%s on a GET as %s', (query, want) => {
+    expect(effectiveWriteMethod('GET', {}, `${U}?${query}`)).toBe(want);
+  });
+
+  // A proxy that decodes the path before it forwards hands the server what follows a `%3F` as a
+  // query string, as the GraphQL check reads it (`urlQueryStrings`).
+  it('reads an override behind an escaped ? in the path', () => {
+    expect(effectiveWriteMethod('GET', {}, `${U}%3F_method=DELETE`)).toBe('DELETE');
+    expect(effectiveWriteMethod('GET', {}, `${U}%253F_method=DELETE`)).toBe('DELETE');
+    expect(effectiveWriteMethod('GET', {}, `${U}%3Fq=1`)).toBe('GET');
+  });
+
   it('reads a multipart part name the same way', () => {
     const MULTI = { 'Content-Type': 'multipart/form-data; boundary=b' };
     const part = (name: string) => `--b\r\nContent-Disposition: form-data; name="${name}"\r\n\r\nDELETE\r\n--b--`;
