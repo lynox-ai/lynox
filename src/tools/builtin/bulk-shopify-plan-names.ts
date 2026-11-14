@@ -45,17 +45,19 @@ export interface ShopifyPlanNames {
 /** judge.schema with its REST names read as the form's. A name whose form name the store cannot
  *  be written is renamed too: the form refuses it either way, with the fields it can write. */
 function renamed(record: Record<string, unknown>, where: string, changes: string[]): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    const name = REST_FIELD_NAMES[key];
-    if (name !== undefined && !Object.hasOwn(record, name)) {
-      out[name] = value;
-      changes.push(`${where} ${key} as ${name}`);
-    } else {
-      out[key] = value;
-    }
-  }
-  return out;
+  // Built as entries: an own key such as `__proto__` stays a key (and is refused as before).
+  return Object.fromEntries(Object.entries(record).map(([key, value]) => {
+    const name = restName(key);
+    if (name === undefined || Object.hasOwn(record, name)) return [key, value];
+    changes.push(`${where} ${key} as ${name}`);
+    return [name, value];
+  }));
+}
+
+/** The form's name for a REST field name, only for the names in the table (never `toString` and
+ *  the like from the object's prototype). */
+function restName(key: unknown): string | undefined {
+  return typeof key === 'string' && Object.hasOwn(REST_FIELD_NAMES, key) ? REST_FIELD_NAMES[key] : undefined;
 }
 
 /** `form` is `shopify` or `shopify_media`; the other arguments as the planner gave them. */
@@ -77,7 +79,7 @@ export function shopifyPlanNames(form: 'shopify' | 'shopify_media', writeMethod:
   }
   if (form === 'shopify' && typeof out['filters'] === 'object' && out['filters'] !== null && !Array.isArray(out['filters']) && Object.keys(out['filters']).length === 0) {
     delete out['filters'];
-    changes.push('filters {} left out (no filter reads every product)');
+    changes.push('filters {} left out (no filter reads every product in every status, drafts and archived included)');
   }
   if (form !== 'shopify') return { writeMethod: method, list: out, judge, changes };
   if (typeof out['after'] === 'object' && out['after'] !== null && !Array.isArray(out['after']) && Object.keys(out['after']).length === 0) {
@@ -94,7 +96,7 @@ export function shopifyPlanNames(form: 'shopify' | 'shopify_media', writeMethod:
     if (Array.isArray(j['context'])) {
       const given = j['context'] as unknown[];
       j['context'] = given.map((f) => {
-        const name = typeof f === 'string' ? REST_FIELD_NAMES[f] : undefined;
+        const name = restName(f);
         if (name === undefined || !SHOPIFY_CONTEXT_FIELDS.includes(name) || given.includes(name)) return f;
         changes.push(`judge.context ${String(f)} as ${name}`);
         return name;

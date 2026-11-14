@@ -8,6 +8,7 @@ import { BulkLedger } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { validateToolInput } from '../../core/tool-input-validator.js';
 import type { IAgent } from '../../types/index.js';
+import { shopifyPlanNames } from './bulk-shopify-plan-names.js';
 
 /**
  * The bulk_plan schema names the Shopify forms but not their rules, so a refused plan in such a
@@ -295,6 +296,23 @@ describe('a Shopify plan in the store\'s REST names', () => {
     expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
   });
 
+  it('leaves every path that narrows the list, or is not the list, to the form\'s refusal', async () => {
+    for (const path of ['/admin/api/2025-01/products.json?status=draft', '/products.json?vendor=X', '/admin/api/2025-01/products/', '/admin/api/2025-01/products/123.json', '/admin/api/2025-01/collections/5/products.json', '/products.json#x']) {
+      expect(await plan({ source_list: { form: 'shopify', path, after: { seo_title: 'x' } } }), path).toMatch(/^Error: source_list\.path is not given/);
+    }
+  });
+
+  it('keeps a schema field named like something of an object\'s prototype as given', () => {
+    for (const key of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      const judge = JSON.parse(`{"rule":"r","schema":{"${key}":{"type":"string"}},"context":["${key}"]}`) as Record<string, unknown>;
+      const names = shopifyPlanNames('shopify', undefined, { form: 'shopify' }, judge);
+      const out = names.judge as { schema: Record<string, unknown>; context: unknown[] };
+      expect(Object.keys(out.schema), key).toEqual([key]);
+      expect(out.context, key).toEqual([key]);
+      expect(names.changes, key).toEqual([]);
+    }
+  });
+
   it('reads nothing in source_list.after otherwise: what it holds is written, and its refusal makes the planner look again', async () => {
     for (const after of [
       { metafields_global_title_tag: 'T' },
@@ -318,7 +336,7 @@ describe('a Shopify plan in the store\'s REST names', () => {
   it('leaves out the product list\'s path without .json, filters {} and an empty after beside a judge', async () => {
     const answer = await plan({ source_list: { form: 'shopify', path: '/admin/api/2025-01/products', filters: {}, after: {} }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } });
     expect(answer).toMatch(/^List dry run recorded/);
-    expect(answer).toContain('path /admin/api/2025-01/products left out (the form reads the store\'s products itself); filters {} left out (no filter reads every product); the empty after left out (with judge, the model decides the values).');
+    expect(answer).toContain('path /admin/api/2025-01/products left out (the form reads the store\'s products itself); filters {} left out (no filter reads every product in every status, drafts and archived included); the empty after left out (with judge, the model decides the values).');
     // Filters that name something stay, and so does an after that sets something beside a judge.
     expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x' } }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } })).toMatch(/^Error: With judge/);
     expect(await plan({ source_list: { form: 'shopify', after: {} } })).toMatch(/^Error: source_list\.after must be a non-empty object/);
