@@ -426,7 +426,7 @@ describe('where the stored Shopify list form is read', () => {
     // The image form on the planner's input: refused where the store connection may not write
     // files, and named after a refused product plan only where it may.
     'tools/builtin/bulk.ts | if (form === \'shopify_media\' && isShopifyStoreHostName(host)',
-    'tools/builtin/bulk.ts | const images = form !== \'shopify\' ? \'\' : mediaWritableFor(in',
+    'tools/builtin/bulk.ts | const images = form !== \'shopify\' ? \'\' : access.kind === \'wr',
     'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listRea',
     // parseShopifyMediaListSource: the planner's image form and the form it is stored under.
     'core/bulk-list.ts | if (form === SHOPIFY_MEDIA_LIST_FORM) return parseShopifyMed',

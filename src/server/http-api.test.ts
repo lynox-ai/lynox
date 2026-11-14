@@ -5858,14 +5858,14 @@ describe('LynoxHTTPApi', () => {
     // approved; change it only with a new approval.
     const APPROVED = [
       'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
-      'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
+      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+      'Für Buchhaltung, Bank und Lohn fragt lynox bei bexio keine Rechte an. Welche Rechte der Zugang am Ende erhält, legt bexio fest. Gewährt bexio mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
     ];
     // The page around it, approved 2026-10-21 under the same rule.
     const APPROVED_FRAME = {
       title: 'Schreibrechte für bexio bestätigen',
-      scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
+      scopesIntro: 'lynox fragt bei bexio diese Schreibrechte an:',
+      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
       button: 'Zustimmen und weiter zu bexio',
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
     };
@@ -6019,6 +6019,26 @@ describe('LynoxHTTPApi', () => {
       const link = new URL(r.location);
       expect(link.host).toBe('auth.bexio.com');
       expect(link.searchParams.get('scope')?.split(' ')).toEqual(expect.arrayContaining(['kb_invoice_edit', 'note_edit']));
+    });
+
+    // The callback records as asked what this cookie carries, so it has to be exactly what the
+    // link asks for and the page showed: the scopes the confirmation was checked against.
+    it('signs into the cookie exactly the scopes the confirmed link asks for', async () => {
+      const r = await open(WRITING, confirm);
+      expect(r.status).toBe(302);
+      const value = decodeURIComponent((r.state ?? '').split(';')[0]!.slice('lynox_profile_oauth_state='.length));
+      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const read = verifyProfileOAuthState(value, TEST_SECRET, Math.floor(Date.now() / 1000));
+      expect(read?.asked).toEqual(new URL(r.location).searchParams.get('scope')?.split(' '));
+      expect(read?.asked).toEqual(SHOWN.slice('?shown_scopes='.length).split('+'));
+    });
+
+    it('refuses a confirmation when the profile now asks for more than the page showed, and sets no cookie', async () => {
+      const r = await open(`${WRITING} contact_edit`, confirm);
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('asks for other access than the page you confirmed showed');
+      expect(r.state).toBeNull();
+      expect(r.location).toBe('');
     });
 
     it.each([
@@ -19437,7 +19457,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockSecretSet.mockReset();
   });
 
-  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal; asked?: string[] } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     expect(store.register({
@@ -19455,7 +19475,11 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockExchangeToken.mockReset();
     mockExchangeToken.mockResolvedValue({ ok: true, status: 200, responseOk: true, text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', scope: 'read_products,read_orders' }) });
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
-    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+    // What the confirmed start signs: the scopes its link asks for, as the route computes them.
+    const { askedScopes } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+    const scope = opts.oauthExtra?.['scope'];
+    const asked = opts.asked ?? askedScopes({ preset_id: 'shopify', scope: typeof scope === 'string' ? scope : undefined }) ?? [];
+    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' }, asked }, TEST_SECRET, Math.floor(Date.now() / 1000));
     if (cookie === null) throw new Error('fixture could not be signed');
     return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(cookie)}`, store };
   }
@@ -19611,6 +19635,21 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain('The provider granted more access than this connection asks for: write_products. The token the provider issued holds all of it.');
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_products']);
+  });
+
+  // What counts as asked is what the confirmed start signed. A save between the start and the
+  // callback that adds a scope changes the next link, not this consent: the grant does not record
+  // it as asked, and the page names it as granted beyond the ask.
+  it('records as asked what the start signed, not the profile as the callback reads it', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products' }, asked: ['read_products'], tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products,write_files' }) });
+    const before = store.get(PROFILE)!;
+    expect(store.register({ ...before, auth: { ...before.auth!, oauth: { ...before.auth!.oauth!, scope: 'read_products write_files' } } })).toBe(true);
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('The provider granted more access than this connection asks for: write_files.');
+    expect(store.get(PROFILE)?.oauth_grant?.asked_scope).toEqual(['read_products']);
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_files']);
   });
 
   it('says only "Connected" for a grant narrower than the ask, and records it as granted', async () => {
@@ -20964,7 +21003,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(res.status).toBe(200);
 
     const grant = store.get(PROFILE)?.oauth_grant ?? {};
-    expect(Object.keys(grant).sort()).toEqual(['connected_by', 'minted_by', 'minted_for', 'origin', 'state', 'written']);
+    expect(Object.keys(grant).sort()).toEqual(['asked_scope', 'connected_by', 'minted_by', 'minted_for', 'origin', 'state', 'written']);
     expect(grant).toMatchObject({ origin: 'callback', state: 'connected', connected_by: 'owner' });
   });
 });
@@ -21750,6 +21789,24 @@ describe('mandate stance of every user route', () => {
 
   it('allows `reads` only on a GET', () => {
     expect(users().filter(r => r.stance?.kind === 'reads' && r.method !== 'GET').map(name)).toEqual([]);
+  });
+
+  // The customer texts of the Shopify and bexio presets say a bulk run writes without asking at each
+  // change only after the OWNER confirmed its list. Every route that releases a run's writes —
+  // approving it, confirming its probe, resuming it, planning its undo, whose approval is the same
+  // approve route — and every route that changes the list it confirms (taking a target out or
+  // putting it back) refuses everyone else. A new writing bulk route joins the set by its path.
+  it('lets only the owner release the writes of a bulk run, its undo included', () => {
+    const writing = users().filter(r => WRITE.has(r.method) && r.path.startsWith('/api/bulk/'));
+    expect(writing.map(name).sort()).toEqual([
+      'POST /api/bulk/runs/stance-probe/approve',
+      'POST /api/bulk/runs/stance-probe/confirm-probe',
+      'POST /api/bulk/runs/stance-probe/resume',
+      'POST /api/bulk/runs/stance-probe/targets/stance-probe/deselect',
+      'POST /api/bulk/runs/stance-probe/targets/stance-probe/reselect',
+      'POST /api/bulk/runs/stance-probe/undo',
+    ]);
+    expect(writing.filter(r => r.stance?.kind !== 'owner-only').map(name), 'Zustimmungstext Absatz 2: nur der Inhaber gibt einen Massenlauf frei').toEqual([]);
   });
 
   // Register 1112: a GET about one chat (by its id, a live run's or a recorded run's) names the chat,

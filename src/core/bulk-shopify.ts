@@ -22,20 +22,33 @@ import { isFeatureEnabled } from './features.js';
 import { presetStoreHost } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
 
-/** The Shopify scopes either of which `fileUpdate`, the bulk image form's write, needs (PRD
- *  shopify-preset §16.6). The Shopify preset asks for neither (`oauth-presets.ts`). */
-export const SHOPIFY_MEDIA_WRITE_SCOPES: readonly string[] = Object.freeze(['write_files', 'write_themes']);
-
 /**
- * Whether the store connection for `host` may run the bulk image form (`fileUpdate`): the engine's own Shopify
- * connection to that store (`presetStoreHost`, the same profile the write attaches) whose grant,
- * as Shopify answered it, holds `write_files` or `write_themes`. Without a recorded grant nothing
- * is known beyond the ask, and the preset never asks for either, so that counts as no.
+ * What the store connection for `host` allows the bulk image form (`fileUpdate`):
+ * - `writable`: the engine's own Shopify connection to that store (`presetStoreHost`, the same
+ *   profile the write attaches) ASKED for `write_files` — so the owner confirmed it on the consent
+ *   page before the link — and its grant, as Shopify answered it, holds it. A grant alone is not
+ *   enough: Shopify grants the app's configured scopes whatever the link asked for, so
+ *   `write_files` can arrive without the owner ever having confirmed it in lynox.
+ * - `not_asked`: that connection never asked for `write_files`, so asking for it would change
+ *   something: a new link with it in the scope.
+ * - `not_granted`: it asked and Shopify did not grant it, or no grant names what was granted. A
+ *   new link would ask for the same, so nothing is offered.
+ * - `no_connection`: no single Shopify connection of this engine maps to `host` — none, another
+ *   kind of profile, or one for another store. Nothing is known about what was asked or granted,
+ *   so neither a refusal by Shopify nor a new link is the thing to say.
  */
-export function shopifyMediaWritable(profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined, host: string): boolean {
+export type ShopifyMediaAccess = 'writable' | 'not_asked' | 'not_granted' | 'no_connection';
+
+export function shopifyMediaAccess(profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined, host: string): ShopifyMediaAccess {
   // Only the Shopify preset derives its API host from the store (`apiOnDerivedHost`), so a match is that preset.
-  if (profile === undefined || presetStoreHost(profile) !== host) return false;
-  return (profile.oauth_grant?.granted_scope ?? []).some((s) => SHOPIFY_MEDIA_WRITE_SCOPES.includes(s));
+  if (profile === undefined || presetStoreHost(profile) !== host) return 'no_connection';
+  // What the person confirmed, as the connect callback recorded it — never the profile's scope,
+  // which a save changes without a consent page. A grant from before it was recorded, or a
+  // record that is no list, asked for nothing: a new link would ask, so that case is offered.
+  const recorded: unknown = profile.oauth_grant?.asked_scope;
+  const asked = Array.isArray(recorded) ? recorded.filter((s): s is string => typeof s === 'string') : [];
+  if (!asked.includes('write_files')) return 'not_asked';
+  return (profile.oauth_grant?.granted_scope ?? []).includes('write_files') ? 'writable' : 'not_granted';
 }
 
 /** Whether this instance reads Shopify stores in bulk runs. Asked when a run is planned and on
