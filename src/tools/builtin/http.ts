@@ -326,6 +326,9 @@ function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: st
         (mandate
           ? `Shorten it, or let this host's API profile attach the key.`
           : `Store a long key in the vault and send it as secret:NAME (the question shows it masked), let an API profile attach it, or put the value into the body.`);
+    case 'name-too-long':
+      // The same for owner and mandate: neither the vault nor the body shortens a name.
+      return `Blocked: this ${write} to ${service} sets a header whose name is ${u.length} characters long, more than the ${SHOWN_HEADER_MAX_CHARS} the approval question shows. Nothing was sent. Use the header name the service documents.`;
     case 'escaped-secret':
       return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Write the value plainly.`);
@@ -3135,9 +3138,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
-    // A URL past the bound is refused before anything parses or reads it: the gates parse it on
+    // A URL past the bound is refused before the handler parses or reads it: the gates parse it on
     // every call site, and the question reads its path in every way a server may decode it
-    // too. Measured on the URL as given, in bytes.
+    // too. The guard hooks (outwardWrite, outwardRead) parse it before this, linearly and within
+    // the reading budget. Measured on the URL as given, in bytes.
     const urlBytes = typeof input.url === 'string' ? sentBytes(input.url) : 0;
     if (urlBytes > URL_MAX_BYTES) {
       blockedVerbatim(`Blocked: the URL of this request is ${urlBytes} bytes, longer than the ${URL_MAX_BYTES} bytes a request may have. Nothing was sent. Send fewer values in the URL, or put them in the body where the service accepts them there, or split the work into several requests.`);

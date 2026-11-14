@@ -955,7 +955,7 @@ describe('a header name longer than the question shows', () => {
   it('is refused unread and not named', () => {
     const name = `x-${'%u0041'.repeat(40)}`;
     expect(name.length).toBeGreaterThan(SHOWN_HEADER_MAX_CHARS);
-    expect(headersForQuestion({ [name]: 'v' }, (t) => t, () => 'show')).toEqual({ unshowable: { reason: 'too-long', name: `(a name of ${name.length} characters)`, length: name.length } });
+    expect(headersForQuestion({ [name]: 'v' }, (t) => t, () => 'show')).toEqual({ unshowable: { reason: 'name-too-long', length: name.length } });
     const atBound = `x-${'a'.repeat(SHOWN_HEADER_MAX_CHARS - 2)}`;
     expect(headersForQuestion({ [atBound]: 'v' }, (t) => t, () => 'show')).toEqual({ unshowable: { reason: 'too-long', name: atBound, length: atBound.length + 3 } });
   });

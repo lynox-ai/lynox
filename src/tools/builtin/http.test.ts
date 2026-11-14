@@ -382,7 +382,7 @@ describe('httpRequestTool', () => {
      * `unstubAllGlobals` here, so a test that does not stub `fetch` runs on whatever the
      * previous one left behind.
      */
-    // A URL past the bound is refused before anything parses or reads it.
+    // A URL past the bound is refused before the handler parses or reads it.
     it('refuses a URL one byte longer than a request may have, and only that one', async () => {
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, statusText: 'OK', body: 'ok' }));
       vi.stubGlobal('fetch', fetchMock);
@@ -9385,6 +9385,25 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(await visible({ url: 'https://h.example/a', method: 'POST', headers, body: '{}' }, owner.agent)).toContain(ownerWay);
       expect(mandate.prompt).not.toHaveBeenCalled();
       expect(owner.prompt).not.toHaveBeenCalled();
+    });
+
+    // A name too long to show: the same text for owner and mandate, without the name (unread, so
+    // not checked for a secret), and without a way out that shortens a value.
+    it('a header name too long to show is refused with its own text, the same for owner and mandate', async () => {
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockClear();
+      const name = `x-${'n'.repeat(200)}`;
+      const text = `Blocked: this POST to h.example sets a header whose name is ${name.length} characters long, more than the 200 the approval question shows. Nothing was sent. Use the header name the service documents.`;
+      for (const principal of [undefined, MANDATE]) {
+        const { agent, prompt } = agent270(principal === undefined ? {} : { principal });
+        const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: { [name]: 'v' }, body: '{}' }, agent);
+        expect(out).toContain(text);
+        expect(out).not.toContain(name);
+        expect(out).not.toContain('secret:NAME');
+        expect(out).not.toContain('into the body');
+        expect(prompt).not.toHaveBeenCalled();
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('control: the owner is asked about a stored secret written plainly in the query, shown masked, with the sentence', async () => {

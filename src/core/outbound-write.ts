@@ -183,9 +183,9 @@ function multipartNamesMethod(body: string): boolean {
 }
 
 /**
- * The longest URL a request may have, in bytes, checked on the URL as given before anything parses
- * or reads it: the gates parse and read a URL on every call site, at a cost in its length
- * (measured at the handler). A query the question shows whole ({@link SHOWN_BODY_MAX_BYTES}) still fits,
+ * The longest URL a request may have, in bytes, checked on the URL as given before the handler
+ * parses or reads it: the gates parse and read a URL on every call site, at a cost in its length
+ * (measured at the handler). The tool's guard hooks parse it earlier, in time linear in its length. A query the question shows whole ({@link SHOWN_BODY_MAX_BYTES}) still fits,
  * with 16 KiB for the rest of the URL; no server takes a URL near this length.
  */
 export const URL_MAX_BYTES = 80 * 1024;
@@ -1113,6 +1113,8 @@ export const SHOWN_HEADER_MAX_CHARS = 200;
 export type UnshowableHeader =
   | { reason: 'duplicate'; name: string }
   | { reason: 'too-long'; name: string; length: number }
+  /** A name longer than a line is shown: not named, as it was not checked for a secret. */
+  | { reason: 'name-too-long'; length: number }
   | { reason: 'escaped-secret'; name: string }
   | { reason: 'secret-name'; name: string };
 
@@ -1155,7 +1157,7 @@ export function headersForQuestion(
   for (const { k, v } of shown) {
     // A name longer than a line is shown is refused unread: reading it every way
     // a server may decode it costs time in its length. Not named, as it was not checked for a secret.
-    if (k.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'too-long', name: `(a name of ${k.length} characters)`, length: k.length } };
+    if (k.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'name-too-long', length: k.length } };
     if (mask(k) !== k || hidesEncodedSecret(k, mask)) return { unshowable: { reason: 'secret-name', name: k } };
     const masked = mask(v);
     const line = `${spelled(k)}: ${spelled(masked)}`;
