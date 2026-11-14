@@ -96,6 +96,8 @@ describe('measured Shopify write forms', () => {
     expect(isMeasuredShopifySend('shopify_product', seo, doc.replace('title: $title, ', 'title: $title, handle: $title, '), '2026-10')).toBe(false);
     expect(isMeasuredShopifySend('shopify_product', seo, doc, '2027-01')).toBe(false);
     expect(isMeasuredShopifySend('shopify_product', seo, doc, null)).toBe(false);
+    // Only the form that was measured: the same variables under another form are not.
+    expect(isMeasuredShopifySend('shopify_media_alt', seo, doc, '2026-10')).toBe(false);
   });
 
   it('holds for the seo pair, the title, and both, with values and with the pair cleared', () => {

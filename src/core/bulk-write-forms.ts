@@ -84,8 +84,8 @@ export const MEASURED_SHOPIFY_FORMS: readonly MeasuredShopifyForm[] = [
  * with `null` was not measured.
  */
 export function isMeasuredShopifyWrite(form: ShopifyWriteForm, after: Readonly<Record<string, unknown>>): boolean {
-  if (form !== 'shopify_product') return false;
-  const variables = shopifyProductWriteVariables(after);
+  // An image's after-state builds no product variables; the form check below also refuses it.
+  const variables = form === 'shopify_product' ? shopifyProductWriteVariables(after) : null;
   return variables !== null && isMeasuredShopifySend(form, variables, SHOPIFY_WRITE_DOCUMENTS[form], shopifyAdminApiVersion());
 }
 
