@@ -915,6 +915,41 @@ export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
 
+/** Per target the owner still writes: how many OTHER targets get the same new value in the same
+ *  field. A judge can give different products one value (three products with one SEO title), and
+ *  the preview showed each row alone. Field changes only, by their exact new text; an empty or
+ *  missing value is no value. A field in which every target that writes it gets one value is not
+ *  marked: that is the order („set every SEO title to …“), not a duplicate. A target that shares
+ *  values in several fields counts its largest group. Targets without a shared value are absent. */
+export function bulkSameValueOthers(targets: readonly Pick<BulkTarget, 'seq' | 'change' | 'diff' | 'deselected'>[]): Map<number, number> {
+	const groups = new Map<string, number[]>();
+	const writers = new Map<string, Set<number>>();
+	for (const x of targets) {
+		if (x.deselected || (x.change !== 'update' && x.change !== 'create') || x.diff.kind !== 'fields') continue;
+		for (const { field, after } of x.diff.fields) {
+			// Every target that writes the field counts toward „all“, also one that clears it.
+			const w = writers.get(field);
+			if (w === undefined) writers.set(field, new Set([x.seq]));
+			else w.add(x.seq);
+			if (after === null || after === undefined) continue;
+			const value = typeof after === 'string' ? after : JSON.stringify(after);
+			if (value.trim() === '') continue;
+			const key = `${field}\u0000${value}`;
+			const seqs = groups.get(key);
+			if (seqs === undefined) groups.set(key, [x.seq]);
+			else if (!seqs.includes(x.seq)) seqs.push(x.seq);
+		}
+	}
+	const others = new Map<number, number>();
+	for (const [key, seqs] of groups) {
+		if (seqs.length < 2) continue;
+		// One value for every target that writes this field: the order itself.
+		if (seqs.length === writers.get(key.slice(0, key.indexOf('\u0000')))?.size) continue;
+		for (const seq of seqs) others.set(seq, Math.max(others.get(seq) ?? 0, seqs.length - 1));
+	}
+	return others;
+}
+
 /** How many targets the owner still writes whose SEO text gains an `&`: the products
  *  the preview's line names. One the owner took out is not counted. */
 export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntityFields' | 'deselected'>[]): number {

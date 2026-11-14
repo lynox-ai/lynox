@@ -14,7 +14,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSameValueOthers, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -432,6 +432,8 @@
 	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, view) : { text: null, nothing: false });
 	// Counted over the loaded targets: a preview the owner approves is loaded whole.
 	const seoEntity = $derived(approving ? bulkSeoEntityCount(targets) : 0);
+	// Same: a preview the owner approves is loaded whole, so every target that shares a value is here.
+	const sameValue = $derived(approving ? bulkSameValueOthers(targets) : new Map<number, number>());
 	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
 	const foldedUnchanged = $derived(targets.length - shownTargets.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
@@ -552,6 +554,9 @@
 					{#if skipped.text && !skipped.nothing}
 						<p class="text-sm mb-2">{skipped.text}</p>
 					{/if}
+					{#if sameValue.size > 0}
+						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-same-value-count">{tf(shopify ? 'bulk.preview.same_value' : 'bulk.preview.same_value_targets', { n: String(sameValue.size) })}</p>
+					{/if}
 					{#if seoEntity > 0}
 						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-seo-entity-count">{seoEntity === 1 ? t('bulk.preview.seo_entity_one') : tf('bulk.preview.seo_entity', { n: String(seoEntity) })}</p>
 					{/if}
@@ -576,6 +581,10 @@
 											{/if}
 											{#if (target.seoEntityFields?.length ?? 0) > 0}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-seo-entity">{t('bulk.target.seo_entity')}</span>
+											{/if}
+											{#if (sameValue.get(target.seq) ?? 0) > 0}
+												{@const n = sameValue.get(target.seq) ?? 0}
+												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-same-value">{n === 1 ? t('bulk.target.same_value_one') : tf('bulk.target.same_value', { n: String(n) })}</span>
 											{/if}
 											{#if bulkRollbackLeft(run, target)}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
