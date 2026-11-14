@@ -43,7 +43,7 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, overrideUnreadInPath, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, pathReadable, URL_MAX_BYTES, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, overrideUnreadInPath, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, pathReadable, URL_MAX_BYTES, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
@@ -404,6 +404,31 @@ function profilesOnHost(url: string, apiStore: NonNullable<ToolContext['apiStore
     }
   }
   return [...ids].map((id) => apiStore.get(id)).filter((p): p is ApiProfile => p !== undefined);
+}
+
+/** Query keys a GraphQL server reads a document, its variables, its operation or a stored document
+ *  from (Relay and Hot Chocolate name a persisted operation `id`; Apollo's by `persistedQuery`). */
+const GRAPHQL_QUERY_KEYS = new Set(['query', 'operationname', 'operation_name', 'variables', 'extensions', 'graphql', 'id', 'documentid', 'doc_id', 'queryid', 'persistedquery', 'hash', 'sha256hash']);
+
+/**
+ * Whether the query strings of a GraphQL write carry nothing but the credential an API profile
+ * on the host declares to go there (`auth.type: 'query'`, Contentful's `?access_token=`): one pair
+ * in the URL's own query string and none a decoded `?` in the path makes, under the name the
+ * profile declares (`key` when it names none), in every reading a server may make of it
+ * (`queryReadings`), and that name none a GraphQL server reads a document from. Anything else
+ * there may be run instead of the body, so it stays refused.
+ */
+function onlyProfileQueryCredential(url: string, toolContext: ToolContext | undefined): boolean {
+  if (!toolContext?.apiStore) return false;
+  const declared = profilesOnHost(url, toolContext.apiStore)
+    .filter((p) => p.auth?.type === 'query')
+    .map((p) => p.auth?.query_param ?? 'key');
+  const strings = urlQueryStrings(url);
+  if (strings.length !== 1) return false;
+  return queryReadings(strings[0]!).every((params) => {
+    const pairs = [...params];
+    return pairs.length === 1 && declared.includes(pairs[0]![0]) && !GRAPHQL_QUERY_KEYS.has(queryKeyName(pairs[0]![0]));
+  });
 }
 
 /** Write approvals denied in a tool batch, keyed by the batch's identity (`IAgent.approvalBatch`):
@@ -3272,8 +3297,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (graphqlEndpoint && isWriteMethod(gatedMethod)) {
       // Some servers read `query` from the URL before the body (express-graphql, graphene-django),
       // so a write there carries nothing in its URL: no list of parameter names a server might read.
-      // The query string a proxy may make of a `?` decoded in the path counts as well.
-      if (urlQueryStrings(input.url).some((search) => search !== '')) {
+      // The query string a proxy may make of a `?` decoded in the path counts as well. The one
+      // pair an API profile on the host declares for its credential is no document
+      // (`onlyProfileQueryCredential`): without it such a profile could write nothing there.
+      if (urlQueryStrings(input.url).some((search) => search !== '') && !onlyProfileQueryCredential(input.url, toolContext)) {
         blockedVerbatim(`Blocked: ${writeShown} to ${service()} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
       }
       const reading = graphqlWrite(headers, input.body);
@@ -3689,7 +3716,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       contract !== undefined &&
       !outboundEffect &&
       !connectedAccount &&
-      named.every((m) => contractGrants('http_request', { ...input, method: m }, contract));
+      // The body as it is sent: the contract reads it (`bodyMayWriteGraphql`), and a repaired body
+      // can parse where the one the model wrote does not.
+      named.every((m) => contractGrants('http_request', { ...input, body: repairedBody?.body ?? input.body, method: m }, contract));
     // The one place where a grant lets an unattended write through, so the one place that
     // marks the call with it (`noteGrantLift`). A contract that names no accepted grant
     // (handed in through `AgentConfig` by an embedder or a test) leaves no mark: the write

@@ -2113,6 +2113,51 @@ describe('WorkerLoop', () => {
     loop.stop();
   });
 
+  // UX-065: the owner reads a member connection's line in the owner's own wording, which names
+  // the plan (the trigger's title) and the way forward; recorded in English, pushed in the notice language.
+  it.each([
+    ['en', 'The plan "Daily Report" did not use api.crm.example (profile "CRM" (id crm-api)). setup@example.org set it up with their own login, so only setup@example.org\'s own session uses it. If the plan should use this service, there are two ways: once setup@example.org\'s access has ended, ask in a chat to take over the connection and confirm with “Allow”; or delete the profile under Settings → APIs and connect the service yourself, which disconnects setup@example.org. Otherwise the plan cannot run this step.'],
+    ['de', 'Der Plan „Daily Report“ hat api.crm.example (Profil "CRM" (id crm-api)) nicht genutzt. setup@example.org hat die Verbindung mit eigenem Login eingerichtet, deshalb nutzt sie nur die eigene Sitzung von setup@example.org. Soll der Plan diesen Dienst nutzen, gibt es zwei Wege: Sobald der Zugang von setup@example.org beendet ist, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit „Erlauben“. Oder lösche das Profil unter Einstellungen → APIs und verbinde den Dienst selbst; das trennt setup@example.org. Sonst kann der Plan diesen Schritt nicht ausführen.'],
+  ] as const)('pushes a plan\'s refused member connection in the owner\'s wording, %s', async (language, pushedLine) => {
+    const { refuseMemberConnection } = await import('./member-connection-notes.js');
+    const { runAsPlanOf } = await import('./plan-run-context.js');
+    const other = { kind: 'mandate', email: 'other@example.org', mandateId: 'M-2' } as const;
+    const crm = {
+      id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'd',
+      auth: { type: 'oauth2', vault_keys: [], oauth: { token_url: 'https://api.crm.example/oauth/token' } },
+      created_by: 'mandate:setup@example.org',
+      oauth_grant: { origin: 'callback', state: 'connected', connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1', grant_id: 'g-1' },
+    } as unknown as import('./api-store.js').ApiProfile;
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    let modelLine: string | null = null;
+    vi.mocked(session.run).mockImplementation(async () => {
+      runAsPlanOf(other, () => { modelLine = refuseMemberConnection(crm, other, { isLive: () => true }); });
+      return 'All done.';
+    });
+    const engine = makeEngine({ taskManager: tm, session });
+    Object.assign(engine as unknown as Record<string, unknown>, { config: { language } });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const recordedLine = 'The plan "Daily Report" did not use api.crm.example (profile "CRM" (id crm-api)). setup@example.org set it up with their own login, so only setup@example.org\'s own session uses it. If the plan should use this service, there are two ways: once setup@example.org\'s access has ended, ask in a chat to take over the connection and confirm with “Allow”; or delete the profile under Settings → APIs and connect the service yourself, which disconnects setup@example.org. Otherwise the plan cannot run this step.';
+    expect(modelLine).toMatch(/^Connection not used: setup@example\.org set up this connection .*Say so in your reply, and do not ask for permission\.$/);
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, `All done.\n• ${recordedLine}`, 'halted');
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `All done.\n• ${pushedLine}` }));
+
+    // The next run meets the same refusal: compared as recorded, so not pushed again, in either language.
+    Object.assign(task, { last_run_status: 'halted', last_run_result: `All done.\n• ${recordedLine}` });
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    loop.stop();
+  });
+
   it('a run ended through recordAndNotify (a workflow\'s end) is told with its line and ⏸, once', async () => {
     const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
     const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
@@ -2134,6 +2179,44 @@ describe('WorkerLoop', () => {
     await end();
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
     expect(router.notify).toHaveBeenCalledTimes(1);
+  });
+
+  // UX-065: a contained run's push leaves out the result but keeps the member lines, in German too.
+  it('a contained run\'s push keeps the owner\'s line in the notice language', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const OWNER = { en: 'The plan "Daily Report" did not use X.', de: 'Der Plan „Daily Report“ hat X nicht genutzt.' };
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection('Connection not used: for the model', () => OWNER); return 'All done.'; });
+    const engine = makeEngine({ taskManager: tm, session, containment: { isContained: () => true } });
+    Object.assign(engine as unknown as Record<string, unknown>, { config: { language: 'de' } });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, `All done.\n• ${OWNER.en}`, 'halted');
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ body: `${WORKER_NOTICES.de.containedResult}\n• ${OWNER.de}` }));
+    loop.stop();
+  });
+
+  // UX-065: a workflow's end pushes the owner's wording in the notice language, recorded in English.
+  it('a workflow\'s end pushes the owner\'s line in German and records it in English', async () => {
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: for the model';
+    const OWNER = { en: 'The plan "Daily Report" did not use X.', de: 'Der Plan „Daily Report“ hat X nicht genutzt.' };
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const engine = makeEngine({ taskManager: tm });
+    Object.assign(engine as unknown as Record<string, unknown>, { config: { language: 'de' } });
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection(LINE, () => OWNER);
+      (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: boolean) => void }).recordAndNotify(task, 'Pipeline completed.', true);
+    }, task.title).done;
+    expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, `Pipeline completed.\n• ${OWNER.en}`, 'halted');
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `Pipeline completed.\n• ${OWNER.de}` }));
   });
 
   // F4: the catch records outside the run's context, from the run's entry.

@@ -814,6 +814,9 @@ describe('the hint for a secret: name the vault does not have', () => {
     const run = runCollectingMemberNotes(() => agentCall(storeOf(members), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOP_API_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') }));
     await run.done;
     expect([...run.notes]).toEqual([expect.stringMatching(/^Connection not used: setup@example\.org set up this connection/)]);
+    // The gate notes the owner's German with it (UX-065): the owner's own run, outside a plan,
+    // and this fixture's grant is not live, so the takeover.
+    expect([...run.said.values()]).toEqual(['setup@example.org hat diese Verbindung (api.shop.example, Profil "shop-api" (id shop-api)) mit eigenem Login eingerichtet. Damit lynox sie für dich nutzt, übernimm sie: Bitte im Chat darum, die Verbindung "shop-api" (id shop-api) zu übernehmen, und bestätige mit „Erlauben“.']);
     expect(sent).toHaveLength(0);
   });
 
