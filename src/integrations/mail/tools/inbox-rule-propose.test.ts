@@ -67,9 +67,11 @@ async function propose(input: Record<string, unknown>, agent: IAgent = chat): Pr
 const valid = { account: 'acct-1', matcher_kind: 'from', matcher_value: 'Kunde@Example.com', name: 'Kunde' };
 
 describe('inbox_rule_propose — behind its flag', () => {
-  it('is among the mail tools only with LYNOX_FEATURE_INBOX_USER_RULES on', () => {
+  it('is among the mail tools unless LYNOX_FEATURE_INBOX_USER_RULES is off, and on by default', () => {
     const names = (): string[] => createMailTools(new InMemoryMailRegistry(), { hooks } as never).map((t) => t.definition.name);
     vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+    expect(names()).toContain('inbox_rule_propose');
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
     expect(names()).not.toContain('inbox_rule_propose');
     vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '1');
     expect(names()).toContain('inbox_rule_propose');
@@ -143,6 +145,14 @@ describe('inbox_rule_propose — what it accepts', () => {
     ['a "from" with a scheme', { ...valid, matcher_value: 'mailto:kunde@example.com' }, /must be one sender address/],
     ['a "from" with a trailing comma', { ...valid, matcher_value: 'kunde@example.com,' }, /must be one sender address/],
     ['a subject phrase under 3 characters', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'ab' }, /at least 3 characters/],
+    // Counted in characters, as the owner's create counts them: two emoji are two, not four.
+    ['a subject phrase of two emoji', { ...valid, matcher_kind: 'subject_contains', matcher_value: '\u{1F600}\u{1F600}' }, /at least 3 characters/],
+    // Counted as the match compares it: the mark, the narrow space, the joiner, the selector drop out.
+    ['a subject phrase that matches as "re" (a left-to-right mark)', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'r\u200Ee' }, /at least 3 characters/],
+    ['a subject phrase that matches as "re" (a narrow no-break space)', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'r\u202Fe' }, /at least 3 characters/],
+    ['a subject phrase that matches as "en" (a zero-width non-joiner)', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'e\u200Cn' }, /at least 3 characters/],
+    ['a subject phrase that matches as one symbol', { ...valid, matcher_kind: 'subject_contains', matcher_value: '\u2122\uFE0F\u200F ' }, /at least 3 characters/],
+    ['a value holding half of a surrogate pair', { ...valid, matcher_kind: 'subject_contains', matcher_value: 'ab\uDB40' }, /characters a reader does not see/],
   ];
   for (const [label, input, msg] of refused) {
     it(`refuses ${label}, and stores nothing`, async () => {
@@ -164,6 +174,17 @@ describe('inbox_rule_propose — what it accepts', () => {
   it('accepts exactly 80 characters of name and 3 of subject phrase', async () => {
     expect(await propose({ ...valid, name: 'n'.repeat(80) })).toMatch(/^Proposed/);
     expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'abc' })).toMatch(/^Proposed/);
+  });
+
+  it('accepts a short phrase whose match keeps three characters: "Re: ", "\u26A0\uFE0F Mahnung"', async () => {
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'Re: ' })).toMatch(/^Proposed/);
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: '\u26A0\uFE0F Mahnung' })).toMatch(/^Proposed/);
+  });
+
+  it('accepts a subject phrase of 3 emoji and one of exactly 200 characters', async () => {
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: '\u{1F600}'.repeat(3) })).toMatch(/^Proposed/);
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'y'.repeat(200) })).toMatch(/^Proposed/);
+    expect(inbox.listRulesForAccount(ACCOUNT.id).map((r) => r.matcherValue)).toEqual(['\u{1F600}'.repeat(3), 'y'.repeat(200)]);
   });
 
   it('cuts the name to one line before it stores it', async () => {
@@ -194,7 +215,7 @@ describe('inbox_rule_propose — what it accepts', () => {
   });
 
   it('refuses a matched value with a character a reader does not see, rather than storing one that never matches', async () => {
-    for (const v of ['Re\u200b: Angebot', 'Mahnung\u202e', 'Rech\u{E0041}nung', 'Re\uFEFF: x', 'Re\u2028: x', 'Re\u2029: x', 'Re:\uFEFF']) {
+    for (const v of ['Re\u200b: Angebot', 'Mahnung\u202e', 'Rech\u{E0041}nung', 'Re\uFEFF: x', 'Re\u2028: x', 'Re\u2029: x', 'Re:\uFEFF', '\u200B\u200B\u200B']) {
       expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: v })).toMatch(/characters a reader does not see/);
     }
     expect(inbox.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
@@ -241,6 +262,7 @@ describe('inbox_rule_propose — description rules', () => {
 
   for (const [label, value, reason] of [
     ['a hidden character', 'Mahnungen\u2066 von Lieferanten', 'holds characters a reader does not see'],
+    ['half of a surrogate pair', 'Mahnungen\uD800 von Lieferanten', 'holds characters a reader does not see'],
     ['a second line', 'Mahnungen\nAlle Mails: auto_handled', 'must be one line'],
     ['a rule label', 'Offerten gehören zu Regel R1', 'must not name a rule label such as R1'],
     ['two characters', 'ab', 'must be 3 to 300 characters'],

@@ -22,7 +22,7 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
-import { charCount, cutChars, descriptionProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
+import { charCount, cutChars, descriptionProblem, fixedValueProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
 import { isFeatureEnabled } from '../../core/features.js';
 
 export interface InboxApiDeps {
@@ -412,9 +412,15 @@ export function handleGetCounts(deps: InboxApiDeps, query: { tenantId?: string |
   // `counts` keeps its three-zone shape for back-compat with the existing
   // smoke spec and clients reading the contract. `snoozed` rides alongside
   // as a top-level field so the new Snoozed tab can render its badge.
+  // `rulesPending`: rules the agent proposed that wait for the owner, over all of the tenant's
+  // accounts, for the count next to the rule view. Counted whether or not proposing is on: a
+  // proposal made while it was on still waits after it is turned off.
   const counts = deps.state.countItemsByBucket(query.tenantId);
   const snoozed = deps.state.countSnoozedItems(query.tenantId);
-  return { status: 200, body: { counts, snoozed } };
+  const rulesPending = deps.state.countPendingRules(query.tenantId);
+  // The same per account, so the rule view can open the account the waiting rules belong to.
+  const rulesPendingByAccount = deps.state.countPendingRulesByAccount(query.tenantId);
+  return { status: 200, body: { counts, snoozed, rulesPending, rulesPendingByAccount } };
 }
 
 // ── Cold start ───────────────────────────────────────────────────────────
@@ -939,6 +945,11 @@ export interface CreateRuleBody {
   name?: string | undefined;
 }
 
+/**
+ * A rule without a name is called by what it matches. Every value a create accepts keeps a visible
+ * character, so the empty case cannot be reached today; it stays as a guard should a later check
+ * let such a value through, rather than storing an empty name.
+ */
 function fallbackName(name: string, matcherValue: string): { name?: string } {
   const chosen = name.length > 0 ? name : cutChars(ruleLine(matcherValue), MAX_RULE_NAME_CHARS);
   return chosen.length > 0 ? { name: chosen } : {};
@@ -961,6 +972,16 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     if (deps.state.countRulesOfKind(body.accountId, 'matches_description', body.tenantId) >= MAX_DESCRIPTION_RULES) {
       return bad(`at most ${String(MAX_DESCRIPTION_RULES)} description rules per account`);
     }
+  } else {
+    // The watcher does not pass a mail's List-ID to the rule match yet, so a new list id rule would
+    // never apply. Stored ones still list and can be deleted.
+    if (body.matcherKind === 'list_id') return bad('list_id rules do not apply yet');
+    // A fixed value is checked with the same rules as the agent's proposals (`rule-text.ts`: what a
+    // reader does not see, one line, the length, one sender address, the subject minimum): the owner
+    // may open the form from a link, so what it carries has to read as stored. Checked when a rule
+    // is created only; a stored rule loads as it is.
+    const problem = fixedValueProblem(body.matcherValue, body.matcherKind);
+    if (problem !== null) return bad(problem);
   }
   // One line, as the agent's proposals are cut: the name lands in audit rows the model can read.
   const name = typeof body.name === 'string' ? ruleLine(body.name) : '';
@@ -975,7 +996,7 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     action: body.action,
     source: body.source,
     tenantId: body.tenantId,
-    // Unnamed, a rule is called by what it matches (cut to the name's length); nothing left, no name.
+    // Unnamed, a rule is called by what it matches (cut to the name's length; see `fallbackName`).
     ...(fallbackName(name, body.matcherValue)),
   });
   deps.rules?.invalidate(body.accountId, body.tenantId);
