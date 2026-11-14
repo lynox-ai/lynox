@@ -386,13 +386,6 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
     "runs-on": "ubuntu-24.04",
     "steps": [
       {
-        "env": {
-          "SHARDS": "${{ needs.test-shard.result }}"
-        },
-        "name": "Every test shard passed",
-        "run": "echo \"test shards: $SHARDS\"\nif [ \"$SHARDS\" != \"success\" ]; then\n  echo \"::error::the test shards did not all pass (result: $SHARDS). A failed, cancelled or skipped shard fails this check.\"\n  exit 1\nfi\n"
-      },
-      {
         "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
       },
       {
