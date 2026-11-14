@@ -158,6 +158,21 @@ function policyRefusal(url: string, ctx: ToolContext | undefined): PolicyRefusal
   }
 }
 
+/** The URL a fallback search sends to: one place, so the policy check reads what a search sends. */
+function duckDuckGoSearchUrl(query: string): string {
+  return `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+}
+
+/**
+ * Why every DuckDuckGo fallback search would be refused under `ctx`'s egress settings right now,
+ * or undefined when a search would go out. The fallback stays registered under such a policy (each
+ * call refused with the reason); this lets the prompt say so instead of pointing at SearXNG.
+ * Read per call: it follows a policy changed at runtime.
+ */
+export function duckDuckGoPolicyRefusal(ctx: ToolContext | undefined): PolicyRefusal | undefined {
+  return policyRefusal(duckDuckGoSearchUrl('lynox'), ctx);
+}
+
 function validateSearxngUrl(url: string): void {
   const problem = searxngUrlProblem(url);
   if (problem !== undefined) throw new Error(problem.message);
@@ -282,7 +297,7 @@ export class DuckDuckGoProvider implements SearchProvider {
   async search(query: string, opts?: SearchOptions, ctx?: ToolContext | undefined): Promise<SearchResult[]> {
     const start = Date.now();
     const maxResults = Math.min(opts?.maxResults ?? 5, 10);
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const url = duckDuckGoSearchUrl(query);
     assertEgressAllowed(url, ctx);
     let response: Response;
     try {

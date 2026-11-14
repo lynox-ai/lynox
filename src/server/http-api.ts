@@ -70,7 +70,7 @@ import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
-import { searxngUrlProblem } from '../integrations/search/search-provider.js';
+import { searxngUrlProblem, searxngPolicyRefusal } from '../integrations/search/search-provider.js';
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
@@ -7528,6 +7528,14 @@ export class LynoxHTTPApi {
       const hostname = new URL(url).hostname;
       if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') {
         errorResponse(res, 400, 'Blocked: cloud metadata endpoint');
+        return;
+      }
+      // A URL this instance's network settings refuse for every search answers this check but is
+      // never searched, so the check refuses it with the rule, as the boot does (the page
+      // shows the rule's text for the code). Read against the settings as they are now.
+      const policy = searxngPolicyRefusal(url, this.engine?.getToolContext());
+      if (policy !== undefined) {
+        errorResponse(res, 400, policy.message, `searxng-${policy.rule === 'policy' ? 'policy' : `policy-${policy.rule}`}`);
         return;
       }
       // On an instance the control plane provisions, a private address is the tenant host's

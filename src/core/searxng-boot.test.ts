@@ -121,4 +121,39 @@ describe('Engine boot — a SearXNG URL every search would be refused for', () =
     const { engine } = await boot('http://searxng:8080');
     expect(engine.getWebSearchStatus()).toBe('configured');
   });
+
+  // The session's prompt names the network settings, not SearXNG, when they are the cause.
+  describe('the web-search suffix a session gets', () => {
+    const promptOf = (engine: Engine): string => {
+      const session = engine.createSession();
+      const agent = (session as unknown as { agent?: { systemPrompt?: string } }).agent;
+      return agent?.systemPrompt ?? '';
+    };
+
+    it('under deny-all: search blocked by the network settings, no SearXNG way out', async () => {
+      process.env['LYNOX_NETWORK_POLICY'] = 'deny-all';
+      const { engine } = await boot('http://searxng:8080');
+      const prompt = promptOf(engine);
+      expect(prompt).toContain('## Web search is blocked by the network settings of this instance');
+      expect(prompt).not.toContain('## Web search is running on a fallback provider');
+      expect(prompt).not.toContain('suggest enabling SearXNG');
+    });
+
+    it('under an allow-list naming the fallback but not SearXNG: the fallback suffix names the rule', async () => {
+      process.env['LYNOX_NETWORK_POLICY'] = 'allow-list';
+      process.env['LYNOX_NETWORK_ALLOWED_HOSTS'] = 'html.duckduckgo.com';
+      const { engine } = await boot('http://searxng:8080');
+      const prompt = promptOf(engine);
+      expect(prompt).toContain('## Web search is running on a fallback provider');
+      expect(prompt).toContain('its network settings do not allow it: the SearXNG host is not on the network allow-list, so searches run on the fallback.');
+      expect(prompt).not.toContain('suggest enabling SearXNG');
+    });
+
+    it('with no policy and no SearXNG: the plain fallback suffix (control)', async () => {
+      const { engine } = await boot('');
+      const prompt = promptOf(engine);
+      expect(prompt).toContain('suggest enabling SearXNG (`docker compose up`, or set `SEARXNG_URL`)');
+      expect(prompt).not.toContain('blocked by the network settings');
+    });
+  });
 });
