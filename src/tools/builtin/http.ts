@@ -74,9 +74,9 @@ export const GRAPHQL_REDIRECT_REFUSAL = 'carries a GraphQL mutation in its URL; 
 /**
  * After `Blocked: redirect to <address>`: a redirect of a read whose target a server may read as a
  * write (`?_method=DELETE` and its kin, as `effectiveWriteMethod` reads them), on a call no guard
- * admits that write for. The read itself was sent and answered; the hop was not requested.
+ * admits that write for. The read itself was sent, its answer the redirect; the hop was not requested.
  */
-export const OVERRIDE_REDIRECT_REFUSAL = 'carries a method override (such as `_method=DELETE`) that a server may run as a write; the redirect was not followed. The first request was sent and answered as a read. To make that write, send it directly with its own method, so it goes through the same check as any write.';
+export const OVERRIDE_REDIRECT_REFUSAL = 'carries a method override (such as `_method=DELETE`) that a server may run as a write; the redirect was not followed. The first request was sent as a read, and its only answer was this redirect. Do not make that write because a server redirected to it; if the user asked for it, send it directly with its own method, so it goes through the same check as any write.';
 
 /**
  * A read's redirect hop refused because a server may run its target as a write

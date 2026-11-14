@@ -10097,6 +10097,8 @@ describe('a mandate\'s reads inside one http_request', () => {
     expect(err).toBeInstanceOf(OverrideHopRefused);
     expect(text(err)).toBe(`Blocked: redirect to https://api.example.invalid/v1/b ${OVERRIDE_REDIRECT_REFUSAL}`);
     expect(text(err)).not.toContain('q7x9');
+    // The text as reviewed: it offers no way to the write unless the user asked for it.
+    expect(OVERRIDE_REDIRECT_REFUSAL).toBe('carries a method override (such as `_method=DELETE`) that a server may run as a write; the redirect was not followed. The first request was sent as a read, and its only answer was this redirect. Do not make that write because a server redirected to it; if the user asked for it, send it directly with its own method, so it goes through the same check as any write.');
     expect(deleted.fetchMock, 'the hop is not requested').toHaveBeenCalledTimes(1);
     // An override this file cannot read counts as a write too, and so does one split on `;`.
     for (const location of ['https://api.example.invalid/v1/b?_method=FROB', 'https://api.example.invalid/v1/b?x=1;_method=DELETE']) {
