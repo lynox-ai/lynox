@@ -95,6 +95,7 @@
 	import { looksLikeSecret } from '../utils/secret-shapes.js';
 	import { maskText } from '../utils/mask-text.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
+	import { scheduledTaskTurn } from '../utils/scheduled-task-turn.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
@@ -2815,6 +2816,21 @@
 								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>
 							{/if}
 						</div>
+					</div>
+				{:else if msg.role === 'user' && scheduledTaskTurn(stripLoadedContext(stripNowMarker(msg.content)))}
+					<!-- A scheduled run's opening turn: the engine wrote it, not the owner, so it is
+					     shown as the task it carries out, not as the owner's bubble (U-160). -->
+					{@const task = scheduledTaskTurn(stripLoadedContext(stripNowMarker(msg.content)))!}
+					<div class="rounded-[var(--radius-md)] border border-border bg-bg-muted px-4 py-2.5 text-sm" data-scheduled-task>
+						<div class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('chat.scheduled_task')}</div>
+						<div class="mt-1 font-medium text-text whitespace-pre-wrap break-words">{task.title}</div>
+						{#if task.description}
+							<div class="mt-1 text-text-muted whitespace-pre-wrap break-words">{task.description}</div>
+						{/if}
+						{#if task.question !== undefined}
+							<div class="mt-2 text-text-muted whitespace-pre-wrap break-words" data-scheduled-task-question><span class="text-text-subtle">{t('chat.scheduled_task_question')}</span> {task.question}</div>
+							<div class="mt-1 text-text-muted whitespace-pre-wrap break-words" data-scheduled-task-answer><span class="text-text-subtle">{t('chat.scheduled_task_answer')}</span> {task.answer}</div>
+						{/if}
 					</div>
 				{:else if msg.role === 'user'}
 					{@const userText = stripLoadedContext(stripNowMarker(msg.content))}
