@@ -469,11 +469,16 @@ export function lapsedSlot(apiStore: Pick<ApiStore, 'knownProfiles'>, name: stri
  * slot is not missing. Anything that throws answers false.
  */
 export function sharesAnotherGrant(apiStore: Pick<ApiStore, 'knownProfiles'>, profile: ApiProfile): boolean {
+  return sharedGrantOwner(apiStore, profile) !== undefined;
+}
+
+/** The profile holding the grant `profile` shares ({@link sharesAnotherGrant}), or undefined. Anything that throws answers undefined. */
+export function sharedGrantOwner(apiStore: Pick<ApiStore, 'knownProfiles'>, profile: ApiProfile): ApiProfile | undefined {
   try {
     const grant = slotGrant(apiStore.knownProfiles(), readersRefreshSlot(profile));
-    return grant.kind === 'owned' && grant.owner.id !== profile.id && grant.members.some((m) => m.id === profile.id);
+    return grant.kind === 'owned' && grant.owner.id !== profile.id && grant.members.some((m) => m.id === profile.id) ? grant.owner : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
