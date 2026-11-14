@@ -116,6 +116,26 @@ describe('mail-scheduled-poller', () => {
     expect(fetched[0]?.sentAt).toBeInstanceOf(Date);
   });
 
+  it('sends no due row while no send limit can be counted, and sends it once one can', async () => {
+    const { configureMailRateLimits, resetMailRateLimits } = await import('./tools/rate-limit.js');
+    try {
+      // The boot without the history database: the limits are set, nothing counts against them.
+      configureMailRateLimits({ provider: null });
+      const id = queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'uncounted probe' });
+      const poller = startScheduledSendPoller({ state: db, registry, accounts });
+      expect(await poller.tickNow()).toEqual({ fired: 0, failed: 0 });
+      expect(sendCalls).toHaveLength(0);
+      expect(db.listScheduledForAccount('acct-1').find((r) => r.id === id)?.sentAt).toBeUndefined();
+      // The restart that opens it.
+      configureMailRateLimits({ provider: { getToolCallCountSince: () => 0 } });
+      expect((await poller.tickNow()).fired).toBe(1);
+      poller.stop();
+      expect(sendCalls).toHaveLength(1);
+    } finally {
+      resetMailRateLimits();
+    }
+  });
+
   it('does not fire rows whose scheduled_at is still in the future', async () => {
     queue({ scheduledAt: new Date(Date.now() + 60_000) });
     const poller = startScheduledSendPoller({ state: db, registry, accounts });

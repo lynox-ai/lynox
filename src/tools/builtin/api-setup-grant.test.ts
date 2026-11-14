@@ -832,8 +832,8 @@ describe('fetch_token — a grant a user gave is never renewed as an app token',
   const PRESET_ONLY = 'connects through the "bexio" provider, which issues its tokens only through a user\'s authorization';
   const CONNECT = 'action "connect"';
   const OWNER = 'needs re-authorizing by the person who owns it';
-  const REMOVE_FIRST = 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect"';
-  const CONNECT_ONLY = 'Call api_setup with action "connect"';
+  const REMOVE_FIRST = 'Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, call api_setup with action "connect" and id "crm-api"; that call returns the sign-in link for the user, or says why there is none.';
+  const CONNECT_ONLY = 'To connect it, call api_setup with action "connect" and id "crm-api"; that call returns the sign-in link for the user, or says why there is none.';
   /** A refresh slot of the profile's own, not the derived name a connect writes to. */
   const ownSlot = (p: ApiProfile, key = 'CRM_OWN_REFRESH'): ApiProfile =>
     ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, refresh_token_key: key } } });

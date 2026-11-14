@@ -10,7 +10,7 @@
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import Database from 'better-sqlite3';
+import { snapshotSqlite } from './sqlite-snapshot.js';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
 import { deriveBackupKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
@@ -1259,16 +1259,7 @@ export class BackupManager {
    * Creates a consistent snapshot even during concurrent writes (WAL mode).
    */
   private vacuumInto(srcPath: string, destPath: string): void {
-    let db: InstanceType<typeof Database> | null = null;
-    try {
-      db = new Database(srcPath, { readonly: true });
-      // VACUUM INTO creates a complete, defragmented copy
-      // Escape single quotes in path to prevent SQL injection
-      const safePath = destPath.replace(/'/g, "''");
-      db.exec(`VACUUM INTO '${safePath}'`);
-    } finally {
-      try { db?.close(); } catch { /* ignore */ }
-    }
+    snapshotSqlite(srcPath, destPath);
   }
 
   /** Recursive directory copy preserving structure. */

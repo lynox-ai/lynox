@@ -92,10 +92,14 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
       executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
       confirmedAt: '2026-07-01T00:00:00.000Z', parameters: [],
     } as unknown as PlannedPipeline;
-    history.insertPlannedPipeline({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: planned.createdAt, template: true }, null);
+    // Stored with the steps it runs and stamped over them: the owner's stamp binds the steps
+    // (`workflow-stamp.ts`), so the copy that runs is the stamped one.
+    const { confirmedAt: _at, ...unstamped } = planned;
+    history.insertPlannedPipeline(unstamped as Parameters<RunHistory['insertPlannedPipeline']>[0], null);
     history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
-    storePipeline(id, planned);
-    return planned;
+    const stamped = history.getWorkflowExact(id)!;
+    storePipeline(id, stamped);
+    return stamped;
   }
 
   function creator(tainted: boolean): IAgent {

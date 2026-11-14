@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
+import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
+
 const mockCreate = vi.fn().mockResolvedValue({
   content: [{ type: 'text', text: '{}' }],
 });
@@ -690,6 +692,52 @@ describe('Memory', () => {
       await mem.maybeUpdate(LONG_ANSWER);
 
       expect(mockCreate).toHaveBeenCalledOnce();       // extraction still runs on self-host
+    });
+
+    it('skips the extraction call when the daily cap is reached, even with no metered host', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        const mem = new Memory(dir);
+        mockCreate.mockClear();
+        mockCreate.mockResolvedValueOnce({
+          content: [{ type: 'text', text: '{"status": "x"}' }],
+          usage: { input_tokens: 100, output_tokens: 10 },
+        });
+
+        await mem.maybeUpdate(LONG_ANSWER);
+
+        expect(mockCreate).not.toHaveBeenCalled();
+      } finally {
+        resetPersistentBudget();
+        mockCreate.mockReset();
+        mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{}' }] });
+      }
+    });
+
+    it('runs the extraction call with no metered host when spend is under the cap', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 4.99, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        const mem = new Memory(dir);
+        mockCreate.mockClear();
+        mockCreate.mockResolvedValueOnce({
+          content: [{ type: 'text', text: '{}' }],
+          usage: { input_tokens: 100, output_tokens: 10 },
+        });
+
+        await mem.maybeUpdate(LONG_ANSWER);
+
+        expect(mockCreate).toHaveBeenCalledOnce();
+      } finally {
+        resetPersistentBudget();
+      }
     });
 
     it('debits the spend even when the response carries no usable text (bills before the early return)', async () => {

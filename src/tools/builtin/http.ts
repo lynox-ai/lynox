@@ -71,6 +71,25 @@ import { timingSafeEqual } from 'node:crypto';
 /** After `Blocked: redirect to <url>`: a hop to a GraphQL URL that carries a mutation, with the way out. */
 export const GRAPHQL_REDIRECT_REFUSAL = 'carries a GraphQL mutation in its URL; the redirect was not followed. To run the mutation, send it as a POST with a JSON body directly to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation.';
 
+/**
+ * After `Blocked: redirect to <address>`: a redirect of a read whose target a server may read as a
+ * write (`?_method=DELETE` and its kin, as `effectiveWriteMethod` reads them), on a call no guard
+ * admits that write for. The read itself was sent, its answer the redirect; the hop was not requested.
+ */
+export const OVERRIDE_REDIRECT_REFUSAL = 'carries a method override (such as `_method=DELETE`) that a server may run as a write; the redirect was not followed. The first request was sent as a read, and its only answer was this redirect. Do not make that write because a server redirected to it; if the user asked for it, send it directly with its own method, so it goes through the same check as any write.';
+
+/**
+ * A read's redirect hop refused because a server may run its target as a write
+ * ({@link OVERRIDE_REDIRECT_REFUSAL}). Its own class, so the read that was sent and answered is
+ * counted.
+ */
+export class OverrideHopRefused extends Error {
+  constructor(nextUrl: string) {
+    super(`Blocked: redirect to ${urlForNote(nextUrl)} ${OVERRIDE_REDIRECT_REFUSAL}`);
+    this.name = 'OverrideHopRefused';
+  }
+}
+
 /** After `Blocked: <write> to <service>`: a JSON object that cannot be a GraphQL request at a
  *  GraphQL-looking address, as a write to a file named `graphql.*` sends (`jsonObjectNotGraphql`). */
 export const GRAPHQL_NOT_A_REQUEST_REFUSAL = 'looks like a GraphQL address to this check, and the body is not a GraphQL request, so it was not sent. If this writes or changes a file whose name contains graphql, lynox cannot send it this way: tell the user which file it is and that they need to change it themselves. Otherwise send one JSON object with a query string and Content-Type: application/json.';
@@ -167,6 +186,10 @@ function blockedFriendly(technical: string): never {
 function blockedVerbatim(message: string): never {
   throw new ToolSoftFailure(message, message);
 }
+
+/** The refusal when an HTTP request limit is set but the history database that counts it did not open. */
+export const HTTP_RATE_UNCOUNTED =
+  'Blocked: the HTTP request limit cannot be checked, because the history database did not open when lynox started. This request was not sent, and nothing keeps it for later. No http_request call goes out until someone restarts lynox and lynox can open the history database again; the log lynox writes at start says why it could not. Do not retry and do not offer to fetch it later on your own: nothing will remind you after the restart. Tell the user it was not sent; after the restart they can ask again. Do not ask whether to try again later either; if they want that, they ask after the restart.';
 
 /** Why a hop after a sent write was not followed, as the note after the write says it. */
 const REFUSED_HOP_REASON = {
@@ -619,6 +642,18 @@ export async function fetchWithValidatedRedirects(
       // not a move, and is not followed at all. A method this file cannot read counts as a write.
       const hopWrite = effectiveWriteMethod(method, headers, nextUrl, typeof body === 'string' ? body : undefined);
       if (hopWrite === null || isWriteMethod(hopWrite)) {
+        // A read turns into a write on this hop only where a guard admitted it. `http_request`
+        // reads a contract only for a write, so for a read it passes no guard that could, and no
+        // other caller does either. Without one nobody was asked, so the hop is not requested:
+        // following it would send the write without a question. A method this file cannot read
+        // counts as one.
+        // The caller's own hop check speaks first, with its own words (a delegated session's, a
+        // discovery read's); nothing was sent on this call but the read, so its refusal is passed
+        // on as it is.
+        if (ownWrite === undefined && redirectGuard === undefined) {
+          onRedirect?.(nextUrl, method, headers);
+          throw new OverrideHopRefused(nextUrl);
+        }
         if (writeSentAgain || sameTarget(currentUrl, nextUrl)) {
           // "The same" against the last write sent, as a server reads it (overrides included).
           throw new RedirectRefusedAfterWrite(sent ?? { method: originalMethod, url }, nextUrl, hopWrite === lastWrite ? 'repeat' : 'another');
@@ -1302,6 +1337,18 @@ export function oauthProfileMayBeRenewedUnattended(
   if (oauthGrantIsUserDelegated(profile)) return false;
   if (grantType === 'client_credentials') return true;
   return !hasStoredRefreshToken;
+}
+
+/**
+ * The reminder appended to a 401 from an OAuth2 api_profile, outside the untrusted-data wrap
+ * (see the call site for why it is fixed text with the profile id as its only interpolation).
+ * `wouldSwap` is {@link oauthFetchTokenWouldSwapDelegatedAccess} for this profile. Exported so a
+ * test can hold the exact text the model reads.
+ */
+export function oauth401Reminder(profile: { id: string; auth?: { header_name?: string | undefined } | undefined }, wouldSwap: boolean): string {
+  return wouldSwap
+    ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${profile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.${typeof profile.auth?.header_name !== 'string' || profile.auth?.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`
+    : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${profile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${profile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (TikTok and others) don't expose long-lived tokens there anymore.${typeof profile.auth?.header_name !== 'string' || profile.auth?.header_name.toLowerCase() === 'authorization' ? '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Check the API\'s docs and set `auth.header_name` on this profile.' : ''}`;
 }
 
 /**
@@ -3093,6 +3140,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const rateLimitProvider = toolContext?.rateLimitProvider ?? null;
     const hourlyLimit = toolContext?.hourlyRateLimit ?? Infinity;
     const dailyLimit = toolContext?.dailyRateLimit ?? Infinity;
+    if (!rateLimitProvider && (hourlyLimit < Infinity || dailyLimit < Infinity)) {
+      // A limit is set and nothing can count against it: the history database did not
+      // open at startup. Refuse rather than send uncounted. Verbatim: the friendly
+      // rewrite matches on substrings, and this text is not written to avoid them.
+      blockedVerbatim(HTTP_RATE_UNCOUNTED);
+    }
     if (rateLimitProvider && (hourlyLimit < Infinity || dailyLimit < Infinity)) {
       if (hourlyLimit < Infinity) {
         const hourlyCount = rateLimitProvider.getToolCallCountSince('http_request', 1);
@@ -4206,9 +4259,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // went out as Bearer) to pick a second fixed sentence each. That is a
             // choice between constants, not an interpolation: no part of the
             // field's value reaches the text. Keep it that way.
-            wrapped += oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpStored !== null)
-              ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`
-              : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (TikTok and others) don't expose long-lived tokens there anymore.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Check the API\'s docs and set `auth.header_name` on this profile.' : ''}`;
+            wrapped += oauth401Reminder(matchedProfile, oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpStored !== null));
           }
         } catch {
           // Bad URL fell through earlier; nothing to do.
@@ -4251,7 +4302,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // The request went out and was answered, so it counts even though reading the answer failed.
       if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
       // So does a write whose redirect hop was refused: it was sent and answered before the hop.
-      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused) {
+      // And a read whose override hop was refused: the read went out and was answered.
+      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused) {
         const sentTo = apiProfileOfUrl(input.url, toolContext);
         if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
       }

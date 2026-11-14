@@ -107,6 +107,8 @@ export interface BulkRunDetailData extends BulkRun {
 	/** A Shopify list narrowed to a product type and/or vendor: the values as the planner gave them (supplied text). */
 	listFilters: Readonly<Record<string, string | readonly string[]>> | null;
 	listStartChecksum: string | null;
+	/** An undone run: the undo that took it back and when its last target was taken back. Absent on an older engine. */
+	undoneBy?: { runId: string; at: string } | null | undefined;
 	/** The engine's note on a list read page by page (English). */
 	listNote: string | null;
 	/** A judged run's rule as the owner starts it (owner only), and its hash the start presents. */
@@ -461,25 +463,61 @@ export function bulkListFilterFolded(filters: Readonly<Record<string, string | r
 }
 
 /** The line naming a filtered Shopify list's group, where the run is started and approved. The
- *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter.
+ *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a group.
  *  `folded` shows each list of more than {@link BULK_LIST_FILTER_UNFOLDED_MAX} values folded. */
 export function bulkListFilterText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n, folded = false): string | null {
 	if (filters === null) return null;
-	// Every value in its own quotes: they are the scope the owner approves. Folded, a long list
-	// shows its first values and the count of the rest, so the line stays true (ux U-175).
-	const values = (v: string | readonly string[]): string => {
-		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
-		if (folded && quoted.length > BULK_LIST_FILTER_UNFOLDED_MAX) {
-			return `${quoted.slice(0, BULK_LIST_FILTER_FOLDED_SHOWN).join(', ')} ${i18n.tf('bulk.list.more', { n: String(quoted.length - BULK_LIST_FILTER_FOLDED_SHOWN) })}`;
-		}
-		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
-	};
+	const values = bulkFilterValues(i18n, folded);
 	const type = filters['product_type'];
 	const vendor = filters['vendor'];
 	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: values(type), vendor: values(vendor) });
 	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: values(type) });
 	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: values(vendor) });
 	return null;
+}
+
+/** A filter's values for its line: every value in its own quotes, they are the scope the owner
+ *  approves. Folded, a long list shows its first values and the count of the rest, so the line
+ *  stays true (U-175). */
+function bulkFilterValues(i18n: BulkI18n, folded: boolean): (v: string | readonly string[]) => string {
+	return (v) => {
+		const quoted = (typeof v === 'string' ? [v] : v).map((x) => i18n.tf('bulk.list.value', { value: bulkVisibleText(x) }));
+		if (folded && quoted.length > BULK_LIST_FILTER_UNFOLDED_MAX) {
+			return `${quoted.slice(0, BULK_LIST_FILTER_FOLDED_SHOWN).join(', ')} ${i18n.tf('bulk.list.more', { n: String(quoted.length - BULK_LIST_FILTER_FOLDED_SHOWN) })}`;
+		}
+		return quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join(', ')} ${i18n.t('bulk.list.or')} ${quoted[quoted.length - 1]!}`;
+	};
+}
+
+/** The line naming the statuses a Shopify product list reads, under the group's line; `{}` is a
+ *  list of every product. A store's search lists drafts, archived products and gift cards unless a
+ *  status narrows it, and the targets name none of them as such. Null for a list that is not a
+ *  store's products. A status filter naming every status narrows nothing, so it reads as no status
+ *  filter: a planner asked for every product often lists all of them, and "only" beside the whole
+ *  set would promise a narrowing there is not. */
+export function bulkListStatusText(filters: Readonly<Record<string, string | readonly string[]>> | null, i18n: BulkI18n): string | null {
+	if (filters === null) return null;
+	const status = filters['status'];
+	if (status !== undefined) {
+		const values = typeof status === 'string' ? [status] : status;
+		// Exactly the four (four entries holding all four repeat none): a stored list with another
+		// value or a repeat is one the engine reads nothing for, and its line names the values as they came.
+		const everyStatus = values.length === BULK_STORE_STATUSES.length && BULK_STORE_STATUSES.every((s) => values.includes(s));
+		if (!everyStatus) {
+			const names = values.map((s) => bulkStatusName(s, i18n));
+			return i18n.tf('bulk.list.filter_status', { status: bulkFilterValues(i18n, false)(names) });
+		}
+	}
+	const group = filters['product_type'] !== undefined || filters['vendor'] !== undefined;
+	return i18n.t(group ? 'bulk.list.any_status' : 'bulk.list.all_status');
+}
+
+/** Every status a Shopify product can have, as the store's search spells them. */
+const BULK_STORE_STATUSES: readonly string[] = ['active', 'draft', 'archived', 'unlisted'];
+
+/** A Shopify product status by its name in the page's language; one no store has, as it came. */
+function bulkStatusName(status: string, i18n: BulkI18n): string {
+	return BULK_STORE_STATUSES.includes(status) ? i18n.t(`bulk.list.status.${status}`) : status;
 }
 
 /** The provider that serves a judge call, by name. */
@@ -619,12 +657,39 @@ export function bulkHostOf(targetSystem: string): string | null {
 	return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
 }
 
-/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`). */
-const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`):
+ *  one label of at most 63 characters. */
+const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$/;
 
 /** Whether an external run writes to a Shopify store. */
 export function bulkIsShopifyHost(host: string | null): boolean {
 	return host !== null && SHOPIFY_STORE_HOST.test(host);
+}
+
+/** A Shopify product's key, exactly: the number is taken from nothing else (a key in any other
+ *  form gets no link). */
+const SHOPIFY_PRODUCT_GID = /^gid:\/\/shopify\/Product\/(\d+)$/;
+
+/** How a target is named to the owner. On a Shopify run with a product key: its number and the
+ *  link to it in the store's admin (https, the run's own host). Anything else is named by its key
+ *  alone. No product title: the before-image holds only the fields a run writes, so a title is
+ *  there only on a run that rewrites it — and then it is the old one, which the diff already shows. */
+export interface BulkTargetName {
+	number: string | null;
+	adminUrl: string | null;
+}
+
+export function bulkTargetName(targetSystem: string, target: { key: string }): BulkTargetName {
+	const host = bulkHostOf(targetSystem);
+	const m = bulkIsShopifyHost(host) ? SHOPIFY_PRODUCT_GID.exec(target.key) : null;
+	if (m === null) return { number: null, adminUrl: null };
+	return { number: m[1]!, adminUrl: `https://${host}/admin/products/${m[1]}` };
+}
+
+/** A target's name in a sentence: „Produkt <Zahl>“ for a Shopify product, else its key. */
+export function bulkTargetLabel(targetSystem: string, target: { key: string }, i18n: Pick<BulkI18n, 'tf'>): string {
+	const name = bulkTargetName(targetSystem, target);
+	return name.number !== null ? i18n.tf('bulk.target.product', { n: name.number }) : bulkVisibleText(target.key);
 }
 
 /** The fields a Shopify run writes or its judge reads (U-140), each with the i18n key of its readable name. */
@@ -689,6 +754,34 @@ export function bulkAtProbe(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' 
 /** Whether a planned run waits for the owner to start it, rather than having halted on a failure. */
 export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
 	return run.phase === 'planned' && (run.haltKey === 'awaitingStart' || run.haltKey === 'listed');
+}
+
+/** Whether the engine is moving the run on by itself right now: reading its list or judging it
+ *  (planned, no halt), or writing it (approved, or writing without a halt). Every other state
+ *  waits for the owner or has ended, so the page has nothing to wait for there. */
+export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason'>): boolean {
+	// Any halt, by its key or by a reason this page does not know (an engine newer than the page).
+	if (run.haltKey !== null || run.haltReason !== null) return false;
+	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
+}
+
+/** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`
+ *  while the tab is visible, loads it whole once the run stopped working, and gives up after
+ *  `BULK_FOLLOW_MAX_MS` (a run still working then is reloaded by the owner). The engine allows a
+ *  client (by IP) 120 requests a minute, and an idle tab already asks about 28 (active runs every
+ *  4 s, the status bar every 30 s): one ask every 5 s adds 12. A refused ask (429 or any failure)
+ *  waits longer each time — twice as long, at least as long as Retry-After says, at most
+ *  `BULK_FOLLOW_BACKOFF_MAX_MS` — and never turns the page into an error. */
+export const BULK_FOLLOW_MS = 5000;
+export const BULK_FOLLOW_MAX_MS = 10 * 60 * 1000;
+export const BULK_FOLLOW_BACKOFF_MAX_MS = 60_000;
+
+/** The next wait of a follow loop after an ask: back to the base after a good answer, longer
+ *  after a refused one (`retryAfterS` from a 429's Retry-After, when it names seconds). */
+export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number | null): number {
+	if (ok) return BULK_FOLLOW_MS;
+	const asked = retryAfterS !== null && Number.isFinite(retryAfterS) && retryAfterS > 0 ? retryAfterS * 1000 : 0;
+	return Math.min(Math.max(prev * 2, asked), BULK_FOLLOW_BACKOFF_MAX_MS);
 }
 
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo
@@ -855,6 +948,34 @@ export function bulkStep(run: BulkStepRun): BulkStepName {
 	if (bulkAtProbe(run) && bulkHasProbeStep(run)) return 'probe';
 	if (run.phase === 'approved' || run.phase === 'writing') return 'run';
 	return 'done';
+}
+
+/** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
+ *  („zurückgenommen“), not „fertig“: its values are no longer live. */
+export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'>, step: BulkStepName): string {
+	return step === 'done' && run.phase === 'undone' ? 'bulk.phase.undone' : `bulk.step.${step}`;
+}
+
+/** Whether a target's after-value is shown as not live: an undo or a rollback took it back, or, on
+ *  a run taken back, the owner took it out before the write, so it never was. */
+export function bulkAfterTakenBack(run: Pick<BulkRun, 'phase'>, target: Pick<BulkTarget, 'undone' | 'deselected'>): boolean {
+	return target.undone === true || (run.phase === 'undone' && target.deselected === true);
+}
+
+/** The sentence over an undone run: when it was taken back and how many targets have their value
+ *  back. Null for a run that is not undone, or an engine that does not name its undo. */
+export function bulkUndoneText(
+	run: Pick<BulkRunDetailData, 'phase' | 'undone' | 'undoneBy'>, locale: string, i18n: BulkI18n,
+): string | null {
+	if (run.phase !== 'undone' || !run.undoneBy) return null;
+	const d = new Date(run.undoneBy.at);
+	if (Number.isNaN(d.getTime())) return null;
+	const loc = locale === 'de' ? 'de-CH' : 'en-US';
+	const date = d.toLocaleDateString(loc, { day: '2-digit', month: '2-digit', year: 'numeric' });
+	const time = d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' });
+	return run.undone === 1
+		? i18n.tf('bulk.undone.sentence_one', { date, time })
+		: i18n.tf('bulk.undone.sentence', { date, time, n: String(run.undone) });
 }
 
 /** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),

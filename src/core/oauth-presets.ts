@@ -377,8 +377,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
-    // starting with a hyphen. Shopify itself admits upper case; the boundary does not.
-    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
+    // starting with a hyphen, at most 63 of them (one DNS label). Shopify itself admits upper
+    // case; the boundary does not.
+    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]{0,62}$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
     requiredScopes: [],
     // `read_all_orders` stays out: Shopify grants it only on request. `write_products` is the one
     // write scope: a bulk run writes a product only through the engine's own write document
@@ -800,4 +801,18 @@ export function askedScopes(oauth: { readonly preset_id?: string | undefined; re
 export function scopesBeyondAsked(granted: readonly string[], asked: readonly string[]): string[] {
   const known = new Set(asked);
   return [...new Set(granted.filter((s) => !known.has(s)))];
+}
+
+/**
+ * How a text sends the model to a built-in provider's sign-in: the connect call, and what that call
+ * returns. "Give the user the link it returns" assumed a link; connect may answer without one,
+ * and a model told to pass a link on then looks for one or writes one (U-191, U-195). One
+ * text for every place that sends the model there, so a fix reaches all of them. `id` is a stored
+ * profile's id, which every path into the store checks; without one the text names "that profile".
+ */
+export function connectCallText(id?: string): string {
+  const call = id === undefined
+    ? 'call api_setup with action "connect" for that profile'
+    : `call api_setup with action "connect" and id "${id}"`;
+  return `${call}; that call returns the sign-in link for the user, or says why there is none.`;
 }
