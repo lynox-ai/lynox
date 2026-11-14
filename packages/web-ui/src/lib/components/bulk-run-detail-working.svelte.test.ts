@@ -204,6 +204,13 @@ describe('a run the engine works on', () => {
 		expect(runAsks).toBe(asks);
 	});
 
+	it('shows no working line on an interrupted run, only the line that it resumes later', async () => {
+		run = makeRun({ phase: 'writing', total: 3, resumesAt: '2026-11-14T12:00:00.000Z' });
+		await render();
+		expect(line()).toBeNull();
+		expect(shown()).toContain('Unterbrochen. lynox setzt den Lauf ab');
+	});
+
 	it('shows no line on a run that waits for the owner, has halted, or is done', async () => {
 		for (const o of [
 			{ haltKey: 'awaitingStart', haltReason: 'awaitingStart' },

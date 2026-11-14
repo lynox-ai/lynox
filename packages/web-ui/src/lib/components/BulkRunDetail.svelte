@@ -369,7 +369,7 @@
 		return d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 	}
 
-	$effect(() => { void runId; following++; void load(); });
+	$effect(() => { void runId; following++; followStopped = false; void load(); });
 	// The page going away ends a follow loop.
 	$effect(() => () => { following++; });
 	$effect(() => {
@@ -391,7 +391,10 @@
 	const undoneText = $derived(run ? bulkUndoneText(run, getLocale(), i18n) : null);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
 	// What the engine works on while it moves the run on by itself; the page keeps its counts until then.
-	const workingStep = $derived(run ? bulkWorkingStep(run) : null);
+	// The step cannot change while the page waits: a list read ends in its own halt (`listed`), the
+	// judge is fixed at planning, and approved and writing are both the write. An interrupted run
+	// that resumes later says so in its own line and gets no working line.
+	const workingStep = $derived(run && !run.resumesAt ? bulkWorkingStep(run) : null);
 	// The probe's target by its title where the loaded targets hold its before-image.
 	const probeLabel = $derived(run?.probe ? bulkTargetLabel(run.targetSystem, { key: run.probe.key }, i18n) : '');
 	// The probe's admin link: its target is often not among the targets the page shows.
