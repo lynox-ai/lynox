@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -174,5 +174,42 @@ describe('the checksum of a run without a deselected target', () => {
     for (const r of rows) parts.push(String(r.seq), engineDb.dec(r.target_key), r.change, r.before === null ? '' : engineDb.dec(r.before), r.after_planned === null ? '' : engineDb.dec(r.after_planned));
     expect(run['contract_json']).toBeNull();
     expect(ledger.computeChecksum(id)).toBe(engineDb.keyedHash(parts));
+  });
+});
+
+describe('the write lock of a toggle', () => {
+  // Each checksum decrypts and hashes every target of the run (up to BULK_MAX_TARGETS). A toggle
+  // holds the engine database's write lock for the compare only; the new checksum comes after.
+  it('holds one checksum, the compare, and answers with the checksum of the run as it left it', async () => {
+    const id = await planFiles(three);
+    const b = seqOf(id, 'b.txt');
+    const seen = ledger.computeChecksum(id)!;
+    const inLock: boolean[] = [];
+    const real = ledger.computeChecksum.bind(ledger);
+    const spy = vi.spyOn(ledger, 'computeChecksum').mockImplementation((runId: string) => {
+      inLock.push(engineDb.getDb().inTransaction);
+      return real(runId);
+    });
+    const off = ledger.deselectTarget(id, b, { checksum: seen });
+    expect(inLock).toEqual([true, false]);
+    inLock.length = 0;
+    const on = ledger.reselectTarget(id, b, { checksum: (off as { checksum: string }).checksum });
+    expect(inLock).toEqual([true, false]);
+    spy.mockRestore();
+    expect(off).toEqual({ ok: true, checksum: expect.any(String) as unknown as string });
+    expect((off as { checksum: string }).checksum).not.toBe(seen);
+    expect(on).toEqual({ ok: true, checksum: seen });
+  });
+
+  it('hashes once on a refusal, and only inside the lock', async () => {
+    const id = await planFiles(three);
+    const inLock: boolean[] = [];
+    const real = ledger.computeChecksum.bind(ledger);
+    vi.spyOn(ledger, 'computeChecksum').mockImplementation((runId: string) => {
+      inLock.push(engineDb.getDb().inTransaction);
+      return real(runId);
+    });
+    expect(ledger.deselectTarget(id, seqOf(id, 'b.txt'), { checksum: 'stale' })).toEqual({ ok: false, reason: 'checksum' });
+    expect(inLock).toEqual([true]);
   });
 });
