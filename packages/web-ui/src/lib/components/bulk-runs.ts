@@ -767,8 +767,8 @@ export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKe
 
 /** The step the engine is working on while it moves a run on by itself, for the page's working
  *  line (`bulk.working.<step>`): reading the list (its first page is set only while the list is
- *  still being read), reading the targets, judging them (a judged run reads them in the same step),
- *  or writing. Null for a run the engine is not working on ({@link bulkEngineWorking}). */
+ *  still being read; the page shows no working line then, the head names the step), reading the
+ *  targets, judging them (a judged run reads them in the same step), or writing. Null for a run the engine is not working on ({@link bulkEngineWorking}). */
 export type BulkWorkingStep = 'list' | 'read' | 'judge' | 'write';
 
 export function bulkWorkingStep(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason' | 'listFirstPage' | 'judge'>): BulkWorkingStep | null {

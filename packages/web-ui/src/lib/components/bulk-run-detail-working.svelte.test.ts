@@ -140,10 +140,13 @@ describe('the step the engine works on', () => {
 });
 
 describe('a run the engine works on', () => {
-	it('says lynox reads the list, and that the numbers move once that is done', async () => {
+	it('shows no working line while it reads the list, and the stopped sentence after the follow limit', async () => {
 		run = makeRun({ listFirstPage: `https://${HOST}/admin/api/2026-10/graphql.json` });
 		await render();
-		expect(line()).toBe(`lynox liest die Liste bei ${HOST} … Die Zahlen hier ändern sich, wenn dieser Schritt fertig ist.`);
+		expect(line()).toBeNull();
+		expect(shown()).not.toContain(t('bulk.working.numbers'));
+		await pass(BULK_FOLLOW_MAX_MS + BULK_FOLLOW_MS);
+		expect(stopped()).toBe('Die Seite fragt nicht mehr nach; lade sie neu, um den Stand zu sehen.');
 	});
 
 	it('says lynox reads the targets', async () => {

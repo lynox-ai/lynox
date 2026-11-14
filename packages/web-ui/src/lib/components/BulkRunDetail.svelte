@@ -539,7 +539,9 @@
 			{/if}
 			{#if workingStep !== null && followStopped}
 				<p class="text-sm text-text-muted" data-testid="bulk-follow-stopped">{t('bulk.follow.stopped')}</p>
-			{:else if workingStep !== null}
+			{:else if workingStep !== null && workingStep !== 'list'}
+				<!-- While the list is read, the head names that step, and the run has no numbers yet for
+				     the second sentence to point at; so only the stopped sentence shows in that step. -->
 				<p class="text-sm text-text-muted" data-testid="bulk-working">{tf(`bulk.working.${workingStep}`, { provider })} {t('bulk.working.numbers')}</p>
 			{/if}
 			{#if bulkWaitsForStart(run)}

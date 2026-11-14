@@ -378,7 +378,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.head.halted': { de: 'Angehalten', en: 'Halted' },
 	'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' },
 	'bulk.halted_after_probe': { de: 'Wie geplant nach dem ersten Ziel angehalten.', en: 'Stopped after the first target, as planned.' },
-	'bulk.working.list': { de: 'lynox liest die Liste bei {provider} …', en: 'lynox is reading the list at {provider} …' },
 	'bulk.working.read': { de: 'lynox liest die Ziele bei {provider} …', en: 'lynox is reading the targets at {provider} …' },
 	'bulk.working.judge': { de: 'lynox beurteilt die Ziele …', en: 'lynox is judging the targets …' },
 	'bulk.working.write': { de: 'lynox schreibt die neuen Werte zu {provider} …', en: 'lynox is writing the new values to {provider} …' },
