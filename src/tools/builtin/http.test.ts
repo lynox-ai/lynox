@@ -3627,7 +3627,7 @@ describe('httpRequestTool', () => {
     });
 
     /** Runs the handler in a call slot whose signal the test aborts, as the agent's stop does. */
-    async function stoppedRequest(method: 'GET' | 'POST', fetchImpl: ReturnType<typeof vi.fn>, agent?: () => never): Promise<{ message: string; ms: number }> {
+    async function stoppedRequest(method: 'GET' | 'POST', fetchImpl: ReturnType<typeof vi.fn>): Promise<{ message: string; ms: number }> {
       mockDnsPublic();
       vi.stubGlobal('fetch', fetchImpl);
       const input = method === 'GET'
@@ -3635,7 +3635,7 @@ describe('httpRequestTool', () => {
         : { url: 'https://hung.example.com/x', method, body: '{}', timeout_ms: 30_000 };
       const slot: CallSlot = { abort: new AbortController() };
       const started = Date.now();
-      const call = runInCallSlot(slot, () => handler(input, agent ? agent() : agentWithPromptFn()));
+      const call = runInCallSlot(slot, () => handler(input, agentWithPromptFn()));
       await vi.waitFor(() => { expect(fetchImpl).toHaveBeenCalled(); });
       slot.abort!.abort();
       try {
@@ -3713,9 +3713,8 @@ describe('httpRequestTool', () => {
       }, 5000);
     });
 
-    // A read whose redirect carried a write as a method override is no read any more: its stop
-    // and its timeout must not call it safe to repeat. Control: the same chain without the
-    // override keeps the read's own words.
+    // A read whose redirect carries a write as a method override does not follow it, so it stays
+    // a read: its stop and its timeout keep the read's own words.
     describe('a read whose redirect carried a write', () => {
       // A read follows a redirect that carries a write only where a contract grants that write;
       // without one the hop is refused before it is sent (`OverrideHopRefused`).
@@ -10080,9 +10079,9 @@ describe('a mandate\'s reads inside one http_request', () => {
     }
   });
 
-  // Without a guard (a contract's own branch admits any hop it grants; the connectors pass
-  // none) the loop itself holds a write to one more send per call.
-  // A read becomes a write on a hop only where a guard admits it; no caller passes one for a read.
+  // A read becomes a write on a hop only where a guard admits it. For a read, `http_request` reads
+  // no contract and so passes no guard that could; the write-context read passes one that admits
+  // no hop at all.
   it('does not request a read\'s redirect hop that a server may run as a write, without a guard that admits it', async () => {
     const { fetchWithValidatedRedirects, OverrideHopRefused } = await import('./http.js');
     const hop = (location: string, guard?: () => boolean) => {
@@ -10115,6 +10114,8 @@ describe('a mandate\'s reads inside one http_request', () => {
     expect(admitted.fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  // Whatever guard admits a hop (a contract's own branch admits any hop it grants), the loop
+  // itself holds a write to one more send per call.
   it('sends a write again on one hop at most, whatever guard admitted it', async () => {
     const { fetchWithValidatedRedirects } = await import('./http.js');
     const send = (method: string, ...locations: string[]) => {
@@ -10262,8 +10263,9 @@ describe('a mandate\'s reads inside one http_request', () => {
       .toEqual({ method: 'POST', url: 'https://api.example.invalid/v1/a' });
   });
 
-  // A read whose redirect carries a method override sends that write on the hop. A later refusal
-  // names the write that was sent and where, not the read the call started as.
+  // A read whose redirect carries a method override sends that write on the hop where a guard
+  // admits it (here one that admits all). A later refusal names the write that was sent and
+  // where, not the read the call started as.
   const text = (e: unknown): string => (e instanceof Error ? e.message : String(e));
   it('names the write a redirect of a read carried when a later hop is refused', async () => {
     const { fetchWithValidatedRedirects } = await import('./http.js');

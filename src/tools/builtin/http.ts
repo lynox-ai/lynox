@@ -642,9 +642,11 @@ export async function fetchWithValidatedRedirects(
       // not a move, and is not followed at all. A method this file cannot read counts as a write.
       const hopWrite = effectiveWriteMethod(method, headers, nextUrl, typeof body === 'string' ? body : undefined);
       if (hopWrite === null || isWriteMethod(hopWrite)) {
-        // A read turns into a write on this hop only where a guard admitted it (a contract that
-        // grants it). Without one nobody was asked, so the hop is not requested: following it
-        // would send the write without a question. A method this file cannot read counts as one.
+        // A read turns into a write on this hop only where a guard admitted it. `http_request`
+        // reads a contract only for a write, so for a read it passes no guard that could, and no
+        // other caller does either. Without one nobody was asked, so the hop is not requested:
+        // following it would send the write without a question. A method this file cannot read
+        // counts as one.
         // The caller's own hop check speaks first, with its own words (a delegated session's, a
         // discovery read's); nothing was sent on this call but the read, so its refusal is passed
         // on as it is.
