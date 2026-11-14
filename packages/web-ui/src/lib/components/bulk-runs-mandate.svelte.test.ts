@@ -321,3 +321,48 @@ describe('a sentence that names an act of the owner\'s', () => {
 		expect(target.textContent).toContain(t('bulk.intro'));
 	});
 });
+
+describe('what the owner\'s pages say about a run\'s time and its list', () => {
+	// The engine stamps a run with SQLite's `datetime('now')`: UTC, without a zone. The pages
+	// show it in the viewer's time; read as local time, it stood an hour early in Zurich.
+	const tz = process.env['TZ'];
+	beforeEach(() => { process.env['TZ'] = 'Europe/Zurich'; viewer = 'owner'; });
+	afterEach(() => { if (tz === undefined) delete process.env['TZ']; else process.env['TZ'] = tz; });
+
+	it('shows a run\'s time in the list as the viewer\'s time, not the engine\'s UTC', async () => {
+		run = makeRun({ createdAt: '2026-11-12 07:53:09' });
+		await renderList();
+		expect(target.textContent).toContain('08:53');
+		expect(target.textContent).not.toContain('07:53');
+	});
+
+	it('shows when a run goes on in the viewer\'s time on its page', async () => {
+		run = makeRun({ resumesAt: '2026-11-12 07:53:09' });
+		await renderDetail();
+		expect(target.textContent).toContain('08:53');
+		expect(target.textContent).not.toContain('07:53');
+	});
+
+	const listed = (list: BulkRunDetailData['list']): BulkRunDetailData => makeRun({
+		phase: 'planned', haltKey: 'listed', haltReason: 'engine English', total: 3, list,
+		listFirstPage: 'https://demo.myshopify.com/products.json', listStartChecksum: 'l1',
+		changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+	});
+
+	it('gives a list read in one page no warning that it was read page by page', async () => {
+		run = listed({ pagesRead: 1 });
+		await renderDetail();
+		expect(target.textContent).toContain(t('bulk.start.listed').replace('{n}', '3'));
+		expect(target.textContent).not.toContain(t('bulk.start.list_note'));
+	});
+
+	it('warns where the list took more than one page, or the engine does not say', async () => {
+		for (const list of [{ pagesRead: 2 }, undefined]) {
+			run = listed(list);
+			await renderDetail();
+			expect(target.textContent).toContain(t('bulk.start.list_note'));
+			unmount(component!);
+			component = undefined;
+		}
+	});
+});
