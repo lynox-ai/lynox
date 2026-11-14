@@ -374,6 +374,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.head.target': { de: 'Ziel', en: 'Target' },
 	'bulk.head.targets': { de: 'Ziele', en: 'Targets' },
 	'bulk.head.counts': { de: '{n} · geschrieben {a} · Konflikte {c} · fehlgeschlagen {f}', en: '{n} · written {a} · conflicts {c} · failed {f}' },
+	'bulk.head.counts_taken_out': { de: '{n} · geschrieben {a} · herausgenommen {d} · Konflikte {c} · fehlgeschlagen {f}', en: '{n} · written {a} · taken out {d} · conflicts {c} · failed {f}' },
 	'bulk.head.cost': { de: 'KI-Kosten', en: 'AI cost' },
 	'bulk.head.halted': { de: 'Angehalten', en: 'Halted' },
 	'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' },
