@@ -212,7 +212,41 @@ function parentOwnCost(model: string, closing: boolean): number {
   return calculateCost(model, { input_tokens: closing ? 200 : 100, output_tokens: closing ? 50 : 20 });
 }
 
+/** A child reply that reaches its `message_delta` (so `turn_end` is handed on) and then stalls until its call is ended. */
+function stallingAfterTurnEnd(): Script {
+  return script([
+    { type: 'message_start', message: { usage: { ...usage } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Here is the whole list' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 30 } },
+  ], true);
+}
+
 describe('a spawned child whose own call is ended mid-stream', { timeout: 60_000 }, () => {
+  it('stopped after its turn_end: the child row still carries the estimate, as a child\'s stream does not count turn_end usage', async () => {
+    const { engine, session, debits } = await boot();
+    const seen = watchChild(session);
+    spawnReply();
+    const childCall = stallingAfterTurnEnd();
+    const turn = session.run('find the order list');
+    await waitFor(() => childCall.yielded === childCall.events.length);
+    const child = seen.child();
+    session.abort();
+    const err = await turn.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+
+    const estimate = child.getHelperCostUsd();
+    expect(child.costGuard.capOnlyUSD).toBeGreaterThan(0);
+    // The call's turn_end went out, but nothing counted its usage for the child: the estimate
+    // is the only place the call shows up, so it stays on the child's line.
+    expect(estimate).toBeGreaterThan(0);
+    expect(estimate).toBeLessThan(child.costGuard.capOnlyUSD);
+    const { parent, child: childRow } = rows(engine, session);
+    expect(childRow.cost_usd).toBeCloseTo(estimate, 12);
+    expect(debits.filter((d) => d.runId !== parent.id)).toEqual([]);
+  });
+
   it('stopped by the parent: the child row carries the estimate, the debit does not, the session cap holds only the reservation', async () => {
     const { engine, session, debits } = await boot();
     const seen = watchChild(session);
@@ -360,5 +394,165 @@ describe('the bounds an agent took back off the session counter are per run', { 
     textReply('All done.');
     await agent.send('and now finish');
     expect(agent.getStoppedCallSessionCostUsd(), 'the second run ended no call').toBe(0);
+  });
+});
+
+// The delegating run's cost ceiling (its CostGuard, read through `getRemainingRunBudgetUSD`).
+// What it is measured against once a child has settled: the parent's own calls, the child's
+// spend (`estimatedCostUSD`) and the upper bounds of the child's ended calls. Without the bounds
+// the parent's next turn would see room the child already used against its own share. Neither
+// the parent's cost snapshot (what its `cost_warning` shows), the `spawn_child_done` figure nor
+// any debit carries a bound.
+describe("the delegating run's ceiling after a child settled", { timeout: 60_000 }, () => {
+  const CEILING = 50;
+
+  async function bootWithCeiling(): Promise<{ engine: Engine; session: Session; debits: Array<{ runId: string; usd: number }>; childDone: number[] }> {
+    const { engine, debits } = await boot();
+    const childDone: number[] = [];
+    const session = engine.createSession({
+      costGuard: { maxBudgetUSD: CEILING },
+      onStream: (ev) => { if (ev.type === 'spawn_child_done') childDone.push(ev.costUsd); },
+    });
+    return { engine, session, debits, childDone };
+  }
+
+  /** The ceiling's figure: what the guard holds against its limit (no hold is left once settled). */
+  function ceilingFigure(session: Session): number {
+    const remaining = session.getAgent()!.getRemainingRunBudgetUSD();
+    expect(remaining, 'the run has a ceiling').not.toBeNull();
+    return CEILING - remaining!;
+  }
+
+  function check(
+    name: string,
+    session: Session,
+    engine: Engine,
+    child: ChildInside,
+    closing: boolean,
+    debits: Array<{ runId: string; usd: number }>,
+    childDone: number[],
+  ): void {
+    const main = session.getAgent()!;
+    const parentModel = rows(engine, session).parent.model_id;
+    const own = parentOwnCost(parentModel, closing);
+    const childSpend = child.getCostSnapshot()?.estimatedCostUSD ?? 0;
+    const bound = child.costGuard.capOnlyUSD;
+    const figure = ceilingFigure(session);
+    // The ceiling counts the parent's calls, the child's spend and the child's bounds, each once.
+    expect(figure).toBeCloseTo(own + childSpend + bound, 12);
+    // The parent's snapshot (shown by its cost warning) is spend only: its calls and the child's.
+    expect(main.getCostSnapshot()?.estimatedCostUSD).toBeCloseTo(own + childSpend, 12);
+    // The figure the parent's stream shows for the child is the child's spend.
+    expect(childDone).toHaveLength(1);
+    expect(childDone[0]).toBeCloseTo(childSpend, 12);
+    // No debit carries a bound: the parent is debited its own calls, the child its own finished
+    // calls (none when its only call was ended).
+    const parentRow = rows(engine, session).parent;
+    expect(debits.filter((d) => d.runId === parentRow.id).map((d) => d.usd)).toEqual([own]);
+    const childOwn = child.getCostSnapshot()?.ownCostUSD ?? 0;
+    const childDebits = debits.filter((d) => d.runId !== parentRow.id).map((d) => d.usd);
+    expect(childDebits).toHaveLength(childOwn > 0 ? 1 : 0);
+    if (childOwn > 0) expect(childDebits[0]).toBeCloseTo(childOwn, 12);
+  }
+
+  it('stopped by the parent: the ceiling gets the bound of the ended call', async () => {
+    const { engine, session, debits, childDone } = await bootWithCeiling();
+    const seen = watchChild(session);
+    spawnReply();
+    const childCall = stallingReply();
+    const turn = session.run('find the order list');
+    await waitFor(() => childCall.yielded === childCall.events.length);
+    session.abort();
+    expect(await turn.catch((e: unknown) => e)).toBeInstanceOf(RunAbortedError);
+    const child = seen.child();
+    expect(child.costGuard.capOnlyUSD).toBeGreaterThan(0);
+    check('parent-stop', session, engine, child, false, debits, childDone);
+  });
+
+  it("stopped by the child's own guard: the ceiling gets the bound of the ended call", async () => {
+    const { engine, session, debits, childDone } = await bootWithCeiling();
+    const seen = watchChild(session);
+    spawnReply();
+    textReply(COPY.repeat(5), 9);
+    textReply('The researcher could not finish.');
+    await session.run('find the order list');
+    const child = seen.child();
+    expect(child.costGuard.capOnlyUSD).toBeGreaterThan(0);
+    check('child-guard', session, engine, child, true, debits, childDone);
+  });
+
+  it("ended by the child's stream timeout: the ceiling gets the bound of the ended call", async () => {
+    const { engine, session, debits, childDone } = await bootWithCeiling();
+    statics.STREAM_TIMEOUT_MS = 300;
+    const seen = watchChild(session);
+    spawnReply();
+    stallingReply();
+    textReply('The researcher timed out.');
+    await session.run('find the order list');
+    const child = seen.child();
+    expect(child.costGuard.capOnlyUSD).toBeGreaterThan(0);
+    check('stream-timeout', session, engine, child, true, debits, childDone);
+  });
+
+  it('stopped after a finished call: the ceiling gets the spend and the bound, added', async () => {
+    const { engine, session, debits, childDone } = await bootWithCeiling();
+    const seen = watchChild(session);
+    spawnReply();
+    lookupReply();
+    const ended = stallingReply();
+    const turn = session.run('find the order list');
+    await waitFor(() => ended.yielded === ended.events.length);
+    session.abort();
+    expect(await turn.catch((e: unknown) => e)).toBeInstanceOf(RunAbortedError);
+    const child = seen.child();
+    expect(child.getCostSnapshot()?.estimatedCostUSD ?? 0).toBeGreaterThan(0);
+    expect(child.costGuard.capOnlyUSD).toBeGreaterThan(0);
+    check('finished-then-stopped', session, engine, child, false, debits, childDone);
+  });
+
+  it('a child that finished: no bound, the ceiling gets its spend only', async () => {
+    const { engine, session, debits, childDone } = await bootWithCeiling();
+    const seen = watchChild(session);
+    spawnReply();
+    textReply('Three orders, all shipped.');
+    textReply('The researcher found three orders.');
+    await session.run('find the order list');
+    const child = seen.child();
+    expect(child.costGuard.capOnlyUSD).toBe(0);
+    const childSpend = child.getCostSnapshot()?.estimatedCostUSD ?? 0;
+    expect(childSpend).toBeCloseTo(calculateCost(rows(engine, session).child.model_id, { input_tokens: 100, output_tokens: 30 }), 12);
+    check('child-finished', session, engine, child, true, debits, childDone);
+  });
+
+  // Today a child that returns normally has no ended call (a stopped, guarded or timed-out call
+  // ends the child's run). Should one ever carry a bound (a retried timeout), the bound still
+  // reaches the delegating ceiling only, never the child's debit or the figure shown for it.
+  it('a finished child that carries a bound: the ceiling gets it, the debit and display do not', async () => {
+    const { engine, session, debits, childDone } = await bootWithCeiling();
+    const BOUND = 0.3;
+    const spy = vi.spyOn(Agent.prototype, 'getCapOnlyCostUsd').mockReturnValue(BOUND);
+    try {
+      const seen = watchChild(session);
+      spawnReply();
+      textReply('Three orders, all shipped.');
+      textReply('The researcher found three orders.');
+      await session.run('find the order list');
+      const child = seen.child();
+      const { parent, child: childRow } = rows(engine, session);
+      expect(childRow.status).toBe('completed');
+      const own = parentOwnCost(parent.model_id, true);
+      const childSpend = child.getCostSnapshot()?.estimatedCostUSD ?? 0;
+      expect(childSpend).toBeGreaterThan(0);
+      expect(ceilingFigure(session)).toBeCloseTo(own + childSpend + BOUND, 12);
+      expect(session.getAgent()!.getCostSnapshot()?.estimatedCostUSD).toBeCloseTo(own + childSpend, 12);
+      expect(childDone).toHaveLength(1);
+      expect(childDone[0]).toBeCloseTo(childSpend, 12);
+      const childDebits = debits.filter((d) => d.runId !== parent.id).map((d) => d.usd);
+      expect(childDebits).toHaveLength(1);
+      expect(childDebits[0]).toBeCloseTo(childSpend, 12);
+      expect(childRow.cost_usd).toBeCloseTo(childSpend, 12);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

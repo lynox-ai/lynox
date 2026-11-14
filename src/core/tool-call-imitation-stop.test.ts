@@ -491,8 +491,9 @@ describe('what a call the person stopped used', () => {
     expect(abortedCallCounts().notBilled[site] ?? 0).toBe(before);
   });
 
-  it('a stop during the wait before a retry books nothing', { timeout: 15_000 }, async () => {
+  it('a stop during the wait before a retry books nothing for the stop; the answered attempt before it is booked once as ended by an error', { timeout: 15_000 }, async () => {
     const before = abortedCallCounts().notBilled[site] ?? 0;
+    const failedBefore = abortedCallCounts().notBilled['agent.stream_error'] ?? 0;
     let agent: Agent | null = null;
     agent = new Agent({
       name: 'test', model, tools: [sendTool], costGuard: { maxBudgetUSD: 100 },
@@ -508,9 +509,14 @@ describe('what a call the person stopped used', () => {
     // Stopped inside the wait, and the second attempt never started.
     expect(Date.now() - started).toBeLessThan(1500);
     expect(calls).toHaveLength(1);
-    expect(agent.getHelperCostUsd()).toBe(0);
-    expect((agent as unknown as Booked).costGuard.capOnlyUSD).toBe(0);
+    // The stop books nothing. The first attempt, which the provider answered before the
+    // connection dropped, is booked once, as an attempt ended by an error, before the wait.
     expect(abortedCallCounts().notBilled[site] ?? 0).toBe(before);
+    expect(abortedCallCounts().notBilled['agent.stream_error'] ?? 0).toBe(failedBefore + 1);
+    const cost = abortedCallCost({ model, maxTokens: (agent as unknown as { maxTokens: number }).maxTokens, request: '', partial: { usage, content: [] } });
+    expect((agent as unknown as Booked).costGuard.capOnlyUSD).toBeCloseTo(cost.upperBoundUsd, 12);
+    expect(agent.getHelperCostUsd()).toBeGreaterThanOrEqual(cost.estimateUsd);
+    expect(agent.getHelperCostUsd()).toBeLessThan(cost.upperBoundUsd);
   });
 
   it('a guard stop that coincides with the run\'s stop is booked once, under the guard', async () => {

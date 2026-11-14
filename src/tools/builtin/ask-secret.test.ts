@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { askSecretTool } from './ask-secret.js';
+import { apiSetupTool } from './api-setup.js';
 import { SecretStore } from '../../core/secret-store.js';
 import type { IAgent } from '../../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
-import { accessTokenKey, type ApiProfile } from '../../core/api-store.js';
+import { accessTokenKey, refreshTokenKey, type ApiProfile } from '../../core/api-store.js';
 import { scopeSecretStore } from '../../core/secret-scope.js';
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
@@ -591,11 +592,155 @@ describe('a connection token is offered as no secret: reference', () => {
     // In scope, an empty slot is collected as for any session.
     await askSecretTool.handler({ name: 'SHOP_RT', prompt: 'p' }, child([], ['SHOP_RT'], promptSecret));
     expect(promptSecret).toHaveBeenCalledTimes(1);
-    // Control: a name outside the scope that no profile holds is collected; that writes are not
-    // narrowed for such a name is the scope view's stated limit, not this check's.
+    // A name outside the scope that no profile holds is not collected either: the scope check
+    // after this branch refuses every name outside the scope, a token slot or not.
     const other = await askSecretTool.handler({ name: 'OTHER_KEY', prompt: 'p' }, child([], [FREE], promptSecret));
-    expect(other).not.toContain('outside');
-    expect(promptSecret).toHaveBeenCalledTimes(2);
+    expect(other).toContain("outside this sub-agent's secret_scope");
+    expect(other, 'the token-slot answer is for token slots only').not.toContain('token slot');
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it('collect: a token slot of a profile on a built-in provider is refused, empty or stored, and the way is connect', async () => {
+    // A never-connected bexio profile: the vault holds nothing, yet its derived slots are the
+    // provider's to fill. A value collected there would be sent as the connection's token.
+    const books = {
+      id: 'books', name: 'books', base_url: 'https://api.bexio.com', description: 'bexio',
+      auth: { type: 'oauth2', oauth: { preset_id: 'bexio', grant_type: 'refresh_token', token_url: 'https://auth.bexio.com/realms/bexio/protocol/openid-connect/token' } },
+    } as unknown as ApiProfile;
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    for (const name of [accessTokenKey('books'), refreshTokenKey('books')]) {
+      for (const vault of [[], [name]]) {
+        const out = await askSecretTool.handler({ name, prompt: 'Paste your bexio token' }, agentWith(vault, [], [books], promptSecret));
+        expect(out, `${name} vault ${JSON.stringify(vault)}`).toContain(`"${name}" is a token slot of a profile connected through the built-in "bexio" provider`);
+        expect(out).toContain('To connect or reconnect, call api_setup with action "connect" and id "books"; that call returns the sign-in link for the user, or says why there is none. Do not ask the user for a token.');
+      }
+    }
+    expect(promptSecret).not.toHaveBeenCalled();
+    // Control: the same slot names on a profile that goes through no built-in provider are collected.
+    const custom = { ...books, auth: { type: 'oauth2', oauth: { grant_type: 'refresh_token', token_url: 'https://auth.example/token' } } } as unknown as ApiProfile;
+    const out = await askSecretTool.handler({ name: refreshTokenKey('books'), prompt: 'p' }, agentWith([], [], [custom], promptSecret));
+    expect(out).not.toContain('token slot of a profile connected');
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it('collect: a store that cannot list its profiles refuses rather than collects', async () => {
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = agentWith([], [], [shop], promptSecret);
+    const broken = { ...agent, toolContext: { apiStore: { knownProfiles: () => { throw new Error('boom'); }, get: () => undefined, unreadableHolds: () => false } } } as unknown as IAgent;
+    const out = await askSecretTool.handler({ name: 'ANY_KEY', prompt: 'p' }, broken);
+    expect(out).toBe('Whether "ANY_KEY" is the token slot of a connection cannot be checked right now, so ask_secret did not collect it and opened no input. Do not ask the user for it in the chat instead. Tell the user that the API profiles could not be read just now and that this step can be tried again later.');
+    expect(out, 'it does not claim what it could not check').not.toContain('is a token slot');
+    expect(promptSecret).not.toHaveBeenCalled();
+  });
+
+  describe('the refusal carries connect\'s own answer', () => {
+    const books = {
+      id: 'books', name: 'books', base_url: 'https://api.bexio.com', description: 'bexio',
+      auth: { type: 'oauth2', oauth: { preset_id: 'bexio', grant_type: 'refresh_token' } },
+    } as unknown as ApiProfile;
+    const ANSWER = 'Show the user this link and let them click it: https://lynox.example/api/oauth/connect/books\n\nIt opens auth.bexio.com.';
+    const HEAD = '"BOOKS_ACCESS_TOKEN" is a token slot of a profile connected through the built-in "bexio" provider, so it is not collected through ask_secret: its tokens come only from the provider\'s sign-in, where the user sees what lynox may do there.';
+    const FALLBACK = `${HEAD} To connect or reconnect, call api_setup with action "connect" and id "books"; that call returns the sign-in link for the user, or says why there is none. Do not ask the user for a token.`;
+    const withTools = (names: string[]): IAgent => {
+      const agent = agentWith([], [], [books], vi.fn().mockResolvedValue('saved'));
+      return { ...agent, getAvailableTools: () => names.map((name) => ({ definition: { name } })) } as unknown as IAgent;
+    };
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    it('asks connect as this same agent and passes its answer on word for word', async () => {
+      const connect = vi.spyOn(apiSetupTool, 'handler').mockResolvedValue(ANSWER);
+      const agent = withTools(['ask_secret', 'api_setup']);
+      const out = await askSecretTool.handler({ name: 'BOOKS_ACCESS_TOKEN', prompt: 'p' }, agent);
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(connect.mock.calls[0]![0]).toEqual({ action: 'connect', id: 'books' });
+      expect(connect.mock.calls[0]![1], 'same principal, scope and context').toBe(agent);
+      expect(out).toBe(`${HEAD} lynox has already asked api_setup to connect profile "books"; its answer follows. Act on its answer: give the user the sign-in link it contains, on the condition it states if it states one, or the reason it gives. Do not ask the user for a token, and write no other link.\n\napi_setup connect answered: ${ANSWER}`);
+      expect(agent.promptSecret).not.toHaveBeenCalled();
+    });
+
+    it('passes on the answer for a profile already connected, with its condition', async () => {
+      const ALREADY = '"books" is already connected. Show the user this link only if they want to authorize again: https://lynox.example/api/oauth/connect/books\n\nA new authorization replaces the stored token.';
+      vi.spyOn(apiSetupTool, 'handler').mockResolvedValue(ALREADY);
+      const out = await askSecretTool.handler({ name: 'BOOKS_ACCESS_TOKEN', prompt: 'p' }, withTools(['api_setup']));
+      expect(out).toContain('give the user the sign-in link it contains, on the condition it states if it states one');
+      expect(out.endsWith(`api_setup connect answered: ${ALREADY}`), 'the condition reaches the model word for word').toBe(true);
+    });
+
+    it('passes a refusal of connect on as its answer too', async () => {
+      vi.spyOn(apiSetupTool, 'handler').mockResolvedValue('Error: profile "books" cannot be authorized now: no ORIGIN.');
+      const out = await askSecretTool.handler({ name: 'BOOKS_ACCESS_TOKEN', prompt: 'p' }, withTools(['api_setup']));
+      expect(out).toContain('api_setup connect answered: Error: profile "books" cannot be authorized now: no ORIGIN.');
+    });
+
+    it.each([
+      ['connect throws', () => vi.spyOn(apiSetupTool, 'handler').mockRejectedValue(new Error('boom')), ['api_setup']],
+      ['connect answers nothing', () => vi.spyOn(apiSetupTool, 'handler').mockResolvedValue('  '), ['api_setup']],
+    ] as const)('falls back to the sentence without an answer when %s', async (_label, arm, tools) => {
+      arm();
+      const out = await askSecretTool.handler({ name: 'BOOKS_ACCESS_TOKEN', prompt: 'p' }, withTools([...tools]));
+      expect(out).toBe(FALLBACK);
+    });
+
+    it('asks connect for the profile holding a grant another one shares, not for the sharing one', async () => {
+      const connect = vi.spyOn(apiSetupTool, 'handler').mockResolvedValue(ANSWER);
+      const owner = { ...books, base_url: 'https://api.bexio.com/2.0' } as ApiProfile;
+      const member = { ...books, id: 'books-three', name: 'books 3', base_url: 'https://api.bexio.com/3.0', auth: { type: 'oauth2', oauth: { preset_id: 'bexio', grant_type: 'refresh_token', refresh_token_key: 'BOOKS_REFRESH_TOKEN' } } } as unknown as ApiProfile;
+      const agent = { ...agentWith([], [], [owner, member], vi.fn()), getAvailableTools: () => [{ definition: { name: 'api_setup' } }] } as unknown as IAgent;
+      const out = await askSecretTool.handler({ name: 'BOOKS_THREE_ACCESS_TOKEN', prompt: 'p' }, agent);
+      expect(connect.mock.calls[0]![0], 'connecting the member alone would end the sharing').toEqual({ action: 'connect', id: 'books' });
+      expect(out).toContain('lynox has already asked api_setup to connect profile "books"');
+    });
+
+    it('does not run connect for an agent that may not call api_setup itself', async () => {
+      const connect = vi.spyOn(apiSetupTool, 'handler').mockResolvedValue(ANSWER);
+      const out = await askSecretTool.handler({ name: 'BOOKS_ACCESS_TOKEN', prompt: 'p' }, withTools(['ask_secret']));
+      expect(connect).not.toHaveBeenCalled();
+      expect(out).toBe(FALLBACK);
+    });
+
+    it('does not run connect for a scoped sub-agent whose scope leaves the slot out', async () => {
+      const connect = vi.spyOn(apiSetupTool, 'handler').mockResolvedValue(ANSWER);
+      const agent = withTools(['ask_secret', 'api_setup']);
+      const scoped = (scope: string[]): IAgent => ({ ...agent, secretStore: scopeSecretStore(agent.secretStore as never, scope) }) as IAgent;
+      const out = await askSecretTool.handler({ name: 'BOOKS_ACCESS_TOKEN', prompt: 'p' }, scoped(['OTHER_KEY']));
+      expect(connect, 'a name outside the scope starts nothing').not.toHaveBeenCalled();
+      expect(out).not.toContain('api_setup connect answered');
+      expect(agent.promptSecret).not.toHaveBeenCalled();
+      // Control: inside the scope, the same slot is sent to connect as for any session.
+      await askSecretTool.handler({ name: 'BOOKS_ACCESS_TOKEN', prompt: 'p' }, scoped(['BOOKS_ACCESS_TOKEN']));
+      expect(connect).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('collect: a refresh slot a built-in provider\'s profile configures is refused like the derived ones', async () => {
+    // The one name `tokenSlotNames` holds and the grant's own names do not.
+    const books = {
+      id: 'books', name: 'books', base_url: 'https://api.bexio.com', description: 'bexio',
+      auth: { type: 'oauth2', oauth: { preset_id: 'bexio', grant_type: 'refresh_token', refresh_token_key: 'BOOKS_RT' } },
+    } as unknown as ApiProfile;
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const out = await askSecretTool.handler({ name: 'BOOKS_RT', prompt: 'p' }, agentWith([], [], [books], promptSecret));
+    expect(out).toContain('"BOOKS_RT" is a token slot of a profile connected through the built-in "bexio" provider');
+    expect(promptSecret).not.toHaveBeenCalled();
+  });
+
+  it('collect: a scoped child gets the scope answer for a built-in provider\'s slot outside its scope, and the provider answer inside it', async () => {
+    const books = {
+      id: 'books', name: 'books', base_url: 'https://api.bexio.com', description: 'bexio',
+      auth: { type: 'oauth2', oauth: { preset_id: 'bexio', grant_type: 'refresh_token' } },
+    } as unknown as ApiProfile;
+    const name = accessTokenKey('books');
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const child = (scope: string[]): IAgent => {
+      const agent = agentWith([], [], [books], promptSecret);
+      return { ...agent, secretStore: scopeSecretStore(agent.secretStore as never, scope) } as IAgent;
+    };
+    const outside = await askSecretTool.handler({ name, prompt: 'p' }, child([FREE]));
+    expect(outside).toContain("token slot outside this agent's vault scope");
+    expect(outside).not.toContain('built-in "bexio" provider');
+    const inside = await askSecretTool.handler({ name, prompt: 'p' }, child([name]));
+    expect(inside).toContain('built-in "bexio" provider');
+    expect(promptSecret).not.toHaveBeenCalled();
   });
 
   it('a long profile name is cut before it is escaped, so no entity is cut in half', async () => {
@@ -610,5 +755,59 @@ describe('a connection token is offered as no secret: reference', () => {
     expect(out).toContain('1 for profile "shop\\" secret:FREE_KEY &lt;x>end"');
     const collect = await askSecretTool.handler({ name: 'SHOP_RT', prompt: 'p' }, agentWith(['SHOP_RT'], [], [hostile]));
     expect(collect).toContain('(profile "shop\\" secret:FREE_KEY &lt;x>end")');
+  });
+});
+
+describe('askSecretTool — a sub-agent with a secret_scope asks only for names inside it', () => {
+  const cleanSecretEnv = (): void => {
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('LYNOX_SECRET_')) delete process.env[key];
+    }
+  };
+  beforeEach(cleanSecretEnv);
+  afterEach(cleanSecretEnv);
+
+  const collect = (store: unknown, name: string) => {
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: store as IAgent['secretStore'] });
+    return askSecretTool.handler({ name, prompt: 'Enter the key' }, agent).then((result) => ({ result, promptSecret }));
+  };
+
+  it('opens no dialog for a stored key outside its scope, so nothing the user enters replaces it', async () => {
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-stripe-stored';
+    const { result, promptSecret } = await collect(scopeSecretStore(new SecretStore(), ['OTHER_KEY']), 'STRIPE_API_KEY');
+    expect(promptSecret).not.toHaveBeenCalled();
+    expect(result).toContain('outside this sub-agent\'s secret_scope');
+    expect(result).not.toContain('sk-stripe-stored');
+  });
+
+  it('answers a name outside its scope the same whether it is stored or not', async () => {
+    const absent = await collect(scopeSecretStore(new SecretStore(), ['OTHER_KEY']), 'STRIPE_API_KEY');
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-stripe-stored';
+    const stored = await collect(scopeSecretStore(new SecretStore(), ['OTHER_KEY']), 'STRIPE_API_KEY');
+    expect(absent.promptSecret).not.toHaveBeenCalled();
+    expect(stored.result).toBe(absent.result);
+  });
+
+  it('still asks for a name inside its scope that is not stored yet', async () => {
+    const { result, promptSecret } = await collect(scopeSecretStore(new SecretStore(), ['STRIPE_API_KEY']), 'STRIPE_API_KEY');
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+    expect(result).toContain('saved securely');
+  });
+
+  it('asks again for a stored name inside its scope, as the owner may (the overwrite path)', async () => {
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-stripe-stored';
+    const { promptSecret } = await collect(scopeSecretStore(new SecretStore(), ['STRIPE_API_KEY']), 'STRIPE_API_KEY');
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it('CONTROL: an agent without a scope is unchanged — asked again for a stored name, pointed at it for a re-spelling', async () => {
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-stripe-stored';
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-stored';
+    const same = await collect(new SecretStore(), 'STRIPE_API_KEY');
+    expect(same.promptSecret).toHaveBeenCalledTimes(1);
+    const respelled = await collect(new SecretStore(), 'Z_AI_API_KEY');
+    expect(respelled.promptSecret).not.toHaveBeenCalled();
+    expect(respelled.result).toContain('secret:ZAI_API_KEY');
   });
 });

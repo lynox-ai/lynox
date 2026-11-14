@@ -135,10 +135,28 @@
 		if (pendingClaimNonce !== null && isViewerKnown() && !isOwnerSession()) untrack(dropPendingClaim);
 	});
 
+	/**
+	 * The nonce leaves the URL before the claim is sent, so a reload while it runs cannot park an
+	 * already-spent nonce again. Only when the engine says it refused the claim before asking the
+	 * control plane (`kept`) is the nonce still good: it goes back into the URL while the page is
+	 * still the one the claim was confirmed on, and onto the card while this instance is mounted.
+	 * One that was left and opened again finds it in the URL on the next reload.
+	 */
 	function confirmPendingClaim(): void {
 		const nonce = pendingClaimNonce;
 		dropPendingClaim();
-		if (nonce) void claimManagedGoogleTokens(nonce);
+		if (!nonce) return;
+		const page = typeof window === 'undefined' ? null : window.location.pathname;
+		void claimManagedGoogleTokens(nonce).then((outcome) => {
+			if (outcome !== 'kept' || page === null || window.location.pathname !== page) return;
+			const url = new URL(window.location.href);
+			// A newer claim reached the URL meanwhile (an in-app link): it is the one to keep.
+			if (url.searchParams.has('google_oauth')) return;
+			url.searchParams.set('google_oauth', nonce);
+			// The router's own entry state is kept: `{}` would drop its history index.
+			window.history.replaceState(window.history.state, '', url.toString());
+			if (mounted) parkClaim(nonce);
+		});
 	}
 
 	$effect(() => {
@@ -181,7 +199,9 @@
 		}
 	});
 
+	let mounted = true;
 	onDestroy(() => {
+		mounted = false;
 		stopAuthPoll();
 	});
 </script>

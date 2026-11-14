@@ -1,4 +1,5 @@
-import { closeSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, statfsSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readSync, rmSync, statfsSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { copyOutAsync, walk } from './workspace-fd.js';
@@ -27,21 +28,25 @@ const REQUEST_DIR_PREFIX = 'workspace-';
 export const ARCHIVE_WORKSPACE_DIR = 'workspace';
 export const ARCHIVE_MANIFEST_NAME = 'workspace-manifest.json';
 /** Kept free beyond the archive: the data disk is shared with the stores. */
-const SPACE_HEADROOM_BYTES = 64 * 1024 * 1024;
+export const SPACE_HEADROOM_BYTES = 64 * 1024 * 1024;
 /** Free space below which a running copy stops, for the same reason. */
-const SPACE_FLOOR_BYTES = 32 * 1024 * 1024;
+export const SPACE_FLOOR_BYTES = 32 * 1024 * 1024;
 /**
  * How many bytes a copy writes between two looks at the free space: half the floor, so the files
  * this copy writes between two looks can take free space below the floor but not to zero (other
  * writers on the disk can; the manifest, written last, is not re-checked).
  */
-const SPACE_RECHECK_BYTES = 16 * 1024 * 1024;
+export const SPACE_RECHECK_BYTES = 16 * 1024 * 1024;
 
 const statfsFree = (path: string): number => {
   const fs = statfsSync(path);
   return Number(fs.bavail) * Number(fs.bsize);
 };
 let freeBytes = statfsFree;
+/** The free bytes of the disk holding `path` (through the test seam below). */
+export function freeBytesAt(path: string): number {
+  return freeBytes(path);
+}
 /** Test seam: the free bytes of the disk holding `path`. */
 export function _setFreeBytesForTesting(probe: ((path: string) => number) | null): void {
   freeBytes = probe ?? statfsFree;
@@ -75,6 +80,10 @@ export interface WorkspaceManifest {
    * the control plane holds and hands out the workspace files.
    */
   readonly omitted?: WorkspaceOmission;
+  /** Full archive only: files written as they are because they are not text; a byte scan found no secret value in them. */
+  readonly not_masked?: string[];
+  /** Full archive only: files withheld because the byte scan found a secret value in them (also under `skipped`). */
+  readonly held_back_secret?: string[];
 }
 
 /** Why the workspace is not in this export, and the source that has it. */
@@ -95,6 +104,104 @@ function omittedSidecar(): WorkspaceManifest {
     present: true, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [],
     may_be_incomplete: true, omitted: { reason: 'sidecar', source: 'control-plane' },
   };
+}
+
+/**
+ * File names the export never carries, wherever they sit (`workspace/`, `memory/`, …): the names of
+ * the data directory's credential files (inventory `export: never`, plus `config.json`, which can
+ * hold provider keys), with a store's `-wal`/`-shm`/`-journal` sidecars. The workspace is
+ * agent-writable, so a copy of `vault.key` or `.env` can land there under its own name; the archive
+ * is meant to be handed on. A NAME rule over the bytes, beside the inode rule (`secretInodes`):
+ * such a file is skipped and listed, never copied.
+ */
+export const CREDENTIAL_FILE_NAMES: ReadonlySet<string> = (() => {
+  const out = new Set<string>(['config.json', '.netrc', '.npmrc', '.pgpass', 'credentials']);
+  for (const e of DATA_DIR_INVENTORY) {
+    if (e.export.by !== 'never') continue;
+    out.add(e.name.toLowerCase());
+    if (e.kind === 'sqlite') for (const sfx of ['-wal', '-shm', '-journal']) out.add(`${e.name}${sfx}`.toLowerCase());
+  }
+  return out;
+})();
+
+/**
+ * Name shapes of common credential files beyond the data directory's own: any `.env` variant
+ * (`.env.bak`, `.env.local`), private keys and key stores by extension, SSH private keys, and the
+ * AWS/gcloud `credentials` file with any extension. Case-insensitive, like the names above: a
+ * copy of `vault.key` is still a copy as `Vault.KEY`.
+ */
+const CREDENTIAL_NAME_SHAPES: readonly RegExp[] = [
+  /^\.env(?:[._-].*)?$/,
+  /\.(?:key|pem|p12|pfx|kdbx)$/,
+  /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?$/,
+  /^credentials\..+$/,
+];
+
+/** Whether the last segment of `rel` is a credential file's name (`CREDENTIAL_FILE_NAMES`, `CREDENTIAL_NAME_SHAPES`). */
+export function hasCredentialName(rel: string): boolean {
+  const base = rel.slice(rel.lastIndexOf('/') + 1).toLowerCase();
+  return CREDENTIAL_FILE_NAMES.has(base) || CREDENTIAL_NAME_SHAPES.some(r => r.test(base));
+}
+
+/**
+ * What the data export does with a file's bytes before they go into the archive. The workspace
+ * route passes none (the owner's own download, as before); the full archive passes one.
+ */
+export interface ContentGuard {
+  /** Mask the secret values in a text, in every form the export knows. */
+  mask(text: string): string;
+  /** Whether raw bytes hold a secret value in any of those forms. */
+  holds(bytes: Buffer): boolean;
+  /** The longest form `holds` looks for: a chunked scan overlaps its chunks by this much. */
+  readonly maxNeedle: number;
+}
+
+/** Files up to this size are read whole: masked when they are text, scanned when not. */
+export const GUARD_READ_CAP_BYTES = 16 * 1024 * 1024;
+const SCAN_CHUNK_BYTES = 1024 * 1024;
+const utf8 = new TextDecoder('utf-8', { fatal: true });
+
+/** Text the export may mask: valid UTF-8 without a NUL byte. */
+function asText(bytes: Buffer): string | null {
+  if (bytes.includes(0)) return null;
+  try {
+    return utf8.decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** Read `size` bytes of `fd` from offset `pos` into one buffer. */
+function readAt(fd: number, size: number, pos: number): Buffer {
+  const buf = Buffer.alloc(size);
+  let off = 0;
+  while (off < size) {
+    const n = readSync(fd, buf, off, size - off, pos + off);
+    if (n === 0) break;
+    off += n;
+  }
+  return off === size ? buf : buf.subarray(0, off);
+}
+
+/**
+ * Decide a file's content under `guard`: `text` (masked bytes to write), `raw` (no secret found by
+ * the byte scan; written as it is, and listed), or `secret` (the scan found one; not written, listed).
+ * `bytes` is set when the file was read whole.
+ */
+export function guardContent(fd: number, size: number, guard: ContentGuard): { kind: 'text' | 'raw'; bytes: Buffer | null } | { kind: 'secret' } {
+  if (size <= GUARD_READ_CAP_BYTES) {
+    const bytes = readAt(fd, size, 0);
+    const text = asText(bytes);
+    if (text !== null) return { kind: 'text', bytes: Buffer.from(guard.mask(text), 'utf8') };
+    return guard.holds(bytes) ? { kind: 'secret' } : { kind: 'raw', bytes };
+  }
+  const overlap = Math.max(0, guard.maxNeedle - 1);
+  for (let pos = 0; pos < size; pos += SCAN_CHUNK_BYTES) {
+    const start = Math.max(0, pos - overlap);
+    const chunk = readAt(fd, Math.min(size, pos + SCAN_CHUNK_BYTES) - start, start);
+    if (guard.holds(chunk)) return { kind: 'secret' };
+  }
+  return { kind: 'raw', bytes: null };
 }
 
 function dataDirKey(dataDir: string): { dev: number; ino: number } {
@@ -157,7 +264,7 @@ export function describeWorkspace(dataDir: string, isolation: ShellIsolation = s
     const skipped: string[] = [];
     for (const e of listing.entries) {
       if (e.type === 'dir') continue;
-      if (e.type === 'file' && e.exactName && tarNameProblem(e.rel) === null && !secrets.has(`${e.dev}:${e.ino}`)) files.push({ path: e.rel, size: e.size });
+      if (e.type === 'file' && e.exactName && tarNameProblem(e.rel) === null && !secrets.has(`${e.dev}:${e.ino}`) && !hasCredentialName(e.rel)) files.push({ path: e.rel, size: e.size });
       else skipped.push(e.rel);
     }
     return {
@@ -174,7 +281,7 @@ export function describeWorkspace(dataDir: string, isolation: ShellIsolation = s
  * it is anything but a real directory of this process's own uid: a link there would point the
  * archive, and the boot sweep's removals, at whatever it names.
  */
-function checkStagingDir(dir: string, create: boolean): boolean {
+export function checkStagingDir(dir: string, create: boolean): boolean {
   let st;
   try {
     st = lstatSync(dir);
@@ -274,52 +381,66 @@ export async function writeWorkspaceArchive(dataDir: string, archivePath: string
   const fd = openSync(archivePath, 'wx', 0o600);
   try {
     const tar = new TarWriter(fd);
-    // Sidecar mode: the archive holds only the manifest that says the workspace was left out.
-    if (isolation.kind === 'sidecar') {
-      const manifest = omittedSidecar();
-      tar.addBuffer(ARCHIVE_MANIFEST_NAME, Buffer.from(JSON.stringify(manifest, null, 2)), Date.now() / 1000);
-      tar.finish();
-      return manifest;
-    }
-    const lease = leaseWorkspaceFor(dataDir);
-    if (lease === null) {
-      tar.addBuffer(ARCHIVE_MANIFEST_NAME, Buffer.from(JSON.stringify(EMPTY, null, 2)), Date.now() / 1000);
-      tar.finish();
-      return EMPTY;
-    }
-    try {
-      const secrets = secretInodes(dataDir);
-      const files: WorkspaceManifestFile[] = [];
-      const unreadable: Array<{ path: string; code: string }> = [];
-      const withheld: string[] = [];
-      const changed: string[] = [];
-      let sinceCheck = 0;
-      const count = await copyOutAsync(lease.access.anchor, '', async (rel, src, size) => {
-        await turn();
-        const st = fstatSync(src);
-        if (tarNameProblem(rel) !== null || secrets.has(`${st.dev}:${st.ino}`)) { withheld.push(rel); return; }
-        sinceCheck += size + tarOverheadFor(rel, size);
-        if (sinceCheck >= SPACE_RECHECK_BYTES) {
-          sinceCheck = 0;
-          const available = freeBytes(archivePath);
-          if (available < SPACE_FLOOR_BYTES + size) throw new ExportSpaceError(SPACE_FLOOR_BYTES + size, available);
-        }
-        const written = await tar.addFile(`${ARCHIVE_WORKSPACE_DIR}/${rel}`, src, size, st.mtimeMs / 1000);
-        files.push({ path: rel, size, sha256: written.sha256 });
-        if (!written.unchanged) changed.push(rel);
-      }, dataDirKey(dataDir), (path, code) => unreadable.push({ path, code }));
-      const skipped = [...count.skipped, ...withheld];
-      const manifest: WorkspaceManifest = {
-        present: true, files, bytes: files.reduce((n, f) => n + f.size, 0), skipped, unreadable, changed_during_export: changed,
-        may_be_incomplete: skipped.length > 0 || unreadable.length > 0 || changed.length > 0,
-      };
-      tar.addBuffer(ARCHIVE_MANIFEST_NAME, Buffer.from(JSON.stringify(manifest, null, 2)), Date.now() / 1000);
-      tar.finish();
-      return manifest;
-    } finally {
-      lease.release();
-    }
+    const manifest = await appendWorkspace(tar, dataDir, archivePath, isolation);
+    tar.addBuffer(ARCHIVE_MANIFEST_NAME, Buffer.from(JSON.stringify(manifest, null, 2)), Date.now() / 1000);
+    tar.finish();
+    return manifest;
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * Append the workspace's files to `tar` under `workspace/` and return their manifest; the caller
+ * writes the manifest where it wants it and finishes the tar. `spacePath` is a path on the disk the
+ * tar is written to (the free space is looked at there while copying). In sidecar mode nothing is
+ * walked and the manifest says so; without a workspace root it is empty.
+ */
+export async function appendWorkspace(tar: TarWriter, dataDir: string, spacePath: string, isolation: ShellIsolation = shellIsolation(), guard: ContentGuard | null = null): Promise<WorkspaceManifest> {
+  if (isolation.kind === 'sidecar') return omittedSidecar();
+  const lease = leaseWorkspaceFor(dataDir);
+  if (lease === null) return EMPTY;
+  try {
+    const secrets = secretInodes(dataDir);
+    const files: WorkspaceManifestFile[] = [];
+    const unreadable: Array<{ path: string; code: string }> = [];
+    const withheld: string[] = [];
+    const changed: string[] = [];
+    const notMasked: string[] = [];
+    const heldBack: string[] = [];
+    let sinceCheck = 0;
+    const count = await copyOutAsync(lease.access.anchor, '', async (rel, src, size) => {
+      await turn();
+      const st = fstatSync(src);
+      if (tarNameProblem(rel) !== null || secrets.has(`${st.dev}:${st.ino}`) || hasCredentialName(rel)) { withheld.push(rel); return; }
+      sinceCheck += size + tarOverheadFor(rel, size);
+      if (sinceCheck >= SPACE_RECHECK_BYTES) {
+        sinceCheck = 0;
+        const available = freeBytes(spacePath);
+        if (available < SPACE_FLOOR_BYTES + size) throw new ExportSpaceError(SPACE_FLOOR_BYTES + size, available);
+      }
+      const name = `${ARCHIVE_WORKSPACE_DIR}/${rel}`;
+      if (guard !== null) {
+        const c = guardContent(src, size, guard);
+        if (c.kind === 'secret') { withheld.push(rel); heldBack.push(rel); return; }
+        if (c.kind === 'raw') notMasked.push(rel);
+        if (c.bytes !== null) {
+          tar.addBuffer(name, c.bytes, st.mtimeMs / 1000);
+          files.push({ path: rel, size: c.bytes.length, sha256: createHash('sha256').update(c.bytes).digest('hex') });
+          return;
+        }
+      }
+      const written = await tar.addFile(name, src, size, st.mtimeMs / 1000);
+      files.push({ path: rel, size, sha256: written.sha256 });
+      if (!written.unchanged) changed.push(rel);
+    }, dataDirKey(dataDir), (path, code) => unreadable.push({ path, code }));
+    const skipped = [...count.skipped, ...withheld];
+    return {
+      present: true, files, bytes: files.reduce((n, f) => n + f.size, 0), skipped, unreadable, changed_during_export: changed,
+      may_be_incomplete: skipped.length > 0 || unreadable.length > 0 || changed.length > 0,
+      ...(guard !== null ? { not_masked: notMasked, held_back_secret: heldBack } : {}),
+    };
+  } finally {
+    lease.release();
   }
 }

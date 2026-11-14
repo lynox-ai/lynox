@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
-	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead, bulkOne,
+	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -24,6 +24,11 @@ const i18n: BulkI18n = {
 };
 const probeState = (o: Partial<Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase'>>): Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase'> =>
 	({ probe: null, haltReason: null, phase: 'previewed', ...o });
+type StepState = Parameters<typeof bulkSteps>[0];
+const stepState = (writing: number, o: Partial<StepState> = {}): StepState => ({
+	probe: null, haltReason: null, phase: 'previewed', targetSystem: 'http:api.example.com', probeConfirmed: false, probeOwn: false,
+	changes: { update: writing, create: 0, delete: 0, unchanged: 0, invalid: 0 }, ...o,
+});
 
 describe('bulk run helpers', () => {
 	it('names a run by its size and where it writes, an undo as such', () => {
@@ -81,13 +86,35 @@ describe('bulk run helpers', () => {
 		expect(bulkCanUndo({ ...stopped, atomic: true, phase: 'done', haltReason: null, undoable: 2 })).toBe(true);
 	});
 
-	it('places a run on its step', () => {
+	it('places a run on its step, and shows the probe only where the run has one', () => {
 		const probe = { key: 'k', fields: [] };
-		expect(bulkStep(probeState({ phase: 'planned' }))).toBe(0);
-		expect(bulkStep(probeState({ phase: 'previewed' }))).toBe(2);
-		expect(bulkStep(probeState({ phase: 'writing', probe, haltReason: 'x' }))).toBe(3);
-		expect(bulkStep(probeState({ phase: 'writing' }))).toBe(4);
-		expect(bulkStep(probeState({ phase: 'done' }))).toBe(5);
+		const all = ['planned', 'preview', 'approval', 'probe', 'run', 'done'];
+		const noProbe = ['planned', 'preview', 'approval', 'run', 'done'];
+		// [state, steps shown, step at]
+		const table: [string, StepState, string[], string][] = [
+			['n=1 planned', stepState(1, { phase: 'planned' }), noProbe, 'planned'],
+			['n=1 approval', stepState(1), noProbe, 'approval'],
+			['n=1 writing', stepState(1, { phase: 'writing' }), noProbe, 'run'],
+			// The engine may hold the one write as at a probe: still the run, no probe step.
+			['n=1 held as at a probe', stepState(1, { phase: 'writing', probe, haltReason: 'x' }), noProbe, 'run'],
+			['n=1 done, its probe confirmed', stepState(1, { phase: 'done', probeConfirmed: true, probeOwn: true }), noProbe, 'done'],
+			['n=2 planned', stepState(2, { phase: 'planned' }), all, 'planned'],
+			['n=2 approval', stepState(2), all, 'approval'],
+			['n=2 at its probe', stepState(2, { phase: 'writing', probe, haltReason: 'x' }), all, 'probe'],
+			['n=2 writing after its own probe', stepState(2, { phase: 'writing', probeConfirmed: true, probeOwn: true }), all, 'run'],
+			['n=2 done after its own probe', stepState(2, { phase: 'done', probeConfirmed: true, probeOwn: true }), all, 'done'],
+			['n=2 on a host whose probe already held', stepState(2, { probeConfirmed: true }), noProbe, 'approval'],
+			['n=2 writing on that host', stepState(2, { phase: 'writing', probeConfirmed: true }), noProbe, 'run'],
+			['n=2 local', stepState(2, { targetSystem: 'workspace' }), noProbe, 'approval'],
+			['n=1 update + 1 create', stepState(1, { changes: { update: 1, create: 1, delete: 0, unchanged: 0, invalid: 0 } }), all, 'approval'],
+			['n=1 update + 1 delete', stepState(1, { changes: { update: 1, create: 0, delete: 1, unchanged: 0, invalid: 0 } }), all, 'approval'],
+		];
+		for (const [name, state, steps, at] of table) {
+			expect([...bulkSteps(state)], name).toEqual(steps);
+			expect(bulkStep(state), name).toBe(at);
+		}
+		// Without `probeOwn` (an engine that does not send it), a run at its probe still reads as the probe step.
+		expect(bulkStep({ ...probeState({ phase: 'writing', probe, haltReason: 'x' }), targetSystem: 'http:h', probeConfirmed: false, changes: stepState(3).changes })).toBe('probe');
 	});
 
 	it('starts a waiting run the way it waits: its list first, then its judging or its read', () => {
@@ -174,19 +201,62 @@ describe('a Shopify run\'s field names and note', () => {
 	});
 
 	it('names a filtered list\'s group by its product type, vendor or both, with hidden characters shown', () => {
-		const t: BulkI18n = { t: (k) => k, tf: (k, vars) => `${k}${JSON.stringify(vars)}` };
-		expect(bulkListFilterText({ product_type: 'Tee' }, t)).toBe('bulk.list.filter_type{"type":"Tee"}');
-		expect(bulkListFilterText({ vendor: 'Acme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"Acme"}');
-		expect(bulkListFilterText({ product_type: 'Tee', vendor: 'Acme' }, t)).toBe('bulk.list.filter_both{"type":"Tee","vendor":"Acme"}');
-		expect(bulkListFilterText({ product_type: 'T\u200Bee', vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_both{"type":"T⟨U+200B⟩ee","vendor":"Ac⟨U+202E⟩me"}');
-		expect(bulkListFilterText({ product_type: 'T\u200Bee' }, t)).toBe('bulk.list.filter_type{"type":"T⟨U+200B⟩ee"}');
-		expect(bulkListFilterText({ vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"Ac⟨U+202E⟩me"}');
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		expect(bulkListFilterText({ product_type: 'Tee' }, t)).toBe('bulk.list.filter_type{"type":"[Tee]"}');
+		expect(bulkListFilterText({ vendor: 'Acme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"[Acme]"}');
+		expect(bulkListFilterText({ product_type: 'Tee', vendor: 'Acme' }, t)).toBe('bulk.list.filter_both{"type":"[Tee]","vendor":"[Acme]"}');
+		expect(bulkListFilterText({ product_type: 'T\u200Bee', vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_both{"type":"[T⟨U+200B⟩ee]","vendor":"[Ac⟨U+202E⟩me]"}');
+		expect(bulkListFilterText({ product_type: 'T\u200Bee' }, t)).toBe('bulk.list.filter_type{"type":"[T⟨U+200B⟩ee]"}');
+		expect(bulkListFilterText({ vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"[Ac⟨U+202E⟩me]"}');
 		expect(bulkListFilterText(null, t)).toBeNull();
 		expect(bulkListFilterText({}, t)).toBeNull();
+		expect(bulkListFilterText({ status: 'active' }, t)).toBeNull();
+	});
+
+	it('names the statuses a store\'s product list reads, on a line of its own: every one without a status filter, else the ones it names', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		expect(bulkListStatusText(null, t)).toBeNull();
+		expect(bulkListStatusText({}, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ product_type: 'Tee' }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ vendor: 'Acme' }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ status: 'active' }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>]"}');
+		expect(bulkListStatusText({ product_type: 'Tee', status: ['draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
+		// A status no store has stays as it came, its hidden characters shown.
+		expect(bulkListStatusText({ status: 'pub\u200Blished' }, t)).toBe('bulk.list.filter_status{"status":"[pub⟨U+200B⟩lished]"}');
+		expect(bulkListStatusText({ status: 'unlisted' }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.unlisted>]"}');
+	});
+
+	it('reads a status filter naming every status as none: no "only" beside the whole set', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		const every = ['active', 'draft', 'archived', 'unlisted'];
+		expect(bulkListStatusText({ status: every }, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ status: [...every].reverse() }, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ product_type: 'Tee', status: every }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ vendor: 'Acme', status: every }, t)).toBe('<bulk.list.any_status>');
+		// A stored list the engine reads nothing for (another value, or one twice) is named as it came.
+		expect(bulkListStatusText({ status: [...every, 'published'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>], [<bulk.list.status.unlisted>] <bulk.list.or> [published]"}');
+		expect(bulkListStatusText({ status: ['active', ...every] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>] <bulk.list.or> [<bulk.list.status.unlisted>]"}');
+		// Four entries that are not the four: one unknown, or one twice.
+		expect(bulkListStatusText({ status: ['active', 'draft', 'archived', 'published'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>] <bulk.list.or> [published]"}');
+		expect(bulkListStatusText({ status: ['active', 'active', 'draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.active>], [<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
+		// Three of the four still narrow: the line names them.
+		expect(bulkListStatusText({ status: ['active', 'draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
+	});
+
+	it('names every value of a list, each in its own quotes and with its hidden characters shown, the last after "or"', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		expect(bulkListFilterText({ product_type: ['Tee', 'Kaffee'] }, t)).toBe('bulk.list.filter_type{"type":"[Tee] <bulk.list.or> [Kaffee]"}');
+		expect(bulkListFilterText({ product_type: ['A', 'B\u200B', 'C'] }, t)).toBe('bulk.list.filter_type{"type":"[A], [B⟨U+200B⟩] <bulk.list.or> [C]"}');
+		expect(bulkListFilterText({ product_type: ['A', 'B'], vendor: ['X', 'Y', 'Z'] }, t)).toBe('bulk.list.filter_both{"type":"[A] <bulk.list.or> [B]","vendor":"[X], [Y] <bulk.list.or> [Z]"}');
+		const fifty = Array.from({ length: 50 }, (_, i) => `G${String(i)}`);
+		const text = bulkListFilterText({ vendor: fifty }, t)!;
+		for (const v of fifty) expect(text).toContain(`[${v}]`);
 	});
 
 	it('knows a store host exactly, not by a suffix', () => {
 		expect(bulkIsShopifyHost('acme.myshopify.com')).toBe(true);
+		expect(bulkIsShopifyHost(`${'a'.repeat(63)}.myshopify.com`)).toBe(true);
+		expect(bulkIsShopifyHost(`${'a'.repeat(64)}.myshopify.com`)).toBe(false);
 		for (const host of ['myshopify.com', 'a.b.myshopify.com', 'acme.myshopify.com.evil.io', 'admin.shopify.com', null]) expect(bulkIsShopifyHost(host), String(host)).toBe(false);
 	});
 });
@@ -468,7 +538,15 @@ describe('going on from a run that halted', () => {
 			.toBe('You can continue. If the run halts again right away, shop.example.invalid or the AI model is not answering yet; try again later.');
 		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
-			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, verbraucht 0.0034 USD.');
+			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, angerechnet sind 0.0034 USD.');
+		// What counts toward the limit, not what was paid: a judge call without an answer counts at
+		// its worst case (ux U-174).
+		expect([de['bulk.halt.costCap'], en['bulk.halt.costCap'], de['bulk.halt.costCap_mandate'], en['bulk.halt.costCap_mandate']]).toEqual([
+			'Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: {cap} USD, angerechnet sind {spent} USD.',
+			'The run reached the AI cost limit you set at its start: {cap} USD, with {spent} USD counted toward it.',
+			'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap} USD, angerechnet sind {spent} USD.',
+			'The run reached the AI cost limit the owner set at its start: {cap} USD, with {spent} USD counted toward it.',
+		]);
 		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
 			cause: 'Deine Instanz darf shop.example.invalid nicht erreichen.',
 			before: 'Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
@@ -1125,7 +1203,7 @@ describe('the context C the judge only reads (U-140)', () => {
 			"'bulk.invalid.secret_in_context_column': { de: 'Die Spalte {field} dieser Zeile enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt die Zeile deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es in der Tabelle, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Spalten neu zu planen.', en: 'The column {field} of this row contains something that looks like a password or key. lynox does not judge this row and sends nothing of it to the AI model. Remove it in the table, or ask lynox in the chat to plan the run again without {field} among the columns it reads.' }",
 			"'bulk.invalid.secret_in_context_field': { de: 'Das Feld {field} dieses Eintrags enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt den Eintrag deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es dort, wo du diesen Eintrag pflegst, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Feldern neu zu planen.', en: 'The field {field} of this entry contains something that looks like a password or key. lynox does not judge this entry and sends nothing of it to the AI model. Remove it where you keep this entry, or ask lynox in the chat to plan the run again without {field} among the fields it reads.' }",
 			// U-142: the way out holds in both directions, whichever spelling is the typo.
-			"'bulk.invalid.not_in_filter': { de: 'Die Shopify-Suche hat dieses Produkt mitgeliefert, aber sein Produkttyp oder Anbieter ist anders geschrieben als im Filter (etwa ü statt u). lynox ändert es nicht. Gehört es in die Gruppe, schreib den Wert in Shopify bei allen Produkten der Gruppe gleich und bitte lynox dann im Chat, den Lauf mit genau dieser Schreibweise neu zu planen.', en: 'Shopify\\'s search returned this product, but its product type or vendor is spelled differently from the filter (for example ü instead of u). lynox does not change it. If it belongs to the group, spell the value the same way on every product of the group in Shopify, then ask lynox in the chat to plan the run again with exactly that spelling.' }",
+			"'bulk.invalid.not_in_filter': { de: 'Die Shopify-Suche hat dieses Produkt mitgeliefert, aber sein Produkttyp oder Anbieter ist anders geschrieben als im Filter (etwa ü statt u), oder es hat einen anderen Status als im Filter. lynox ändert es nicht. Liegt es am Status, gehört es nicht in diesen Lauf. Gehört es in die Gruppe, schreib den Wert in Shopify bei allen Produkten der Gruppe gleich und bitte lynox dann im Chat, den Lauf mit genau dieser Schreibweise neu zu planen.', en: 'Shopify\\'s search returned this product, but its product type or vendor is spelled differently from the filter (for example ü instead of u), or its status is not the filter\\'s. lynox does not change it. If the status is the reason, it does not belong in this run. If it belongs to the group, spell the value the same way on every product of the group in Shopify, then ask lynox in the chat to plan the run again with exactly that spelling.' }",
 			// U-146: the mark and its line name only &, which is all the engine counts.
 			"'bulk.target.seo_entity': { de: '& neu in Titel oder SEO-Text', en: 'New & in title or SEO text' }",
 			"'bulk.preview.seo_entity': { de: 'Bei {n} Produkten kommt ein & neu in den Titel, den Browser-Tab und Suchergebnisse zeigen, oder in die Beschreibung im Suchergebnis. Manche Shop-Themes zeigen es dort als &amp;. Willst du das vermeiden, bitte lynox im Chat, den Lauf mit „und“ statt & neu zu planen, oder wähl bei diesen Produkten vor dem Freigeben „Nicht schreiben“. Sonst prüf nach dem Schreiben im Browser-Tab einer Produktseite, ob das & richtig erscheint.', en: 'In {n} products, an & is added to the title that the browser tab and search results show, or to the description in search results. Some store themes show it there as &amp;. To avoid this, ask lynox in a chat to plan the run again with \"and\" instead of &, or choose \"Don\\'t write\" on these products before you approve. Otherwise, after the write, check in the browser tab of a product page that the & shows correctly.' }",

@@ -462,6 +462,26 @@ export function lapsedSlot(apiStore: Pick<ApiStore, 'knownProfiles'>, name: stri
   }
 }
 
+/**
+ * Whether `profile` reads the refresh slot of another profile's grant as a member of it: the two
+ * share the grant through a built-in provider ({@link SlotGrant} `owned`, another owner, `profile`
+ * among the members). Such a profile renews through the owner's grant on purpose; its own refresh
+ * slot is not missing. Anything that throws answers false.
+ */
+export function sharesAnotherGrant(apiStore: Pick<ApiStore, 'knownProfiles'>, profile: ApiProfile): boolean {
+  return sharedGrantOwner(apiStore, profile) !== undefined;
+}
+
+/** The profile holding the grant `profile` shares ({@link sharesAnotherGrant}), or undefined. Anything that throws answers undefined. */
+export function sharedGrantOwner(apiStore: Pick<ApiStore, 'knownProfiles'>, profile: ApiProfile): ApiProfile | undefined {
+  try {
+    const grant = slotGrant(apiStore.knownProfiles(), readersRefreshSlot(profile));
+    return grant.kind === 'owned' && grant.owner.id !== profile.id && grant.members.some((m) => m.id === profile.id) ? grant.owner : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Whether `name` is a refresh slot of `p`: the one its id derives, or the one it configures. */
 function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
   return p.auth?.type === 'oauth2' && (refreshTokenKey(p.id) === name || p.auth.oauth?.refresh_token_key === name);
@@ -1067,14 +1087,48 @@ export function occupiedTokenSlots(store: SecretStoreLike, id: string): string[]
  * no mandate counts as live. What lifts it is the owner's consent: connecting the account again,
  * or adopting the connection (`api_setup` action `adopt_connection`, which asks the person).
  * Saving over the profile alone keeps the mandate's grant.
+ *
+ * It needs the profiles: without them nobody knows which names hold a connection's token. The
+ * engine's guard does not ask this before every profile is known, nor after loading them failed
+ * (`Engine`, `resolveGuard`); there is no answer here for a missing store.
  */
 export function connectionTokenAllowed(
-  apiStore: Pick<ApiStore, 'knownProfiles'> | null,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   ends: Pick<MandateEnds, 'isLive'> | null,
   name: string,
 ): boolean {
-  if (apiStore === null) return true;
   return !apiStore.knownProfiles().some((p) => connectionWaits(p, ends) && grantTokenNames(p).has(name));
+}
+
+/**
+ * The engine's resolve guard (`Engine.resolveGuard`), set as soon as the secret store exists.
+ *
+ * - Before the profiles are loaded, and for good when loading them failed (`apiStore` null), only a
+ *   name the environment set or one of the platform's own slots goes out. Nobody knows then which
+ *   other names hold a connection's token. A protected name is refused as a token's slot on every
+ *   write path; an environment name holds the environment's value at boot.
+ * - Loaded, every name is {@link connectionTokenAllowed} over every stored profile, the ones the
+ *   import still waits to write included. That covers an environment name too: a connection that
+ *   writes its token there (`set`) replaces the environment's value in the store.
+ * - Loaded, a name a stored entry the boot could not read may hold does not go out either: whose
+ *   connection that is, and whether its mandate ended, cannot be told until the entry is repaired
+ *   or removed. The environment's names and the platform's slots are exempt from this, so one
+ *   unreadable entry that may hold every name does not take the provider keys with it.
+ */
+export function resolveGuardAllows(
+  state: {
+    readonly profilesKnown: boolean;
+    readonly apiStore: Pick<ApiStore, 'knownProfiles' | 'waitingProfiles' | 'unreadableHolds'> | null;
+    readonly ends: Pick<MandateEnds, 'isLive'> | null;
+    readonly fromEnvironment: (name: string) => boolean;
+  },
+  name: string,
+): boolean {
+  const own = state.fromEnvironment(name) || isProtectedSecretWrite(name);
+  const apiStore = state.apiStore;
+  if (!state.profilesKnown || apiStore === null) return own;
+  if (!own && apiStore.unreadableHolds(name)) return false;
+  return connectionTokenAllowed({ knownProfiles: () => [...apiStore.knownProfiles(), ...apiStore.waitingProfiles()] }, state.ends, name);
 }
 
 /**
@@ -1172,7 +1226,7 @@ function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string,
  * with only "Tell the owner", it sometimes told the member instead.
  */
 function planRefusalFinal(person: string): string {
-  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${RUN_REFUSAL_CLOSE}`;
+  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${OWNER_ALLOWS_AT} ${RUN_REFUSAL_CLOSE}`;
 }
 
 /**
@@ -1214,6 +1268,33 @@ export function memberConnectionRefusal(
   ends: Pick<MandateEnds, 'isLive'> | null,
   mode: 'read' | 'write' = 'read',
 ): string | null {
+  const refusal = memberRefusalCase(profile, reader, ends, mode);
+  return refusal === null ? null : memberRefusalText(refusal);
+}
+
+/**
+ * Which of the refusals of {@link memberConnectionRefusal} a request meets, with what its words
+ * name; null when it may go on. One decision for both readers of a refusal: the run's model reads
+ * {@link memberRefusalText}, the owner the note {@link memberRefusalOwnerNote} (UX-065), and
+ * the two cannot take different branches for the same request.
+ */
+export interface MemberRefusal {
+  readonly kind:
+    | 'plan-owner-started' | 'plan-unlisted' | 'plan-changed' | 'plan-own-not-covered' | 'plan-other-member'
+    | 'earlier-access' | 'not-owner' | 'owner-live' | 'owner-ended';
+  readonly person: string;
+  readonly provider: string;
+  readonly shown: string;
+  /** That person's access has ended, so the owner can take the connection over (`connectionWaits`). */
+  readonly ended: boolean;
+}
+
+export function memberRefusalCase(
+  profile: ApiProfile,
+  reader: RequestPrincipal,
+  ends: Pick<MandateEnds, 'isLive'> | null,
+  mode: 'read' | 'write' = 'read',
+): MemberRefusal | null {
   if (!isMandateConnection(profile)) return null;
   const by = profile.oauth_grant!.connected_by!;
   const own = reader.kind === 'mandate' && principalTag(reader) === by;
@@ -1221,34 +1302,171 @@ export function memberConnectionRefusal(
   if (own && (inPlan === 'no-plan' || inPlan === 'listed') && memberConnectionReader(profile, reader, mode, ends)) return null;
   const person = singleLine(by.slice(MANDATE_TAG_PREFIX.length));
   const { provider, shown } = connectionShown(profile);
-  const lead = `${person} set up this connection (${provider}, profile ${shown}) with their own login`;
+  const ended = connectionWaits(profile, ends);
+  const as = (kind: MemberRefusal['kind']): MemberRefusal => ({ kind, person, provider, shown, ended });
   // A plan's run acting for that person uses it only as the owner's stamp of the plan lists it;
   // a plan's run acting for anyone else reaches it no more than any other reader.
   if (inPlan !== 'no-plan') {
     const ownPlan = own && memberConnectionReader(profile, reader, mode, ends);
     // The owner started this run of the person's workflow (1100): no schedule stands behind it, so
     // there is no confirmation that could list the connection, and nobody needs telling.
+    if (ownPlan && inPlan === 'unlisted' && currentPlanOwnerStarted()) return as('plan-owner-started');
+    if (ownPlan && inPlan === 'unlisted') return as('plan-unlisted');
+    if (ownPlan && inPlan === 'changed') return as('plan-changed');
+    // Not "only in their own session" for the member's own: their access does not carry this
+    // request, there or here.
+    if (own) return as('plan-own-not-covered');
+    return as('plan-other-member');
+  }
+  // The same person under a later access: the connection was made under the earlier one.
+  if (own) return as('earlier-access');
+  if (reader.kind !== 'owner') return as('not-owner');
+  return as(ended ? 'owner-ended' : 'owner-live');
+}
+
+/** The words of a refusal for the run's model (and, outside a plan, for whoever reads the request). */
+export function memberRefusalText(refusal: MemberRefusal): string {
+  const { person, provider, shown } = refusal;
+  const lead = `${person} set up this connection (${provider}, profile ${shown}) with their own login`;
+  switch (refusal.kind) {
     // Its own end, with the ways on (ux U-122); the shared sentences stay as they are.
-    if (ownPlan && inPlan === 'unlisted' && currentPlanOwnerStarted()) {
+    case 'plan-owner-started':
       return `${lead}. This run of a workflow ${person} set up or changed was not started by a schedule of ${person}'s, so it does not use connections ${person} made with their own login. `
         + `${RUN_REFUSAL_FINAL} In your reply, say so. The person reading your reply is the owner of this instance, not ${person}. `
         + `Tell them to connect ${provider} themselves under Settings → APIs and then ask lynox in a chat to do this step with that connection. `
         + `Do not suggest running this workflow again, and do not ask ${person} to do anything. Do not ask for permission to try again.`;
+    case 'plan-unlisted': return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
+    case 'plan-changed': return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
+    case 'plan-own-not-covered': return `${lead}, and ${person}'s access does not cover this plan, so the connection is not used in this plan's run. ${ownRefusalFinalForRun()}`;
+    case 'plan-other-member': return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session. ${planRefusalFinalForRun()}`;
+    case 'earlier-access': return `This connection (${provider}, profile ${shown}) was set up under an earlier access of ${person}'s, so it is not used now. Connect it again with api_setup action "connect".`;
+    case 'not-owner': return `${lead}, so it is not used in this session.`;
+    case 'owner-live': return `${lead}, so lynox does not use it for you. Take it over in the chat once ${person}'s access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects ${person}).`;
+    case 'owner-ended': return `${lead}. To let lynox use it for you, take it over: in the chat, ask to take over the connection ${shown} and confirm with "Allow".`;
+    default: { const never: never = refusal.kind; return never; }
+  }
+}
+
+/**
+ * A line the owner reads under a run's result: English as recorded, German as pushed. Without
+ * `en`, the run's own line is recorded as it is (its English already speaks to the owner).
+ */
+export interface OwnerNote {
+  readonly en?: string;
+  readonly de: string;
+}
+
+/**
+ * The label of the button that confirms a takeover in the chat, as the web UI shows it
+ * (`chat.allow` in packages/web-ui/src/lib/i18n.svelte.ts; a test fails when the two differ).
+ * The owner is told to press it, so the words have to be the ones on the owner's screen.
+ */
+export const ALLOW_LABEL = { en: 'Allow', de: 'Erlauben' } as const;
+
+const ALLOW_EN = `“${ALLOW_LABEL.en}”`;
+const ALLOW_DE = `„${ALLOW_LABEL.de}“`;
+
+/** The plan as the owner's note names it: the trigger's title, or "this plan" when the run does not know it. */
+const MAX_PLAN_TITLE_CHARS = 120;
+
+function planNamed(plan: string | undefined): { en: string; de: string } {
+  // One line and bounded: every note repeats the title, and notes are appended after the result's cap.
+  const line = plan !== undefined ? singleLine(plan) : '';
+  const title = line.length > MAX_PLAN_TITLE_CHARS ? `${line.slice(0, MAX_PLAN_TITLE_CHARS - 1)}…` : line;
+  return title !== '' ? { en: `The plan "${title}"`, de: `Der Plan „${title}“` } : { en: 'This plan', de: 'Dieser Plan' };
+}
+
+/**
+ * The owner's own line for a refusal a collecting run noted (UX-065, wording U-095 and
+ * U-214): what the plan did not use and the owner's way to change it, without the model's
+ * instructions to itself ("do not ask for permission"), which the owner read as addressed to
+ * the owner. The ways are the ones the code has: a listed connection through the plan's stamp; another
+ * person's own login only by taking it over once their access has ended, or by deleting the
+ * profile and connecting the service directly (one host holds one profile, `api-setup.ts`).
+ * Null where there is no owner's wording: a run the owner started (U-122; its answer reaches the
+ * owner through the model) and the refusals a member's own session meets. The collector then
+ * records the model's line as it did before (`noteMemberConnection`), also where such a run is
+ * nested in a trigger of the owner's and so reaches the owner's push: not covered here.
+ * `plan`: the trigger's title, when the run knows it.
+ */
+export function memberRefusalOwnerNote(refusal: MemberRefusal, plan: string | undefined): OwnerNote | null {
+  const { person, provider, shown, ended } = refusal;
+  const named = planNamed(plan);
+  const connEn = `${provider} (profile ${shown})`;
+  const connDe = `${provider} (Profil ${shown})`;
+  // A plan's refusal once the access the connection was made under has ended (`connectionWaits`
+  // asks that grant, not the person: they may hold a later access, so the words say which one):
+  // the takeover is the owner's way, also
+  // for a listed or changed connection. A plan reads the member's connection under the grant
+  // alone (`memberConnectionReader` 'read' asks no end), so a run already under way when the
+  // access ended lands in those branches too, where the stamp would no longer help.
+  const planKinds: ReadonlySet<MemberRefusal['kind']> = new Set(['plan-unlisted', 'plan-changed', 'plan-own-not-covered', 'plan-other-member']);
+  if (ended && planKinds.has(refusal.kind)) {
+    return {
+      en: `${named.en} did not use ${connEn}. ${person} set it up with their own login, and the access ${person} set it up under has ended. If the plan should use it, ask in a chat to take over the connection and confirm with ${ALLOW_EN}. Otherwise the plan cannot run this step.`,
+      de: `${named.de} hat ${connDe} nicht genutzt. ${person} hat die Verbindung mit eigenem Login eingerichtet, und der Zugang, unter dem ${person} sie eingerichtet hat, ist beendet. Soll der Plan sie nutzen, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit ${ALLOW_DE}. Sonst kann der Plan diesen Schritt nicht ausführen.`,
+    };
+  }
+  switch (refusal.kind) {
+    case 'plan-unlisted':
+    case 'plan-changed': {
+      const changed = refusal.kind === 'plan-changed';
+      return {
+        en: `${named.en} did not use ${connEn}. ${person} set it up with their own login, and your confirmation of this plan does not list it${changed ? ', or it has changed since you confirmed' : ''}. `
+          + 'If the plan should use it, open Automation → Triggers and choose “Check connections” on this plan. Otherwise the plan cannot run this step.',
+        de: `${named.de} hat ${connDe} nicht genutzt. ${person} hat die Verbindung mit eigenem Login eingerichtet, und deine Bestätigung dieses Plans enthält sie nicht${changed ? ', oder sie hat sich seit deiner Bestätigung geändert' : ''}. `
+          + 'Soll der Plan sie nutzen, öffne Automation → Trigger und wähle bei diesem Plan „Verbindungen prüfen“. Sonst kann der Plan diesen Schritt nicht ausführen.',
+      };
     }
-    if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
-    if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
-    // Not "only in their own session" for the member's own: their access does not carry this
-    // request, there or here.
-    if (own) return `${lead}, and ${person}'s access does not cover this plan, so the connection is not used in this plan's run. ${ownRefusalFinalForRun()}`;
-    return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session. ${planRefusalFinalForRun()}`;
+    case 'plan-own-not-covered':
+    case 'plan-other-member': {
+      const own = refusal.kind === 'plan-own-not-covered';
+      return {
+        en: `${named.en} did not use ${connEn}. ${person} set it up with their own login${own ? `, and ${person}'s access does not cover this plan` : `, so only ${person}'s own session uses it`}. `
+          + `If the plan should use this service, there are two ways: once ${person}'s access has ended, ask in a chat to take over the connection and confirm with ${ALLOW_EN}; or delete the profile under Settings → APIs and connect the service yourself, which disconnects ${person}. Otherwise the plan cannot run this step.`,
+        de: `${named.de} hat ${connDe} nicht genutzt. ${person} hat die Verbindung mit eigenem Login eingerichtet${own ? `, und der Zugang von ${person} deckt diesen Plan nicht` : `, deshalb nutzt sie nur die eigene Sitzung von ${person}`}. `
+          + `Soll der Plan diesen Dienst nutzen, gibt es zwei Wege: Sobald der Zugang von ${person} beendet ist, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit ${ALLOW_DE}. Oder lösche das Profil unter Einstellungen → APIs und verbinde den Dienst selbst; das trennt ${person}. Sonst kann der Plan diesen Schritt nicht ausführen.`,
+      };
+    }
+    // The owner's own trigger (no plan): the model's words already speak to the owner, so the
+    // English stays as it is; the German is the push's.
+    case 'owner-live':
+      return {
+        de: `${person} hat diese Verbindung (${provider}, Profil ${shown}) mit eigenem Login eingerichtet, deshalb nutzt lynox sie nicht für dich. Übernimm sie im Chat, sobald der Zugang von ${person} beendet ist, oder lösche dieses Profil unter Einstellungen → APIs und verbinde den Dienst selbst (das trennt ${person}).`,
+      };
+    case 'owner-ended':
+      return {
+        de: `${person} hat diese Verbindung (${provider}, Profil ${shown}) mit eigenem Login eingerichtet. Damit lynox sie für dich nutzt, übernimm sie: Bitte im Chat darum, die Verbindung ${shown} zu übernehmen, und bestätige mit ${ALLOW_DE}.`,
+      };
+    case 'plan-owner-started':
+    case 'earlier-access':
+    case 'not-owner':
+      return null;
+    default: { const never: never = refusal.kind; return never; }
   }
-  // The same person under a later access: the connection was made under the earlier one.
-  if (own) return `This connection (${provider}, profile ${shown}) was set up under an earlier access of ${person}'s, so it is not used now. Connect it again with api_setup action "connect".`;
-  if (reader.kind !== 'owner') return `${lead}, so it is not used in this session.`;
-  if (!connectionWaits(profile, ends)) {
-    return `${lead}, so lynox does not use it for you. Take it over in the chat once ${person}'s access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects ${person}).`;
-  }
-  return `${lead}. To let lynox use it for you, take it over: in the chat, ask to take over the connection ${shown} and confirm with "Allow".`;
+}
+
+/**
+ * The owner's own line for the refused token exchange of {@link sharedRefreshRefusal} (U-214
+ * E): without it the owner sees a step fail with no reason. Only one wording: the exchange is
+ * refused this way only for a reader the holder's own refusal lets through, and in a plan that
+ * is the person themself under an access that is live (`memberConnectionReader` 'write'), so
+ * the way is the takeover once it has ended. Null outside a plan's scheduled run.
+ */
+export function sharedRefreshOwnerNote(holder: ApiProfile, via: ApiProfile, plan: string | undefined): OwnerNote | null {
+  // A plan's scheduled run only: its words are about the plan. Elsewhere the model's line stays.
+  // Asked through the one reader of the plan context, not beside it (plan-run-context-guard).
+  if (planConnectionState(holder) === 'no-plan' || currentPlanOwnerStarted()) return null;
+  const person = singleLine(holder.oauth_grant!.connected_by!.slice(MANDATE_TAG_PREFIX.length));
+  const h = connectionShown(holder);
+  const v = connectionShown(via);
+  const named = planNamed(plan);
+  const holderEn = `${h.provider} (profile ${h.shown})`;
+  const holderDe = `${h.provider} (Profil ${h.shown})`;
+  return {
+    en: `${named.en} could not renew the sign-in of ${v.provider} (profile ${v.shown}): it shares that sign-in with ${holderEn}, which ${person} set up with their own login, and only that connection can renew it. Once ${person}'s access has ended, you can take it over in a chat. Otherwise the plan cannot run this step.`,
+    de: `${named.de} konnte die Anmeldung von ${v.provider} (Profil ${v.shown}) nicht erneuern: Sie teilt sich die Anmeldung mit ${holderDe}, die ${person} mit eigenem Login eingerichtet hat, und erneuern kann sie nur diese Verbindung. Sobald der Zugang von ${person} beendet ist, kannst du sie im Chat übernehmen. Sonst kann der Plan diesen Schritt nicht ausführen.`,
+  };
 }
 
 /**
@@ -1294,6 +1512,13 @@ function planMayUse(profile: ApiProfile): boolean {
   const state = planConnectionState(profile);
   return state === 'no-plan' || state === 'listed';
 }
+
+/**
+ * Where the owner lifts a plan's refusal of a connection it may not use (641 4b ii-c-min, ux U-058).
+ * The model reads it and passes it on, so it names the place in both languages the owner's screen
+ * may be in: what it says is what the owner finds.
+ */
+const OWNER_ALLOWS_AT = 'The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
 
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
   const presetId = profile.auth?.oauth?.preset_id;
@@ -1375,6 +1600,13 @@ export function secretsForProfile(
     get(target, prop, receiver) {
       if (prop === 'resolve') {
         return (name: string): string | null => (hidden(name) ? null : target.resolve(name));
+      }
+      if (prop === 'holds') {
+        // Whether a name is there is information about it too: a hidden name answers false. A store
+        // that cannot answer stays one that cannot: no function, so the caller assumes nothing.
+        const holds = target.holds?.bind(target);
+        if (holds === undefined) return undefined;
+        return (name: string): boolean => (hidden(name) ? false : holds(name));
       }
       if (prop === 'resolveSecretRefs') {
         // Nothing is resolved when any name is hidden: the callers probe one name at a time,

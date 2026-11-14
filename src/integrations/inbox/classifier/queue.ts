@@ -15,6 +15,7 @@
 
 import type { ClassifyResult } from './index.js';
 import { runOutsideGroup } from '../../../core/run-group.js';
+import { processErrorText } from '../../../core/error-egress.js';
 
 export const DEFAULT_MAX_CONCURRENCY = 2;
 export const DEFAULT_PER_JOB_TIMEOUT_MS = 30_000;
@@ -44,6 +45,19 @@ export class DrainedForShutdownError extends Error {
   constructor() {
     super('drained-for-shutdown');
     this.name = 'DrainedForShutdown';
+  }
+}
+
+/**
+ * The reason a job leaves a queue that is being replaced (the inbox rebootstrap on a region
+ * switch): it was still waiting, or it was running when the window ran out. It is not classified
+ * here; `handOver` gives it to the replacing queue, and returns false when that one does not take
+ * it (full or draining), in which case it is dead-lettered as a failed classification.
+ */
+export class HandedOverError extends Error {
+  constructor(readonly handOver: (input: unknown) => boolean) {
+    super('handed-over');
+    this.name = 'HandedOver';
   }
 }
 
@@ -280,7 +294,7 @@ export class ClassifierQueue<T> {
       await fn();
     } catch (err) {
       // Surface to stderr so the host operator sees something — never throw.
-      console.error(`[ClassifierQueue] ${label} callback threw:`, err);
+      console.error(`[ClassifierQueue] ${label} callback threw:`, processErrorText(err, true));
     }
   }
 }

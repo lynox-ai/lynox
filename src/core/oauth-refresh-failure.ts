@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { ISO_TIMESTAMP_SHAPE, shapedForLog, slotNameForModel } from './profile-value-shape.js';
+import { connectCallText } from './oauth-presets.js';
 
 /**
  * How a failed token-endpoint call is read, for every OAuth path in the engine:
@@ -163,7 +164,7 @@ export function revokedGrantMessage(
   const since = revokedAt === undefined ? '' : ` (recorded ${shapedForLog(revokedAt, ISO_TIMESTAMP_SHAPE, 30)})`;
   const head = `Error: the provider rejected the stored refresh token of api_profile "${id}" as revoked or expired${since}. This is not an expired access token — fetching again with the same refresh token cannot work, and fetch_token will not resend it.`;
   return viaPreset
-    ? `${head} The user has to consent again at the provider: call api_setup with action "connect" for this profile and give the user the link it returns. Do not ask the user for a token.`
+    ? `${head} The user has to consent again at the provider: ${connectCallText(id)} Do not ask the user for a token.`
     : `${head} The user has to authorize the app again at the provider; store the new refresh token under "${slotNameForModel(refreshKey, derivedRefreshKey)}" with ask_secret, then call fetch_token once.`;
 }
 
