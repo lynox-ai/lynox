@@ -280,9 +280,13 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
   for (const [name, value] of Object.entries(headers)) {
     if (OVERRIDE_HEADERS.has(headerKey(name))) candidates.push(value);
   }
+  // Every way a receiving server may split the query (`queryReadings`): one that also splits on
+  // `;` reads `?x=1;_method=DELETE` as an override, where `searchParams` sees a single field `x`.
   try {
-    for (const [name, value] of new URL(url).searchParams) {
-      if (isOverrideFieldName(name)) candidates.push(value);
+    for (const params of queryReadings(new URL(url).search)) {
+      for (const [name, value] of params) {
+        if (isOverrideFieldName(name)) candidates.push(value);
+      }
     }
   } catch { /* an unparsable URL is refused before it is sent */ }
   // A GET or HEAD sends no body, so nothing in one can override it.

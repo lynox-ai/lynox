@@ -1255,6 +1255,60 @@ describe('api_setup tool', () => {
       }
     });
 
+    // A server that honours a method override runs `GET …?_method=DELETE` as a DELETE. A spec
+    // read is never a write: the address is refused before it is requested.
+    it('does not request a spec address that carries a method override', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json?x=1;_method=DELETE' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the address carries a method override');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('does not follow a redirect whose target carries a method override, and says the first request was sent', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://example.com/items/5?_method=DELETE' } }),
+      );
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the server answered with a redirect to an address that carries a method override');
+        expect(result).toContain('the first request was sent and answered');
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // The guard's sentences are matched whole: a host that holds the word of another refusal
+    // (`enforce_https.…`) is not read as that refusal, and a hop's refusal does not say that
+    // nothing was sent.
+    it('does not read a refused hop to a host named like another refusal as that refusal', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://enforce_https.example.com/graphql?query=mutation%7Bx%7D' } }),
+      );
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered');
+        expect(result).not.toContain('plain HTTP');
+        expect(result).not.toContain('refused before it was sent');
+        expect(result).not.toContain('enforce_https.example');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     // A redirect's target host is chosen by the remote server, and the network guard's refusal
     // quotes it. The refusal is reported by its kind, without the host.
     it('reports a network refusal by its kind, without the host it names', async () => {

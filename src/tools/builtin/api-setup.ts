@@ -46,7 +46,7 @@ import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-b
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
-import { isRequestShapingHeaderName } from '../../core/outbound-write.js';
+import { effectiveWriteMethod, isReadMethod, isRequestShapingHeaderName } from '../../core/outbound-write.js';
 import { ifEmptiedAny, ifOk, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -647,24 +647,71 @@ const BOOTSTRAP_DRAFT_PREAMBLE =
  * A failed bootstrap fetch, said without the remote's words. The network guard's refusals quote
  * the hostname, and on a redirect that is the hostname the REMOTE server chose (a WHATWG
  * hostname keeps `_ , ; ! "` and more, enough for a sentence). So a refusal is reported by its
- * kind, never its text; any other failure by its error class and code only.
+ * kind, never its text; any other failure by its error class and code only. Each kind is matched
+ * on the guard's whole sentence, anchored at both ends: a hostname has no space, so it cannot
+ * supply the fixed words around it, and a host such as `enforce_https.example` in another refusal
+ * is not read as that kind.
  */
 const GUARD_REFUSALS: ReadonlyArray<[RegExp, string]> = [
-  [/not in network allow-list/, 'the address or a redirect target is not in the network allow-list'],
-  [/not permitted under guarded egress policy/, 'the address or a redirect target is not permitted under the guarded egress policy'],
-  [/private IP/, 'the address or a redirect target is a private IP address'],
-  [/did not resolve|without an address/, 'the address or a redirect target did not resolve'],
-  [/enforce_https/, 'plain HTTP is not allowed (enforce_https)'],
-  [/unsupported protocol/, 'the address or a redirect target uses an unsupported protocol'],
-  [/network_policy=deny-all|network access denied/, 'network access is denied for this tool'],
-  [/redirect without location header/, 'the server answered with a redirect that names no target'],
-  [/too many redirects/, 'the server redirected too many times'],
-  [/redirect handling failed/, 'the redirect could not be followed'],
+  [/^Blocked: hostname ".*" not in network allow-list$/, 'the address or a redirect target is not in the network allow-list'],
+  [/^Blocked: hostname ".*" not permitted under guarded egress policy$/, 'the address or a redirect target is not permitted under the guarded egress policy'],
+  [/^Blocked: (?:private IP address ".*"|".*" resolves to private IP ".*")$/, 'the address or a redirect target is a private IP address'],
+  [/^Blocked: (?:hostname ".*" did not resolve to any IP|DNS returned a record without an address for ".*")$/, 'the address or a redirect target did not resolve'],
+  [/^Blocked: HTTP not allowed — enforce_https is enabled\. Use HTTPS\.$/, 'plain HTTP is not allowed (enforce_https)'],
+  [/^Blocked: unsupported protocol ".*"$/, 'the address or a redirect target uses an unsupported protocol'],
+  [/^Blocked: network access denied (?:for this tool \(network_policy=deny-all\)|\(unrecognised egress (?:surface|policy)\))$/, 'network access is denied for this tool'],
+  [/^Blocked: redirect without location header \(\d+\)$/, 'the server answered with a redirect that names no target'],
+  [/^Blocked: too many redirects \(>\d+\)$/, 'the server redirected too many times'],
+  [/^Blocked: redirect handling failed$/, 'the redirect could not be followed'],
 ];
+
+/**
+ * A discovery read refused before it was requested: its address, or the target of a redirect the
+ * server answered with, carries a method override (`?_method=DELETE` and its kin, read as every
+ * write gate reads them). A spec or docs page is read, never written, and a server that runs the
+ * override would act on a GET as on a DELETE. The text is fixed and names no part of the address.
+ */
+class DiscoveryOverrideRefused extends Error {
+  constructor(hop: boolean) {
+    super(hop
+      ? 'blocked: the server answered with a redirect to an address that carries a method override (such as `_method=DELETE`), which a server may run as a write, so the redirect was not followed; the first request was sent and answered'
+      : 'blocked: the address carries a method override (such as `_method=DELETE`), which a server may run as a write, so it was not requested. Pass the plain address of the spec or docs page');
+    this.name = 'DiscoveryOverrideRefused';
+  }
+}
+
+/** Whether a request a server receives as `method` may be run as a write (an override it carries included). */
+function sendsWrite(method: string, headers: Record<string, string>, url: string): boolean {
+  return !isReadMethod(effectiveWriteMethod(method, headers, url));
+}
+
+/**
+ * One discovery read (a spec, a docs page, a section of it), the first request and every redirect
+ * hop checked for a method override before it is requested. A delegated session's reader then
+ * records each hop it follows (`delegatedRedirects`).
+ */
+function fetchForDiscovery(url: string, signal: AbortSignal, agent: IAgent): ReturnType<typeof fetchWithValidatedRedirects> {
+  if (sendsWrite('GET', {}, url)) return Promise.reject(new DiscoveryOverrideRefused(false));
+  const delegated = delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'));
+  return fetchWithValidatedRedirects(url, { signal }, { surface: 'discovery' }, agent.toolContext,
+    undefined, undefined, undefined, (nextUrl, method, headers) => {
+      if (sendsWrite(method, headers, nextUrl)) throw new DiscoveryOverrideRefused(true);
+      delegated?.(nextUrl, method, headers);
+    });
+}
+
 function fetchFailureForModel(err: unknown): string {
+  // Checked before `delegatedRedirects` on every hop, so a delegated session's write refusal
+  // (`DelegatedHopRefused`) does not reach here: the same reading refuses the hop first.
+  if (err instanceof DiscoveryOverrideRefused) return err.message;
   const message = err instanceof Error ? err.message : '';
   if (message.startsWith('Blocked:')) {
     for (const [pattern, said] of GUARD_REFUSALS) if (pattern.test(message)) return `blocked: ${said}`;
+    // A hop the redirect handling refused (a GraphQL mutation in its address): the first request
+    // went out and was answered with that redirect.
+    if (message.startsWith('Blocked: redirect to ')) {
+      return 'blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered';
+    }
     return 'the request was refused before it was sent';
   }
   if (err instanceof Error && err.name === 'AbortError') return 'the request timed out';
@@ -1026,8 +1073,7 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
       // before the read is recorded: a section the budget stops leaves no row.
       if (!reserveRequest(agent)) return null;
       outwardReadRecorder(agent, 'api_setup:read')?.(httpTarget('GET', url));
-      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
-        undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
+      const { response: resp } = await fetchForDiscovery(url, joinCallSignal(ac.signal), agent);
       if (!resp.ok) return '';
       const { text } = await readBodyLimited(resp, remainingBudget);
       return text;
@@ -1180,8 +1226,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
-        undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
+      const { response: resp } = await fetchForDiscovery(docsUrl, joinCallSignal(ac.signal), agent);
       if (!resp.ok) {
         // `resp.statusText` is the HTTP reason phrase — chosen by the REMOTE server,
         // free-form, and was echoed here verbatim. When this was written `api_setup`
@@ -1959,8 +2004,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
-            undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'))));
+          ({ response: resp } = await fetchForDiscovery(input.openapi_url, joinCallSignal(ac.signal), agent));
         } finally {
           clearTimeout(timer);
         }
