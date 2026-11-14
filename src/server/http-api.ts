@@ -114,6 +114,7 @@ import {
   type PersonErasureDeps, type PersonErasurePreview, type PersonErasureRefusal, type PersonErasureResult,
 } from '../core/person-erasure.js';
 import { durableMemoryState } from '../core/memory-tool-set.js';
+import { migrationCeiling } from '../core/migration-ceiling.js';
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
@@ -2336,6 +2337,9 @@ export class LynoxHTTPApi {
         total_threads: threadCount,
         ...(engine !== null ? { durable_memory: durableMemoryState(engine.getLegacyMemoryReason()) } : {}),
       },
+      // What a migration into this instance may hold in memory; a source reads it before it
+      // exports (src/core/migration-ceiling.ts).
+      migration: migrationCeiling(),
     };
 
     this.healthCache = { data, expiresAt: now + 10_000 };

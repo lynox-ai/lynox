@@ -43,6 +43,7 @@ const HEALTH_BASE = {
     disk_used_gb: 50,
   },
   engine: { active_sessions: 0, total_threads: 0, durable_memory: 'on' as const },
+  migration: { import_limit_mb: 1536, baseline_mb: 191, k: 7.1, rest_factor: 1.944 },
 };
 
 /** Fixture file name (relative to `fixtures/`) → its typed mirror. */
