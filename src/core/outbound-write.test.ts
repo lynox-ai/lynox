@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { SecretStore } from './secret-store.js';
 import {
   GATE_READ_MAX_BYTES, URL_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, pathReadable, pathHoldsSecret, queryForQuestion, urlQueryStrings, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, overrideUnreadInPath, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
+  readAddressWrites,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -979,6 +980,9 @@ describe('a part too costly to read every way', () => {
     expect(overrideUnreadInPath('GET', 'https://h.example/x%3F_method=DELETE')).toBe(false);
     // The same override behind a short path is read and gated as the DELETE it names.
     expect(effectiveWriteMethod('POST', {}, 'https://h.example/x%3F_method=DELETE')).toBe('DELETE');
+    // A watch or feed address with such a path is read as a write too, so it is refused.
+    expect(readAddressWrites(hidden)).toBe(true);
+    expect(readAddressWrites('https://h.example/x%3Fpage=2')).toBe(false);
   });
 
   it('gives each part its own budget: a slow path leaves the body readable', () => {
@@ -1006,5 +1010,17 @@ describe('the body read once per body and headers', () => {
     expect(effectiveWriteMethod('POST', { 'content-type': 'application/json', 'content-encoding': 'gzip' }, U, body)).toBe('DELETE');
     expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, body)).toBe('POST');
     expect(effectiveWriteMethod('POST', { 'content-type': 'application/json', 'content-encoding': 'gzip' }, U, body)).toBe('DELETE');
+  });
+});
+
+describe('readAddressWrites', () => {
+  it('reads a method override or a GraphQL mutation as a write, and nothing else', () => {
+    expect(readAddressWrites('https://h.example/items/5?_method=DELETE')).toBe(true);
+    expect(readAddressWrites('https://h.example/items/5?_method=FROB')).toBe(true);
+    expect(readAddressWrites('https://h.example/graphql?query=mutation%7BdeleteAll%7D')).toBe(true);
+    expect(readAddressWrites('https://h.example/graphql?query=%7Bitems%7Bid%7D%7D')).toBe(false);
+    expect(readAddressWrites('https://h.example/items?page=2;size=10')).toBe(false);
+    // An address that does not parse is no write: it fails when it is fetched, under its own error.
+    expect(readAddressWrites('h.example/page')).toBe(false);
   });
 });

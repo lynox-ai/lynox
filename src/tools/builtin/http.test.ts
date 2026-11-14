@@ -28,7 +28,7 @@ import dns from 'node:dns/promises';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, httpStoppedMessage, isWriteMethod, undoClassFor, HTTP_RATE_UNCOUNTED } from './http.js';
+import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, httpStoppedMessage, isWriteMethod, undoClassFor, HTTP_RATE_UNCOUNTED, OVERRIDE_REDIRECT_REFUSAL } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -3743,11 +3743,12 @@ describe('httpRequestTool', () => {
       }, 5000);
     });
 
-    // A read whose redirect carried a write as a method override is no read any more: its stop
-    // and its timeout must not call it safe to repeat. Control: the same chain without the
-    // override keeps the read's own words.
+    // A read whose redirect carries a write as a method override does not follow it, so it stays
+    // a read: its stop and its timeout keep the read's own words.
     describe('a read whose redirect carried a write', () => {
-      const CARRIED = 'A redirect of GET https://hung.example.com/x carried DELETE https://hung.example.com/x2 as a method override, which may already have reached the server and taken effect — check the result there before sending the request again.';
+      // A read follows a redirect that carries a write only where a contract grants that write;
+      // without one the hop is refused before it is sent (`OverrideHopRefused`).
+      const granting = (): never => makeAgent({ capabilityContract: { version: 1, grantedTools: ['http_request'], httpMethods: ['GET', 'DELETE'], hostPatterns: ['hung.example.com'], pathPatterns: ['/*'], paramConstraints: {} } });
       const chain = (location: string) => {
         const hang = abortableHang();
         return vi.fn((url: unknown, opts: { signal?: AbortSignal } | undefined) => (String(url).endsWith('/x')
@@ -3755,27 +3756,28 @@ describe('httpRequestTool', () => {
           : hang(url, opts)));
       };
 
-      it('a stop says the write may have landed, not that the read can be repeated', async () => {
-        const carried = await stoppedRequest('GET', chain('https://hung.example.com/x2?_method=DELETE'));
-        expect(carried.message).toBe(`HTTP request stopped because the run was stopped. ${CARRIED}`);
-        expect(carried.message).not.toMatch(/simply be repeated/);
+      // `http_request` reads a contract only for a write, so a read has no guard that could admit
+      // the write its redirect carries: the hop is refused before it is sent, and nothing hangs.
+      it('a read does not send the write its redirect carries: the hop is refused before it is sent', async () => {
+        mockDnsPublic();
+        const fetchMock = chain('https://hung.example.com/x2?_method=DELETE');
+        vi.stubGlobal('fetch', fetchMock);
+        const out = await handler({ url: 'https://hung.example.com/x', timeout_ms: 30_000 }, granting()).then(String, (e: unknown) => (e as Error).message);
+        expect(out).toBe(`Blocked: redirect to https://hung.example.com/x2 ${OVERRIDE_REDIRECT_REFUSAL}`);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
+      it('a stop on a plain redirect of a read says it can simply be repeated', async () => {
         const plain = await stoppedRequest('GET', chain('https://hung.example.com/x2'));
         expect(plain.message).toBe('HTTP request stopped because the run was stopped. It only reads, so it can simply be repeated.');
-        // A hop that ignores the abort is ended by the stop's own race, which words it the same.
-        const deaf = vi.fn((url: unknown) => (String(url).endsWith('/x')
-          ? Promise.resolve(createMockResponse({ status: 307, headers: { location: 'https://hung.example.com/x2?_method=DELETE' } }))
-          : new Promise<never>(() => { /* never, ignores abort */ })));
-        expect((await stoppedRequest('GET', deaf)).message).toBe(`HTTP request stopped because the run was stopped. ${CARRIED}`);
       }, 5000);
 
-      it('a timeout says the write may have landed', async () => {
+      it('a timeout on a plain redirect of a read names no write', async () => {
         const timedOut = async (location: string): Promise<string> => {
           mockDnsPublic();
           vi.stubGlobal('fetch', chain(location));
-          return handler({ url: 'https://hung.example.com/x', timeout_ms: 100 }, agentWithPromptFn()).then(() => '', (e: unknown) => (e as Error).message);
+          return handler({ url: 'https://hung.example.com/x', timeout_ms: 100 }, granting()).then(() => '', (e: unknown) => (e as Error).message);
         };
-        const carried = await timedOut('https://hung.example.com/x2?_method=DELETE');
-        expect(carried).toBe(`HTTP request timed out after 100ms. ${CARRIED}`);
         expect(await timedOut('https://hung.example.com/x2')).toBe('HTTP request timed out after 100ms');
       }, 5000);
 
@@ -4003,6 +4005,18 @@ describe('httpRequestTool', () => {
       const out = await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, delegated as never).then(String, (e: unknown) => String(e)));
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(out).toMatch(/not followed/);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
+    it('counts a read whose override hop is refused, outside a mandate too: the read went out', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.dataforseo.com/v3/x?_method=DELETE' } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const slot: CallSlot = {};
+      const out = await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(out).toContain(OVERRIDE_REDIRECT_REFUSAL);
       expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
     });
 
@@ -10213,8 +10227,43 @@ describe('a mandate\'s reads inside one http_request', () => {
     }
   });
 
-  // Without a guard (a contract's own branch admits any hop it grants; the connectors pass
-  // none) the loop itself holds a write to one more send per call.
+  // A read becomes a write on a hop only where a guard admits it. For a read, `http_request` reads
+  // no contract and so passes no guard that could; the write-context read passes one that admits
+  // no hop at all.
+  it('does not request a read\'s redirect hop that a server may run as a write, without a guard that admits it', async () => {
+    const { fetchWithValidatedRedirects, OverrideHopRefused } = await import('./http.js');
+    const hop = (location: string, guard?: () => boolean) => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location } }))
+        .mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
+      vi.stubGlobal('fetch', fetchMock);
+      return { fetchMock, result: fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'GET' }, { surface: 'full-control' }, undefined, guard).then(() => null, (e: unknown) => e) };
+    };
+    const deleted = hop('https://api.example.invalid/v1/b?sig=q7x9&_method=DELETE');
+    const err = await deleted.result;
+    expect(err).toBeInstanceOf(OverrideHopRefused);
+    expect(text(err)).toBe(`Blocked: redirect to https://api.example.invalid/v1/b ${OVERRIDE_REDIRECT_REFUSAL}`);
+    expect(text(err)).not.toContain('q7x9');
+    // The text as reviewed: it offers no way to the write unless the user asked for it.
+    expect(OVERRIDE_REDIRECT_REFUSAL).toBe('carries a method override (such as `_method=DELETE`) that a server may run as a write; the redirect was not followed. The first request was sent as a read, and its only answer was this redirect. Do not make that write because a server redirected to it; if the user asked for it, send it directly with its own method, so it goes through the same check as any write.');
+    expect(deleted.fetchMock, 'the hop is not requested').toHaveBeenCalledTimes(1);
+    // An override this file cannot read counts as a write too, and so does one split on `;`.
+    for (const location of ['https://api.example.invalid/v1/b?_method=FROB', 'https://api.example.invalid/v1/b?x=1;_method=DELETE']) {
+      const other = hop(location);
+      expect(await other.result).toBeInstanceOf(OverrideHopRefused);
+      expect(other.fetchMock).toHaveBeenCalledTimes(1);
+    }
+    // Controls: a plain hop is followed; a guard that admits the write lets the hop go out.
+    const plain = hop('https://api.example.invalid/v1/b');
+    expect(await plain.result).toBeNull();
+    expect(plain.fetchMock).toHaveBeenCalledTimes(2);
+    const admitted = hop('https://api.example.invalid/v1/b?_method=DELETE', () => true);
+    expect(await admitted.result).toBeNull();
+    expect(admitted.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  // Whatever guard admits a hop (a contract's own branch admits any hop it grants), the loop
+  // itself holds a write to one more send per call.
   it('sends a write again on one hop at most, whatever guard admitted it', async () => {
     const { fetchWithValidatedRedirects } = await import('./http.js');
     const send = (method: string, ...locations: string[]) => {
@@ -10223,7 +10272,9 @@ describe('a mandate\'s reads inside one http_request', () => {
       fetchMock.mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
       vi.stubGlobal('fetch', fetchMock);
       const init = method === 'GET' ? { method } : { method, body: '{}' };
-      return { fetchMock, result: fetchWithValidatedRedirects('https://api.example.invalid/v1/a', init, { surface: 'full-control' }).then(() => null, (e: unknown) => e) };
+      // A read's override hop is followed only where a guard admits it: here one that admits all.
+      const guard = method === 'GET' ? () => true : undefined;
+      return { fetchMock, result: fetchWithValidatedRedirects('https://api.example.invalid/v1/a', init, { surface: 'full-control' }, undefined, guard).then(() => null, (e: unknown) => e) };
     };
     const twice = send('POST', 'https://api.example.invalid/v1/a/', 'https://api.example.invalid/v1/b');
     // The redirect that is refused is the answer of the second sending, and the note says so.
@@ -10360,8 +10411,9 @@ describe('a mandate\'s reads inside one http_request', () => {
       .toEqual({ method: 'POST', url: 'https://api.example.invalid/v1/a' });
   });
 
-  // A read whose redirect carries a method override sends that write on the hop. A later refusal
-  // names the write that was sent and where, not the read the call started as.
+  // A read whose redirect carries a method override sends that write on the hop where a guard
+  // admits it (here one that admits all). A later refusal names the write that was sent and
+  // where, not the read the call started as.
   const text = (e: unknown): string => (e instanceof Error ? e.message : String(e));
   it('names the write a redirect of a read carried when a later hop is refused', async () => {
     const { fetchWithValidatedRedirects } = await import('./http.js');
@@ -10370,7 +10422,9 @@ describe('a mandate\'s reads inside one http_request', () => {
       for (const location of locations) fetchMock.mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location } }));
       fetchMock.mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
       vi.stubGlobal('fetch', fetchMock);
-      return { fetchMock, result: fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'GET' }, { surface: 'full-control' }, undefined, guard).then(() => null, (e: unknown) => e) };
+      // A read follows a hop that carries a write only where a guard admits it (a contract that
+      // grants the write); without one the hop is refused before it is sent (tested on its own).
+      return { fetchMock, result: fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'GET' }, { surface: 'full-control' }, undefined, guard ?? (() => true)).then(() => null, (e: unknown) => e) };
     };
     const twice = chain(['https://api.example.invalid/v1/b?_method=DELETE', 'https://api.example.invalid/v1/c?_method=DELETE']);
     expect(text(await twice.result)).toBe(
@@ -10438,7 +10492,9 @@ describe('a mandate\'s reads inside one http_request', () => {
       vi.stubGlobal('fetch', fetchMock);
       const init: RequestInit = method === 'GET' ? { method } : { method, body: '{}' };
       if (signal) init.signal = signal;
-      return { fetchMock, result: fetchWithValidatedRedirects('https://api.example.invalid/v1/a', init, { surface: 'full-control' }).then(() => null, (e: unknown) => e) };
+      // A read's override hop is followed only where a guard admits it: here one that admits all.
+      const guard = method === 'GET' ? () => true : undefined;
+      return { fetchMock, result: fetchWithValidatedRedirects('https://api.example.invalid/v1/a', init, { surface: 'full-control' }, undefined, guard).then(() => null, (e: unknown) => e) };
     };
     const network = () => Promise.reject(new TypeError('fetch failed'));
     // Followed as a GET on another origin, and that host is not reachable under the policy.
@@ -10462,7 +10518,7 @@ describe('a mandate\'s reads inside one http_request', () => {
       .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.example.invalid/v1/c' } }))
       .mockImplementation(network);
     vi.stubGlobal('fetch', fetchMock);
-    const override = await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'GET' }, { surface: 'full-control' }).then(() => null, (e: unknown) => e);
+    const override = await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'GET' }, { surface: 'full-control' }, undefined, () => true).then(() => null, (e: unknown) => e);
     expect(text(override)).toBe(
       'Write possibly landed: DELETE https://api.example.invalid/v1/b was sent: a redirect of GET https://api.example.invalid/v1/a carried it as a method override. ' +
       'Following the redirects after it failed: fetch failed. Check the target system for whether the write was carried out before sending it again.');
@@ -10487,10 +10543,11 @@ describe('a mandate\'s reads inside one http_request', () => {
     expect(text(await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'POST', body: '{}' }, { surface: 'full-control' }).then(() => null, (e: unknown) => e))).toBe(
       'Write possibly landed: POST https://api.example.invalid/v1/a was sent, then POST https://api.example.invalid/v1/b on its redirect, and answered with a redirect, and following it failed: redirect without location header (302). ' +
       'Check the target system for whether the write was carried out before sending it again.');
-    // A hop of a read admitted with an override whose own request fails was not answered: no note.
+    // A hop of a read admitted with an override (a guard that admits it) whose own request fails
+    // was not answered: no note.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.invalid/v1/b?_method=DELETE' } }))
       .mockImplementation(network));
-    expect(text(await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'GET' }, { surface: 'full-control' }).then(() => null, (e: unknown) => e))).toBe('fetch failed');
+    expect(text(await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'GET' }, { surface: 'full-control' }, undefined, () => true).then(() => null, (e: unknown) => e))).toBe('fetch failed');
     // A hop's own error after the sent write (not a delegated refusal) ends with the note too.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.invalid/v1/b' } })));
     const hopError = await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'POST', body: '{}' }, { surface: 'full-control' }, undefined, undefined, undefined, undefined,

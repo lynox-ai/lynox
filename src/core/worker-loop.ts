@@ -45,7 +45,8 @@ import type { DeliverySummary, NotificationRouter, NotificationMessage } from '.
 import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { stripHidden } from './hidden-text.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
-import { admittedTriggerTier } from './task-manager.js';
+import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL } from './task-manager.js';
+import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
@@ -3876,6 +3877,14 @@ export class WorkerLoop {
       if (taskManager) {
         this.#recordRun(taskManager, task.id, 'Watch task missing URL in config', 'failed');
       }
+      return;
+    }
+
+    // A watch only reads its page. An address a server may run as a write is not requested,
+    // and not recorded as a read either: a watch made before this check could carry one.
+    if (readAddressWrites(config.url)) {
+      const taskManager = this.engine.getTaskManager();
+      if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: its address ${WATCH_OVERRIDE_REFUSAL} Set the watch up again in the chat with the address of the page without the override or the mutation.`, 'failed');
       return;
     }
 

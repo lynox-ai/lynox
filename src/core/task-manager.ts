@@ -1231,3 +1231,6 @@ export class TaskManager {
 }
 
 const MAX_RUN_RESULT_CHARS = 10_000;
+
+/** After "its address" or "watch_url": why an address a server may run as a write is not watched (`readAddressWrites`). */
+export const WATCH_OVERRIDE_REFUSAL = 'carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page.';
