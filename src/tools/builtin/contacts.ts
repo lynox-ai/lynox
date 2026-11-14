@@ -84,7 +84,9 @@ export const contactsSaveTool: ToolEntry<ContactsSaveInput> = {
         name,
         source: deriveTurnUntrusted(agent) ? 'agent_external' : 'agent',
       };
-      if (input.email !== undefined) data.email = input.email;
+      // A blank address is no address: stored as "" it is a real value of the unique key, and the
+      // next blank save would overwrite this contact while the answer says it was not deduplicated.
+      if (input.email !== undefined && input.email.trim() !== '') data.email = input.email;
       if (input.phone !== undefined) data.phone = input.phone;
       if (input.company !== undefined) data.company = input.company;
       if (input.type !== undefined) data.type = input.type;
@@ -92,10 +94,16 @@ export const contactsSaveTool: ToolEntry<ContactsSaveInput> = {
       if (input.tags !== undefined) data.tags = input.tags;
 
       return withInstanceWrite(agent, { site: 'contacts_save#save', kind: 'save', store: 'contacts', main: ['upsert'] }, (w) => {
-        w.run('upsert', () => crm.upsertContact(data, rowStampOf(agent)), ifCounts);
+        const written = w.run('upsert', () => crm.upsertContact(data, rowStampOf(agent)), ifCounts);
 
+        // The store reports a record it could not write in `errors`, not by throwing: say "Saved"
+        // only for a row it wrote, and pass on what it noted about one it wrote anyway.
+        if (written.inserted + written.updated === 0) {
+          return `contacts_save error: the contact was not saved. ${written.errors.join(' ') || 'The store wrote no row.'}`;
+        }
         const emailNote = data.email ? ` <${data.email.trim().toLowerCase()}>` : ' (no email — not deduplicated)';
-        return `Saved contact: ${name}${emailNote}.`;
+        const notes = written.errors.length > 0 ? ` Note: ${written.errors.join(' ')}` : '';
+        return `Saved contact: ${name}${emailNote}.${notes}`;
       });
     } catch (err) {
       return `contacts_save error: ${getErrorMessage(err)}`;
