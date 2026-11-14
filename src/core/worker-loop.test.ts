@@ -488,6 +488,40 @@ describe('WorkerLoop', () => {
     expect(analysisSession._recreateAgent).not.toHaveBeenCalled();
   });
 
+  it('executeWatch does not read a watched address a server may read as a write, and says why', async () => {
+    vi.useRealTimers();
+    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager;
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(),
+      escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    mockFetchPinned.mockClear();
+    // Saved before task_create refused it.
+    await fire(makeTask({ id: 't-ovr', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test/items/5?_method=DELETE', interval_minutes: 60 }) }));
+    expect(mockFetchPinned).not.toHaveBeenCalled();
+    expect(engine.createSession).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(taskManager.recordTaskRun).mock.calls)).toContain('The watched page was not read: its address carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page. Set the watch up again in the chat with the address of the page without the override or the mutation.');
+    // A GraphQL mutation in the query is a write too.
+    await fire(makeTask({ id: 't-gql', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test/graphql?query=mutation%7BdeleteAll%7D', interval_minutes: 60 }) }));
+    expect(mockFetchPinned).not.toHaveBeenCalled();
+    // A delegated session's watch: the read that is not sent is not recorded as one either.
+    const record = vi.fn();
+    (engine as unknown as { getAuditLog: () => unknown }).getAuditLog = () => ({ record });
+    await fire(makeTask({ id: 't-hovr', source: 'watch', effect: 'run_agent', created_by: 'mandate:h@x.test', watch_config: JSON.stringify({ url: 'https://x.test/items/5?_method=DELETE', interval_minutes: 60 }) }));
+    expect(record).not.toHaveBeenCalled();
+    expect(mockFetchPinned).not.toHaveBeenCalled();
+    // Control: the same watch on the plain address is read.
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT', { status: 200 }));
+    await fire(makeTask({ id: 't-ovr', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test/items/5', interval_minutes: 60 }) })).catch(() => undefined);
+    expect(mockFetchPinned).toHaveBeenCalledTimes(1);
+  });
+
   it('executeWatch hands the analysis model the stored URL without the characters that render as nothing', async () => {
     vi.useRealTimers();
     const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;

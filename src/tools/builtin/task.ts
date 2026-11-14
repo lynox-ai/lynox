@@ -9,6 +9,8 @@ import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
+import { readAddressWrites } from '../../core/outbound-write.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -524,6 +526,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       }
 
       if (input.watch_url) {
+        // A watch only reads its page, unattended and again and again: an address a server may
+        // run as a write (`?_method=DELETE`, a GraphQL mutation) would send that write on every check.
+        if (readAddressWrites(input.watch_url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);
