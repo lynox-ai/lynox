@@ -31,7 +31,7 @@ import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type Sho
 import { shopifyBulkReadEnabled, shopifyPairedAfter, shopifySeoEntityFields } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
-import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
+import { isMeasuredShopifyWrite, isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
 import { contextFieldsOfListForm, judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
@@ -1856,8 +1856,9 @@ export class BulkLedger {
   private probeCoverage(run: RunRow): { holds: boolean; missing: BulkProbeMissing[] } {
     const host = externalHostOf(run.target_system);
     if (host === null) return { holds: true, missing: [] };
-    // A Shopify run writes through its form; the form is its kind, and no form of a store is
-    // measured yet, so the probe must be this run's own (PRD shopify-preset §16.3 item 4).
+    // A Shopify run writes through its form; the form is its kind, and the probe must be this
+    // run's own (PRD shopify-preset §16.3 item 4) — also where the form is measured: the
+    // measurement covers Shopify, not an app or a webhook in the customer's store.
     const form = this.shopifyFormOfRun(run);
     if (form !== null) {
       if (run.kind === 'undo') return { holds: true, missing: [] };
@@ -2087,9 +2088,28 @@ export class BulkLedger {
   private writeFormOfRun(run: RunRow): 'measured' | 'unmeasured' | null {
     const host = externalHostOf(run.target_system);
     if (host === null || run.list_state === 'pending') return null;
-    // A Shopify run writes through its form, and no store form is measured yet.
-    if (this.shopifyFormOfRun(run) !== null) return 'unmeasured';
+    const form = this.shopifyFormOfRun(run);
+    if (form !== null) return this.shopifyRunMeasured(run, form) ? 'measured' : 'unmeasured';
     return writeFormOf(host, parseContractPaths(run.contract_json), parseContractMethods(run.contract_json));
+  }
+
+  /**
+   * Whether a Shopify run writes only measured forms: it has a target to write, and every one is an
+   * update whose approved after-state is a measured write ({@link isMeasuredShopifyWrite}) — the
+   * same after-state its apply sends ({@link shopifyApplyOf}). The form knows only `productUpdate`,
+   * so a target to create leaves the run unmeasured. Its probe is not widened by this: a Shopify
+   * run still writes its own probe first ({@link probeCoverage}).
+   */
+  private shopifyRunMeasured(run: RunRow, form: ShopifyWriteForm): boolean {
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT change, after_planned FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}`,
+    ).all(run.id) as { change: BulkChange; after_planned: string | null }[];
+    if (rows.length === 0) return false;
+    return rows.every((r) => {
+      if (r.change !== 'update' || r.after_planned === null) return false;
+      const after = JSON.parse(this.engineDb.dec(r.after_planned)) as unknown;
+      return isPlainRecord(after) && isMeasuredShopifyWrite(form, after);
+    });
   }
 
   /**

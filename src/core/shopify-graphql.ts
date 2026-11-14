@@ -75,8 +75,8 @@ export function mediaImageGidNumber(gid: string): number | null {
 
 /** The store's Admin GraphQL endpoint at the preset's pinned version, or null without a pin or for a host that is not exactly a store's. */
 export function shopifyGraphqlEndpoint(host: string): string | null {
-  const version = OAUTH_PRESETS.get('shopify')?.adminApiVersion;
-  if (version === undefined || !isShopifyStoreHostName(host)) return null;
+  const version = shopifyAdminApiVersion();
+  if (version === null || !isShopifyStoreHostName(host)) return null;
   return `https://${host}/admin/api/${version}/graphql.json`;
 }
 
@@ -288,18 +288,36 @@ export const SHOPIFY_WRITABLE_FIELDS: readonly string[] = Object.freeze(PRODUCT_
  */
 export function shopifyProductWriteBody(gid: string, after: Readonly<Record<string, unknown>>): string | null {
   if (productGidNumber(gid) === null) return null;
+  const variables = shopifyProductWriteVariables(after);
+  if (variables === null) return null;
+  return JSON.stringify({ query: SHOPIFY_WRITE_DOCUMENTS.shopify_product, variables: { id: gid, ...variables } });
+}
+
+/**
+ * The variables a product write sets for `after`, the `id` left out, in body order; null where
+ * {@link shopifyProductWriteBody} builds no body for it. The one place that decides which fields a
+ * product write sends: the body is built from it, and so is the field set a run's write form is
+ * judged by (`bulk-write-forms.ts`), so the two cannot disagree.
+ */
+export function shopifyProductWriteVariables(after: Readonly<Record<string, unknown>>): Readonly<Record<string, string | null>> | null {
   const known = new Set(PRODUCT_WRITE_VARIABLES.map(([f]) => f));
   const fields = Object.keys(after);
   if (fields.length === 0 || fields.some((f) => !known.has(f))) return null;
   if (Object.hasOwn(after, 'seo_title') !== Object.hasOwn(after, 'seo_description')) return null;
-  const variables: Record<string, string | null> = { id: gid };
+  const variables: Record<string, string | null> = {};
   for (const [field, variable] of PRODUCT_WRITE_VARIABLES) {
     if (!Object.hasOwn(after, field)) continue;
     const value = after[field];
     if (value !== null && typeof value !== 'string') return null;
     variables[variable] = value;
   }
-  return JSON.stringify({ query: SHOPIFY_WRITE_DOCUMENTS.shopify_product, variables });
+  return variables;
+}
+
+/** The Admin API version the engine sends every store request at, or null without a pin. */
+export function shopifyAdminApiVersion(): string | null {
+  const version = OAUTH_PRESETS.get('shopify')?.adminApiVersion;
+  return version ?? null;
 }
 
 /** The image fields a media run may set: the one the write document names. */

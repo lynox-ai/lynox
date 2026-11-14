@@ -430,8 +430,9 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // On a connected account a run writes only in a measured form; any other write is not
     // granted, whatever the run's approval said. A GraphQL read is no write. A write of the
     // engine's own form passes in place of that gate: its body is one the apply grant minted
-    // byte for byte (`withShopifyApply`), the owner confirmed the form as unmeasured, and the run
-    // wrote and read back its own probe first (PRD shopify-preset §16.4).
+    // byte for byte (`withShopifyApply`), the owner confirmed the form where it is unmeasured
+    // (`isMeasuredShopifyWrite`), and the run wrote and read back its own probe first (PRD
+    // shopify-preset §16.4).
     const engineFormWrite = graphql !== undefined && (graphql.writes !== true || isMintedShopifyWrite(deps.contract, payload));
     if (!isReadMethod(gated) && !engineFormWrite && deps.connectedAccount(url) && !isMeasuredWriteForm(hostname, new URL(url).pathname, gated)) {
       return { kind: 'not_granted' };
