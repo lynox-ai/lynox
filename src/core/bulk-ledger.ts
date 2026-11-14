@@ -2258,19 +2258,25 @@ export class BulkLedger {
 
   private setSelected(runId: string, seq: number, selected: boolean, params: { checksum: string; now?: number | undefined }): BulkSelectOutcome {
     const db = this.engineDb.getDb();
-    return db.transaction((): BulkSelectOutcome => {
+    // Under the write lock only the compare: the checksum the owner saw against the run as it is.
+    // A run holds up to BULK_MAX_TARGETS targets, and each checksum decrypts and hashes all of them.
+    const moved = db.transaction((): BulkSelectOutcome | null => {
       const run = this.runRow(runId);
       if (!run) return { ok: false, reason: 'not_found' };
       if (run.phase !== 'previewed') return { ok: false, reason: 'wrong_phase' };
       if (run.kind === 'undo' && run.atomic === 1) return { ok: false, reason: 'atomic_undo' };
       if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
       const at = new Date(params.now ?? Date.now()).toISOString();
-      const moved = selected
+      const changed = selected
         ? db.prepare(`UPDATE bulk_targets SET deselected_at = NULL WHERE run_id = ? AND seq = ? AND change IN ${WRITING_CHANGES} AND deselected_at IS NOT NULL`).run(runId, seq)
         : db.prepare(`UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ? AND ${WRITING_SQL}`).run(at, runId, seq);
-      if (moved.changes !== 1) return { ok: false, reason: 'not_writing' };
-      return { ok: true, checksum: this.computeChecksum(runId)! };
+      return changed.changes === 1 ? null : { ok: false, reason: 'not_writing' };
     }).immediate();
+    if (moved !== null) return moved;
+    // The new checksum after the commit. This engine writes its database through one connection
+    // and this method runs to its end without yielding, so nothing of the engine's lands between
+    // the commit and this read: it is the checksum of the run as the toggle left it.
+    return { ok: true, checksum: this.computeChecksum(runId)! };
   }
 
   /**

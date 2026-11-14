@@ -216,18 +216,45 @@
 		});
 	}
 
+	/** After a toggle the run is asked for again — its counts and the checksum the approval
+	 *  presents moved — but of its targets only the toggled one changed: it is marked here instead
+	 *  of every page being loaded again. False where the run is no longer the preview this page
+	 *  shows, or could not be read; the caller then loads it whole. */
+	async function afterToggle(seq: number, deselected: boolean): Promise<boolean> {
+		const id = runId;
+		const before = run;
+		const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
+		if (id !== runId || run !== before || !r.ok || r.body.phase !== 'previewed' || r.body.total !== before?.total) return false;
+		run = r.body;
+		targets = targets.map((x) => (x.seq === seq ? { ...x, deselected } : x));
+		maxTargets = Math.max(1, bulkWriting(r.body));
+		unmeasuredOk = false;
+		probeOk = false;
+		supersedable = null;
+		return true;
+	}
+
 	/** Take one target out of the write, or put it back, against the checksum this page showed:
-	 *  each moves the checksum, so the page reloads and approves only the run as it now is. */
-	function toggleSelected(target: BulkTarget): Promise<void> {
-		return act(async () => {
-			if (!run?.checksum) return t('common.load_failed');
-			const verb = target.deselected ? 'reselect' : 'deselect';
-			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/targets/${target.seq}/${verb}`, { checksum: run.checksum });
-			// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
-			const code = r.body.code;
-			if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) return t(`bulk.deselect.refused.${code}`);
-			return refusalOf(r);
-		});
+	 *  each moves the checksum, so the page approves only the run as it now is. */
+	async function toggleSelected(target: BulkTarget): Promise<void> {
+		busy = true;
+		actionError = '';
+		try {
+			if (!run?.checksum) {
+				actionError = t('common.load_failed');
+			} else {
+				const deselect = target.deselected !== true;
+				const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/targets/${target.seq}/${deselect ? 'deselect' : 'reselect'}`, { checksum: run.checksum });
+				// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
+				const code = r.body.code;
+				if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) actionError = t(`bulk.deselect.refused.${code}`);
+				else if (!r.ok) actionError = refusalOf(r) ?? t('common.load_failed');
+				else if (!(await afterToggle(target.seq, deselect))) await load();
+			}
+		} catch {
+			actionError = t('common.load_failed');
+		}
+		busy = false;
 	}
 
 	function approveUndo(): Promise<void> {
