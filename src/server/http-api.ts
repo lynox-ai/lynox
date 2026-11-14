@@ -98,7 +98,7 @@ import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, Promp
 import { isTierSlot } from '../types/config.js';
 import { acquireSlot, readSlot, sweepSlot, type HeldSlot } from '../core/export-slot.js';
 import { sweepStaleExports } from '../core/export-archive.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded , toMistralEuBase } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded , toMistralEuBase, isMistralHost } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
@@ -7716,6 +7716,19 @@ export class LynoxHTTPApi {
           };
         }
       }
+      // On an instance connected to a Shopify store Mistral is off the provider list
+      // (`contained-providers.ts`): its tile is locked, and a pick of it went back to Anthropic at
+      // boot. `provider_reset` is that change, for the line the chat and the settings show until the
+      // owner dismisses it or picks a provider (`exchange-provider-reset.ts`).
+      {
+        const { providerListApplies } = await import('../core/contained-providers.js');
+        const listApplies = providerListApplies();
+        if (listApplies) locks.mistral_provider = { reason: 'shopify-exchange' };
+        const { readProviderResetNotice } = await import('../core/exchange-provider-reset.js');
+        // Only while the exchange is on: turned off again, Mistral is available and the line would be false.
+        const notice = listApplies ? readProviderResetNotice() : null;
+        redacted['provider_reset'] = notice === null ? null : { from: notice.from };
+      }
       redacted['locks'] = locks;
       // Settings v3 Item 6 (model-aware context-window radios): resolve the
       // currently active model from tier + provider and surface its native
@@ -8211,6 +8224,18 @@ export class LynoxHTTPApi {
           merged['accepted_custom_endpoints'] = [...prior, { host: acceptedHostToRecord, accepted_at: new Date().toISOString() }];
         }
       }
+      // On an instance connected to a Shopify store Mistral is off the provider list
+      // (`contained-providers.ts`); the page locks its tile, and this refuses the same pick sent
+      // another way. Only a request that names the provider or its endpoint: a stored Mistral pick
+      // goes back to Anthropic at the next boot and does not block saving the rest.
+      if ('provider' in update || 'api_base_url' in update) {
+        const { providerListApplies } = await import('../core/contained-providers.js');
+        const base = merged['api_base_url'];
+        if (providerListApplies() && merged['provider'] === 'openai' && typeof base === 'string' && isMistralHost(base)) {
+          errorResponse(res, 400, 'Mistral is not available on this instance. Choose Anthropic.');
+          return;
+        }
+      }
       // Checked BEFORE the write, by the loader itself: a file the loader refuses would answer
       // every later GET here with a 500 and stop the next boot, and on a managed instance every
       // PUT too (its lock gate loads the stored file above), so only a hand edit in the container
@@ -8238,6 +8263,12 @@ export class LynoxHTTPApi {
       saveUserConfig(merged);
       reloadConfig();
       await engine.reloadUserConfig();
+      // A provider the owner picks ends the line about the one the engine picked for them. The LLM
+      // page sends `provider` with every save, so only a change counts, not a resent value.
+      if (typeof update['provider'] === 'string' && update['provider'] !== existing['provider']) {
+        const { clearProviderResetNotice } = await import('../core/exchange-provider-reset.js');
+        clearProviderResetNotice();
+      }
 
       // PRD-IA-V2 P3-PR-B (Security S4) — structured audit-log per
       // saveUserConfig write. Keys-only (no values) → safe for self-host
@@ -8264,6 +8295,14 @@ export class LynoxHTTPApi {
 
       jsonResponse(res, 200, { ok: true });
     }, ownerOnly('change the configuration'));
+
+    // "Got it" on the line that says the engine put the provider back on Anthropic
+    // (`exchange-provider-reset.ts`): it ends for every page of the instance.
+    this.addStatic('user', 'POST /api/config/provider-reset/dismiss', async (_req, res) => {
+      const { clearProviderResetNotice } = await import('../core/exchange-provider-reset.js');
+      clearProviderResetNotice();
+      jsonResponse(res, 200, { ok: true });
+    }, ownerOnly('dismiss this notice'));
 
     // ── History ──
     this.addStatic('user', 'GET /api/history/runs', async (req, res) => {

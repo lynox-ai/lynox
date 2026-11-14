@@ -43,4 +43,14 @@ describe('isProviderTileLocked', () => {
 			expect(isProviderTileLocked({ ...base, customEndpointsLocked: true, requiresBaseUrl: false })).toBe(false);
 		});
 	});
+
+	describe('off the provider list of a Shopify-connected instance (locks.mistral_provider)', () => {
+		it('disables the tile, even the active one', () => {
+			expect(isProviderTileLocked({ ...base, offList: true })).toBe(true);
+			expect(isProviderTileLocked({ ...base, offList: true, isActive: true })).toBe(true);
+		});
+		it('leaves a tile on the list alone', () => {
+			expect(isProviderTileLocked({ ...base, offList: false })).toBe(false);
+		});
+	});
 });

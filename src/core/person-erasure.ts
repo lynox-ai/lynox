@@ -90,6 +90,7 @@ export const PERSON_ERASURE_REACH: Readonly<Record<string, ReadonlyArray<'covere
   'retrieval-shadow.jsonl': ['measurement_logs'],
   'untrusted-cause.jsonl': ['measurement_logs'],
   'config.json': { none: 'the instance settings' },
+  'provider-reset.json': { none: 'which provider the engine moved this instance off, and when' },
   'vault.db': { none: 'the instance credentials' },
   'secrets.json': { none: 'the instance credentials' },
   'push-subscriptions.db': { none: 'the devices that receive this instance\'s notifications' },

@@ -35,6 +35,7 @@
 	import { cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
+	import ProviderResetLine from './ProviderResetLine.svelte';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { endpointText, optionLabel, orNotSet } from './settings-readonly/values.js';
@@ -195,6 +196,9 @@
 		// `requires_base_url === true` (OpenAI-compat, Anthropic-compat) are
 		// disabled.
 		custom_provider_endpoints?: { reason: string };
+		// An instance connected to a Shopify store: Mistral is off its provider list, so the Mistral
+		// tile is locked even while active.
+		mistral_provider?: { reason: string };
 		// model-presets W4: set on managed when the CP can't back a preset (e.g. ⚡
 		// efficient's Fireworks slot without the operator opt-in) → that card renders
 		// disabled with the contact CTA rather than silently downgrading.
@@ -1009,6 +1013,8 @@
 	const hybridActive = $derived(strategy === 'custom');
 	const providerLocked = $derived(!!locks.provider);
 	const customEndpointsLocked = $derived(!!locks.custom_provider_endpoints);
+	// Shopify-connected instance: Mistral is off the provider list (`locks.mistral_provider`).
+	const mistralOffList = $derived(!!locks.mistral_provider);
 	// `LYNOX_LLM_PROVIDER` is set → any provider switch is rejected (env wins on
 	// reload + backend 403s the save). Drives the read-only tile state below.
 	const providerEnvPinned = $derived(!!config.env_overrides?.provider);
@@ -1021,6 +1027,8 @@
 	// selectable and a save just 403'd. Filter them OUT of the tile list entirely so a
 	// managed customer is never offered a provider whose save can't land. Hosted-BYOK
 	// (customer's own key, `cpSuppliesLLMKeyForInstance() === false`) keeps the full list.
+	/** The Mistral preset tile, the one a Shopify-connected instance locks. */
+	const isMistralTile = (p: CatalogProvider): boolean => p.provider === 'openai' && p.preset_id === 'mistral';
 	const isManagedCuratedProvider = (p: CatalogProvider): boolean =>
 		p.provider === 'anthropic' || (p.provider === 'openai' && p.preset_id === 'mistral');
 	const providersForDisplay = $derived(
@@ -1075,6 +1083,7 @@
 			customEndpointsLocked,
 			isActive: catalogEntryKey(entry) === activeCatalogKey,
 			requiresBaseUrl: !!entry.requires_base_url,
+			offList: mistralOffList && isMistralTile(entry),
 		});
 	}
 
@@ -1192,11 +1201,15 @@
 		</div>
 	{:else if customEndpointsLocked}
 		<!-- P3-FOLLOWUP-HOTFIX: narrower notice for Managed — curated providers
-		     stay switchable, only free-text endpoints are off-limits. -->
+		     stay switchable, only free-text endpoints are off-limits. On an instance
+		     connected to a Shopify store Mistral is off the list, so the notice does
+		     not name it. -->
 		<div class="border border-warning/50 bg-warning/5 rounded p-3 text-sm">
-			<p>{t('llm.custom_endpoints_locked_notice')}</p>
+			<p>{t(mistralOffList ? 'llm.custom_endpoints_locked_notice_exchange' : 'llm.custom_endpoints_locked_notice')}</p>
 		</div>
 	{/if}
+
+	<ProviderResetLine />
 
 	{#if captureDegraded}
 		<!-- DK is on but the active balanced model is a measured-weak capture caller
@@ -1379,6 +1392,9 @@
 						{/if}
 					</div>
 					<div class="text-xs text-text-muted mt-0.5">{p.default_residency}</div>
+					{#if mistralOffList && isMistralTile(p)}
+						<p class="text-[11px] text-warning mt-1">{t('llm.provider_unavailable_instance')}</p>
+					{/if}
 				</button>
 			{/each}
 		</div>
