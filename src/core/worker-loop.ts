@@ -64,7 +64,7 @@ import { WorkflowQuestions } from './workflow-questions.js';
 import { WEBHOOK_AWAITS_STAMP_REASON, workflowAwaitsStampResult, workflowStampStateOf } from './workflow-stamp.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
 import { openRunGroup } from './run-group.js';
-import { collectingMemberNotes, currentMemberNotes, memberNotesRepeat, runCollectingMemberNotes, withMemberNotes } from './member-connection-notes.js';
+import { collectingMemberNotes, currentMemberNotes, currentMemberNotesIn, memberNotesRepeat, runCollectingMemberNotes, withMemberNotes } from './member-connection-notes.js';
 
 /** The canonical "the human did not answer" value. Spelled the same in
  *  `http-api.ts` (which calls it "the canonical skip marker") and in
@@ -2214,7 +2214,8 @@ export class WorkerLoop {
         }
         // Outermost, so every request of the run — whichever effect, whichever plan — notes a
         // refused member connection where `#recordRun` and the notification read it.
-        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp, trail?.key) : dispatch()));
+        // The title goes with it: the owner's wording of a line names the plan (UX-065).
+        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp, trail?.key) : dispatch()), task.title);
         entry.memberNotes = collected.notes;
         await collected.done;
       });
@@ -3330,8 +3331,10 @@ export class WorkerLoop {
 
     // A refused member connection is told as `#recordRun` recorded it: its lines under the
     // result and ⏸ instead of ✓, and not again for a run that halted on the same lines.
+    // Compared as recorded (English); pushed in the owner's language (`said`).
     const memberNotes = currentMemberNotes();
-    const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null ? 'other' : 'success', memberNotes);
+    const memberSaid = currentMemberNotesIn(noticeLanguage(this.engine.config?.language));
+    const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null ? 'other' : 'success', memberSaid);
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
       // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
       // its error does (above); the recorded run keeps the full text. Only the run's text is
@@ -3341,9 +3344,9 @@ export class WorkerLoop {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
       const pushed = resultReduced
-        ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberNotes).result
+        ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberSaid).result
         : capStop === null ? memberTold.result
-          : withMemberNotes(truncate(`${capStop}\n\n${result}`), 'other', memberNotes).result;
+          : withMemberNotes(truncate(`${capStop}\n\n${result}`), 'other', memberSaid).result;
       await this.notificationRouter.notify({
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
@@ -3825,8 +3828,9 @@ export class WorkerLoop {
     // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that
     // meets the same refusal at every run is recorded each time, not pushed each time.
     const notes = currentMemberNotes();
-    // `said`: a stored sentence's version in the owner's language, pushed in its place.
-    const told = withMemberNotes(said ?? resultSummary, look.status, notes);
+    // `said`: a stored sentence's version in the owner's language, pushed in its place; the
+    // member-connection lines likewise (UX-065).
+    const told = withMemberNotes(said ?? resultSummary, look.status, currentMemberNotesIn(noticeLanguage(this.engine.config?.language)));
     const toldLook = RUN_END_LOOK[told.status];
     // A webhook run is told by the drain, once per event and only when it did not succeed: a
     // push per order would be noise, and its success is in the run history, where the
