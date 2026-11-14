@@ -78,7 +78,7 @@ describe('Engine boot — an undelivered escalation reaches the control plane', 
 
   it('posts the class to the control plane on an instance the control plane runs', async () => {
     const { engine, fetchSpy } = await boot(true);
-    engine.escalateToUser({ key: 'sched-1', title: 'Weekly report', body: 'It failed' });
+    engine.escalateToUser({ key: 'sched-1', title: 'Weekly report', opener: 'What happened?', body: 'It failed' });
     await flush(); await flush();
     const posts = escalationPosts(fetchSpy);
     expect(posts).toHaveLength(1);
@@ -89,14 +89,14 @@ describe('Engine boot — an undelivered escalation reaches the control plane', 
   it('posts nothing on an instance the control plane runs once the owner switched the mail off', async () => {
     const { engine, fetchSpy } = await boot(true);
     (engine as unknown as { userConfig: LynoxUserConfig }).userConfig = { ...engine.getUserConfig(), escalation_mail: false };
-    engine.escalateToUser({ key: 'sched-1', title: 'Weekly report', body: 'It failed' });
+    engine.escalateToUser({ key: 'sched-1', title: 'Weekly report', opener: 'What happened?', body: 'It failed' });
     await flush(); await flush();
     expect(escalationPosts(fetchSpy)).toHaveLength(0);
   });
 
   it('posts nothing on self-host, where no control plane installed the hook', async () => {
     const { engine, fetchSpy } = await boot(false);
-    engine.escalateToUser({ key: 'sched-1', title: 'Weekly report', body: 'It failed' });
+    engine.escalateToUser({ key: 'sched-1', title: 'Weekly report', opener: 'What happened?', body: 'It failed' });
     await flush(); await flush();
     expect(escalationPosts(fetchSpy)).toHaveLength(0);
   });
@@ -122,7 +122,7 @@ describe('Engine.escalateToUser — the hooks hear of the delivery', () => {
     const { engine, heard } = engineWith();
     const order: string[] = [];
     engine.registerHooks({ onEscalationReported: () => { order.push('hook'); } });
-    engine.escalateToUser({ key: 'k', title: 't', body: 'b', onReported: () => { order.push('caller'); } });
+    engine.escalateToUser({ key: 'k', title: 't', opener: 'What happened?', body: 'b', onReported: () => { order.push('caller'); } });
     await flush();
     expect(heard).toEqual(['not_delivered']);
     expect(order).toEqual(['caller', 'hook']);
@@ -130,7 +130,7 @@ describe('Engine.escalateToUser — the hooks hear of the delivery', () => {
 
   it('still tells the hook when the caller\'s record throws', async () => {
     const { engine, heard } = engineWith();
-    engine.escalateToUser({ key: 'k', title: 't', body: 'b', onReported: () => { throw new Error('record failed'); } });
+    engine.escalateToUser({ key: 'k', title: 't', opener: 'What happened?', body: 'b', onReported: () => { throw new Error('record failed'); } });
     await flush();
     expect(heard).toEqual(['not_delivered']);
   });
@@ -142,7 +142,7 @@ describe('Engine.escalateToUser — the hooks hear of the delivery', () => {
     engine.registerHooks({ onEscalationReported: () => { throw new Error('hook failed'); } });
     engine.registerHooks({ onEscalationReported: (d) => { heard.push(d); } });
     const recorded: DeliverySummary[] = [];
-    engine.escalateToUser({ key: 'k', title: 't', body: 'b', onReported: (d) => { recorded.push(d); } });
+    engine.escalateToUser({ key: 'k', title: 't', opener: 'What happened?', body: 'b', onReported: (d) => { recorded.push(d); } });
     await flush();
     expect(heard).toEqual(['not_delivered']);
     expect(recorded).toEqual(['not_delivered']);
@@ -150,7 +150,7 @@ describe('Engine.escalateToUser — the hooks hear of the delivery', () => {
 
   it('reads the switch when the delivery answers, not when the escalation starts', async () => {
     const { engine, heard } = engineWith({ escalation_mail: false });
-    engine.escalateToUser({ key: 'k', title: 't', body: 'b' });
+    engine.escalateToUser({ key: 'k', title: 't', opener: 'What happened?', body: 'b' });
     // Switched on while the push is still out: the delivery that answers afterwards counts.
     (engine as unknown as { userConfig: LynoxUserConfig }).userConfig = { ...engine.getUserConfig(), escalation_mail: true };
     await flush();
@@ -160,14 +160,14 @@ describe('Engine.escalateToUser — the hooks hear of the delivery', () => {
   it('tells the hooks nothing while the owner has switched the mail off, and again once on', async () => {
     const { engine, heard } = engineWith({ escalation_mail: false });
     const recorded: DeliverySummary[] = [];
-    engine.escalateToUser({ key: 'k', title: 't', body: 'b', onReported: (d) => { recorded.push(d); } });
+    engine.escalateToUser({ key: 'k', title: 't', opener: 'What happened?', body: 'b', onReported: (d) => { recorded.push(d); } });
     await flush();
     expect(heard).toEqual([]);
     expect(recorded).toEqual(['not_delivered']); // the switch is the mail's, never the record's
 
     // Read when the delivery answers, so a switch flipped at runtime takes effect at once.
     (engine as unknown as { userConfig: LynoxUserConfig }).userConfig = { ...engine.getUserConfig(), escalation_mail: true };
-    engine.escalateToUser({ key: 'k', title: 't', body: 'b' });
+    engine.escalateToUser({ key: 'k', title: 't', opener: 'What happened?', body: 'b' });
     await flush();
     expect(heard).toEqual(['not_delivered']);
   });

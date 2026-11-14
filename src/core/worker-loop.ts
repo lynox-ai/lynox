@@ -3698,6 +3698,7 @@ export class WorkerLoop {
     this.engine.escalateToUser({
       key: task.id,
       title: othersPlan ? notices.helperPlanFailedTitle(othersTrigger ? shownMandate(task) : undefined) : `✗ ${task.title}`,
+      opener: notices.reportOpener,
       body: othersPlan
         ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
         : `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
@@ -3725,10 +3726,13 @@ export class WorkerLoop {
   ): { runId: string; channel: WorkflowQuestions } {
     const runId = randomUUID();
     const teardown = active?.controller.signal ?? new AbortController().signal;
+    const notices = this.#notices();
     const channel = new WorkflowQuestions({
       runId,
       scheduleId: task.id,
       title: task.title,
+      opener: notices.questionOpener,
+      titleLine: notices.questionFrom(task.title),
       principal: runAs,
       handRun: active?.handRun === true,
       promptStore: () => this.engine.getPromptStore(),
@@ -4043,6 +4047,7 @@ export class WorkerLoop {
       this.engine.escalateToUser({
         key: task.id,
         title: othersWatch ? notices.helperWatchTitle(shownMandate(task)) : `\uD83D\uDD0D ${task.title}`,
+        opener: notices.reportOpener,
         // The helper's case is lynox's own bubble to the owner, so in the owner's language.
         body: othersWatch ? notices.helperWatchChanged : `${config.url} changed.\n\n${truncatedAnalysis}`,
         pushBody: othersWatch ? notices.helperWatchChangedPush : notices.watchChanged(config.url, truncatedAnalysis),

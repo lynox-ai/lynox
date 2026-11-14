@@ -30,8 +30,14 @@ export interface WorkflowQuestionDeps {
   runId: string;
   /** The schedule that fired the run, named on the notification. */
   scheduleId: string;
-  /** The schedule's title: the thread's title and the notification's. */
+  /** The schedule's title: the thread's title and the notification's. Not a turn of its own:
+   *  someone else may have written it. */
   title: string;
+  /** The `user` turn that opens the thread: a fixed sentence of the engine's, which the model
+   *  reads as the owner's own words. */
+  opener: string;
+  /** The line that names the schedule above each question in the thread, the title quoted. */
+  titleLine: string;
   /** Who started the run, stamped on the prompt row (tag and, for a mandate, its grant) and the thread (tag). */
   principal: RequestPrincipal;
   handRun: boolean;
@@ -241,10 +247,12 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       // thread does (`escalation.ts`).
       const last = threads.getMessages(id, { apiOnly: true }).at(-1)?.role ?? null;
       // The turns the model reads when the owner answers, without the characters that render as
-      // nothing (`hidden-text.ts`): the schedule's title may have been written by someone else.
+      // nothing (`hidden-text.ts`). The schedule's title may have been written by someone else, so
+      // it is no `user` turn, which speaks with the owner's voice: that turn is the engine's
+      // opener, and the title is quoted above the question.
       const seeds: BetaMessageParam[] = [];
-      if (last === null || last === 'assistant') seeds.push({ role: 'user', content: [{ type: 'text', text: stripHidden(this.#deps.title) }] });
-      seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(text) }] });
+      if (last === null || last === 'assistant') seeds.push({ role: 'user', content: [{ type: 'text', text: this.#deps.opener }] });
+      seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(`${this.#deps.titleLine}\n\n${text}`) }] });
       const count = threads.getThread(id)?.message_count ?? 0;
       threads.appendMessages(id, seeds, threads.getNextSeq(id), { message_count: count + seeds.length });
       threads.updateThread(id, { is_unread: true });
