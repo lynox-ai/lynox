@@ -13,9 +13,14 @@ import { SHOPIFY_WRITABLE_FIELDS } from '../../core/shopify-graphql.js';
  * writes with its own mutation), the id field `id`, the path of the store's whole product list,
  * filters given as `{}` (no filter), and an empty after beside a judge. A POST, any other path (a
  * collection's products narrow the list) and any other id field are left to the form's refusal.
- * A REST name, and an SEO text in the nested shape a store API writes it, are read as the form's
- * only where that name is valid in the place it stands and the form's own name is not given
- * beside it.
+ * A REST field name in judge.schema or judge.context is read as the form's, only where that
+ * name is valid there and the form's own name is not given beside it.
+ *
+ * Never source_list.after: what it holds is written into every product, and a plan whose after
+ * the form refuses (a REST name, an SEO text nested as the store's APIs write it) is the one the
+ * refusal makes the planner look at again. Read as the form's, an after nested as
+ * `seo: { title: "placeholder" }` was recorded with "placeholder" as every product's SEO title,
+ * where the refusal had led planners to a judge for each product (planner eval, 2026-11-14).
  */
 
 /** REST product field → the form's name for it. */
@@ -38,39 +43,9 @@ export interface ShopifyPlanNames {
   changes: string[];
 }
 
-/** The SEO texts in the shapes the store's APIs write them: GraphQL `seo: { title, description }`
- *  and REST `metafields` of namespace `global` with key `title_tag` or `description_tag`. Each as
- *  the form's flat field, or null where the value is not wholly one of these shapes. */
-function seoFieldsOf(key: string, value: unknown): Record<string, unknown> | null {
-  if (key === 'seo' && typeof value === 'object' && value !== null && !Array.isArray(value)) {
-    const seo = value as Record<string, unknown>;
-    const keys = Object.keys(seo);
-    if (keys.length === 0 || !keys.every((k) => k === 'title' || k === 'description')) return null;
-    return Object.fromEntries(keys.map((k) => [`seo_${k}`, seo[k]]));
-  }
-  if (key === 'metafields' && Array.isArray(value) && value.length > 0) {
-    const out: Record<string, unknown> = {};
-    for (const m of value as unknown[]) {
-      if (typeof m !== 'object' || m === null) return null;
-      const f = m as Record<string, unknown>;
-      const field = f['key'] === 'title_tag' ? 'seo_title' : f['key'] === 'description_tag' ? 'seo_description' : null;
-      if (f['namespace'] !== 'global' || field === null || field in out || !Object.keys(f).every((k) => ['namespace', 'key', 'value', 'type'].includes(k))) return null;
-      out[field] = f['value'];
-    }
-    return out;
-  }
-  return null;
-}
-
 function renamed(record: Record<string, unknown>, valid: readonly string[], where: string, changes: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    const seo = where === 'source_list.after' ? seoFieldsOf(key, value) : null;
-    if (seo !== null && Object.keys(seo).every((f) => valid.includes(f) && !Object.hasOwn(record, f))) {
-      Object.assign(out, seo);
-      changes.push(`${where} ${key} as ${Object.keys(seo).join(' and ')}`);
-      continue;
-    }
     const name = REST_FIELD_NAMES[key];
     if (name !== undefined && valid.includes(name) && !Object.hasOwn(record, name)) {
       out[name] = value;
@@ -107,9 +82,6 @@ export function shopifyPlanNames(form: 'shopify' | 'shopify_media', writeMethod:
   if (judge !== undefined && typeof out['after'] === 'object' && out['after'] !== null && !Array.isArray(out['after']) && Object.keys(out['after']).length === 0) {
     delete out['after'];
     changes.push('the empty after left out (with judge, the model decides the values)');
-  }
-  if (typeof out['after'] === 'object' && out['after'] !== null && !Array.isArray(out['after'])) {
-    out['after'] = renamed(out['after'] as Record<string, unknown>, SHOPIFY_WRITABLE_FIELDS, 'source_list.after', changes);
   }
   let rule = judge;
   if (typeof judge === 'object' && judge !== null && !Array.isArray(judge)) {

@@ -277,16 +277,24 @@ describe('a Shopify plan in the store\'s REST names', () => {
     expect(await plan({ write_method: 'PATCH', source_list: { form: 'shopify', path: '/products.json', after: { title: 'y' } } })).toMatch(/^List dry run recorded/);
   });
 
-  it('reads REST field names as the form\'s in after, judge.schema and judge.context', async () => {
-    const after = await plan({ source_list: { form: 'shopify', after: { metafields_global_title_tag: 'T', metafields_global_description_tag: 'D' } } });
-    expect(listOf(after).after).toEqual({ seo_title: 'T', seo_description: 'D' });
-    expect(after).toContain('Read for form shopify: source_list.after metafields_global_title_tag as seo_title; source_list.after metafields_global_description_tag as seo_description.');
+  it('reads REST field names as the form\'s in judge.schema and judge.context', async () => {
     const judged = await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { metafields_global_title_tag: { type: 'string', maxLength: 70 } }, context: ['body_html', 'product_type', 'vendor'] } });
     expect(judged).toMatch(/^List dry run recorded/);
     const rule = ledger.getJudgeRuleForOwner(runOf(judged))!;
     expect(Object.keys(rule.schema.properties)).toEqual(['seo_title']);
     expect(rule.context).toEqual(['descriptionHtml', 'productType', 'vendor']);
-    expect(judged).toContain('judge.schema metafields_global_title_tag as seo_title; judge.context body_html as descriptionHtml; judge.context product_type as productType.');
+    expect(judged).toContain('Read for form shopify: judge.schema metafields_global_title_tag as seo_title; judge.context body_html as descriptionHtml; judge.context product_type as productType.');
+  });
+
+  it('reads nothing in source_list.after otherwise: what it holds is written, and its refusal makes the planner look again', async () => {
+    for (const after of [
+      { metafields_global_title_tag: 'T' },
+      { seo: { title: 'placeholder' } },
+      { metafields: [{ namespace: 'global', key: 'description_tag', value: 'D', type: 'string' }] },
+    ]) {
+      expect(await plan({ source_list: { form: 'shopify', after } }), JSON.stringify(after)).toMatch(/^Error: source_list\.after/);
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+    }
   });
 
   it('changes nothing it cannot read as the form\'s, and says nothing where nothing changed', async () => {
@@ -294,26 +302,8 @@ describe('a Shopify plan in the store\'s REST names', () => {
     expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } }, context: ['body_html', 'descriptionHtml'] } }))
       .toMatch(/^Error: judge\.context names body_html/);
     expect(await plan({ source_list: { form: 'shopify', after: { body_html: 'x' } } })).toMatch(/^Error: source_list\.after may only set/);
-    expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x', metafields_global_title_tag: 'y' } } })).toMatch(/^Error: source_list\.after may only set/);
     expect(await plan({ source_list: { form: 'shopify', id_field: 'handle', after: { seo_title: 'x' } } })).toMatch(/^Error: source_list\.id_field is not given/);
     expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x' } } })).not.toContain('Read for form');
-  });
-
-  it('reads the SEO texts in the nested shapes of the store\'s APIs as the form\'s fields', async () => {
-    const graphql = await plan({ source_list: { form: 'shopify', after: { seo: { title: 'T', description: 'D' } } } });
-    expect(listOf(graphql).after).toEqual({ seo_title: 'T', seo_description: 'D' });
-    expect(graphql).toContain('Read for form shopify: source_list.after seo as seo_title and seo_description.');
-    const rest = await plan({ source_list: { form: 'shopify', after: { metafields: [{ namespace: 'global', key: 'description_tag', value: 'D', type: 'string' }] } } });
-    expect(listOf(rest).after).toEqual({ seo_description: 'D' });
-    // Anything else in such a shape stays as given, and the form refuses it.
-    for (const after of [
-      { seo: { title: 'T', keywords: 'k' } },
-      { seo: {} },
-      { metafields: [{ namespace: 'custom', key: 'description_tag', value: 'D' }] },
-      { metafields: [{ namespace: 'global', key: 'description_tag', value: 'D' }, { namespace: 'global', key: 'description_tag', value: 'E' }] },
-      { metafields: [{ namespace: 'global', key: 'title_tag', value: 'T', owner_id: 1 }] },
-      { seo: { title: 'T' }, seo_title: 'U' },
-    ]) expect(await plan({ source_list: { form: 'shopify', after } }), JSON.stringify(after)).toMatch(/^Error: source_list\.after/);
   });
 
   it('leaves out the product list\'s path without .json, filters {} and an empty after beside a judge', async () => {
