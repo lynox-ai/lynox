@@ -1244,6 +1244,39 @@ export interface SaveOptions {
   trailId?: string | undefined;
 }
 
+/**
+ * The parts of the refusals of an engine running without engine.db, put together by
+ * {@link engineLessText}: the model reads them from `api_setup`, an HTTP client from the 409 and the
+ * OAuth pages. (The settings page shows its own sentence for the code `engine_less`.) Without
+ * engine.db a profile is written to the flat files in `apis/`, which the next boot with engine.db
+ * does not read: a change made there is lost and a deleted profile comes back.
+ */
+const ENGINE_LESS_HEADS = {
+  save: "This engine is running without engine.db, which it could not open when it was started, so lynox does not add or change API connections now: the change would be lost once the engine opens engine.db again. Nothing was saved, and nothing is saved later on its own; once someone has restarted the engine, the connection has to be added or changed again.",
+  remove: "This engine is running without engine.db, which it could not open when it was started, so lynox does not remove API connections now: a removed connection would come back once the engine opens engine.db again. Nothing was removed, and nothing is removed later on its own; once someone has restarted the engine, the connection has to be removed again.",
+  connect: "This engine is running without engine.db, which it could not open when it was started, so lynox does not connect API accounts now: the connection would be lost once the engine opens engine.db again. Nothing was sent to the provider, and nothing is connected later on its own; once someone has restarted the engine, the account has to be connected again.",
+  renew: "This engine is running without engine.db, which it could not open when it was started, so lynox does not renew an API connection's access now: the renewed access would be lost once the engine opens engine.db again. Nothing was sent to the provider.",
+} as const;
+/** True for every reader: it lasts until a restart, and the log says why. */
+const ENGINE_LESS_LASTS = "This does not end on its own: it lasts until someone restarts the engine and the engine can open all its files again; the log the engine writes at start says why it could not.";
+/**
+ * For the model only: without it, models measured on these refusals offered to do it after the
+ * restart, which nothing in lynox would carry out. An HTTP answer is read by a person or a
+ * program, not by the model, so it gets no such advice; the JSON error body is also capped at 600
+ * characters, which the sentences with it would exceed.
+ */
+const ENGINE_LESS_TO_MODEL = "Do not retry and do not offer to do it later on your own: nothing will remind you after the restart. Tell the user it did not happen; after the restart they can ask again. Do not ask whether to try again later either; if they want that, they ask after the restart.";
+
+export type EngineLessKind = keyof typeof ENGINE_LESS_HEADS;
+/** `model`: a tool result the model reads. `client`: an HTTP answer (a JSON error or an OAuth page). */
+export type EngineLessReader = 'model' | 'client';
+
+/** The refusal of `kind` for `reader`; both readers' sentences are built from the same parts. */
+export function engineLessText(kind: EngineLessKind, reader: EngineLessReader): string {
+  const told = `${ENGINE_LESS_HEADS[kind]} ${ENGINE_LESS_LASTS}`;
+  return reader === 'model' ? `${told} ${ENGINE_LESS_TO_MODEL}` : told;
+}
+
 /** A save the store refused, with the reason it gives the caller. */
 export class SaveRefused extends Error {
   constructor(readonly reason: string) { super(reason); }
@@ -1485,6 +1518,29 @@ export class ApiStore {
    * where persistence falls back to the flat-JSON directory (legacy behaviour).
    */
   private connStore: ConnectionStore | null = null;
+  /** Set by an engine that started without engine.db: see {@link refuseChangesWithoutStore}. */
+  private changesRefused = false;
+
+  /**
+   * Called by an engine that started without engine.db. From then on a person's change to an API
+   * profile (a create, an edit, a delete, a new OAuth connection) is refused with a plain reason
+   * instead of being written to the flat files, which the next boot with engine.db does not read.
+   * So is every other save: the ones the engine makes by itself follow a token exchange
+   * (`fetch_token`), which such an engine refuses before anything is sent. A store never told this keeps the flat-file fallback, which tests and tools use on purpose.
+   */
+  refuseChangesWithoutStore(): void {
+    this.changesRefused = this.connStore === null;
+  }
+
+  /**
+   * The refusal for a person's `kind` of change on an engine without engine.db, or `null` when
+   * the change may go ahead. Asked by the entrances before anything is written or sent: the OAuth
+   * start before it redirects to the provider, a delete before it reads the profile.
+   */
+  engineLessRefusal(kind: EngineLessKind, reader: EngineLessReader): string | null {
+    if (!this.changesRefused || this.connStore !== null) return null;
+    return engineLessText(kind, reader);
+  }
 
   /** Wire the engine.db backing store so future `save`/`remove` persist there. */
   setConnectionStore(store: ConnectionStore): void {
@@ -2617,7 +2673,8 @@ export class ApiStore {
    * `grant-revoked` verdict) and, in the same engine.db transaction, the record of it: a provider's
    * erasure, held, or a closing record (`writeConnectionRecord`). A throw rolls both back and puts
    * the in-memory profile back. Without engine.db (the flat-JSON fallback) the refusal is saved as
-   * before and no record is written. `stamped` says whether the refused token is the one the
+   * before and no record is written, unless the engine refuses changes there
+   * ({@link ApiStore.refuseChangesWithoutStore}): then the save throws `SaveRefused`. `stamped` says whether the refused token is the one the
    * grant's stamp names; only then can the record be an erasure. Returns the kind of record
    * written, or `none`.
    */
@@ -2789,6 +2846,9 @@ export class ApiStore {
   }
 
   private _saveAdmit(profile: ApiProfile, dryRun: boolean): string | null {
+    // First, before anything below writes (the import's sentinel) or registers.
+    const engineLess = this.engineLessRefusal('save', 'model');
+    if (engineLess !== null) return engineLess;
     // What the boot would not read as a profile is not stored: it would come back as an entry
     // that holds every string it carries, against every other profile.
     if (missingRequiredField(profile)) {
@@ -2823,6 +2883,10 @@ export class ApiStore {
    * recorded. The flat-JSON path records nothing.
    */
   remove(id: string, apisDir?: string, options?: { readonly record?: ConnectionRecordKind | undefined }): boolean {
+    // The entrances ask `engineLessRefusal('remove', …)` first and answer with it; this throws only
+    // for one that did not, so that it removes nothing either.
+    const engineLess = this.engineLessRefusal('remove', 'model');
+    if (engineLess !== null) throw new SaveRefused(engineLess);
     // Before the profile goes, while it still names its slots. A write that throws keeps it in place.
     this._markLapsedReaders(id, apisDir);
     const removed = this._removeStored(id, apisDir, options?.record);
@@ -2952,6 +3016,8 @@ export class ApiStore {
    * frees every name it held.
    */
   deleteRefusal(profile: ApiProfile, secretStore: SecretStoreLike | null | undefined, asker: 'owner' | 'other'): string | null {
+    const engineLess = this.engineLessRefusal('remove', 'model');
+    if (engineLess !== null) return engineLess;
     if (isMandateConnection(profile)) return null;
     for (const e of this.unreadable.values()) {
       const names = recordedWrites(profile).filter((w) => {
