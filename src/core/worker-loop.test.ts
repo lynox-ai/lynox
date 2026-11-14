@@ -506,7 +506,16 @@ describe('WorkerLoop', () => {
     await fire(makeTask({ id: 't-ovr', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test/items/5?_method=DELETE', interval_minutes: 60 }) }));
     expect(mockFetchPinned).not.toHaveBeenCalled();
     expect(engine.createSession).not.toHaveBeenCalled();
-    expect(JSON.stringify(vi.mocked(taskManager.recordTaskRun).mock.calls)).toContain('The watched page was not read: its address carries a method override (such as `_method=DELETE`), which a server may run as a write instead of showing a page, Change the watch to the plain address of the page.');
+    expect(JSON.stringify(vi.mocked(taskManager.recordTaskRun).mock.calls)).toContain('The watched page was not read: its address carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page. Set the watch up again in the chat with the address of the page without the override or the mutation.');
+    // A GraphQL mutation in the query is a write too.
+    await fire(makeTask({ id: 't-gql', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test/graphql?query=mutation%7BdeleteAll%7D', interval_minutes: 60 }) }));
+    expect(mockFetchPinned).not.toHaveBeenCalled();
+    // A delegated session's watch: the read that is not sent is not recorded as one either.
+    const record = vi.fn();
+    (engine as unknown as { getAuditLog: () => unknown }).getAuditLog = () => ({ record });
+    await fire(makeTask({ id: 't-hovr', source: 'watch', effect: 'run_agent', created_by: 'mandate:h@x.test', watch_config: JSON.stringify({ url: 'https://x.test/items/5?_method=DELETE', interval_minutes: 60 }) }));
+    expect(record).not.toHaveBeenCalled();
+    expect(mockFetchPinned).not.toHaveBeenCalled();
     // Control: the same watch on the plain address is read.
     mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT', { status: 200 }));
     await fire(makeTask({ id: 't-ovr', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test/items/5', interval_minutes: 60 }) })).catch(() => undefined);
