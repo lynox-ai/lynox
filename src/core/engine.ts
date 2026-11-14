@@ -38,9 +38,10 @@ import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
+import { fireBeforeRunGate } from './metered-request.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenAllowed, connectionTokenHolders } from './profile-secret-view.js';
+import { connectionTokenHolders, resolveGuardAllows } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -476,6 +477,8 @@ export class Engine {
     driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
   } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
+  /** Set once every stored API profile is loaded; until then {@link resolveGuard} cannot tell which vault names hold a connection's token. */
+  private _profilesKnown = false;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _subjectStore: import('./subject-store.js').SubjectStore | null = null;
@@ -1041,6 +1044,8 @@ export class Engine {
         this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
         // The store as the inbox view reads it, for inbox_read.
         this._mailContext.hooks.inboxReader = runtime.inboxReader;
+        // Waiting rules for inbox_rule_propose.
+        this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -1055,7 +1060,7 @@ export class Engine {
       console.error(
         '[lynox] Inbox classifier rebootstrap on provider-switch failed — '
         + 'classifier disabled until next restart:',
-        err,
+        processErrorText(err, true),
       );
       // No runtime to hand over to: what the old one still holds is surfaced as a failed
       // classification, still within the bound.
@@ -1473,6 +1478,17 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] workflow content-schema migration failed: ${err instanceof Error ? err.message : String(err)} — retry next boot\n`);
       }
+
+      // The workflow stamps from before the digest get theirs, once per engine.db (marker v69),
+      // AFTER the backfill and the content migration so it sees the definitions as they run.
+      // A failure leaves the marker at 0 and every stamp without a digest not holding: those
+      // workflows wait for the owner (fail closed) until a later boot passes.
+      try {
+        const stamped = this.runHistory.stampExistingWorkflows();
+        if (stamped !== null && stamped > 0) process.stderr.write(`[lynox] workflow stamps: ${stamped} definition(s) bound to their steps\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] workflow stamp pass failed: ${processErrorText(err)} — retry next boot\n`);
+      }
     }
 
     // Initialize thread store (shares DB connection with RunHistory)
@@ -1531,7 +1547,7 @@ export class Engine {
           try {
             promptStore.expireEndedMandates(mandateLive);
           } catch (err: unknown) {
-            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${processErrorText(err)}\n`);
           }
         };
         sweepEnded();
@@ -1689,8 +1705,9 @@ export class Engine {
     }
 
     // Configure persistent budget caps, HTTP rate limits and the egress policy.
-    // Called with or without RunHistory: the limits that count against it are
-    // skipped when it failed to open, the egress policy is applied regardless.
+    // Called with or without RunHistory. Without it the daily/monthly caps cannot be
+    // checked and refuse every run (session-budget.ts), and the send-rate limits that
+    // count against it refuse rather than send uncounted; the egress policy is applied regardless.
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
     configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
   }
@@ -1725,6 +1742,10 @@ export class Engine {
     const secretResult = initSecrets(this.userConfig);
     this.secretVault = secretResult.vault;
     this.secretStore = secretResult.store;
+    // From the moment the store exists, a token of a connection whose mandate has ended is not
+    // handed out, to anyone. Set here, not after the profiles load: a guard set at the end of that
+    // block is never set when the block throws.
+    this.secretStore?.setResolveGuard((name) => this.resolveGuard(name));
     this.secretsBriefing = secretResult.secretsBriefing;
     for (const part of secretResult.briefingParts) {
       this.briefing = compose(
@@ -1916,6 +1937,9 @@ export class Engine {
         // Degraded (engine.db unavailable): fall back to the flat-JSON directory,
         // exactly as before S4b.
         loaded = this._apiStore.loadFromDirectory(apisDir);
+        // What a person changes from here on would land only in those files, which the next boot
+        // with engine.db does not read: refused with a plain reason instead.
+        this._apiStore.refuseChangesWithoutStore();
       }
       // Wire the in-memory store into tool context unconditionally — otherwise
       // a fresh install (zero profiles) leaves toolContext.apiStore undefined, so
@@ -1940,8 +1964,12 @@ export class Engine {
           process.stderr.write(`[lynox:vault-bindings] Migration failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }
-      // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
-      this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
+      // The stored profiles are loaded: the guard set with the secret store answers by them, and by
+      // the entries it could not read (`resolveGuardAllows`).
+      this._profilesKnown = true;
+      // The LLM client was built before this, when the guard handed out only the environment's and
+      // the platform's names: a Vertex project id kept in the vault is read now.
+      if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();
       if (loaded > 0) {
         const store = this._apiStore;
         const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
@@ -1965,8 +1993,11 @@ export class Engine {
       if (suggestedContext) {
         this.briefing = this.briefing ? `${this.briefing}\n\n${suggestedContext}` : suggestedContext;
       }
-    } catch {
+    } catch (err: unknown) {
       this._apiStore = null;
+      // From here on the guard hands out no vault name that could hold a connection's token: say so,
+      // or the owner's own secrets look missing with no cause anywhere.
+      process.stderr.write(`[lynox:api-store] API profiles could not be loaded; until the next start only the environment's and the platform's own secrets are handed out: ${processErrorText(err)}\n`);
     }
 
     // Register builtin tools
@@ -2411,6 +2442,8 @@ export class Engine {
           this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
           // The store as the inbox view reads it, for inbox_read.
           this._mailContext.hooks.inboxReader = runtime.inboxReader;
+          // Waiting rules for inbox_rule_propose.
+          this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —
@@ -2434,7 +2467,7 @@ export class Engine {
       } catch (err) {
         // Surface the failure so a silently-disabled feature does not
         // become a debugging black hole. Mail integration still works.
-        console.error('[lynox] Inbox bootstrap failed — feature disabled:', err);
+        console.error('[lynox] Inbox bootstrap failed — feature disabled:', processErrorText(err, true));
       }
     }
 
@@ -2932,7 +2965,7 @@ export class Engine {
       try {
         end();
       } catch (err: unknown) {
-        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${processErrorText(err)}\n`);
       }
     }
   }
@@ -2967,6 +3000,16 @@ export class Engine {
   getLegacyMemoryReason(): LegacyMemoryReason | null { return this._legacyMemory; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
+
+  /** The secret store's resolve guard: {@link resolveGuardAllows} over this engine's state. */
+  private resolveGuard(name: string): boolean {
+    return resolveGuardAllows({
+      profilesKnown: this._profilesKnown,
+      apiStore: this._apiStore,
+      ends: this._mandateEnds,
+      fromEnvironment: (n) => this.secretStore?.isEnvironmentSecret(n) === true,
+    }, name);
+  }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 
   /**
@@ -3370,10 +3413,15 @@ export class Engine {
   // ── Batch ──
 
   async batch(reqs: BatchRequest[], sessionConfig?: { systemPromptSuffix?: string | undefined }): Promise<string> {
+    const modelTier = this.config.model ?? 'deep';
+    // A batch is a paid model call outside `Session.run()`: the same admission as
+    // every other one — the daily and monthly spending caps, then the hooks.
+    const gate = await fireBeforeRunGate(this, modelTier);
+    if (gate.blockedReason !== null) throw new Error(gate.blockedReason);
     const result = await submitBatch(
       this.client, reqs,
       {
-        modelTier: this.config.model ?? 'deep',
+        modelTier,
         maxTokens: this.config.maxTokens ?? 8192,
         systemPrompt: this.config.systemPrompt,
         systemPromptSuffix: sessionConfig?.systemPromptSuffix,

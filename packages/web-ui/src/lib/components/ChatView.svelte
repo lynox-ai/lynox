@@ -114,6 +114,7 @@
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { canChooseModel, isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { speakHttpFailureText, transcribeFailureText } from './voice-failure.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -1075,8 +1076,7 @@
 
 						if (!res.ok || !res.body) {
 							removePlaceholder(placeholderIdx);
-							if (res.status === 503) addToast(t('chat.whisper_unavailable'), 'error');
-							else addToast(t('chat.transcribe_failed'), 'error');
+							addToast(res.ok ? t('chat.transcribe_failed') : transcribeFailureText(res.status), 'error');
 							return;
 						}
 
@@ -1509,7 +1509,7 @@
 		switch (err.code) {
 			case 'unavailable': return t('chat.speak_failed_unavailable');
 			case 'too_long':    return t('chat.speak_failed_too_long');
-			case 'http':        return `${t('chat.speak_failed_http')} ${String(err.status)}`;
+			case 'http':        return speakHttpFailureText(err.status);
 			case 'network':     return t('chat.speak_failed_network');
 			case 'stream':      return t('chat.speak_failed_stream');
 			case 'synth':       return t('chat.speak_failed_synth');

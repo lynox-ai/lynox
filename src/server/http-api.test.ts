@@ -8,6 +8,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
+import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
@@ -176,6 +177,13 @@ const mockGoogleHasUserScope = vi.fn().mockReturnValue(true);
 const mockGoogleGetAccessToken = vi.fn().mockResolvedValue('access-token');
 const DRIVE_DELETED = { status: 'deleted', deleted: 3, foldersKept: 2, problems: [] };
 const mockDeleteUploadedBackups = vi.fn().mockResolvedValue(DRIVE_DELETED);
+// The control plane's usage summary, as a managed instance would fetch it. Null by default,
+// which is also what the real fetch returns without the managed env vars.
+const mockCpUsageSummary = vi.fn().mockResolvedValue(null);
+vi.mock('../core/managed-usage-summary.js', async (importActual) => ({
+  ...(await importActual<typeof import('../core/managed-usage-summary.js')>()),
+  fetchControlPlaneUsageSummary: (...a: unknown[]) => mockCpUsageSummary(...a),
+}));
 vi.mock('../core/backup-upload-gdrive.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/backup-upload-gdrive.js')>()),
   deleteUploadedBackups: (...a: unknown[]) => mockDeleteUploadedBackups(...a),
@@ -329,6 +337,12 @@ vi.mock('../core/engine.js', () => ({
       deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
       getWorkflowAuthorship: mockHistoryGetWorkflowAuthorship,
       setWorkflowConfirmedAt: mockSetWorkflowConfirmedAt,
+      // The owner's stamp on a workflow (`workflow-stamp.ts`): by default a workflow here is the
+      // owner's, and stamped when it carries `confirmedAt`; the stamp tests override these.
+      workflowStampState: vi.fn((p: { confirmedAt?: string }) => (p.confirmedAt ? 'holds' : 'unconfirmed')),
+      workflowMandateShaped: vi.fn().mockReturnValue(false),
+      workflowStampDigest: vi.fn().mockReturnValue('digest-1'),
+      getWorkflowExact: vi.fn().mockReturnValue(undefined),
       getTask: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
@@ -562,6 +576,7 @@ vi.mock('../core/audio-duration.js', async (importActual) => ({
 // === Import after mocks ===
 
 const { LynoxHTTPApi } = await import('./http-api.js');
+const { configurePersistentBudget, resetPersistentBudget } = await import('../core/session-budget.js');
 
 // === Helpers ===
 
@@ -588,6 +603,12 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
     headers['Content-Type'] = 'application/json';
   }
   return fetch(`${baseUrl}${path}`, { ...opts, headers });
+}
+
+/** The confirm body the view sends: the digest from the schedule's stamp preview. */
+async function confirmBody(id: string): Promise<string> {
+  const shown = await (await jsonFetch(`/api/tasks/${id}/stamp-preview`)).json() as { expect: string };
+  return JSON.stringify({ expect: shown.expect });
 }
 
 /**
@@ -1290,6 +1311,66 @@ describe('LynoxHTTPApi', () => {
       expect(((await asOwner.json()) as { error: string }).error).toBe('Missing provider');
     });
 
+    // The search endpoint check is the owner's: it makes this instance send a
+    // request to an address the caller names, and setting up search is the owner's business.
+    it('refuses a mandate the search endpoint check, and lets the owner through', async () => {
+      repayRateWindow();
+      const probe = (token: string): Promise<Response> => fetch(`${baseUrl}/api/searxng/check`, {
+        method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const asMandate = await probe(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+      expect(asMandate.status).toBe(403);
+      expect(await asMandate.json()).toEqual({ error: 'Only the owner of this instance can check a search endpoint.' });
+      // Twin: the owner's cookie reaches the handler, which answers the empty body itself.
+      const asOwner = await probe(webUiLoginSession(TEST_SECRET, null)!.token);
+      expect(asOwner.status).toBe(400);
+      expect(((await asOwner.json()) as { error: string }).error).toBe('Missing url');
+    });
+
+    // On a provisioned instance a private address is the tenant host's network:
+    // the check answers only for the configured endpoint or a public address there. A self-hosted
+    // owner keeps checking a LAN endpoint.
+    it('checks a private search endpoint on a provisioned instance only when it is the configured one', async () => {
+      const { createServer } = await import('node:http');
+      const hits: string[] = [];
+      const lan = createServer((req, res) => { hits.push(req.url ?? ''); res.writeHead(200); res.end('ok'); });
+      await new Promise<void>(r => lan.listen(0, '127.0.0.1', () => r()));
+      onTestFinished(() => new Promise<void>(r => lan.close(() => r())));
+      const lanUrl = `http://127.0.0.1:${(lan.address() as { port: number }).port}`;
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      const check = async (url: string): Promise<{ status: number; body: unknown }> => {
+        repayRateWindow();
+        const res = await fetch(`${baseUrl}/api/searxng/check`, {
+          method: 'POST', headers: { cookie: `lynox_session=${owner}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+        });
+        return { status: res.status, body: await res.json() };
+      };
+      const keys = ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'SEARXNG_URL'] as const;
+      const saved = keys.map(k => process.env[k]);
+      onTestFinished(() => { keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; }); });
+      for (const k of keys) delete process.env[k];
+
+      // Self-hosted: the LAN endpoint is checked, and the request reaches it.
+      expect(await check(lanUrl)).toEqual({ status: 200, body: { healthy: true } });
+      expect(hits).toEqual(['/healthz']);
+
+      // Provisioned, not configured: refused before any request leaves.
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      expect(await check(lanUrl)).toEqual({ status: 400, body: { error: 'On this instance, a search endpoint must be the configured one or a public address' } });
+      expect(hits).toEqual(['/healthz']);
+
+      // Provisioned, named only in the config file, which the owner writes: still refused.
+      mockGetUserConfig.mockReturnValue({ searxng_url: lanUrl });
+      onTestFinished(() => { mockGetUserConfig.mockReturnValue({}); });
+      expect(await check(lanUrl)).toEqual({ status: 400, body: { error: 'On this instance, a search endpoint must be the configured one or a public address' } });
+      expect(hits).toEqual(['/healthz']);
+
+      // Provisioned, the control plane's endpoint (trailing slash on either side does not matter): checked.
+      process.env['SEARXNG_URL'] = `${lanUrl}/`;
+      expect(await check(lanUrl)).toEqual({ status: 200, body: { healthy: true } });
+      expect(hits).toEqual(['/healthz', '/healthz']);
+    });
+
     for (const [path, field, value, what] of [
       ['/api/auth/token', 'token', TEST_SECRET, 'see the access token'],
       ['/api/vault/key', 'key', 'TEST-VAULT-KEY-0000000000000000', 'see the vault key'],
@@ -1864,7 +1945,7 @@ describe('LynoxHTTPApi', () => {
         body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 1 * *', params: { month: '2026-06' } }),
       });
       expect(res.status).toBe(201);
-      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String), 'digest-1');
       // Evicts the in-memory pipeline cache so the WorkerLoop reads the
       // now-confirmed blob at fire time (else the confirmedAt gate breaks it).
       expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
@@ -1963,7 +2044,7 @@ describe('LynoxHTTPApi', () => {
       storeWf({ mode: 'interactive', steps: [{ id: 'pick', task: 'ask_user which month' }] });
       const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *', params: { month: '2026-06' } }) });
       expect(res.status).toBe(201);
-      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String), 'digest-1');
       expect(mockTaskCreatePipeline).toHaveBeenCalledWith(expect.objectContaining({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }));
     });
 
@@ -2062,7 +2143,7 @@ describe('LynoxHTTPApi', () => {
           await withGrantServices(async () => {
             const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES }) });
             expect(res.status).toBe(201);
-            expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+            expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String), 'digest-1');
             expect(setGrant).not.toHaveBeenCalled();
           });
         });
@@ -2108,7 +2189,7 @@ describe('LynoxHTTPApi', () => {
               contractJson: expect.stringContaining('"origin":"reviewed"'),
             }), expect.objectContaining({
               triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String), grantId,
-            }), expect.any(String));
+            }), expect.any(String), expect.objectContaining({ id: 'wf-sched' }));
             expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled(); // the grant write carries the confirm
             expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
           });
@@ -3881,6 +3962,116 @@ describe('LynoxHTTPApi', () => {
       }, { signalled: true });
     });
 
+    // A chat run that works on while a scheduled run's question waits in the same thread. The
+    // thread holds one open question, and it is not the run's: the run must not be taken over as
+    // if it were parked on it, and the question must not lapse with the run.
+    async function withRunBesideQuestion(
+      sid: string,
+      body: (ctx: {
+        prompts: { getById: (id: string) => { status: string; closed_reason: string | null } | undefined };
+        slots: Map<string, unknown>;
+        /** The scheduled run's question. */
+        questionId: string;
+      }) => Promise<void>,
+    ): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        segments_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        answer_error TEXT,
+        multi_select INTEGER,
+        payload_json TEXT,
+        origin_json TEXT,
+        trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        closed_reason TEXT, expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      try {
+        const questionId = realPromptStore.insertAskUser(sid, 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+        let finishWork!: () => void;
+        const work = new Promise<void>((r) => { finishWork = r; });
+        // The chat run works, without a question of its own, until the test lets it finish or
+        // `session.abort()` stops it, as the real agent loop does: a takeover then frees the slot.
+        mockSessionRun.mockImplementationOnce(async () => { await work; return 'done'; });
+        mockSessionAbort.mockImplementation(() => { finishWork(); });
+        // Not awaited: a run that writes nothing yet sends no headers either.
+        const runRes = jsonFetch(`/api/sessions/${sid}/run`, {
+          method: 'POST',
+          body: JSON.stringify({ task: 'sort the invoices', protocol: 1 }),
+        }).then((r) => r.text()).catch(() => undefined);
+        for (let i = 0; i < 200 && !slots.has(sid); i++) await new Promise<void>((r) => setTimeout(r, 5));
+        expect(slots.has(sid), 'positive control: the run holds its slot').toBe(true);
+        try {
+          await body({ prompts: realPromptStore, slots, questionId });
+        } finally {
+          finishWork();
+          await runRes;
+          await expectSlotReclaimed(slots, sid);
+        }
+      } finally {
+        mockSessionAbort.mockImplementation(() => undefined);
+        engineRef.getPromptStore = originalGetPromptStore;
+        db.close();
+      }
+    }
+
+    // The stream is marked dead by hand, as in the takeover test above: the server does not see
+    // the connection close on this route today, so no test can drop it for real.
+    // Only the question is ruled out as a reason. That a run silent past the stale window is still
+    // taken over, with the scheduled question left open, is read from the code, not tested here.
+    it('a scheduled question does not let a second message take over a working run', async () => {
+      repayRateWindow();
+      await withRunBesideQuestion('second-beside-1', async ({ prompts, slots, questionId }) => {
+        (slots.get('second-beside-1') as { streamAlive: boolean }).streamAlive = false;
+        const next = await jsonFetch('/api/sessions/second-beside-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'something else', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+        expect(slots.has('second-beside-1')).toBe(true);
+        expect(prompts.getById(questionId)?.status).toBe('pending');
+      });
+    });
+
+    it('stopping a run working beside a scheduled question frees it and leaves the question open', async () => {
+      repayRateWindow();
+      await withRunBesideQuestion('abort-beside-1', async ({ prompts, slots, questionId }) => {
+        const abortRes = await jsonFetch('/api/sessions/abort-beside-1/abort', { method: 'POST' });
+        expect(abortRes.status).toBe(200);
+        await expectSlotReclaimed(slots, 'abort-beside-1');
+        expect(prompts.getById(questionId)?.status).toBe('pending');
+      });
+    });
+
     it('POST /abort reclaims a parked run even when the Session is already gone', async () => {
       await withParkedRun('abort-parked-2', async ({ prompts, slots }) => {
         mockSessionGet.mockReturnValueOnce(undefined);
@@ -4580,6 +4771,38 @@ describe('LynoxHTTPApi', () => {
           store.insertAskUser('chat-thread', 'Continue?', ['Yes', 'No']);
           const here = (await activeRuns()).filter((r) => r.threadId === 'chat-thread');
           expect(here).toEqual([expect.objectContaining({ runId: 'chat-run', status: 'awaiting_input', attachable: true })]);
+        });
+      });
+
+      it('reads a chat run working beside a scheduled run\'s earlier question as running, listed once', async () => {
+        repayRateWindow();
+        await withQuestions(async (reg, store, db) => {
+          const id = store.insertAskUser('shared-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          // Asked a minute before the chat run started: not the run's own question.
+          db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
+          reg.start('shared-thread', 'chat-run');
+          const here = (await activeRuns()).filter((r) => r.threadId === 'shared-thread');
+          expect(here.map((r) => [r.runId, r.status, r.attachable])).toEqual([['chat-run', 'running', true]]);
+        });
+      });
+
+      it('reads it as running in a thread\'s transcript too, and as waiting for a question asked after it started', async () => {
+        repayRateWindow();
+        await withQuestions(async (reg, store, db) => {
+          const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+          const orig = engineRef.getThreadStore;
+          engineRef.getThreadStore = (): unknown => ({ getThread: () => ({ id: 'shared-thread' }), getMessages: () => [] });
+          try {
+            const activeRun = async (): Promise<{ status: string } | null> =>
+              (await (await jsonFetch('/api/threads/shared-thread/messages')).json() as { activeRun: { status: string } | null }).activeRun;
+            const id = store.insertAskUser('shared-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+            db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
+            reg.start('shared-thread', 'chat-run');
+            expect((await activeRun())?.status).toBe('running');
+            // Asked after the run started: read as the run's own question.
+            db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '+1 minute') WHERE id = ?`).run(id);
+            expect((await activeRun())?.status).toBe('awaiting_input');
+          } finally { engineRef.getThreadStore = orig; }
         });
       });
 
@@ -8123,6 +8346,35 @@ describe('LynoxHTTPApi', () => {
       expect(body['used_cents']).toBe(1969);
     });
 
+    it('managed: the control plane lifts used_cents only when it sends its billing period', async () => {
+      repayRateWindow();
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+      onTestFinished(() => { vi.stubEnv('LYNOX_BILLING_TIER', ''); mockCpUsageSummary.mockReset(); mockCpUsageSummary.mockResolvedValue(null); });
+      const local = 1500 + 462 + 7;
+      const daily = [
+        { date: '2026-11-02', cost_cents: 1500 },
+        { date: '2026-11-05', cost_cents: 462 },
+        { date: '2026-11-06', cost_cents: 7 },
+      ];
+      const read = async (cp: Record<string, unknown>): Promise<number> => {
+        api._clearUsageCache();
+        mockCpUsageSummary.mockResolvedValueOnce(cp);
+        mockHistoryGetUsageSummary.mockReturnValueOnce({
+          period: { label: 'Nov', start_iso: '2026-11-01T00:00:00.000Z', end_iso: '2026-12-01T00:00:00.000Z', source: 'calendar-month' },
+          used_cents: local, by_model: [], by_kind: [], daily,
+        });
+        const res = await jsonFetch('/api/usage/current');
+        expect(res.status).toBe(200);
+        return (await res.json() as { used_cents: number }).used_cents;
+      };
+      // No period: the control plane counted some other window, the engine's own month stands.
+      expect(await read({ managed: true, budget_cents: 3000, used_cents: 9000 })).toBe(local);
+      // With its period: the same window, so the larger count stands.
+      expect(await read({ managed: true, budget_cents: 3000, used_cents: 9000, period: { start_iso: '2026-11-03T00:00:00.000Z', end_iso: '2026-12-03T00:00:00.000Z', source: 'stripe-billing' } })).toBe(9000);
+      expect(mockCpUsageSummary).toHaveBeenCalledTimes(2);
+    });
+
     it('summary used_cents matches by_kind sum when daily and by_kind agree', async () => {
       mockHistoryGetUsageSummary.mockReturnValueOnce({
         period: { label: 'Apr', start_iso: '2026-04-01T00:00:00.000Z', end_iso: '2026-05-01T00:00:00.000Z', source: 'calendar-month' },
@@ -10458,7 +10710,7 @@ describe('LynoxHTTPApi', () => {
         ['/api/tasks/bulk-r/', 'PATCH', JSON.stringify({ schedule_cron: '1h' })],
         ['/api/tasks/bulk-r/complete', 'POST'],
         ['/api/tasks/bulk-r', 'PATCH', JSON.stringify({ enabled: false })],
-        ['/api/tasks/bulk-r/confirm', 'POST'],
+        ['/api/tasks/bulk-r/confirm', 'POST', await confirmBody('bulk-r')],
       ];
       for (const [path, method, body] of calls) {
         const res = await jsonFetch(path.replace(/\/$/, ''), { method, ...(body ? { body } : {}) });
@@ -10477,16 +10729,44 @@ describe('LynoxHTTPApi', () => {
 
     // triggers-consent — the human consent surface.
     it('POST /api/tasks/:id/confirm confirms a trigger (200)', async () => {
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' });
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') });
       expect(res.status).toBe(200);
       const body = await res.json() as { confirmed_at: string };
       expect(body.confirmed_at).toBeTruthy();
     });
 
-    it('POST /api/tasks/:id/confirm returns 404 for an unknown trigger', async () => {
+    it('POST /api/tasks/:id/confirm returns 404 for a trigger gone by the time it is stamped', async () => {
       mockConfirmTrigger.mockReturnValueOnce(undefined);
-      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST' });
+      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: await confirmBody('nope') });
       expect(res.status).toBe(404);
+    });
+
+    it('POST /api/tasks/:id/confirm returns 404 for a trigger the history does not hold, and stamps nothing', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = ref['getRunHistory'];
+      ref['getRunHistory'] = () => ({ getTrigger: () => undefined });
+      try {
+        mockConfirmTrigger.mockClear();
+        const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'any' }) });
+        expect(res.status).toBe(404);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
+      } finally {
+        ref['getRunHistory'] = saved;
+      }
+    });
+
+    it.each([
+      ['no body', undefined],
+      ['an empty object', '{}'],
+      ['a digest that is not a string', JSON.stringify({ expect: 1 })],
+    ])('POST /api/tasks/:id/confirm with %s stamps nothing (400): the owner confirms from the preview', async (_label, body) => {
+      mockConfirmTrigger.mockClear();
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', ...(body !== undefined ? { body } : {}) });
+      expect(res.status).toBe(400);
+      const answer = (await res.json()) as { error: string; code: string };
+      expect(answer.error).toContain('"expect" is required');
+      expect(answer.code).toBe('expect_required');
+      expect(mockConfirmTrigger).not.toHaveBeenCalled();
     });
 
     // ── Run now, and the two different 409s ──────────────────────────────────
@@ -10923,6 +11203,9 @@ describe('LynoxHTTPApi', () => {
       const history = {
         getTriggerStampConnections: () => ({ confirmedAt: AT, stampConnections: raw }),
         getPlannedPipeline: () => undefined,
+        // The list also says whether a plan's workflow waits for the owner's stamp; not the subject here.
+        getWorkflowExact: (id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', goal: '', steps: [], reasoning: '', estimatedCost: 0, createdAt: AT, executed: false } : undefined),
+        workflowStampState: () => 'holds',
         getWorkflowAuthorship: () => ({ createdBy: 'mandate:eva@kanzlei.example', createdMandateId: MID, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-10-01 00:00:00' }),
       };
       const onWorkflow = { id: 'trg-wf', title: 'w', effect: 'run_workflow', pipeline_id: 'wf-eva', created_by: 'owner', confirmed_at: AT };
@@ -10955,13 +11238,13 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('GET /api/triggers adds the two flags, and the pause\'s, and nothing else to a row', async () => {
+    it('GET /api/triggers adds the two flags, the pause\'s, and whether its workflow waits for a stamp, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
       // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's
       // (`triggerForRoute`), on by default since the takeover is in the view.
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
-        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'running', 'stoppable', 'title']);
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'running', 'stoppable', 'title', 'workflow_awaits_stamp']);
       });
     });
 
@@ -11993,7 +12276,7 @@ describe('LynoxHTTPApi', () => {
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
     });
 
-    it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb', async () => {
+    it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb, and its filters as an empty set', async () => {
       const host = 'acme.myshopify.com';
       const source = parseListSource(host, { form: 'shopify', after: { seo_title: 'x' } }, 'PATCH', () => null);
       const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
@@ -12002,9 +12285,11 @@ describe('LynoxHTTPApi', () => {
       expect(shown['listFirstPage']).toBe(`https://${host}/admin/api/2026-10/graphql.json`);
       expect(shown['list']).toMatchObject({ state: 'pending', method: null, after: { seo_title: 'x' } });
       expect(shown['writeFormNote']).toBeNull();
+      // A store's product list without a filter names an empty set, so the page says every status is read.
+      expect(shown['listFilters']).toEqual({});
     });
 
-    it('shows a list whose stored filters were changed past what a parse takes by its host, without failing, and a withdrawn path as its address', async () => {
+    it('shows a list whose stored filters were changed past what a parse takes by its host, without failing and with no store filters, and a withdrawn path as its address', async () => {
       repayRateWindow();
       const host = 'shop.example.com';
       const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
@@ -12013,7 +12298,10 @@ describe('LynoxHTTPApi', () => {
       bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, filters: { category: ['12', '13'] } })), planned.status.id);
       const res = await jsonFetch(`/api/bulk/runs/${planned.status.id}`);
       expect(res.status).toBe(200);
-      expect(((await res.json()) as Record<string, unknown>)['listFirstPage']).toBe(host);
+      const changed = await res.json() as Record<string, unknown>;
+      expect(changed['listFirstPage']).toBe(host);
+      // A list that is not a store's products has no filters to show, not an empty set.
+      expect(changed['listFilters']).toBeNull();
       // A run whose path was withdrawn since still has an address, and shows it.
       bulkDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(bulkDb.enc(JSON.stringify({ ...source, path: '/wp-json/wc/v3/orders' })), planned.status.id);
       const withdrawn = await (await jsonFetch(`/api/bulk/runs/${planned.status.id}`)).json() as Record<string, unknown>;
@@ -13389,6 +13677,8 @@ describe('LynoxHTTPApi', () => {
       beforeEach(() => {
         claimDir = mkdtempSync(join(tmpdir(), 'lynox-route-claim-'));
         claimHistory = new RunHistory(join(claimDir, 'history.db'));
+        // The workflow the claims are taken for is the owner's, stamped (`workflow-stamp.ts`).
+        vi.spyOn(claimHistory, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
         // clearAllMocks (global beforeEach) clears CALLS, not implementations — an
         // implementation left standing here would reach every sibling describe.
         mockRunSavedWorkflow.mockReset();
@@ -17960,6 +18250,8 @@ describe('metered audio routes: managed credit gate + debit', () => {
       // touches extractSessionContext / transcribeWithStream — so a denied
       // tenant gets a 402 and the pool key is never used for STT.
       mockEngineHooks = [{ onBeforeRun: vi.fn().mockRejectedValue(new Error('AI budget for this period reached.')) }];
+      // Voxtral spends on a provider key, so it is gated; local whisper.cpp is free and is not.
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
       const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
       expect(res.status).toBe(402);
       const body = await res.json() as { error: string };
@@ -17969,19 +18261,50 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(mockTranscribeWithStream).not.toHaveBeenCalled();
     });
 
-    it('does not debit when the active STT backend is local whisper (free, no pool-key spend)', async () => {
+    it('neither gates nor debits when the active STT backend is local whisper (free), even at the spending cap', async () => {
       const onBeforeRun = vi.fn();
       const onAfterRun = vi.fn();
       mockEngineHooks = [{ onBeforeRun, onAfterRun }];
       mockGetActiveTranscribeProvider.mockReturnValue({ name: 'whisper-cpp' });
       mockGetAudioDurationSec.mockResolvedValue(120);
-      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      let res: Response;
+      try {
+        res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      } finally {
+        resetPersistentBudget();
+      }
       expect(res.status).toBe(200);
       await readSse(res);
-      expect(onBeforeRun).toHaveBeenCalledOnce();
+      expect(onBeforeRun).not.toHaveBeenCalled();
       expect(mockTranscribeWithStream).toHaveBeenCalledOnce();
       // Local whisper is free — no pool-key spend, so no debit even with a known duration.
       expect(onAfterRun).not.toHaveBeenCalled();
+    });
+
+    it('blocks Voxtral with 402 at the daily spending cap, with no hooks (self-host) — provider never touched', async () => {
+      repayRateWindow();
+      mockEngineHooks = [];
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      let res: Response;
+      try {
+        res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      } finally {
+        resetPersistentBudget();
+      }
+      expect(res.status).toBe(402);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe('Daily spending cap ($5) reached. Today: $5.00.');
+      expect(mockTranscribeWithStream).not.toHaveBeenCalled();
     });
 
     it('debits Voxtral pool-key STT via onAfterRun ($0.003/min) keyed on the gate run id', async () => {
@@ -21447,11 +21770,198 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       storeWf();
       const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
       expect(res.status).toBe(201);
-      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+      // Stamped over the definition the schedule's checks judged, and no other.
+      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String), 'digest-1');
+    });
+
+    // The owner stamps a workflow a mandate shaped in its own
+    // act, after seeing its steps; scheduling it does not, and nothing runs it before.
+    describe('the owner\'s stamp on a workflow a mandate shaped', () => {
+      type Hist = Record<string, ReturnType<typeof vi.fn>>;
+      const hist = (): Hist => (api as unknown as { engine: { getRunHistory: () => Hist } }).engine.getRunHistory();
+      const MANDATE_WF = {
+        id: 'wf-sched', name: 'Report', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+        executed: false, template: true, mode: 'autonomous', on_failure: 'stop', parameters: [{ name: 'month', description: '', type: 'string', source: 'user_input', defaultValue: 'May' }],
+        steps: [
+          { id: 's1', task: 'look up the report', tools: ['memory_recall'] },
+          { id: 's2', task: 'post it', tool: 'http_request', input_template: { url: 'https://api.example.com/{{params.month}}', headers: { Authorization: 'secret:CRM_TOKEN' } } },
+        ],
+      };
+      function shaped(state: 'holds' | 'awaits_owner_stamp' = 'awaits_owner_stamp'): () => void {
+        const h = hist();
+        const saved = { s: h['workflowStampState']!.getMockImplementation(), m: h['workflowMandateShaped']!.getMockImplementation(), g: h['getWorkflowExact']!.getMockImplementation() };
+        h['workflowStampState']!.mockImplementation(() => state);
+        h['workflowMandateShaped']!.mockImplementation(() => true);
+        h['getWorkflowExact']!.mockImplementation((id: string) => (id === 'wf-sched' ? structuredClone(MANDATE_WF) : undefined));
+        return () => {
+          h['workflowStampState']!.mockImplementation(saved.s ?? (() => 'holds'));
+          h['workflowMandateShaped']!.mockImplementation(saved.m ?? (() => false));
+          h['getWorkflowExact']!.mockImplementation(saved.g ?? (() => undefined));
+        };
+      }
+
+      it('scheduling it is refused with the code and the id, and stamps nothing', async () => {
+        storeWf();
+        const restore = shaped();
+        try {
+          mockSetWorkflowConfirmedAt.mockClear();
+          const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
+          expect(res.status).toBe(409);
+          expect(await res.json()).toMatchObject({ code: 'workflow_awaits_stamp', pipelineId: 'wf-sched' });
+          expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+        } finally { restore(); }
+      });
+
+      it('scheduling the owner\'s own workflow whose steps changed after its stamp is refused too, and stamps nothing', async () => {
+        storeWf();
+        const restore = shaped();
+        hist()['workflowMandateShaped']!.mockImplementation(() => false);
+        try {
+          mockSetWorkflowConfirmedAt.mockClear();
+          mockTaskCreatePipeline.mockClear();
+          const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { code: string }).code).toBe('workflow_awaits_stamp');
+          expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+          expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+        } finally { restore(); }
+      });
+
+      it('a stamp refused because the steps changed meanwhile makes no schedule', async () => {
+        storeWf();
+        mockTaskCreatePipeline.mockClear();
+        mockSetWorkflowConfirmedAt.mockReturnValueOnce(false);
+        const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'steps_changed', pipelineId: 'wf-sched' });
+        expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+      });
+
+      it('the confirm counts the one-shots the wait switched off, and switches none on', async () => {
+        const restore = shaped();
+        const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const orig = engineRef['getTaskManager'];
+        const setEnabled = vi.fn();
+        const waited = `${workflowAwaitsStampResult('wf-sched')} It was switched off; switch it on again once its steps are stamped.`;
+        const hook = `${workflowAwaitsStampResult('wf-sched')} The trigger was switched off; switch it on again once its steps are stamped.`;
+        const row = (over: Record<string, unknown>): Record<string, unknown> => ({ pipeline_id: 'wf-sched', enabled: 0, schedule_cron: null, watch_config: null, last_run_status: 'halted', last_run_result: waited, ...over });
+        engineRef['getTaskManager'] = () => ({ setEnabled, listTriggers: () => [
+          row({}), row({ id: 'b' }),
+          // A webhook the wait switched off: still off too.
+          row({ source: 'webhook', last_run_status: 'failed', last_run_result: hook }),
+          row({ enabled: 1 }), row({ enabled: undefined }), row({ pipeline_id: 'wf-other' }),
+          // Off for another reason (a bulk run at its maximum, switched off by hand): not the wait's.
+          row({ last_run_result: 'Bulk run halted at its approved maximum.' }),
+        ] });
+        try {
+          const ok = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+          expect(ok.status).toBe(200);
+          expect(((await ok.json()) as { stillOff: number }).stillOff).toBe(3);
+          expect(setEnabled).not.toHaveBeenCalled();
+        } finally { engineRef['getTaskManager'] = orig; restore(); }
+      });
+
+      it('CONTROL: once the owner\'s stamp holds, scheduling it goes ahead', async () => {
+        storeWf();
+        const restore = shaped('holds');
+        try {
+          expect((await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) })).status).toBe(201);
+        } finally { restore(); }
+      });
+
+      it('the library\'s Run is refused with the code and the id', async () => {
+        storeWf();
+        const restore = shaped();
+        try {
+          const res = await jsonFetch('/api/workflows/wf-sched/run', { method: 'POST', body: '{}' });
+          expect(res.status).toBe(409);
+          expect(await res.json()).toMatchObject({ code: 'workflow_awaits_stamp', pipelineId: 'wf-sched' });
+        } finally { restore(); }
+      });
+
+      it('the preview shows each step as it runs, with the captured call and the tools it gets, and no secret', async () => {
+        const restore = shaped();
+        try {
+          const res = await jsonFetch('/api/workflows/wf-sched/stamp-preview');
+          expect(res.status).toBe(200);
+          const shown = await res.json() as Record<string, unknown> & { steps: Array<Record<string, unknown>> };
+          expect(shown).toMatchObject({ expect: 'digest-1', stampedAt: null, changedBy: 'mandate', awaitsStamp: true, mode: 'autonomous', onFailure: 'stop', limits: null, contract: null });
+          expect(shown['parameters']).toEqual([{ name: 'month', required: false, default: 'May' }]);
+          expect(shown.steps[0]).toEqual({ id: 's1', task: 'look up the report', tool: null, inputTemplate: null, tools: ['memory_recall'], model: null, role: null, roleGrant: null, effort: null, thinking: null, timeoutMs: null, inputFrom: null });
+          expect(shown.steps[1]).toMatchObject({ id: 's2', tool: 'http_request', inputTemplate: MANDATE_WF.steps[1]!.input_template });
+          // A step that names no tools gets the inline pool, and the replayed tool with it; never bash silently.
+          expect(shown.steps[1]!['tools']).toContain('http_request');
+          expect(shown.steps[1]!['tools']).not.toContain('bash');
+          // A secret reference stays its name.
+          expect(JSON.stringify(shown)).toContain('secret:CRM_TOKEN');
+          // Exact id only: a prefix is no workflow.
+          expect((await jsonFetch('/api/workflows/wf-sch/stamp-preview')).status).toBe(404);
+        } finally { restore(); }
+      });
+
+      it('the confirm needs the preview\'s digest, stamps only that, and a changed one is refused', async () => {
+        const restore = shaped();
+        try {
+          mockSetWorkflowConfirmedAt.mockClear();
+          const none = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: '{}' });
+          expect(none.status).toBe(400);
+          expect(((await none.json()) as { code: string }).code).toBe('expect_required');
+          expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+          mockSetWorkflowConfirmedAt.mockReturnValueOnce(false);
+          const stale = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-0' }) });
+          expect(stale.status).toBe(409);
+          expect(((await stale.json()) as { code: string }).code).toBe('steps_changed');
+          const ok = await jsonFetch('/api/workflows/wf-sched/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) });
+          expect(ok.status).toBe(200);
+          expect(mockSetWorkflowConfirmedAt).toHaveBeenLastCalledWith('wf-sched', expect.any(String), 'digest-1');
+          expect((await jsonFetch('/api/workflows/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'digest-1' }) })).status).toBe(404);
+        } finally { restore(); }
+      });
+
+      it('the library marks the workflow and says who reads', async () => {
+        const restore = shaped();
+        mockHistoryGetPlannedPipelines.mockReturnValueOnce([{ id: 'wf-sched', manifest_name: 'Report', manifest_json: JSON.stringify(MANDATE_WF), step_count: 2, started_at: '2026-01-01' }]);
+        try {
+          const body = await (await jsonFetch('/api/workflows/library')).json() as { viewer: string; workflows: Array<{ id: string; awaitsStamp: boolean }> };
+          expect(body.viewer).toBe('owner');
+          expect(body.workflows.find((w) => w.id === 'wf-sched')?.awaitsStamp).toBe(true);
+        } finally { restore(); }
+      });
+
+      it('the library and the preview mark the owner\'s own workflow whose steps changed after its stamp, as the run does', async () => {
+        const restore = shaped();
+        const h = hist();
+        h['workflowMandateShaped']!.mockImplementation(() => false);
+        mockHistoryGetPlannedPipelines.mockReturnValueOnce([{ id: 'wf-sched', manifest_name: 'Report', manifest_json: JSON.stringify(MANDATE_WF), step_count: 2, started_at: '2026-01-01' }]);
+        try {
+          const lib = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; awaitsStamp: boolean }> };
+          expect(lib.workflows.find((w) => w.id === 'wf-sched')?.awaitsStamp).toBe(true);
+          const shown = await (await jsonFetch('/api/workflows/wf-sched/stamp-preview')).json() as { awaitsStamp: boolean; changedBy: string };
+          expect(shown).toMatchObject({ awaitsStamp: true, changedBy: 'owner' });
+        } finally { restore(); }
+      });
+
+      it('the preview names a step\'s role, effort, thinking and time limit, and takes a definition without steps', async () => {
+        const restore = shaped();
+        const h = hist();
+        h['getWorkflowExact']!.mockImplementation(() => ({ ...structuredClone(MANDATE_WF), steps: [{ id: 's1', task: 't', role: 'researcher', effort: 'high', thinking: 'deep', timeout_ms: 5000 }] }));
+        try {
+          const shown = await (await jsonFetch('/api/workflows/wf-sched/stamp-preview')).json() as { steps: Array<Record<string, unknown>> };
+          expect(shown.steps[0]).toMatchObject({ role: 'researcher', effort: 'high', thinking: 'deep', timeoutMs: 5000 });
+          // The role's own grant, as the built-in role states it.
+          const { getRole } = await import('../core/roles.js');
+          const researcher = getRole('researcher')!;
+          expect(shown.steps[0]!['roleGrant']).toEqual({ model: researcher.model, effort: researcher.effort, allowTools: researcher.allowTools ? [...researcher.allowTools] : null, denyTools: researcher.denyTools ? [...researcher.denyTools] : null, readOnly: researcher.readOnly === true });
+          h['getWorkflowExact']!.mockImplementation(() => ({ ...structuredClone(MANDATE_WF), steps: undefined }));
+          const empty = await jsonFetch('/api/workflows/wf-sched/stamp-preview');
+          expect(empty.status).toBe(200);
+          expect(((await empty.json()) as { steps: unknown[] }).steps).toEqual([]);
+        } finally { restore(); }
+      });
     });
 
     it('confirms a schedule, recorded as the owner, and its changes leave no mark', async () => {
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockConfirmTrigger).toHaveBeenCalledWith('task-1', undefined, 'owner', undefined);
       await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
       expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
@@ -21509,9 +22019,10 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: null, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-secret-1' })] });
 
-        // Without the digest: stamped without a list, as every confirm was before.
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
-        expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+        // Without the digest: nothing is stamped, not even without a list.
+        mockConfirmTrigger.mockClear();
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(400);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
 
         // A mandate's backup or notice never uses a connection: nothing is listed or shown for it.
         for (const effect of ['backup', 'notify']) {
@@ -21586,7 +22097,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     it('confirming a workflow schedule never stamps the workflow, which every schedule naming it shares', async () => {
       mockConfirmTrigger.mockReturnValueOnce({ id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-sched', confirmed_at: '2026-10-08T00:00:00.000Z' });
       storeWf(); // an unstamped workflow
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
     });
 
@@ -22039,7 +22550,6 @@ describe('mandate stance of every user route', () => {
       'POST /api/push/subscribe own',
       'POST /api/push/test own',
       'POST /api/push/unsubscribe own',
-      'POST /api/searxng/check free',
       'POST /api/secrets/validate-key free',
       'POST /api/sessions own',
       'POST /api/sessions/stance-probe/abort own',
@@ -22116,7 +22626,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });
@@ -24361,5 +24871,56 @@ describe('moveMistralEndpointsToEu', () => {
     const update = { api_base_url: 'https://api.mistral.ai.evil.com/v1' };
     moveMistralEndpointsToEu(update);
     expect(update.api_base_url).toBe('https://api.mistral.ai.evil.com/v1');
+  });
+});
+
+// Rule names, confirming and the filter by rule over the wire: the route maps the body and the
+// query itself, which the handler tests in `integrations/inbox/api.test.ts` do not reach.
+describe('inbox rules over HTTP: name, confirm, filter by rule', () => {
+  type Host = { engine: Record<string, unknown> };
+  let orig: unknown;
+  let close: () => void = () => {};
+  let state: import('../integrations/inbox/state.js').InboxStateDb;
+
+  beforeEach(async () => {
+    repayRateWindow();
+    const { MailStateDb } = await import('../integrations/mail/state.js');
+    const { InboxStateDb } = await import('../integrations/inbox/state.js');
+    const { InboxRulesLoader } = await import('../integrations/inbox/rules-loader.js');
+    const mail = new MailStateDb({ path: ':memory:' });
+    close = () => mail.close();
+    state = new InboxStateDb(mail.getConnection());
+    const runtime = { state, rules: new InboxRulesLoader(state), coldStartTracker: {}, sensitiveMode: 'skip', contactResolver: null };
+    const host = api as unknown as Host;
+    orig = host.engine['getInboxRuntime'];
+    host.engine['getInboxRuntime'] = () => runtime;
+  });
+  afterEach(() => {
+    (api as unknown as Host).engine['getInboxRuntime'] = orig;
+    close();
+  });
+
+  it('stores the name the owner gives, confirms a waiting rule, and lists the items one rule filed', async () => {
+    const created = await jsonFetch('/api/inbox/rules', {
+      method: 'POST',
+      body: JSON.stringify({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'a@x', bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Belege' }),
+    });
+    expect(created.status).toBe(201);
+    const ruleId = ((await created.json()) as { id: string }).id;
+    expect(state.listRulesForAccount('acct-1').map((r) => r.name)).toEqual(['Belege']);
+
+    const p = state.proposeRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'b@x', name: 'B' }, 10);
+    const waiting = p.ok ? p.id : '';
+    expect((await jsonFetch(`/api/inbox/rules/${waiting}/confirm`, { method: 'POST', body: '{}' })).status).toBe(200);
+    expect(state.listConfirmedRulesForAccount('acct-1').map((r) => r.id)).toContain(waiting);
+    expect((await jsonFetch('/api/inbox/rules/rul_missing/confirm', { method: 'POST', body: '{}' })).status).toBe(404);
+
+    const base = { accountId: 'acct-1', channel: 'email' as const, bucket: 'requires_user' as const, confidence: 1, reasonDe: 'r', classifiedAt: new Date(), classifierVersion: 'v' };
+    state.insertItem({ ...base, threadKey: 'filed', matchedRuleId: ruleId });
+    state.insertItem({ ...base, threadKey: 'other' });
+    const listed = await jsonFetch(`/api/inbox/items?ruleId=${encodeURIComponent(ruleId)}`);
+    expect(listed.status).toBe(200);
+    expect(((await listed.json()) as { items: Array<{ threadKey: string }> }).items.map((i) => i.threadKey)).toEqual(['filed']);
+    expect((await jsonFetch('/api/inbox/items?ruleId=itm_1')).status).toBe(400);
   });
 });

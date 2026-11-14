@@ -146,6 +146,9 @@ function makeHarness(opts?: {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
+  // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+  // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+  vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
   const engineDb = new EngineDb(join(dir, 'engine.db'));
   history.setVerbGraph(engineDb);
   closers.push(() => { try { history.close(); } catch { /* twice is fine */ } });
@@ -737,6 +740,8 @@ function makeClassHarness(opts: {
       updateTrigger: (_id: string, patch: unknown) => { reArms.push(patch); },
       // The owner saved the workflow: no mandate it depends on.
       getWorkflowAuthorship: () => ({ createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-01-01 00:00:00' }),
+      // Stamped when it carries `confirmedAt`, as before the stamp bound its steps (`workflow-stamp.ts`).
+      workflowStampState: (p: { confirmedAt?: string }) => (p.confirmedAt ? 'holds' : 'unconfirmed'),
     }),
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),

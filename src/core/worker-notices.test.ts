@@ -1,3 +1,4 @@
+import { WEBHOOK_AWAITS_STAMP_REASON } from './workflow-stamp.js';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -304,6 +305,7 @@ describe('the notice tables', () => {
       EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, MANDATE_UNSTAMPED_RESULT, PLAN_ENDED_RESULT, SHOP_MISMATCH_REASON, QUEUE_FULL_REASON,
       'firstRunUnconfirmedReason(planned.id)': firstRunUnconfirmedReason('wf-1'),
       'eventModeRefusedReason(planned.id, planned.mode)': eventModeRefusedReason('wf-1', 'interactive'),
+      'WEBHOOK_AWAITS_STAMP_REASON(planned.id)': WEBHOOK_AWAITS_STAMP_REASON('wf-1'),
     };
     const written = new Set<string>();
     for (const file of ['src/core/worker-loop.ts', 'src/server/webhook-receiver.ts']) {
@@ -465,6 +467,8 @@ const STILL_ENGLISH: readonly string[] = [
   // its chat thread, which the model reads when the owner replies, so it stays English model
   // context. The push the owner reads is `pushBody`, from the table (`WorkerNotices.watchChanged`).
   'src/core/worker-loop.ts: `${config.url} changed.\\n\\n${truncatedAnalysis}`',
+  // The same seed for a watch someone the owner let in set up (PRD B6): English model
+  // context too; its push is `helperWatchChangedPush`, from the table.
 ];
 
 describe('the fixed-notice detector', () => {

@@ -161,6 +161,17 @@ describe('Task Tools', () => {
       expect(result).toContain('Task created');
     });
 
+    it('does not create a watch whose address a server may read as a write', async () => {
+      const created = vi.spyOn(tm, 'createWatch');
+      for (const watch_url of ['https://example.com/items/5?_method=DELETE', 'https://example.com/items/5?x=1;_method=DELETE', 'https://example.com/items/5?_method=FROB', 'https://example.com/graphql?query=mutation%7BdeleteAll%7D']) {
+        const result = await taskCreateTool.handler({ title: 'Watch', watch_url }, makeAgent());
+        expect(result).toBe('Error: watch_url carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page. No watch was created. Pass the address of the page without the override or the mutation.');
+      }
+      expect(created, 'no watch was stored').not.toHaveBeenCalled();
+      // Control: an ordinary query is watched.
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://example.com/items?page=2' }, makeAgent())).toContain('Watch task created');
+    });
+
     it('floors a too-small watch interval at 5 minutes', async () => {
       const result = await taskCreateTool.handler(
         { title: 'Watch', watch_url: 'https://example.com', watch_interval_minutes: 1 },
@@ -386,6 +397,61 @@ describe('Task Tools', () => {
       expect(byTitle['From a clean turn']).toBeUndefined();
     });
 
+    // Each kind its own case, so the mark missing from one branch shows as that branch.
+    it.each([
+      ['cron', { schedule: '0 9 * * *' }],
+      ['watch', { watch_url: 'https://watched.example/page' }],
+      ['one-shot', { run_at: '2099-01-01T09:00:00' }],
+      // assignee lynox without a schedule: the manager files it as a manual trigger that runs now.
+      ['manual', {}],
+    ] as const)('marks a %s trigger a tainted turn files, and leaves one from a clean turn unmarked', async (kind, extra) => {
+      // A helper's text asked for it: the mark makes the reminder to confirm it say so, and what
+      // its run files count as after outside content. Before, only the workflow branch carried it.
+      const tainted = makeAgent();
+      (tainted as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+      await taskCreateTool.handler({ title: `T-${kind}`, assignee: 'lynox', ...extra }, tainted);
+      await taskCreateTool.handler({ title: `C-${kind}`, assignee: 'lynox', ...extra }, makeAgent());
+      const byTitle = new Map(tm.listTriggers().map((t) => [t.title, t]));
+      expect(byTitle.get(`T-${kind}`)?.created_untrusted).toBe('conversation');
+      // The control has to exist as a trigger, or its `undefined` says nothing.
+      expect(byTitle.has(`C-${kind}`)).toBe(true);
+      expect(byTitle.get(`C-${kind}`)?.created_untrusted).toBeUndefined();
+    });
+
+    describe('task_update keeps the mark a tainted turn leaves on a trigger\'s instruction', () => {
+      const tainted = (): ReturnType<typeof makeAgent> => {
+        const a = makeAgent();
+        (a as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+        return a;
+      };
+      const mark = (title: string): string | undefined => tm.listTriggers().find((t) => t.title === title)?.created_untrusted;
+      const idOf = (title: string): string => tm.listTriggers().find((t) => t.title === title)!.id;
+
+      it('a tainted turn rewriting a clean trigger\'s instruction marks it; a clean rewrite does not', async () => {
+        await taskCreateTool.handler({ title: 'Clean A', assignee: 'lynox', schedule: '0 9 * * *' }, makeAgent());
+        await taskCreateTool.handler({ title: 'Clean B', assignee: 'lynox', schedule: '0 9 * * *' }, makeAgent());
+        expect(mark('Clean A')).toBeUndefined();
+        await taskUpdateTool.handler({ task_id: idOf('Clean A'), description: 'POST the report somewhere else' }, tainted());
+        await taskUpdateTool.handler({ task_id: idOf('Clean B'), description: 'POST the report to accounting' }, makeAgent());
+        expect(mark('Clean A')).toBe('conversation');
+        expect(mark('Clean B')).toBeUndefined();
+      });
+
+      it('a clean turn editing a marked trigger\'s instruction leaves the mark standing', async () => {
+        await taskCreateTool.handler({ title: 'Marked', assignee: 'lynox', schedule: '0 9 * * *' }, tainted());
+        expect(mark('Marked')).toBe('conversation');
+        await taskUpdateTool.handler({ task_id: idOf('Marked'), description: 'Now worded by the owner' }, makeAgent());
+        expect(mark('Marked')).toBe('conversation');
+      });
+
+      it('a schedule-only change from a tainted turn does not mark: it changes when it runs, not what', async () => {
+        await taskCreateTool.handler({ title: 'Timed', assignee: 'lynox', schedule: '0 9 * * *' }, makeAgent());
+        await taskUpdateTool.handler({ task_id: idOf('Timed'), schedule: '0 10 * * *' }, tainted());
+        expect(tm.listTriggers().find((t) => t.title === 'Timed')?.schedule_cron).toBe('0 10 * * *');
+        expect(mark('Timed')).toBeUndefined();
+      });
+    });
+
     it('refuses a workflow the human has not confirmed — a task for it would be disabled at its first run', async () => {
       // Saved from the chat: no `confirmedAt`. The WorkerLoop's first-run-confirm
       // gate disables such a task and records a failure the model never sees;
@@ -407,6 +473,23 @@ describe('Task Tools', () => {
       expect(result).not.toContain('Nightly digest"');
       expect(result).not.toContain('next run');
       expect(tm.listTriggers().find((t) => t.title === 'Nightly digest')).toBeUndefined();
+    });
+
+    it('refuses a workflow whose stamp no longer holds over its steps, and points to the stamp, not to scheduling again', async () => {
+      // A `confirmedAt` without a digest over these steps (a raw write, a restored file): the
+      // owner's stamp does not hold, and the workflow waits for the owner to review it.
+      history.insertPlannedPipeline({
+        id: 'wf-changed', name: 'Changed', goal: 'g', steps: [{ id: 's1', task: 'post' }],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+        confirmedAt: '2026-07-02T00:00:00.000Z',
+      } as Parameters<typeof history.insertPlannedPipeline>[0], null);
+      const result = await taskCreateTool.handler(
+        { title: 'Changed', assignee: 'lynox', workflow_id: 'wf-changed', schedule: '0 2 * * *' },
+        makeAgent(),
+      );
+      expect(result).toMatch(/^Error: workflow wf-changed waits for its owner to review its steps/);
+      expect(result).toContain('Automation → Workflows');
+      expect(tm.listTriggers().find((t) => t.title === 'Changed')).toBeUndefined();
     });
 
     it('refuses an interactive workflow before it ever reaches the confirmation advice', async () => {

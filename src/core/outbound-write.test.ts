@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { SecretStore } from './secret-store.js';
 import {
   bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
+  readAddressWrites,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -70,6 +71,25 @@ describe('a query or form name a server may read as the override', () => {
   ] as const)('%s=DELETE is gated as %s, in the query and in a form body', (name, want) => {
     expect(effectiveWriteMethod('POST', {}, `${U}?${name}=DELETE`)).toBe(want);
     expect(effectiveWriteMethod('POST', FORM, U, `${name}=DELETE`)).toBe(want);
+  });
+
+  // A server that splits the query on `;` too (Rack before 3, Python's `parse_qs` before 3.9.2,
+  // servlet containers on request) or decodes `%uXXXX` (IIS) reads an override `searchParams` does
+  // not see as a field of its own.
+  it.each([
+    ['x=1;_method=DELETE', 'DELETE'],
+    ['%u005fmethod=DELETE', 'DELETE'],
+    ['x=1;y=2', 'GET'],
+  ] as const)('reads ?%s on a GET as %s', (query, want) => {
+    expect(effectiveWriteMethod('GET', {}, `${U}?${query}`)).toBe(want);
+  });
+
+  // A proxy that decodes the path before it forwards hands the server what follows a `%3F` as a
+  // query string, as the GraphQL check reads it (`urlQueryStrings`).
+  it('reads an override behind an escaped ? in the path', () => {
+    expect(effectiveWriteMethod('GET', {}, `${U}%3F_method=DELETE`)).toBe('DELETE');
+    expect(effectiveWriteMethod('GET', {}, `${U}%253F_method=DELETE`)).toBe('DELETE');
+    expect(effectiveWriteMethod('GET', {}, `${U}%3Fq=1`)).toBe('GET');
   });
 
   it('reads a multipart part name the same way', () => {
@@ -830,5 +850,17 @@ describe('a short secret through the store\'s own mask', () => {
       expect(bodyForQuestion(JSON.stringify({ a: enc(pin) }), mask)).toEqual({ unshowable: 'escaped-secret' });
       expect(bodyForQuestion(JSON.stringify({ a: pin }), mask)).toEqual({ text: '{\n  "a": "***"\n}', escapedSecret: false });
     }
+  });
+});
+
+describe('readAddressWrites', () => {
+  it('reads a method override or a GraphQL mutation as a write, and nothing else', () => {
+    expect(readAddressWrites('https://h.example/items/5?_method=DELETE')).toBe(true);
+    expect(readAddressWrites('https://h.example/items/5?_method=FROB')).toBe(true);
+    expect(readAddressWrites('https://h.example/graphql?query=mutation%7BdeleteAll%7D')).toBe(true);
+    expect(readAddressWrites('https://h.example/graphql?query=%7Bitems%7Bid%7D%7D')).toBe(false);
+    expect(readAddressWrites('https://h.example/items?page=2;size=10')).toBe(false);
+    // An address that does not parse is no write: it fails when it is fetched, under its own error.
+    expect(readAddressWrites('h.example/page')).toBe(false);
   });
 });

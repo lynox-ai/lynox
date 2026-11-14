@@ -82,6 +82,13 @@ export class InboxCostBudget {
     this.spentUSD += cost;
   }
 
+  /** Add a cost already priced by the caller — a call to another model than the classifier's
+   *  (the description-rule check), which shares this daily cap. */
+  recordCost(costUsd: number): void {
+    this._maybeRoll();
+    if (Number.isFinite(costUsd) && costUsd > 0) this.spentUSD += costUsd;
+  }
+
   /** True when today's spend has hit the cap. Triggers the circuit-breaker. */
   isExceeded(): boolean {
     this._maybeRoll();

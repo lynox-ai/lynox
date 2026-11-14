@@ -310,7 +310,7 @@ const INLINE_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(
   [...INLINE_CORE_TOOLS].filter(name => name !== 'bash'),
 );
 
-function inlineStepToolNames(step: Pick<ManifestStep, 'tools' | 'tool'>): ReadonlySet<string> {
+export function inlineStepToolNames(step: Pick<ManifestStep, 'tools' | 'tool'>): ReadonlySet<string> {
   const replayTool = step.tool !== undefined && INLINE_CORE_TOOLS.has(step.tool) ? step.tool : undefined;
   if (!step.tools && replayTool === undefined) return INLINE_DEFAULT_TOOL_NAMES;
   const admitted = new Set(

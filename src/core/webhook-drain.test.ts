@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
 import { TaskManager } from './task-manager.js';
 import { WorkflowStore } from './workflow-store.js';
 import { ConnectionStore } from './connection-store.js';
@@ -25,6 +26,10 @@ const runner = vi.hoisted(() => ({
   mode: { value: 'autonomous' as string },
   steps: { value: [] as unknown[] },
   confirmedAt: { value: '2026-10-01T00:00:00.000Z' as string | undefined },
+  // The engine's hash, so a confirmed workflow carries a stamp that holds (`workflow-stamp.ts`).
+  hasher: { value: null as EngineDb | null },
+  // The stamp was taken over other steps than the ones the workflow has now.
+  staleStamp: { value: false },
 }));
 const budget = vi.hoisted(() => ({ refuse: false, released: 0 }));
 vi.mock('./session-budget.js', async (importOriginal) => {
@@ -36,10 +41,19 @@ vi.mock('./session-budget.js', async (importOriginal) => {
   };
 });
 vi.mock('./saved-workflow-runner.js', () => ({ runGuardedSavedWorkflow: (...args: unknown[]) => runner.run(...args) }));
-vi.mock('../tools/builtin/pipeline.js', async (importOriginal) => ({
+vi.mock('../tools/builtin/pipeline.js', async (importOriginal) => {
+  const { withOwnerStamp } = await import('./workflow-stamp.js');
+  return {
   ...(await importOriginal<object>()),
-  getPipeline: (id: string) => ({ id, name: 'Orders', mode: runner.mode.value, steps: runner.steps.value, confirmedAt: runner.confirmedAt.value }),
-}));
+  getPipeline: (id: string) => {
+    const planned = { id, name: 'Orders', mode: runner.mode.value, steps: runner.steps.value } as unknown as PlannedPipeline;
+    const at = runner.confirmedAt.value;
+    if (at === undefined || runner.hasher.value === null) return planned;
+    const stamped = withOwnerStamp(runner.hasher.value, planned, at);
+    return runner.staleStamp.value ? { ...stamped, steps: [{ id: 'later', task: 'changed after the stamp' }] } : stamped;
+  },
+  };
+});
 
 const SHOP = 'demo-store.myshopify.com';
 
@@ -61,11 +75,13 @@ describe('the webhook drain', () => {
     runner.mode.value = 'autonomous';
     runner.steps.value = [];
     runner.confirmedAt.value = '2026-10-01T00:00:00.000Z';
+    runner.staleStamp.value = false;
     budget.refuse = false;
     budget.released = 0;
     dir = mkdtempSync(join(tmpdir(), 'lynox-webhook-drain-'));
     history = new RunHistory(join(dir, 'history.db'));
     engineDb = new EngineDb(join(dir, 'engine.db'));
+    runner.hasher.value = engineDb;
     history.setVerbGraph(engineDb);
     tm = new TaskManager(history);
     ledger = new InboundEventStore(engineDb);
@@ -314,6 +330,20 @@ describe('the webhook drain', () => {
   });
 
   // A refusal before the run that holds until the owner acts drops the event.
+  it('drops an event of a workflow whose steps changed after its stamp, switches the trigger off, and says so once', async () => {
+    runner.staleStamp.value = true;
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'dropped');
+    expect(runner.run).not.toHaveBeenCalled();
+    expect(eventOf(t, id).reason).toContain('waits for its owner to review its steps');
+    expect(Boolean(tm.getTrigger(t)!.enabled)).toBe(false);
+    await loop.tick();
+    await loop.tick();
+    expect(pushes('waits for its owner to review its steps')).toBe(1);
+  });
+
   it('drops an event of a workflow nobody confirmed, switches the trigger off, and says so once', async () => {
     runner.confirmedAt.value = undefined;
     const t = sharedTrigger();

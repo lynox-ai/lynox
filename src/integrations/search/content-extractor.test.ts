@@ -496,6 +496,39 @@ describe('extractContent', () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
+  // A server that honours a method override runs `GET …?_method=DELETE` as a DELETE. A page read
+  // sends no write: the address asked for, and a hop, are refused before they are requested.
+  it('does not request an address that carries a method override, asked for or redirected to', async () => {
+    await expect(extractContent('https://shop.example.com/items/5?_method=DELETE'))
+      .rejects.toThrow('Blocked: https://shop.example.com/items/5 carries a method override');
+    await expect(extractContent('https://shop.example.com/items/5?x=1;_method=DELETE'))
+      .rejects.toThrow('Blocked: https://shop.example.com/items/5 carries a method override');
+    await expect(extractContent('https://shop.example.com/items/5?_method=FROB'))
+      .rejects.toThrow('Blocked: https://shop.example.com/items/5 carries a method override');
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 302, headers: new Headers({ location: 'https://shop.example.com/items/5?_method=DELETE&sig=q7x9' }) });
+    const hops: string[] = [];
+    const refused = await extractContent('https://example.com/old', undefined, undefined, (next) => { hops.push(next); })
+      .then(() => null, (err: unknown) => String(err));
+    expect(refused).toContain('Blocked: redirect to https://shop.example.com/items/5 carries a method override');
+    expect(refused).not.toContain('q7x9');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(hops).toEqual([]);
+  });
+
+  it('CONTROL: an address whose override names a read, or a field only named like one, is fetched', async () => {
+    const page = (): unknown => ({
+      ok: true, status: 200, headers: new Headers({ 'content-type': 'text/html' }),
+      body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('<html><body>Page</body></html>')); c.close(); } }),
+    });
+    mockFetch.mockResolvedValueOnce(page()).mockResolvedValueOnce(page()).mockResolvedValueOnce(page());
+    await extractContent('https://shop.example.com/items/5');
+    await extractContent('https://shop.example.com/items/5?_method=GET');
+    await extractContent('https://docs.example.com/search?q=_method%3DDELETE');
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
   it('throws on too many redirects', async () => {
     // 6 redirects → exceeds MAX_REDIRECTS (5)
     for (let i = 0; i < 7; i++) {
