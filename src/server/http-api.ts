@@ -9930,7 +9930,9 @@ export class LynoxHTTPApi {
         // host instead, as a Shopify list does; one whose path was withdrawn still shows its address.
         listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : hasListPageUrl(listRun.source) ? listPageUrl(listRun.host, listRun.source, 1) : listRun.host) : null,
         listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
-        listNote: status.list ? BULK_LIST_NOTE : null,
+        // Said before the read, and after it only where it took more than one page: one page is one
+        // answer of the host, read at one instant.
+        listNote: status.list && (status.list.state === 'pending' || status.list.pagesRead > 1) ? BULK_LIST_NOTE : null,
         // A Shopify product list's filters ({} for every product): shown wherever the run is started or
         // approved, so the owner sees which group and which statuses it reads (PRD shopify-preset §22.2 item 5).
         listFilters: shopifyListFiltersOf(status.list === null ? null : ledger.getListRun(params['id']!)),

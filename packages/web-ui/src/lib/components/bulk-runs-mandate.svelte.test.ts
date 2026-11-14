@@ -336,8 +336,8 @@ describe('what the owner\'s pages say about a run\'s time and its list', () => {
 		expect(target.textContent).not.toContain('07:53');
 	});
 
-	it('shows when a run goes on in the viewer\'s time on its page', async () => {
-		run = makeRun({ resumesAt: '2026-11-12 07:53:09' });
+	it('shows when a run goes on in the viewer\'s time on its page, from the engine\'s ISO time', async () => {
+		run = makeRun({ resumesAt: '2026-11-12T07:53:09.000Z' });
 		await renderDetail();
 		expect(target.textContent).toContain('08:53');
 		expect(target.textContent).not.toContain('07:53');

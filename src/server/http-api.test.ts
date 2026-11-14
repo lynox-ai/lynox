@@ -12319,6 +12319,14 @@ describe('LynoxHTTPApi', () => {
       expect(shown['listStartChecksum']).toBe(bulkLedger.listStartChecksum(id));
       expect(shown['list']).toMatchObject({ state: 'pending', filters: { category: '12' }, idField: 'id', method: 'PUT', after: { status: 'draft' } });
       expect(shown['listNote']).toBe(BULK_LIST_NOTE);
+      // Once read, the note stays only for a list that took more than one page.
+      const listNoteAfterRead = async (pages: number): Promise<unknown> => {
+        bulkDb.getDb().prepare(`UPDATE bulk_runs SET list_state = 'done', list_page = ? WHERE id = ?`).run(pages, id);
+        return ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as Record<string, unknown>)['listNote'];
+      };
+      expect(await listNoteAfterRead(1)).toBeNull();
+      expect(await listNoteAfterRead(2)).toBe(BULK_LIST_NOTE);
+      bulkDb.getDb().prepare(`UPDATE bulk_runs SET list_state = 'pending', list_page = 0 WHERE id = ?`).run(id);
 
       const resume = (body: unknown): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(body) });
       expect((await resume({})).status).toBe(400);
