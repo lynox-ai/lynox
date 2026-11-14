@@ -963,6 +963,19 @@ describe('a part too costly to read every way', () => {
     expect(graphqlUrlWrites(slowPath)).toBe(false);
   });
 
+  it('refuses an override behind a path too costly to read for queries', () => {
+    const slowPrefix = `https://h.example/${Array.from({ length: 2400 }, (_, i) => slowPiece(i)).join('/')}`;
+    const hidden = `${slowPrefix}/x%3F_method=DELETE`;
+    expect(hidden.length).toBeLessThanOrEqual(URL_MAX_BYTES);
+    expect(urlQueryStrings(hidden)).toContain('(unread)');
+    // Neither a read nor a write passes as sent: the override cannot be ruled out.
+    expect(effectiveWriteMethod('GET', {}, hidden)).toBeNull();
+    expect(effectiveWriteMethod('POST', {}, hidden)).toBeNull();
+    expect(writeMethodsNamed('POST', {}, hidden)).toEqual(['POST']);
+    // The same override behind a short path is read and gated as the DELETE it names.
+    expect(effectiveWriteMethod('POST', {}, 'https://h.example/x%3F_method=DELETE')).toBe('DELETE');
+  });
+
   it('gives each part its own budget: a slow path leaves the body readable', () => {
     expect(pathReadable(slowPath, plain)).toBe(false);
     expect('text' in bodyForQuestion('{"a":"b"}', plain, 'application/json')).toBe(true);

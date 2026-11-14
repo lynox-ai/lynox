@@ -331,6 +331,12 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
   // also splits on `;` reads `?x=1;_method=DELETE` as an override, where `searchParams` sees a
   // single field `x`. An unparsable URL gives none, and is refused before it is sent.
   for (const search of urlQueryStrings(url)) {
+    // A path too costly to read for queries may still hold an override: pass the marker on as a
+    // candidate, which is no method, so the request is refused rather than gated as sent.
+    if (search === UNREAD_QUERY) {
+      candidates.push(search);
+      continue;
+    }
     for (const params of queryReadings(search)) {
       for (const [name, value] of params) {
         if (isOverrideFieldName(name)) candidates.push(value);
