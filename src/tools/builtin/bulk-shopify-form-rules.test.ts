@@ -286,6 +286,15 @@ describe('a Shopify plan in the store\'s REST names', () => {
     expect(judged).toContain('Read for form shopify: judge.schema metafields_global_title_tag as seo_title; judge.context body_html as descriptionHtml; judge.context product_type as productType.');
   });
 
+  it('leaves a REST name in judge.schema where the form\'s name stands beside it', async () => {
+    // Read as the form's name, a field the store cannot be written yet gets the refusal that says so.
+    expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { body_html: { type: 'string', maxLength: 70 } } } })).toMatch(/^Error: source_list\.after cannot set descriptionHtml yet/);
+    const both = await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 }, metafields_global_title_tag: { type: 'string', maxLength: 10 } } } });
+    // Both kept as given: the REST one is not a field the form sets, and the plan is refused.
+    expect(both).toMatch(/^Error: source_list\.after may only set/);
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+  });
+
   it('reads nothing in source_list.after otherwise: what it holds is written, and its refusal makes the planner look again', async () => {
     for (const after of [
       { metafields_global_title_tag: 'T' },

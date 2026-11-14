@@ -1,5 +1,4 @@
 import { SHOPIFY_CONTEXT_FIELDS } from '../../core/bulk-judge-rule.js';
-import { SHOPIFY_WRITABLE_FIELDS } from '../../core/shopify-graphql.js';
 
 /**
  * A Shopify list plan as its form takes it. A planner often reads the store over its REST API
@@ -11,10 +10,10 @@ import { SHOPIFY_WRITABLE_FIELDS } from '../../core/shopify-graphql.js';
  *
  * Left out, only what cannot narrow or shape the run: a verb that edits (PATCH, PUT; the form
  * writes with its own mutation), the id field `id`, the path of the store's whole product list,
- * filters given as `{}` (no filter), and an empty after beside a judge. A POST, any other path (a
+ * filters given as `{}` (no filter), and an empty after. A POST, any other path (a
  * collection's products narrow the list) and any other id field are left to the form's refusal.
- * A REST field name in judge.schema or judge.context is read as the form's, only where that
- * name is valid there and the form's own name is not given beside it.
+ * A REST field name in judge.schema or judge.context is read as the form's, only where the
+ * form's own name is not given beside it (and in judge.context only where the form reads it).
  *
  * Never source_list.after: what it holds is written into every product, and a plan whose after
  * the form refuses (a REST name, an SEO text nested as the store's APIs write it) is the one the
@@ -43,11 +42,13 @@ export interface ShopifyPlanNames {
   changes: string[];
 }
 
-function renamed(record: Record<string, unknown>, valid: readonly string[], where: string, changes: string[]): Record<string, unknown> {
+/** judge.schema with its REST names read as the form's. A name whose form name the store cannot
+ *  be written is renamed too: the form refuses it either way, with the fields it can write. */
+function renamed(record: Record<string, unknown>, where: string, changes: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
     const name = REST_FIELD_NAMES[key];
-    if (name !== undefined && valid.includes(name) && !Object.hasOwn(record, name)) {
+    if (name !== undefined && !Object.hasOwn(record, name)) {
       out[name] = value;
       changes.push(`${where} ${key} as ${name}`);
     } else {
@@ -79,15 +80,16 @@ export function shopifyPlanNames(form: 'shopify' | 'shopify_media', writeMethod:
     changes.push('filters {} left out (no filter reads every product)');
   }
   if (form !== 'shopify') return { writeMethod: method, list: out, judge, changes };
-  if (judge !== undefined && typeof out['after'] === 'object' && out['after'] !== null && !Array.isArray(out['after']) && Object.keys(out['after']).length === 0) {
+  if (typeof out['after'] === 'object' && out['after'] !== null && !Array.isArray(out['after']) && Object.keys(out['after']).length === 0) {
     delete out['after'];
+    // Without a judge the plan then has nothing to set, and the form refuses it for that.
     changes.push('the empty after left out (with judge, the model decides the values)');
   }
   let rule = judge;
   if (typeof judge === 'object' && judge !== null && !Array.isArray(judge)) {
     const j: Record<string, unknown> = { ...(judge as Record<string, unknown>) };
     if (typeof j['schema'] === 'object' && j['schema'] !== null && !Array.isArray(j['schema'])) {
-      j['schema'] = renamed(j['schema'] as Record<string, unknown>, SHOPIFY_WRITABLE_FIELDS, 'judge.schema', changes);
+      j['schema'] = renamed(j['schema'] as Record<string, unknown>, 'judge.schema', changes);
     }
     if (Array.isArray(j['context'])) {
       const given = j['context'] as unknown[];
