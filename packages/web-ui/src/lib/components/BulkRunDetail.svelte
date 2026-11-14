@@ -513,7 +513,7 @@
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
 				<dd>{provider}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
 				<dt class="text-text-subtle">{t('bulk.head.targets')}</dt>
-				<dd>{tf('bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) })}</dd>
+				<dd>{tf(run.deselected > 0 ? 'bulk.head.counts_taken_out' : 'bulk.head.counts', { n: String(run.total), a: String(run.applied), d: String(run.deselected), c: String(run.conflicts), f: String(run.failed) })}</dd>
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
 					<dt class="text-text-subtle">{t('bulk.head.cost')}</dt>
 					<dd class="font-mono">{formatCost(run.costUsd)}{run.costCapUsd !== null ? ` / ${formatCost(run.costCapUsd)}` : ''}</dd>
@@ -527,7 +527,8 @@
 			{#if run.resumesAt}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{tf('bulk.resumes_at', { time: when(run.resumesAt) })}</p>
 			{/if}
-			{#if bulkWaitsForStart(run)}
+			{#if bulkWaitsForStart(run) && !(run.haltKey === 'listed' && ownerActs)}
+				<!-- An owner's read list says the same and more in its own sentence below; a mandate does not get that sentence. -->
 				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
 			{/if}
 			{#if run.phase === 'planned' && run.haltKey === 'listed'}
@@ -607,10 +608,10 @@
 													{/each}
 												{/if}
 											{/if}
-											{#if approving && (target.deselected || writes(target))}
+											{#if target.deselected || (approving && writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
 													{#if target.deselected}<span class="text-text-subtle">{view.t('bulk.deselect.taken_out')}</span>{/if}
-													{#if ownerActs}
+													{#if approving && ownerActs}
 														<button type="button" class="{btnPlain} text-xs" disabled={busy} onclick={() => toggleSelected(target)}>{t(target.deselected ? 'bulk.deselect.on' : 'bulk.deselect.off')}</button>
 													{/if}
 												</div>
