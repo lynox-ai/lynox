@@ -161,6 +161,15 @@ describe('Task Tools', () => {
       expect(result).toContain('Task created');
     });
 
+    it('does not create a watch whose address a server may read as a write', async () => {
+      for (const watch_url of ['https://example.com/items/5?_method=DELETE', 'https://example.com/items/5?x=1;_method=DELETE', 'https://example.com/items/5?_method=FROB']) {
+        const result = await taskCreateTool.handler({ title: 'Watch', watch_url }, makeAgent());
+        expect(result).toBe('Error: watch_url carries a method override (such as `_method=DELETE`), which a server may run as a write instead of showing a page, so no watch was created. Pass the plain address of the page to watch.');
+      }
+      // Control: an ordinary query is watched.
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://example.com/items?page=2' }, makeAgent())).toContain('Watch task created');
+    });
+
     it('floors a too-small watch interval at 5 minutes', async () => {
       const result = await taskCreateTool.handler(
         { title: 'Watch', watch_url: 'https://example.com', watch_interval_minutes: 1 },

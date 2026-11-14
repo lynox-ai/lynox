@@ -45,7 +45,7 @@ import type { DeliverySummary, NotificationRouter, NotificationMessage } from '.
 import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { stripHidden } from './hidden-text.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
-import { admittedTriggerTier } from './task-manager.js';
+import { admittedTriggerTier, watchUrlCarriesOverride, WATCH_OVERRIDE_REFUSAL } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
@@ -3879,6 +3879,14 @@ export class WorkerLoop {
       return;
     }
 
+    // A watch only reads its page. An address a server may read as a write is not requested,
+    // and not recorded as a read either: a watch made before this check could carry one.
+    if (watchUrlCarriesOverride(config.url)) {
+      const taskManager = this.engine.getTaskManager();
+      if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: its address ${WATCH_OVERRIDE_REFUSAL} Change the watch to the plain address of the page.`, 'failed');
+      return;
+    }
+
     // A page a delegated session watches is read on its behalf: by hand, it started the run;
     // on schedule, it chose the page, and the owner's stamp let it run. Either way the read is
     // a row of its own first, and is not sent without one (PRD customer-granted-operator-access
@@ -4180,3 +4188,4 @@ export function watchReader(task: PlanAuthorshipRow, starter: RequestPrincipal |
   // The plan's own mandate, as the gate reads it: a mark the owner took over is none.
   return planMandate(planAuthorshipOf(task))?.principal ?? null;
 }
+

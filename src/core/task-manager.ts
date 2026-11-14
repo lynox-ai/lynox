@@ -15,6 +15,7 @@ import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
 import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
 import { stripHidden } from './hidden-text.js';
+import { effectiveWriteMethod, isReadMethod } from './outbound-write.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -1231,3 +1232,15 @@ export class TaskManager {
 }
 
 const MAX_RUN_RESULT_CHARS = 10_000;
+
+/** After "its address" or "watch_url": why an address a server may read as a write is not watched. */
+export const WATCH_OVERRIDE_REFUSAL = 'carries a method override (such as `_method=DELETE`), which a server may run as a write instead of showing a page,';
+
+/**
+ * Whether a server may read a watch's address as a write (`?_method=DELETE` and its kin, as every
+ * write gate reads them). A watch fetches its page as a GET on a schedule; one of these would send
+ * the write on every check, with no one asked.
+ */
+export function watchUrlCarriesOverride(url: string): boolean {
+  return !isReadMethod(effectiveWriteMethod('GET', {}, url));
+}
