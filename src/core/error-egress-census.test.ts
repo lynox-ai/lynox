@@ -360,7 +360,13 @@ it('sees every raw form it claims to see, and lets errorText through', () => {
   expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13']);
 });
 
-it('no sink writes raw error text beyond the frozen census', () => {
+// Parses every source file under src/ with the TypeScript compiler. Under coverage in CI this test
+// took 7–10 s in November 2026 and twice ran past the 10 s default (once at 10.4 s): it failed on
+// time, not on what it checks. 30 s leaves about three times its usual time.
+const SCAN_TIMEOUT_MS = 30_000;
+it('no sink writes raw error text beyond the frozen census', ({ task }) => {
+  // The ceiling below is this test's own, not the 10 s default it outgrew.
+  expect(task.timeout).toBe(SCAN_TIMEOUT_MS);
   const found: Record<string, string[]> = {};
   for (const file of sourceFiles(SRC)) {
     const rel = relative(SRC, file);
@@ -373,4 +379,4 @@ it('no sink writes raw error text beyond the frozen census', () => {
   for (const f of JUDGED) expect(FROZEN[f], `${f} is judged but not frozen`).toBeGreaterThan(0);
   const sinksOf = (file: string): RawSink[] => rawSinks(file, readFileSync(join(SRC, file), 'utf8'));
   expect(staleJudgements(sinksOf, JUDGED_SINKS), 'a judged sink moved or changed: judge it again').toEqual([]);
-});
+}, SCAN_TIMEOUT_MS);
