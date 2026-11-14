@@ -44,6 +44,9 @@ function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean
     if (/(^|\.)getErrorMessage$/.test(callee)) return node.getText();
   }
   if (ts.isTemplateSpan(node) && ts.isIdentifier(node.expression) && ERRISH.test(node.expression.text)) return `\${${node.expression.text}}`;
+  // The same text kept in a property first: `${f.error}`, `${result.reason}`.
+  if (ts.isTemplateSpan(node) && ts.isPropertyAccessExpression(node.expression) && ERRISH.test(node.expression.name.text)) return `\${${node.expression.getText()}}`;
+  if (kind === 'console' && topLevelArg && ts.isPropertyAccessExpression(node) && ERRISH.test(node.name.text)) return node.getText();
   if (ts.isIdentifier(node) && BODYISH.test(node.text)) return node.text;
   // A console call formats a whole error object: message and stack.
   if (kind === 'console' && topLevelArg && ts.isIdentifier(node) && ERRISH.test(node.text)) return node.text;
@@ -184,7 +187,12 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'Import waits — could not read', count: 1, why: 'fs errno naming the profile file, which the line already prints' },
     { marker: 'Import transaction failed', count: 1, why: 'the atomic upsert of the parsed rows: SQLite, bound values never quoted' },
   ],
+  'scripts/subject-sweep.ts': [
+    { marker: '[subject-sweep] ROLLBACK-MERGE refused', count: 1, why: 'an operator CLI; the reason is lynox text with ids, or the error of the local SQLite statements and ledger-file writes that reverse a subject merge (subject-merge-runner.ts), all with bound values; no provider call' },
+    { marker: '[subject-sweep] MERGE refused', count: 1, why: 'the same, for the merge itself; it also runs JSON.parse over a table\'s stored schema, whose error quotes column names and types, not row data' },
+  ],
   'core/engine.ts': [
+    { marker: 'could not get its source columns and refuses writes until a restart migrates it', count: 1, why: 'the SQLite text of a failed table-info read or ALTER TABLE ADD COLUMN on the store: it names the table, column or constraint, never a row value; the table name in it is the one the same line already prints' },
     { marker: '[escalation] recording the delivery failed', count: 1, why: 'a SQLite UPDATE binding a fixed delivery summary' },
     { marker: '[escalation] a hook failed on the delivery', count: 1, why: 'the engine own hook posts a fixed body and swallows its fetch; an embedder hook is its own code' },
     { marker: 'Grant backfill failed', count: 1, why: 'backfillGrants and checkFingerprints read the ledger and the vault, no provider' },
@@ -217,6 +225,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'wire snapshot prune failed', count: 1, why: 'a DELETE by capture time' },
   ],
   'server/http-api.ts': [
+    { marker: 'are stored, but what this engine learned about them could not be recorded', count: 1, why: 'saved.reason is a refusal api-store builds from profile ids, vault names, hosts and file names; no error text enters it' },
     { marker: 'mandate end not recorded', count: 1, why: 'an INSERT with bound values; the plan-pause listener reports through processErrorText' },
     { marker: 'withdrawing the questions of deleted thread', count: 1, why: 'an UPDATE by thread id' },
     { marker: 'stopping the run of deleted schedule', count: 1, why: 'map lookups and an abort; nothing that throws carries run text' },
@@ -272,7 +281,7 @@ const FROZEN: Record<string, number> = {
   'core/config.ts': 1,
   'core/crm.ts': 1,
   'core/engine-init.ts': 1,
-  'core/engine.ts': 30,
+  'core/engine.ts': 31,
   'core/knowledge-layer.ts': 8,
   'core/knowledge-store.ts': 2,
   'core/llm-wire-rules.ts': 1,
@@ -291,7 +300,8 @@ const FROZEN: Record<string, number> = {
   'integrations/microsoft/microsoft-auth.ts': 1,
   'integrations/mail/escalation-mail-channel.ts': 1,
   'integrations/push/web-push-channel.ts': 1,
-  'server/http-api.ts': 6,
+  'server/http-api.ts': 7,
+  'scripts/subject-sweep.ts': 2,
   'shell-sidecar/exec-daemon.ts': 1,
   'tools/builtin/http.ts': 1,
 };
@@ -338,12 +348,16 @@ it('sees every raw form it claims to see, and lets errorText through', () => {
     'console.error(err);',
     "console.warn('g', fetchErr);",
     "console.log('h', e.stack);",
+    'process.stderr.write(`i ${f.error}\\n`);',
+    "console.error('j', result.reason);",
+    'process.stderr.write(`k ${res?.error}\\n`);',
+    'process.stderr.write(`ok ${f.errorCount}\\n`);',
     'process.stderr.write(`ok ${errorText(err, reduce)}\\n`);',
     "console.error('ok', errorText(err, true));",
     "process.stderr.write('ok plain\\n');",
     'process.stderr.write(`ok ${processErrorText(err)}\\n`);',
   ].join('\n');
-  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']);
+  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13']);
 });
 
 it('no sink writes raw error text beyond the frozen census', () => {
