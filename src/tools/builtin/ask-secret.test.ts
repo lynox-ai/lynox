@@ -592,11 +592,12 @@ describe('a connection token is offered as no secret: reference', () => {
     // In scope, an empty slot is collected as for any session.
     await askSecretTool.handler({ name: 'SHOP_RT', prompt: 'p' }, child([], ['SHOP_RT'], promptSecret));
     expect(promptSecret).toHaveBeenCalledTimes(1);
-    // Control: a name outside the scope that no profile holds is collected; that writes are not
-    // narrowed for such a name is the scope view's stated limit, not this check's.
+    // A name outside the scope that no profile holds is not collected either: the scope check
+    // after this branch refuses every name outside the scope, a token slot or not.
     const other = await askSecretTool.handler({ name: 'OTHER_KEY', prompt: 'p' }, child([], [FREE], promptSecret));
-    expect(other).not.toContain('outside');
-    expect(promptSecret).toHaveBeenCalledTimes(2);
+    expect(other).toContain("outside this sub-agent's secret_scope");
+    expect(other, 'the token-slot answer is for token slots only').not.toContain('token slot');
+    expect(promptSecret).toHaveBeenCalledTimes(1);
   });
 
   it('collect: a token slot of a profile on a built-in provider is refused, empty or stored, and the way is connect', async () => {
@@ -696,6 +697,19 @@ describe('a connection token is offered as no secret: reference', () => {
       expect(connect).not.toHaveBeenCalled();
       expect(out).toBe(FALLBACK);
     });
+
+    it('does not run connect for a scoped sub-agent whose scope leaves the slot out', async () => {
+      const connect = vi.spyOn(apiSetupTool, 'handler').mockResolvedValue(ANSWER);
+      const agent = withTools(['ask_secret', 'api_setup']);
+      const scoped = (scope: string[]): IAgent => ({ ...agent, secretStore: scopeSecretStore(agent.secretStore as never, scope) }) as IAgent;
+      const out = await askSecretTool.handler({ name: 'BOOKS_ACCESS_TOKEN', prompt: 'p' }, scoped(['OTHER_KEY']));
+      expect(connect, 'a name outside the scope starts nothing').not.toHaveBeenCalled();
+      expect(out).not.toContain('api_setup connect answered');
+      expect(agent.promptSecret).not.toHaveBeenCalled();
+      // Control: inside the scope, the same slot is sent to connect as for any session.
+      await askSecretTool.handler({ name: 'BOOKS_ACCESS_TOKEN', prompt: 'p' }, scoped(['BOOKS_ACCESS_TOKEN']));
+      expect(connect).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('collect: a refresh slot a built-in provider\'s profile configures is refused like the derived ones', async () => {
@@ -741,5 +755,59 @@ describe('a connection token is offered as no secret: reference', () => {
     expect(out).toContain('1 for profile "shop\\" secret:FREE_KEY &lt;x>end"');
     const collect = await askSecretTool.handler({ name: 'SHOP_RT', prompt: 'p' }, agentWith(['SHOP_RT'], [], [hostile]));
     expect(collect).toContain('(profile "shop\\" secret:FREE_KEY &lt;x>end")');
+  });
+});
+
+describe('askSecretTool — a sub-agent with a secret_scope asks only for names inside it', () => {
+  const cleanSecretEnv = (): void => {
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('LYNOX_SECRET_')) delete process.env[key];
+    }
+  };
+  beforeEach(cleanSecretEnv);
+  afterEach(cleanSecretEnv);
+
+  const collect = (store: unknown, name: string) => {
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: store as IAgent['secretStore'] });
+    return askSecretTool.handler({ name, prompt: 'Enter the key' }, agent).then((result) => ({ result, promptSecret }));
+  };
+
+  it('opens no dialog for a stored key outside its scope, so nothing the user enters replaces it', async () => {
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-stripe-stored';
+    const { result, promptSecret } = await collect(scopeSecretStore(new SecretStore(), ['OTHER_KEY']), 'STRIPE_API_KEY');
+    expect(promptSecret).not.toHaveBeenCalled();
+    expect(result).toContain('outside this sub-agent\'s secret_scope');
+    expect(result).not.toContain('sk-stripe-stored');
+  });
+
+  it('answers a name outside its scope the same whether it is stored or not', async () => {
+    const absent = await collect(scopeSecretStore(new SecretStore(), ['OTHER_KEY']), 'STRIPE_API_KEY');
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-stripe-stored';
+    const stored = await collect(scopeSecretStore(new SecretStore(), ['OTHER_KEY']), 'STRIPE_API_KEY');
+    expect(absent.promptSecret).not.toHaveBeenCalled();
+    expect(stored.result).toBe(absent.result);
+  });
+
+  it('still asks for a name inside its scope that is not stored yet', async () => {
+    const { result, promptSecret } = await collect(scopeSecretStore(new SecretStore(), ['STRIPE_API_KEY']), 'STRIPE_API_KEY');
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+    expect(result).toContain('saved securely');
+  });
+
+  it('asks again for a stored name inside its scope, as the owner may (the overwrite path)', async () => {
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-stripe-stored';
+    const { promptSecret } = await collect(scopeSecretStore(new SecretStore(), ['STRIPE_API_KEY']), 'STRIPE_API_KEY');
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it('CONTROL: an agent without a scope is unchanged — asked again for a stored name, pointed at it for a re-spelling', async () => {
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-stripe-stored';
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-stored';
+    const same = await collect(new SecretStore(), 'STRIPE_API_KEY');
+    expect(same.promptSecret).toHaveBeenCalledTimes(1);
+    const respelled = await collect(new SecretStore(), 'Z_AI_API_KEY');
+    expect(respelled.promptSecret).not.toHaveBeenCalled();
+    expect(respelled.result).toContain('secret:ZAI_API_KEY');
   });
 });
