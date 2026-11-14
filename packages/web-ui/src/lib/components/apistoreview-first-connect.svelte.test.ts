@@ -104,6 +104,12 @@ describe('the first connect of a profile on a built-in provider', () => {
 		expect(q('api-connect-first-link')).toBeNull();
 	});
 
+	it('a mandate, a profile with an API key (nothing to connect): no sentence', async () => {
+		serve('mandate', [{ ...shop, id: 'crm', auth: { type: 'bearer' }, reader_may_connect: false }]);
+		await render();
+		expect(q('api-connect-first-not-yours')).toBeNull();
+	});
+
 	it('a mandate the server lets connect it (its own profile): no refusal sentence', async () => {
 		serve('mandate', [{ ...shop, reader_may_connect: true }]);
 		await render();
