@@ -547,6 +547,72 @@ export function mandateCredentialInput(text: string): string | null {
  * exact pass could not hide a shape. It does not: a value of four characters or
  * fewer becomes `***` (today every value under 16), so `xx ab yy` grows by one.)
  */
+/** Shortest JSON-blob leaf the export masker hides on its own: below it a leaf is a label, not a credential. */
+const EXPORT_MASK_LEAF_MIN = 12;
+/** The shortest form the export's byte scan of non-text files looks for. */
+export const EXPORT_SCAN_MIN = 8;
+
+/**
+ * The values the data export masks, derived from the stored ones. A secret is not only written
+ * down whole: an OAuth or app-password secret is a JSON blob whose refresh token can appear on its
+ * own, and any value can appear JSON-escaped (once or twice: a tool result inside a JSON column),
+ * base64-encoded or URL-encoded. Each stored value contributes itself, the string leaves of its
+ * JSON (at least `EXPORT_MASK_LEAF_MIN` characters), and those forms of each. Named remainder:
+ * base64 is matched only at the alignment it starts on, and other encodings are not derived.
+ */
+/** Shortest value whose base64 is also derived at a shifted offset: below it the run is too short to tell. */
+const EXPORT_SHIFT_MIN = 12;
+
+/**
+ * The base64 characters a value's bytes decide alone when `k` (0, 1, 2) other bytes come before it
+ * and an unknown number after it: the full groups of the padded buffer, without the first group
+ * when something precedes the value (it mixes in those bytes) and without the trailing partial group.
+ */
+export function shiftedBase64(bytes: Buffer): string[] {
+  const out: string[] = [];
+  for (let k = 0; k < 3; k++) {
+    const enc = Buffer.concat([Buffer.alloc(k), bytes]).toString('base64');
+    const start = k === 0 ? 0 : 4;
+    const end = Math.floor((k + bytes.length) / 3) * 4;
+    if (end - start >= 8) out.push(enc.slice(start, end));
+  }
+  return out;
+}
+
+export function exportMaskValues(values: readonly string[]): string[] {
+  const out = new Set<string>();
+  const leaves = (v: unknown, into: string[]): void => {
+    if (typeof v === 'string') { if (v.length >= EXPORT_MASK_LEAF_MIN) into.push(v); return; }
+    if (Array.isArray(v)) { for (const x of v) leaves(x, into); return; }
+    if (v !== null && typeof v === 'object') for (const x of Object.values(v as Record<string, unknown>)) leaves(x, into);
+  };
+  for (const value of values) {
+    if (value.length < 2) continue;
+    const base = [value];
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed !== null && typeof parsed === 'object') leaves(parsed, base);
+    } catch { /* not JSON: the value alone */ }
+    for (const c of base) {
+      out.add(c);
+      const once = JSON.stringify(c).slice(1, -1);
+      out.add(once);
+      out.add(JSON.stringify(once).slice(1, -1));
+      out.add(Buffer.from(c, 'utf8').toString('base64'));
+      out.add(Buffer.from(c, 'utf8').toString('base64url'));
+      out.add(encodeURIComponent(c));
+      // base64 of a value inside a longer text (`user:` + a password in Basic auth) does not start
+      // on the value's own alignment and does not end on it: for each of the three offsets, the
+      // run of full groups that only the value's bytes decide.
+      if (c.length >= EXPORT_SHIFT_MIN) for (const shifted of shiftedBase64(Buffer.from(c, 'utf8'))) {
+        out.add(shifted);
+        out.add(shifted.replace(/\+/g, '-').replace(/\//g, '_'));
+      }
+    }
+  }
+  return [...out];
+}
+
 export function maskSecretsAndPatterns(
   text: string,
   values: readonly string[],
@@ -849,9 +915,10 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
-   * A check every {@link resolve} asks before it hands a value out, set by the engine once the
-   * stores it reads exist (`connectionTokenAllowed`: a token of a connection whose mandate has
-   * ended). A guard that throws withholds the value.
+   * A check every {@link resolve} asks before it hands a value out, set by the engine as soon as
+   * this store exists (`Engine.resolveGuard`: a token of a connection whose mandate has ended, and,
+   * while the API profiles are not known, every vault name that could hold one). A guard that
+   * throws withholds the value.
    */
   private resolveGuard: ((name: string) => boolean) | null = null;
 
@@ -874,7 +941,12 @@ export class SecretStore implements SecretStoreLike {
     return secret === undefined || secret.value === '' ? '' : hash(secret.value);
   }
 
-  resolve(name: string): string | null {
+  /**
+   * The value {@link resolve} would hand out for `name`, or `null`: stored, not expired, consented
+   * to, and let through by the resolve guard. The one place these four questions are asked, so
+   * {@link resolve} and {@link holds} cannot drift apart.
+   */
+  private usableValue(name: string): string | null {
     const secret = this.secrets.get(name);
     if (!secret) return null;
     if (this.isExpired(name)) return null;
@@ -886,9 +958,23 @@ export class SecretStore implements SecretStoreLike {
         return null;
       }
     }
-
-    channels.secretAccess.publish({ name, action: 'resolve' });
     return secret.value;
+  }
+
+  resolve(name: string): string | null {
+    const value = this.usableValue(name);
+    if (value === null) return null;
+    channels.secretAccess.publish({ name, action: 'resolve' });
+    return value;
+  }
+
+  /**
+   * Whether {@link resolve} would hand out a value for `name`, without reading it out: nothing is
+   * returned and no `secretAccess` event is published, so a check that only asks "is it there?"
+   * does not read in the audit trail as a credential read.
+   */
+  holds(name: string): boolean {
+    return this.usableValue(name) !== null;
   }
 
   listNames(): string[] {
@@ -986,6 +1072,31 @@ export class SecretStore implements SecretStoreLike {
 
   maskSecrets(text: string): string {
     return maskValuesIn(text, this._maskedValues());
+  }
+
+  /**
+   * The data export's masker: {@link maskAll} over the stored values AND the forms they take once
+   * written down elsewhere ({@link exportMaskValues}). The values never leave this object.
+   */
+  maskForExport(text: string): string {
+    return maskSecretsAndPatterns(text, exportMaskValues(this._maskedValues()));
+  }
+
+  /**
+   * The data export's guard for file bytes: masks text with {@link maskForExport}, and says
+   * whether raw bytes hold any of the export's forms of a stored value. Built once per export;
+   * the values stay inside the closure, never in what it returns.
+   */
+  exportGuard(): { mask: (text: string) => string; holds: (bytes: Buffer) => boolean; readonly maxNeedle: number } {
+    const values = exportMaskValues(this._maskedValues());
+    // Shorter forms would occur by chance in almost any binary file and withhold it: the scan
+    // looks for forms of at least EXPORT_SCAN_MIN characters (a named remainder below that).
+    const needles = values.filter(v => v.length >= EXPORT_SCAN_MIN).map(v => Buffer.from(v, 'utf8'));
+    return {
+      mask: (text) => maskSecretsAndPatterns(text, values),
+      holds: (bytes) => needles.some(n => bytes.includes(n)),
+      maxNeedle: needles.reduce((m, n) => Math.max(m, n.length), 0),
+    };
   }
 
   recordConsent(name: string): void {

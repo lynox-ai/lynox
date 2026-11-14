@@ -28,6 +28,7 @@ import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
 import { credentialBearing, credentialHosts, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
+import { processErrorText, reducedErrorText } from './error-egress.js';
 
 // ── Errors ──
 
@@ -1243,6 +1244,39 @@ export interface SaveOptions {
   trailId?: string | undefined;
 }
 
+/**
+ * The parts of the refusals of an engine running without engine.db, put together by
+ * {@link engineLessText}: the model reads them from `api_setup`, an HTTP client from the 409 and the
+ * OAuth pages. (The settings page shows its own sentence for the code `engine_less`.) Without
+ * engine.db a profile is written to the flat files in `apis/`, which the next boot with engine.db
+ * does not read: a change made there is lost and a deleted profile comes back.
+ */
+const ENGINE_LESS_HEADS = {
+  save: "This engine is running without engine.db, which it could not open when it was started, so lynox does not add or change API connections now: the change would be lost once the engine opens engine.db again. Nothing was saved, and nothing is saved later on its own; once someone has restarted the engine, the connection has to be added or changed again.",
+  remove: "This engine is running without engine.db, which it could not open when it was started, so lynox does not remove API connections now: a removed connection would come back once the engine opens engine.db again. Nothing was removed, and nothing is removed later on its own; once someone has restarted the engine, the connection has to be removed again.",
+  connect: "This engine is running without engine.db, which it could not open when it was started, so lynox does not connect API accounts now: the connection would be lost once the engine opens engine.db again. Nothing was sent to the provider, and nothing is connected later on its own; once someone has restarted the engine, the account has to be connected again.",
+  renew: "This engine is running without engine.db, which it could not open when it was started, so lynox does not renew an API connection's access now: the renewed access would be lost once the engine opens engine.db again. Nothing was sent to the provider.",
+} as const;
+/** True for every reader: it lasts until a restart, and the log says why. */
+const ENGINE_LESS_LASTS = "This does not end on its own: it lasts until someone restarts the engine and the engine can open all its files again; the log the engine writes at start says why it could not.";
+/**
+ * For the model only: without it, models measured on these refusals offered to do it after the
+ * restart, which nothing in lynox would carry out. An HTTP answer is read by a person or a
+ * program, not by the model, so it gets no such advice; the JSON error body is also capped at 600
+ * characters, which the sentences with it would exceed.
+ */
+const ENGINE_LESS_TO_MODEL = "Do not retry and do not offer to do it later on your own: nothing will remind you after the restart. Tell the user it did not happen; after the restart they can ask again. Do not ask whether to try again later either; if they want that, they ask after the restart.";
+
+export type EngineLessKind = keyof typeof ENGINE_LESS_HEADS;
+/** `model`: a tool result the model reads. `client`: an HTTP answer (a JSON error or an OAuth page). */
+export type EngineLessReader = 'model' | 'client';
+
+/** The refusal of `kind` for `reader`; both readers' sentences are built from the same parts. */
+export function engineLessText(kind: EngineLessKind, reader: EngineLessReader): string {
+  const told = `${ENGINE_LESS_HEADS[kind]} ${ENGINE_LESS_LASTS}`;
+  return reader === 'model' ? `${told} ${ENGINE_LESS_TO_MODEL}` : told;
+}
+
 /** A save the store refused, with the reason it gives the caller. */
 export class SaveRefused extends Error {
   constructor(readonly reason: string) { super(reason); }
@@ -1484,6 +1518,29 @@ export class ApiStore {
    * where persistence falls back to the flat-JSON directory (legacy behaviour).
    */
   private connStore: ConnectionStore | null = null;
+  /** Set by an engine that started without engine.db: see {@link refuseChangesWithoutStore}. */
+  private changesRefused = false;
+
+  /**
+   * Called by an engine that started without engine.db. From then on a person's change to an API
+   * profile (a create, an edit, a delete, a new OAuth connection) is refused with a plain reason
+   * instead of being written to the flat files, which the next boot with engine.db does not read.
+   * So is every other save: the ones the engine makes by itself follow a token exchange
+   * (`fetch_token`), which such an engine refuses before anything is sent. A store never told this keeps the flat-file fallback, which tests and tools use on purpose.
+   */
+  refuseChangesWithoutStore(): void {
+    this.changesRefused = this.connStore === null;
+  }
+
+  /**
+   * The refusal for a person's `kind` of change on an engine without engine.db, or `null` when
+   * the change may go ahead. Asked by the entrances before anything is written or sent: the OAuth
+   * start before it redirects to the provider, a delete before it reads the profile.
+   */
+  engineLessRefusal(kind: EngineLessKind, reader: EngineLessReader): string | null {
+    if (!this.changesRefused || this.connStore !== null) return null;
+    return engineLessText(kind, reader);
+  }
 
   /** Wire the engine.db backing store so future `save`/`remove` persist there. */
   setConnectionStore(store: ConnectionStore): void {
@@ -1699,9 +1756,10 @@ export class ApiStore {
   private _othersWatching(id: string, names: readonly string[]): void {
     if (names.length === 0) return;
     // Registered profiles only, as in `secretWritten` and `_followRenewal`: a profile the boot
-    // held back has no grant in use, and it comes back only through a save, which mints it as
-    // new (it is not in `profiles`, so `prev` is undefined), or through the next boot, whose
-    // fingerprint comparison reads the vault as it is then.
+    // held back has no grant in use, and it comes back only through a save, which reads its
+    // stored grant as a registered one's and mints for the same reasons (a new consent, other
+    // credentials, an exchange on a credential its fingerprints do not know), or through the
+    // next boot, whose fingerprint comparison reads the vault as it is then.
     for (const p of [...this.profiles.values()]) {
       if (p.id !== id && watchedNames(p).some((n) => names.includes(n))) this._reissue(p.id, 'engine-write');
     }
@@ -1817,19 +1875,40 @@ export class ApiStore {
     if (!this.grantLedger || this.fingerprinter === null) return 0;
     let minted = 0;
     for (const p of [...this.profiles.values()]) {
-      const stored = storedFingerprints(p);
-      const check: unknown = p.oauth_grant?.fingerprint_check;
-      let reason: GrantMintReason | null = stored === undefined || typeof check !== 'string' ? 'baseline'
-        : check !== this.fingerprinter.keyCheck ? 'rekey'
-        : null;
-      for (const [name, fp] of Object.entries(this._credentialsOf(p)?.fingerprints ?? {})) {
-        if (reason !== null) break;
-        if (!Object.hasOwn(stored!, name)) reason = 'baseline';
-        else if (stored![name] !== fp) reason = 'secret-changed';
-      }
+      const reason = this._fingerprintDrift(p);
       if (reason !== null && this._reissue(p.id, reason)) minted++;
     }
     return minted;
+  }
+
+  /** Why the boot comparison ({@link checkFingerprints}) would mint for `p`, or null where the
+   *  vault holds what its grant recorded. Null without a fingerprinter: nothing to compare with. */
+  private _fingerprintDrift(p: ApiProfile): GrantMintReason | null {
+    if (this.fingerprinter === null) return null;
+    const stored = storedFingerprints(p);
+    const check: unknown = p.oauth_grant?.fingerprint_check;
+    let reason: GrantMintReason | null = stored === undefined || typeof check !== 'string' ? 'baseline'
+      : check !== this.fingerprinter.keyCheck ? 'rekey'
+      : null;
+    for (const [name, fp] of Object.entries(this._credentialsOf(p)?.fingerprints ?? {})) {
+      if (reason !== null) break;
+      if (!Object.hasOwn(stored!, name)) reason = 'baseline';
+      else if (stored![name] !== fp) reason = 'secret-changed';
+    }
+    return reason;
+  }
+
+  /** `held`, a profile the boot held back, where its grant is one {@link backfillGrants} would
+   *  keep: recorded for this connection and its latest. The boot backfills registered profiles
+   *  only, so a held-back one may carry no grant, an unknown one or another connection's; a save
+   *  that brings it back then starts the connection's line (`new`), as it did before it read the
+   *  held-back grant at all. */
+  private _heldBackGrantKept(held: ApiProfile | undefined): ApiProfile | undefined {
+    const g = held?.oauth_grant?.grant_id;
+    const ledger = this.grantLedger;
+    if (held === undefined || ledger === null || typeof g !== 'string' || g === '') return undefined;
+    // The latest grant the ledger records for this id is this connection's by construction.
+    return ledger.latest(held.id)?.grant_id === g ? held : undefined;
   }
 
   /**
@@ -1935,7 +2014,10 @@ export class ApiStore {
         }
         read.push({ source, deleteId: row.id, profile: migrateV1Profile(profile) });
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${err instanceof Error ? err.message : String(err)}\n`);
+        // Never the error's message, as for a profile file: the parser's quotes the stored config
+        // around the fault. Named by its class instead.
+        const why = err instanceof SyntaxError ? 'not valid JSON' : `could not be read as a profile (${reducedErrorText(err)})`;
+        process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${why}\n`);
         fault.push(unreadableEntry(source, row.id, profile, row.configJson, [row.name, row.vaultKeys]));
       }
     }
@@ -1970,7 +2052,9 @@ export class ApiStore {
         try {
           if (this.register(profile, 'load')) loaded.push(profile.id);
         } catch (err: unknown) {
-          process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${err instanceof Error ? err.message : String(err)}\n`);
+          // `register` returns its refusals; what throws here is a runtime error over a stored
+          // profile, whose message may quote one of its values.
+          process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${processErrorText(err)}\n`);
           this.unreadable.set(source, unreadableEntry(source, deleteId, profile, null));
           threw = true;
         }
@@ -2399,7 +2483,7 @@ export class ApiStore {
     // registered profiles only, as before; which of two stored rivals the boot keeps is not
     // decided here.
     // A save is asked against the profiles the import waits to write too: they are stored once it runs.
-    const rivals = mode === 'save' && !wasRegistered ? [...this.knownProfiles(), ...this._waitingProfiles()] : [...this.profiles.values()];
+    const rivals = mode === 'save' && !wasRegistered ? [...this.knownProfiles(), ...this.waitingProfiles()] : [...this.profiles.values()];
     const slot = vaultSlotBase(profile.id);
     for (const { id: otherId } of rivals) {
       if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
@@ -2456,7 +2540,7 @@ export class ApiStore {
     if (mode === 'save') {
       const prev = this.profiles.get(profile.id);
       const key = (c: SlotConflict): string => JSON.stringify([c.name, c.loser]);
-      for (const other of [...this.knownProfiles(), ...this._waitingProfiles()]) {
+      for (const other of [...this.knownProfiles(), ...this.waitingProfiles()]) {
         if (other.id === profile.id) continue;
         const had = new Set(prev === undefined ? [] : slotConflicts(prev, other).filter((c) => c.name !== null).map(key));
         const fresh = slotConflicts(profile, other).find((c) => !(c.name === null && c.loser === 'y') && !had.has(key(c)));
@@ -2611,7 +2695,8 @@ export class ApiStore {
    * `grant-revoked` verdict) and, in the same engine.db transaction, the record of it: a provider's
    * erasure, held, or a closing record (`writeConnectionRecord`). A throw rolls both back and puts
    * the in-memory profile back. Without engine.db (the flat-JSON fallback) the refusal is saved as
-   * before and no record is written. `stamped` says whether the refused token is the one the
+   * before and no record is written, unless the engine refuses changes there
+   * ({@link ApiStore.refuseChangesWithoutStore}): then the save throws `SaveRefused`. `stamped` says whether the refused token is the one the
    * grant's stamp names; only then can the record be an erasure. Returns the kind of record
    * written, or `none`.
    */
@@ -2656,6 +2741,11 @@ export class ApiStore {
     const prev = this.profiles.get(profile.id);
     const heldBefore = this.heldBack.get(profile.id);
     const isNew = prev === undefined;
+    // What the grant decisions read: the registered profile, or the one the boot held back. A
+    // held-back profile is out of service, not new: where its grant is still the connection's,
+    // a save that brings it back keeps it, or mints for the same reasons a registered one would —
+    // and a new consent then ends a provider's erasure still held on it, as it does there.
+    const stored = prev ?? this._heldBackGrantKept(heldBefore);
     const ledger = this.grantLedger;
     const exchange = options?.exchange;
     // The grant is the engine's, never the caller's: a save mints when it creates the
@@ -2663,10 +2753,13 @@ export class ApiStore {
     // that ran on a credential this epoch did not record, and otherwise keeps the stored grant
     // and its fingerprints — whatever the passed profile says.
     const mintReason: GrantMintReason | null = ledger === null ? null
-      : isNew ? 'new'
+      : stored === undefined ? 'new'
       : options?.newConsent === true ? 'consent'
-      : credentialTuple(prev) !== credentialTuple(profile) ? 'credentials'
-      : exchange !== undefined && this.fingerprinter !== null && !exchangeKnown(prev, exchange) ? 'exchange'
+      : credentialTuple(stored) !== credentialTuple(profile) ? 'credentials'
+      : exchange !== undefined && this.fingerprinter !== null && !exchangeKnown(stored, exchange) ? 'exchange'
+      // A held-back profile coming back: the writes, renewals and boot comparison it missed
+      // while held back, made up for here as the boot would.
+      : prev === undefined ? this._fingerprintDrift(stored)
       : null;
     // What the engine itself just wrote into the vault for this connection, which any other
     // connection reading the same name must treat as a new credential.
@@ -2678,20 +2771,20 @@ export class ApiStore {
       // A known exchange moves the fingerprints of the watched names it wrote, read back now:
       // the new values are this epoch's, so neither the next exchange nor the boot reads them as
       // a change. The foreign tokens stay as they are; the next mint keeps those still held.
-      const fps = storedFingerprints(prev);
-      const check: unknown = prev?.oauth_grant?.fingerprint_check;
-      let kept: GrantCredentials = { fingerprints: fps, foreign: storedForeign(prev), check: typeof check === 'string' ? check : undefined };
+      const fps = storedFingerprints(stored);
+      const check: unknown = stored?.oauth_grant?.fingerprint_check;
+      let kept: GrantCredentials = { fingerprints: fps, foreign: storedForeign(stored), check: typeof check === 'string' ? check : undefined };
       const f = this.fingerprinter;
       if (fps !== undefined && exchange !== undefined && f !== null) {
         const moved = { ...fps };
         for (const name of exchange.wrote) if (Object.hasOwn(moved, name)) moved[name] = keyedOf(f, name);
         kept = { ...kept, fingerprints: moved };
       }
-      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew, options?.trailId);
+      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, stored?.oauth_grant?.grant_id, kept), apisDir, isNew, options?.trailId);
       // A save that clears a revocation from the grant it keeps (an exchange that worked again with
       // the same token) lifts it: a provider's erasure of that grant still held is cancelled with it,
       // whoever saves, since the same grant works again. A save that names no actor cancels nothing.
-      const liftedGrant = prev?.oauth_grant?.state === 'revoked' && profile.oauth_grant?.state !== 'revoked' ? prev.oauth_grant.grant_id : undefined;
+      const liftedGrant = stored?.oauth_grant?.state === 'revoked' && profile.oauth_grant?.state !== 'revoked' ? stored.oauth_grant.grant_id : undefined;
       const conn = this.connStore;
       const actor = options?.actor;
       let saved: ReturnType<ApiStore['save']>;
@@ -2723,7 +2816,7 @@ export class ApiStore {
     try {
       const saved = ledger.transaction(() => {
         const minted = withGrant(profile, ledger.mint(profile.id, 'api', mintReason), this._credentialsOf(profile, {
-          prevForeign: storedForeign(prev),
+          prevForeign: storedForeign(stored),
           consentRefresh: options?.newConsent === true ? options.consentRefresh : undefined,
           adopt: mintReason === 'exchange' ? exchange?.presentedRefreshTokenFp ?? undefined : undefined,
         }));
@@ -2738,7 +2831,7 @@ export class ApiStore {
         // never reaches an erasure of a grant someone else connected. A `credentials` mint (a
         // configuration change) does not count.
         const actor = options?.actor;
-        const refused = prev?.oauth_grant;
+        const refused = stored?.oauth_grant;
         if ((mintReason === 'consent' || mintReason === 'exchange') && this.connStore !== null && mayCancelProviderErasure(actor, refused)) {
           const onlyGrant = actor.kind === 'owner' ? undefined : refused?.grant_id;
           if (actor.kind === 'owner' || onlyGrant !== undefined) {
@@ -2783,6 +2876,9 @@ export class ApiStore {
   }
 
   private _saveAdmit(profile: ApiProfile, dryRun: boolean): string | null {
+    // First, before anything below writes (the import's sentinel) or registers.
+    const engineLess = this.engineLessRefusal('save', 'model');
+    if (engineLess !== null) return engineLess;
     // What the boot would not read as a profile is not stored: it would come back as an entry
     // that holds every string it carries, against every other profile.
     if (missingRequiredField(profile)) {
@@ -2817,6 +2913,10 @@ export class ApiStore {
    * recorded. The flat-JSON path records nothing.
    */
   remove(id: string, apisDir?: string, options?: { readonly record?: ConnectionRecordKind | undefined }): boolean {
+    // The entrances ask `engineLessRefusal('remove', …)` first and answer with it; this throws only
+    // for one that did not, so that it removes nothing either.
+    const engineLess = this.engineLessRefusal('remove', 'model');
+    if (engineLess !== null) throw new SaveRefused(engineLess);
     // Before the profile goes, while it still names its slots. A write that throws keeps it in place.
     this._markLapsedReaders(id, apisDir);
     const removed = this._removeStored(id, apisDir, options?.record);
@@ -2946,6 +3046,8 @@ export class ApiStore {
    * frees every name it held.
    */
   deleteRefusal(profile: ApiProfile, secretStore: SecretStoreLike | null | undefined, asker: 'owner' | 'other'): string | null {
+    const engineLess = this.engineLessRefusal('remove', 'model');
+    if (engineLess !== null) return engineLess;
     if (isMandateConnection(profile)) return null;
     for (const e of this.unreadable.values()) {
       const names = recordedWrites(profile).filter((w) => {
@@ -3043,8 +3145,8 @@ export class ApiStore {
     return [...this.profiles.values(), ...[...this.heldBack.values()].filter((p) => !this.profiles.has(p.id))];
   }
 
-  /** The profiles the import waits to write ({@link importWaiting}). */
-  private _waitingProfiles(): ApiProfile[] {
+  /** The profiles the import waits to write ({@link importWaiting}). Stored, not yet registered: whose tokens their names hold is known from them. */
+  waitingProfiles(): ApiProfile[] {
     return [...this.importWaiting.values()].map((w) => w.profile);
   }
 

@@ -28,6 +28,8 @@ const DEFAULT_DAILY_LIMIT = 200;
 const DEFAULT_DEDUP_WINDOW_MS = 60_000;
 
 let _provider: ToolCallCountProvider | null = null;
+/** Set by {@link configureMailRateLimits}: the limits apply, whether or not a provider counts them. */
+let _configured = false;
 let _hourlyLimit = DEFAULT_HOURLY_LIMIT;
 let _dailyLimit = DEFAULT_DAILY_LIMIT;
 let _dedupWindowMs = DEFAULT_DEDUP_WINDOW_MS;
@@ -36,7 +38,8 @@ let _dedupWindowMs = DEFAULT_DEDUP_WINDOW_MS;
 const _dedupSeen = new Map<string, number>();
 
 export interface MailRateLimitOptions {
-  provider: ToolCallCountProvider;
+  /** Null when the history database did not open: a set limit then cannot be counted. */
+  provider: ToolCallCountProvider | null;
   hourlyLimit?: number | undefined;
   dailyLimit?: number | undefined;
   dedupWindowMs?: number | undefined;
@@ -44,6 +47,7 @@ export interface MailRateLimitOptions {
 
 /** Configure cross-session mail rate limits. Called once at orchestrator init. */
 export function configureMailRateLimits(opts: MailRateLimitOptions): void {
+  _configured = true;
   _provider = opts.provider;
   _hourlyLimit = opts.hourlyLimit ?? DEFAULT_HOURLY_LIMIT;
   _dailyLimit = opts.dailyLimit ?? DEFAULT_DAILY_LIMIT;
@@ -52,6 +56,7 @@ export function configureMailRateLimits(opts: MailRateLimitOptions): void {
 
 /** Reset all mail rate-limit state (for testing). */
 export function resetMailRateLimits(): void {
+  _configured = false;
   _provider = null;
   _hourlyLimit = DEFAULT_HOURLY_LIMIT;
   _dailyLimit = DEFAULT_DAILY_LIMIT;
@@ -60,13 +65,27 @@ export function resetMailRateLimits(): void {
 }
 
 /**
+ * True when the limits were configured, at least one is set, and nothing counts
+ * against them: the history database did not open at startup. The send paths
+ * then refuse rather than send uncounted.
+ */
+export function mailSendsUncounted(): boolean {
+  return _configured && _provider === null && (Number.isFinite(_hourlyLimit) || Number.isFinite(_dailyLimit));
+}
+
+/** The refusal when a mail limit is set but the history database that counts it did not open. */
+export const MAIL_RATE_UNCOUNTED =
+  'Blocked: the mail send limit cannot be checked, because the history database did not open when lynox started. This mail was not sent, and nothing keeps it for later. No mail goes out until someone restarts lynox and lynox can open the history database again; the log lynox writes at start says why it could not. Do not retry and do not offer to send it later on your own: nothing will remind you after the restart. Tell the user it was not sent; after the restart they can ask again, or they can send it themselves now. Do not ask whether to try again later either; if they want that, they ask after the restart.';
+
+/**
  * Check the per-tool hourly + daily caps. Returns null when below both
- * limits, or a clear-text block message when one is exceeded.
+ * limits, or a clear-text block message when one is exceeded or cannot be
+ * counted.
  *
- * No provider configured → no enforcement (self-host without RunHistory
- * still works; managed instances always wire one).
+ * Never configured (tests, a bare library use) → no enforcement.
  */
 export function checkMailRateLimit(toolName: 'mail_send' | 'mail_reply'): string | null {
+  if (mailSendsUncounted()) return MAIL_RATE_UNCOUNTED;
   if (!_provider) return null;
 
   if (Number.isFinite(_hourlyLimit)) {
@@ -88,10 +107,15 @@ export function checkMailRateLimit(toolName: 'mail_send' | 'mail_reply'): string
  * The same hourly + daily caps for a mail the approval queue sends, outside any tool call:
  * whether one more may go, counting the tool calls as {@link checkMailRateLimit} does plus the
  * queue's own sends in the window (`alsoSent`). A filed mail was a recorded tool call and its
- * send counts again: the conservative direction. Without a provider the queue's sends still
- * count.
+ * send counts again: the conservative direction. Never configured (no provider, no limits set
+ * up), the queue's sends still count. Configured but without a provider (the history database
+ * did not open), it admits nothing: the entries wait until a restart opens it, unless they
+ * expire first (`APPROVAL_TTL_MS`).
  */
 export function mailSendLimitAdmits(toolName: 'mail_send' | 'mail_reply', alsoSent: { hour: number; day: number }): boolean {
+  // The queue's own sends are counted, the tool calls before this start are not: the
+  // window is not known, so the queue holds its entries until a restart opens the history.
+  if (mailSendsUncounted()) return false;
   const calls = (hours: number): number => _provider?.getToolCallCountSince(toolName, hours) ?? 0;
   if (Number.isFinite(_hourlyLimit) && calls(1) + alsoSent.hour >= _hourlyLimit) return false;
   if (Number.isFinite(_dailyLimit) && calls(24) + alsoSent.day >= _dailyLimit) return false;

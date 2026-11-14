@@ -469,11 +469,16 @@ export function lapsedSlot(apiStore: Pick<ApiStore, 'knownProfiles'>, name: stri
  * slot is not missing. Anything that throws answers false.
  */
 export function sharesAnotherGrant(apiStore: Pick<ApiStore, 'knownProfiles'>, profile: ApiProfile): boolean {
+  return sharedGrantOwner(apiStore, profile) !== undefined;
+}
+
+/** The profile holding the grant `profile` shares ({@link sharesAnotherGrant}), or undefined. Anything that throws answers undefined. */
+export function sharedGrantOwner(apiStore: Pick<ApiStore, 'knownProfiles'>, profile: ApiProfile): ApiProfile | undefined {
   try {
     const grant = slotGrant(apiStore.knownProfiles(), readersRefreshSlot(profile));
-    return grant.kind === 'owned' && grant.owner.id !== profile.id && grant.members.some((m) => m.id === profile.id);
+    return grant.kind === 'owned' && grant.owner.id !== profile.id && grant.members.some((m) => m.id === profile.id) ? grant.owner : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -1082,14 +1087,48 @@ export function occupiedTokenSlots(store: SecretStoreLike, id: string): string[]
  * no mandate counts as live. What lifts it is the owner's consent: connecting the account again,
  * or adopting the connection (`api_setup` action `adopt_connection`, which asks the person).
  * Saving over the profile alone keeps the mandate's grant.
+ *
+ * It needs the profiles: without them nobody knows which names hold a connection's token. The
+ * engine's guard does not ask this before every profile is known, nor after loading them failed
+ * (`Engine`, `resolveGuard`); there is no answer here for a missing store.
  */
 export function connectionTokenAllowed(
-  apiStore: Pick<ApiStore, 'knownProfiles'> | null,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   ends: Pick<MandateEnds, 'isLive'> | null,
   name: string,
 ): boolean {
-  if (apiStore === null) return true;
   return !apiStore.knownProfiles().some((p) => connectionWaits(p, ends) && grantTokenNames(p).has(name));
+}
+
+/**
+ * The engine's resolve guard (`Engine.resolveGuard`), set as soon as the secret store exists.
+ *
+ * - Before the profiles are loaded, and for good when loading them failed (`apiStore` null), only a
+ *   name the environment set or one of the platform's own slots goes out. Nobody knows then which
+ *   other names hold a connection's token. A protected name is refused as a token's slot on every
+ *   write path; an environment name holds the environment's value at boot.
+ * - Loaded, every name is {@link connectionTokenAllowed} over every stored profile, the ones the
+ *   import still waits to write included. That covers an environment name too: a connection that
+ *   writes its token there (`set`) replaces the environment's value in the store.
+ * - Loaded, a name a stored entry the boot could not read may hold does not go out either: whose
+ *   connection that is, and whether its mandate ended, cannot be told until the entry is repaired
+ *   or removed. The environment's names and the platform's slots are exempt from this, so one
+ *   unreadable entry that may hold every name does not take the provider keys with it.
+ */
+export function resolveGuardAllows(
+  state: {
+    readonly profilesKnown: boolean;
+    readonly apiStore: Pick<ApiStore, 'knownProfiles' | 'waitingProfiles' | 'unreadableHolds'> | null;
+    readonly ends: Pick<MandateEnds, 'isLive'> | null;
+    readonly fromEnvironment: (name: string) => boolean;
+  },
+  name: string,
+): boolean {
+  const own = state.fromEnvironment(name) || isProtectedSecretWrite(name);
+  const apiStore = state.apiStore;
+  if (!state.profilesKnown || apiStore === null) return own;
+  if (!own && apiStore.unreadableHolds(name)) return false;
+  return connectionTokenAllowed({ knownProfiles: () => [...apiStore.knownProfiles(), ...apiStore.waitingProfiles()] }, state.ends, name);
 }
 
 /**
@@ -1187,7 +1226,7 @@ function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string,
  * with only "Tell the owner", it sometimes told the member instead.
  */
 function planRefusalFinal(person: string): string {
-  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${RUN_REFUSAL_CLOSE}`;
+  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${OWNER_ALLOWS_AT} ${RUN_REFUSAL_CLOSE}`;
 }
 
 /**
@@ -1310,6 +1349,13 @@ function planMayUse(profile: ApiProfile): boolean {
   return state === 'no-plan' || state === 'listed';
 }
 
+/**
+ * Where the owner lifts a plan's refusal of a connection it may not use (641 4b ii-c-min, ux U-058).
+ * The model reads it and passes it on, so it names the place in both languages the owner's screen
+ * may be in: what it says is what the owner finds.
+ */
+const OWNER_ALLOWS_AT = 'The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
+
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
   const presetId = profile.auth?.oauth?.preset_id;
   return {
@@ -1390,6 +1436,13 @@ export function secretsForProfile(
     get(target, prop, receiver) {
       if (prop === 'resolve') {
         return (name: string): string | null => (hidden(name) ? null : target.resolve(name));
+      }
+      if (prop === 'holds') {
+        // Whether a name is there is information about it too: a hidden name answers false. A store
+        // that cannot answer stays one that cannot: no function, so the caller assumes nothing.
+        const holds = target.holds?.bind(target);
+        if (holds === undefined) return undefined;
+        return (name: string): boolean => (hidden(name) ? false : holds(name));
       }
       if (prop === 'resolveSecretRefs') {
         // Nothing is resolved when any name is hidden: the callers probe one name at a time,

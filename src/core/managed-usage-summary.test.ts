@@ -11,7 +11,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchControlPlaneUsageSummary } from './managed-usage-summary.js';
+import { fetchControlPlaneUsageSummary, managedUsedCents } from './managed-usage-summary.js';
 
 const ENV_CONTROL = 'LYNOX_MANAGED_CONTROL_PLANE_URL';
 const ENV_INSTANCE = 'LYNOX_MANAGED_INSTANCE_ID';
@@ -120,5 +120,24 @@ describe('contract fixtures: /summary parse side', () => {
     };
     expect(f.available_cents).toBe(f.budget_cents + f.topup_cents);
     expect(f.used_cents).toBe(f.available_cents - f.balance_cents);
+  });
+});
+
+describe('managedUsedCents: the control plane lifts the local sum only over the same window', () => {
+  const PERIOD = { start_iso: '2026-11-03T00:00:00.000Z', end_iso: '2026-12-03T00:00:00.000Z', source: 'stripe-billing' as const };
+
+  it('without a billing period, the local sum stands even when the control plane sends more', () => {
+    expect(managedUsedCents(700, { managed: true, used_cents: 5000 })).toBe(700);
+    expect(managedUsedCents(700, { managed: true, used_cents: 5000, period: null })).toBe(700);
+  });
+
+  it('with a billing period, the larger of the two stands', () => {
+    expect(managedUsedCents(700, { managed: true, used_cents: 5000, period: PERIOD })).toBe(5000);
+    expect(managedUsedCents(7000, { managed: true, used_cents: 5000, period: PERIOD })).toBe(7000);
+  });
+
+  it('not managed or no answer: the local sum', () => {
+    expect(managedUsedCents(700, { managed: false, used_cents: 5000, period: PERIOD })).toBe(700);
+    expect(managedUsedCents(700, null)).toBe(700);
   });
 });

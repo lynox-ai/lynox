@@ -130,8 +130,8 @@ export type BulkInvalidReason =
   | 'list_item_mismatch'
   /** a product held more media than its list page reads: those past it are not listed */
   | 'list_item_truncated'
-  /** a filtered Shopify list's search listed a product whose product type or vendor is not the
-   *  filter's value up to ASCII letter case (Shopify folds diacritics; PRD shopify-preset §22.4) */
+  /** a filtered Shopify list's search listed a product whose product type, vendor or status is not
+   *  the filter's value up to ASCII letter case (Shopify folds diacritics; PRD shopify-preset §22.4) */
   | 'not_in_filter'
   /** An undo would write back an `actual` whose read-back held markup the write never sent
    *  (`shop_added_markup`, PRD shopify-preset §21.2 item 7 (b)): never the owner's state. */
@@ -2200,6 +2200,22 @@ export class BulkLedger {
     return (this.engineDb.getDb().prepare(
       `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(run.target_system) !== null)}`,
     ).get(runId) as { n: number }).n;
+  }
+
+  /** The undo that took an undone run back, for the owner's page: the last finished undo started
+   *  from it, and when its last target was taken back. Null for a run that is not `undone`.
+   *  Only an undo carries a `source_run_id` ({@link planUndo}), so the source link alone finds it.
+   *  Only a finished one counts: a second undo planned beside it stays previewed for good. Two
+   *  planned in the same second are told apart by insertion order, as the prune does. */
+  undoneBy(runId: string): { runId: string; at: string } | null {
+    const run = this.runRow(runId);
+    if (!run || run.phase !== 'undone') return null;
+    const db = this.engineDb.getDb();
+    const undo = db.prepare(
+      `SELECT id FROM bulk_runs WHERE source_run_id = ? AND phase = 'done' ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    ).get(runId) as { id: string } | undefined;
+    const at = (db.prepare('SELECT MAX(undone_at) AS at FROM bulk_targets WHERE run_id = ?').get(runId) as { at: string | null }).at;
+    return undo === undefined || at === null ? null : { runId: undo.id, at };
   }
 
   /** Targets the run writes: `update`, `create`, `delete`. */
