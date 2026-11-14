@@ -130,7 +130,7 @@ import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 import { ifNotDeduped, instanceTrailFor, InstanceWriteUnrecorded, withInstanceWriteAs, type InstanceActor } from './instance-trail.js';
-import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { isShopifyAdminHost, SHOPIFY_CREDENTIAL_REFERENCE, storeInstanceRefusal } from './shopify-host.js';
 
 /** What the `secret:` destination check decides for a call (`Agent._secretVerdict`). */
 type SecretVerdict =
@@ -4501,9 +4501,13 @@ export class Agent implements IAgent {
         resolvedHost = new URL(String(resolved.url)).host;
       } catch { resolvedHost = undefined; }
       if (resolvedHost !== parsed.host) return notGoing('would reach a different host once its secrets are filled in');
-      // A Shopify store gets no secret for now (`shopify-host.ts`), approved or not: refused
-      // before any question, since the request tool would refuse the request itself anyway.
-      if (isShopifyAdminHost(parsed.hostname)) return refused(`Blocked: ${SHOPIFY_UNAVAILABLE}`, notHere());
+      // A Shopify store gets no secret, approved or not: the engine attaches the store connection
+      // itself (`shopify-host.ts`). Refused before any question, since the request tool would
+      // refuse the request anyway. Where no store pass is possible on this instance at all, the
+      // refusal names that cause instead: sending again without the reference would not help.
+      if (isShopifyAdminHost(parsed.hostname)) {
+        return refused(`Blocked: ${storeInstanceRefusal(this.toolContext) ?? SHOPIFY_CREDENTIAL_REFERENCE}`, notHere());
+      }
       // A token slot goes only to where its grant points, whoever approved what before: asked
       // before the profile's names and the session's approvals, and refused, never asked.
       // A member's token is refused with who and which, before the base check would let it

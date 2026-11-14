@@ -9998,20 +9998,20 @@ describe('requests to a Shopify store are refused', () => {
     ['with a credential header of the model\'s own', { headers: { 'X-Shopify-Access-Token': 'store-value' } }],
     ['through a profile with its key in the query', { profile: true }],
   ] as const)('refuses one %s, says why, and sends nothing', async (_label, extra) => {
-    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    const { SHOPIFY_SELF_HOSTED } = await import('../../core/shopify-host.js');
     const { out, fetchMock } = await sent(STORE, extra);
-    expect(out).toContain(SHOPIFY_UNAVAILABLE);
+    expect(out).toContain(SHOPIFY_SELF_HOSTED);
     expect(fetchMock).not.toHaveBeenCalled();
     // Control: the same request to another host goes out.
     const control = await sent(OTHER, extra);
-    expect(control.out).not.toContain('Shopify is temporarily unavailable');
+    expect(control.out).not.toContain('Shopify');
     expect(control.fetchMock).toHaveBeenCalledTimes(1);
   });
 
   // Under the attach: `fetchPinned` refuses every hop whose URL or Host header names a store, so
   // a redirect into one and a Host header that names one send nothing there either.
   it('refuses a redirect into a store and does not follow it, and follows one to another host', async () => {
-    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    const { SHOPIFY_REDIRECT } = await import('../../core/shopify-host.js');
     const run = async (location: string) => {
       mockDnsPublic();
       const fetchMock = vi.fn()
@@ -10023,11 +10023,11 @@ describe('requests to a Shopify store are refused', () => {
       return { out, fetchMock };
     };
     const refused = await run('https://shop.myshopify.com./admin/api/2026-10/products.json');
-    await expect(refused.out).rejects.toThrow(SHOPIFY_UNAVAILABLE);
+    await expect(refused.out).rejects.toThrow(SHOPIFY_REDIRECT);
     expect(refused.fetchMock).toHaveBeenCalledTimes(1);
     expect(lastPinnedInputs.map((i) => new URL(i.url).hostname)).toEqual(['shop.commerce.example']);
     const control = await run('https://other.commerce.example/products.json');
-    expect(await control.out).not.toContain('Shopify is temporarily unavailable');
+    expect(await control.out).not.toContain('Shopify');
     expect(control.fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -10042,16 +10042,16 @@ describe('requests to a Shopify store are refused', () => {
     [{ Host: 'other.commerce.example:8443' }, false],
     [{ Host: 'other.commerce.example' }, false],
   ] as const)('Host headers %o on a read: refused %s', async (hostHeaders, refused) => {
-    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    const { SHOPIFY_HOST_HEADER } = await import('../../core/shopify-host.js');
     mockDnsPublic();
     const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
     vi.stubGlobal('fetch', fetchMock);
     const out = visible({ url: 'https://shop.commerce.example/products.json', method: 'GET', headers: { ...hostHeaders } }, makeAgent());
     if (refused) {
-      await expect(out).rejects.toThrow(SHOPIFY_UNAVAILABLE);
+      await expect(out).rejects.toThrow(SHOPIFY_HOST_HEADER);
       expect(fetchMock).not.toHaveBeenCalled();
     } else {
-      expect(await out).not.toContain('Shopify is temporarily unavailable');
+      expect(await out).not.toContain('Shopify');
       expect(fetchMock).toHaveBeenCalledTimes(1);
     }
   });

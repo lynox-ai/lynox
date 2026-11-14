@@ -22,7 +22,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { repairStrayCloseTag } from './model-json-body.js';
-import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
+import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy, refuseRedirectToStore } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote, writeForShortNote } from '../../core/write-notes.js';
@@ -45,7 +45,7 @@ import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
+import { clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_SET_UP, storeClearanceHeld, storeSetupRefusal } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
 import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
@@ -597,6 +597,8 @@ export async function fetchWithValidatedRedirects(
       }
       // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
       // one shot — no rebind window between validate and connect.
+      // A hop to a store, from a request that was not one, is a redirect the engine does not follow.
+      if (redirects > 0 && pass === undefined) refuseRedirectToStore(currentUrl);
       const response = await fetchPinned(currentUrl, requestInit, pass);
       sent ??= ownWrite ?? overrideHop;
       if (pendingAgain !== undefined && sent !== undefined) sent = { ...sent, again: pendingAgain };
@@ -2064,11 +2066,11 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  *  6a. no refusal of the control plane that still holds.
  */
 function storePassPrecheck(url: string, headers: Record<string, string>, toolContext: ToolContext | undefined): string | null {
-  if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return SHOPIFY_UNAVAILABLE;
-  if (toolContext.shellIsolation.kind !== 'sidecar') return SHOPIFY_UNAVAILABLE;
-  const apiStore = toolContext.apiStore;
+  const setupRefusal = storeSetupRefusal(toolContext);
+  if (setupRefusal !== null) return setupRefusal;
+  const apiStore = toolContext!.apiStore;
   let parsed: URL;
-  try { parsed = new URL(url); } catch { return SHOPIFY_UNAVAILABLE; }
+  try { parsed = new URL(url); } catch { return SHOPIFY_NOT_SET_UP; }
   const host = normalizeHostForMatch(parsed.hostname);
   const profile = apiStore?.getByHostname(parsed.hostname);
   const preset = profile?.auth?.type === 'oauth2' ? OAUTH_PRESETS.get(profile.auth.oauth?.preset_id ?? '') : undefined;
@@ -2081,9 +2083,9 @@ function storePassPrecheck(url: string, headers: Record<string, string>, toolCon
   for (const name of Object.keys(headers)) {
     if (STORE_CREDENTIAL_HEADERS.has(name.toLowerCase())) return `a request to a Shopify store may not carry a credential header of its own (${shapedForLog(name, DERIVED_NAME_SHAPE, 60)}). Remove it; the engine attaches the store connection itself.`;
   }
-  if (toolContext.exactClearance.blockedNow()) return SHOPIFY_UNAVAILABLE;
-  return null;
+  return storeClearanceHeld(toolContext!);
 }
+
 
 /**
  * The tail of the store pass (the clearance, step 6b, and the mint), the only place a request pass is
@@ -2128,7 +2130,7 @@ async function mintStorePassFor(
   const threads = target.kind === 'thread' ? toolContext.threadStore : null;
   if (target.kind === 'thread' && !threads) return { refusal: CONTAINMENT_UNWRITABLE };
   const clearance = await toolContext.exactClearance.ensure();
-  if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
+  if (!clearance.ok) return { refusal: clearanceRefusalText(clearance.reason, toolContext.exactClearance.heldRefusal()) };
   try {
     containment.contain(target, connection);
     // Read back in both records: `INSERT OR IGNORE` swallows a refused row as well.
@@ -2206,8 +2208,8 @@ async function attachEngineManagedAuth(
    *  (`store-pass-guards.test.ts`) lists each with its rule. */
   container: StoreContainer,
 ): Promise<AttachedAuth> {
-  // A Shopify store gets nothing from this engine for now (`core/shopify-host.ts`): refused here,
-  // before the profiles, the vault and the `!apiStore || !vault` exit below, so it holds whatever
+  // A request to a Shopify store goes out only under a store pass (`core/shopify-host.ts`): checked
+  // here, before the profiles, the vault and the `!apiStore || !vault` exit below, so it holds whatever
   // the request carries and whether or not a profile exists. `http_request`, the write-context
   // reads and a bulk run's requests all pass through here before they send.
   // Whether this request goes to a Shopify store. Such a request goes out only under a store
@@ -2242,6 +2244,9 @@ async function attachEngineManagedAuth(
   if (astray && write) {
     return { refusal: `Error: writes to ${astray.provider.label} go through this engine's built-in "${astray.provider.id}" provider, which shows the user what lynox may do there and asks each write with what it sends. api_profile "${astray.profile.id}" signs in another way, so this write was not sent; reading through it works as before. To write, change this profile with api_setup action "update" to auth.type "oauth2" with auth.oauth.preset_id "${astray.provider.id}" (one host holds one profile), then connect it with api_setup action "connect"; it reads again once it is connected.` };
   }
+  // A store request past the precheck needs the vault for its pass: without one this instance
+  // misses a part, and the request would otherwise go on without a pass and be refused as a page.
+  if (toStore && (!apiStore || !vault)) return { refusal: `Error: ${SHOPIFY_NOT_SET_UP}` };
   if (!apiStore || !vault) return {};
 
   let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
