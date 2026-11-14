@@ -33,6 +33,13 @@
 		return p.auth?.type === 'oauth2' && typeof p.auth.oauth?.preset_id === 'string' && p.auth.oauth.preset_id !== '';
 	}
 
+	// Never connected and nothing revoked to show: the first connect is still to make. A revocation
+	// view brings its own reconnect link, so the two never show together.
+	function notYetConnected(p: ApiProfile): boolean {
+		return onBuiltInProvider(p) && (p.oauth_grant === undefined || p.oauth_grant === null)
+			&& revocationView(p.oauth_grant, notices.get(p.id), now) === null;
+	}
+
 	// A file the import of the earlier profiles waits on (`ApiStore.importWaitsOn`).
 	interface ImportWait { file: string; reason: 'unread' | 'malformed' | 'not_a_profile' | 'invalid_id'; deleteId: string | null; }
 	const WAIT_REASON: Record<ImportWait['reason'], string> = {
@@ -248,7 +255,12 @@
 					{/if}
 					{#if onBuiltInProvider(profile) && isOwnerSession()}
 						<div class="border-t border-border px-4 py-3">
-							<PresetClientForm profileId={profile.id} />
+							<PresetClientForm profileId={profile.id} connectHref={notYetConnected(profile) ? connectHref(getApiBase(), profile.id) : null} />
+						</div>
+					{:else if notYetConnected(profile) && profile.reader_may_connect === false}
+						<!-- The server says `false` only to a mandate, which connects only a profile it set up. -->
+						<div class="border-t border-border px-4 py-3 text-xs text-text-muted">
+							<p data-testid="api-connect-first-not-yours">{t('apis.connect_first_not_yours')}</p>
 						</div>
 					{/if}
 					{#if expanded === profile.id && profile.endpoints && profile.endpoints.length > 0}

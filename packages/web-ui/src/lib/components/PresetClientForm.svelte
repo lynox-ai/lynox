@@ -10,7 +10,10 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import { presetProviderLabel } from '../utils/preset-provider-label.js';
 
-	let { profileId }: { profileId: string } = $props();
+	// `connectHref`: the engine's connect route for this profile, given by the page only while the
+	// profile has no grant and no revocation of one to show; with the secret saved, the form then
+	// offers the first connect right below the app credentials.
+	let { profileId, connectHref = null }: { profileId: string; connectHref?: string | null } = $props();
 
 	interface ClientState {
 		preset: string;
@@ -36,6 +39,7 @@
 	let notice = $state<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
 	const provider = $derived(client ? presetProviderLabel(client.preset) : '');
+	const connectFirst = $derived(connectHref !== null && client !== null && client.client_secret_set);
 	// A different client id is a different app, whose secret is not the stored one: the field opens.
 	const idDiffers = $derived(client !== null && client.client_id !== null && clientId.trim() !== client.client_id);
 	const secretInputShown = $derived(client !== null && (!client.client_secret_set || replacing || idDiffers));
@@ -93,7 +97,8 @@
 				clientSecret = '';
 				replacing = false;
 				client = { ...client, client_id: body.client_id, client_secret_set: client.client_secret_set || body.client_secret !== undefined };
-				notice = { kind: 'ok', text: t('integrations.preset_client_saved') };
+				// "With the button below" only where the button is: a connected profile's save just says saved.
+				notice = { kind: 'ok', text: t(connectHref !== null ? 'integrations.preset_client_saved' : 'integrations.preset_client_saved_plain') };
 			}
 		} catch {
 			notice = { kind: 'error', text: t('integrations.preset_client_save_failed') };
@@ -182,6 +187,15 @@
 
 		{#if notice}
 			<p class="text-xs {notice.kind === 'ok' ? 'text-success' : 'text-danger'}" role="status">{notice.text}</p>
+		{/if}
+
+		{#if connectFirst}
+			<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
+			<div class="space-y-2 border-t border-border pt-3" data-testid="api-connect-first">
+				<p class="text-sm text-text-muted">{tf('apis.connect_first_intro', { provider })}</p>
+				<a href={connectHref} data-sveltekit-reload data-testid="api-connect-first-link"
+					class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.connect_first')}</a>
+			</div>
 		{/if}
 	</div>
 {/if}
