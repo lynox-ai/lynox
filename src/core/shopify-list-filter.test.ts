@@ -474,6 +474,11 @@ describe('where the stored Shopify list form is read', () => {
     'tools/builtin/bulk.ts | if (form === \'shopify_media\' && isShopifyStoreHostName(host)',
     'tools/builtin/bulk.ts | const images = form !== \'shopify\' ? \'\' : mediaWritableFor(in',
     'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listRea',
+    // The planner's REST names and empty parts read as its form's, before the form's own checks.
+    'tools/builtin/bulk-shopify-plan-names.ts | export function shopifyPlanNames(form: \'shopify\' | \'shopify_',
+    'tools/builtin/bulk-shopify-plan-names.ts | if (form !== \'shopify\') return { writeMethod: method, list: ',
+    'tools/builtin/bulk-shopify-plan-names.ts | if (form === \'shopify\' && typeof out[\'filters\'] === \'object\'',
+    'tools/builtin/bulk-shopify-plan-names.ts | if (form === \'shopify\' && typeof out[\'path\'] === \'string\' &&',
     // parseShopifyMediaListSource: the planner's image form and the form it is stored under.
     'core/bulk-list.ts | if (form === SHOPIFY_MEDIA_LIST_FORM) return parseShopifyMed',
     'core/bulk-list.ts | return { form: SHOPIFY_MEDIA_LIST_FORM, path: \'\', filters: {',
