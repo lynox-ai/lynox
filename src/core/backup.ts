@@ -7,7 +7,7 @@
  * All operations are designed to be safe during concurrent lynox operation.
  */
 
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { snapshotSqlite } from './sqlite-snapshot.js';
@@ -54,6 +54,69 @@ function unrestorableEntry(files: unknown): string | null {
 }
 
 /**
+ * Why an entry of the backup must not be read, or null. Every component below the backup folder is
+ * asked with `lstat`: a link there would lead the read, and the verify pass that reports sizes, to
+ * a file outside the backup. The backup folder itself may be a link (a backups dir moved elsewhere).
+ * A missing component is not this check's to report: the verify pass names it. Any other failure
+ * to ask refuses: what cannot be checked is not read.
+ */
+export function backupSourceProblem(backupPath: string, entry: Pick<BackupFileEntry, 'path' | 'type'>): string | null {
+  const parts = entry.path.split('/');
+  let at = backupPath;
+  for (let i = 0; i < parts.length; i++) {
+    at = join(at, parts[i] as string);
+    const shown = parts.slice(0, i + 1).join('/');
+    let st;
+    try {
+      st = lstatSync(at);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return null;
+      return `${shown} could not be checked inside the backup (${typeof code === 'string' ? code : 'unknown error'})`;
+    }
+    if (st.isSymbolicLink()) return `${shown} is a link inside the backup`;
+    const last = i === parts.length - 1;
+    if (!last || entry.type === 'directory') {
+      if (!st.isDirectory()) return `${shown} is not a folder inside the backup`;
+    } else if (!st.isFile()) {
+      return `${shown} is not a plain file inside the backup`;
+    }
+  }
+  return null;
+}
+
+/**
+ * A backup's `manifest.json`, read without following a link: it is read before any entry, and by
+ * the list, whose answer carries its fields — a link would lead that read to a file of this machine.
+ */
+type ManifestRead = { ok: true; raw: Buffer } | { ok: false; why: 'missing' | 'link' | 'unreadable' };
+function readManifestFile(manifestPath: string): ManifestRead {
+  let fd: number;
+  try {
+    fd = openSync(manifestPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return { ok: false, why: code === 'ENOENT' ? 'missing' : code === 'ELOOP' ? 'link' : 'unreadable' };
+  }
+  try {
+    return { ok: true, raw: readFileSync(fd) };
+  } catch {
+    return { ok: false, why: 'unreadable' };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The first entry `backupSourceProblem` refuses, as its reason, or null. */
+function backupSourceRefusal(backupPath: string, files: readonly BackupFileEntry[]): string | null {
+  for (const entry of files) {
+    const problem = backupSourceProblem(backupPath, entry);
+    if (problem !== null) return problem;
+  }
+  return null;
+}
+
+/**
  * Read a backup file once and check THOSE bytes against its entry. The restore verifies the
  * archive first and stages it later, with the safety backup in between; a file swapped in that
  * window would be copied unchecked if it were read again by name. In an encrypted backup every
@@ -62,7 +125,14 @@ function unrestorableEntry(files: unknown): string | null {
 function readEntryBytes(srcFile: string, entry: BackupFileEntry, encrypted: boolean): Buffer {
   let raw: Buffer;
   try {
-    raw = readFileSync(srcFile);
+    // Not following a link set after `backupSourceProblem` ran: a link here fails the open (ELOOP).
+    // A folder fails the read; any other kind is read once and must match the entry below.
+    const fd = openSync(srcFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      raw = readFileSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     // The verify pass found it; gone now means changed, not "skip it and report success".
     throw new Error(`Backup file changed after it was verified — refusing to restore: ${entry.path}`);
@@ -857,9 +927,15 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Missing manifest.json' };
     }
 
+    const read = readManifestFile(manifestPath);
+    if (!read.ok && read.why === 'link') {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Refusing to restore: manifest.json is a link inside the backup. Nothing was replaced.' };
+    }
+
     let manifest: BackupManifest;
     try {
-      manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+      if (!read.ok) throw new Error(read.why);
+      manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
     } catch {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
     }
@@ -873,6 +949,13 @@ export class BackupManager {
     const unrestorable = unrestorableEntry(manifest.files);
     if (unrestorable !== null) {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path outside the backup — refusing to restore: ${unrestorable}` };
+    }
+
+    // Before anything reads an entry (the verify pass, the key probe, staging): no link inside the
+    // backup may lead a read to a file of this machine.
+    const linked = backupSourceRefusal(backupPath, manifest.files);
+    if (linked !== null) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Refusing to restore: ${linked}. Nothing was replaced.` };
     }
 
     // Written only where `isBackedUpEntryPath` allows. The rest is named in the result, not refused: a
@@ -1149,7 +1232,9 @@ export class BackupManager {
       const manifestPath = join(this.backupDir, entry.name, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const raw = readFileSync(manifestPath);
+        const read = readManifestFile(manifestPath);
+        if (!read.ok) continue;
+        const raw = read.raw;
         const manifest = JSON.parse(raw.toString('utf-8')) as BackupManifest;
         seen.add(entry.name);
         // Without a vault key there is no MAC to check (`no-key`), so nothing to keep or to hash.
@@ -1196,7 +1281,9 @@ export class BackupManager {
       const manifestPath = join(this.backupDir, entry.name, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+        const read = readManifestFile(manifestPath);
+        if (!read.ok) continue;
+        const manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
         backups.push({ name: entry.name, createdAt: new Date(manifest.created_at) });
       } catch {
         continue;
@@ -1227,10 +1314,14 @@ export class BackupManager {
     if (!existsSync(manifestPath)) {
       return { valid: false, errors: ['Missing manifest.json'], files_checked: 0 };
     }
+    const read = readManifestFile(manifestPath);
+    if (!read.ok) return { valid: false, errors: [read.why === 'link' ? 'manifest.json is a link inside the backup' : 'Invalid manifest.json'], files_checked: 0 };
     try {
-      const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+      const manifest = JSON.parse(read.raw.toString('utf-8')) as BackupManifest;
       const unrestorable = unrestorableEntry(manifest.files);
       if (unrestorable !== null) return { valid: false, errors: [`Path outside the backup: ${unrestorable}`], files_checked: 0 };
+      const linked = backupSourceRefusal(backupPath, manifest.files);
+      if (linked !== null) return { valid: false, errors: [linked], files_checked: 0 };
       const verifiableFiles = manifest.files.filter(f => f.type !== 'directory');
       // The sqlite→file relabel, which this method used to omit while `createBackup` step 9 and
       // `restoreBackup` both carried it. One question asked in several places, and the one that
