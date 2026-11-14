@@ -11,9 +11,13 @@ env:
   # Skipping it removes a CDN dependency from every install.
   ONNXRUNTIME_NODE_INSTALL: skip
 
+# Every job carries timeout-minutes (dispatch-pro-release on its one step), set well above its
+# duration in past release runs; without one a stalled job holds the release run until the 6 h
+# runner default. tests/ci-job-timeouts.test.ts checks it.
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     # Scoped for the same reason as ci.yml's `test`: this job downloads a
     # third-party executable, runs it over the checkout, and hands the install
     # action a token.
@@ -53,6 +57,7 @@ jobs:
   pre-release-check:
     needs: test
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify NPM_TOKEN is valid
@@ -84,6 +89,7 @@ jobs:
             runner: ubuntu-24.04-arm
             arch_tag: arm64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -212,6 +218,7 @@ jobs:
   docker-manifest:
     needs: docker-build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -304,6 +311,7 @@ jobs:
   docker-attest:
     needs: docker-manifest
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -385,6 +393,7 @@ jobs:
   npm:
     needs: pre-release-check
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -406,6 +415,7 @@ jobs:
   deploy-docs-prod:
     needs: [docker-manifest, npm]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -467,6 +477,9 @@ jobs:
     needs: [docker-manifest, npm]
     environment: production
     runs-on: ubuntu-24.04
+    # The bound sits on the step, not the job: this job waits hours for the approval above, and
+    # it is not established whether a job-level timeout-minutes counts that wait. A step's bound
+    # counts only the step's own run.
     permissions:
       contents: read
       # Kept although the explicit record step is gone: before core#142 this job
@@ -476,6 +489,7 @@ jobs:
       deployments: write
     steps:
       - name: Dispatch release to lynox-pro
+        timeout-minutes: 10
         env:
           PRO_DISPATCH_TOKEN: ${{ secrets.PRO_DISPATCH_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
