@@ -110,7 +110,7 @@ import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
 import { collectVaultKeys, grantTokenNames, isMandateConnection } from './api-store.js';
 import { MEMBER_CONNECTION_PREFIX, noteMemberConnection } from './member-connection-notes.js';
-import { boundCtx, memberConnectionRefusal, slotMayReach, type BindingCtx } from './profile-secret-view.js';
+import { boundCtx, memberRefusalCase, memberRefusalOwnerNote, memberRefusalText, slotMayReach, type BindingCtx, type MemberRefusal, type OwnerNote } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
@@ -137,7 +137,8 @@ type SecretVerdict =
   | { kind: 'go' }
   /** `misplaced`: the names refused because they do not belong where this call sends them; none
    *  when the refusal is about the call itself or a missing approval, which leaves the name right. */
-  | { kind: 'refused'; content: string; misplaced: readonly string[]; memberNote?: true }
+  /** `memberNote`: the refusal is a member connection's, noted for the run with the owner's wording it gives. */
+  | { kind: 'refused'; content: string; misplaced: readonly string[]; memberNote?: (plan: string | undefined) => OwnerNote | null }
   | {
     kind: 'ask';
     /** The names still to approve, read again when it is this call's turn to ask. */
@@ -4379,7 +4380,7 @@ export class Agent implements IAgent {
     if (verdict.kind === 'go') return null;
     if (verdict.kind === 'refused') {
       // Its line opens the result as it is, so a saved workflow's report picks it up (`collectWriteNotes`).
-      if (verdict.memberNote === true) noteMemberConnection(verdict.content);
+      if (verdict.memberNote !== undefined) noteMemberConnection(verdict.content, verdict.memberNote);
       return refuse(verdict.content);
     }
     // One prompt at a time per Session; each waiter re-reads the approvals once it is its turn.
@@ -4419,9 +4420,9 @@ export class Agent implements IAgent {
       const bindCtx = this._secretBindCtx();
       // A token of a connection someone else made with their own login is theirs, wherever the
       // request goes (`memberConnectionRefusal`; when that refusal is the answer, the gate notes it).
-      const theirs = (n: string): string | null => {
+      const theirs = (n: string): MemberRefusal | null => {
         const holder = apiStore?.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
-        return holder !== undefined ? memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;
+        return holder !== undefined ? memberRefusalCase(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;
       };
       // The names that do not belong where this request goes, whatever else is wrong with it: a
       // refusal of the call itself still says so for them, which is what the hint reads.
@@ -4461,8 +4462,8 @@ export class Agent implements IAgent {
       // A member's token is refused with who and which, before the base check would let it
       // through to that connection's own base_url.
       for (const n of apiStore ? secretNames : []) {
-        const line = theirs(n);
-        if (line !== null) return { kind: 'refused', content: `${MEMBER_CONNECTION_PREFIX} ${line}`, misplaced: [n], memberNote: true };
+        const refusal = theirs(n);
+        if (refusal !== null) return { kind: 'refused', content: `${MEMBER_CONNECTION_PREFIX} ${memberRefusalText(refusal)}`, misplaced: [n], memberNote: (plan) => memberRefusalOwnerNote(refusal, plan) };
       }
       const offGrant = offGrantOf(secretNames);
       if (offGrant.length > 0) {

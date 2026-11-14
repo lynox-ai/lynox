@@ -28,7 +28,7 @@ import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
-import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes, noteMemberConnection, runCollectingMemberNotes } from '../../core/member-connection-notes.js';
+import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes, relayMemberNotes, runCollectingMemberNotes } from '../../core/member-connection-notes.js';
 import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '../../core/audit-log.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import type { WorkflowAuthorship } from '../../core/workflow-store.js';
@@ -1113,7 +1113,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     const collected = runCollectingMemberNotes(asPlan);
     try { return await collected.done; } finally {
       memberRefused = collected.notes.size > 0;
-      for (const line of collected.notes) noteMemberConnection(line);
+      relayMemberNotes(collected);
     }
   };
 
