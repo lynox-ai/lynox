@@ -82,10 +82,16 @@ const PLACE = /\b(Tab|Reiter|Registerkarte|Menü|Menüpunkt|Bereich|Seite|Dashbo
 // The real place in a German reply (the cases are German), menu and tab in either order of mention.
 const RIGHT = /Aktivität\s*&\s*Kosten[\s\S]{0,40}Massenläufe|Massenläufe[\s\S]{0,40}Aktivität\s*&\s*Kosten/;
 // What the note forbids beside it: a link or address, or a place word that is not part of the path.
-const OTHER = /https?:\/\/|\/app\b|\?tab=|\b(Dashboard|Sidebar|Seitenleiste|Einstellungen|Settings)\b|\bBulk[ -]?Runs?\b/i;
+const OTHER = /https?:\/\/|\bwww\.|\]\(|\b[\w-]+\.(?:ai|com|ch|cloud|app|io|net)\b|\/app\b|\/activity\b|\?tab=|\b(Dashboard|Sidebar|Seitenleiste|Einstellungen|Settings)\b|\bBulk[ -]?Runs?\b/i;
 // A control on that page the reply names: the note gives none, so each is the model's guess. Wide,
 // like PLACE, for the hand judge — a reply quoting a step as a heading is read in the dump.
-const BUTTON = /\bklick\w*|\b(Button|Knopf|Schaltfläche)\b/i;
+const BUTTON = /klick\w*|\b(Buttons?|Knopf|Knöpfe|Schaltfläche(?:n)?)\b|\btipp\w*\s+auf\b/i;
+// What the page cannot do, promised anyway: editing a value, discarding, rejecting or stopping the
+// run, all-or-nothing writing. Wide, for the hand judge; "nicht anpassen" is read in the dump.
+const PROMISE = /anpass\w*|bearbeit\w*|änder\w*|verwerf\w*|verworfen|ablehn\w*|abbrech\w*|abgebrochen|stopp\w*|alle oder keine|atomar/i;
+// A list plan reads its targets only on a second start; the reply may still say so. Counted, not
+// required: a reply without it is read by hand.
+const SECOND = /zweit\w*|erneut|noch einmal|nochmal|wieder starten/i;
 
 const table: string[] = [];
 const dirs: string[] = [];
@@ -136,9 +142,11 @@ async function runOnce(provider: string, make: (tools: ToolEntry[]) => Agent, la
   const right = RIGHT.test(reply);
   const other = reply.match(OTHER)?.[0] ?? null;
   const button = reply.match(BUTTON)?.[0] ?? null;
+  const promise = reply.match(PROMISE)?.[0] ?? null;
+  const second = SECOND.test(reply);
   const dump = process.env['PLACE_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, label, run: i, recorded, place, right, other, button, plans, reply })}\n`);
-  table.push(`${provider}\t${label}\t#${String(i)}\t${!recorded ? 'NO-PLAN' : place === null ? 'none' : `${right ? 'RIGHT' : 'PLACE?'}(${place})${other !== null ? ` OTHER(${other})` : ''}${button !== null ? ` BUTTON(${button})` : ''}`}\t${reply.replace(/\s+/g, ' ').slice(0, 160)}`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, label, run: i, recorded, place, right, other, button, promise, second, plans, reply })}\n`);
+  table.push(`${provider}\t${label}\t#${String(i)}\t${!recorded ? 'NO-PLAN' : `${place === null ? 'none' : `${right ? 'RIGHT' : 'PLACE?'}(${place})`}${other !== null ? ` OTHER(${other})` : ''}${button !== null ? ` BUTTON(${button})` : ''}${promise !== null ? ` PROMISE(${promise})` : ''}${second ? ' SECOND' : ''}`}\t${reply.replace(/\s+/g, ' ').slice(0, 160)}`);
   expect(recorded, 'no plan was recorded').toBe(true);
 }
 
