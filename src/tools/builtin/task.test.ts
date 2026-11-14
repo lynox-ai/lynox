@@ -162,11 +162,12 @@ describe('Task Tools', () => {
     });
 
     it('does not create a watch whose address a server may read as a write', async () => {
+      const created = vi.spyOn(tm, 'createWatch');
       for (const watch_url of ['https://example.com/items/5?_method=DELETE', 'https://example.com/items/5?x=1;_method=DELETE', 'https://example.com/items/5?_method=FROB', 'https://example.com/graphql?query=mutation%7BdeleteAll%7D']) {
         const result = await taskCreateTool.handler({ title: 'Watch', watch_url }, makeAgent());
         expect(result).toBe('Error: watch_url carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page. No watch was created. Pass the address of the page without the override or the mutation.');
       }
-      expect(tm.list(), 'no watch was stored').toEqual([]);
+      expect(created, 'no watch was stored').not.toHaveBeenCalled();
       // Control: an ordinary query is watched.
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://example.com/items?page=2' }, makeAgent())).toContain('Watch task created');
     });

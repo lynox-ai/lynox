@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { SecretStore } from './secret-store.js';
 import {
   bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
+  readAddressWrites,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -849,5 +850,17 @@ describe('a short secret through the store\'s own mask', () => {
       expect(bodyForQuestion(JSON.stringify({ a: enc(pin) }), mask)).toEqual({ unshowable: 'escaped-secret' });
       expect(bodyForQuestion(JSON.stringify({ a: pin }), mask)).toEqual({ text: '{\n  "a": "***"\n}', escapedSecret: false });
     }
+  });
+});
+
+describe('readAddressWrites', () => {
+  it('reads a method override or a GraphQL mutation as a write, and nothing else', () => {
+    expect(readAddressWrites('https://h.example/items/5?_method=DELETE')).toBe(true);
+    expect(readAddressWrites('https://h.example/items/5?_method=FROB')).toBe(true);
+    expect(readAddressWrites('https://h.example/graphql?query=mutation%7BdeleteAll%7D')).toBe(true);
+    expect(readAddressWrites('https://h.example/graphql?query=%7Bitems%7Bid%7D%7D')).toBe(false);
+    expect(readAddressWrites('https://h.example/items?page=2;size=10')).toBe(false);
+    // An address that does not parse is no write: it fails when it is fetched, under its own error.
+    expect(readAddressWrites('h.example/page')).toBe(false);
   });
 });
