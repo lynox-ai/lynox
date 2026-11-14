@@ -763,7 +763,8 @@
 					{#if resumeText.before}
 						<p class="text-sm">{resumeText.before}</p>
 					{/if}
-					{#if supportMail}
+					<!-- The support link stands under the sentence that names support: after the check when that sentence follows it. -->
+					{#if supportMail && !resumeText.after}
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
 					{/if}
 					{#if resumeKind === 'none'}
@@ -788,6 +789,12 @@
 						{/if}
 						{#if resumeText.check}
 							<p class="text-sm">{resumeText.check}</p>
+						{/if}
+						{#if resumeText.after}
+							<p class="text-sm">{resumeText.after}</p>
+							{#if supportMail}
+								<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
+							{/if}
 						{/if}
 						{#if resumeText.kept}
 							<p class="text-sm text-text-muted">{resumeText.kept}</p>
