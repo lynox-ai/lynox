@@ -46,7 +46,7 @@ async function inPlan(planOf: RequestPrincipal, request: () => string | null, st
 }
 
 const CONN_EN = 'api.crm.example (profile "CRM" (id crm-api))';
-const CONN_DE = 'api.crm.example (Profil "CRM" (id crm-api))';
+const CONN_DE = 'api.crm.example (Verbindung "CRM" (id crm-api))';
 const P = 'setup@example.org';
 
 describe('the owner\'s line for a plan\'s refusal of a member\'s connection (UX-065)', () => {

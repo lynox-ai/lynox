@@ -440,6 +440,7 @@ describe('PresetClientForm, the first connect', () => {
 	it('offers no connect while the Client ID names another app', async () => {
 		getExtra = { client_id: 'client-1', client_secret_set: true };
 		await open('shop-admin', HREF);
+		expect(link()).not.toBeNull();
 		type(idInput(), 'client-2');
 		expect(link()).toBeNull();
 	});

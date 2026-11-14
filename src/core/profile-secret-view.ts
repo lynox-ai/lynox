@@ -1393,7 +1393,7 @@ export function memberRefusalOwnerNote(refusal: MemberRefusal, plan: string | un
   const { person, provider, shown, ended } = refusal;
   const named = planNamed(plan);
   const connEn = `${provider} (profile ${shown})`;
-  const connDe = `${provider} (Profil ${shown})`;
+  const connDe = `${provider} (Verbindung ${shown})`;
   // A plan's refusal once the access the connection was made under has ended (`connectionWaits`
   // asks that grant, not the person: they may hold a later access, so the words say which one):
   // the takeover is the owner's way, also
