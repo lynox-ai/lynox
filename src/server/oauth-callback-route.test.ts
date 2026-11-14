@@ -128,11 +128,15 @@ describe('what a stranger gets', () => {
     expect(body).not.toContain('bexio');
     expect(body).not.toContain(STATE);
 
-    // The same signing with a principal field passes the cookie check and reaches the profile
-    // lookup, which finds no such profile here: the refusal above is the missing principal, not a
-    // signature this test got wrong.
+    // The same signing with a principal field and the asked scopes passes the cookie check and
+    // reaches the profile lookup, which finds no such profile here: the refusal above is the
+    // missing principal, not a signature this test got wrong. Without the asked scopes the same
+    // principal is refused too: a cookie must say what its consent asked for.
     const owner = Buffer.from(JSON.stringify({ tag: 'owner' })).toString('base64url');
-    const withPrincipal = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${owner}.${at}`));
+    const asked = Buffer.from(JSON.stringify([])).toString('base64url');
+    const noAsked = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${owner}.${at}`));
+    expect(noAsked.status).toBe(400);
+    const withPrincipal = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${owner}.${asked}.${at}`));
     expect(withPrincipal.status).toBe(409);
     expect(await withPrincipal.text()).toContain('no longer exists');
   });

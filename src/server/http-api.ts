@@ -39,7 +39,7 @@ import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfi
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
-import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
+import { scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
@@ -12073,6 +12073,9 @@ export class LynoxHTTPApi {
         {
           state, profileId: id, verifier,
           by: principal.kind === 'mandate' ? { tag: principalTag(principal), mandateId: principal.mandateId } : { tag: 'owner' },
+          // What the link asks for, from the same decision the confirmation is checked against
+          // below (`shown_scopes`) and the link is built from: the callback records it as asked.
+          asked: decision.scopes,
         },
         httpSecret,
         Math.floor(Date.now() / 1000),
@@ -12080,9 +12083,10 @@ export class LynoxHTTPApi {
       if (!signed) {
         // `decideConnect` has already established the secret and the profile, and
         // the id it saw is the id signed here. What still lands here is a value the
-        // format cannot carry: a mandate address with enough non-ASCII characters
-        // that its encoding exceeds what the reader accepts. Refused before the
-        // user is sent anywhere, and never asserted, because this is the one place
+        // format cannot carry: a mandate address whose encoding exceeds what the
+        // reader accepts, a list of asked scopes the format refuses, or a whole value
+        // longer than a browser keeps (`PROFILE_OAUTH_STATE_MAX_LEN`). Refused before
+        // the user is sent anywhere, and never asserted, because this is the one place
         // where a wrong value would mint a cookie that verifies as a DIFFERENT one.
         sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.startFailed, 'apis');
         return;
@@ -12606,11 +12610,14 @@ export class LynoxHTTPApi {
           if (lapsed.length > 0) grantNext.lapsed_slots = lapsed;
           // What the token can do, as the provider says: a narrower grant is recorded as granted.
           // A broader one is recorded too, and the page below names what it holds beyond the ask.
+          // What was asked is what the confirmed start signed, not the profile now: a save in
+          // between changes the next link, not this consent.
+          const asked = signed.asked ?? [];
+          grantNext.asked_scope = [...asked];
           const grantedNow = scopesOfAnswer(parsed.scope);
           if (grantedNow !== undefined) {
             grantNext.granted_scope = grantedNow;
-            const asked = askedScopes(fresh.auth?.oauth ?? {});
-            if (asked !== undefined) grantedBeyond = scopesBeyondAsked(grantedNow, asked);
+            if (preset?.compareGrantedScope === true) grantedBeyond = scopesBeyondAsked(grantedNow, asked);
           }
           // The account this consent signed in with, for the person to read: the store the
           // provider signed for, or the account an OpenID Connect preset's id_token names.

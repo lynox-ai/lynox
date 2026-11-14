@@ -427,6 +427,14 @@ export interface OAuthGrantRecord {
    */
   granted_scope?: string[] | undefined;
   /**
+   * The scopes the authorize link asked for, as the person confirmed them on the consent page:
+   * written only by the connect callback, from the signed state of the confirmed start, never from
+   * the profile. A save over the profile changes `auth.oauth.scope` for the NEXT link and leaves
+   * this as it is, so a scope added without a new consent never reads as asked. A renewal keeps
+   * it. Absent on every grant from before it was recorded, which reads as nothing asked.
+   */
+  asked_scope?: string[] | undefined;
+  /**
    * The binding of this grant's access token to the profile and the store the provider signed
    * for (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B4): `EngineDb.storeBindingDigest` over the
    * profile id, the store origin and the token. Written by the callback in the same save as the

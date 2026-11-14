@@ -36,10 +36,10 @@ import { BULK_MAX_TARGETS } from './bulk-plan.js';
 import type { IAgent } from '../types/index.js';
 
 const HOST = 'acme.myshopify.com';
-// The store connection of HOST, granted the scope image alt texts need (`shopifyMediaWritable`), so a
+// The store connection of HOST, granted the scope image alt texts need (`shopifyMediaAccess`), so a
 // plan in the image form gets past the scope check to what this file tests.
 const IMAGE_WRITING_STORE = {
-  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] }, scope: 'read_products write_products write_files' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'], asked_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
 };
 const ENDPOINT = `https://${HOST}/admin/api/2026-10/graphql.json`;
 const product = (n: number): string => `gid://shopify/Product/${String(n)}`;
@@ -98,6 +98,17 @@ describe('the media documents and bodies', () => {
 
   it('selects the fileUpdate userErrors, with their code', () => {
     expect(SHOPIFY_WRITE_DOCUMENTS.shopify_media_alt).toMatch(/userErrors \{ field message code \}/);
+  });
+
+  // `write_files` lets `fileUpdate` replace a file's content (`originalSource`, `previewImageSource`)
+  // and rename it. The bulk image form sets the alt text and nothing else: the one input object
+  // carries exactly `id` and `alt`, and the variables of a write body are those two.
+  it('sends fileUpdate exactly the id and the alt text, nothing that replaces or renames a file', () => {
+    const inputs = [...SHOPIFY_WRITE_DOCUMENTS.shopify_media_alt.matchAll(/fileUpdate\(files: \[\{([^}]*)\}\]\)/g)].map((m) => m[1]!);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]!.split(',').map((f) => f.split(':')[0]!.trim()).sort()).toEqual(['alt', 'id']);
+    expect(SHOPIFY_WRITE_DOCUMENTS.shopify_media_alt).not.toMatch(/originalSource|previewImageSource|filename|fileCreate|fileDelete/);
+    expect(Object.keys(JSON.parse(shopifyMediaAltWriteBody(image(7), { alt: 'Blue mug' })!).variables).sort()).toEqual(['alt', 'id']);
   });
 });
 

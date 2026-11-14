@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { OAUTH_PRESETS, consentFrameProblems, derivePresetEndpoints, presetNotFollowed, presetRegisterOf, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
 import { decideConnect, isRefusal } from '../server/oauth-connect-decision.js';
-import { SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName, shopifyGraphqlEndpoint } from './shopify-graphql.js';
+import { SHOPIFY_MEDIA_WRITABLE_FIELDS, isShopifyStoreHostName, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 
 const shopify = OAUTH_PRESETS.get('shopify')!;
 
@@ -35,21 +35,24 @@ describe('the Shopify preset', () => {
     expect(derivePresetEndpoints('shopify', { shop: 'a'.repeat(64) })).toMatchObject({ kind: 'bad-param' });
   });
 
-  it('allows the read scopes and write_products, and asks for nothing it does not name', () => {
+  it('allows the read scopes, write_products and write_files, and asks for nothing it does not name', () => {
     expect(shopify.requiredScopes).toEqual([]);
-    // The whole list: a scope added here reaches every store the preset connects. One write
-    // scope, for the bulk run's product write; any other write scope is a reviewed change.
-    expect(shopify.allowedScopes).toEqual(['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products']);
+    // The whole list: a scope added here reaches every store the preset connects. Two write
+    // scopes, for the bulk run's product write and its image form; any other is a reviewed change.
+    expect(shopify.allowedScopes).toEqual(['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products', 'write_files']);
     expect(presetScopeRequest(shopify, 'read_products read_orders')).toEqual({ scopes: ['read_products', 'read_orders'] });
     expect(presetScopeRequest(shopify, 'read_all_orders')).toEqual({ refused: ['read_all_orders'] });
   });
 
-  it('asks for write_products only when the profile names it', () => {
+  it('asks for write_products and write_files only when the profile names them', () => {
     expect(presetScopeRequest(shopify, 'read_products write_products')).toEqual({ scopes: ['read_products', 'write_products'] });
+    expect(presetScopeRequest(shopify, 'read_products write_products write_files')).toEqual({ scopes: ['read_products', 'write_products', 'write_files'] });
     expect(presetScopeRequest(shopify, 'read_products')).toEqual({ scopes: ['read_products'] });
   });
 
-  it.each(['write_files', 'write_orders', 'write_inventory', 'write_customers', 'write_themes'])('still refuses %s, with write_products or without', (scope) => {
+  // `write_themes` would also let the image form write, but it reaches theme code (Liquid and
+  // scripts in the storefront): it stays out of the preset.
+  it.each(['write_themes', 'write_orders', 'write_inventory', 'write_customers'])('still refuses %s, with write_products or without', (scope) => {
     expect(presetScopeRequest(shopify, `read_products write_products ${scope}`)).toEqual({ refused: [scope] });
     expect(presetScopeRequest(shopify, scope)).toEqual({ refused: [scope] });
   });
@@ -161,58 +164,39 @@ describe('the Shopify customer text', () => {
     expect(reading).not.toHaveProperty('consent');
   });
 
-  // The text says a bulk run changes only product texts (paragraph 2) and lynox asks for no write
-  // access to orders, customers, stock or shipping (paragraph 3). Both hold only while
-  // `write_products` is the one write scope: any other (`write_inventory`, …) fails here.
-  it('allows no write scope besides write_products while paragraphs 2 and 3 say so', () => {
-    expect(shopify.consentNotice?.paragraphs.join(' ')).toContain('Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.');
-    expect(
-      shopify.allowedScopes.filter((s) => s.startsWith('write_') && s !== 'write_products'),
-      'Zustimmungstext Absatz 2/3 neu fassen und neu freigeben',
-    ).toEqual([]);
+  // Paragraph 3 says lynox asks for no write access to orders, customers, stock or shipping. It
+  // holds while the preset's write scopes are exactly the two the line under the list names, and
+  // the page comes before every link that asks for either.
+  it('asks for no write scope besides write_products and write_files, and shows the page for both', () => {
+    expect(shopify.consentNotice?.paragraphs[2]).toContain('Für Bestellungen, Kunden, Lagerbestand und Versand fragt lynox bei Shopify keine Schreibrechte an.');
+    const writing = shopify.allowedScopes.filter((s) => s.startsWith('write_'));
+    expect(writing, 'Zustimmungstext Absatz 3 und Rahmen neu fassen und neu freigeben').toEqual(['write_products', 'write_files']);
+    expect([...(shopify.consentNotice?.writeScopes ?? [])].sort()).toEqual([...writing].sort());
+    expect(Object.keys(shopify.consentNotice?.scopeNames ?? {}).sort()).toEqual([...writing].sort());
+    const files = connect('read_products write_files');
+    expect(isRefusal(files)).toBe(false);
+    if (isRefusal(files)) return;
+    expect(files.consent?.writeScopes).toEqual(['write_files']);
   });
 
-  // The text names the fields a bulk run writes with this scope: those of the engine's product
-  // write form. A field added to the form fails here, and the text needs a new approval.
-  it('names exactly the fields the engine\'s Shopify product write form sets', () => {
-    const named: Record<string, string> = { title: 'Titel', descriptionHtml: 'Beschreibung', seo_title: 'SEO-Titel', seo_description: 'SEO-Beschreibung' };
-    const order = ['title', 'descriptionHtml', 'seo_title', 'seo_description'];
-    for (const f of SHOPIFY_WRITABLE_FIELDS) expect(named[f], `a name for ${f}`).toBeDefined();
-    const fields = order.filter((f) => SHOPIFY_WRITABLE_FIELDS.includes(f)).map((f) => named[f]);
-    const list = `${fields.slice(0, -1).join(', ')} und ${fields[fields.length - 1]}`;
-    expect(shopify.consentNotice?.paragraphs[1]).toContain(`Ein Massenlauf ändert nur Texte bestehender Produkte: ${list}.`);
-  });
-
-  // The engine's image form writes alt texts through `fileUpdate`, which Shopify grants only with
-  // `write_files` or `write_themes`. Without either scope a bulk run writes no alt text, so the
-  // text may not promise one. (`write_products` can change an alt text through the deprecated
-  // `productUpdateMedia`; the engine has no form for it.)
-  it('promises no image alt texts while the preset allows no scope the engine\'s image form needs', () => {
+  // The image form writes only an alt text: the one field the page's line names for it.
+  it('holds the image form to the alt text', () => {
     expect(SHOPIFY_MEDIA_WRITABLE_FIELDS).toEqual(['alt']);
-    expect(shopify.allowedScopes.filter((s) => s === 'write_files' || s === 'write_themes')).toEqual([]);
-    // Every text the page shows: the paragraphs, the frame and the names of the scopes.
-    const text = [...shopify.consentNotice!.paragraphs, ...Object.values(shopify.consentNotice!.frame ?? {}), ...Object.values(shopify.consentNotice!.scopeNames ?? {})].join(' ');
-    const IMAGE_WORDS = /alt[- ]?text|bild|foto|medi/i;
-    // The pattern catches each way the page could name images, in either case.
-    for (const word of ['Alt-Text', 'Alttext', 'alt text', 'Bilder', 'Fotos', 'Medien', 'media']) expect(word).toMatch(IMAGE_WORDS);
-    expect(text).not.toMatch(IMAGE_WORDS);
   });
 
-  // The words the owner reads, byte for byte. A change to one needs a new approval; this test is
-  // the reminder, as bexio's is.
   it('holds the customer text byte for byte', () => {
     expect(shopify.consentNotice?.paragraphs).toEqual([
       'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an Shopify schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in Shopify, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er.',
-      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Zuerst schreibt lynox eine einzige Änderung, die der Inhaber bestätigen muss, bevor der Rest folgt. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel und SEO-Beschreibung. Anlegen, löschen oder Preise ändern kann er nicht.',
-      'Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.',
+      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+      'Für Bestellungen, Kunden, Lagerbestand und Versand fragt lynox bei Shopify keine Schreibrechte an. Welche Rechte der Zugang am Ende erhält, legt die App in deinem Shopify fest. Gewährt sie mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
     ]);
     expect(shopify.consentNotice?.frame).toEqual({
       title: 'Schreibrechte für Shopify bestätigen',
-      scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in Shopify:',
-      scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
+      scopesIntro: 'lynox fragt bei Shopify diese Schreibrechte an:',
+      scopesNote: 'Ein Schreibzugriff auf Produkte gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Ein Schreibzugriff auf Dateien gilt für alle Dateien des Stores, also Bilder, Videos, 3D-Modelle und andere Dateien, etwa hochladen, ersetzen, umbenennen, Alt-Texte ändern und löschen. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
       button: 'Zustimmen und weiter zu Shopify',
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
     });
-    expect(shopify.consentNotice?.scopeNames).toEqual({ write_products: 'Produkte: Schreibzugriff' });
+    expect(shopify.consentNotice?.scopeNames).toEqual({ write_products: 'Produkte: Schreibzugriff', write_files: 'Dateien: Schreibzugriff' });
   });
 });
