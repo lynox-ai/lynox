@@ -5,6 +5,7 @@ import { tokenSlotNames, type ApiProfile } from '../../core/api-store.js';
 import { apiSetupTool } from './api-setup.js';
 import { toolLockFor } from '../../core/mandate-tool-lock.js';
 import { connectionTokenHolderName, connectionTokenHolders, describeConnectionTokens, FORGING_CHARS, sharedGrantOwner } from '../../core/profile-secret-view.js';
+import { vaultScopeOf, VAULT_SCOPE_ALL } from '../../core/secret-scope.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -220,7 +221,6 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     if (isPresetClientSecretName(input.name)) {
       return `Error: not collected through ask_secret. ${presetClientSecretGuidance(input.name)}`;
     }
-
     // Reconcile an already-stored name BEFORE prompting. Two match classes with DIFFERENT
     // handling — the distinction is what keeps a legitimate SECOND key in the same vendor
     // namespace reachable:
@@ -243,6 +243,23 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       return `"${input.name}" is a connection's token slot outside this agent's vault scope, so it is not ` +
         `collected here. This is a scope decision — whether the vault holds it is not something this agent ` +
         `is told. Either proceed without it, or report back that this task needs secret_scope: "${input.name}".`;
+    }
+    // A sub-agent with a secret_scope asks only for names inside it, before the preset check below,
+    // which would ask api_setup to connect: a name outside the scope starts nothing. The reconcile below reads
+    // names through this agent's store, and a scoped view lists only the names in scope, so a
+    // stored key outside the scope looked absent: the dialog opened, and what the user entered
+    // replaced that key. Decided on scope membership, never on whether the name is stored, so
+    // the answer tells the sub-agent nothing about the vault (as `explainUnresolved` does). It
+    // loses nothing either: a value collected under a name outside its scope it could not read,
+    // not even through an API profile, which reads through the same view (`http.ts`). The text
+    // says where the result goes: a sub-agent that thought it spoke to the user asked for the key
+    // itself, and a result asking for it is passed on to the user, who would paste it in the chat.
+    const scope = vaultScopeOf(agent.secretStore);
+    if (scope !== VAULT_SCOPE_ALL && !scope.includes(input.name)) {
+      return `Not collected: "${input.name}" is outside this sub-agent's secret_scope, so it does not ask the user for it. `
+        + `Your result goes to the agent that started you, not to the user. In it, say that the task needs ${input.name} and stop: `
+        + `do not ask anyone to enter, paste or provide the key, and do not say whether it is stored. `
+        + `The agent that started you can collect it with ask_secret, or start you again with secret_scope naming it.`;
     }
     // A token slot of a profile on a built-in provider comes only from that provider's sign-in.
     const presetHolder = presetSlotHolder(agent, input.name);
