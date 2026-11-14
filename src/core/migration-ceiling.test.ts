@@ -37,12 +37,52 @@ describe('readImportLimitMb', () => {
     expect(readImportLimitMb(files({ '/sys/fs/cgroup/memory/memory.limit_in_bytes': '1073741824' }), 4 * GIB)).toBe(1024);
   });
 
-  it('prefers v2 over v1', () => {
+  it('takes the smaller of a v2 and a v1 limit', () => {
     const read = files({
       '/sys/fs/cgroup/memory.max': '1610612736',
       '/sys/fs/cgroup/memory/memory.limit_in_bytes': '1073741824',
     });
+    expect(readImportLimitMb(read, 4 * GIB)).toBe(1024);
+  });
+
+  it('reads on past a v2 `max` to a v1 limit', () => {
+    const read = files({
+      '/sys/fs/cgroup/memory.max': 'max',
+      '/sys/fs/cgroup/memory/memory.limit_in_bytes': '1073741824',
+    });
+    expect(readImportLimitMb(read, 4 * GIB)).toBe(1024);
+  });
+
+  it('finds the limit on its own cgroup outside a private namespace', () => {
+    const read = files({
+      '/proc/self/cgroup': '0::/system.slice/docker-abc.scope\n',
+      '/sys/fs/cgroup/system.slice/docker-abc.scope/memory.max': '1610612736',
+      '/sys/fs/cgroup/memory.max': 'max',
+    });
     expect(readImportLimitMb(read, 4 * GIB)).toBe(1536);
+  });
+
+  it('finds a limit on an ancestor when its own cgroup says max', () => {
+    const read = files({
+      '/proc/self/cgroup': '0::/kubepods/pod1/c1\n',
+      '/sys/fs/cgroup/kubepods/pod1/c1/memory.max': 'max',
+      '/sys/fs/cgroup/kubepods/pod1/memory.max': '1073741824',
+      '/sys/fs/cgroup/kubepods/memory.max': 'max',
+    });
+    expect(readImportLimitMb(read, 4 * GIB)).toBe(1024);
+  });
+
+  it('reads the v1 memory controller line of /proc/self/cgroup', () => {
+    const read = files({
+      '/proc/self/cgroup': '5:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n',
+      '/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes': '1073741824',
+      '/sys/fs/cgroup/memory/memory.limit_in_bytes': '9223372036854771712',
+    });
+    expect(readImportLimitMb(read, 4 * GIB)).toBe(1024);
+  });
+
+  it('ignores a limit that reads as 0', () => {
+    expect(readImportLimitMb(files({ '/sys/fs/cgroup/memory.max': '0' }), 4 * GIB)).toBe(4096);
   });
 
   it('falls back to the host when the cgroup has no limit', () => {
@@ -117,5 +157,8 @@ describe('storePath', () => {
     expect(storePath(CONTAINER, { ...fine, storeBytes: -1 })).toBe('raw');
     // a bundle smaller than the store it contains
     expect(storePath(CONTAINER, { bundleBytes: MIB, restBytes: 0, storeBytes: 10 * MIB })).toBe('raw');
+    // a bundle smaller than the store and the rest it contains
+    expect(storePath(CONTAINER, { bundleBytes: 15 * MIB, restBytes: 10 * MIB, storeBytes: 10 * MIB })).toBe('raw');
+    expect(storePath(CONTAINER, { bundleBytes: 20 * MIB, restBytes: 10 * MIB, storeBytes: 10 * MIB })).toBe('plain'); // control
   });
 });

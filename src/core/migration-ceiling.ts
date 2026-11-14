@@ -54,26 +54,57 @@ export const MIGRATION_MEMORY = {
   k: 7.1,
 } as const;
 
-/** Where the container's limit is read from: cgroup v2, then v1. */
-const CGROUP_LIMIT_FILES = ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'];
+/**
+ * The files that may hold a memory limit for this process: for its own cgroup and every
+ * ancestor, the v2 `memory.max` and the v1 `memory.limit_in_bytes`, each read relative to the
+ * mount. The cgroup's path comes from `/proc/self/cgroup` (`0::<path>` on v2,
+ * `<n>:memory:<path>` on v1). Inside a private cgroup namespace (Docker's default on v2) the
+ * path is `/` and only the mount's own file counts; without one (a shared namespace, a nested
+ * slice) the limit can sit on any ancestor, and a cgroup that says `max` can sit under one
+ * that does not.
+ */
+function cgroupLimitFiles(readFile: (path: string) => string): string[] {
+  const paths: Array<{ mount: string; file: string; path: string }> = [];
+  let self = '';
+  try { self = readFile('/proc/self/cgroup'); } catch { /* not Linux, or no procfs */ }
+  for (const line of self.split('\n')) {
+    const [, controllers, path] = /^\d+:([^:]*):(\/.*)$/.exec(line.trim()) ?? [];
+    if (path === undefined) continue;
+    if (controllers === '') paths.push({ mount: '/sys/fs/cgroup', file: 'memory.max', path });
+    else if (controllers!.split(',').includes('memory')) paths.push({ mount: '/sys/fs/cgroup/memory', file: 'memory.limit_in_bytes', path });
+  }
+  // No procfs entry: still read the mounts' own files.
+  if (paths.length === 0) {
+    paths.push({ mount: '/sys/fs/cgroup', file: 'memory.max', path: '/' });
+    paths.push({ mount: '/sys/fs/cgroup/memory', file: 'memory.limit_in_bytes', path: '/' });
+  }
+  const files: string[] = [];
+  for (const { mount, file, path } of paths) {
+    const parts = path.split('/').filter((p) => p !== '' && p !== '..');
+    for (let depth = parts.length; depth >= 0; depth--) {
+      files.push([mount, ...parts.slice(0, depth), file].join('/'));
+    }
+  }
+  return files;
+}
 
 /**
- * The memory the import may use, in MiB: the container's limit when one is set, else the
- * host's memory. A cgroup without a limit says `max` (v2) or a value near 2^63 (v1); both
- * leave the host's memory as the bound, and so does a limit above it.
+ * The memory the import may use, in MiB: the smallest limit set on this process's cgroup or
+ * any ancestor (cgroup v2 or v1), else the host's memory. A cgroup without a limit says `max`
+ * (v2) or a value near 2^63 (v1); neither lowers the bound, and neither does a limit above the
+ * host's memory or one that reads as 0.
  */
 export function readImportLimitMb(
   readFile: (path: string) => string = (p) => readFileSync(p, 'utf8'),
   hostBytes: number = totalmem(),
 ): number {
   let limit = hostBytes;
-  for (const file of CGROUP_LIMIT_FILES) {
+  for (const file of cgroupLimitFiles(readFile)) {
     let text: string;
     try { text = readFile(file).trim(); } catch { continue; }
-    if (!/^\d+$/.test(text)) break; // `max`: no limit on this cgroup
+    if (!/^\d+$/.test(text)) continue; // `max`: no limit on this cgroup, an ancestor may have one
     const bytes = Number(text);
-    if (Number.isSafeInteger(bytes) && bytes > 0 && bytes < limit) limit = bytes;
-    break;
+    if (bytes > 0 && bytes < limit) limit = bytes;
   }
   return Math.floor(limit / MIB);
 }

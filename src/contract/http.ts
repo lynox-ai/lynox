@@ -359,7 +359,7 @@ export interface HealthBody {
   /**
    * What a migration into this instance may hold in memory. A source reads it before it
    * exports and decides per store whether the plaintext path fits:
-   * `baseline_mb + bundle + rest_factor * rest + (k - 1) * store <= import_limit_mb`, sizes in MB.
+   * `baseline_mb + bundle + rest_factor * rest + (k - 1) * store <= import_limit_mb`, sizes in MiB.
    * The destination checks a manifest with the same numbers, so a later release that
    * re-measures them does not make an older source fail. Optional: absent on an engine that
    * predates it, and a reader that does not migrate ignores it.
