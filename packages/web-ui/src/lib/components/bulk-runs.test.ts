@@ -738,6 +738,8 @@ describe('going on from a run that halted', () => {
 				const text = bulkResumeText(w(key, unclear), managed, DE);
 				expect(bulkResumeKind(w(key, unclear)), key).toBe('check');
 				expect([text?.before, text?.check, text?.after].join(' '), `${key} ${String(managed)}`).not.toMatch(/fortsetzen/);
+				const en = bulkResumeText(w(key, unclear), managed, EN);
+				expect([en?.before, en?.check, en?.after].join(' '), `${key} ${String(managed)} en`).not.toMatch(/can continue\./);
 				expect(text?.check, key).toBe(check);
 			}
 		}
