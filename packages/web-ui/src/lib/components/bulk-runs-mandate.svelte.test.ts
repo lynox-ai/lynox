@@ -336,12 +336,16 @@ describe('what the owner\'s pages say about a run\'s time and its list', () => {
 		expect(target.textContent).not.toContain('07:53');
 	});
 
-	it('shows when a run goes on in the viewer\'s time on its page, from the engine\'s ISO time', async () => {
-		run = makeRun({ resumesAt: '2026-11-12T07:53:09.000Z' });
-		await renderDetail();
-		expect(target.textContent).toContain('08:53');
-		expect(target.textContent).not.toContain('07:53');
-	});
+	// The engine sends this time with its zone; the page reads it as every engine time, so one
+	// written without a zone, as the engine's tables stamp theirs, shows the same.
+	for (const resumesAt of ['2026-11-12T07:53:09.000Z', '2026-11-12 07:53:09']) {
+		it(`shows when a run goes on in the viewer's time on its page (${resumesAt})`, async () => {
+			run = makeRun({ resumesAt });
+			await renderDetail();
+			expect(target.textContent).toContain('08:53');
+			expect(target.textContent).not.toContain('07:53');
+		});
+	}
 
 	const listed = (list: BulkRunDetailData['list']): BulkRunDetailData => makeRun({
 		phase: 'planned', haltKey: 'listed', haltReason: 'engine English', total: 3, list,
