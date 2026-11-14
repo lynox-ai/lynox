@@ -4,7 +4,9 @@
 	import type { IconName } from '../primitives/icons.js';
 	import {
 		getInboxCounts,
+		getRulesPendingCount,
 		getSnoozedCount,
+		rulesPendingLabel,
 		type InboxZone,
 	} from '../stores/inbox.svelte.js';
 
@@ -30,6 +32,7 @@
 
 	const counts = $derived(getInboxCounts());
 	const snoozedCount = $derived(getSnoozedCount());
+	const rulesPending = $derived(getRulesPendingCount());
 
 	interface ZoneEntry {
 		key: InboxZone;
@@ -92,9 +95,15 @@
 		</button>
 		<a
 			href="/app/inbox/rules"
-			class="rounded-[var(--radius-sm)] px-2.5 py-1.5 text-[11px] text-text-subtle hover:text-text-muted hover:bg-bg-muted text-center"
+			class="flex items-center justify-center gap-1.5 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-[11px] text-text-subtle hover:text-text-muted hover:bg-bg-muted text-center"
+			title={rulesPending > 0 ? rulesPendingLabel(rulesPending) : undefined}
 		>
-			{t('inbox.rules_link')}
+			<span>{t('inbox.rules_link')}</span>
+			{#if rulesPending > 0}
+				<!-- Proposals waiting for confirmation: the number shows, the sentence is read. -->
+				<span class="rounded-full bg-accent/15 text-accent-text px-1.5 text-[10px] font-mono leading-5" aria-hidden="true" data-testid="rules-pending-badge">{rulesPending}</span>
+				<span class="sr-only">{rulesPendingLabel(rulesPending)}</span>
+			{/if}
 		</a>
 		{#if showHelp && onHelp}
 			<button

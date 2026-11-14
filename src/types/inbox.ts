@@ -102,6 +102,41 @@ export interface InboxItem {
   notifiedAt: Date | undefined;
   /** The rule that filed this item (v20); cleared when the rule is deleted. */
   matchedRuleId?: string | undefined;
+  /**
+   * The rule that named this item but was not applied (v21), or null when none was withheld.
+   * Always set on an item read from the store; optional so hand-built items compile.
+   */
+  ruleWithheld?: InboxRuleWithheld | null | undefined;
+}
+
+/**
+ * Why a rule that named a mail was not applied, so the mail is shown instead:
+ * - `rule_withheld_sensitive`: the rule would have filed a sensitive mail as handled.
+ * - `rule_withheld_classifier`: a description rule would have filed the mail as handled, and the
+ *   classifier does not see it as handled; the classifier's verdict stands.
+ * - `rule_withheld_unchecked`: as before, but the classifier's check could not run.
+ * - `forwarded_by_person`: the rule would have filed a mail a person forwarded as handled.
+ */
+export type InboxRuleWithheldReason =
+  | 'rule_withheld_sensitive'
+  | 'rule_withheld_classifier'
+  | 'rule_withheld_unchecked'
+  | 'forwarded_by_person';
+
+export const INBOX_RULE_WITHHELD_REASONS: ReadonlyArray<InboxRuleWithheldReason> = [
+  'rule_withheld_sensitive',
+  'rule_withheld_classifier',
+  'rule_withheld_unchecked',
+  'forwarded_by_person',
+];
+
+/** A rule withheld on an item, as it was when it was withheld. */
+export interface InboxRuleWithheld {
+  /** Null once the rule is deleted. */
+  id: string | null;
+  /** The rule's name when it was withheld; kept when the rule is renamed or deleted. Null when it had none. */
+  name: string | null;
+  reason: InboxRuleWithheldReason;
 }
 
 export interface InboxAuditEntry {
