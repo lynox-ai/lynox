@@ -12,6 +12,7 @@
  *
  * Pure, so the rules are asserted directly; the callers apply them.
  */
+import { createHash } from 'node:crypto';
 import { singleLine } from './prompt-value.js';
 import { normalizeApprovalHost } from './untrusted-epoch.js';
 
@@ -182,6 +183,25 @@ function multipartNamesMethod(body: string): boolean {
 }
 
 /**
+ * The longest URL a request may have, in bytes, checked on the URL as given before the handler
+ * parses or reads it: the gates parse and read a URL on every call site, at a cost in its length
+ * (measured at the handler). The tool's guard hooks parse it earlier, in time linear in its length. A query the question shows whole ({@link SHOWN_BODY_MAX_BYTES}) still fits,
+ * with 16 KiB for the rest of the URL; no server takes a URL near this length.
+ */
+export const URL_MAX_BYTES = 80 * 1024;
+
+/**
+ * The most of a write's body the gate reads for a method override, in bytes sent. Every reading
+ * (JSON, form, multipart, escapes) costs time in the size of the body, and the gate reads a body
+ * about ten times per call: measured at the handler, a body of 1 MB built to be slow to read held
+ * the event loop for about 0.85 s, one of 256 KB for about 0.15 s. A body over
+ * it counts as unreadable (`bodyOverrides`): it is gated as a DELETE, so it is asked, or refused
+ * where no one can be asked. It never counts as a read. Four times what a question shows whole
+ * (`SHOWN_BODY_MAX_BYTES`): a write the owner's contract grants may still send a larger body.
+ */
+export const GATE_READ_MAX_BYTES = 256 * 1024;
+
+/**
  * The `_method` fields of a request body, as a server that parses the body may read them
  * (Rack's MethodOverride and Laravel read the form or the JSON body; Express's method-override
  * reads whatever its body parser produced). Only top-level fields are read as overrides: a field
@@ -196,10 +216,36 @@ function multipartNamesMethod(body: string): boolean {
  * does not parse and holds a `"_method":` key; JSON that names the same `_method` key twice (in
  * any case, at any depth); a body under a multipart type with a part named `_method`; or a body
  * sent with a `Content-Encoding` other than `identity`, or in a charset outside a fixed list of
- * UTF-8 and single-byte ASCII supersets.
+ * UTF-8 and single-byte ASCII supersets; and a body larger than {@link GATE_READ_MAX_BYTES}, which
+ * is not read at all.
  * The caller gates such a request as the strongest method.
  */
-function bodyOverrides(body: string, headers: Record<string, string>): { declared: string[]; other: string[]; unreadable: boolean } {
+type BodyOverrideReading = { declared: string[]; other: string[]; unreadable: boolean };
+
+/**
+ * The last readings of `bodyOverrides`, by a SHA-256 of the body and the headers: the gate reads
+ * one call's body about ten times, and a form full of escapes costs `URLSearchParams` about
+ * 0.1 s per 256 KB. Keyed by digest, so no body (which may carry a secret) is
+ * kept. Callers only read the arrays.
+ */
+const BODY_READING_CACHE: Array<{ key: string; reading: BodyOverrideReading }> = [];
+const BODY_READING_CACHE_SIZE = 8;
+
+function bodyOverrides(body: string, headers: Record<string, string>): BodyOverrideReading {
+  // Not read past the bound: the readings below cost time in the size of the body, on every call
+  // site of the gate. A body over it counts as unreadable and is asked as the strongest method.
+  if (body.length > GATE_READ_MAX_BYTES || sentBytes(body) > GATE_READ_MAX_BYTES) return { declared: [], other: [], unreadable: true };
+  const key = createHash('sha256').update(JSON.stringify(Object.entries(headers))).update('\0').update(body).digest('base64');
+  const cached = BODY_READING_CACHE.find((entry) => entry.key === key)?.reading;
+  const reading = cached ?? bodyOverridesRead(body, headers);
+  if (cached === undefined) {
+    BODY_READING_CACHE.unshift({ key, reading });
+    BODY_READING_CACHE.length = Math.min(BODY_READING_CACHE.length, BODY_READING_CACHE_SIZE);
+  }
+  return reading;
+}
+
+function bodyOverridesRead(body: string, headers: Record<string, string>): BodyOverrideReading {
   const contentType = Object.entries(headers)
     .filter(([name]) => name.trim().toLowerCase() === 'content-type')
     .map(([, value]) => value).join(', ').toLowerCase();
@@ -285,6 +331,12 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
   // also splits on `;` reads `?x=1;_method=DELETE` as an override, where `searchParams` sees a
   // single field `x`. An unparsable URL gives none, and is refused before it is sent.
   for (const search of urlQueryStrings(url)) {
+    // A path too costly to read for queries may still hold an override: pass the marker on as a
+    // candidate, which is no method, so the request is refused rather than gated as sent.
+    if (search === UNREAD_QUERY) {
+      candidates.push(search);
+      continue;
+    }
     for (const params of queryReadings(search)) {
       for (const [name, value] of params) {
         if (isOverrideFieldName(name)) candidates.push(value);
@@ -428,6 +480,14 @@ export function isGraphqlEndpoint(url: string): boolean {
     return true;
   }
   if (parsed.hostname.toLowerCase().split('.').some((label) => label.startsWith('graphql'))) return true;
+  // A URL too costly to read every way (`READING_BUDGET_CHARS`) counts, like one that does not parse.
+  // That is the stricter answer where GraphQL means "check the body for a mutation", not where it
+  // lets a POST without one count as a read (containment, bulk-external): there it is no wider than
+  // a literal /graphql segment, which whoever writes the path could set for a few bytes anyway.
+  return withinReadingBudget(() => isGraphqlPathOrQuery(url, parsed), () => true);
+}
+
+function isGraphqlPathOrQuery(url: string, parsed: URL): boolean {
   // WPGraphQL answers on any path that carries the query key `graphql` (`/?graphql`,
   // `/index.php?graphql`), with or without a value; PHP reads `graphql[]` and ` graphql` (leading
   // spaces dropped) as the same key.
@@ -458,10 +518,26 @@ export function urlQueryStrings(url: string): string[] {
   }
   const out = [parsed.search.slice(1)];
   if (!parsed.pathname.includes('%')) return out;
-  for (const reading of serverReadings(parsed.pathname)) {
-    for (let at = reading.indexOf('?'); at !== -1; at = reading.indexOf('?', at + 1)) out.push(reading.slice(at + 1).split('#')[0]!);
-  }
-  return out;
+  // A path too costly to read every way (`READING_BUDGET_CHARS`) may decode a `?`: it counts as
+  // carrying a query string of its own.
+  return withinReadingBudget(() => {
+    for (const reading of serverReadings(parsed.pathname)) {
+      for (let at = reading.indexOf('?'); at !== -1; at = reading.indexOf('?', at + 1)) out.push(reading.slice(at + 1).split('#')[0]!);
+    }
+    return out;
+  }, () => [...out, UNREAD_QUERY]);
+}
+
+/** The query string `urlQueryStrings` names for a path it could not read every way. */
+const UNREAD_QUERY = '(unread)';
+
+/**
+ * Why `effectiveWriteMethod` gave `null` for a request sent with a known method, when the reason
+ * is the path: too costly to read every way, it may hide an override that cannot be ruled out.
+ * The caller names this reason on its own; a method that is not a method keeps the other text.
+ */
+export function overrideUnreadInPath(method: string, url: string): boolean {
+  return KNOWN_METHODS.has(method.trim().toUpperCase()) && urlQueryStrings(url).includes(UNREAD_QUERY);
 }
 
 /** An operation that writes: `mutation` or `subscription` as a GraphQL name anywhere in the document. */
@@ -574,7 +650,13 @@ export function graphqlWrite(headers: Readonly<Record<string, string>>, body: un
 export function graphqlUrlWrites(url: string): boolean {
   try {
     new URL(url);
-    return urlQueryStrings(url).some((search) => queryReadings(search).some((params) => [...params].some(([key, value]) => queryKeyName(key) === 'query' && GRAPHQL_WRITE_OPERATION.test(value))));
+    // A URL too costly to read every way (`READING_BUDGET_CHARS`) counts as carrying a mutation.
+    return withinReadingBudget(
+      // `UNREAD_QUERY` cannot come back inside this budget (the inner read shares it and throws to
+      // the `() => true` below); checked all the same, so no later change lets it read as no mutation.
+      () => urlQueryStrings(url).some((search) => search === UNREAD_QUERY || queryReadings(search).some((params) => [...params].some(([key, value]) => queryKeyName(key) === 'query' && GRAPHQL_WRITE_OPERATION.test(value)))),
+      () => true,
+    );
   } catch {
     return true;
   }
@@ -649,13 +731,15 @@ const PERSISTED_QUERY_KEYS = new Set(['documentid', 'doc_id', 'queryid', 'persis
  *  - a multipart body with an `operations` part, the GraphQL upload form, whose escapes no reading
  *    here undoes.
  * Other fields of a JSON body are not read: a description that says „Mutation (…)" is no request a
- * server runs. A body that is not a string, or that throws while it is read, counts as one.
+ * server runs. A body that is not a string, or that throws while it is read, counts as one; so does
+ * a body over {@link GATE_READ_MAX_BYTES}, which the gate does not read.
  *
  * For grants, not for questions: a question shows the body; a grant lets it go unseen.
  */
 export function bodyMayWriteGraphql(body: unknown, headers: Readonly<Record<string, string>> | undefined): boolean {
   if (body === undefined || body === '') return false;
   if (typeof body !== 'string') return true;
+  if (body.length > GATE_READ_MAX_BYTES || sentBytes(body) > GATE_READ_MAX_BYTES) return true;
   try {
     const contentType = Object.entries(headers ?? {}).filter(([name]) => name.trim().toLowerCase() === 'content-type').map(([, value]) => value).join(',');
     if (/multipart/i.test(contentType) && /\boperations\b/i.test(body)) return true;
@@ -704,7 +788,8 @@ export function bodyMayWriteGraphql(body: unknown, headers: Readonly<Record<stri
  */
 export function urlMayWriteGraphql(url: string): boolean {
   try {
-    return urlQueryStrings(url).some((search) => queryReadings(search).some((params) => [...params].some(([key, value]) => {
+    // A path too costly to read may hide a `query` that names a write: it counts as one.
+    return urlQueryStrings(url).some((search) => search === UNREAD_QUERY || queryReadings(search).some((params) => [...params].some(([key, value]) => {
       const name = queryKeyName(key);
       return PERSISTED_QUERY_KEYS.has(name) || (name === 'query' && namesGraphqlWrite(value));
     })));
@@ -915,6 +1000,45 @@ function percentUDecode(text: string): string {
  */
 const READING_STEPS: ReadonlyArray<(text: string) => string> = [lenientDecode, latin1Decode, windows1252Decode, percentUDecode, (t) => t.replace(/\+/g, ' ')];
 const READING_DEPTH = 3;
+
+/**
+ * The most characters the distinct readings of one part may produce (`serverReadings`, summed
+ * over every text the part reads, each reading counted with {@link READING_OVERHEAD_CHARS} on
+ * top), and so the most work its masking does: each reading is masked once more. A text with many
+ * escapes of several kinds has up to 155 readings, each as long as the text. Measured at the
+ * handler with 50 stored secrets: a URL path of 26 KB built that way took
+ * 0.39 s and spent about 2 M; a German product text sent as a 30 KB form spent 0.5 M in 0.1 s, the
+ * same text as JSON almost nothing. The budget lets such a form through to about 36 KB and stops
+ * a path built to be slow after about 0.1 s.
+ * Past the budget the part counts as unreadable (`withinReadingBudget`): it is not shown, and
+ * where a hidden secret would refuse the write (a mandate's session, a connected account), it is
+ * refused too. The URL-only checks (`isGraphqlEndpoint`, `graphqlUrlWrites`, `urlQueryStrings`)
+ * read under the same budget and count such a URL as GraphQL with a query string.
+ */
+export const READING_BUDGET_CHARS = 600_000;
+/** What one more distinct reading costs beyond its length: it is masked as a call of its own. */
+const READING_OVERHEAD_CHARS = 64;
+let readingBudgetLeft: number | null = null;
+class ReadingBudgetSpent extends Error {}
+
+/**
+ * Runs `read` with a budget of {@link READING_BUDGET_CHARS} for every reading it takes, and
+ * `over` instead when the budget runs out. Synchronous: no other part reads while it runs. A call
+ * inside one shares the budget of the outer one.
+ */
+function withinReadingBudget<T>(read: () => T, over: () => T): T {
+  if (readingBudgetLeft !== null) return read();
+  readingBudgetLeft = READING_BUDGET_CHARS;
+  try {
+    return read();
+  } catch (err) {
+    if (err instanceof ReadingBudgetSpent) return over();
+    throw err;
+  } finally {
+    readingBudgetLeft = null;
+  }
+}
+
 function serverReadings(text: string): Set<string> {
   const seen = new Set<string>();
   let frontier = [text];
@@ -923,6 +1047,10 @@ function serverReadings(text: string): Set<string> {
     for (const t of frontier) {
       for (const step of READING_STEPS) {
         const read = step(t);
+        if (readingBudgetLeft !== null && !seen.has(read)) {
+          readingBudgetLeft -= read.length + READING_OVERHEAD_CHARS;
+          if (readingBudgetLeft < 0) throw new ReadingBudgetSpent();
+        }
         seen.add(read);
         next.push(read);
       }
@@ -981,6 +1109,11 @@ function clipName(name: string, max: number): string {
  */
 export function bodyFieldNames(body: string | undefined, mask: (text: string) => string = (t) => t): string {
   if (body === undefined || body === '') return 'no body';
+  // Too costly to read for the question (`READING_BUDGET_CHARS`): named by its size, no names.
+  return withinReadingBudget(() => bodyFieldNamesRead(body, mask), () => `body of ${new TextEncoder().encode(body).byteLength} bytes`);
+}
+
+function bodyFieldNamesRead(body: string, mask: (text: string) => string): string {
   // Each name as sent (`raw`) and as shown (`read`): a form name is shown decoded.
   let names: Array<{ raw: string; read: string }> | undefined;
   try {
@@ -1010,7 +1143,19 @@ export function bodyFieldNames(body: string | undefined, mask: (text: string) =>
  */
 export function pathForQuestion(url: string, mask: (text: string) => string): string {
   const shown = pathShown(url, mask);
-  return shown === undefined ? '(unparsable)' : clipName(shown, MAX_PATH_CHARS);
+  return shown === undefined ? '(unparsable)' : shown === null ? UNREADABLE_PATH : clipName(shown, MAX_PATH_CHARS);
+}
+
+/** What a question shows for a path too costly to read (`READING_BUDGET_CHARS`). */
+const UNREADABLE_PATH = '(not shown: too many encoded characters to check for a stored secret)';
+
+/**
+ * Whether the path a request sends can be read for the question within
+ * {@link READING_BUDGET_CHARS}. One that cannot is not shown, and is refused where a hidden secret
+ * would refuse it (`http.ts`).
+ */
+export function pathReadable(url: string, mask: (text: string) => string): boolean {
+  return pathShown(url, mask) !== null;
 }
 
 /**
@@ -1019,13 +1164,21 @@ export function pathForQuestion(url: string, mask: (text: string) => string): st
  * is clipped, so a secret past the clip still counts.
  */
 export function pathHoldsSecret(url: string, mask: (text: string) => string): boolean {
-  return pathShown(url, mask) !== pathShown(url, (text) => text);
+  const masked = pathShown(url, mask);
+  // A path too costly to read may hold one: it counts as holding one.
+  if (masked === null) return true;
+  return masked !== pathShown(url, (text) => text);
 }
 
-/** {@link pathForQuestion} before it is clipped; `undefined` for a URL that does not parse. */
-function pathShown(url: string, mask: (text: string) => string): string | undefined {
+/** {@link pathForQuestion} before it is clipped; `undefined` for a URL that does not parse,
+ *  `null` for one too costly to read (`withinReadingBudget`). */
+function pathShown(url: string, mask: (text: string) => string): string | undefined | null {
   let parsed: URL;
   try { parsed = new URL(url); } catch { return undefined; }
+  return withinReadingBudget(() => pathShownRead(parsed, mask), () => null);
+}
+
+function pathShownRead(parsed: URL, mask: (text: string) => string): string {
   // Masked in both forms, encoded and decoded: a secret with a character the URL encodes is
   // found only in the decoded one, and the decoded form is what is shown. Segment by segment,
   // so another server reading of one (a second decoding, a single-byte charset) that turns it into a secret
@@ -1117,6 +1270,8 @@ export const SHOWN_HEADER_MAX_CHARS = 200;
 export type UnshowableHeader =
   | { reason: 'duplicate'; name: string }
   | { reason: 'too-long'; name: string; length: number }
+  /** A name longer than a line is shown: not named, as it was not checked for a secret. */
+  | { reason: 'name-too-long'; length: number }
   | { reason: 'escaped-secret'; name: string }
   | { reason: 'secret-name'; name: string };
 
@@ -1157,6 +1312,9 @@ export function headersForQuestion(
   const spelled = (text: string): string => visible(text).replace(/\t/g, '⟨U+0009⟩');
   const lines: string[] = [];
   for (const { k, v } of shown) {
+    // A name longer than a line is shown is refused unread: reading it every way
+    // a server may decode it costs time in its length. Not named, as it was not checked for a secret.
+    if (k.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'name-too-long', length: k.length } };
     if (mask(k) !== k || hidesEncodedSecret(k, mask)) return { unshowable: { reason: 'secret-name', name: k } };
     const masked = mask(v);
     const line = `${spelled(k)}: ${spelled(masked)}`;
@@ -1194,7 +1352,16 @@ export function headersForQuestion(
  * reading it shows, or starred, and stays showable, so a caller that refuses such a body asks
  * this as well as `unshowable` (which implies it).
  */
-export function bodyForQuestion(body: string, mask: (text: string) => string, contentType = ''): { text: string; escapedSecret: boolean } | { unshowable: 'escaped-secret' } {
+export function bodyForQuestion(body: string, mask: (text: string) => string, contentType = ''): { text: string; escapedSecret: boolean } | { unshowable: 'escaped-secret' | 'unreadable' } {
+  // Too costly to read (`READING_BUDGET_CHARS`): not shown, and refused where a hidden secret
+  // would refuse it.
+  return withinReadingBudget<{ text: string; escapedSecret: boolean } | { unshowable: 'escaped-secret' | 'unreadable' }>(
+    () => bodyForQuestionRead(body, mask, contentType),
+    () => ({ unshowable: 'unreadable' }),
+  );
+}
+
+function bodyForQuestionRead(body: string, mask: (text: string) => string, contentType: string): { text: string; escapedSecret: boolean } | { unshowable: 'escaped-secret' } {
   let parsed: unknown;
   let isJson = true;
   try { parsed = JSON.parse(body); } catch { isJson = false; }
@@ -1275,7 +1442,15 @@ function formPart(raw: string, mask: (text: string) => string): string {
  * the mask did not see as sent; a mandate's session and a connected account refuse such a query
  * (`http.ts`).
  */
-export function queryForQuestion(search: string, mask: (text: string) => string): { text: string; secret: boolean; escaped: boolean } {
+export function queryForQuestion(search: string, mask: (text: string) => string): { text: string; secret: boolean; escaped: boolean; unreadable: boolean } {
+  // Too costly to read (`READING_BUDGET_CHARS`): not shown, and counted as hiding a secret.
+  return withinReadingBudget<{ text: string; secret: boolean; escaped: boolean; unreadable: boolean }>(
+    () => ({ ...queryForQuestionRead(search, mask), unreadable: false }),
+    () => ({ text: '', secret: true, escaped: true, unreadable: true }),
+  );
+}
+
+function queryForQuestionRead(search: string, mask: (text: string) => string): { text: string; secret: boolean; escaped: boolean } {
   const sent = search.startsWith('?') ? search.slice(1) : search;
   const shown = mask(sent);
   const escaped = hidesEncodedSecret(shown, mask);

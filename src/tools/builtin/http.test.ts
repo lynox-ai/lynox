@@ -9,9 +9,19 @@ vi.mock('node:dns/promises', () => ({
 // A test hook past the slot-name denylist: with `pastDenylist` set, the attach lets a slot named
 // like a header the gate reads through, as a name the list does not know yet would be.
 const shapingSlots = vi.hoisted(() => ({ pastDenylist: false }));
+// A test hook for the reading budget: a query or path the question cannot read within its budget.
+// Through the handler neither is reached today (a long query is refused earlier, a slow path by the
+// GraphQL check), so the wiring behind them is witnessed by setting the reading's answer.
+const unreadable = vi.hoisted(() => ({ query: false, path: false }));
 vi.mock('../../core/outbound-write.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../core/outbound-write.js')>();
-  return { ...actual, isRequestShapingHeaderName: (name: string) => !shapingSlots.pastDenylist && actual.isRequestShapingHeaderName(name) };
+  return {
+    ...actual,
+    isRequestShapingHeaderName: (name: string) => !shapingSlots.pastDenylist && actual.isRequestShapingHeaderName(name),
+    queryForQuestion: (search: string, mask: (t: string) => string) => (unreadable.query ? { text: '', secret: true, escaped: true, unreadable: true } : actual.queryForQuestion(search, mask)),
+    pathReadable: (url: string, mask: (t: string) => string) => !unreadable.path && actual.pathReadable(url, mask),
+    pathForQuestion: (url: string, mask: (t: string) => string) => (unreadable.path ? '(not shown: too many encoded characters to check for a stored secret)' : actual.pathForQuestion(url, mask)),
+  };
 });
 
 import dns from 'node:dns/promises';
@@ -36,7 +46,7 @@ function writeKeyOf(method: string, url: string, body = '{}', headers: Array<[st
   const u = new URL(url);
   return writeApprovalKey(method, approvalOrigin(u), u, body, headers);
 }
-import { OUTBOUND_EFFECT_PATHS, SHOWN_BODY_MAX_BYTES, effectiveWriteMethod, sentBytes } from '../../core/outbound-write.js';
+import { OUTBOUND_EFFECT_PATHS, SHOWN_BODY_MAX_BYTES, URL_MAX_BYTES, effectiveWriteMethod, sentBytes } from '../../core/outbound-write.js';
 import { WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
 import { collectWriteNotes } from './pipeline.js';
 import { DEFAULT_MAX_TOOL_RESULT_CHARS } from '../../types/index.js';
@@ -372,6 +382,26 @@ describe('httpRequestTool', () => {
      * `unstubAllGlobals` here, so a test that does not stub `fetch` runs on whatever the
      * previous one left behind.
      */
+    // A URL past the bound is refused before the handler parses or reads it.
+    it('refuses a URL one byte longer than a request may have, and only that one', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, statusText: 'OK', body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const base = 'https://example.com/';
+      const over = base + 'a'.repeat(URL_MAX_BYTES + 1 - base.length);
+      await expect(handler({ url: over, method: 'GET' }, makeAgent()))
+        // U-189, written out here so the test does not take the text from the code it checks.
+        .rejects.toThrow(`Blocked: the URL of this request is ${URL_MAX_BYTES + 1} bytes, longer than the 81920 bytes a request may have. Nothing was sent. Send fewer values in the URL, or put them in the body where the service accepts them there, or split the work into several requests.`);
+      expect(fetchMock).not.toHaveBeenCalled();
+      // Counted in bytes: fewer characters than the bound, more bytes.
+      const wide = base + 'ü'.repeat(Math.ceil((URL_MAX_BYTES + 1 - base.length) / 2));
+      expect(wide.length).toBeLessThan(URL_MAX_BYTES);
+      await expect(handler({ url: wide, method: 'GET' }, makeAgent())).rejects.toThrow(/Blocked: the URL of this request is \d+ bytes/);
+      // Exactly the bound goes out.
+      const at = base + 'a'.repeat(URL_MAX_BYTES - base.length);
+      await handler({ url: at, method: 'GET' }, makeAgent());
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
     it('the first write to a host is gated even when it carries no body', async () => {
       // "first": a host that holds no approval yet. (A DELETE is asked every time anyway;
       // this witness is about the gate being reached with no body at all.)
@@ -9134,6 +9164,85 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(escaped.prompt).not.toHaveBeenCalled();
     });
 
+    // A part too costly to read every way (READING_BUDGET_CHARS) is not shown,
+    // and refused like a hidden secret where one would be: in a mandate's session.
+    describe('a part too costly to read for the question', () => {
+      const slowPiece = (i: number): string => `p%u0025${i % 90 + 10}%E9%80%2541%u0041`;
+      const slowForm = Array.from({ length: 1000 }, (_, i) => `f${i}=v%u0025${i % 90 + 10}%E9%2541+y`).join('&');
+      const slowPath = `https://h.example/${Array.from({ length: 1000 }, (_, i) => slowPiece(i)).join('/')}`;
+      const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' };
+      // U-189, written out here so the test does not take the text from the code it checks.
+      const refusal = (part: string): string => `Blocked: the ${part} of this POST to h.example has too many percent-encoded characters for the approval question to check it for a stored secret. Nothing was sent. Send the values as plain text where the service accepts that, or fewer of them per request. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in h.example.`;
+
+      it('refuses a body built to be slow in a mandate\'s session, without asking', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        const { agent, prompt } = agent270({ principal: MANDATE, mask: (t) => t });
+        const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: FORM, body: slowForm }, agent);
+        expect(out).toContain(refusal('body'));
+        expect(prompt).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('asks the owner about a body built to be slow, and says it is not shown', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+        const { agent, prompt } = agent270({ answer: 'Deny' });
+        await visible({ url: 'https://h.example/a', method: 'POST', headers: FORM, body: slowForm }, agent);
+        expect(question(prompt, 0)).toContain(' The body has too many percent-encoded characters to check for a stored secret, so it is not shown here. If you do not know what this write sends, decline it.');
+      });
+
+      describe('a query or a path the question cannot read', () => {
+        afterEach(() => { unreadable.query = false; unreadable.path = false; });
+        it.each(['query', 'path'] as const)('refuses an unreadable %s in a mandate\'s session, and asks the owner', async (part) => {
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          unreadable[part] = true;
+          const url = 'https://h.example/a?x=1';
+          const mandate = agent270({ principal: MANDATE, mask: (t) => t });
+          const out = await visible({ url, method: 'POST', body: '{}' }, mandate.agent);
+          expect(out).toContain(refusal(part));
+          expect(mandate.prompt).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+          const owner = agent270({ answer: 'Deny' });
+          await visible({ url, method: 'POST', body: '{}' }, owner.agent);
+          expect(question(owner.prompt, 0)).toContain(part === 'query'
+            ? ' The query has too many percent-encoded characters to check for a stored secret, so it is not shown here; the path above names its keys.'
+            : '(not shown: too many encoded characters to check for a stored secret)');
+        });
+      });
+
+      // The question reads the path with the query's keys under one budget; each alone fits it.
+      it('refuses a path that only the query\'s keys push past the budget, in a mandate\'s session', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        const path = `https://h.example/${Array.from({ length: 300 }, (_, i) => slowPiece(i)).join('/')}`;
+        const keys = Array.from({ length: 17 }, (_, i) => `${slowPiece(i + 5000)}=1`).join('&');
+        expect(keys.length).toBeLessThan(500);
+        const { agent, prompt } = agent270({ principal: MANDATE, mask: (t) => t });
+        const out = await visible({ url: `${path}?${keys}`, method: 'POST', body: '{}' }, agent);
+        expect(out).toContain(refusal('path'));
+        expect(prompt).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+        // The path alone is read and shown.
+        const owner = agent270({ answer: 'Deny' });
+        await visible({ url: path, method: 'POST', body: '{}' }, owner.agent);
+        expect(question(owner.prompt, 0)).not.toContain('(not shown');
+      });
+
+      // A path built to be slow has escapes whose routing is not known, so the GraphQL check reads
+      // it every way, runs past the budget and counts it as a GraphQL address: refused before the
+      // question, for the owner too. (A query that long is refused earlier, as an exfiltration.)
+      it('refuses a path built to be slow before anyone is asked', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        const { agent, prompt } = agent270();
+        const out = await visible({ url: slowPath, method: 'POST', body: '{}' }, agent);
+        expect(out).toMatch(/^Blocked: /);
+        expect(prompt).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+    });
+
     // The query by the body's rule: shown whole up to the same limit on the bytes sent; over it a
     // mandate is refused and the owner asked with the keys.
     const queryOfBytes = (bytes: number): string => `x=${'a'.repeat(bytes - 2)}`;
@@ -9390,6 +9499,45 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(await visible({ url: 'https://h.example/a', method: 'POST', headers, body: '{}' }, owner.agent)).toContain(ownerWay);
       expect(mandate.prompt).not.toHaveBeenCalled();
       expect(owner.prompt).not.toHaveBeenCalled();
+    });
+
+    // A name too long to show: the same text for owner and mandate, without the name (unread, so
+    // not checked for a secret), and without a way out that shortens a value.
+    it('a header name too long to show is refused with its own text, the same for owner and mandate', async () => {
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockClear();
+      const name = `x-${'n'.repeat(200)}`;
+      const text = `Blocked: this POST to h.example sets a header whose name is ${name.length} characters long, more than the 200 the approval question shows. Nothing was sent. Use the header name the service documents.`;
+      for (const principal of [undefined, MANDATE]) {
+        const { agent, prompt } = agent270(principal === undefined ? {} : { principal });
+        const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: { [name]: 'v' }, body: '{}' }, agent);
+        expect(out).toContain(text);
+        expect(out).not.toContain(name);
+        expect(out).not.toContain('secret:NAME');
+        expect(out).not.toContain('into the body');
+        expect(prompt).not.toHaveBeenCalled();
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    // A path too costly to read may hide a `%3F_method=…`: refused with its own text, not as a
+    // method that is not one, for a read and a write, owner and mandate alike.
+    it('a path too costly to check for an override is refused with its own text', async () => {
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockClear();
+      const piece = (i: number): string => `p%u0025${i % 90 + 10}%E9%80%2541%u0041`;
+      const url = `https://h.example/${Array.from({ length: 2400 }, (_, i) => piece(i)).join('/')}/x%3F_method=DELETE`;
+      for (const method of ['GET', 'POST'] as const) {
+        const text = `Blocked: the path of this ${method} to h.example is too long to check for a method override. Nothing was sent. Send it with a shorter path or with fewer percent-encoded characters in it.`;
+        for (const principal of [undefined, MANDATE]) {
+          const { agent, prompt } = agent270(principal === undefined ? {} : { principal });
+          const out = await visible({ url, method, ...(method === 'POST' ? { body: '{}' } : {}) }, agent);
+          expect(out).toContain(text);
+          expect(out).not.toContain('is not an HTTP method');
+          expect(prompt).not.toHaveBeenCalled();
+        }
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('control: the owner is asked about a stored secret written plainly in the query, shown masked, with the sentence', async () => {

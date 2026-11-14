@@ -43,7 +43,7 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, overrideUnreadInPath, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, pathReadable, URL_MAX_BYTES, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
@@ -345,6 +345,9 @@ function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: st
         (mandate
           ? `Shorten it, or let this host's API profile attach the key.`
           : `Store a long key in the vault and send it as secret:NAME (the question shows it masked), let an API profile attach it, or put the value into the body.`);
+    case 'name-too-long':
+      // The same for owner and mandate: neither the vault nor the body shortens a name.
+      return `Blocked: this ${write} to ${service} sets a header whose name is ${u.length} characters long, more than the ${SHOWN_HEADER_MAX_CHARS} the approval question shows. Nothing was sent. Use the header name the service documents.`;
     case 'escaped-secret':
       return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Write the value plainly.`);
@@ -3191,6 +3194,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
+    // A URL past the bound is refused before the handler parses or reads it: the gates parse it on
+    // every call site, and the question reads its path in every way a server may decode it
+    // too. The guard hooks (outwardWrite, outwardRead) parse it before this, linearly and within
+    // the reading budget. Measured on the URL as given, in bytes.
+    const urlBytes = typeof input.url === 'string' ? sentBytes(input.url) : 0;
+    if (urlBytes > URL_MAX_BYTES) {
+      blockedVerbatim(`Blocked: the URL of this request is ${urlBytes} bytes, longer than the ${URL_MAX_BYTES} bytes a request may have. Nothing was sent. Send fewer values in the URL, or put them in the body where the service accepts them there, or split the work into several requests.`);
+    }
+
     // Per-API rate limiting + profile enforcement (from API Store)
     if (toolContext?.apiStore && toolContext.apiStore.size > 0) {
       try {
@@ -3238,11 +3250,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // request carries (`outbound-write.ts`). It is what is sent that stays `method`; every gate
     // below that asks "is this a write, and which one" reads `gatedMethod`.
     const effective = effectiveWriteMethod(method, headers, input.url, gateBodyReadings(input.body, headers));
-    if (effective === null) {
-      // The value is not repeated: it is whatever the request put there.
-      blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header, or a `_method` query parameter or body field), is not an HTTP method. Send the request with a method name, or without the override.');
-    }
-    const gatedMethod = effective;
     // The write as the refusals below name it: with every write an override names, not only the
     // one it is gated as (`writeForNote`).
     // The service these refusals name, as the question and the gate's refusals do (`approvalOrigin`):
@@ -3261,6 +3268,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false);
     };
     const service = (): string => (hostHoldsSecret() ? 'this service' : approvalOrigin(new URL(input.url)));
+    if (effective === null) {
+      // A path too costly to read may hide an override: named as such, since the request may carry
+      // none. The method is named only when it is one (`overrideUnreadInPath`), and the URL then parses.
+      if (overrideUnreadInPath(method, input.url)) {
+        blockedVerbatim(`Blocked: the path of this ${method.trim().toUpperCase()} to ${service()} is too long to check for a method override. Nothing was sent. Send it with a shorter path or with fewer percent-encoded characters in it.`);
+      }
+      // The value is not repeated: it is whatever the request put there.
+      blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header, or a `_method` query parameter or body field), is not an HTTP method. Send the request with a method name, or without the override.');
+    }
+    const gatedMethod = effective;
     const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
     // The approval and the outbound-effect table are keyed by the URL's host. A header a
     // server or proxy routes on instead (`Host`, `X-Forwarded-Host`, `X-Original-URL`, …)
@@ -3766,7 +3783,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const query = sentQuery === '' || querySize > SHOWN_BODY_MAX_BYTES ? undefined : queryForQuestion(sentQuery, mask);
         const queryBlock = sentQuery === '' ? pv``
           : query === undefined ? pv` The query (${querySize} bytes) is too large to show; the path above names its keys, cut short where it is long.`
-            : pv`${onBoxBlock(query.text)}${query.secret ? pv` A stored secret is sent in this query; it is shown masked (***).` : pv``}`;
+            : query.unreadable ? pv` The query has too many percent-encoded characters to check for a stored secret, so it is not shown here; the path above names its keys.`
+              : pv`${onBoxBlock(query.text)}${query.secret ? pv` A stored secret is sent in this query; it is shown masked (***).` : pv``}`;
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
         // N12-4 (2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
@@ -3812,7 +3830,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const pathSecret = mandate && pathHoldsSecret(pathOnly.href, mask);
           // The host goes out in DNS and TLS and is named in the question unmasked (`hostHoldsSecret`).
           const hostSecret = mandate && hostHoldsSecret();
-          const refusal = bodyGoesOut && shown === undefined
+          // A part too costly to read for the question (`READING_BUDGET_CHARS`) may hide a stored
+          // secret no one can see: refused like one, with its own way out.
+          const unreadablePart = shown !== undefined && 'unshowable' in shown && shown.unshowable === 'unreadable' ? 'body'
+            : query?.unreadable === true ? 'query'
+              // The URL as the question reads it: the path with the query's keys (`pathForQuestion`).
+              : !pathReadable(input.url, mask) ? 'path'
+                : undefined;
+          const refusal = unreadablePart !== undefined
+            ? `Blocked: the ${unreadablePart} of this ${refusedAs} to ${service()} has too many percent-encoded characters for the approval question to check it for a stored secret. Nothing was sent. Send the values as plain text where the service accepts that, or fewer of them per request. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in ${service()}.`
+            : bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
               ? `Blocked: the body of this ${refusedAs} to ${service()} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
               : `Blocked: the body of this ${refusedAs} to ${service()} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`)
@@ -3852,7 +3879,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const bodyBlock = shown !== undefined && 'text' in shown
           ? onBoxBlock(shown.text)
           : !bodyGoesOut ? pv``
-            : shown !== undefined ? pv` The body holds a stored secret and is not shown.`
+            : shown !== undefined && 'unshowable' in shown && shown.unshowable === 'unreadable' ? pv` The body has too many percent-encoded characters to check for a stored secret, so it is not shown here. If you do not know what this write sends, decline it.`
+              : shown !== undefined ? pv` The body holds a stored secret and is not shown.`
               : pv` The body (${bodySize} bytes) is too large to show; its field names are listed.`;
         // Parallel calls of the same batch with the SAME question share one answer, and an Allow
         // sends that write as many times as the question named: the number of calls that are this
