@@ -78,30 +78,46 @@ describe('one run per required check name', () => {
     expect(Object.keys(jobs).sort()).toEqual(['detect', 'gitleaks', 'test-shard', 'test', 'lint', ...GATED].sort());
   });
 
+  type GateStep = { name?: string; run?: string; uses?: string; env?: Record<string, string> };
+  const testSteps = () => ((load('ci.yml').jobs ?? {})['test'] as Job & { steps?: GateStep[] }).steps ?? [];
+  const GATE = 'Every test shard passed';
+
   it('test passes only when every shard succeeded: a failed, cancelled or skipped shard fails it', () => {
     // Run the gate step itself rather than read it: GitHub reports a skipped job as passed, so a
     // gate that let `skipped` through would turn a shard that never ran into a green check.
-    type Step = { name?: string; run?: string; uses?: string; env?: Record<string, string> };
-    const steps = ((load('ci.yml').jobs ?? {})['test'] as Job & { steps?: Step[] }).steps ?? [];
-    const at = steps.findIndex((st) => st.name === 'Every test shard passed');
-    const gate = steps[at];
-    expect(at, 'no shard check in test').toBeGreaterThan(-1);
-    // The dependency scan, the override guard and the typecheck run before it, so they report even
-    // when a shard failed; the merge runs after it, so it never merges a part of the suite as all.
-    const index = (pred: (st: Step) => boolean) => steps.findIndex(pred);
-    for (const before of [
-      index((st) => (st.name ?? '').startsWith('Scan dependencies')),
-      index((st) => (st.name ?? '').startsWith('Recorded overrides')),
-      index((st) => st.run === 'pnpm run typecheck'),
-    ]) {
-      expect(before).toBeGreaterThan(-1);
-      expect(before).toBeLessThan(at);
-    }
-    expect(index((st) => (st.uses ?? '').startsWith('actions/download-artifact@'))).toBeGreaterThan(at);
-    expect(gate?.env?.['SHARDS']).toBe('${{ needs.test-shard.result }}');
+    const gate = testSteps().find((st) => st.name === GATE);
+    expect(gate, 'no shard check in test').toBeDefined();
+    // Exactly these keys: an `if:`, a `continue-on-error:` or a `shell:` on this step could skip
+    // it or swallow its exit, and nothing else pins the step.
+    expect(Object.keys(gate ?? {}).sort()).toEqual(['env', 'name', 'run']);
+    expect(gate?.env).toEqual({ SHARDS: '${{ needs.test-shard.result }}' });
     const exitFor = (result: string) => spawnSync('bash', ['-e', '-c', gate?.run ?? ''], { env: { ...process.env, SHARDS: result }, encoding: 'utf8' }).status;
     expect(exitFor('success')).toBe(0);
     for (const result of ['failure', 'cancelled', 'skipped', '']) expect(exitFor(result), result).not.toBe(0);
+  });
+
+  it('test checks the shards after the scan, the override guard and the typecheck, and before the merge', () => {
+    // Before: those report even when a shard failed. After: the download, the report count and the
+    // merge never treat a part of the suite as all of it.
+    const steps = testSteps();
+    const index = (pred: (st: GateStep) => boolean) => steps.findIndex(pred);
+    const at = index((st) => st.name === GATE);
+    expect(at).toBeGreaterThan(-1);
+    for (const [what, i] of [
+      ['scan', index((st) => (st.name ?? '').startsWith('Scan dependencies'))],
+      ['override guard', index((st) => (st.name ?? '').startsWith('Recorded overrides'))],
+      ['typecheck', index((st) => st.run === 'pnpm run typecheck')],
+    ] as const) {
+      expect(i, what).toBeGreaterThan(-1);
+      expect(i, what).toBeLessThan(at);
+    }
+    for (const [what, i] of [
+      ['download', index((st) => (st.uses ?? '').startsWith('actions/download-artifact@'))],
+      ['report count', index((st) => st.name === 'One report per shard')],
+      ['merge', index((st) => (st.run ?? '').includes('--merge-reports'))],
+    ] as const) {
+      expect(i, what).toBeGreaterThan(at);
+    }
   });
 
   it('eslint runs in its own job, and in that one only', () => {
