@@ -28,12 +28,16 @@ let searxngSaving = $state(false);
 let searxngSaved = $state(false);
 let searxngChecking = $state(false);
 let searxngHealthy = $state<boolean | null>(null);
+/** Why the check refused the URL (`searxngUrlProblem`'s code), as against it being unreachable; or null. */
+let searxngCheckProblem = $state<string | null>(null);
 
 export function getSearxngUrl(): string {
 	return searxngUrl;
 }
 export function setSearxngUrl(v: string): void {
 	searxngUrl = v;
+	// A check answered for the URL as it was; an edited one is unchecked.
+	searxngCheckProblem = null;
 }
 export function isSearxngSaving(): boolean {
 	return searxngSaving;
@@ -49,17 +53,26 @@ export function getSearxngHealthy(): boolean | null {
 }
 export function resetSearxngHealth(): void {
 	searxngHealthy = null;
+	searxngCheckProblem = null;
+}
+export function getSearxngCheckProblem(): string | null {
+	return searxngCheckProblem;
 }
 
 export async function checkSearxng(url: string): Promise<void> {
 	searxngChecking = true;
 	searxngHealthy = null;
+	searxngCheckProblem = null;
 	try {
 		const res = await fetch(`${getApiBase()}/searxng/check`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ url }),
 		});
+		if (res.status === 400) {
+			const refused = (await res.json().catch(() => ({}))) as { code?: unknown };
+			searxngCheckProblem = typeof refused.code === 'string' && refused.code.startsWith('searxng-') ? refused.code.slice('searxng-'.length) : null;
+		}
 		if (!res.ok) throw new Error();
 		const data = (await res.json()) as { healthy: boolean };
 		searxngHealthy = data.healthy;
@@ -83,6 +96,7 @@ export async function saveSearxng(): Promise<void> {
 		searxngUrl = '';
 		searxngSaved = true;
 		searxngHealthy = null;
+		searxngCheckProblem = null;
 		setTimeout(() => (searxngSaved = false), 2000);
 		await loadSecretStatuses();
 	} catch (e) {
@@ -141,6 +155,7 @@ export async function removeSearxng(): Promise<void> {
 		await throwIfRefused(res);
 		markSearxngRemoved();
 		searxngHealthy = null;
+		searxngCheckProblem = null;
 		await loadSecretStatuses();
 	} catch (e) {
 		addToast(saveFailedText(e, t('common.save_failed')), 'error');

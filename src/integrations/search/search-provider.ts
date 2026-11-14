@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { assertEgressAllowed } from './content-extractor.js';
+import { isPrivateIP } from '../../core/network-guard.js';
 import { joinCallSignal } from '../../core/call-connection.js';
 
 export interface SearchResult {
@@ -80,18 +81,47 @@ interface SearXNGResponse {
   unresponsive_engines?: Array<[string, string]> | undefined;
 }
 
-/** Validate that a URL uses http/https and is not a cloud metadata endpoint. */
-function validateSearxngUrl(url: string): void {
+/**
+ * Why a SearXNG URL cannot serve as the search backend, or undefined when it can. Checked where
+ * the URL is taken (boot, the settings check), so a URL every search would be refused for never
+ * counts as configured: the engine falls back and the model is told so in its prompt.
+ *
+ * A literal private, loopback or reserved IP is refused here because `search` sends through
+ * `assertEgressAllowed`, which refuses every such literal, whatever the policy (network-guard.ts,
+ * `isPrivateIP` on the parsed hostname). The same parse and the same function, so the two cannot
+ * disagree. A hostname is not resolved here or there: `http://searxng:8080` and
+ * `http://localhost:8888`, the documented forms, work.
+ */
+/** Why a SearXNG URL cannot serve; `private-ip` is the one the settings page names on its own. */
+export interface SearxngUrlProblem { code: 'invalid' | 'protocol' | 'metadata' | 'private-ip'; message: string }
+
+export function searxngUrlProblem(url: string): SearxngUrlProblem | undefined {
   let parsed: URL;
-  try { parsed = new URL(url); } catch { throw new Error('Invalid SearXNG URL'); }
+  try { parsed = new URL(url); } catch { return { code: 'invalid', message: 'Invalid SearXNG URL' }; }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`Blocked: SearXNG URL must use http:// or https:// (got ${parsed.protocol})`);
+    return { code: 'protocol', message: `Blocked: SearXNG URL must use http:// or https:// (got ${parsed.protocol})` };
   }
-  // Block cloud metadata endpoints (link-local)
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+  // Cloud metadata endpoints (link-local); named on their own, before the private-IP rule.
   if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')) {
-    throw new Error('Blocked: cloud metadata endpoint');
+    return { code: 'metadata', message: 'Blocked: cloud metadata endpoint' };
   }
+  if (isPrivateIP(hostname)) {
+    // The hostname way reaches the same address; that is intended for a URL the operator
+    // sets (env or the owner's settings), never the model.
+    return {
+      code: 'private-ip',
+      message: `SearXNG URL ${parsed.origin} names the IP address ${hostname}, and lynox sends no search to a private, loopback or reserved IP written as a number. `
+        + 'Name the host instead: http://localhost:<port> for a SearXNG on this machine, the service name for one in Docker Compose (http://searxng:8080), or a hostname for one on your network. '
+        + 'If enforce_https is on, any host other than localhost needs https; if network_policy is allow-list, the host has to be on that list.',
+    };
+  }
+  return undefined;
+}
+
+function validateSearxngUrl(url: string): void {
+  const problem = searxngUrlProblem(url);
+  if (problem !== undefined) throw new Error(problem.message);
 }
 
 export class SearXNGProvider implements SearchProvider {

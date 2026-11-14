@@ -16,6 +16,8 @@
 		isSecretsLoading,
 		isSearxngConfigured,
 		getSearxngConfiguredUrl,
+		getSearxngProblem,
+		isSearxngFromEnv,
 		loadSecretStatuses,
 	} from '../stores/integrations/secrets.svelte.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
@@ -26,6 +28,7 @@
 		isSearxngSaved,
 		isSearxngChecking,
 		getSearxngHealthy,
+		getSearxngCheckProblem,
 		checkSearxng,
 		saveSearxng,
 		removeSearxng,
@@ -63,6 +66,24 @@
 	// Reactive snapshot — Svelte 5 forbids `{@const}` at the top level of the
 	// template, so we compute it once here and read it from the markup below.
 	const rerankerCap = $derived(getRerankerCapability());
+
+	// Why a SearXNG URL is not used, by `searxngUrlProblem`'s code; null for a
+	// code without a text of its own, which shows only the status.
+	const PROBLEM_TEXT: Readonly<Record<string, string>> = {
+		'private-ip': 'integrations.searxng_private_ip',
+		invalid: 'integrations.searxng_invalid',
+		protocol: 'integrations.searxng_protocol',
+		metadata: 'integrations.searxng_metadata',
+	};
+	/** `fromEnv`: the URL is `SEARXNG_URL`'s, which this page cannot replace (the `_env` text). */
+	function problemText(code: string | null, fromEnv: boolean): string | null {
+		const key = code === null ? undefined : PROBLEM_TEXT[code];
+		return key === undefined ? null : t(fromEnv ? `${key}_env` : key);
+	}
+	// The stored URL: what the boot refuses, else what its last check refused. A typed URL's check
+	// is about what the person enters here, never the environment's.
+	const storedProblemText = $derived(problemText(getSearxngProblem() ?? getSearxngCheckProblem(), isSearxngFromEnv()));
+	const checkProblemText = $derived(problemText(getSearxngCheckProblem(), false));
 </script>
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
@@ -93,8 +114,10 @@
 				</div>
 				{#if isSecretsLoading()}
 					<span class="text-xs text-text-subtle">{t('common.loading')}</span>
-				{:else if isSearxngConfigured()}
+				{:else if isSearxngConfigured() && getSearxngProblem() === null}
 					<span class="text-xs text-success">{t('integrations.searxng_configured')}</span>
+				{:else if isSearxngConfigured()}
+					<span class="text-xs text-error">{t('integrations.searxng_refused')}</span>
 				{:else}
 					<span class="text-xs text-text-subtle">{t('integrations.searxng_not_configured')}</span>
 				{/if}
@@ -105,6 +128,10 @@
 			{:else if isSearxngConfigured()}
 				<div class="space-y-3">
 					<p class="text-xs text-text-muted font-mono">{getSearxngConfiguredUrl()}</p>
+					<!-- A stored URL the engine refuses at boot, or the check refused, is named as such. -->
+					{#if storedProblemText !== null}
+						<p class="text-xs text-error" role="alert">{storedProblemText}</p>
+					{/if}
 					<div class="flex gap-2">
 						<button
 							onclick={() => checkSearxng(getSearxngConfiguredUrl())}
@@ -113,17 +140,20 @@
 						>
 							{isSearxngChecking() ? t('integrations.searxng_checking') : t('integrations.searxng_check')}
 						</button>
-						<button
-							onclick={removeSearxng}
-							disabled={isSearxngSaving()}
-							class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-error hover:border-error disabled:opacity-50"
-						>
-							{t('integrations.searxng_remove')}
-						</button>
+						<!-- The environment's URL wins at boot, so removing it here does nothing. -->
+						{#if !isSearxngFromEnv()}
+							<button
+								onclick={removeSearxng}
+								disabled={isSearxngSaving()}
+								class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-error hover:border-error disabled:opacity-50"
+							>
+								{t('integrations.searxng_remove')}
+							</button>
+						{/if}
 					</div>
 					{#if getSearxngHealthy() === true}
 						<p class="text-xs text-success">{t('integrations.searxng_healthy')}</p>
-					{:else if getSearxngHealthy() === false}
+					{:else if getSearxngHealthy() === false && storedProblemText === null}
 						<p class="text-xs text-error">{t('integrations.searxng_check_failed')}</p>
 					{/if}
 				</div>
@@ -156,6 +186,8 @@
 					</div>
 					{#if getSearxngHealthy() === true}
 						<p class="text-xs text-success">{t('integrations.searxng_healthy')}</p>
+					{:else if getSearxngHealthy() === false && checkProblemText !== null}
+						<p class="text-xs text-error" role="alert">{checkProblemText}</p>
 					{:else if getSearxngHealthy() === false}
 						<p class="text-xs text-error">{t('integrations.searxng_check_failed')}</p>
 					{/if}

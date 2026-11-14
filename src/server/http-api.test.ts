@@ -1327,9 +1327,11 @@ describe('LynoxHTTPApi', () => {
       const { createServer } = await import('node:http');
       const hits: string[] = [];
       const lan = createServer((req, res) => { hits.push(req.url ?? ''); res.writeHead(200); res.end('ok'); });
-      await new Promise<void>(r => lan.listen(0, '127.0.0.1', () => r()));
+      // Both stacks: `localhost` may resolve to ::1 or 127.0.0.1.
+      await new Promise<void>(r => lan.listen(0, () => r()));
       onTestFinished(() => new Promise<void>(r => lan.close(() => r())));
-      const lanUrl = `http://127.0.0.1:${(lan.address() as { port: number }).port}`;
+      // A hostname, as the boot asks for: a private IP written as a number is refused before this.
+      const lanUrl = `http://localhost:${(lan.address() as { port: number }).port}`;
       const owner = webUiLoginSession(TEST_SECRET, null)!.token;
       const check = async (url: string): Promise<{ status: number; body: unknown }> => {
         repayRateWindow();
@@ -6663,6 +6665,75 @@ describe('LynoxHTTPApi', () => {
       } finally {
         engine['getSecretStore'] = orig;
         mockGetApiStore.mockReturnValue(null);
+      }
+    });
+  });
+
+  // The settings check takes the boot's rule: a private IP written as a number answers a health
+  // check but every search to it is refused.
+  describe('POST /api/searxng/check', () => {
+    it('refuses a SearXNG URL naming a private IP and names the hostname way, before it checks', async () => {
+      repayRateWindow();
+      const res = await jsonFetch('/api/searxng/check', { method: 'POST', body: JSON.stringify({ url: 'http://127.0.0.1:18080' }) });
+      expect(res.status).toBe(400);
+      const body = await res.json() as { code?: string; error?: string };
+      expect(body.code).toBe('searxng-private-ip');
+      expect(body.error).toContain('names the IP address 127.0.0.1, and lynox sends no search to a private, loopback or reserved IP written as a number. Name the host instead: http://localhost:<port>');
+    });
+
+    it.each([
+      ['not-a-url', 'searxng-invalid'],
+      ['localhost:8888', 'searxng-protocol'],
+      ['ftp://searx.example', 'searxng-protocol'],
+      ['http://169.254.169.254', 'searxng-metadata'],
+      ['http://10.0.0.5:8080', 'searxng-private-ip'],
+    ])('refuses %s with the code %s, which the page names', async (url, code) => {
+      repayRateWindow();
+      const res = await jsonFetch('/api/searxng/check', { method: 'POST', body: JSON.stringify({ url }) });
+      expect(res.status).toBe(400);
+      expect((await res.json() as { code?: string }).code).toBe(code);
+    });
+
+    it('refuses a metadata host name without a code: the page\'s metadata text names the 169.254 range', async () => {
+      repayRateWindow();
+      const res = await jsonFetch('/api/searxng/check', { method: 'POST', body: JSON.stringify({ url: 'http://metadata.google.internal' }) });
+      expect(res.status).toBe(400);
+      expect((await res.json() as { code?: string }).code).toBeUndefined();
+    });
+
+    it('says whether the stored URL is the environment\'s, which the page cannot replace', async () => {
+      repayRateWindow();
+      const before = process.env['SEARXNG_URL'];
+      try {
+        for (const env of [undefined, 'http://169.254.1.1'] as const) {
+          if (env === undefined) delete process.env['SEARXNG_URL']; else process.env['SEARXNG_URL'] = env;
+          // Without the env, a stored URL of its own: the problem then comes from the config file.
+          mockGetUserConfig.mockReturnValueOnce({ searxng_url: env ?? 'http://10.0.0.1' });
+          const body = await (await jsonFetch('/api/secrets/status')).json() as { searxng_from_env: boolean; searxng_problem: string | null };
+          expect(body.searxng_from_env).toBe(env !== undefined);
+          expect(body.searxng_problem).toBe(env === undefined ? 'private-ip' : 'metadata');
+        }
+      } finally {
+        if (before === undefined) delete process.env['SEARXNG_URL']; else process.env['SEARXNG_URL'] = before;
+      }
+    });
+
+    // The hostname way the refusal names reaches a private address on purpose, which holds only
+    // while the search base is the operator's: env, or the owner's settings, never a mandate's.
+    it('lets only the owner set the search base', () => {
+      const stances = (api as unknown as { staticRouteStances: Map<string, { kind: string }> }).staticRouteStances;
+      expect(stances.get('PUT /api/config')?.kind).toBe('owner-only');
+    });
+
+    it('does not report a stored URL the boot refuses as search set up, and names why', async () => {
+      repayRateWindow();
+      for (const [url, search, problem] of [['http://127.0.0.1:18080', false, 'private-ip'], ['http://localhost:18080', true, null]] as const) {
+        mockGetUserConfig.mockReturnValueOnce({ searxng_url: url });
+        const res = await jsonFetch('/api/secrets/status');
+        const body = await res.json() as { configured: { search: boolean; searxng: boolean }; searxng_url: string; searxng_problem: string | null };
+        expect(body.configured).toMatchObject({ search, searxng: true });
+        expect(body.searxng_url).toBe(url);
+        expect(body.searxng_problem).toBe(problem);
       }
     });
   });

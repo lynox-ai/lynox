@@ -24,6 +24,10 @@ let apiKeyConfigured = $state(false);
 let searchConfigured = $state(false);
 let searxngConfigured = $state(false);
 let searxngConfiguredUrl = $state('');
+/** Why the stored SearXNG URL does not serve (`GET /api/secrets/status`), or null. */
+let searxngProblem = $state<string | null>(null);
+/** The stored URL is the environment's `SEARXNG_URL`, which wins at boot: the page cannot replace it. */
+let searxngFromEnv = $state(false);
 
 // Anthropic API key form state
 let apiKey = $state('');
@@ -48,6 +52,13 @@ export function isSearxngConfigured(): boolean {
 export function getSearxngConfiguredUrl(): string {
 	return searxngConfiguredUrl;
 }
+/** Any code means the engine does not use the stored URL; `private-ip` has its own text. */
+export function getSearxngProblem(): string | null {
+	return searxngProblem;
+}
+export function isSearxngFromEnv(): boolean {
+	return searxngFromEnv;
+}
 
 // Anthropic API key form
 export function getApiKey(): string {
@@ -67,6 +78,8 @@ export function isApiKeySaving(): boolean {
 interface SecretsStatusResponse {
 	configured: { search: boolean; api_key: boolean; searxng: boolean };
 	searxng_url: string | null;
+	searxng_problem?: string | null;
+	searxng_from_env?: boolean;
 }
 
 export async function loadSecretStatuses(): Promise<void> {
@@ -79,6 +92,8 @@ export async function loadSecretStatuses(): Promise<void> {
 		searchConfigured = data.configured.search;
 		searxngConfigured = data.configured.searxng;
 		searxngConfiguredUrl = data.searxng_url ?? '';
+		searxngProblem = typeof data.searxng_problem === 'string' && data.searxng_problem !== '' ? data.searxng_problem : null;
+		searxngFromEnv = data.searxng_from_env === true;
 	} catch {
 		/* ignore — keep previous values, original behaviour */
 	}
@@ -109,4 +124,6 @@ export async function saveAnthropicApiKey(): Promise<void> {
 export function markSearxngRemoved(): void {
 	searxngConfigured = false;
 	searxngConfiguredUrl = '';
+	searxngProblem = null;
+	searxngFromEnv = false;
 }
