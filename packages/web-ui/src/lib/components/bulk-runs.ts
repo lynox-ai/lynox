@@ -765,6 +765,19 @@ export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKe
 	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
 }
 
+/** The step the engine is working on while it moves a run on by itself, for the page's working
+ *  line (`bulk.working.<step>`): reading the list (its first page is set only while the list is
+ *  still being read), reading the targets, judging them (a judged run reads them in the same step),
+ *  or writing. Null for a run the engine is not working on ({@link bulkEngineWorking}). */
+export type BulkWorkingStep = 'list' | 'read' | 'judge' | 'write';
+
+export function bulkWorkingStep(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason' | 'listFirstPage' | 'judge'>): BulkWorkingStep | null {
+	if (!bulkEngineWorking(run)) return null;
+	if (run.phase === 'approved' || run.phase === 'writing') return 'write';
+	if (run.listFirstPage !== null) return 'list';
+	return run.judge !== null ? 'judge' : 'read';
+}
+
 /** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`
  *  while the tab is visible, loads it whole once the run stopped working, and gives up after
  *  `BULK_FOLLOW_MAX_MS` (a run still working then is reloaded by the owner). The engine allows a
