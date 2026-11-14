@@ -677,7 +677,7 @@ class DiscoveryOverrideRefused extends Error {
     super(kind === 'hop'
       ? 'blocked: the server answered with a redirect to an address that carries a method override (such as `_method=DELETE`), which a server may run as a write, so the redirect was not followed; the first request was sent and answered'
       : kind === 'graphql'
-        ? 'blocked: the address carries a GraphQL mutation, which asks the server to change data, so it was not requested. Pass the plain address of the spec or docs page'
+        ? 'blocked: the address is a GraphQL endpoint whose query names a mutation or subscription, which may ask the server to change data, so it was not requested. Pass the plain address of the spec or docs page'
         : 'blocked: the address carries a method override (such as `_method=DELETE`), which a server may run as a write, so it was not requested. Pass the plain address of the spec or docs page');
     this.name = 'DiscoveryOverrideRefused';
   }
@@ -696,8 +696,9 @@ function sendsWrite(method: string, headers: Record<string, string>, url: string
 function fetchForDiscovery(url: string, signal: AbortSignal, agent: IAgent): ReturnType<typeof fetchWithValidatedRedirects> {
   if (sendsWrite('GET', {}, url)) return Promise.reject(new DiscoveryOverrideRefused('address'));
   // A GraphQL endpoint runs a mutation it finds in the URL's `query` for a GET as well; a hop is
-  // held to that inside `fetchWithValidatedRedirects`, the first request here.
-  if (isGraphqlEndpoint(url) && graphqlUrlWrites(url)) return Promise.reject(new DiscoveryOverrideRefused('graphql'));
+  // held to that inside `fetchWithValidatedRedirects`, the first request here. Only for an address
+  // that parses: both checks answer yes for one that does not, and that one fails as unparsable.
+  if (URL.canParse(url) && isGraphqlEndpoint(url) && graphqlUrlWrites(url)) return Promise.reject(new DiscoveryOverrideRefused('graphql'));
   const delegated = delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'));
   return fetchWithValidatedRedirects(url, { signal }, { surface: 'discovery' }, agent.toolContext,
     undefined, undefined, undefined, (nextUrl, method, headers) => {

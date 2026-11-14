@@ -1278,11 +1278,20 @@ describe('api_setup tool', () => {
           { action: 'bootstrap', openapi_url: 'https://api.example.com/graphql?query=mutation%7BdeleteAll%7D' },
           createMockAgent(new ApiStore()),
         );
-        expect(result).toContain('blocked: the address carries a GraphQL mutation');
+        expect(result).toContain('blocked: the address is a GraphQL endpoint whose query names a mutation');
         expect(fetchSpy).not.toHaveBeenCalled();
       } finally {
         fetchSpy.mockRestore();
       }
+    });
+
+    it('CONTROL: names an address without a scheme as unparsable, not as a GraphQL mutation', async () => {
+      const result = await apiSetupTool.handler(
+        { action: 'bootstrap', openapi_url: 'api.example.com/openapi.json' },
+        createMockAgent(new ApiStore()),
+      );
+      expect(result).not.toContain('GraphQL');
+      expect(result).toContain('the request failed');
     });
 
     it('does not request a docs address that carries a method override', async () => {
