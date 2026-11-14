@@ -1535,7 +1535,7 @@ export class Session {
             // never blocks the run, skipped in private mode, and never clobbers a
             // manual rename (the method re-checks the title before writing).
             if (llmUpgrade && taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
-              void this._generateLLMTitle(stripLoadedContext(taskText), title);
+              void this._generateLLMTitle(llmTitleSource(taskText), title);
             }
           }
           // Stamp this run's token/cost totals onto its final assistant
@@ -2479,9 +2479,7 @@ export class Session {
       // instance's spending caps, which this run already passed at its start.
       const titleGate = await fireBeforeRunGate(this.engine, 'fast');
       if (titleGate.blockedReason !== null) return;
-      const prompt =
-        'Write a concise 3-6 word title in Title Case for a conversation that begins ' +
-        'with the message below. No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
+      const prompt = LLM_TITLE_PROMPT;
       const stream = titleClient.beta.messages.stream({
         model: fastSnap.modelId,
         max_tokens: 64,
@@ -3117,6 +3115,26 @@ export function generateThreadTitle(taskText: string): string {
 
   return title || 'New Chat';
 }
+
+/**
+ * The text the fast model titles. A scheduled run's opening turn starts with the engine's English
+ * lead (`run-task-turn.ts`); the title follows the language of the message, so the model gets the
+ * task's own words, as the heuristic title does. Other chats lose only the loaded-context preamble.
+ */
+export function llmTitleSource(taskText: string): string {
+  return runTaskTitle(taskText) ?? stripLoadedContext(taskText);
+}
+
+/**
+ * What the fast model is asked for a thread's title. The title is in the language of the first
+ * message: a German conversation listed under an English title reads as someone else's. Title
+ * Case is an English rule, so it is asked only for an English title. Exported for the test that
+ * pins it.
+ */
+export const LLM_TITLE_PROMPT =
+  'Write a concise 3-6 word title for a conversation that begins with the message below. ' +
+  'Write it in the language of that message; use Title Case only for an English title. ' +
+  'No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
 
 /**
  * Clean a raw LLM title response into a usable thread title: take the first
