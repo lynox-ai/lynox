@@ -86,6 +86,8 @@ export interface BulkRun {
 	resumeSends: number;
 	/** Writing targets the owner took out before approving; not counted in `changes`. */
 	deselected: number;
+	/** A list run's read so far; null for a run with no list. Absent on an older engine. */
+	list?: { pagesRead: number } | null | undefined;
 }
 
 export interface BulkRunDetailData extends BulkRun {
@@ -962,14 +964,41 @@ export function bulkAfterTakenBack(run: Pick<BulkRun, 'phase'>, target: Pick<Bul
 	return target.undone === true || (run.phase === 'undone' && target.deselected === true);
 }
 
+/** Whether a read list took more than one page, so that the note on a list read page by page
+ *  holds: one page is one answer of the host, read at one instant. Where the engine does not say
+ *  how many pages it read (an older engine), the note stays. */
+export function bulkListReadPaged(run: Pick<BulkRun, 'list'>): boolean {
+	return run.list?.pagesRead === undefined || run.list.pagesRead > 1;
+}
+
+/** A time as the engine sends it, or null when it reads as none. The engine's tables stamp rows
+ *  with SQLite's `datetime('now')`: UTC, written without a zone (`2026-11-12 07:53:09`), which
+ *  `new Date` would read as local time. A time without a zone is therefore read as UTC; one
+ *  with a zone (an ISO string ending in `Z` or an offset) as it says. */
+export function bulkTime(value: string): Date | null {
+	const zoneless = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(value);
+	const d = new Date(zoneless ? `${value.replace(' ', 'T')}Z` : value);
+	return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** A time from the engine in the viewer's local time, as the bulk pages show it; the year only
+ *  where asked for. The value itself where it does not read as a time. */
+export function bulkWhen(value: string, locale: string, withYear: boolean): string {
+	const d = bulkTime(value);
+	if (d === null) return value;
+	return d.toLocaleString(locale === 'de' ? 'de-CH' : 'en-US', {
+		day: '2-digit', month: '2-digit', ...(withYear ? { year: 'numeric' } : {}), hour: '2-digit', minute: '2-digit',
+	});
+}
+
 /** The sentence over an undone run: when it was taken back and how many targets have their value
  *  back. Null for a run that is not undone, or an engine that does not name its undo. */
 export function bulkUndoneText(
 	run: Pick<BulkRunDetailData, 'phase' | 'undone' | 'undoneBy'>, locale: string, i18n: BulkI18n,
 ): string | null {
 	if (run.phase !== 'undone' || !run.undoneBy) return null;
-	const d = new Date(run.undoneBy.at);
-	if (Number.isNaN(d.getTime())) return null;
+	const d = bulkTime(run.undoneBy.at);
+	if (d === null) return null;
 	const loc = locale === 'de' ? 'de-CH' : 'en-US';
 	const date = d.toLocaleDateString(loc, { day: '2-digit', month: '2-digit', year: 'numeric' });
 	const time = d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' });

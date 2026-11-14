@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, bulkTime, bulkWhen, bulkListReadPaged, bulkUndoneText,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 } from './bulk-runs.js';
@@ -1376,4 +1376,39 @@ describe('the singular of a count of one', () => {
 			expect(bulkSkippedHead(run, shopify, EN)).toEqual({ text: enText, nothing: true });
 		});
 	}
+});
+
+describe('the times the engine sends and the pages its list took', () => {
+	it('reads a time without a zone as UTC, and one with a zone as it says', () => {
+		expect(bulkTime('2026-11-12 07:53:09')?.getTime()).toBe(Date.UTC(2026, 10, 12, 7, 53, 9));
+		expect(bulkTime('2026-11-12T07:53:09.250')?.getTime()).toBe(Date.UTC(2026, 10, 12, 7, 53, 9, 250));
+		expect(bulkTime('2026-11-12T07:53:09Z')?.getTime()).toBe(Date.UTC(2026, 10, 12, 7, 53, 9));
+		expect(bulkTime('2026-11-12T07:53:09+01:00')?.getTime()).toBe(Date.UTC(2026, 10, 12, 6, 53, 9));
+		expect(bulkTime('soon')).toBeNull();
+	});
+
+	describe('in a zone at UTC+1', () => {
+		const tz = process.env['TZ'];
+		beforeEach(() => { process.env['TZ'] = 'Europe/Zurich'; });
+		afterEach(() => { if (tz === undefined) delete process.env['TZ']; else process.env['TZ'] = tz; });
+
+		it('shows the engine\'s 07:53 UTC as 08:53, with the year where asked for', () => {
+			expect(bulkWhen('2026-11-12 07:53:09', 'de', true)).toBe('12.11.2026, 08:53');
+			expect(bulkWhen('2026-11-12 07:53:09', 'de', false)).toBe('12.11., 08:53');
+			expect(bulkWhen('soon', 'de', true)).toBe('soon');
+		});
+
+		it('says when an undone run was taken back in the viewer\'s time', () => {
+			const i18n: BulkI18n = { t: (k) => k, tf: (k, v) => `${k} ${v['date'] ?? ''} ${v['time'] ?? ''}` };
+			expect(bulkUndoneText({ phase: 'undone', undone: 1, undoneBy: { runId: 'u1', at: '2026-11-12 07:53:09' } }, 'de', i18n))
+				.toBe('bulk.undone.sentence_one 12.11.2026 08:53');
+		});
+	});
+
+	it('keeps the page-by-page note only for a list that took more than one page, or an engine that does not say', () => {
+		expect(bulkListReadPaged({ list: { pagesRead: 1 } })).toBe(false);
+		expect(bulkListReadPaged({ list: { pagesRead: 2 } })).toBe(true);
+		expect(bulkListReadPaged({ list: undefined })).toBe(true);
+		expect(bulkListReadPaged({ list: null })).toBe(true);
+	});
 });
