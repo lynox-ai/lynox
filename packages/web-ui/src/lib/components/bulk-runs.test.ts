@@ -6,13 +6,15 @@ import {
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 } from './bulk-runs.js';
-import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
 import { BULK_HALT_REASONS } from '../../../../../src/core/bulk-ledger.js';
 import { MERGE_REFUSAL_CODES } from '../../../../../src/core/subject-merge-runner.js';
 
 const TABLE: Record<string, string> = {
 	'bulk.label': '{n} Ziele · {target}',
+	'bulk.label_listing': 'Liste wird gelesen · {target}',
+	'bulk.label_list_unread': 'Liste noch nicht gelesen · {target}',
 	'bulk.label_undo': 'Rücknahme · {n} Ziele · {target}',
 	'bulk.label_one': '1 Ziel · {target}',
 	'bulk.label_undo_one': 'Rücknahme · 1 Ziel · {target}',
@@ -37,6 +39,22 @@ describe('bulk run helpers', () => {
 		// One target is named in the singular.
 		expect(bulkLabel({ kind: 'apply', total: 1, targetSystem: 'http:shop.example.invalid' }, i18n)).toBe('1 Ziel · shop.example.invalid');
 		expect(bulkLabel({ kind: 'undo', total: 1, targetSystem: 'data_store' }, i18n)).toBe('Rücknahme · 1 Ziel · Datenspeicher');
+	});
+
+	it('names the list read instead of a count while the engine reads the list, and counts again once it halted or is read', () => {
+		const shop = { kind: 'apply', total: 0, targetSystem: 'http:shop.example.invalid', phase: 'planned', haltKey: null, haltReason: null } as const;
+		expect(bulkLabel({ ...shop, list: { state: 'pending' } }, i18n)).toBe('Liste wird gelesen · shop.example.invalid');
+		expect(bulkLabel({ ...shop, total: 600, list: { state: 'pending' }, haltKey: 'listReadFailed', haltReason: 'listReadFailed' }, i18n)).toBe('600 Ziele · shop.example.invalid');
+		expect(bulkLabel({ ...shop, total: 2, list: { state: 'done' }, haltKey: 'listed', haltReason: 'listed' }, i18n)).toBe('2 Ziele · shop.example.invalid');
+		// Before its start, and a read that halted before it found a target: the list is not read yet.
+		expect(bulkLabel({ ...shop, list: { state: 'pending' }, haltKey: 'awaitingStart', haltReason: 'awaitingStart' }, i18n)).toBe('Liste noch nicht gelesen · shop.example.invalid');
+		expect(bulkLabel({ ...shop, list: { state: 'pending' }, haltKey: 'listReadFailed', haltReason: 'listReadFailed' }, i18n)).toBe('Liste noch nicht gelesen · shop.example.invalid');
+		// A run ended before its list was read never reads it: the count, not „not read yet“.
+		expect(bulkLabel({ ...shop, phase: 'aborted', list: { state: 'pending' }, haltKey: 'mandateEnded', haltReason: 'mandateEnded' }, i18n)).toBe('0 Ziele · shop.example.invalid');
+		// The list is read and the engine works on its targets: the count.
+		expect(bulkLabel({ ...shop, total: 2, list: { state: 'done' } }, i18n)).toBe('2 Ziele · shop.example.invalid');
+		// An older engine sends no list state: the count, as before.
+		expect(bulkLabel({ ...shop }, i18n)).toBe('0 Ziele · shop.example.invalid');
 	});
 
 	it('shows the host of an external run and the raw name of a system it has no word for', () => {
@@ -270,9 +288,14 @@ describe('the approved unchecked-change texts', () => {
 	};
 	const entry = (key: string, de: string, en: string): string => `'${key}': { de: ${JSON.stringify(de).replace(/^"|"$/g, "'")}, en: ${JSON.stringify(en).replace(/^"|"$/g, "'")} },`;
 
-	it('holds the note', () => {
+	it('heads a run whose list is still read with the step, not a count', () => {
+		expect(line('bulk.label_listing')).toBe(entry('bulk.label_listing', 'Liste wird gelesen · {target}', 'Reading the list · {target}'));
+	});
+
+	it('holds the note, without what is written first: the approval says that in its own line', () => {
+		expect(BULK_UNMEASURED_NOTE).toBe('lynox has not checked this kind of change with this provider. It can trigger something else there, such as emails to your customers, a payment or an invoice.');
 		expect(line('bulk.approve.unmeasured_note')).toBe(entry('bulk.approve.unmeasured_note',
-			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung. Deshalb schreibt lynox zuerst nur ein Ziel. Schau es dir dort an, bevor du den Rest freigibst.',
+			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung.',
 			BULK_UNMEASURED_NOTE));
 	});
 
@@ -284,8 +307,10 @@ describe('the approved unchecked-change texts', () => {
 
 	it('holds the Shopify note and the readable field names (ux 2026-10-26)', () => {
 		expect(line('bulk.approve.shopify_visible')).toBe(entry('bulk.approve.shopify_visible',
-			'Bei veröffentlichten Produkten sind Titel und SEO-Texte sofort in deinem Shop sichtbar, sobald lynox sie schreibt.',
-			'For published products, titles and SEO texts are visible in your shop as soon as lynox writes them.'));
+			'Bei veröffentlichten Produkten gelten die neuen Werte sofort in deinem Shop, sobald lynox sie schreibt.',
+			'For published products, the new values take effect in your shop as soon as lynox writes them.'));
+		// It names no field: an image-alt run gets it as well, and is not told about titles.
+		expect(line('bulk.approve.shopify_visible')).not.toMatch(/Titel|SEO|title/);
 		for (const [key, de, en] of [['title', 'Titel', 'Title'], ['descriptionHtml', 'Beschreibung', 'Description'], ['seo_title', 'SEO-Titel', 'SEO title'], ['seo_description', 'SEO-Beschreibung', 'SEO description']] as const) {
 			expect(line(`bulk.field.shopify.${key}`)).toBe(entry(`bulk.field.shopify.${key}`, de, en));
 		}
@@ -303,15 +328,6 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.only_one')).toBe(entry('bulk.approve.only_one',
 			'Es gibt nur dieses eine Ziel, deshalb kommt vorher keine Probe: Du gibst gleich den ganzen Lauf frei.', 'There is only this one target, so there is no probe first: you approve the whole run now.'));
 		expect(line('bulk.approve.write_only')).toBe(entry('bulk.approve.write_only', 'Das Ziel schreiben', 'Write the target'));
-	});
-
-	it('holds the note of a run with one target to write: the first two sentences, approved word for word', () => {
-		const approved = 'lynox has not checked this kind of change with this provider. It can trigger something else there, such as emails to your customers, a payment or an invoice.';
-		expect(BULK_UNMEASURED_NOTE_ONE).toBe(approved);
-		expect(BULK_UNMEASURED_NOTE.startsWith(`${BULK_UNMEASURED_NOTE_ONE} `)).toBe(true);
-		expect(line('bulk.approve.unmeasured_note_one')).toBe(entry('bulk.approve.unmeasured_note_one',
-			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung.',
-			BULK_UNMEASURED_NOTE_ONE));
 	});
 
 	it('holds the confirmation', () => {

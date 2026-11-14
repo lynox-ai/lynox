@@ -73,7 +73,7 @@ describe('measured write forms', () => {
   });
 
   it('carries the approved texts word for word', () => {
-    expect(BULK_UNMEASURED_NOTE).toBe('lynox has not checked this kind of change with this provider. It can trigger something else there, such as emails to your customers, a payment or an invoice. So lynox writes one target first. Check it there before you approve the rest.');
+    expect(BULK_UNMEASURED_NOTE).toBe('lynox has not checked this kind of change with this provider. It can trigger something else there, such as emails to your customers, a payment or an invoice.');
     expect(BULK_UNMEASURED_CONFIRMATION).toBe('I know lynox has not checked this kind of change, and I approve it anyway.');
   });
 });
