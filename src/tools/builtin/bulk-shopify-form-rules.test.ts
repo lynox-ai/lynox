@@ -53,7 +53,7 @@ const plan = (input: Record<string, unknown>): Promise<string> =>
 describe('a refused bulk_plan in a Shopify form', () => {
   it.each([
     ['write_method POST', { write_method: 'POST', source_list: { form: 'shopify', after: { seo_description: 'x' } } }, 'source_list.form shopify does not take write_method'],
-    ['a nested after', { source_list: { form: 'shopify', after: { seo: { description: 'x' } } } }, 'source_list.after may only hold text, numbers, true/false or null.'],
+    ['a nested after', { source_list: { form: 'shopify', after: { title: { de: 'x' } } } }, 'source_list.after may only hold text, numbers, true/false or null.'],
     ['a field the store cannot be written', { source_list: { form: 'shopify', after: { vendor: 'x' } } }, 'source_list.after may only set: title, seo_title, seo_description.'],
     ['a path that narrows the list', { source_list: { form: 'shopify', path: '/admin/api/2025-01/collections/5/products.json', after: { title: 'x' } } }, 'source_list.path is not given for form shopify'],
     ['a judge with after', { source_list: { form: 'shopify', after: { seo_title: null } }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } }, 'With judge, source_list takes no "after"'],
@@ -297,6 +297,32 @@ describe('a Shopify plan in the store\'s REST names', () => {
     expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x', metafields_global_title_tag: 'y' } } })).toMatch(/^Error: source_list\.after may only set/);
     expect(await plan({ source_list: { form: 'shopify', id_field: 'handle', after: { seo_title: 'x' } } })).toMatch(/^Error: source_list\.id_field is not given/);
     expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x' } } })).not.toContain('Read for form');
+  });
+
+  it('reads the SEO texts in the nested shapes of the store\'s APIs as the form\'s fields', async () => {
+    const graphql = await plan({ source_list: { form: 'shopify', after: { seo: { title: 'T', description: 'D' } } } });
+    expect(listOf(graphql).after).toEqual({ seo_title: 'T', seo_description: 'D' });
+    expect(graphql).toContain('Read for form shopify: source_list.after seo as seo_title and seo_description.');
+    const rest = await plan({ source_list: { form: 'shopify', after: { metafields: [{ namespace: 'global', key: 'description_tag', value: 'D', type: 'string' }] } } });
+    expect(listOf(rest).after).toEqual({ seo_description: 'D' });
+    // Anything else in such a shape stays as given, and the form refuses it.
+    for (const after of [
+      { seo: { title: 'T', keywords: 'k' } },
+      { seo: {} },
+      { metafields: [{ namespace: 'custom', key: 'description_tag', value: 'D' }] },
+      { metafields: [{ namespace: 'global', key: 'description_tag', value: 'D' }, { namespace: 'global', key: 'description_tag', value: 'E' }] },
+      { metafields: [{ namespace: 'global', key: 'title_tag', value: 'T', owner_id: 1 }] },
+      { seo: { title: 'T' }, seo_title: 'U' },
+    ]) expect(await plan({ source_list: { form: 'shopify', after } }), JSON.stringify(after)).toMatch(/^Error: source_list\.after/);
+  });
+
+  it('leaves out the product list\'s path without .json, filters {} and an empty after beside a judge', async () => {
+    const answer = await plan({ source_list: { form: 'shopify', path: '/admin/api/2025-01/products', filters: {}, after: {} }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } });
+    expect(answer).toMatch(/^List dry run recorded/);
+    expect(answer).toContain('path /admin/api/2025-01/products left out (the form reads the store\'s products itself); filters {} left out (no filter reads every product); the empty after left out (with judge, the model decides the values).');
+    // Filters that name something stay, and so does an after that sets something beside a judge.
+    expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x' } }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } })).toMatch(/^Error: With judge/);
+    expect(await plan({ source_list: { form: 'shopify', after: {} } })).toMatch(/^Error: source_list\.after must be a non-empty object/);
   });
 
   it('leaves out an edit verb and the id field id on an image plan, and no path', async () => {
