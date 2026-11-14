@@ -62,16 +62,33 @@ describe('one run per required check name', () => {
       expect(jobs[id]?.needs, id).toBe('detect');
       expect(jobs[id]?.if, id).toBe(FAIL_CLOSED_IF);
     }
-    // gitleaks, test and lint run on every change, docs-only included (test carries the osv gate,
-    // which tests/osv-workflow-pin.test.ts keeps unconditional; lint is the CI twin of the
-    // pre-commit lint); detect has nothing to wait for
-    for (const id of ['gitleaks', 'test', 'lint']) {
+    // gitleaks, the test shards and lint run on every change, docs-only included (lint is the CI
+    // twin of the pre-commit lint); detect has nothing to wait for
+    for (const id of ['gitleaks', 'test-shard', 'lint']) {
       expect(jobs[id]?.if, id).toBeUndefined();
       expect(jobs[id]?.needs, id).toBeUndefined();
     }
+    // test, the required check, carries the osv gate and waits for the shards. It runs whatever
+    // happened to them: without `always()` a failed shard would skip it, and a skipped required
+    // check counts as passed.
+    expect(jobs['test']?.needs).toBe('test-shard');
+    expect(jobs['test']?.if).toBe('${{ always() }}');
     expect(jobs['detect']?.if).toBeUndefined();
     // every other job of ci.yml is named here — a new one has to be placed on purpose
-    expect(Object.keys(jobs).sort()).toEqual(['detect', 'gitleaks', 'test', 'lint', ...GATED].sort());
+    expect(Object.keys(jobs).sort()).toEqual(['detect', 'gitleaks', 'test-shard', 'test', 'lint', ...GATED].sort());
+  });
+
+  it('test passes only when every shard succeeded: a failed, cancelled or skipped shard fails it', () => {
+    // Run the gate step itself rather than read it: GitHub reports a skipped job as passed, so a
+    // gate that let `skipped` through would turn a shard that never ran into a green check.
+    type Step = { name?: string; run?: string; env?: Record<string, string> };
+    const steps = ((load('ci.yml').jobs ?? {})['test'] as Job & { steps?: Step[] }).steps ?? [];
+    const gate = steps[0];
+    expect(gate?.name).toBe('Every test shard passed');
+    expect(gate?.env?.['SHARDS']).toBe('${{ needs.test-shard.result }}');
+    const exitFor = (result: string) => spawnSync('bash', ['-e', '-c', gate?.run ?? ''], { env: { ...process.env, SHARDS: result }, encoding: 'utf8' }).status;
+    expect(exitFor('success')).toBe(0);
+    for (const result of ['failure', 'cancelled', 'skipped', '']) expect(exitFor(result), result).not.toBe(0);
   });
 
   it('eslint runs in its own job, and in that one only', () => {

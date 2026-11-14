@@ -90,6 +90,9 @@ function allJobs(): Job[] {
 
 /** The jobs that MUST carry the gate. Named, so deleting one is not "no match". */
 const REQUIRED_GATE_JOBS = ['ci.yml:test', 'release.yml:test', 'dep-scan-daily.yml:dep-scan'];
+
+/** The one job-level condition a gate job may carry; see the defang check below. */
+const ALWAYS = '${{ always() }}';
 /** The one place allowed to fetch the binary, and the reason the rest may not. */
 const SANCTIONED_INSTALLER = 'actions/install-osv-scanner';
 
@@ -375,11 +378,20 @@ function pinnedSlice(where: string): string[] {
  */
 const PINNED_JOB: Readonly<Record<string, unknown>> = {
   "ci.yml:test": {
+    "if": "${{ always() }}",
+    "needs": "test-shard",
     "permissions": {
       "contents": "read"
     },
     "runs-on": "ubuntu-24.04",
     "steps": [
+      {
+        "env": {
+          "SHARDS": "${{ needs.test-shard.result }}"
+        },
+        "name": "Every test shard passed",
+        "run": "echo \"test shards: $SHARDS\"\nif [ \"$SHARDS\" != \"success\" ]; then\n  echo \"::error::the test shards did not all pass (result: $SHARDS). A failed, cancelled or skipped shard fails this check.\"\n  exit 1\nfi\n"
+      },
       {
         "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
       },
@@ -406,7 +418,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
         "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nosv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json\nOSV_DOCS_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --report /tmp/osv-docs.json --rc \"${OSV_DOCS_RC}\"\n"
       }
     ],
-    "timeout-minutes": 45
+    "timeout-minutes": 15
   },
   "release.yml:test": {
     "permissions": {
@@ -863,7 +875,14 @@ describe('every job that touches osv-scanner', () => {
       // well as step level — switching the whole job off there left every
       // step-level assertion green.
       expect(j.continueOnError, `${j.where}: continue-on-error on the JOB`).toBeUndefined();
-      expect(j.if, `${j.where}: a condition on the JOB`).toBeUndefined();
+      // One condition is allowed, and only this one: `always()` can never be false, so it cannot
+      // switch the job off. A gate job that waits for others (`needs:`) must carry it, because
+      // without it a failed or skipped job it waits for skips the gate, and a skipped required
+      // check counts as passed.
+      if (j.if !== undefined) expect(j.if, `${j.where}: a condition on the JOB`).toBe(ALWAYS);
+      if ((j.raw as { needs?: unknown } | undefined)?.needs !== undefined) {
+        expect(j.if, `${j.where}: waits for other jobs without \`always()\`, so their failure skips the gate`).toBe(ALWAYS);
+      }
       for (const s of j.steps) {
         const osv = s.uses === ACTION_REF || commands(s.run).some((l) => /osv-scanner|osv-report-gate|sha256sum|attestation/.test(l));
         if (!osv) continue;

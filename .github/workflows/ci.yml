@@ -122,6 +122,8 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
+          # "Re-run all jobs" uploads under the same name into the same run; without this it fails.
+          overwrite: true
 
   # The required check. It runs whatever happened to the parts (`always()`), and passes only if
   # every part succeeded: a part that failed, was cancelled or was skipped makes it fail, so a
