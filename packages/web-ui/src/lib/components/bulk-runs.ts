@@ -86,6 +86,9 @@ export interface BulkRun {
 	resumeSends: number;
 	/** Writing targets the owner took out before approving; not counted in `changes`. */
 	deselected: number;
+	/** A run planned from a list: whether the engine has read it yet. Optional: an older engine sends
+	 *  none, and a run without a list has none. */
+	list?: { state: 'pending' | 'done' } | null | undefined;
 }
 
 export interface BulkRunDetailData extends BulkRun {
@@ -724,7 +727,24 @@ export function bulkSystemName(targetSystem: string, i18n: BulkI18n): string {
 }
 
 /** A run has no title: it is named by its size and where it writes. */
-export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): string {
+/** Where a run planned from a list stands with it while it has no targets to count: `reading`
+ *  while the engine reads it, `unread` before it was read (the run waits for its start, or the read
+ *  halted before it found a target; a run ended before that only counts), null otherwise. A read that halted part-way stays pending, but
+ *  the run counts the targets collected so far. */
+export type BulkListHead = 'reading' | 'unread';
+
+export function bulkListHead(run: Pick<BulkRun, 'total'> & Partial<Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason' | 'list'>>): BulkListHead | null {
+	if (run.list?.state !== 'pending' || run.phase === undefined) return null;
+	if (bulkEngineWorking({ phase: run.phase, haltKey: run.haltKey ?? null, haltReason: run.haltReason ?? null })) return 'reading';
+	// Only a planned run still has its list to read: an ended or superseded run never reads it.
+	return run.phase === 'planned' && run.total === 0 ? 'unread' : null;
+}
+
+/** The run's name in the head and in the list of runs: what it does and to how many targets, or,
+ *  while its list is not read yet and it has no targets, where it stands with the list. */
+export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'> & Partial<Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason' | 'list'>>, i18n: BulkI18n): string {
+	const listHead = bulkListHead(run);
+	if (listHead !== null) return i18n.tf(listHead === 'reading' ? 'bulk.label_listing' : 'bulk.label_list_unread', { target: bulkSystemName(run.targetSystem, i18n) });
 	const one = run.total === 1 ? '_one' : '';
 	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n: String(run.total), target: bulkSystemName(run.targetSystem, i18n) });
 }

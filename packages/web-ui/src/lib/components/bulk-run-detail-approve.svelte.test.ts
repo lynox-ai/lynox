@@ -237,18 +237,18 @@ describe('approving a preview', () => {
 		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
 		expect(block.querySelector('#bulk-approve-nothing')).not.toBeNull();
 		expect(block.querySelectorAll('input')).toHaveLength(0);
-		for (const key of ['bulk.approve.unmeasured_note', 'bulk.approve.unmeasured_note_one', 'bulk.approve.unmeasured_confirm']) expect(block.textContent).not.toContain(t(key));
+		for (const key of ['bulk.approve.unmeasured_note', 'bulk.approve.unmeasured_confirm']) expect(block.textContent).not.toContain(t(key));
 		expect(block.textContent).not.toContain('Tee');
 	});
 
-	it('cuts the unchecked note to its first two sentences at one target to write, and keeps it whole at two', async () => {
+	it('shows one note at one target and at two, and says what is written first only in the line below it', async () => {
 		const unchecked = (update: number): BulkRunDetailData => makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', changes: { update, create: 0, delete: 0, unchanged: 0, invalid: 3 - update } });
 		run = unchecked(1);
 		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
 		await render();
-		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note_one'));
-		expect(target.textContent).not.toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
 		expect(target.textContent).toContain(t('bulk.approve.only_one'));
+		expect(target.textContent).not.toContain('Deshalb schreibt lynox zuerst nur ein Ziel');
 		unmount(component!);
 		component = undefined;
 		run = unchecked(2);
@@ -256,6 +256,8 @@ describe('approving a preview', () => {
 		await render();
 		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
 		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+		// The first target is said once, in the line below the note, not in the note as well.
+		expect(target.textContent).not.toContain('Deshalb schreibt lynox zuerst nur ein Ziel');
 		// Every kind of write counts, as the write counts it: one update and one create are two.
 		unmount(component!);
 		component = undefined;

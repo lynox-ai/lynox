@@ -136,7 +136,7 @@ import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoi
 import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
-import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { WorkflowStore, type WorkflowAuthorship } from '../core/workflow-store.js';
 import { ConnectionStore } from '../core/connection-store.js';
@@ -9934,13 +9934,9 @@ export class LynoxHTTPApi {
         // A Shopify product list's filters ({} for every product): shown wherever the run is started or
         // approved, so the owner sees which group and which statuses it reads (PRD shopify-preset §22.2 item 5).
         listFilters: shopifyListFiltersOf(status.list === null ? null : ledger.getListRun(params['id']!)),
-        // An unmeasured apply run writes one target first and is approved only with this
-        // confirmation. An undo is neither: it restores what its source wrote, under the
-        // source's confirmation, so the note's promise of one target first would not hold.
-        // With one target to write (counted as the write counts them), that write is the whole run:
-        // the note keeps only its first two sentences.
-        writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply'
-          ? (ledger.countWriting(params['id']!) === 1 ? BULK_UNMEASURED_NOTE_ONE : BULK_UNMEASURED_NOTE) : null,
+        // An unmeasured apply run is approved only with this confirmation. An undo is not: it
+        // restores what its source wrote, under the source's confirmation.
+        writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_NOTE : null,
         writeFormConfirmation: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_CONFIRMATION : null,
         // A probe this run confirmed stays a step it went through, after it holds.
         probeOwn: ledger.probeOwn(params['id']!),
