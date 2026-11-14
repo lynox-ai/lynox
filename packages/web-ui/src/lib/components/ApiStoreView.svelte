@@ -196,7 +196,7 @@
 								<span class="text-sm font-medium">{profile.name}</span>
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
 							</div>
-							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
+							<p class="text-xs text-text-subtle mt-1 font-mono break-all">{profile.base_url}</p>
 							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
 							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
 						</button>
