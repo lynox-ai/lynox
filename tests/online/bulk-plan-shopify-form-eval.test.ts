@@ -141,8 +141,10 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   dirs.push(dir);
   const engineDb = new EngineDb(join(dir, 'engine.db'), 'form-eval-vault-key');
   const plans: Plan[] = [];
+  const ledger = new BulkLedger(engineDb, null);
+  let stored: Record<string, unknown> | undefined;
   const agent = make([
-    realBulkPlan(new BulkLedger(engineDb, null), plans),
+    realBulkPlan(ledger, plans),
     { ...(httpRequestTool as ToolEntry), handler: async () => PRODUCTS } as ToolEntry,
     { ...(bulkStatusTool as ToolEntry), handler: async () => 'No bulk runs recorded.' } as ToolEntry,
     { ...(askUserTool as ToolEntry), handler: async () => 'Mach einfach, so wie beschrieben.' } as ToolEntry,
@@ -151,11 +153,23 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   try {
     reply = String(await agent.send(c.message));
   } catch (err) {
-    if (transient(err)) { table.push(`${provider}\t${c.label}\t#${String(i)}\tSKIP\ttransient`); return; }
-    throw err;
-  } finally {
+    if (transient(err)) { table.push(`${provider}\t${c.label}\t#${String(i)}\tSKIP\ttransient`); engineDb.close(); return; }
     engineDb.close();
+    throw err;
   }
+  // The plan as the engine recorded it, read back from the ledger, not the planner's input: the
+  // engine may read the input's names otherwise (a REST name as the form's), and what runs is
+  // what it recorded. In the input's shape, so each case's check reads it as before.
+  const run = ledger.listRuns(1)[0];
+  if (run !== undefined) {
+    const list = ledger.getListRun(run.id)?.source;
+    const rule = ledger.getJudgeRuleForOwner(run.id);
+    stored = {
+      source_list: list === undefined ? {} : { form: list.form === 'shopify_filtered' ? 'shopify' : list.form, after: rule === null ? list.after : undefined },
+      ...(rule === null ? {} : { judge: { schema: rule.schema.properties, context: rule.context ?? [] } }),
+    };
+  }
+  engineDb.close();
   const at = plans.findIndex((p) => RECORDED.test(p.answer));
   const recorded = at === -1 ? undefined : plans[at];
   // Handler calls up to the recorded one: after it, a further plan only gets "another external
@@ -164,10 +178,10 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   let why: string;
   let ok = false;
   if (recorded === undefined) why = plans.length === 0 ? 'no bulk_plan call reached the handler' : `no plan recorded in ${String(plans.length)} handled calls`;
-  else if (!c.right(recorded.input)) why = `recorded, but not the asked form and field: ${JSON.stringify(recorded.input['source_list'])}`;
+  else if (stored === undefined || !c.right(stored)) why = `recorded, but not the asked form and field: ${JSON.stringify(stored ?? recorded.input['source_list'])}`;
   else { ok = true; why = handled === 1 ? 'right on the first handled call' : `right on handled call ${String(handled)}`; }
   const dump = process.env['FORM_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, handled, first: ok && handled === 1, plans, reply: reply.slice(0, 4000) })}\n`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, handled, first: ok && handled === 1, plans, stored, reply: reply.slice(0, 4000) })}\n`);
   table.push(`${provider}\t${c.label}\t#${String(i)}\t${ok ? 'PASS' : 'FAIL'}\t${why}`);
   expect(ok, why).toBe(true);
 }

@@ -8,6 +8,7 @@ import { BulkLedger } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { validateToolInput } from '../../core/tool-input-validator.js';
 import type { IAgent } from '../../types/index.js';
+import { shopifyPlanNames } from './bulk-shopify-plan-names.js';
 
 /**
  * The bulk_plan schema names the Shopify forms but not their rules, so a refused plan in such a
@@ -52,10 +53,10 @@ const plan = (input: Record<string, unknown>): Promise<string> =>
 
 describe('a refused bulk_plan in a Shopify form', () => {
   it.each([
-    ['write_method', { write_method: 'PUT', source_list: { form: 'shopify', after: { seo_description: 'x' } } }, 'source_list.form shopify does not take write_method'],
-    ['a nested after', { source_list: { form: 'shopify', after: { seo: { description: 'x' } } } }, 'source_list.after may only hold text, numbers, true/false or null.'],
+    ['write_method POST', { write_method: 'POST', source_list: { form: 'shopify', after: { seo_description: 'x' } } }, 'source_list.form shopify does not take write_method'],
+    ['a nested after', { source_list: { form: 'shopify', after: { title: { de: 'x' } } } }, 'source_list.after may only hold text, numbers, true/false or null.'],
     ['a field the store cannot be written', { source_list: { form: 'shopify', after: { vendor: 'x' } } }, 'source_list.after may only set: title, seo_title, seo_description.'],
-    ['a path', { source_list: { form: 'shopify', path: '/admin/api/2025-01/products.json', after: { title: 'x' } } }, 'source_list.path is not given for form shopify'],
+    ['a path that narrows the list', { source_list: { form: 'shopify', path: '/admin/api/2025-01/collections/5/products.json', after: { title: 'x' } } }, 'source_list.path is not given for form shopify'],
     ['a judge with after', { source_list: { form: 'shopify', after: { seo_title: null } }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } }, 'With judge, source_list takes no "after"'],
   ])('in form shopify, refused for %s, says the refusal and then every rule of the form', async (_what, input, refusal) => {
     const answer = await plan(input);
@@ -65,7 +66,7 @@ describe('a refused bulk_plan in a Shopify form', () => {
   });
 
   it.each([
-    ['write_method', { write_method: 'PUT', source_list: { form: 'shopify_media', after: { alt: 'x' } } }, 'source_list.form shopify_media does not take write_method'],
+    ['write_method POST', { write_method: 'POST', source_list: { form: 'shopify_media', after: { alt: 'x' } } }, 'source_list.form shopify_media does not take write_method'],
     ['a product field', { source_list: { form: 'shopify_media', after: { title: 'x' } } }, 'source_list.after may only set: alt.'],
     ['a judge', { source_list: { form: 'shopify_media' }, judge: { rule: 'r', schema: { alt: { type: 'string', maxLength: 100 } } } }, 'source_list.form shopify_media does not take judge yet'],
   ])('in form shopify_media, refused for %s, says the refusal and then every rule of the form', async (_what, input, refusal) => {
@@ -254,11 +255,97 @@ describe('an image plan on a store connection that may not write image alt texts
   it('records a product plan over the same connection; its refusals and the host hint do not name the image form and carry the bulk-run note', async () => {
     const store = connection(preset({ granted_scope: ['read_products', 'write_products'] }));
     expect(await planOn(store, { source_list: { form: 'shopify', after: { seo_title: 'x' } } })).toMatch(/^List dry run recorded/);
-    const refused = await planOn(store, { write_method: 'PUT', source_list: { form: 'shopify', after: { title: 'x' } } });
+    const refused = await planOn(store, { write_method: 'POST', source_list: { form: 'shopify', after: { title: 'x' } } });
     expect(refused.endsWith(` ${PRODUCT_RULES.replace(' For the images of the products, use form shopify_media.', '')} ${NOTE}`), refused).toBe(true);
     expect(refused).not.toContain('shopify_media');
     const woo = await planOn(store, { source_list: { form: 'woocommerce', path: '/admin/api/2025-01/products.json', after: { title: 'x' } } });
     expect(woo.endsWith(` target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields). ${NOTE}`), woo).toBe(true);
     expect(woo).not.toContain('shopify_media');
+  });
+});
+
+describe('a Shopify plan in the store\'s REST names', () => {
+  // In the planner eval most first calls were refused for write_method alone, and judge.context
+  // came as body_html and product_type: names of the REST API the planner read the store with.
+  const runOf = (answer: string): string => /Bulk run ([0-9a-f-]{36})/.exec(answer)?.[1] ?? '';
+  const listOf = (answer: string) => ledger.getListRun(runOf(answer))!.source;
+
+  it('leaves out an edit verb, the id field id and the whole product list\'s path, and says so', async () => {
+    const answer = await plan({ write_method: 'PUT', source_list: { form: 'shopify', path: '/admin/api/2025-01/products.json', id_field: 'id', after: { seo_description: 'x' } } });
+    expect(answer).toMatch(/^List dry run recorded/);
+    expect(answer).toContain('Read for form shopify: write_method PUT left out (the engine writes a store with its own form); id_field id left out (the form keys products by their own id); path /admin/api/2025-01/products.json left out (the form reads the store\'s products itself). Use these names next time.');
+    expect(listOf(answer).after).toEqual({ seo_description: 'x' });
+    expect(await plan({ write_method: 'PATCH', source_list: { form: 'shopify', path: '/products.json', after: { title: 'y' } } })).toMatch(/^List dry run recorded/);
+  });
+
+  it('reads REST field names as the form\'s in judge.schema and judge.context', async () => {
+    const judged = await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { metafields_global_title_tag: { type: 'string', maxLength: 70 } }, context: ['body_html', 'product_type', 'vendor'] } });
+    expect(judged).toMatch(/^List dry run recorded/);
+    const rule = ledger.getJudgeRuleForOwner(runOf(judged))!;
+    expect(Object.keys(rule.schema.properties)).toEqual(['seo_title']);
+    expect(rule.context).toEqual(['descriptionHtml', 'productType', 'vendor']);
+    expect(judged).toContain('Read for form shopify: judge.schema metafields_global_title_tag as seo_title; judge.context body_html as descriptionHtml; judge.context product_type as productType.');
+  });
+
+  it('leaves a REST name in judge.schema where the form\'s name stands beside it', async () => {
+    // Read as the form's name, a field the store cannot be written yet gets the refusal that says so.
+    expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { body_html: { type: 'string', maxLength: 70 } } } })).toMatch(/^Error: source_list\.after cannot set descriptionHtml yet/);
+    const both = await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 }, metafields_global_title_tag: { type: 'string', maxLength: 10 } } } });
+    // Both kept as given: the REST one is not a field the form sets, and the plan is refused.
+    expect(both).toMatch(/^Error: source_list\.after may only set/);
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+  });
+
+  it('leaves every path that narrows the list, or is not the list, to the form\'s refusal', async () => {
+    for (const path of ['/admin/api/2025-01/products.json?status=draft', '/products.json?vendor=X', '/admin/api/2025-01/products/', '/admin/api/2025-01/products/123.json', '/admin/api/2025-01/collections/5/products.json', '/products.json#x']) {
+      expect(await plan({ source_list: { form: 'shopify', path, after: { seo_title: 'x' } } }), path).toMatch(/^Error: source_list\.path is not given/);
+    }
+  });
+
+  it('keeps a schema field named like something of an object\'s prototype as given', () => {
+    for (const key of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      const judge = JSON.parse(`{"rule":"r","schema":{"${key}":{"type":"string"}},"context":["${key}"]}`) as Record<string, unknown>;
+      const names = shopifyPlanNames('shopify', undefined, { form: 'shopify' }, judge);
+      const out = names.judge as { schema: Record<string, unknown>; context: unknown[] };
+      expect(Object.keys(out.schema), key).toEqual([key]);
+      expect(out.context, key).toEqual([key]);
+      expect(names.changes, key).toEqual([]);
+    }
+  });
+
+  it('reads nothing in source_list.after otherwise: what it holds is written, and its refusal makes the planner look again', async () => {
+    for (const after of [
+      { metafields_global_title_tag: 'T' },
+      { seo: { title: 'placeholder' } },
+      { metafields: [{ namespace: 'global', key: 'description_tag', value: 'D', type: 'string' }] },
+    ]) {
+      expect(await plan({ source_list: { form: 'shopify', after } }), JSON.stringify(after)).toMatch(/^Error: source_list\.after/);
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+    }
+  });
+
+  it('changes nothing it cannot read as the form\'s, and says nothing where nothing changed', async () => {
+    // The form's own name beside the REST one: the REST one stays, and the form refuses it.
+    expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } }, context: ['body_html', 'descriptionHtml'] } }))
+      .toMatch(/^Error: judge\.context names body_html/);
+    expect(await plan({ source_list: { form: 'shopify', after: { body_html: 'x' } } })).toMatch(/^Error: source_list\.after may only set/);
+    expect(await plan({ source_list: { form: 'shopify', id_field: 'handle', after: { seo_title: 'x' } } })).toMatch(/^Error: source_list\.id_field is not given/);
+    expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x' } } })).not.toContain('Read for form');
+  });
+
+  it('leaves out the product list\'s path without .json, filters {} and an empty after beside a judge', async () => {
+    const answer = await plan({ source_list: { form: 'shopify', path: '/admin/api/2025-01/products', filters: {}, after: {} }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } });
+    expect(answer).toMatch(/^List dry run recorded/);
+    expect(answer).toContain('path /admin/api/2025-01/products left out (the form reads the store\'s products itself); filters {} left out (no filter reads every product in every status, drafts and archived included); the empty after left out (with judge, the model decides the values).');
+    // Filters that name something stay, and so does an after that sets something beside a judge.
+    expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x' } }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } })).toMatch(/^Error: With judge/);
+    expect(await plan({ source_list: { form: 'shopify', after: {} } })).toMatch(/^Error: source_list\.after must be a non-empty object/);
+  });
+
+  it('leaves out an edit verb and the id field id on an image plan, and no path', async () => {
+    const answer = await plan({ write_method: 'PATCH', source_list: { form: 'shopify_media', id_field: 'id', after: { alt: 'x' } } });
+    expect(answer).toMatch(/^List dry run recorded/);
+    expect(answer).toContain('Read for form shopify_media: write_method PATCH left out (the engine writes a store with its own form); id_field id left out (the form keys products by their own id).');
+    expect(await plan({ source_list: { form: 'shopify_media', path: '/products.json', after: { alt: 'x' } } })).toMatch(/^Error: source_list\.path is not given for form shopify_media/);
   });
 });

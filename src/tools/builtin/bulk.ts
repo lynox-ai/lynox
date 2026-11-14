@@ -12,6 +12,7 @@ import {
 import { contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
 import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_STATUS_VALUES, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
+import { shopifyPlanNames, shopifyPlanNamesNote } from './bulk-shopify-plan-names.js';
 
 /**
  * The model-facing half of a bulk run's dry run (PRD bulk-changes-reversible §3.2,
@@ -247,10 +248,18 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
   if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
   let listInput = input.source_list;
   const listForm = typeof listInput === 'object' && listInput !== null ? (listInput as Record<string, unknown>)['form'] : undefined;
+  let namesNote: string | null = null;
   if (isPlannerShopifyForm(listForm)) {
     const form = listForm;
     // Checked when the run is planned and again on every tick of it (`bulk-preview.ts`).
     if (!shopifyBulkReadEnabled()) throw new BulkSourceError(SHOPIFY_READ_OFF);
+    // REST names and parts that cannot change the run, read as the form takes them, before its
+    // checks; the answer says what was read how (`bulk-shopify-plan-names.ts`).
+    const names = shopifyPlanNames(form, input.write_method, listInput as Record<string, unknown>, judgeInput);
+    input = { ...input, source_list: names.list, write_method: names.writeMethod as BulkPlanInput['write_method'] };
+    listInput = names.list;
+    judgeInput = names.judge;
+    namesNote = shopifyPlanNamesNote(form, names.changes);
     // A judge plans its fields F like an after-state: the Shopify parse below bounds them to the
     // writable fields. Only the product form takes one: an image run writes its alt text from
     // source_list.after until a judge is decided for it. A verb would name a write nothing grants.
@@ -291,6 +300,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     'Once started, the engine reads the list page by page with the host\'s stored API credential and stops, so the user sees how many targets it holds. ' +
       'Each target is read only after the user starts the run a second time; bulk_status shows phase previewed when that is done. ' +
       'What the list and the targets hold is in the run\'s ledger for the user to review; it is not shown to you.',
+    ...(namesNote === null ? [] : [namesNote]),
     NO_PLACE_NOTE,
   ].join('\n');
 }

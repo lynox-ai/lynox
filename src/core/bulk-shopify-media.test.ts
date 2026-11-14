@@ -535,7 +535,7 @@ describe('bulk_plan with a Shopify media source', () => {
   it('refuses a judge and a write method, naming its form', async () => {
     vi.stubEnv(FLAG, '1');
     expect(await plan({ judge: { rule: 'r', fields: { alt: { type: 'string' } } } })).toMatch(/form shopify_media does not take judge/);
-    expect(await plan({ write_method: 'PATCH' })).toMatch(/form shopify_media does not take write_method/);
+    expect(await plan({ write_method: 'POST' })).toMatch(/form shopify_media does not take write_method/);
     expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
   });
 });
