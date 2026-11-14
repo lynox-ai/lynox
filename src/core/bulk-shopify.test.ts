@@ -996,7 +996,7 @@ describe('bulk_plan with a Shopify source', () => {
   it('refuses a write method', async () => {
     vi.stubEnv(FLAG, '1');
     try {
-      expect(await plan({ write_method: 'PATCH' })).toMatch(/does not take write_method/);
+      expect(await plan({ write_method: 'POST' })).toMatch(/does not take write_method/);
       expect(await plan({ source_list: { form: 'shopify', after: { descriptionHtml: '<p>x</p>' } } })).toMatch(/descriptions comes with a later step/);
     } finally {
       vi.unstubAllEnvs();
