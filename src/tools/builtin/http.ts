@@ -81,7 +81,7 @@ export const OVERRIDE_REDIRECT_REFUSAL = 'carries a method override (such as `_m
 /**
  * A read's redirect hop refused because a server may run its target as a write
  * ({@link OVERRIDE_REDIRECT_REFUSAL}). Its own class, so the read that was sent and answered is
- * counted, and the text reaches the model as it is.
+ * counted.
  */
 export class OverrideHopRefused extends Error {
   constructor(nextUrl: string) {
@@ -4324,7 +4324,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // refusal: here the write was sent and answered, and only its redirect was refused or failed.
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
       if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
-      if (err instanceof OverrideHopRefused) blockedVerbatim(err.message);
       if (timedOut === 'stopped') {
         throw new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite, againWrite) + repairNote);
       }
