@@ -4435,6 +4435,60 @@ describe('spawn_agent tool', () => {
       expect(providerSearchAdmitted(ctx)).toBe(false);
     });
 
+    // A child the policy keeps off the web is told so (SUBAGENT_NO_WEB_PROMPT_BLOCK): measured
+    // without it, such a child named a guessed address as a business's "official website".
+    const childPrompt = async (parentCtx: import('../../core/tool-context.js').ToolContext, tools: string[]): Promise<string> => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'narrow', task: 'Look something up', tools }] },
+        makeAgent({ toolContext: parentCtx }),
+      );
+      return String((vi.mocked(MockAgent).mock.calls[0]![0] as { systemPrompt: string }).systemPrompt);
+    };
+
+    it.each(['deny-all', 'allow-list'] as const)('tells a child with no web search under %s that it cannot reach the web', async (policy) => {
+      const { tc } = await actual();
+      const { SUBAGENT_NO_WEB_PROMPT_BLOCK, GROUNDING_PROMPT_BLOCK } = await import('../../core/prompts.js');
+      const parent = tc.createToolContext({});
+      tc.applyNetworkPolicy(parent, policy, policy === 'allow-list' ? ['api.example.com'] : []);
+      const prompt = await childPrompt(parent, ['read_file']);
+      expect(prompt).toBe(`${GROUNDING_PROMPT_BLOCK}\n\n${SUBAGENT_NO_WEB_PROMPT_BLOCK}`);
+    });
+
+    it('says nothing about the web under an open policy or an unread one', async () => {
+      const { tc } = await actual();
+      const { SUBAGENT_NO_WEB_PROMPT_BLOCK } = await import('../../core/prompts.js');
+      const open = tc.createToolContext({});
+      tc.applyNetworkPolicy(open, 'allow-all', []);
+      expect(await childPrompt(open, ['read_file'])).not.toContain(SUBAGENT_NO_WEB_PROMPT_BLOCK);
+      expect(await childPrompt(tc.createToolContext({}), ['read_file'])).not.toContain(SUBAGENT_NO_WEB_PROMPT_BLOCK);
+      expect(await childPrompt(tc.markPolicyUnread(tc.createToolContext({})), ['read_file'])).not.toContain(SUBAGENT_NO_WEB_PROMPT_BLOCK);
+    });
+
+    it('decides by the policy and by web_research in the child\'s tools', async () => {
+      const { tc } = await actual();
+      const { subAgentLacksWebSearch } = await vi.importActual<typeof import('./spawn.js')>('./spawn.js');
+      const tool = (name: string) => ({ definition: { name } }) as unknown as import('../../types/index.js').ToolEntry;
+      const deny = tc.createToolContext({});
+      tc.applyNetworkPolicy(deny, 'deny-all', []);
+      expect(subAgentLacksWebSearch([tool('read_file')], deny)).toBe(true);
+      // deny-all blocks web_research and http_request too; only bash, outside sidecar mode, gets past it.
+      expect(subAgentLacksWebSearch([tool('read_file'), tool('web_research'), tool('http_request')], deny)).toBe(true);
+      expect(subAgentLacksWebSearch([tool('read_file'), tool('bash')], deny)).toBe(false);
+      // allow-list leaves the allowed hosts open: any web-reaching tool keeps the child on the web.
+      const allow = tc.createToolContext({});
+      tc.applyNetworkPolicy(allow, 'allow-list', ['api.example.com']);
+      expect(subAgentLacksWebSearch([tool('read_file')], allow)).toBe(true);
+      for (const name of ['web_research', 'http_request', 'api_setup', 'google_docs', 'google_drive', 'google_sheets', 'google_calendar', 'bash']) {
+        expect(subAgentLacksWebSearch([tool('read_file'), tool(name)], allow), name).toBe(false);
+      }
+      const guarded = tc.createToolContext({});
+      tc.applyNetworkPolicy(guarded, 'guarded', []);
+      expect(subAgentLacksWebSearch([tool('read_file')], guarded)).toBe(false);
+      expect(subAgentLacksWebSearch([tool('read_file')], undefined)).toBe(false);
+    });
+
     it('keeps the child of a parent with no policy of its own withheld, and the child of an open one offered', async () => {
       const { providerSearchAdmitted, tc } = await actual();
       const unread = tc.markPolicyUnread(tc.createToolContext({}));

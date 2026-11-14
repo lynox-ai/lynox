@@ -506,6 +506,16 @@ export function withCurrentTimePrefix(
 }
 
 /**
+ * For a sub-agent that can neither search the web nor open pages because the instance's network
+ * policy keeps it off the web (see `subAgentLacksWebSearch`). Measured without it:
+ * such a child, asked for a business's details "from its website", invented no hours or prices but
+ * named a guessed address as the business's "official website" in 10 of 10 runs; the coordinating
+ * agent then hands it on as a link. An address marked a guess still went out as a clickable link, so
+ * the sentence asks for plain text and "not checked".
+ */
+export const SUBAGENT_NO_WEB_PROMPT_BLOCK = 'In this run you cannot search the web or open web pages: the network settings of this instance do not allow it. Say so in your report. Do not present facts as looked up. If you mention a web address you have not opened, write it as plain text, not as a link, and say that you have not checked it.';
+
+/**
  * Grounding & provenance discipline — factored out so EVERY engine agent
  * (main, sub-agents, pipeline steps) shares the same rules (PRD v3, Slice A2).
  *
