@@ -3,6 +3,7 @@
 	import { formatCost } from '../format.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { bulkTime } from './bulk-runs.js';
 	import { unarchiveThread } from '../stores/threads.svelte.js';
 
 	interface RunRecord {
@@ -323,9 +324,13 @@
 		return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 	}
 
-	function formatDateTime(iso: string): string {
+	// The engine stamps a run with SQLite's `datetime('now')`: UTC, without a zone. Read as
+	// local time it stood an hour early in Zurich; bulkTime reads it as UTC.
+	function formatDateTime(value: string): string {
 		const locale = getLocale() === 'de' ? 'de-CH' : 'en-US';
-		return new Date(iso).toLocaleString(locale, {
+		const d = bulkTime(value);
+		if (d === null) return value;
+		return d.toLocaleString(locale, {
 			day: 'numeric',
 			month: 'numeric',
 			year: 'numeric',
