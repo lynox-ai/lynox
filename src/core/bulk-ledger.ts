@@ -2273,9 +2273,10 @@ export class BulkLedger {
       return changed.changes === 1 ? null : { ok: false, reason: 'not_writing' };
     }).immediate();
     if (moved !== null) return moved;
-    // The new checksum after the commit. This engine writes its database through one connection
-    // and this method runs to its end without yielding, so nothing of the engine's lands between
-    // the commit and this read: it is the checksum of the run as the toggle left it.
+    // The new checksum after the commit. This process writes its database through one connection
+    // and this method runs to its end without yielding, so nothing of this process lands between
+    // the commit and this read. Another process that wrote the run meanwhile would move it, and
+    // the approval compares what it presents with the run as it then is (`approve`).
     return { ok: true, checksum: this.computeChecksum(runId)! };
   }
 

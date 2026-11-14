@@ -763,6 +763,43 @@ describe('a toggle on the run\'s page', () => {
 		expect(buttonByText(t('bulk.deselect.off'))).toBeDefined();
 	});
 
+	for (const [what, change] of [
+		['another view took a second target out meanwhile', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, deselected: r.deselected + 1 })],
+		['the run lists another number of targets', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, total: r.total + 1 })],
+	] as const) {
+		it(`loads the run whole where ${what}`, async () => {
+			await render();
+			const asked = gets.length;
+			const realFetch = globalThis.fetch;
+			vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+				if (init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url)) && gets.length === asked) run = change(run);
+				return realFetch(url, init);
+			}));
+			buttonByText(t('bulk.deselect.off'))!.click();
+			await settle();
+			expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		});
+	}
+
+	it('loads the run whole where the ask for it fails', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		let failed = false;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (!failed && init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) {
+				failed = true;
+				gets.push(String(url));
+				return new Response('{}', { status: 502, headers: { 'Content-Type': 'application/json' } });
+			}
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
+	});
+
 	it('loads the run whole where it is no longer the preview it showed', async () => {
 		await render();
 		const asked = gets.length;

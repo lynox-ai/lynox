@@ -219,12 +219,14 @@
 	/** After a toggle the run is asked for again — its counts and the checksum the approval
 	 *  presents moved — but of its targets only the toggled one changed: it is marked here instead
 	 *  of every page being loaded again. False where the run is no longer the preview this page
-	 *  shows, or could not be read; the caller then loads it whole. */
+	 *  shows, could not be read, or moved by more than this toggle (another view took a target out
+	 *  or put one back meanwhile, so another row would be stale); the caller then loads it whole. */
 	async function afterToggle(seq: number, deselected: boolean): Promise<boolean> {
 		const id = runId;
 		const before = run;
 		const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
-		if (id !== runId || run !== before || !r.ok || r.body.phase !== 'previewed' || r.body.total !== before?.total) return false;
+		if (id !== runId || run !== before || before === null || !r.ok || r.body.phase !== 'previewed' || r.body.total !== before.total) return false;
+		if (r.body.deselected !== before.deselected + (deselected ? 1 : -1)) return false;
 		run = r.body;
 		targets = targets.map((x) => (x.seq === seq ? { ...x, deselected } : x));
 		maxTargets = Math.max(1, bulkWriting(r.body));
