@@ -622,12 +622,12 @@ export class Memory implements IMemory {
         ? finalAnswer.slice(0, extractionLimit)
         : finalAnswer;
 
-      // Route the auto-extraction pool-key spend through the managed gate: when
-      // the tenant's balance is exhausted the onBeforeRun hook throws →
-      // blockedReason is set → skip the extraction entirely (fail-closed),
-      // matching the KnowledgeLayer extractor. No-op on self-host (no hooks).
-      const extractGate = this.meteredHost ? await fireBeforeRunGate(this.meteredHost, 'fast') : null;
-      if (extractGate && extractGate.blockedReason !== null) return;
+      // Admit the extraction like any model call outside a run: the spending caps on
+      // every instance, then the managed gate (a tenant whose balance is exhausted →
+      // the onBeforeRun hook throws). Blocked → skip the extraction entirely
+      // (fail-closed), matching the KnowledgeLayer extractor.
+      const extractGate = await fireBeforeRunGate(this.meteredHost, 'fast');
+      if (extractGate.blockedReason !== null) return;
 
       const fast = resolveTierModel('fast', getActiveProvider());
       const fastClient = clientForTierSnapshot(fast, this.client, getActiveProvider());
@@ -645,7 +645,7 @@ export class Memory implements IMemory {
       // Debit the spend BEFORE any early return so an empty extraction still
       // bills the tenant (mirrors the KG extractor). reportMeteredCost no-ops on
       // zero/undefined cost, so a usage-less response is a clean skip.
-      if (extractGate && this.meteredHost) {
+      if (this.meteredHost) {
         const u = response.usage;
         const costUsd = u
           ? calculateCost(fast.modelId, {

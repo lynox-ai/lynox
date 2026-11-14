@@ -6,6 +6,7 @@
 	returned with the run — so a run that changed since is refused, not approved.
 -->
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
@@ -13,7 +14,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -46,6 +47,7 @@
 
 	async function json<T>(path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; body: T }> {
 		const res = await fetch(`${getApiBase()}${path}`, init);
+		if (res.status === 429) lastRetryAfter = Number(res.headers.get('Retry-After'));
 		const body = (await res.json().catch(() => ({}))) as T;
 		return { ok: res.ok, status: res.status, body };
 	}
@@ -87,12 +89,59 @@
 		return out;
 	}
 
-	async function load(): Promise<void> {
-		loading = true;
-		error = '';
+	// The run a follow loop (below) belongs to: a new load for another run, or the page going
+	// away, ends the loop of the one before.
+	let following = 0;
+	// What the engine's last 429 said to wait (Retry-After, seconds), for a follow loop's next wait.
+	let lastRetryAfter: number | null = null;
+
+	/** Ask for the run again while the engine moves it on by itself (a list read, a judging, a
+	 *  write the owner started), so the page shows the next step without a reload. Only while the
+	 *  tab is visible, one request an ask. While the run still works the page keeps what it shows:
+	 *  its counts and the marks on its targets come from one load and agree. Once the run stopped
+	 *  working, the page loads it once as on opening. A refused or failed ask or load leaves the
+	 *  page as it is and waits longer ({@link bulkFollowDelay}); the loop ends once that load
+	 *  succeeded, after `BULK_FOLLOW_MAX_MS`, or when the page shows another run. */
+	async function follow(): Promise<void> {
+		const mine = ++following;
+		const until = Date.now() + BULK_FOLLOW_MAX_MS;
+		let delay = BULK_FOLLOW_MS;
+		while (mine === following && run !== null && bulkEngineWorking(run) && Date.now() < until) {
+			await new Promise((r) => setTimeout(r, delay));
+			if (mine !== following) return;
+			if (busy || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) continue;
+			let res: Response | null = null;
+			try {
+				res = await fetch(`${getApiBase()}/bulk/runs/${encodeURIComponent(runId)}`);
+			} catch {
+				res = null;
+			}
+			if (mine !== following) return;
+			const body = res?.ok ? ((await res.json().catch(() => null)) as BulkRunDetailData | null) : null;
+			let retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
+			let ok = body !== null;
+			if (body !== null && !bulkEngineWorking(body)) {
+				lastRetryAfter = null;
+				ok = await load({ quiet: true });
+				if (!ok) retryAfter = lastRetryAfter;
+			}
+			delay = bulkFollowDelay(delay, ok, retryAfter);
+		}
+	}
+
+	/** Load the run and its targets. True when the page now shows them; false when the load
+	 *  failed (a quiet load leaves the page as it was) or the page moved on to another run. */
+	async function load(opts: { quiet?: boolean } = {}): Promise<boolean> {
+		const quiet = opts.quiet === true;
+		const id = runId;
+		if (!quiet) {
+			loading = true;
+			error = '';
+		}
 		try {
-			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(runId)}`);
-			if (!r.ok) { error = t('common.load_failed'); loading = false; return; }
+			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
+			if (id !== runId) return false;
+			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
@@ -106,19 +155,28 @@
 			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
-			if (whole && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
+			if (id !== runId) return false;
+			if (whole && shown.length !== r.body.total) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
 			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
+			// A load for a run the page no longer shows writes nothing: the newer load owns the page.
+			if (id !== runId) return false;
 			run = r.body;
 			targets = shown;
 			creates = deleted;
+			// A follow ask runs only while the engine works, when the page offers the owner no input.
 			maxTargets = Math.max(1, bulkWriting(run));
 			unmeasuredOk = false;
 			probeOk = false;
 			supersedable = null;
 		} catch {
-			error = t('common.load_failed');
+			if (id !== runId) return false;
+			if (!quiet) error = t('common.load_failed');
+			loading = false;
+			return false;
 		}
 		loading = false;
+		if (!quiet && run !== null && bulkEngineWorking(run)) void follow();
+		return true;
 	}
 
 	async function showMore(): Promise<void> {
@@ -306,7 +364,9 @@
 		return d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 	}
 
-	$effect(() => { void runId; void load(); });
+	$effect(() => { void runId; following++; void load(); });
+	// The page going away ends a follow loop.
+	$effect(() => () => { following++; });
 	$effect(() => {
 		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
@@ -321,10 +381,19 @@
 
 	const host = $derived(run ? bulkHostOf(run.targetSystem) : null);
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
-	const step = $derived(run ? bulkStep(run) : 0);
+	const step = $derived(run ? bulkStep(run) : 'planned');
+	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
+	const undoneText = $derived(run ? bulkUndoneText(run, getLocale(), i18n) : null);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
+	// The probe's target by its title where the loaded targets hold its before-image.
+	const probeLabel = $derived(run?.probe ? bulkTargetLabel(run.targetSystem, { key: run.probe.key }, i18n) : '');
+	// The probe's admin link: its target is often not among the targets the page shows.
+	const probeName = $derived(run?.probe ? bulkTargetName(run.targetSystem, { key: run.probe.key }) : null);
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
-	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote ? t('bulk.approve.unmeasured_note') : run.writeFormNote);
+	// With one target to write the note keeps its first two sentences, here and in the engine's own (EN).
+	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote
+		? t(run !== null && bulkWriting(run) === 1 ? 'bulk.approve.unmeasured_note_one' : 'bulk.approve.unmeasured_note')
+		: run.writeFormNote);
 	const unmeasuredConfirmation = $derived(getLocale() === 'de' || !run?.writeFormConfirmation ? t('bulk.approve.unmeasured_confirm') : run.writeFormConfirmation);
 	const canUndo = $derived(run !== null && bulkCanUndo(run));
 	const startKind = $derived(run ? bulkStartKind(run) : null);
@@ -340,7 +409,20 @@
 	const view = $derived(mandate ? bulkMandateI18n(i18n) : i18n);
 	const restartKind = $derived(run ? bulkRestartKind(run) : null);
 	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
-	const listFilterText = $derived(run ? bulkListFilterText(run.listFilters, i18n) : null);
+	// A long filter list is folded until the owner shows it all; for this run only (ux U-175).
+	let filtersShownFor = $state<string | null>(null);
+	const filtersFolded = $derived(run !== null && filtersShownFor !== run.id ? bulkListFilterFolded(run.listFilters) : 0);
+	const listFilterText = $derived(run ? bulkListFilterText(run.listFilters, i18n, filtersFolded > 0) : null);
+	// Which statuses a store's product list reads: drafts, archived products and gift cards unless a status narrows it.
+	const listStatusText = $derived(run ? bulkListStatusText(run.listFilters, i18n) : null);
+	let filterLine = $state<HTMLParagraphElement | null>(null);
+	async function showAllFilters(): Promise<void> {
+		if (run === null) return;
+		filtersShownFor = run.id;
+		// The button is gone: focus moves to the line it opened, not to nowhere.
+		await tick();
+		filterLine?.focus();
+	}
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
@@ -361,6 +443,10 @@
 </script>
 
 <!-- Taking the run back: offered on its own, and beside writing on a run that halted. -->
+{#snippet filterLineOf(text: string)}
+	<p class="text-sm" tabindex="-1" bind:this={filterLine}>{filtersFolded > 0 ? `${text} ` : text}{#if filtersFolded > 0}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => showAllFilters()}>{tf('bulk.list.showAll', { n: String(filtersFolded) })}</button>{/if}</p>
+{/snippet}
+
 {#snippet undoOffer()}
 	<div class="space-y-3 border-t border-border pt-4">
 		<h2 class="text-sm font-medium">{t('bulk.undo.title')}</h2>
@@ -372,6 +458,15 @@
 <!-- The markup a target's new value adds and removes in an HTML field (1010), as code text with
      every attribute whole (sec-core M3): set as text, never rendered, and wrapped so a long value
      stays in view. On an undo it says what the undo writes back and takes out. -->
+{#snippet targetName(target: { key: string })}
+	{@const name = bulkTargetName(run?.targetSystem ?? '', target)}
+	{#if name.adminUrl === null}
+		<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+	{:else}
+		<a class="text-sm underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{tf('bulk.target.product', { n: name.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
+	{/if}
+{/snippet}
+
 {#snippet markupList(target: BulkTarget, undo: boolean)}
 	{#each target.markupChanges ?? [] as change (change.field)}
 		{@const list = bulkMarkupList(change, undo, shopify ? bulkFieldNamesText(host, [change.field], t) : bulkVisibleText(change.field), view)}
@@ -401,10 +496,18 @@
 			<h1 class="text-lg font-medium">{bulkLabel(run, i18n)}</h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
-				{#each BULK_STEPS as s, i (s)}
-					<li class="rounded-full px-2 py-0.5 {i === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={i === step ? 'step' : undefined}>{t(`bulk.step.${s}`)}</li>
+				{#each steps as s (s)}
+					<li class="rounded-full px-2 py-0.5 {s === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={s === step ? 'step' : undefined}>{t(bulkStepLabelKey(run, s))}</li>
 				{/each}
 			</ol>
+			{#if undoneText}
+				<p class="text-sm rounded-[var(--radius-sm)] bg-bg-muted border border-border px-3 py-2" data-testid="bulk-undone">
+					{undoneText}
+					{#if run.undoneBy}
+						<button type="button" class="{btnPlain} ml-1" onclick={() => onOpen(run!.undoneBy!.runId)}>{t('bulk.undone.open')}</button>
+					{/if}
+				</p>
+			{/if}
 
 			<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
@@ -464,7 +567,7 @@
 								{#each shownTargets as target (target.seq)}
 									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
 										<td class="py-1.5 pr-3">
-											<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+											{@render targetName(target)}
 											{#if target.shopAddedMarkup}
 												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
 											{/if}
@@ -484,12 +587,12 @@
 													<div>
 														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
-														→ <ins class="text-success no-underline">{bulkValueText(f.after)}</ins>
+														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{bulkValueText(f.after)}</ins>
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
 												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
-{/each}{#each target.diff.added as line, i (i)}<ins class="text-success no-underline">+ {bulkVisibleText(line)}</ins>
+{/each}{#each target.diff.added as line, i (i)}<ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">+ {bulkVisibleText(line)}</ins>
 {/each}</pre>
 											{:else if target.error && target.change !== 'invalid'}
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
@@ -522,7 +625,7 @@
 						</table>
 					</div>
 					{#if foldedUnchanged > 0}
-						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? 'bulk.preview.show_unchanged' : 'bulk.preview.show_unchanged_targets', { n: String(foldedUnchanged) })}</button>
+						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? bulkOne('bulk.preview.show_unchanged', foldedUnchanged) : bulkOne('bulk.preview.show_unchanged_targets', foldedUnchanged), { n: String(foldedUnchanged) })}</button>
 					{/if}
 					{#if targets.length < run.total}
 						<button type="button" class="{btnPlain} mt-2" onclick={showMore}>{tf('bulk.preview.show_all', { n: String(run.total) })}</button>
@@ -545,7 +648,7 @@
 			{:else if startKind === 'list' && run.listFirstPage}
 				<div class="space-y-3 border-t border-border pt-4">
 					<p class="text-sm">{tf('bulk.start.list_explain', { provider, address: bulkVisibleText(run.listFirstPage) })}</p>
-					{#if listFilterText}<p class="text-sm">{listFilterText}</p>{/if}
+					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}{#if listStatusText}<p class="text-sm">{listStatusText}</p>{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t(startButton ?? 'bulk.start.list')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
@@ -707,7 +810,14 @@
 			{:else if run.phase === 'previewed' && run.kind === 'apply'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.approve.title')}</h2>
-					{#if listFilterText}<p class="text-sm">{listFilterText}</p>{/if}
+					{#if skipped.nothing}
+						<!-- Nothing left to write: no note on what a write does, no button that cannot act. -->
+						<p id="bulk-approve-nothing" class="text-sm">{skipped.text}</p>
+						<div class="flex flex-wrap gap-2">
+							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+						</div>
+					{:else}
+					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}{#if listStatusText}<p class="text-sm">{listStatusText}</p>{/if}
 					{#if run.writeForm === 'unmeasured'}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{unmeasuredNote}</p>
 						<label class="flex gap-2 items-start text-sm">
@@ -719,7 +829,8 @@
 						<p class="text-sm">{t('bulk.approve.shopify_visible')}</p>
 					{/if}
 					{#if host !== null && !run.probeConfirmed}
-						<p class="text-sm">{t('bulk.approve.one_first')}</p>
+						<!-- With one target to write, the first is the whole run: nothing is left to approve after it. -->
+						<p class="text-sm">{t(bulkWriting(run) === 1 ? 'bulk.approve.only_one' : 'bulk.approve.one_first')}</p>
 					{:else}
 						<label class="flex items-center gap-2 text-sm">
 							{t('bulk.approve.at_most')}
@@ -729,25 +840,27 @@
 					{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary}
-							disabled={busy || skipped.nothing || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
-							aria-describedby={skipped.nothing ? 'bulk-approve-nothing' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
+							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
+							aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>
-							{host !== null && !run.probeConfirmed ? t('bulk.approve.write_one') : t('bulk.approve.approve')}
+							{host !== null && !run.probeConfirmed ? t(bulkWriting(run) === 1 ? 'bulk.approve.write_only' : 'bulk.approve.write_one') : t('bulk.approve.approve')}
 						</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
-					{#if skipped.nothing}
-						<p id="bulk-approve-nothing" class="text-sm">{skipped.text}</p>
-					{:else if run.writeForm === 'unmeasured' && !unmeasuredOk}
+					{#if run.writeForm === 'unmeasured' && !unmeasuredOk}
 						<p id="bulk-approve-confirm-first" class="text-xs text-text-subtle">{t('bulk.approve.confirm_first')}</p>
+					{/if}
 					{/if}
 				</div>
 			{:else if atProbe && run.probe}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
 					<p class="text-sm">{run.probe.fields.length > 0
-						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
-						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: bulkVisibleText(run.probe.key), provider })}</p>
+						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: probeLabel, provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
+						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider })}</p>
+					{#if probeName?.adminUrl}
+						<a class="text-sm underline hover:text-text" href={probeName.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-probe-admin">{tf('bulk.target.product', { n: probeName.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
+					{/if}
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
 						<span>{tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
@@ -769,7 +882,7 @@
 					<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
 					{#each targets.filter((x) => (x.markupChanges?.length ?? 0) > 0) as target (target.seq)}
 						<div class="text-sm" data-testid="bulk-undo-markup">
-							<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+							{@render targetName(target)}
 							{@render markupList(target, true)}
 						</div>
 					{/each}
@@ -777,7 +890,7 @@
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
 							<ul class="list-disc pl-5 mt-1">
-								{#each creates as c (c.seq)}<li><code class="text-xs break-all">{bulkVisibleText(c.key)}</code></li>{/each}
+								{#each creates as c (c.seq)}<li>{@render targetName(c)}</li>{/each}
 							</ul>
 						</div>
 					{/if}

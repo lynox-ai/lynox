@@ -26,7 +26,7 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
-import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoneLeftSentence, shopifyPairedAfter, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyPairedAfter, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
 import { SHOPIFY_READ_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { ApiStore } from './api-store.js';
@@ -166,8 +166,9 @@ interface Store {
   productAnswer?: (id: string) => unknown;
   /** Answer a product write with this instead of applying it. */
   writeAnswer?: (id: string) => unknown;
-  /** Product number → its product type and vendor, for a filtered list; a product not here has neither. */
-  groups?: Map<number, { product_type?: string; vendor?: string }>;
+  /** Product number → its product type, vendor and status (`ACTIVE`, as the store answers it), for a
+   *  filtered list; a product not here has none of them. */
+  groups?: Map<number, { product_type?: string; vendor?: string; status?: string }>;
 }
 
 /** A write's variables applied to a product the way Shopify applies `productUpdate`. */
@@ -199,17 +200,23 @@ function serve(s: Store): () => void {
     }
     if (typeof variables['q'] === 'string') {
       // The search as the store reads it, strictly: a `$q` of another shape fails the test.
-      const m = /^id:>(\d+)((?: AND (?:product_type|vendor):"[^"]*")*)$/.exec(variables['q'])!;
+      // A term is one quoted value, or a list of them joined by OR in parentheses, all of one key.
+      const m = /^id:>(\d+)((?: AND (?:(?:product_type|vendor|status):"[^"]*"|\((?:product_type|vendor|status):"[^"]*"(?: OR (?:product_type|vendor|status):"[^"]*")+\)))*)$/.exec(variables['q'])!;
       const afterId = Number(m[1]);
-      const terms = [...m[2]!.matchAll(/ AND (product_type|vendor):"([^"]*)"/g)].map((t) => [t[1] as 'product_type' | 'vendor', t[2]!] as const);
+      const terms = [...m[2]!.matchAll(/ AND (?:\(([^)]*)\)|((?:product_type|vendor|status):"[^"]*"))/g)].map((t) => {
+        const parts = [...(t[1] ?? t[2]!).matchAll(/(product_type|vendor|status):"([^"]*)"/g)];
+        const key = parts[0]![1] as 'product_type' | 'vendor' | 'status';
+        if (parts.some((x) => x[1] !== key)) throw new Error(`an OR group mixes keys: ${variables['q'] as string}`);
+        return [key, parts.map((x) => x[2]!)] as const;
+      });
       const special = s.listAnswer?.(afterId);
       if (special !== undefined) return new Response(JSON.stringify(special), { status: 200 });
       // Matched like Shopify matches a quoted value: whole value, letter case ignored (measured,
       // M-F1), and diacritics folded, so `Gemuse` lists `Gemüse` too (measured, M-F2).
       const folded = (t: string): string => t.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-      const inGroup = (id: number): boolean => terms.every(([k, v]) => {
+      const inGroup = (id: number): boolean => terms.every(([k, vs]) => {
         const held = s.groups?.get(id)?.[k];
-        return held !== undefined && folded(held) === folded(v);
+        return held !== undefined && vs.some((v) => folded(held) === folded(v));
       });
       const ids = [...s.products.keys()].filter((id) => id > afterId && inGroup(id)).sort((a, b) => a - b).slice(0, variables['n'] as number);
       return new Response(JSON.stringify({ data: { products: { nodes: ids.map((id) => ({ id: gid(id) })) } } }), { status: 200 });
@@ -221,7 +228,7 @@ function serve(s: Store): () => void {
     const p = s.products.get(n);
     // A product of a group answers its product type and vendor as the store holds them.
     const g = s.groups?.get(n);
-    const group = { ...(g?.product_type !== undefined ? { productType: g.product_type } : {}), ...(g?.vendor !== undefined ? { vendor: g.vendor } : {}) };
+    const group = { ...(g?.product_type !== undefined ? { productType: g.product_type } : {}), ...(g?.vendor !== undefined ? { vendor: g.vendor } : {}), ...(g?.status !== undefined ? { status: g.status } : {}) };
     return new Response(JSON.stringify({ data: { product: p === undefined ? null : { id, ...p, ...group } } }), { status: 200 });
   });
 }
@@ -340,7 +347,7 @@ describe('reading a store\'s product list', () => {
 });
 
 describe('reading a store\'s product list narrowed by a filter', () => {
-  const filtered = (filters: Record<string, string>): BulkListSource =>
+  const filtered = (filters: Record<string, string | string[]>): BulkListSource =>
     parseListSource(HOST, { form: 'shopify', filters, after: { seo_title: 'New title' } }, 'PATCH', scan);
   /** Products 10..60; 20, 40 and 60 are tees, 40 and 60 of Acme, 50 an Acme mug, 30 of Beta. */
   function groups(): void {
@@ -372,6 +379,99 @@ describe('reading a store\'s product list narrowed by a filter', () => {
     expect(s.requests.map((r) => r.variables['q'])).toEqual(['id:>0 AND product_type:"Tee" AND vendor:"Acme"']);
     expect(minted).toEqual([{ phase: 'list', afterId: 0, filters: { vendor: 'Acme', product_type: 'Tee' } }]);
     expect(ledger.externalTargetKeys(id)).toEqual([gid(40), gid(60)]);
+  });
+
+  it('reads a list of values as one search, pages on with it, and leaves out a product spelled as none of them', async () => {
+    fill(600);
+    // 600 products, so the two listed groups fill more than one page: two groups listed, one not; one of the listed spelled with a fold only Shopify makes.
+    s.groups = new Map([...s.products.keys()].map((k) => [k, { product_type: k % 3 === 0 ? 'Tee' : k % 3 === 1 ? 'Kaffee' : 'Mug' }]));
+    const folded = [...s.products.keys()].find((k) => k % 3 === 1)!;
+    s.groups.set(folded, { product_type: 'Kaffée' });
+    const src = filtered({ product_type: ['Tee', 'Kaffee'] });
+    expect(src.filters).toEqual({ product_type: ['Tee', 'Kaffee'] });
+    const id = startedList(src);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    const pages = s.requests.map((r) => r.variables['q']).filter((q) => typeof q === 'string');
+    expect(pages[0]).toBe('id:>0 AND (product_type:"Tee" OR product_type:"Kaffee")');
+    expect(pages.every((q) => / AND \(product_type:"Tee" OR product_type:"Kaffee"\)$/.test(q as string))).toBe(true);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(minted.length).toBeGreaterThan(1);
+    for (const m of minted) expect(m).toMatchObject({ phase: 'list', filters: { product_type: ['Tee', 'Kaffee'] } });
+    const listed = [...s.products.keys()].filter((k) => k % 3 !== 2).sort((a, b) => a - b);
+    expect(ledger.externalTargetKeys(id)).toEqual(listed.map((k) => gid(k)));
+    // The read of each listed product, under the flag: the check after it decides what stays.
+    vi.stubEnv(FLAG, '1');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    const preview = ledger.getPreview(id);
+    // Kaffée is listed by the store's fold, and left out by the check, which does not fold.
+    expect(preview.filter((t) => t.error === 'not_in_filter').map((t) => t.key)).toEqual([gid(folded)]);
+  });
+
+  // A run meant for the products the shop shows names status active: without it the search lists
+  // drafts, archived products and gift cards too, and the targets name none of them as such.
+  describe('a status', () => {
+    /** Products 10..60: 20 a draft tee, 30 archived, 40 an active tee, 50 an active mug, 60 a gift card (active); 10 has no status. */
+    function statuses(): void {
+      fill(6);
+      s.groups = new Map([[20, { product_type: 'Tee', status: 'DRAFT' }], [30, { status: 'ARCHIVED' }], [40, { product_type: 'Tee', status: 'ACTIVE' }], [50, { product_type: 'Mug', status: 'ACTIVE' }], [60, { product_type: 'Gift Card', status: 'ACTIVE' }]]);
+    }
+
+    it('is sent as a status term after the group, and lists only products of that status', async () => {
+      statuses();
+      const src = filtered({ status: 'active', product_type: 'Tee' });
+      expect(src).toMatchObject({ form: SHOPIFY_FILTERED_LIST_FORM, filters: { status: 'active', product_type: 'Tee' } });
+      const id = startedList(src);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(s.requests.map((r) => r.variables['q'])).toEqual(['id:>0 AND product_type:"Tee" AND status:"active"']);
+      expect(minted).toEqual([{ phase: 'list', afterId: 0, filters: { status: 'active', product_type: 'Tee' } }]);
+      expect(ledger.externalTargetKeys(id)).toEqual([gid(40)]);
+    });
+
+    it('takes a list of statuses as one search, any one of which matches', async () => {
+      statuses();
+      const id = startedList(filtered({ status: ['draft', 'archived'] }));
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(s.requests.map((r) => r.variables['q'])).toEqual(['id:>0 AND (status:"draft" OR status:"archived")']);
+      expect(ledger.externalTargetKeys(id)).toEqual([gid(20), gid(30)]);
+    });
+
+    it('leaves out a listed product whose read status is not the filter\'s, as not_in_filter', async () => {
+      statuses();
+      // A search that dropped the status term: the store lists every tee, the check after the read keeps the active one.
+      s.listAnswer = (a) => (a === 0 ? { data: { products: { nodes: [{ id: gid(20) }, { id: gid(40) }] } } } : { data: { products: { nodes: [] } } });
+      const id = startedList(filtered({ status: 'active' }));
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      vi.stubEnv(FLAG, '1');
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(ledger.getPreview(id).filter((t) => t.error === 'not_in_filter').map((t) => t.key)).toEqual([gid(20)]);
+    });
+
+    const STATUS_NO_MATCH: [string, Record<string, string | string[]>, string][] = [
+      ['en', { status: 'archived', product_type: 'Mug' }, 'List read: no product matches both the group and the status in the filter. Check them in the store, then ask lynox in a chat to plan the list again.'],
+      ['de', { status: 'archived', product_type: 'Mug' }, 'Liste gelesen: Kein Produkt passt zugleich zur Gruppe und zum Status aus dem Filter. Prüf beides im Shop und bitte lynox im Chat, die Liste neu zu planen.'],
+    ];
+    it.each(STATUS_NO_MATCH)('says in %s that no product of the group matched %j among that status', async (lang, filters, text) => {
+      statuses();
+      const out = await runBulkPreview(startedList(filtered(filters)), deps({ notices: BULK_NOTICES[lang as 'en' | 'de'] }));
+      expect(out.status).toBe('done');
+      expect(out.summary.startsWith(`${text} `), out.summary).toBe(true);
+      expect(out.summary.length).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+    });
+
+    it('names the status alone when only a status filters, in both languages, one or several', () => {
+      expect(shopifyNoMatchSentence({ status: 'draft' }, BULK_NOTICES.en)).toBe('List read: no product has the status in the filter. Check the products\' status in the store, then ask lynox in a chat to plan the list again.');
+      expect(shopifyNoMatchSentence({ status: ['draft', 'archived'] }, BULK_NOTICES.de)).toBe('Liste gelesen: Kein Produkt hat einen der Status aus dem Filter. Prüf den Status der Produkte im Shop und bitte lynox im Chat, die Liste neu zu planen.');
+      const all = { total: 2, invalidReasons: { not_in_filter: 2 } };
+      expect(shopifyNoneLeftSentence({ status: 'active' }, all, BULK_NOTICES.en)).toBe('Preview: products found, but none with the status in the filter. Ask lynox in a chat to plan the list again.');
+      expect(shopifyNoneLeftSentence({ status: 'active' }, all, BULK_NOTICES.de)).toBe('Vorschau: Produkte gefunden, aber keines hat den Status aus dem Filter. Bitte lynox im Chat, die Liste neu zu planen.');
+      // A group with a status closes its first sentence with the clause; without one it reads as before.
+      // A group read among one status names neither as the one to blame; without a status it reads as before.
+      expect(shopifyNoneLeftSentence({ vendor: 'A', status: 'active' }, all, BULK_NOTICES.en)).toBe('Preview: products found, but none with both group and status as in the filter. Ask lynox in a chat to plan again with the spellings the store shows.');
+      expect(shopifyNoneLeftSentence({ vendor: 'A', status: 'active' }, all, BULK_NOTICES.de)).toBe('Vorschau: Produkte gefunden, aber bei keinem stimmen Gruppe und Status beide mit dem Filter überein. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.');
+      expect(shopifyNoneLeftSentence({ vendor: 'A' }, all, BULK_NOTICES.en)).toBe(BULK_NOTICES.en.listNoneLeft('vendor'));
+    });
   });
 
   it('pages on from the last id with the same filter', async () => {
@@ -521,6 +621,50 @@ describe('reading a store\'s product list narrowed by a filter', () => {
       ]);
     });
 
+    // ux U-175: with a list of values the sentences speak of values; one value each reads as above.
+    it('words every case of a filter with a list of values as ux decided it (U-175)', () => {
+      const en = BULK_NOTICES.en; const de = BULK_NOTICES.de;
+      expect([en.listNoMatch('product_type', true), en.listNoMatch('vendor', true), en.listNoMatch('both', true)]).toEqual([
+        'List read: no product has any of the product types in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.',
+        'List read: no product has any of the vendors in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.',
+        'List read: no product has both a product type and a vendor in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.',
+      ]);
+      expect([de.listNoMatch('product_type', true), de.listNoMatch('vendor', true), de.listNoMatch('both', true)]).toEqual([
+        'Liste gelesen: Kein Produkt hat einen der Produkttypen aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.',
+        'Liste gelesen: Kein Produkt hat einen der Anbieter aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.',
+        'Liste gelesen: Kein Produkt hat zugleich einen Produkttyp und einen Anbieter aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.',
+      ]);
+      expect([en.listNoneLeft('product_type', true), en.listNoneLeft('vendor', true), en.listNoneLeft('both', true)]).toEqual([
+        'Preview: products found, but none with a product type spelled as one in the filter. Ask lynox in a chat to plan again with the spellings the store shows.',
+        'Preview: products found, but none with a vendor spelled as one in the filter. Ask lynox in a chat to plan again with the spellings the store shows.',
+        'Preview: products found, but none with both product type and vendor spelled as a value in the filter. Ask lynox in a chat to plan again with the spellings the store shows.',
+      ]);
+      expect([de.listNoneLeft('product_type', true), de.listNoneLeft('vendor', true), de.listNoneLeft('both', true)]).toEqual([
+        'Vorschau: Produkte gefunden, aber bei keinem ist der Produkttyp so geschrieben wie einer im Filter. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.',
+        'Vorschau: Produkte gefunden, aber bei keinem ist der Anbieter so geschrieben wie einer im Filter. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.',
+        'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter beide wie im Filter geschrieben. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.',
+      ]);
+      // One value each: the sentence of U-143/U-123, unchanged, whether `many` is left out or false.
+      for (const say of [en, de]) for (const kind of ['product_type', 'vendor', 'both'] as const) {
+        expect(say.listNoMatch(kind, false)).toBe(say.listNoMatch(kind));
+        expect(say.listNoneLeft(kind, false)).toBe(say.listNoneLeft(kind));
+      }
+    });
+
+    it('picks the sentence of values when any filter lists them, and of one value otherwise', () => {
+      const say = BULK_NOTICES.en; const all = { total: 2, invalidReasons: { not_in_filter: 2 } };
+      expect(shopifyNoneLeftSentence({ product_type: ['Tee', 'Mug'] }, all, say)).toBe(say.listNoneLeft('product_type', true));
+      expect(shopifyNoneLeftSentence({ product_type: 'Tee', vendor: ['A', 'B'] }, all, say)).toBe(say.listNoneLeft('both', true));
+      expect(shopifyNoneLeftSentence({ product_type: 'Tee', vendor: 'A' }, all, say)).toBe(say.listNoneLeft('both'));
+      expect(shopifyNoMatchSentence({ vendor: ['A', 'B'] }, say)).toBe(say.listNoMatch('vendor', true));
+      expect(shopifyNoMatchSentence({ vendor: 'A' }, say)).toBe(say.listNoMatch('vendor'));
+      // A list of statuses is counted for a status alone, never for a group: one type beside it is one type.
+      expect(shopifyNoMatchSentence({ status: ['draft', 'archived'] }, say)).toBe(say.listNoMatch('status', true));
+      expect(shopifyNoMatchSentence({ status: 'draft' }, say)).toBe(say.listNoMatch('status'));
+      expect(shopifyNoneLeftSentence({ product_type: 'Tee', status: ['draft', 'archived'] }, all, say)).toBe(say.listNoneLeft('group_status'));
+      expect(shopifyNoMatchSentence({ product_type: 'Tee', status: ['draft', 'archived'] }, say)).toBe(say.listNoMatch('group_status'));
+    });
+
     it('says nothing of a run without targets, or of one where another reason left a target out', () => {
       const say = BULK_NOTICES.en;
       expect(shopifyNoneLeftSentence({ product_type: 'Gemuse' }, { total: 0, invalidReasons: {} }, say)).toBeNull();
@@ -532,11 +676,13 @@ describe('reading a store\'s product list narrowed by a filter', () => {
     });
 
     it('fits web push\'s cut with the largest counts a run can have, in both languages and for every filter', () => {
-      for (const say of [BULK_NOTICES.en, BULK_NOTICES.de]) for (const kind of ['product_type', 'vendor', 'both'] as const) {
+      for (const say of [BULK_NOTICES.en, BULK_NOTICES.de]) for (const kind of ['product_type', 'vendor', 'both', 'status', 'group_status'] as const) {
         // The sentence comes only when every target is out as not_in_filter: its counts are 0 read
         // or judged and N invalid of N, at most BULK_MAX_TARGETS.
         const counts = [say.previewCounts(0, BULK_MAX_TARGETS, 0, BULK_MAX_TARGETS), say.judgeCounts(0, BULK_MAX_TARGETS, 0, BULK_MAX_TARGETS)];
-        for (const c of counts) expect(`${say.listNoneLeft(kind)} ${c}`.length, `${kind} ${c}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+        for (const c of counts) for (const many of [false, true]) expect(`${say.listNoneLeft(kind, many)} ${c}`.length, `${kind} ${String(many)} ${c}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+        // A list that matched nothing has read nothing: its counts are all 0.
+        for (const many of [false, true]) expect(`${say.listNoMatch(kind, many)} ${say.previewCounts(0, 0, 0, 0)}`.length, `${kind} ${String(many)}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
       }
     });
 
@@ -611,9 +757,11 @@ describe('reading a store\'s product list narrowed by a filter', () => {
     expect(ledger.resumePreview(all, Date.now(), { listChecksum: shownAll })).toEqual({ ok: false, reason: 'checksum' });
   });
 
-  it('shows the owner the filters of a filtered list only', () => {
+  it('shows the owner the filters of a store\'s product list, none as {} so the page names every status, and nothing for its images', () => {
     expect(shopifyListFiltersOf({ source: filtered({ product_type: 'Tee', vendor: 'Acme' }) })).toEqual({ product_type: 'Tee', vendor: 'Acme' });
-    expect(shopifyListFiltersOf({ source: source() })).toBeNull();
+    expect(shopifyListFiltersOf({ source: filtered({ status: 'active' }) })).toEqual({ status: 'active' });
+    expect(shopifyListFiltersOf({ source: source() })).toEqual({});
+    expect(shopifyListFiltersOf({ source: parseListSource(HOST, { form: 'shopify_media', after: { alt: 'x' } }, 'PATCH', scan) })).toBeNull();
     expect(shopifyListFiltersOf(null)).toBeNull();
   });
 });
@@ -1584,7 +1732,7 @@ describe('a judged Shopify run', () => {
       resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as Anthropic }),
       gate: async () => ({ runId: 'gate', blockedReason: null }),
       report: () => {},
-      bookSpend: () => {},
+      bookSpend: () => undefined, settleSpend: () => {},
       budgetAllows: () => true,
       scanSecret: () => null,
       maskVault: (t) => t,
@@ -1750,9 +1898,9 @@ describe('the context C of a judged Shopify run (PRD shopify-preset §20.2 item 
   const F = { seo_title: { type: 'string', maxLength: 70 }, seo_description: { type: 'string', maxLength: 160 } };
   const C = ['title', 'descriptionHtml', 'productType', 'vendor', 'tags'];
 
-  it('reads the product with a fixed document that also asks for type, vendor and tags, and grants it byte for byte', () => {
+  it('reads the product with a fixed document that also asks for type, vendor, status and tags, and grants it byte for byte', () => {
     expect(SHOPIFY_READ_DOCUMENTS.shopify_product_read)
-      .toBe('query($id: ID!) { product(id: $id) { id title descriptionHtml productType vendor tags seo { title description } } }');
+      .toBe('query($id: ID!) { product(id: $id) { id title descriptionHtml productType vendor status tags seo { title description } } }');
     expect(JSON.parse(shopifyProductReadBody(gid(7))!))
       .toEqual({ query: SHOPIFY_READ_DOCUMENTS.shopify_product_read, variables: { id: gid(7) } });
   });
@@ -1788,7 +1936,7 @@ describe('the context C of a judged Shopify run (PRD shopify-preset §20.2 item 
       deps: {
         ledger, readTargets: () => runBulkPreview(id, deps()),
         resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as Anthropic }),
-        gate: async () => ({ runId: 'gate', blockedReason: null }), report: () => {}, bookSpend: () => {}, budgetAllows: () => true,
+        gate: async () => ({ runId: 'gate', blockedReason: null }), report: () => {}, bookSpend: () => undefined, settleSpend: () => {}, budgetAllows: () => true,
         scanSecret: (t) => (t.includes('sk-live-') ? 'api_key' : null), maskVault: (t) => t, call,
       },
     };
@@ -1938,6 +2086,15 @@ describe('whether a read product lies in a list\'s filters', () => {
     ['a key no field answers', { productType: 'Tee' }, { tag: 'Tee' }, false],
     ['the filter key as a field name', { product_type: 'Tee' }, { product_type: 'Tee' }, false],
     ['no filter', {}, {}, true],
+    // Searched in small letters, answered in capitals: ASCII case folds them.
+    ['a status', { status: 'ACTIVE' }, { status: 'active' }, true],
+    ['another status', { status: 'DRAFT' }, { status: 'active' }, false],
+    ['one of several statuses', { status: 'ARCHIVED' }, { status: ['draft', 'archived'] }, true],
+    ['a status with a group', { productType: 'Tee', status: 'DRAFT' }, { product_type: 'Tee', status: 'active' }, false],
+    ['no status in the answer', { productType: 'Tee' }, { status: 'active' }, false],
+    // A stored value no parse built: refused, so it holds no product even where the read would match.
+    ['a status the rule does not take', { status: 'ACTIVE' }, { status: 'Active' }, false],
+    ['a status as free text', { status: 'PUBLISHED' }, { status: 'published' }, false],
   ])('%s', (_name, product, filters, inside) => {
     expect(shopifyInFilter(answer(product), filters)).toBe(inside);
   });

@@ -378,7 +378,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
     "permissions": {
       "contents": "read"
     },
-    "runs-on": "ubuntu-latest",
+    "runs-on": "ubuntu-24.04",
     "steps": [
       {
         "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
@@ -406,13 +406,13 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
         "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nosv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json\nOSV_DOCS_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --report /tmp/osv-docs.json --rc \"${OSV_DOCS_RC}\"\n"
       }
     ],
-    "timeout-minutes": 30
+    "timeout-minutes": 45
   },
   "release.yml:test": {
     "permissions": {
       "contents": "read"
     },
-    "runs-on": "ubuntu-latest",
+    "runs-on": "ubuntu-24.04",
     "steps": [
       {
         "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"

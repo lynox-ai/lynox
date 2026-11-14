@@ -20,6 +20,10 @@ export interface BulkApplyCounts {
 
 export type BulkPhase = 'apply' | 'preview' | 'judge';
 
+/** Which filters a Shopify list names, for its sentences: its group (`both` = type and vendor), a
+ *  status alone, or a group read among one status (`group_status`). */
+export type ShopifyFilterKind = 'product_type' | 'vendor' | 'both' | 'status' | 'group_status';
+
 export interface BulkNotices {
   readonly applyDone: string;
   readonly previewDone: string;
@@ -28,10 +32,10 @@ export interface BulkNotices {
   readonly listWaiting: string;
   /** A filtered Shopify list that matched no product, by which filters it has: the finding and
    *  the next step, never the value (ux U-123). The task tool gives the same text to a model. */
-  listNoMatch(filters: 'product_type' | 'vendor' | 'both'): string;
+  listNoMatch(filters: ShopifyFilterKind, many?: boolean): string;
   /** A filtered list whose search listed products, every one of them spelled otherwise than the
    *  filter (`not_in_filter`, PRD shopify-preset §22.4): products exist, none as written. */
-  listNoneLeft(filters: 'product_type' | 'vendor' | 'both'): string;
+  listNoneLeft(filters: ShopifyFilterKind, many?: boolean): string;
   readonly judgeDone: string;
   applyCounts(c: BulkApplyCounts): string;
   previewCounts(read: number, invalid: number, unread: number, total: number): string;
@@ -107,10 +111,27 @@ const EN: BulkNotices = Object.freeze({
   readDone: 'Bulk read done. The targets are to be judged next.',
   listEmpty: 'Bulk list read done. The list holds no target that could be planned.',
   listWaiting: 'Bulk list read done. Review the targets, then start reading them.',
-  listNoMatch: (filters: 'product_type' | 'vendor' | 'both') => filters === 'both'
+  // `many`: at least one filter lists values (ux U-175); one value each reads as it always did.
+  listNoMatch: (filters: ShopifyFilterKind, many = false) => filters === 'status'
+    ? `List read: no product has ${many ? 'any of the statuses' : 'the status'} in the filter. Check the products' status in the store, then ask lynox in a chat to plan the list again.`
+    : filters === 'group_status'
+    ? 'List read: no product matches both the group and the status in the filter. Check them in the store, then ask lynox in a chat to plan the list again.'
+    : many
+    ? (filters === 'both'
+      ? 'List read: no product has both a product type and a vendor in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.'
+      : `List read: no product has any of the ${filters === 'product_type' ? 'product types' : 'vendors'} in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.`)
+    : filters === 'both'
     ? 'List read: no product has both the product type and the vendor in the filter. Check both values in the store, then ask lynox in a chat to plan the list again.'
     : `List read: no product has the ${filters === 'product_type' ? 'product type' : 'vendor'} in the filter. Check the value in the store, then ask lynox in a chat to plan the list again.`,
-  listNoneLeft: (filters: 'product_type' | 'vendor' | 'both') => filters === 'both'
+  listNoneLeft: (filters: ShopifyFilterKind, many = false) => filters === 'status'
+    ? `Preview: products found, but none with ${many ? 'any of the statuses' : 'the status'} in the filter. Ask lynox in a chat to plan the list again.`
+    : filters === 'group_status'
+    ? 'Preview: products found, but none with both group and status as in the filter. Ask lynox in a chat to plan again with the spellings the store shows.'
+    : many
+    ? (filters === 'both'
+      ? 'Preview: products found, but none with both product type and vendor spelled as a value in the filter. Ask lynox in a chat to plan again with the spellings the store shows.'
+      : `Preview: products found, but none with a ${filters === 'product_type' ? 'product type' : 'vendor'} spelled as one in the filter. Ask lynox in a chat to plan again with the spellings the store shows.`)
+    : filters === 'both'
     ? 'Preview: products found, but none with both product type and vendor spelled as in the filter. Ask lynox in a chat to plan again with the spellings the store shows.'
     : `Preview: products found, but none with the ${filters === 'product_type' ? 'product type' : 'vendor'} spelled as in the filter. Ask lynox in a chat to plan again with the spelling the store shows.`,
   judgeDone: 'Bulk judge done. The run is ready for review.',
@@ -219,10 +240,26 @@ const DE: BulkNotices = Object.freeze({
   readDone: 'Lesen fertig. Als Nächstes werden die Ziele beurteilt.',
   listEmpty: 'Liste gelesen. Sie enthält kein Ziel, das sich planen lässt.',
   listWaiting: 'Liste gelesen. Prüf die Ziele und starte dann das Lesen.',
-  listNoMatch: (filters: 'product_type' | 'vendor' | 'both') => filters === 'both'
+  listNoMatch: (filters: ShopifyFilterKind, many = false) => filters === 'status'
+    ? `Liste gelesen: Kein Produkt hat ${many ? 'einen der Status' : 'den Status'} aus dem Filter. Prüf den Status der Produkte im Shop und bitte lynox im Chat, die Liste neu zu planen.`
+    : filters === 'group_status'
+    ? 'Liste gelesen: Kein Produkt passt zugleich zur Gruppe und zum Status aus dem Filter. Prüf beides im Shop und bitte lynox im Chat, die Liste neu zu planen.'
+    : many
+    ? (filters === 'both'
+      ? 'Liste gelesen: Kein Produkt hat zugleich einen Produkttyp und einen Anbieter aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.'
+      : `Liste gelesen: Kein Produkt hat einen der ${filters === 'product_type' ? 'Produkttypen' : 'Anbieter'} aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.`)
+    : filters === 'both'
     ? 'Liste gelesen: Kein Produkt hat zugleich Produkttyp und Anbieter aus dem Filter. Prüf beide Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.'
     : `Liste gelesen: Kein Produkt hat den ${filters === 'product_type' ? 'Produkttyp' : 'Anbieter'} aus dem Filter. Prüf den Wert im Shop und bitte lynox im Chat, die Liste neu zu planen.`,
-  listNoneLeft: (filters: 'product_type' | 'vendor' | 'both') => filters === 'both'
+  listNoneLeft: (filters: ShopifyFilterKind, many = false) => filters === 'status'
+    ? `Vorschau: Produkte gefunden, aber keines hat ${many ? 'einen der Status' : 'den Status'} aus dem Filter. Bitte lynox im Chat, die Liste neu zu planen.`
+    : filters === 'group_status'
+    ? 'Vorschau: Produkte gefunden, aber bei keinem stimmen Gruppe und Status beide mit dem Filter überein. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.'
+    : many
+    ? (filters === 'both'
+      ? 'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter beide wie im Filter geschrieben. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.'
+      : `Vorschau: Produkte gefunden, aber bei keinem ist der ${filters === 'product_type' ? 'Produkttyp' : 'Anbieter'} so geschrieben wie einer im Filter. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.`)
+    : filters === 'both'
     ? 'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter beide wie im Filter geschrieben. Bitte lynox im Chat, mit der Schreibweise aus dem Shop neu zu planen.'
     : `Vorschau: Produkte gefunden, aber bei keinem ist der ${filters === 'product_type' ? 'Produkttyp' : 'Anbieter'} wie im Filter geschrieben. Bitte lynox im Chat, mit der Schreibweise aus dem Shop neu zu planen.`,
   judgeDone: 'Beurteilung fertig. Der Massenlauf wartet auf deine Prüfung.',

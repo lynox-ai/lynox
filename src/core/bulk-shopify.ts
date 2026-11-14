@@ -16,8 +16,8 @@
  */
 import { isPlainObject, type ExternalClient, type ExternalRead, type TargetIo } from './bulk-external.js';
 import type { BulkInvalidReason, BulkRunStatus, ListPageItem } from './bulk-ledger.js';
-import type { BulkNotices } from './bulk-notices.js';
-import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, mediaImageGidNumber, productGidNumber, type ShopifyWriteForm } from './shopify-graphql.js';
+import type { BulkNotices, ShopifyFilterKind } from './bulk-notices.js';
+import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, asciiLower, isShopifyFilterValues, isShopifyStatusValues, mediaImageGidNumber, productGidNumber, shopifyFilterValues, type ShopifyListFilterValue, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
 import { presetStoreHost } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
@@ -164,34 +164,38 @@ export function shopifyBeforeImage(data: unknown, gid: string): { value: Record<
   return { value };
 }
 
-/** A text with only `A`–`Z` made lower case: no locale and no Unicode case mapping takes part. */
-function asciiLower(text: string): string {
-  return text.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
-}
-
 /**
  * Whether a product, as the preview's `shopify_product_read` answered it, lies in the list's
  * filters (PRD shopify-preset §22.4, `not_in_filter`): each filter's field of the RAW answer
  * equals its value up to ASCII letter case. Shopify's search folds diacritics, so a search for
  * `Gemuse` lists `Gemüse` too; this check does not, and fails closed — `GEMÜSE` is not in a
- * `Gemüse` group, and an answer without the field, or with another key, is in none. A list
- * without filters holds every product it lists.
+ * `Gemüse` group, and an answer without the field, or with another key, is in none. A filter
+ * with a list of values holds a product whose field equals any one of them, by the same rule; a
+ * list with no value holds none. A list without filters holds every product it lists.
  */
-export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, string>>): boolean {
+export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, ShopifyListFilterValue>>): boolean {
   const product = isPlainObject(data) && isPlainObject(data['product']) ? data['product'] : {};
-  const field: Readonly<Record<string, string>> = { product_type: 'productType', vendor: 'vendor' };
+  // `status` is answered in capitals (`ACTIVE`) and searched in small letters: ASCII case folds them.
+  const field: Readonly<Record<string, string>> = { product_type: 'productType', vendor: 'vendor', status: 'status' };
   return Object.entries(filters).every(([key, value]) => {
     const name = Object.hasOwn(field, key) ? field[key]! : null;
     const held = name === null ? undefined : product[name];
-    return typeof held === 'string' && asciiLower(held) === asciiLower(value);
+    // A value the rule does not take (a stored source no parse built) holds no product.
+    if (!(key === 'status' ? isShopifyStatusValues(value) : isShopifyFilterValues(value))) return false;
+    return typeof held === 'string' && shopifyFilterValues(value).some((v) => asciiLower(held) === asciiLower(v));
   });
 }
 
 /** Which filters a Shopify list has, for the sentences below; null for a list without filters. */
-function filterKind(filters: Readonly<Record<string, string>>): 'product_type' | 'vendor' | 'both' | null {
+function filterKind(filters: Readonly<Record<string, ShopifyListFilterValue>>): ShopifyFilterKind | null {
   const type = filters['product_type'] !== undefined;
   const vendor = filters['vendor'] !== undefined;
-  if (!type && !vendor) return null;
+  const status = filters['status'] !== undefined;
+  // A status alone: the group is the whole store, so only the status can be to blame.
+  if (!type && !vendor) return status ? 'status' : null;
+  // A group read among one status may match none for either reason: neither is named as the one,
+  // and its sentence is the same for one value or several.
+  if (status) return 'group_status';
   // With both, each value may match products while the pair matches none: no value is to blame.
   return type && vendor ? 'both' : type ? 'product_type' : 'vendor';
 }
@@ -202,9 +206,9 @@ function filterKind(filters: Readonly<Record<string, string>>): 'product_type' |
  * not repeated: no summary of this code echoes the planner's input, and the model has it in its
  * own plan.
  */
-export function shopifyNoMatchSentence(filters: Readonly<Record<string, string>>, say: BulkNotices): string | null {
+export function shopifyNoMatchSentence(filters: Readonly<Record<string, ShopifyListFilterValue>>, say: BulkNotices): string | null {
   const kind = filterKind(filters);
-  return kind === null ? null : say.listNoMatch(kind);
+  return kind === null ? null : say.listNoMatch(kind, Object.values(filters).some((v) => typeof v !== 'string'));
 }
 
 /**
@@ -215,11 +219,11 @@ export function shopifyNoMatchSentence(filters: Readonly<Record<string, string>>
  * that failed) may have matched, and the run does not say that none did.
  */
 export function shopifyNoneLeftSentence(
-  filters: Readonly<Record<string, string>>, status: Pick<BulkRunStatus, 'total' | 'invalidReasons'> | null, say: BulkNotices,
+  filters: Readonly<Record<string, ShopifyListFilterValue>>, status: Pick<BulkRunStatus, 'total' | 'invalidReasons'> | null, say: BulkNotices,
 ): string | null {
   if (status === null || status.invalidReasons.not_in_filter !== status.total) return null;
   const kind = filterKind(filters);
-  return kind === null ? null : say.listNoneLeft(kind);
+  return kind === null ? null : say.listNoneLeft(kind, Object.values(filters).some((v) => typeof v !== 'string'));
 }
 
 /**

@@ -3,10 +3,10 @@ import type { VoiceInfo } from './types.js';
 /**
  * The outcome of asking the catalogue for a voice in a given language.
  *
- * `matched: false` is not an error and not a defect — it is the state the product
- * is in today for German, because the provider has no German voice at all. The
- * caller falls back to the provider's default voice, which is exactly what happens
- * now, and says so.
+ * `matched: false` is not an error and not a defect — it is what happens for a
+ * language the catalogue has no voice for. The caller falls back to the provider's
+ * default voice and says so. (Until autumn 2026 that was German; the catalogue now
+ * has a German voice, see `DEFAULT_VOICE` in `mistral-voxtral-tts.ts`.)
  */
 export interface VoiceChoice {
   /** The chosen voice id, or `undefined` when the catalogue has none for this language. */

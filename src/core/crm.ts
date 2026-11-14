@@ -13,6 +13,7 @@
 import type { DataStore, RowStamp } from './data-store.js';
 import type { EngineDb } from './engine-db.js';
 import { SubjectStore, ambiguityError } from './subject-store.js';
+import { reducedErrorText } from './error-egress.js';
 import { RelationshipStore } from './relationship-store.js';
 import { CRM_CONTACTS, CRM_DEALS, CRM_INTERACTIONS, createParamsOf } from './crm-schema.js';
 
@@ -311,9 +312,12 @@ export class CRM {
           mirrored++;
         } catch (err: unknown) {
           // One malformed row must not abort the batch; the name is plaintext PII,
-          // so it is omitted from the log (matches the live upsertContact path).
+          // so it is omitted from the log (matches the live upsertContact path). Reduced:
+          // a legacy table can hold a number where a string belongs, and Node's type
+          // error for it quotes the value (a phone number). This runs in the backfill CLI,
+          // where the instance-wide reduction is never on.
           process.stderr.write(
-            `[lynox:subject-graph] S2 contact backfill skipped a row: ${err instanceof Error ? err.message : String(err)}\n`,
+            `[lynox:subject-graph] S2 contact backfill skipped a row: ${reducedErrorText(err)}\n`,
           );
         }
       }

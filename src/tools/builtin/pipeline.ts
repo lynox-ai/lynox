@@ -11,7 +11,8 @@ import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
+import { asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
+import { withWorkflowDefaults, workflowAwaitsStampResult, workflowStampState } from '../../core/workflow-stamp.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
 import { DEFAULT_STEP_TIMEOUT_MS, undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
@@ -50,7 +51,10 @@ const pipelineStore = new Map<string, PlannedPipeline>();
 // last chat that retried it. A retry hands the state's cached outputs to whoever retries it, so a
 // retry from another chat is a read of the run.
 // `ranAs`: whom the run was for (`principalKey`), so a retry under anyone else is refused (1100).
-type ExecutedState = { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined; originThreadId?: string | undefined; ranAs: string };
+/** `ranDigest`: the owner-stamp digest of the definition the run executed unmodified; absent when
+ *  the caller changed its steps (`modifications`) or there was no verb graph. An autonomous retry
+ *  runs only on a run whose steps were exactly the stamped ones (`workflow-stamp.ts`). */
+type ExecutedState = { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined; originThreadId?: string | undefined; ranAs: string; ranDigest?: string | undefined };
 const executedStates = new Map<string, ExecutedState>();
 
 // Non-template reentrancy guard: a non-template (run-once) pipeline currently
@@ -79,15 +83,12 @@ function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipel
   // in-memory read as "current" would, once a real transform exists (Slice 1b+),
   // mask a blob that still carries an old shape. The runtime does not branch on
   // the version, so leaving it undefined on a read is honest and harmless.
-  planned.template ??= false;
-  // Legacy rows (saved before the re-target schema landed) have no `parameters`;
-  // default to an empty schema so binding/validation treats them as no-param.
-  planned.parameters ??= [];
-  // Legacy rows have no stored failure strategy; default to 'stop' (the prior
-  // hardcoded headless behaviour) so the headless path can read it uniformly.
-  planned.on_failure ??= 'stop';
-  if (planned.mode === undefined) {
-    planned.mode = inferPipelineMode(planned.steps);
+  // Legacy rows have no `parameters` (no-param), no failure strategy ('stop', the prior
+  // headless behaviour) and no mode (inferred). The workflow stamp's digest is taken over
+  // the same defaults (`withWorkflowDefaults`), so a legacy row hashes alike here and there.
+  const inferred = planned.mode === undefined;
+  withWorkflowDefaults(planned);
+  if (inferred) {
     if (planned.mode === 'interactive' && !warnedLegacyIds.has(planned.id)) {
       // Bound the dedup set so a long-lived process can't grow it without
       // bound on environments with many distinct legacy pipelines.
@@ -1182,7 +1183,14 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   if (deps.autonomy === 'autonomous' && planned.mode === 'interactive' && isSchedulableWorkflow(planned)) {
     return `Error: Workflow "${planned.id}" asks its owner while it runs, and only its schedule gives those questions their own channel to the owner. It runs on a schedule from the workflow library (the consent step confirms it), or from an interactive chat.`;
   }
-  if (deps.autonomy === 'autonomous' && !planned.confirmedAt) {
+  // The owner's stamp is bound to the steps (`workflow-stamp.ts`): a stamp over other steps, or a
+  // workflow a mandate shaped, waits for the owner here too. Only for an autonomous caller, like
+  // the check below: in an interactive chat each dangerous step still asks.
+  const stamp = deps.autonomy === 'autonomous'
+    ? (deps.runHistory?.workflowStampState(planned) ?? workflowStampState(null, planned, undefined))
+    : 'holds';
+  if (stamp === 'awaits_owner_stamp') return `Error: ${workflowAwaitsStampResult(planned.id)}`;
+  if (deps.autonomy === 'autonomous' && stamp === 'unconfirmed') {
     if (planned.mode !== 'interactive') {
       return `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
     }
@@ -1209,6 +1217,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     // another's run, or re-run a mandate's steps without its lock (1100).
     if (prev.ranAs !== principalKey(runAs)) {
       return `Error: ${RETRY_OTHER_PRINCIPAL_REFUSAL}`;
+    }
+    // A retry runs the previous run's steps, not the stored ones: unattended, only when those were
+    // exactly the steps the owner's stamp holds over now.
+    if (deps.autonomy === 'autonomous' && (prev.ranDigest === undefined || prev.ranDigest !== deps.runHistory?.workflowStampDigest(planned))) {
+      return `Error: ${workflowAwaitsStampResult(planned.id)}`;
     }
     // A run started from a contained chat carries that chat's data, and a retry re-runs steps
     // on its cached outputs and returns them here: this chat is contained too before any step
@@ -1300,7 +1313,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // this chat is its origin from here on: it carries the first origin's rows if that one was
       // contained, and its own if a re-run step contained it. Keeping the first origin would let
       // the next retry from a third chat skip the check while this chat is contained.
-      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs) });
+      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs), ranDigest: prev.ranDigest });
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents, prev.state.outputs);
       const text = formatResult(state, planned.name, resultLimit);
       // Set last: a throw above returns an error, and the end row must not say success then.
@@ -1342,6 +1355,10 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   // Deep copy steps for modification
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
 
+  // Changed steps are not the stamped ones: an unattended caller runs the workflow as stamped.
+  if (deps.autonomy === 'autonomous' && input.modifications?.length) {
+    return `Error: Workflow "${planned.id}" runs unattended only as its owner stamped it, so its steps cannot be changed for this run. Run it from an interactive chat to try a change.`;
+  }
   if (input.modifications?.length) {
     // One run's changes: drop a step or change its task. Ids and the step list change only in the
     // stored workflow (`update_workflow_steps`), where they are saved and checked.
@@ -1420,7 +1437,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentChangeset: deps.parentAgent?.changeset,
     })));
 
-    recordExecutedState(planned.id, { manifest, state, runTaint, originThreadId: (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined, ranAs: principalKey(runAs) });
+    recordExecutedState(planned.id, {
+      manifest, state, runTaint, originThreadId: (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined,
+      ranAs: principalKey(runAs),
+      // Only an unattended run records it: only an unattended retry asks for it, and one without
+      // it is refused, so an attended run never needs the hash.
+      ranDigest: deps.autonomy === 'autonomous' && !input.modifications?.length ? (deps.runHistory?.workflowStampDigest(planned) ?? undefined) : undefined,
+    });
     if (!isTemplate) {
       try { definitionRemoved = deps.runHistory?.markPipelineExecuted(planned.id) === true; } catch { /* fire-and-forget */ }
     }

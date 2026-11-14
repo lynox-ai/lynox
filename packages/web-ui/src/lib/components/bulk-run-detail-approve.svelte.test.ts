@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t, tf } from '../i18n.svelte.js';
+import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // The approval of a preview: the owner sees every target, why lynox leaves one out, can take one
@@ -107,14 +107,83 @@ const buttonByText = (text: string): HTMLButtonElement | undefined =>
 	[...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === text);
 
 describe('approving a preview', () => {
+	it('folds a long filter list until asked, then shows it whole and moves focus to it (ux U-175)', async () => {
+		const groups = (n: number, name: string): string[] => Array.from({ length: n }, (_, i) => `${name} ${String(i + 1).padStart(2, '0')}`);
+		const before = getLocale();
+		setLocale('de');
+		onTestFinished(() => setLocale(before));
+		run = makeRun({ listFilters: { product_type: groups(50, 'Gruppe'), vendor: groups(7, 'Anbieter') } });
+		await render();
+		const folded = tf('bulk.list.filter_both', { type: `„Gruppe 01“, „Gruppe 02“, „Gruppe 03“ ${tf('bulk.list.more', { n: '47' })}`, vendor: `„Anbieter 01“, „Anbieter 02“, „Anbieter 03“ ${tf('bulk.list.more', { n: '4' })}` });
+		const line = (): HTMLParagraphElement | undefined => [...target.querySelectorAll('p')].find((p) => p.textContent?.startsWith(folded.slice(0, 30)));
+		expect(line()!.textContent).toBe(`${folded} ${tf('bulk.list.showAll', { n: '57' })}`);
+		buttonByText(tf('bulk.list.showAll', { n: '57' }))!.click();
+		await settle();
+		const full = tf('bulk.list.filter_both', {
+			type: `${groups(49, 'Gruppe').map((g) => `„${g}“`).join(', ')} ${t('bulk.list.or')} „Gruppe 50“`,
+			vendor: `${groups(6, 'Anbieter').map((g) => `„${g}“`).join(', ')} ${t('bulk.list.or')} „Anbieter 07“`,
+		});
+		expect(line()!.textContent).toBe(full);
+		expect(buttonByText(tf('bulk.list.showAll', { n: '57' }))).toBeUndefined();
+		expect(document.activeElement).toBe(line());
+		// The statuses the list reads stand on a line of their own, after the group's: never between it and its button.
+		const lines = [...target.querySelectorAll('p')].map((p) => p.textContent);
+		expect(lines[lines.indexOf(full) + 1]).toBe(t('bulk.list.any_status'));
+	});
+
+	describe('the statuses a store\'s product list reads, where it is approved', () => {
+		const texts = (): (string | null)[] => [...target.querySelectorAll('p')].map((p) => p.textContent);
+		const german = (): void => {
+			const before = getLocale();
+			setLocale('de');
+			onTestFinished(() => setLocale(before));
+		};
+		it('names every status for a list without a filter', async () => {
+			german();
+			run = makeRun({ listFilters: {} });
+			await render();
+			expect(texts()).toContain('Gelesen wird jedes Produkt des Shops, in jedem Status, auch „Entwurf“ und „archiviert“, und auch Geschenkgutscheine.');
+		});
+		it('names the status a filter names, on its own line after the group\'s', async () => {
+			german();
+			run = makeRun({ listFilters: { product_type: 'Tee', status: 'active' } });
+			await render();
+			const all = texts();
+			expect(all[all.indexOf('Gelesen werden nur die Produkte vom Produkttyp „Tee“.') + 1]).toBe('Gelesen werden nur Produkte mit dem Status „aktiv“.');
+			expect(target.textContent).not.toContain(t('bulk.list.all_status'));
+		});
+		it('names the status where a listed run is started, before its list is read', async () => {
+			german();
+			run = makeRun({ phase: 'planned', haltKey: 'listed', haltReason: 'engine English', total: 1, listFirstPage: 'https://demo.myshopify.com/products.json', listStartChecksum: 'l1', listFilters: { status: 'active' }, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+			await render();
+			expect(texts()).toContain('Gelesen werden nur Produkte mit dem Status „aktiv“.');
+		});
+		it('names no status for a list that is not a store\'s products', async () => {
+			german();
+			run = makeRun({ listFilters: null });
+			await render();
+			expect(target.textContent).not.toContain('Status');
+		});
+	});
+
 	it('shows why lynox leaves a product out, and folds the unchanged one until asked', async () => {
 		await render();
 		expect(target.textContent).toContain(t('bulk.invalid.not_found'));
-		expect(target.textContent).toContain('Product/1');
-		expect(target.textContent).not.toContain('Product/2');
-		buttonByText(t('bulk.preview.show_unchanged').replace('{n}', '1'))!.click();
+		expect(target.innerHTML).toContain('admin/products/1"');
+		expect(target.innerHTML).not.toContain('admin/products/2"');
+		buttonByText(t('bulk.preview.show_unchanged_one'))!.click();
 		await settle();
-		expect(target.textContent).toContain('Product/2');
+		expect(target.innerHTML).toContain('admin/products/2"');
+	});
+
+	it('folds the one unchanged target of another host under a button in the singular', async () => {
+		run = makeRun({ targetSystem: 'http:api.example.com' });
+		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
+		await render();
+		expect(target.textContent).not.toContain('items/2');
+		buttonByText(t('bulk.preview.show_unchanged_targets_one'))!.click();
+		await settle();
+		expect(target.textContent).toContain('items/2');
 	});
 
 	it('shows a description lynox does not write for a shortcode, whole, under the reason (1130)', async () => {
@@ -141,24 +210,94 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('short_description:');
 	});
 
-	it('takes a product out against the checksum it showed, and then shuts an approval with nothing left', async () => {
+	it('approves a run of one target whole, takes the product out against the checksum it showed, and then keeps only why nothing is left', async () => {
 		await render();
-		const approve = buttonByText(t('bulk.approve.write_one'))!;
+		// One target to write: no probe first, the approval covers the whole run.
+		const approve = buttonByText(t('bulk.approve.write_only'))!;
 		expect(approve.disabled).toBe(false);
+		expect(target.textContent).toContain(t('bulk.approve.only_one'));
+		expect(target.textContent).not.toContain(t('bulk.approve.one_first'));
+		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
 		buttonByText(t('bulk.deselect.off'))!.click();
 		await settle();
 		expect(posts).toEqual([{ url: expect.stringMatching(/\/bulk\/runs\/r1\/targets\/1\/deselect$/) as unknown as string, body: { checksum: 'c1' } }]);
 		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
 		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
-		const shut = buttonByText(t('bulk.approve.write_one'))!;
-		expect(shut.disabled).toBe(true);
-		expect(shut.getAttribute('aria-describedby')).toBe('bulk-approve-nothing');
-		expect(target.querySelector('#bulk-approve-nothing')?.textContent).toBe(t('bulk.nothing.products'));
+		// Nothing left to write: the sentence and a way back, no button that cannot act and no note on a write.
+		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
+		expect(block.querySelector('#bulk-approve-nothing')?.textContent).toBe(t('bulk.nothing.products'));
+		expect([...block.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual([t('bulk.not_now')]);
+		for (const key of ['bulk.approve.only_one', 'bulk.approve.one_first', 'bulk.approve.shopify_visible']) expect(block.textContent).not.toContain(t(key));
+	});
+
+	it('keeps only why nothing is left on an unchecked filtered run: no note, no confirmation, no filter', async () => {
+		run = makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', listFilters: { product_type: 'Tee' }, total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'https://api.example.com/items/1', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false }];
+		await render();
+		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
+		expect(block.querySelector('#bulk-approve-nothing')).not.toBeNull();
+		expect(block.querySelectorAll('input')).toHaveLength(0);
+		for (const key of ['bulk.approve.unmeasured_note', 'bulk.approve.unmeasured_note_one', 'bulk.approve.unmeasured_confirm']) expect(block.textContent).not.toContain(t(key));
+		expect(block.textContent).not.toContain('Tee');
+	});
+
+	it('cuts the unchecked note to its first two sentences at one target to write, and keeps it whole at two', async () => {
+		const unchecked = (update: number): BulkRunDetailData => makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', changes: { update, create: 0, delete: 0, unchanged: 0, invalid: 3 - update } });
+		run = unchecked(1);
+		targets = targets.map((x) => ({ ...x, key: `https://api.example.com/items/${String(x.seq)}` }));
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note_one'));
+		expect(target.textContent).not.toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).toContain(t('bulk.approve.only_one'));
+		unmount(component!);
+		component = undefined;
+		run = unchecked(2);
+		targets = targets.map((x) => (x.seq === 2 ? { ...x, change: 'update', diff: TARGETS[0]!.diff } : x));
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+		// Every kind of write counts, as the write counts it: one update and one create are two.
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ targetSystem: 'http:api.example.com', writeForm: 'unmeasured', changes: { update: 1, create: 1, delete: 0, unchanged: 0, invalid: 1 } });
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.unmeasured_note'));
+		expect(target.textContent).not.toContain(t('bulk.approve.only_one'));
+	});
+
+	it('shows no probe step for a run of one target, and the run as the step it writes in', async () => {
+		const chips = (): string[] => [...target.querySelectorAll('ol li')].map((li) => li.textContent ?? '');
+		const current = (): string | null | undefined => target.querySelector('ol li[aria-current="step"]')?.textContent;
+		run = makeRun({ targetSystem: 'http:api.example.com' });
+		await render();
+		expect(chips()).not.toContain(t('bulk.step.probe'));
+		expect(current()).toBe(t('bulk.step.approval'));
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ targetSystem: 'http:api.example.com', phase: 'writing', probe: { key: 'https://api.example.com/items/1', fields: ['title'] }, haltReason: 'x', haltKey: 'maxTargets' });
+		await render();
+		expect(chips()).not.toContain(t('bulk.step.probe'));
+		expect(current()).toBe(t('bulk.step.run'));
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ targetSystem: 'http:api.example.com', changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		await render();
+		expect(chips()).toContain(t('bulk.step.probe'));
+	});
+
+	it('writes one target first and leaves the rest to approve when there are two', async () => {
+		run = makeRun({ changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = targets.map((x) => (x.seq === 2 ? { ...x, change: 'update', diff: TARGETS[0]!.diff } : x));
+		await render();
+		expect(target.textContent).toContain(t('bulk.approve.one_first'));
+		expect(target.textContent).not.toContain(t('bulk.approve.only_one'));
+		expect(buttonByText(t('bulk.approve.write_one'))?.disabled).toBe(false);
+		expect(buttonByText(t('bulk.approve.write_only'))).toBeUndefined();
 	});
 
 	it('offers no way out on a product lynox leaves out, and none on an unchanged one', async () => {
 		await render();
-		buttonByText(t('bulk.preview.show_unchanged').replace('{n}', '1'))!.click();
+		buttonByText(t('bulk.preview.show_unchanged_one'))!.click();
 		await settle();
 		expect([...target.querySelectorAll('button')].filter((b) => b.textContent?.trim() === t('bulk.deselect.off'))).toHaveLength(1);
 	});
@@ -170,7 +309,7 @@ describe('approving a preview', () => {
 		expect(gets.filter((u) => u.includes('/targets?'))).toEqual([
 			expect.stringMatching(/offset=0&limit=500$/), expect.stringMatching(/offset=500&limit=500$/),
 		]);
-		expect(target.textContent).toContain('Product/501');
+		expect(target.innerHTML).toContain('admin/products/501"');
 	});
 
 	it('offers no approval when the pages list fewer targets than the run counts (L1)', async () => {
@@ -178,7 +317,8 @@ describe('approving a preview', () => {
 		await render();
 		expect(target.textContent).toContain(t('common.load_failed'));
 		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
-		expect(target.textContent).not.toContain('Product/1');
+		expect(buttonByText(t('bulk.approve.write_only'))).toBeUndefined();
+		expect(target.innerHTML).not.toContain('admin/products/1"');
 	});
 
 	it('words a refused take-out by its code, not by the engine\'s English (U-040)', async () => {
@@ -283,7 +423,7 @@ describe('a run halted on markup its store added', () => {
 		}));
 		await render();
 		const marked = [...target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')]
-			.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+			.map((m) => m.closest('tr')?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')?.replace(/^https:\/\/[^/]+\/admin\/products\//, 'gid://shopify/Product/') ?? '');
 		expect(marked).toEqual(['gid://shopify/Product/8']);
 		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop'));
 		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop_before'));
@@ -319,7 +459,7 @@ describe('a run whose store kept descriptions otherwise than sent', () => {
 		}));
 	};
 	const markedKeys = (): string[] => [...target.querySelectorAll('[data-testid="bulk-host-rewrote"]')]
-		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+		.map((m) => m.closest('tr')?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')?.replace(/^https:\/\/[^/]+\/admin\/products\//, 'gid://shopify/Product/') ?? '');
 
 	it('names one product in the singular, and marks it past the first page', async () => {
 		rewritten([8]);
@@ -359,7 +499,7 @@ describe('an atomic run that rolled back', () => {
 		{ seq: 3, key: 'gid://shopify/Product/3', change: 'update', diff: fieldsDiff('E', 'F'), error: 'write failed', deselected: false, written: false, undone: false },
 	];
 	const marked = (): string[] => [...target.querySelectorAll('[data-testid="bulk-rollback-left"]')]
-		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+		.map((m) => m.closest('tr')?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')?.replace(/^https:\/\/[^/]+\/admin\/products\//, 'gid://shopify/Product/') ?? '');
 
 	it('marks exactly the target the rollback left, with its own sentence and no way on', async () => {
 		run = aborted('atomicRollbackIncomplete');
@@ -517,7 +657,7 @@ describe('a preview whose SEO text gains an &', () => {
 	};
 	const line = (): string | null | undefined => target.querySelector('[data-testid="bulk-seo-entity-count"]')?.textContent;
 	const markedKeys = (): string[] => [...target.querySelectorAll('[data-testid="bulk-seo-entity"]')]
-		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+		.map((m) => m.closest('tr')?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')?.replace(/^https:\/\/[^/]+\/admin\/products\//, 'gid://shopify/Product/') ?? '');
 
 	it('names two products with their number, marks each, and shows the entity as text', async () => {
 		gaining([1, 3]);
@@ -590,7 +730,9 @@ describe('the markup a target changes (1010)', () => {
 		await render();
 		const undo = target.querySelectorAll('[data-testid="bulk-undo-markup"]');
 		expect(undo).toHaveLength(1);
-		expect(codes(undo[0]!)).toEqual(['gid://shopify/Product/1', '<script>steal()</script>']);
+		// The product is named by its admin link; the markup it writes back is listed as text.
+		expect(undo[0]!.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
+		expect(codes(undo[0]!)).toEqual(['<script>steal()</script>']);
 		expect(undo[0]!.textContent).toContain(t('bulk.markup.restores'));
 		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note'));
 		expect(target.querySelectorAll('script')).toHaveLength(0);

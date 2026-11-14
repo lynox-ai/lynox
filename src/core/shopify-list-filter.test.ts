@@ -8,9 +8,11 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_READ_DOCUMENTS, isShopifyFilterValue, isShopifyListFilters, shopifyFilterRefusal, shopifyListBody, shopifyReadRequest,
+  SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_READ_DOCUMENTS, isShopifyFilterValue, isShopifyFilterValues, isShopifyListFilters,
+  SHOPIFY_READ_DETAIL_MAX, SHOPIFY_STATUS_REFUSAL, isShopifyStatusValues, shopifyFilterListRefusal, shopifyFilterRefusal, shopifyListBody, shopifyReadRequest,
 } from './shopify-graphql.js';
-import { parseListSource, type BulkListSource } from './bulk-list.js';
+import { listPageUrl, listQueryParams, parseListSource, type BulkListSource } from './bulk-list.js';
+import { shopifyInFilter } from './bulk-shopify.js';
 import { contractGrants, withShopifyRead } from '../tools/permission-guard.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
@@ -101,7 +103,9 @@ describe('the value rule', () => {
   it('takes a set of filters naming known keys only, at least one, each with a value it takes', () => {
     expect(isShopifyListFilters({ product_type: 'Tee' })).toBe(true);
     expect(isShopifyListFilters({ product_type: 'Tee', vendor: 'Acme' })).toBe(true);
-    for (const f of [{}, { tag: 'x' }, { product_type: 'Tee', tag: 'x' }, { vendor: '' }, { vendor: 'a OR b' }, [], null, 'Tee']) {
+    expect(isShopifyListFilters({ status: 'active' })).toBe(true);
+    expect(isShopifyListFilters({ product_type: 'Tee', status: ['draft', 'archived'] })).toBe(true);
+    for (const f of [{}, { tag: 'x' }, { product_type: 'Tee', tag: 'x' }, { vendor: '' }, { vendor: 'a OR b' }, { status: 'Tee' }, { status: 'Active' }, [], null, 'Tee']) {
       expect(isShopifyListFilters(f), JSON.stringify(f)).toBe(false);
     }
   });
@@ -147,8 +151,8 @@ describe('the refusal sentence', () => {
     for (const w of ['XOR', 'NOR', 'NAND', 'ANDOR', 'TO', 'IN']) expect(isShopifyFilterValue(`A ${w} B`), w).toBe(true);
   });
 
-  it('is what the planner is told, for each key, without the value', () => {
-    for (const key of SHOPIFY_LIST_FILTER_KEYS) {
+  it('is what the planner is told, for each key but status, without the value', () => {
+    for (const key of SHOPIFY_LIST_FILTER_KEYS.filter((k) => k !== 'status')) {
       expect(() => parseListSource(HOST, { form: 'shopify', filters: { [key]: 'Secret"Value' }, after: { title: 'x' } }, 'PATCH', () => null))
         .toThrow(shopifyFilterRefusal(key));
       try {
@@ -165,19 +169,61 @@ describe('a Shopify list source with filters, as the planner gives it', () => {
     parseListSource(HOST, { form: 'shopify', filters, after: { title: 'x' } }, 'PATCH', scan);
 
   it('refuses empty filters and an empty value instead of reading every product', () => {
-    for (const f of [{}, [], 'Tee', null, 5]) expect(() => parse(f), JSON.stringify(f)).toThrow('source_list.filters for form shopify must name product_type, vendor or both.');
+    for (const f of [{}, [], 'Tee', null, 5]) expect(() => parse(f), JSON.stringify(f)).toThrow('source_list.filters for form shopify must name one or more of product_type, vendor, status.');
     expect(() => parse({ product_type: '' })).toThrow(shopifyFilterRefusal('product_type'));
     expect(() => parse({ vendor: ' ' })).toThrow(shopifyFilterRefusal('vendor'));
   });
 
   it('refuses a key it does not know, and a value that looks like a credential', () => {
-    expect(() => parse({ product_type: 'Tee', tag: 'x' })).toThrow('source_list.filters for form shopify may only use: product_type, vendor.');
+    expect(() => parse({ product_type: 'Tee', tag: 'x' })).toThrow('source_list.filters for form shopify may only use: product_type, vendor, status.');
     expect(() => parse({ vendor: 'Acme' }, (t) => (t === 'Acme' ? 'token' : null))).toThrow('source_list.filters.vendor holds something that looks like a credential.');
   });
 
   it('keeps an absent filter apart from an empty one', () => {
     expect(parseListSource(HOST, { form: 'shopify', after: { title: 'x' } }, 'PATCH', () => null)).toMatchObject({ form: 'shopify', filters: {} });
     expect(parse({ vendor: 'Acme' })).toMatchObject({ form: 'shopify_filtered', filters: { vendor: 'Acme' } });
+  });
+});
+
+// A status is a product's state in the store, one of three words: never free text, since nothing
+// but those words may reach the search under this key.
+describe('a status filter', () => {
+  const parse = (filters: unknown): BulkListSource =>
+    parseListSource(HOST, { form: 'shopify', filters, after: { title: 'x' } }, 'PATCH', () => null);
+
+  it('takes active, draft, archived or unlisted as written, or a list of 2 or more different ones', () => {
+    for (const v of ['active', 'draft', 'archived', 'unlisted', ['active', 'draft'], ['draft', 'archived', 'active', 'unlisted']]) expect(isShopifyStatusValues(v), JSON.stringify(v)).toBe(true);
+    for (const v of ['Active', 'ACTIVE', 'published', 'UNLISTED', '', ' active', 'active OR draft', ['active'], [], ['active', 'active'], ['active', 'Draft'], 5, null]) {
+      expect(isShopifyStatusValues(v), JSON.stringify(v)).toBe(false);
+    }
+  });
+
+  it('is stored as written beside a group, and refused with its own sentence, never the value', () => {
+    expect(parse({ status: 'active', product_type: 'Tee' })).toMatchObject({ form: 'shopify_filtered', filters: { status: 'active', product_type: 'Tee' } });
+    expect(parse({ status: ['draft', 'archived'] })).toMatchObject({ form: 'shopify_filtered', filters: { status: ['draft', 'archived'] } });
+    expect(SHOPIFY_STATUS_REFUSAL).toBe('source_list.filters.status may hold active, draft, archived, unlisted as written, or a list of 2 or more different ones.');
+    for (const v of ['Active', 'Secret"Value', ['active'], ['active', 'active']]) {
+      expect(() => parse({ status: v }), JSON.stringify(v)).toThrow(SHOPIFY_STATUS_REFUSAL);
+    }
+    try { parse({ status: 'Secret"Value' }); } catch (e) { expect((e as Error).message).not.toContain('Secret'); }
+  });
+
+  it('is sent in $q after the group, a list joined by OR, and the body builds nothing for a status the rule refuses', () => {
+    const q = (body: string | null): unknown => (body === null ? null : (JSON.parse(body) as { variables: { q: string } }).variables.q);
+    expect(q(shopifyListBody(0, { status: 'active' }))).toBe('id:>0 AND status:"active"');
+    expect(q(shopifyListBody(7, { status: ['active', 'draft'], vendor: 'Acme' }))).toBe('id:>7 AND vendor:"Acme" AND (status:"active" OR status:"draft")');
+    expect(shopifyListBody(0, { status: 'published' })).toBeNull();
+  });
+
+  it('is granted with its own status only — not the whole store, not another status', () => {
+    const base: CapabilityContract = { version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: [], hostPatterns: [HOST], pathPatterns: [], paramConstraints: {} };
+    const post = (contract: CapabilityContract, body: unknown): boolean =>
+      contractGrants('http_request', { method: 'POST', url: ENDPOINT, headers: { 'content-type': 'application/json' }, body }, contract);
+    const active = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: { status: 'active' } });
+    expect(post(active, shopifyListBody(0, { status: 'active' }))).toBe(true);
+    expect(post(active, shopifyListBody(0, {}))).toBe(false);
+    expect(post(active, shopifyListBody(0, { status: 'draft' }))).toBe(false);
+    expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: { status: 'published' } })).toThrow(/filters the value rule takes/);
   });
 });
 
@@ -201,6 +247,47 @@ describe('the body of a filtered list page', () => {
     expect(shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: { product_type: 'Tee' } })?.detail).toBe('shopify_products_list id:>7 AND product_type:"Tee"');
     expect(shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: {} })?.detail).toBe('shopify_products_list id:>7');
     expect(shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: { vendor: 'a OR b' } })).toBeNull();
+  });
+
+  it('records a list search as sent where it fits, and otherwise the sent text cut at a value\'s end, saying how many it leaves out', () => {
+    const detail = (filters: Parameters<typeof shopifyListBody>[1], room?: number): string =>
+      shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters }, room)!.detail.slice('shopify_products_list '.length);
+    expect(detail({ product_type: ['Tee', 'Kaffee'], vendor: 'Acme' })).toBe('id:>7 AND (product_type:"Tee" OR product_type:"Kaffee") AND vendor:"Acme"');
+    // One value of the longest the rule takes: whole where the row has room, else said to be left out.
+    const longest = `A${'b'.repeat(254)}`;
+    expect(detail({ product_type: longest }, 300)).toBe(`id:>7 AND product_type:"${longest}"`);
+    expect(detail({ product_type: longest })).toBe('id:>7 … [cut here: 1 of 1 values left out]');
+    expect(SHOPIFY_READ_DETAIL_MAX).toBe(400 - 59 - (63 + '.myshopify.com'.length));
+    const values = Array.from({ length: 50 }, (_, i) => `Obergruppe Nummer ${String(i + 1).padStart(2, '0')}`);
+    const filters = { product_type: values, vendor: 'Acme' };
+    const sent = `id:>7 AND (${values.map((v) => `product_type:"${v}"`).join(' OR ')}) AND vendor:"Acme"`;
+    const shown = detail(filters);
+    expect(shown.length).toBeLessThanOrEqual(SHOPIFY_READ_DETAIL_MAX);
+    const m = /^(.*) … \[cut here: (\d+) of 51 values left out\]$/.exec(shown)!;
+    // The sent text itself, operators and all, cut right after a value.
+    expect(sent.startsWith(m[1]!)).toBe(true);
+    expect(m[1]!.endsWith('"')).toBe(true);
+    const kept = [...m[1]!.matchAll(/product_type:"[^"]*"/g)].length;
+    expect(kept).toBeGreaterThan(0);
+    expect(m[1]).toBe(`id:>7 AND (${values.slice(0, kept).map((v) => `product_type:"${v}"`).join(' OR ')}`);
+    expect(Number(m[2])).toBe(51 - kept);
+    // As full as the row allows: the next value would not fit.
+    expect(`id:>7 AND (${values.slice(0, kept + 1).map((v) => `product_type:"${v}"`).join(' OR ')} … [cut here: ${String(50 - kept)} of 51 values left out]`.length)
+      .toBeGreaterThan(SHOPIFY_READ_DETAIL_MAX);
+  });
+
+  it('never says it cut nothing: a search just over the row leaves out at least one value', () => {
+    // Seven values of length L: the sent search is 141 + 7·L, from under the budget to just over it.
+    let cuts = 0;
+    for (let L = 17; L <= 25; L++) {
+      const values = Array.from({ length: 7 }, (_, i) => `W${String(i)}${'x'.repeat(L - 2)}`);
+      const d = shopifyReadRequest({ form: 'shopify_products_list', afterId: 7, filters: { product_type: values } })!.detail;
+      const m = / \[cut here: (\d+) of 7 values left out\]$/.exec(d);
+      if (m === null) continue;
+      cuts++;
+      expect(Number(m[1]), d).toBeGreaterThan(0);
+    }
+    expect(cuts).toBeGreaterThan(0);
   });
 });
 
@@ -236,6 +323,93 @@ describe('the grant of a filtered list page', () => {
   });
 });
 
+describe('a filter with a list of values', () => {
+  const parse = (filters: unknown, scan: (t: string) => string | null = () => null): BulkListSource =>
+    parseListSource(HOST, { form: 'shopify', filters, after: { title: 'x' } }, 'PATCH', scan);
+  const q = (body: string | null): unknown => (body === null ? null : (JSON.parse(body) as { variables: { q: string } }).variables.q);
+  const many = (n: number): string[] => Array.from({ length: n }, (_, i) => `Gruppe ${String(i)}`);
+
+  it('takes 2 to the maximum of values the rule takes, none two the same up to ASCII letter case', () => {
+    expect(isShopifyFilterValues(['Tee', 'Kaffee'])).toBe(true);
+    expect(isShopifyFilterValues(many(SHOPIFY_LIST_FILTER_MAX_VALUES))).toBe(true);
+    expect(isShopifyFilterValues('Tee')).toBe(true);
+    for (const v of [[], ['Tee'], many(SHOPIFY_LIST_FILTER_MAX_VALUES + 1), ['Tee', 'tee'], ['Tee', 'Tee'], ['Tee', ''], ['Tee', 'a" OR vendor:"b'], ['Tee', 'x)'], ['Tee', 5], ['Tee', ['Mug']]]) {
+      expect(isShopifyFilterValues(v), JSON.stringify(v)).toBe(false);
+    }
+    // Diacritics are not folded: Gemüse and Gemuse are two values, as the check after the read sees them.
+    expect(isShopifyFilterValues(['Gemüse', 'Gemuse'])).toBe(true);
+  });
+
+  it('is parsed as written, in the planner\'s order, and refused whole otherwise', () => {
+    expect(parse({ product_type: ['Kaffee', 'Tee'], vendor: 'Acme' })).toMatchObject({ form: 'shopify_filtered', filters: { product_type: ['Kaffee', 'Tee'], vendor: 'Acme' } });
+    for (const v of [[], ['Tee'], many(SHOPIFY_LIST_FILTER_MAX_VALUES + 1), ['Tee', 'TEE']]) {
+      expect(() => parse({ product_type: v }), JSON.stringify(v)).toThrow(shopifyFilterListRefusal('product_type'));
+    }
+    expect(() => parse({ vendor: ['Acme', 'a OR b'] })).toThrow(shopifyFilterRefusal('vendor'));
+    expect(() => parse({ vendor: ['Acme', 'Beta'] }, (t) => (t === 'Beta' ? 'token' : null))).toThrow('source_list.filters.vendor holds something that looks like a credential.');
+    expect(shopifyFilterListRefusal('vendor')).toBe(`source_list.filters.vendor as a list holds 2 to ${String(SHOPIFY_LIST_FILTER_MAX_VALUES)} values, no two the same up to letter case; for one value give it as text.`);
+  });
+
+  it('puts a list in $q as its values joined by OR in parentheses, one value as before', () => {
+    expect(q(shopifyListBody(7, { product_type: ['Tee', 'Kaffee'] }))).toBe('id:>7 AND (product_type:"Tee" OR product_type:"Kaffee")');
+    expect(q(shopifyListBody(7, { vendor: ['A', 'B'], product_type: ['Tee', 'Mug'] }))).toBe('id:>7 AND (product_type:"Tee" OR product_type:"Mug") AND (vendor:"A" OR vendor:"B")');
+    expect(q(shopifyListBody(7, { product_type: ['Tee', 'Mug'], vendor: 'Acme' }))).toBe('id:>7 AND (product_type:"Tee" OR product_type:"Mug") AND vendor:"Acme"');
+    // One value builds byte for byte as before lists existed.
+    expect(shopifyListBody(7, { product_type: 'Tee' })).toBe(JSON.stringify({ query: SHOPIFY_READ_DOCUMENTS.shopify_products_list, variables: { n: SHOPIFY_LIST_PAGE_SIZE, q: 'id:>7 AND product_type:"Tee"' } }));
+    for (const f of [{ product_type: ['Tee'] }, { product_type: [] }, { product_type: ['Tee', 'tee'] }, { product_type: ['Tee', 'a" OR x:"b'] }, { product_type: many(SHOPIFY_LIST_FILTER_MAX_VALUES + 1) }]) {
+      expect(shopifyListBody(0, f), JSON.stringify(f).slice(0, 80)).toBeNull();
+    }
+  });
+
+  it('is granted with its own list only — not another order, not a subset, not one value of it', () => {
+    const base: CapabilityContract = { version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: [], hostPatterns: [HOST], pathPatterns: [], paramConstraints: {} };
+    const post = (contract: CapabilityContract, body: unknown): boolean =>
+      contractGrants('http_request', { method: 'POST', url: ENDPOINT, headers: { 'content-type': 'application/json' }, body }, contract);
+    const g = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: { product_type: ['Tee', 'Kaffee'] } });
+    expect(post(g, shopifyListBody(0, { product_type: ['Tee', 'Kaffee'] }))).toBe(true);
+    for (const f of [{ product_type: ['Kaffee', 'Tee'] }, { product_type: 'Tee' }, { product_type: ['Tee', 'Kaffee', 'Mug'] }, {}]) {
+      expect(post(g, shopifyListBody(0, f)), JSON.stringify(f)).toBe(false);
+    }
+    expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: { product_type: ['Tee'] } })).toThrow(/filters the value rule takes/);
+  });
+
+  it('holds a product whose field equals any one value, by the same rule as one value, and none of an empty list', () => {
+    const product = (productType: unknown, vendor: unknown = 'Acme'): unknown => ({ product: { productType, vendor } });
+    expect(shopifyInFilter(product('Kaffee'), { product_type: ['Tee', 'Kaffee'] })).toBe(true);
+    expect(shopifyInFilter(product('KAFFEE'), { product_type: ['Tee', 'Kaffee'] })).toBe(true);
+    expect(shopifyInFilter(product('Mug'), { product_type: ['Tee', 'Kaffee'] })).toBe(false);
+    expect(shopifyInFilter(product('Gemuse'), { product_type: ['Tee', 'Gemüse'] })).toBe(false);
+    expect(shopifyInFilter(product('KAFFEÉ'), { product_type: ['Kaffeé'] as never })).toBe(false);
+    expect(shopifyInFilter(product(null), { product_type: ['Tee', 'Kaffee'] })).toBe(false);
+    expect(shopifyInFilter(product('Tee'), { product_type: [] as never })).toBe(false);
+    expect(shopifyInFilter(product('Tee', 'Beta'), { product_type: ['Tee', 'Mug'], vendor: ['Acme', 'Beta'] })).toBe(true);
+    expect(shopifyInFilter(product('Tee', 'Gamma'), { product_type: ['Tee', 'Mug'], vendor: ['Acme', 'Beta'] })).toBe(false);
+  });
+
+  it('holds no product for a stored list no parse built, and does not throw', () => {
+    const product = { product: { productType: 'Tee', vendor: 'Acme' } };
+    for (const tampered of [[5, 'Tee'], ['Tee', null], { 0: 'Tee' }, 7]) {
+      const filters = { product_type: tampered } as never;
+      expect(() => shopifyInFilter(product, filters), JSON.stringify(tampered)).not.toThrow();
+    }
+    expect(shopifyInFilter(product, { product_type: [5, 'Tee'] } as never)).toBe(false);
+    expect(shopifyInFilter(product, { product_type: { 0: 'Tee' } } as never)).toBe(false);
+    // Nor a list the rule refuses, though its values are text and one of them matches.
+    expect(shopifyInFilter(product, { product_type: ['Tee'] } as never)).toBe(false);
+    expect(shopifyInFilter(product, { product_type: ['Tee', 'tee'] } as never)).toBe(false);
+    expect(shopifyInFilter(product, { product_type: ['Tee', 'a OR b'] } as never)).toBe(false);
+    expect(shopifyInFilter(product, { product_type: 'Tee OR Mug' } as never)).toBe(false);
+    // The same list, as the rule takes it, holds it.
+    expect(shopifyInFilter(product, { product_type: ['Tee', 'Kaffee'] })).toBe(true);
+  });
+
+  it('never reaches the address or the query grant of a list form other than Shopify\'s', () => {
+    const woo: BulkListSource = { form: 'woocommerce', path: '/wp-json/wc/v3/products', filters: { category: ['1', '2'] }, idField: 'id', method: 'PATCH', after: { absent: false, value: {} } } as never;
+    expect(() => listPageUrl('shop.example.com', woo, 1)).toThrow('only a Shopify list takes a list of filter values');
+    expect(() => listQueryParams(woo)).toThrow('only a Shopify list takes a list of filter values');
+  });
+});
+
 describe('where the stored Shopify list form is read', () => {
   // Every place in the engine that names a Shopify list form, sorted. READ takes the stored
   // form, so it must hold for `shopify_filtered` too; INPUT is what the planner may name, so it
@@ -252,17 +426,20 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-list.ts | hostPatterns: [host], pathPatterns: isShopifyListForm(source',
     'core/bulk-list.ts | if (isShopifyListForm(source.form)) return undefined;',
     'core/bulk-list.ts | if (isShopifyListForm(source.form)) throw new RangeError(\'a ',
+    'core/bulk-list.ts | if (list.source.form === SHOPIFY_FILTERED_LIST_FORM) return ',
     'core/bulk-list.ts | if (source.form === SHOPIFY_FILTERED_LIST_FORM) return sourc',
     'core/bulk-list.ts | if (source.form === SHOPIFY_LIST_FORM) return source.path ==',
     'core/bulk-list.ts | return form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTER',
     'core/bulk-list.ts | return isListForm(source.form) && BULK_LIST_FORMS[source.for',
+    'core/bulk-list.ts | return isListForm(source.form) && Object.values(source.filte',
     'core/bulk-list.ts | return isShopifyListForm(source.form);',
-    'core/bulk-list.ts | return list !== null && list.source.form === SHOPIFY_FILTERE',
+    // The page's filters: a store's products without a filter are {} (every status), any other list null.
+    'core/bulk-list.ts | return list.source.form === SHOPIFY_LIST_FORM ? {} : null;',
     'core/bulk-preview.ts | BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_L',
     'core/bulk-preview.ts | const shopify = list !== null && isShopifyListSource(list.so',
     // A filtered list is written with the product form.
     'core/bulk-preview.ts | const shopifyForm = list !== null && isShopifyListForm(list.',
-    'core/bulk-preview.ts | const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST',
+    'core/bulk-preview.ts | const onFilters = list.source.form === SHOPIFY_FILTERED_LIST',
     'core/bulk-preview.ts | if (isShopifyListForm(source.form)) throw new Error(\'a Shopi',
     // The product writer and the HTML fields of a product run: a filtered list writes products too.
     'core/bulk-external-writer.ts | const fields = htmlFieldsOfListForm(\'shopify\').filter((f) =>',
@@ -270,7 +447,7 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-judge-rule.ts | if (form === \'shopify\' || form === \'shopify_filtered\') retur',
     'core/bulk-judge-rule.ts | if (form === \'shopify_media\') return [];',
     'core/bulk-ledger.ts | if (this.shopifyFormOfRun(run) === \'shopify_product\') for (c',
-    'server/http-api.ts | import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl, s',
+    'server/http-api.ts | import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource',
     'server/http-api.ts | listFirstPage: listRun ? (isShopifyListSource(listRun.source',
     // The image list: every other stored form, filtered or not, is read and written as products.
     'core/bulk-ledger.ts | import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type ',
