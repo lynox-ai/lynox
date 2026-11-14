@@ -81,23 +81,63 @@ jobs:
 
   # `test` runs on docs-only changes too; it carries the osv gate, which may not be conditional
   # (tests/osv-workflow-pin.test.ts). Do not gate it on detect.
+  # The suite in four parts, each on its own runner. The whole suite in one job ran 22-30 min on
+  # main by mid-November 2026 (vitest alone 29 min of it) and was cancelled at its ceiling more
+  # than once, which blocked every pull request and main. `test` below stays the one required
+  # check: it fails unless every part passed, and merges their reports and coverage.
+  test-shard:
+    name: test shard ${{ matrix.shard }}/4
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    # The suite spawns subprocesses (the cross-repo convention pins run workflow shell against a
+    # stubbed curl). Their own timeout signals the shell it started, not that shell's own
+    # children: an orphaned grandchild outlives it. Without a job ceiling such a process would
+    # burn the runner's 6h default instead of failing. A part runs about a quarter of the suite
+    # (29 min in one job), so 25 sits well above a part's own time.
+    timeout-minutes: 25
+    strategy:
+      # Every part runs to its end: a failure in one must not hide the others' results.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - run: pnpm install --frozen-lockfile
+      # `blob` keeps this part's results and coverage for `test` to merge; `default` prints them here.
+      # The coverage thresholds in vitest.config.ts are set to 0 for a part, which covers only a
+      # quarter of the code: `test` applies them to the merged coverage of all four.
+      - run: >-
+          pnpm exec vitest run --coverage --shard=${{ matrix.shard }}/4 --reporter=blob --reporter=default
+          --coverage.thresholds.lines=0 --coverage.thresholds.functions=0
+          --coverage.thresholds.branches=0 --coverage.thresholds.statements=0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vitest-blob-${{ matrix.shard }}
+          path: .vitest-reports/
+          # The report directory starts with a dot, which the action leaves out unless told.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+          # "Re-run all jobs" uploads under the same name into the same run; without this it fails.
+          overwrite: true
+
+  # The required check. It runs whatever happened to the parts (`always()`), and passes only if
+  # every part succeeded: a part that failed, was cancelled or was skipped makes it fail, so a
+  # skipped part never counts as a passed one.
   test:
+    needs: test-shard
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     # Scoped because this job downloads a third-party executable and runs it
     # over the checkout, and because the install action is handed a token: the
     # comment that calls it read-only is now enforced rather than asserted.
     permissions:
       contents: read
-    # The suite spawns subprocesses (the cross-repo convention pins run workflow
-    # shell against a stubbed curl). Their own timeout signals the shell it
-    # started, not that shell's own children — an orphaned grandchild outlives
-    # it. Without a job ceiling such a process would burn the runner's 6h
-    # default instead of failing. The ceiling sits above the suite's own time,
-    # not at it: the suite alone ran 18-20 min on main by late October 2026
-    # (one run was cancelled at 20:03), so 20 cut off green runs. By
-    # mid-November the whole job ran 22-29 min on main and one green run was
-    # cancelled at 30:02 while writing coverage, so 30 had the same problem.
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -153,7 +193,31 @@ jobs:
         run: node scripts/override-applied-guard.mjs
 
       - run: pnpm run typecheck
-      - run: pnpm exec vitest run --coverage
+      # After the scan, the override guard and the typecheck, so those report even when a shard
+      # failed; before the merge, which has nothing whole to merge then.
+      - name: Every test shard passed
+        env:
+          SHARDS: ${{ needs.test-shard.result }}
+        run: |
+          echo "test shards: $SHARDS"
+          if [ "$SHARDS" != "success" ]; then
+            echo "::error::the test shards did not all pass (result: $SHARDS). A failed, cancelled or skipped shard fails this check."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: vitest-blob-*
+          path: .vitest-reports/
+          merge-multiple: true
+      # Four parts, four reports: a merge over fewer would report a part of the suite as all of it.
+      - name: One report per shard
+        run: |
+          n=$(find .vitest-reports -maxdepth 1 -name 'blob-*.json' | wc -l)
+          echo "shard reports: $n"
+          test "$n" -eq 4
+      # The thresholds in vitest.config.ts apply here, to the merged coverage.
+      - run: pnpm exec vitest run --merge-reports --coverage
       - name: Check coverage threshold
         run: node --input-type=module -e "import{readFileSync}from'node:fs';const r=JSON.parse(readFileSync('./coverage/coverage-summary.json','utf8')).total;const p=r.lines.pct;console.log('Line coverage '+p+'%');if(p<65)process.exit(1)"
 
