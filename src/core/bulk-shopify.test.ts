@@ -2227,7 +2227,7 @@ describe('a Shopify preview naming SEO text a theme may show as an entity', () =
   });
 });
 
-// The owner knows a product by its title. The preview keeps the title the store answered its read
+// People know a product by its title. The preview keeps the title the store answered its read
 // with, encrypted like the before-image, and the targets route shows it; nothing else writes it.
 describe('a product target\'s title', () => {
   async function previewed(src: BulkListSource = source()): Promise<string> {

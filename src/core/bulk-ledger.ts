@@ -607,9 +607,10 @@ export function bulkTargetTitleCell(title: string | null | undefined): string | 
 export interface PreviewTarget {
   seq: number;
   key: string;
-  /** A Shopify product target's title as the store answered the preview's read: what the owner
-   *  knows the product by. Absent for an image target, a target read before titles were kept,
-   *  and a product without one. Text, never markup. */
+  /** A Shopify product target's title as the store answered the preview's read: what people
+   *  know the product by (the targets route: the owner and read-only mandates). Absent for an
+   *  image target, a target read before titles were kept, and a product without one. Text, never
+   *  markup. */
   title?: string | undefined;
   /** External targets: fields the write sends although their value does not change —
    *  because the source named them, or the provider requires them on every edit. Shown so
@@ -2760,7 +2761,7 @@ export class BulkLedger {
     /** The after-state the read completed (a Shopify target's seo pair): stored with the image, in one transaction, and classified against. */
     completedAfter?: Readonly<Record<string, unknown>>,
     /** The title the same read answered: on a run compared in its store's saved form
-     *  ({@link comparedInSavedForm}) classified with, and stored for the owner to see the target
+     *  ({@link comparedInSavedForm}) classified with, and stored for the targets route to show the target
      *  by (`target_title`, at most {@link BULK_TARGET_TITLE_MAX} code points). Never the plan's
      *  title and never a model's: only the store's answer to this read comes in here. */
     titleNow?: string | null,

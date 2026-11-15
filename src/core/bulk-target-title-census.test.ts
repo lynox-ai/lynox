@@ -2,10 +2,10 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-// A product target's stored title (`bulk_targets.target_title`) is for the owner's eyes: the
-// preview's read writes it and the targets route shows it. A model never reads it. That holds
-// while the readers that feed a model (the judge's `loadJudgeTarget`, the tool's status) pick
-// their columns by name; so this counts every file that names the column, and refuses a
+// A product target's stored title (`bulk_targets.target_title`) is for people, not a model: the
+// preview's read writes it and the targets route shows it to the owner and to read-only mandates.
+// A model never reads it. That holds while the readers that feed a model (the judge's
+// `loadJudgeTarget`, the tool's status) pick their columns by name; so this counts every file that names the column, and refuses a
 // `SELECT *` over bulk_targets, which would carry it along without naming it. A new mention has
 // to be looked at and either removed or added below with why it is not on a model's way.
 const COLUMN = /\btarget_title\b/g;
@@ -14,7 +14,7 @@ const SELECT_ALL = /SELECT\s+(?:\w+\.)?\*[^`'"]*\bFROM\s+bulk_targets\b/gi;
 /** Every file that names the column today, with why that is not a way to a model. */
 const EXPECTED: Record<string, { count: number; why: string }> = {
   'src/core/engine-db.ts': { count: 1, why: 'the migration that adds the column' },
-  'src/core/bulk-ledger.ts': { count: 11, why: 'recordRead writes it from the store\'s read (and its doc names it); getPreview reads it for the owner\'s targets route; planUndo copies it, still encrypted, from the source target to the undo target' },
+  'src/core/bulk-ledger.ts': { count: 11, why: 'recordRead writes it from the store\'s read (and its doc names it); getPreview reads it for the targets route (the owner and read-only mandates); planUndo copies it, still encrypted, from the source target to the undo target' },
   'src/core/export-tables.ts': { count: 1, why: 'the customer\'s data export decrypts it' },
 };
 
@@ -42,7 +42,7 @@ describe('the stored target title', () => {
     }
   });
 
-  it('is named only where it is written for the owner, shown to the owner, or exported', () => {
+  it('is named only where it is written from the store\'s read, shown on the targets route, or exported', () => {
     const found: Record<string, number> = {};
     for (const file of sources(join(ROOT, 'src'))) {
       const n = readFileSync(file, 'utf-8').match(COLUMN)?.length ?? 0;

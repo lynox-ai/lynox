@@ -1632,7 +1632,7 @@ const MIGRATIONS: string[] = [
    );
    INSERT OR IGNORE INTO workflow_stamp_marker (id, done) VALUES (1, 0);`,
   // v70: a Shopify product target's title, as the read in the preview answered it, encrypted like
-  // `before`, so the owner sees each target by its name. That read writes it (`recordRead`) and an
+  // `before`, so the targets route shows each target by its name. That read writes it (`recordRead`) and an
   // undo copies it from its source; NULL for every existing target, for an image target and for a
   // target without a title.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
