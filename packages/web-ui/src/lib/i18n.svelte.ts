@@ -3143,6 +3143,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.bulk_undo_toast': { de: '{count} archiviert', en: '{count} archived' },
 	'inbox.bulk_undo_toast_snoozed': { de: '{count} gesnoozt', en: '{count} snoozed' },
 	'inbox.bulk_undo': { de: 'Rückgängig', en: 'Undo' },
+	'inbox.bulk_undo_skipped': { de: '{restored} zurückgeholt, {skipped} übersprungen, weil sie sich seither geändert haben.', en: '{restored} restored, {skipped} skipped because they changed since.' },
+	'inbox.raised_reason': { de: 'Wieder hier: Eine neue Nachricht in diesem Verlauf hat vertraulichen Inhalt.', en: 'Back here: a new message in this thread has confidential content.' },
 	'inbox.bulk_escalate': { de: '{count} im Chat', en: '{count} in chat' },
 	'inbox.bulk_escalate_prompt': { de: 'Hilf mir, diese E-Mails zu bearbeiten:', en: 'Help me work through these emails:' },
 	'inbox.search_placeholder': { de: 'In dieser Zone suchen…', en: 'Search this zone…' },

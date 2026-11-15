@@ -2,6 +2,7 @@
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { isRaisedOpen } from '../utils/inbox-raised.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
 		closeItem,
@@ -640,11 +641,14 @@
 													</span>
 													<span aria-hidden="true">·</span>
 													<span class="shrink-0">{channelLabel(item.channel)}</span>
-													{#if item.classifierVersion === 'sensitive-prefilter'}
+													{#if item.classifierVersion === 'sensitive-prefilter' || isRaisedOpen(item)}
 														<span aria-hidden="true">·</span>
 														<span class="shrink-0 text-warning" aria-label="sensitive content">⚠</span>
 													{/if}
 												</div>
+												{#if isRaisedOpen(item)}
+													<p class="mt-0.5 text-[11px] text-text-subtle min-w-0 break-words [overflow-wrap:anywhere]">{t('inbox.raised_reason')}</p>
+												{/if}
 											</button>
 										</div>
 										{#if zone === 'snoozed'}

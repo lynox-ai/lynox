@@ -14,7 +14,7 @@ import {
 
 export type { RefreshBodyFailure };
 import { getApiBase } from '../config.svelte.js';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import { addToast } from './toast.svelte.js';
 
 export type InboxBucket = 'requires_user' | 'draft_ready' | 'auto_handled';
@@ -239,6 +239,11 @@ export async function undoBulk(bulkId: string, currentZone: InboxBucket): Promis
 	if (!res.ok) {
 		addToast(t('inbox.error_bulk_undo'), 'error');
 		return false;
+	}
+	// Items that changed since the bulk action stay as they are; say so, with the real numbers.
+	const body = (await res.json().catch(() => ({}))) as { reverted?: unknown; skipped?: unknown };
+	if (typeof body.skipped === 'number' && body.skipped > 0 && typeof body.reverted === 'number') {
+		addToast(tf('inbox.bulk_undo_skipped', { restored: String(body.reverted), skipped: String(body.skipped) }), 'info');
 	}
 	void loadInboxCounts();
 	void loadInboxItems(currentZone);
