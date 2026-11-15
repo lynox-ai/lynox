@@ -4077,22 +4077,27 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    // A wait on the run's own question that throws (the store failed, as on a locked database)
-    // must not leave the run marked as parked: a stop would then let the NEXT question in the
-    // thread lapse with it, though that one is a scheduled run's. Each of the four question paths.
+    // A wait on the run's own question that throws (its first read of the row failed, as on a
+    // locked database) must close that question and leave the run unparked. Left pending, the
+    // question would hold the thread's one open slot with nobody waiting on it; left parked, a stop
+    // would let the NEXT question in the thread lapse, though that one is a scheduled run's.
+    // Each of the four question paths.
     for (const path of ['promptUser', 'promptTabs', 'promptSecret', 'promptMailConnect'] as const) {
-      it(`a ${path} wait that throws leaves the run unparked, so a stop spares a scheduled question asked after it`, async () => {
+      it(`a ${path} wait that throws closes its question and unparks the run, so a stop spares a scheduled question asked after it`, async () => {
         repayRateWindow();
         const sid = `wait-throws-${path}`;
         const { db, store } = await promptDb();
         const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
         const originalGetPromptStore = engineRef.getPromptStore;
         engineRef.getPromptStore = (): unknown => store;
-        const slots = (api as unknown as { runningSessions: Map<string, { parked?: () => boolean }> }).runningSessions;
-        // The question is settled in the store, then the wait throws: the thread's one open slot
-        // is free again, as after an answer the run never got to read.
+        const slots = (api as unknown as { runningSessions: Map<string, { parked?: () => boolean; lastEventAt: number }> }).runningSessions;
+        // The wait rejects before the question settled, as `waitForSettled` does when its first
+        // read of the row throws: the row is still pending.
+        let ownId: string | undefined;
+        let pendingWhenThrown: string | undefined;
         store.waitForSettled = (id: string): Promise<never> => {
-          store.expirePrompt(id, 'run_stopped');
+          ownId = id;
+          pendingWhenThrown = store.getById(id)?.status;
           return Promise.reject(new Error('SQLITE_BUSY: database is locked'));
         };
         let finishWork!: () => void;
@@ -4100,10 +4105,13 @@ describe('LynoxHTTPApi', () => {
         let waitError = '';
         let scheduledId: string | undefined;
         let parkedAfterThrow: boolean | undefined;
+        let lastEventAfterThrow: number | undefined;
         try {
           mockSessionRun.mockImplementationOnce(async () => {
             const session = mockSessionInstance as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
             const ask = session[path]!;
+            // Zeroed, so the wall-clock resume after the failed wait shows as a fresh stamp.
+            slots.get(sid)!.lastEventAt = 0;
             try {
               if (path === 'promptUser') await ask('Which repo did you mean?', ['lynox', 'other']);
               else if (path === 'promptTabs') await ask([{ question: 'Which repo?', options: ['lynox', 'other'] }]);
@@ -4113,6 +4121,7 @@ describe('LynoxHTTPApi', () => {
               waitError = String(err);
             }
             parkedAfterThrow = slots.get(sid)?.parked?.();
+            lastEventAfterThrow = slots.get(sid)?.lastEventAt;
             scheduledId = store.insertAskUser(sid, 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
             await work;
             return 'done';
@@ -4124,7 +4133,11 @@ describe('LynoxHTTPApi', () => {
           }).then((r) => r.text()).catch(() => undefined);
           for (let i = 0; i < 400 && scheduledId === undefined; i++) await new Promise<void>((r) => setTimeout(r, 5));
           expect(waitError, 'positive control: the wait threw into the run').toContain('SQLITE_BUSY');
+          expect(pendingWhenThrown, 'positive control: the wait threw on a pending question').toBe('pending');
+          expect(store.getById(ownId!)?.status).toBe('expired');
+          expect(store.getById(ownId!)?.closed_reason).toBe('run_stopped');
           expect(parkedAfterThrow).toBe(false);
+          expect(lastEventAfterThrow).toBeGreaterThan(0);
           expect(scheduledId, 'positive control: the scheduled question was asked').toBeDefined();
           const abortRes = await jsonFetch(`/api/sessions/${sid}/abort`, { method: 'POST' });
           expect(abortRes.status).toBe(200);
