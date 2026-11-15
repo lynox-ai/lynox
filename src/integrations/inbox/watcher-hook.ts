@@ -128,7 +128,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
    * A new message in a thread the inbox already holds (PRD inbox-user-rules E6). It is stored as a
    * thread message after the same sensitive check a first mail gets: without its text on `skip`,
    * masked on `mask`. A `replied` item opens again for it, unless it is an automatic reply; the
-   * bucket stays, and no rule or classifier runs. Without a Message-ID, or when the message is
+   * bucket stays, and no rule or classifier runs. A message the check flags raises the item to
+   * "requires you" instead, open and not snoozed, and pushes. Without a Message-ID, or when the message is
    * stored already, nothing happens. Only Gmail and Graph have threads: on IMAP the thread key is the
    * Message-ID, so only a redelivered mail comes here, and it is stored already.
    */
@@ -189,18 +190,50 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     if (fields.inReplyTo !== undefined) input.inReplyTo = fields.inReplyTo;
     if (fields.mailDate !== undefined) input.mailDate = fields.mailDate;
     if (snippet !== undefined) input.snippet = snippet;
-    // Only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
+    // A message older than the reply (a backfill or a redelivery) did not come after it.
+    const beforeUserAction = fields.mailDate !== undefined && existing.userActionAt !== undefined
+      && fields.mailDate.getTime() <= existing.userActionAt.getTime();
+    // A flagged message from someone else brings the item back to "requires you", whatever its
+    // bucket, user action or snooze, as a flagged first mail lands there: no classifier verdict, no
+    // rule and no earlier "done" keeps it out of the owner's view. An automatic reply counts too,
+    // since a flagged first mail is not let through for being one.
+    // Decided on the item as it was before this mail: the hook may have woken a snoozed item for it
+    // already (`unsnooze_on_reply`), which makes it look open now. An item that was open in
+    // "requires you" stays as it is, so a second flagged message writes and pushes nothing.
+    const openBefore = existing.bucket === 'requires_user' && existing.userAction === undefined
+      && !(existing.snoozeUntil !== undefined && existing.snoozeUntil.getTime() > Date.now());
+    const raises = sensitive.isSensitive && !own && !beforeUserAction && !openBefore;
+    // Otherwise only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
     // An unknown answer reopens (see `confirmAutoReply`): only a known automatic reply does not.
-    const opens = existing.userAction === 'replied'
-      && autoReply !== true
-      && !own
-      // A message older than the reply (a backfill or a redelivery) did not come after it.
-      && !(fields.mailDate !== undefined && existing.userActionAt !== undefined
-        && fields.mailDate.getTime() <= existing.userActionAt.getTime());
-    const reopened = opts.state.runInTransaction(() => {
+    const opens = existing.userAction === 'replied' && autoReply !== true && !own && !beforeUserAction;
+    // What the check found in the item's own mail, before this message.
+    const itemCategories = opts.state.sensitiveCategoriesAtIngest(existing);
+    const outcome = opts.state.runInTransaction((): 'raised' | 'reopened' | 'none' => {
       opts.state.insertThreadMessage(input);
-      if (!opens) return false;
-      if (!opts.state.reopenReplied(existing.id, existing.tenantId, fields.mailDate ?? new Date())) return false;
+      if (raises) {
+        opts.state.raiseToRequiresUser(existing.id, existing.tenantId, fields.mailDate ?? new Date());
+        opts.state.appendAudit({
+          tenantId: existing.tenantId,
+          itemId: existing.id,
+          action: 'raised_on_sensitive_follow_up',
+          actor: 'system',
+          // The verdict the item had before, and what the check found in this message. Under its own
+          // key, not `sensitive_categories`: a reader withholds the item's own mail by that, and this
+          // is another message, stored as the mode says.
+          payloadJson: JSON.stringify({
+            trigger: 'inbound_mail',
+            message_id: messageId,
+            prior_bucket: existing.bucket,
+            prior_user_action: existing.userAction ?? null,
+            prior_snooze_until: existing.snoozeUntil?.toISOString() ?? null,
+            prior_sensitive_categories: itemCategories,
+            follow_up_sensitive_categories: sensitive.categories,
+          }),
+        });
+        return 'raised';
+      }
+      if (!opens) return 'none';
+      if (!opts.state.reopenReplied(existing.id, existing.tenantId, fields.mailDate ?? new Date())) return 'none';
       opts.state.appendAudit({
         tenantId: existing.tenantId,
         itemId: existing.id,
@@ -210,16 +243,17 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         // mail by, and this is another message. Its stored text is checked again when it is read.
         payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: messageId }),
       });
-      return true;
+      return 'reopened';
     });
-    if (reopened && opts.notifier && existing.bucket === 'requires_user') {
-      const item = opts.state.getItem(existing.id, existing.tenantId);
-      // A snoozed item is not in the list until it wakes; a push now would lead nowhere.
-      const snoozed = item?.snoozeUntil !== undefined && item.snoozeUntil.getTime() > Date.now();
-      // The push names the item's own sender and subject, so its own mail's flag counts as well.
-      const flagged = sensitive.isSensitive || opts.state.sensitiveCategoriesAtIngest(existing).length > 0;
-      if (item && !snoozed) void opts.notifier.notifyNewItem(item, { flagged });
-    }
+    if (outcome === 'none' || !opts.notifier) return;
+    if (outcome === 'reopened' && existing.bucket !== 'requires_user') return;
+    const item = opts.state.getItem(existing.id, existing.tenantId);
+    // A snoozed item is not in the list until it wakes; a push now would lead nowhere. A raised item
+    // is not snoozed any more.
+    const snoozed = item?.snoozeUntil !== undefined && item.snoozeUntil.getTime() > Date.now();
+    // The push names the item's own sender and subject, so its own mail's flag counts as well.
+    const flagged = sensitive.isSensitive || itemCategories.length > 0;
+    if (item && !snoozed) void opts.notifier.notifyNewItem(item, { flagged });
   };
 
   return async (accountId, env): Promise<InboxHookOutcome> => {

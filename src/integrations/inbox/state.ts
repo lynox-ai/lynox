@@ -613,6 +613,28 @@ export class InboxStateDb {
   }
 
   /**
+   * Brings an item back to where the owner sees it, for a flagged message that arrived in its
+   * thread: "requires you", no user action, not snoozed, with the message's date at the top of its
+   * list. Only ever raises: an item that is open in "requires you" already is left alone, so the
+   * same state reached twice writes nothing. Returns whether the row changed.
+   */
+  raiseToRequiresUser(id: string, tenantId: string, mailDate: Date, at: Date = new Date()): boolean {
+    const now = at.getTime();
+    const result = this.db
+      .prepare<[number, number, string, string, number], unknown>(
+        `UPDATE inbox_items
+            SET bucket = 'requires_user', user_action = NULL, user_action_at = NULL,
+                snooze_until = NULL, snooze_condition = NULL, notify_on_unsnooze = 0,
+                mail_date = ?, classified_at = ?
+          WHERE id = ? AND tenant_id = ?
+            AND NOT (bucket = 'requires_user' AND user_action IS NULL
+                     AND (snooze_until IS NULL OR snooze_until <= ?))`,
+      )
+      .run(mailDate.getTime(), now, id, tenantId, now) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /**
    * v11 thread-walk: all items sharing a thread_key, newest-first.
    *
    * PRD-INBOX-PHASE-3 §"Reading-Pane + Thread API" — `MailProvider.search`
