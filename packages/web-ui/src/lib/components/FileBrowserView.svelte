@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { SaveRefused, shownReason, throwIfRefused } from '../api/save-refusal.js';
 	import { t, tf } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
@@ -30,13 +31,13 @@
 		try {
 			const qs = showHidden ? '&hidden=1' : '';
 			const res = await fetch(`${getApiBase()}/files?path=${encodeURIComponent(path)}${qs}`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { path: string; entries: FileEntry[] };
 			entries = data.entries.sort((a, b) => {
 				if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
 				return a.name.localeCompare(b.name);
 			});
-		} catch { error = t('common.load_failed'); entries = []; }
+		} catch (e) { error = loadFailedText(e); entries = []; }
 		loading = false;
 	}
 

@@ -12,6 +12,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { loadFailedText } from '../load-failed.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
@@ -90,7 +91,7 @@
 			openedFromChat = fromChat;
 			selected = full;
 		} else {
-			addToast(t('common.load_failed'), 'error');
+			addToast(loadFailedText(), 'error');
 		}
 	}
 

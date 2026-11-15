@@ -2,6 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
@@ -104,15 +105,15 @@
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/library?limit=100`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { workflows: SavedWorkflow[]; grantEnabled?: boolean; viewer?: string };
 			workflows = data.workflows;
 			grantEnabled = data.grantEnabled === true;
 			viewer = typeof data.viewer === 'string' ? data.viewer : undefined;
 			loading = false;
 			return true;
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 		return false;
@@ -400,11 +401,11 @@
 			const body = res.ok ? await res.json().catch(() => null) : null;
 			if (generation !== stampGeneration) return false;
 			const preview = parseStampPreview(body);
-			if (!preview) { error = t('common.load_failed'); return false; }
+			if (!preview) { error = loadFailedText(res); return false; }
 			stampPreview = preview;
 			return true;
 		} catch {
-			if (generation === stampGeneration) error = t('common.load_failed');
+			if (generation === stampGeneration) error = loadFailedText();
 		} finally {
 			if (generation === stampGeneration) stampLoading = false;
 		}

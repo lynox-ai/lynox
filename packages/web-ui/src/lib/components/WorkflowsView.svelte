@@ -3,6 +3,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost, formatDuration } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { timeAgo } from '../utils/time.js';
@@ -68,11 +69,11 @@
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/workflows?limit=50`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { runs: PipelineRun[] };
 			runs = data.runs;
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 	}

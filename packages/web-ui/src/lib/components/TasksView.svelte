@@ -2,6 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
@@ -51,11 +52,11 @@
 			// User-TODOs only (`/api/tasks`). Agent-triggers (`/api/triggers`) have
 			// their own home (the Triggers tab) — the v42 split is reflected here.
 			const res = await fetch(`${getApiBase()}/tasks`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { tasks: TaskRecord[] };
 			tasks = data.tasks;
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 	}

@@ -12,6 +12,7 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
+	import { loadFailedText } from '../load-failed.js';
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import BulkRunDetail from './BulkRunDetail.svelte';
@@ -51,15 +52,18 @@
 				fetch(`${getApiBase()}/bulk/runs`),
 				fetch(`${getApiBase()}/merges`),
 			]);
-			// Bulk runs ship off; a 404 here means the feature is off, not a failure.
-			runs = runRes.ok ? ((await runRes.json()) as { runs: BulkRun[] }).runs : [];
+			// Bulk runs ship off; a 404 here means the feature is off, not a failure. Any other
+			// failure keeps the list as it was, as the merges below do.
+			if (runRes.ok) runs = ((await runRes.json()) as { runs: BulkRun[] }).runs;
+			else if (runRes.status === 404) runs = [];
 			// No subject store answers 404: no merges. Any other failure keeps the list as it was
 			// and says so, so an answer read against it is not read against an empty list.
 			if (mergeRes.ok) merges = ((await mergeRes.json()) as { merges: BulkMerge[] }).merges;
 			else if (mergeRes.status === 404) merges = [];
-			if ((!runRes.ok && runRes.status !== 404) || (!mergeRes.ok && mergeRes.status !== 404)) error = t('common.load_failed');
-		} catch {
-			error = t('common.load_failed');
+			const failed = [runRes, mergeRes].find((r) => !r.ok && r.status !== 404);
+			if (failed) error = loadFailedText(failed);
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 	}
@@ -120,6 +124,8 @@
 
 			{#if loading}
 				<p class="text-text-subtle text-sm">{t('common.loading')}</p>
+			{:else if runs.length === 0 && error}
+				<!-- A failed load says only that it failed: "no runs yet" would be read as an answer. -->
 			{:else if runs.length === 0}
 				<p class="text-sm text-text-subtle py-6 text-center">{t('bulk.empty')}</p>
 			{:else}

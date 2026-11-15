@@ -2,6 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -100,7 +101,7 @@
 		if (!quiet) { loading = true; error = ''; }
 		try {
 			const res = await fetch(`${getApiBase()}/triggers`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { triggers: Trigger[]; viewer?: 'owner' | 'mandate' | 'none' };
 			if (load < shownLoad) return;
 			shownLoad = load;
@@ -115,9 +116,9 @@
 			triggers = data.triggers;
 			error = '';
 			loading = false;
-		} catch {
+		} catch (e) {
 			if (quiet) return;
-			if (load > shownLoad) error = t('common.load_failed');
+			if (load > shownLoad) error = loadFailedText(e);
 			loading = false;
 		}
 	}
@@ -155,7 +156,7 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ enabled: nextEnabled }),
 			});
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			await loadTriggers();
 		} catch {
 			addToast(t('common.save_failed'), 'error');
@@ -270,7 +271,7 @@
 		busy[trigger.id] = true;
 		try {
 			const res = await fetch(`${getApiBase()}/tasks/${trigger.id}`, { method: 'DELETE' });
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			await loadTriggers();
 		} catch {
 			addToast(t('common.save_failed'), 'error');
@@ -352,7 +353,7 @@
 		try {
 			const res = await fetch(`${getApiBase()}/triggers/${trigger.id}/takeover-preview`);
 			if (!currentPreview(n, trigger)) return;
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as TakeoverPreview & { refusal: string | null; message?: string };
 			if (!currentPreview(n, trigger)) return;
 			if (data.refusal !== null) {

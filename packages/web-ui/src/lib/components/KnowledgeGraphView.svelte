@@ -5,6 +5,7 @@
 	import { fetchEntityRelations } from '../api/kg-entity.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 
 	interface Entity { id: string; canonicalName: string; entityType: string; aliases: string[]; description: string; mentionCount: number; firstSeenAt: string; lastSeenAt: string; }
 	interface Relation { fromEntityId: string; toEntityId: string; relationType: string; description: string; confidence: number; }
@@ -80,7 +81,7 @@
 			if (query) params.set('q', query);
 			if (typeFilter) params.set('type', typeFilter);
 			const res = await fetch(`${getApiBase()}/kg/entities?${params}`);
-			if (!res.ok) throw new Error(`${res.status}`);
+			ensureOk(res);
 			const data = (await res.json()) as { entities: Entity[] };
 			if (append) {
 				entities = [...entities, ...data.entities];
@@ -88,7 +89,7 @@
 				entities = data.entities;
 			}
 			hasMore = data.entities.length >= PAGE_SIZE;
-		} catch { error = t('common.load_failed'); }
+		} catch (e) { error = loadFailedText(e); }
 		loading = false;
 		loadingMore = false;
 	}
@@ -98,7 +99,7 @@
 		// A failed read must not look like an entity without relations.
 		const loaded = await fetchEntityRelations<Relation>(getApiBase(), e.id);
 		relations = loaded ?? [];
-		if (loaded === null) addToast(t('common.load_failed'), 'error');
+		if (loaded === null) addToast(loadFailedText(), 'error');
 	}
 
 	async function loadGraph() {
@@ -109,7 +110,7 @@
 			// outside the page, so no edges could draw. `/kg/graph` returns edges
 			// with BOTH endpoints present, plus exactly the nodes they touch.
 			const res = await fetch(`${getApiBase()}/kg/graph?limit=80`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { nodes: Entity[]; edges: { fromEntityId: string; toEntityId: string; relationType: string }[] };
 			const ents = data.nodes;
 			const entityIds = new Set(ents.map(e => e.id));
@@ -190,7 +191,7 @@
 
 			graphNodes = nodes;
 			graphEdges = edges;
-		} catch { error = t('common.load_failed'); }
+		} catch (e) { error = loadFailedText(e); }
 		graphLoading = false;
 		graphLoaded = true;   // latch after the attempt (success OR fail) — never re-loop
 	}

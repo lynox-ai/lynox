@@ -2,6 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { getLocale, t, tf } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { apiDeleteNotice } from '../utils/api-delete-notice.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
@@ -75,12 +76,12 @@
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/api-profiles`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { profiles: ApiProfile[]; importWaiting?: ImportWait[] };
 			profiles = data.profiles;
 			importWaiting = data.importWaiting ?? [];
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 	}
