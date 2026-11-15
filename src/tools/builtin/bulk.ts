@@ -78,10 +78,10 @@ export function nothingToApprove(s: BulkRunStatus): boolean {
  *  says which one is gone. */
 export function formatDropped(dropped: readonly BulkDroppedRun[]): string[] {
   if (dropped.length === 0) return [];
-  const runs = dropped.map((d) => `run ${d.id} (${d.targetSystem}, created ${d.createdAt})`).join('; ');
+  const runs = dropped.map((d) => `run ${d.id} (${d.targetSystem}, created ${d.createdAt}${d.replaced ? ', already replaced by a run the user started' : ''})`).join('; ');
   return [`To keep at most ${String(BULK_MAX_PREVIEWED_RUNS)} unapproved plans, recording this one discarded ` +
     `${dropped.length === 1 ? 'an older unapproved plan' : `${String(dropped.length)} older unapproved plans`}: ${runs}. ` +
-    'Nothing of a discarded plan is kept: tell the user which plans are gone, and plan them again if they are still wanted.'];
+    'Nothing of a discarded plan is kept: tell the user which plans are gone, and plan again any that is still wanted and was not replaced.'];
 }
 
 export function formatStatus(s: BulkRunStatus): string {

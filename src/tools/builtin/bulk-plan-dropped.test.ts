@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { bulkPlanTool } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
-import { BulkLedger, BULK_MAX_PREVIEWED_RUNS } from '../../core/bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_MAX_PREVIEWED_RUNS } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
 import type { IAgent } from '../../types/index.js';
@@ -41,12 +41,10 @@ const planList = (): Promise<string> => bulkPlanTool.handler({
   source_list: { path: '/wp-json/wc/v3/products', filters: { category: 12 }, after: { status: 'draft' } },
 } as Parameters<typeof bulkPlanTool.handler>[0], agent());
 
-/** The line naming `id` as dropped, as the answer carries it. */
+/** Whether the answer names `id` as dropped and the run is gone from the ledger. */
 function namedAsDropped(answer: string, id: string): boolean {
-  const s = ledger.listRuns(50).find((r) => r.id === id);
-  // A dropped run is gone from the ledger: its system and time come from the answer itself.
-  expect(s).toBeUndefined();
-  return new RegExp(`discarded [^\\n]*run ${id} \\(`).test(answer);
+  const gone = ledger.listRuns(50).every((r) => r.id !== id);
+  return gone && new RegExp(`discarded [^\\n]*run ${id} \\(`).test(answer);
 }
 
 beforeEach(() => {
@@ -75,7 +73,7 @@ describe('a planning that drops unapproved runs over the cap', () => {
     expect(namedAsDropped(answer, firstId)).toBe(true);
     expect(answer).toContain(
       `To keep at most ${String(BULK_MAX_PREVIEWED_RUNS)} unapproved plans, recording this one discarded an older unapproved plan: ` +
-      `run ${firstId} (workspace, created ${createdAt}). Nothing of a discarded plan is kept: tell the user which plans are gone, and plan them again if they are still wanted.`,
+      `run ${firstId} (workspace, created ${createdAt}). Nothing of a discarded plan is kept: tell the user which plans are gone, and plan again any that is still wanted and was not replaced.`,
     );
     // Only the run dropped is named as one: the new run is the one the status line reports.
     expect(answer.match(/run [0-9a-f-]{36} \(workspace, created /g)).toHaveLength(1);
@@ -102,6 +100,17 @@ describe('a planning that drops unapproved runs over the cap', () => {
       'run old-01 (workspace, created 2000-01-01 00:00:01).');
     expect(namedAsDropped(answer, 'old-01')).toBe(true);
     expect(ledger.listRuns(50)).toHaveLength(BULK_MAX_PREVIEWED_RUNS);
+  });
+
+  it('says of a dropped run already replaced by a started one that it was replaced', async () => {
+    engineDb.getDb().prepare(
+      `INSERT INTO bulk_runs (id, created_at, rule_hash, target_system, undo, phase, halt_reason)
+       VALUES ('replaced-run', '2000-01-01 00:00:00', 'h', 'data_store', 'restorable', 'aborted', ?)`,
+    ).run(BULK_HALT_REASONS.superseded);
+    for (let i = 1; i < BULK_MAX_PREVIEWED_RUNS; i++) await planWorkspace();
+    const answer = await planWorkspace();
+    expect(answer).toContain('discarded an older unapproved plan: run replaced-run (data_store, created 2000-01-01 00:00:00, already replaced by a run the user started).');
+    expect(namedAsDropped(answer, 'replaced-run')).toBe(true);
   });
 
   it('names it from an external plan', async () => {
