@@ -1,0 +1,124 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { bulkPlanTool } from './bulk.js';
+import { EngineDb } from '../../core/engine-db.js';
+import { BulkLedger, BULK_MAX_PREVIEWED_RUNS } from '../../core/bulk-ledger.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
+import type { IAgent } from '../../types/index.js';
+
+/**
+ * A planning over the cap of unapproved runs drops the oldest, and nothing keeps them. Its answer
+ * names each run it dropped — id, system and when it was planned, as bulk_status shows a run — so
+ * the planner can tell the user which plan is gone. A planning that drops nothing says nothing.
+ */
+
+const HOST = 'shop.example.com';
+
+let dir: string;
+let ws: string;
+let engineDb: EngineDb;
+let ledger: BulkLedger;
+
+function agent(): IAgent {
+  return { toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL } as unknown as IAgent;
+}
+
+function runIdOf(result: string): string {
+  const m = /Bulk run ([0-9a-f-]{36})/.exec(result);
+  if (!m) throw new Error(`no run id in: ${result}`);
+  return m[1]!;
+}
+
+const planWorkspace = (): Promise<string> =>
+  bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent());
+const planExternal = (): Promise<string> =>
+  bulkPlanTool.handler({ target_system: 'http', target_host: HOST, source_file: 'src.json' }, agent());
+const planList = (): Promise<string> => bulkPlanTool.handler({
+  target_system: 'http', target_host: HOST,
+  source_list: { path: '/wp-json/wc/v3/products', filters: { category: 12 }, after: { status: 'draft' } },
+} as Parameters<typeof bulkPlanTool.handler>[0], agent());
+
+/** The line naming `id` as dropped, as the answer carries it. */
+function namedAsDropped(answer: string, id: string): boolean {
+  const s = ledger.listRuns(50).find((r) => r.id === id);
+  // A dropped run is gone from the ledger: its system and time come from the answer itself.
+  expect(s).toBeUndefined();
+  return new RegExp(`discarded [^\\n]*run ${id} \\(`).test(answer);
+}
+
+beforeEach(() => {
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-dropped-')));
+  ws = join(dir, 'workspace');
+  mkdirSync(ws);
+  setTenantWorkspace(ws);
+  writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'page.md', after: 'y' }]));
+  writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: `https://${HOST}/products/1`, after: { price: '1' } }]));
+  engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
+  ledger = new BulkLedger(engineDb, null);
+});
+afterEach(() => {
+  clearTenantWorkspace();
+  engineDb.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+describe('a planning that drops unapproved runs over the cap', () => {
+  it('names the run it dropped, with its system and time, and says the plan is gone', async () => {
+    const first = await planWorkspace();
+    const firstId = runIdOf(first);
+    const createdAt = ledger.getStatus(firstId)!.createdAt;
+    for (let i = 1; i < BULK_MAX_PREVIEWED_RUNS; i++) await planWorkspace();
+    const answer = await planWorkspace();
+    expect(namedAsDropped(answer, firstId)).toBe(true);
+    expect(answer).toContain(
+      `To keep at most ${String(BULK_MAX_PREVIEWED_RUNS)} unapproved plans, recording this one discarded an older unapproved plan: ` +
+      `run ${firstId} (workspace, created ${createdAt}). Nothing of a discarded plan is kept: tell the user which plans are gone, and plan them again if they are still wanted.`,
+    );
+    // Only the run dropped is named as one: the new run is the one the status line reports.
+    expect(answer.match(/run [0-9a-f-]{36} \(workspace, created /g)).toHaveLength(1);
+  });
+
+  it('says nothing of dropping while the plans fit under the cap', async () => {
+    for (let i = 0; i < BULK_MAX_PREVIEWED_RUNS; i++) {
+      const answer = await planWorkspace();
+      expect(answer).not.toContain('discarded');
+      expect(answer).not.toContain('Nothing of a discarded plan is kept');
+    }
+    expect(ledger.listRuns(50)).toHaveLength(BULK_MAX_PREVIEWED_RUNS);
+  });
+
+  it('names every run one planning dropped, oldest first', async () => {
+    // One unapproved run more than the cap already waits (planned while the cap was higher): the
+    // next planning drops two. Inserted newest first, so rowid order cannot stand in for time.
+    const insert = engineDb.getDb().prepare(
+      "INSERT INTO bulk_runs (id, created_at, rule_hash, target_system, undo, phase) VALUES (?, ?, 'h', 'workspace', 'restorable', 'previewed')",
+    );
+    for (let i = BULK_MAX_PREVIEWED_RUNS; i >= 0; i--) insert.run(`old-${String(i).padStart(2, '0')}`, `2000-01-01 00:00:${String(i).padStart(2, '0')}`);
+    const answer = await planWorkspace();
+    expect(answer).toContain('discarded 2 older unapproved plans: run old-00 (workspace, created 2000-01-01 00:00:00); ' +
+      'run old-01 (workspace, created 2000-01-01 00:00:01).');
+    expect(namedAsDropped(answer, 'old-01')).toBe(true);
+    expect(ledger.listRuns(50)).toHaveLength(BULK_MAX_PREVIEWED_RUNS);
+  });
+
+  it('names it from an external plan', async () => {
+    const firstId = runIdOf(await planExternal());
+    for (let i = 1; i < BULK_MAX_PREVIEWED_RUNS; i++) expect(await planExternal()).not.toContain('discarded');
+    const answer = await planExternal();
+    expect(answer).toContain('External dry run recorded');
+    expect(namedAsDropped(answer, firstId)).toBe(true);
+    expect(answer).toContain(`run ${firstId} (http:${HOST}, created `);
+  });
+
+  it('names it from a list plan', async () => {
+    const firstId = runIdOf(await planList());
+    for (let i = 1; i < BULK_MAX_PREVIEWED_RUNS; i++) expect(await planList()).not.toContain('discarded');
+    const answer = await planList();
+    expect(answer).toContain('List dry run recorded');
+    expect(namedAsDropped(answer, firstId)).toBe(true);
+    expect(answer).toContain(`run ${firstId} (http:${HOST}, created `);
+  });
+});
