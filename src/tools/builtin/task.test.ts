@@ -731,7 +731,7 @@ describe('Task Tools', () => {
       const t = tm.listTriggers({}).find((x) => x.title === 'Granted notice')!;
       expect(tm.getTrigger(t.id)).toMatchObject({ created_by: 'mandate:setup@example.org', created_mandate_id: 'grant-7' });
       const other: RequestPrincipal = { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' };
-      await taskUpdateTool.handler({ task_id: t.id, priority: 'high' }, makeAgent(undefined, other));
+      await taskUpdateTool.handler({ task_id: t.id, run_at: '2020-01-02T00:00:00.000Z' }, makeAgent(undefined, other));
       expect(tm.getTrigger(t.id)).toMatchObject({ created_mandate_id: 'grant-7', mandate_editor: 'mandate:second@example.org', mandate_editor_id: 'grant-9' });
     });
 
@@ -743,7 +743,7 @@ describe('Task Tools', () => {
     });
 
     it.each([
-      ['a field the owner may change without losing the stamp', { priority: 'high' }],
+      ['a field the owner may change without losing the stamp', { run_at: '2020-01-02T00:00:00.000Z' }],
       ['completion', { status: 'completed' }],
     ])('task_update of %s on an owner-stamped schedule takes the stamp off it, so it is no longer due', async (_label, change) => {
       const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
@@ -773,9 +773,34 @@ describe('Task Tools', () => {
 
     it('control: the owner\'s task_update keeps the stamp, and the schedule stays due', async () => {
       const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
-      await taskUpdateTool.handler({ task_id: t.id, priority: 'high' }, makeAgent());
+      await taskUpdateTool.handler({ task_id: t.id, run_at: '2020-01-02T00:00:00.000Z' }, makeAgent());
       expect(tm.getTrigger(t.id)!.confirmed_at).toBeTruthy();
       expect(due(t.id)).toBe(true);
+    });
+
+    it.each([
+      ['an invalid schedule', { schedule: 'every now and then' }, 'Invalid schedule'],
+      ['an invalid status', { status: 'done' }, 'Invalid status'],
+      ['a run time and a schedule at once', { run_at: '2020-01-02T00:00:00.000Z', schedule: '0 9 * * *' }, 'mutually exclusive'],
+      ['only fields a plan does not carry', { priority: 'high', tags: ['x'] }, 'it has no priority, tags'],
+    ])('task_update by a mandate with %s is refused before the mark: the owner\'s stamp stays and the schedule stays due', async (_label, change, refusal) => {
+      const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
+      const report = await taskUpdateTool.handler({ task_id: t.id, ...change }, makeAgent(undefined, mandate));
+      expect(report).toMatch(/^Error: /);
+      expect(report).toContain(refusal);
+      const after = tm.getTrigger(t.id)!;
+      expect(after.edited_by).toBeFalsy();
+      expect(after.mandate_editor).toBeFalsy();
+      expect(after.confirmed_at).toBe('2026-06-01T00:00:00.000Z');
+      expect(due(t.id)).toBe(true);
+    });
+
+    it('task_update of only fields a plan does not carry tells the owner so, instead of "not found"', async () => {
+      const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
+      const report = await taskUpdateTool.handler({ task_id: t.id, due_date: '2026-12-01' }, makeAgent());
+      expect(report).toBe('Error: This is a scheduled plan, not a to-do: it has no due date. Nothing was changed.');
+      const none = await taskUpdateTool.handler({ task_id: t.id }, makeAgent());
+      expect(none).toBe('Error: This change names no field of a scheduled plan. Nothing was changed.');
     });
 
     it('task_update by a mandate on a schedule in another scope marks nothing', async () => {
