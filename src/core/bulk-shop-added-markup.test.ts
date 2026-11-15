@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, BULK_HALT_REASONS, classifyChange, sameValue } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, classifyChange, diffTarget, sameValue, unchangedFields } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { externalWriter, mintBulkContract, type ExternalClient, type ExternalImage, type ExternalRead } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
@@ -448,5 +448,35 @@ describe('a WooCommerce description keeps today\'s comparison (§21.4, N5)', () 
     await run(id, w);
     expect(w.sent).toEqual([]);
     expect(ledger.getStatus(id)).toMatchObject({ applied: 0, conflicts: 1 });
+  });
+});
+
+describe('diffTarget and unchangedFields: the list compares a run\'s HTML fields as sameValue does', () => {
+  const html = ['description'];
+  const before: BeforeImage = { absent: false, value: { description: '<P>Neu<br/></P>', name: 'a' } };
+
+  it('shows no change for a description only re-serialised, and names it among the fields sent unchanged', () => {
+    expect(diffTarget(before, { description: '<p>Neu<br></p>', name: 'a' }, html)).toEqual({ kind: 'none' });
+    expect(diffTarget(before, { description: '<p>Neu<br></p>', name: 'b' }, html))
+      .toEqual({ kind: 'fields', fields: [{ field: 'name', before: 'a', after: 'b' }] });
+    expect(unchangedFields({ description: '<P>Neu<br/></P>', name: 'a' }, { description: '<p>Neu<br></p>', name: 'b' }, html)).toEqual(['description']);
+  });
+
+  it('compares byte for byte without the field in the run\'s HTML fields, and where sameValue would', () => {
+    const reformatted = { description: '<p>Neu<br></p>', name: 'a' };
+    expect(diffTarget(before, reformatted)).toEqual({ kind: 'fields', fields: [{ field: 'description', before: '<P>Neu<br/></P>', after: '<p>Neu<br></p>' }] });
+    expect(unchangedFields({ description: '<P>Neu<br/></P>', name: 'a' }, reformatted)).toEqual(['name']);
+    // A tag left open at the end is compared byte for byte, as sameValue does.
+    const open: BeforeImage = { absent: false, value: { description: '<p><strong>a</p>' } };
+    expect(diffTarget(open, { description: '<p><strong>a</strong></p>' }, html).kind).toBe('fields');
+    expect(sameValue({ description: '<p><strong>a</p>' }, { description: '<p><strong>a</strong></p>' }, html)).toBe(false);
+  });
+
+  it('keeps a WooCommerce run\'s list byte for byte: its store\'s rewriting is not measured', () => {
+    const id = approvedRun({ description: '<p>Neu<br></p>', name: 'b' }, [{ description: '<P>Neu<br/></P>', name: 'a' }]);
+    expect(ledger.getPreview(id)[0]!.diff).toEqual({ kind: 'fields', fields: [
+      { field: 'description', before: '<P>Neu<br/></P>', after: '<p>Neu<br></p>' },
+      { field: 'name', before: 'a', after: 'b' },
+    ] });
   });
 });

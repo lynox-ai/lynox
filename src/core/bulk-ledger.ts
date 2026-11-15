@@ -986,14 +986,23 @@ export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] 
   if (htmlFields.length === 0 || !isObject(a) || !isObject(b)) return canonicalJson(a) === canonicalJson(b);
   for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
     if (Object.hasOwn(a, k) !== Object.hasOwn(b, k)) return false;
-    const x = a[k];
-    const y = b[k];
-    const same = htmlFields.includes(k) && typeof x === 'string' && typeof y === 'string' && endsClosed(x) && endsClosed(y)
-      && droppedTagsOf(x).length === 0 && droppedTagsOf(y).length === 0
-      ? htmlEqual(x, y) : canonicalJson(x) === canonicalJson(y);
-    if (!same) return false;
+    if (!sameField(k, a[k], b[k], htmlFields)) return false;
   }
   return true;
+}
+
+/** One field of {@link sameValue}: under `htmlEqual` for a run's HTML field where both sides are
+ *  text that ends closed and holds no dropped stretch, otherwise byte for byte over canonical JSON. */
+function sameField(field: string, x: unknown, y: unknown, htmlFields: readonly string[]): boolean {
+  return htmlFields.includes(field) && typeof x === 'string' && typeof y === 'string' && endsClosed(x) && endsClosed(y)
+    && droppedTagsOf(x).length === 0 && droppedTagsOf(y).length === 0
+    ? htmlEqual(x, y) : canonicalJson(x) === canonicalJson(y);
+}
+
+/** The fields of `after` whose value equals the before-image's ({@link sameField}): sent, but
+ *  no change. A description the store only re-serialised counts among them. */
+export function unchangedFields(prior: Record<string, unknown>, after: Record<string, unknown>, htmlFields: readonly string[] = []): string[] {
+  return Object.keys(after).sort().filter((f) => sameField(f, prior[f], after[f], htmlFields));
 }
 
 /** What the rule would do to one target; `htmlFields` compare under `htmlEqual` ({@link sameValue}). */
@@ -1003,8 +1012,10 @@ export function classifyChange(before: BeforeImage, after: unknown, htmlFields: 
 }
 
 /** The diff between a before-image and the planned after-state. Text is diffed by
- *  line; a row (plain object) by field, over the fields the after-state names. */
-export function diffTarget(before: BeforeImage, after: unknown): TargetDiff {
+ *  line; a row (plain object) by field, over the fields the after-state names. A field in
+ *  `htmlFields` compares as {@link sameValue} does: a description the store only re-serialised
+ *  is no changed field. */
+export function diffTarget(before: BeforeImage, after: unknown, htmlFields: readonly string[] = []): TargetDiff {
   const prior = before.absent ? undefined : before.value;
   if (typeof after === 'string' && (prior === undefined || typeof prior === 'string')) {
     const a = prior === undefined ? [] : prior.split('\n');
@@ -1021,7 +1032,7 @@ export function diffTarget(before: BeforeImage, after: unknown): TargetDiff {
     const priorObj = prior !== null && typeof prior === 'object' && !Array.isArray(prior)
       ? prior as Record<string, unknown> : {};
     const fields = Object.keys(after as Record<string, unknown>).sort()
-      .filter((f) => canonicalJson(priorObj[f]) !== canonicalJson((after as Record<string, unknown>)[f]))
+      .filter((f) => !sameField(f, priorObj[f], (after as Record<string, unknown>)[f], htmlFields))
       .map((f) => ({ field: f, before: priorObj[f], after: (after as Record<string, unknown>)[f] }));
     return fields.length === 0 ? { kind: 'none' } : { kind: 'fields', fields };
   }
@@ -1613,6 +1624,9 @@ export class BulkLedger {
     const contextNames = judged ? this.judgeRuleOf(run!).context ?? [] : [];
     // An undo's list is what it restores: the HTML fields of the run its family started from.
     const htmlFields = this.htmlFieldsOf(runId);
+    // The fields the list and the counts compare as HTML, as the run's own classification does
+    // (`comparedAsHtml`): a description the store only re-serialised shows as no change.
+    const compared = this.comparedAsHtml(runId);
     // An undo writes back a state the product held before: the owner's, or for an undo of an undo
     // the text the apply wrote, which its own preview already named. An undo is never approved
     // from a preview, so the line that counts the marks would not show either.
@@ -1625,9 +1639,9 @@ export class BulkLedger {
       const after: unknown = undecided || r.after_planned === null ? null : JSON.parse(this.engineDb.dec(r.after_planned));
       const prior = before !== null && !before.absent ? before.value : null;
       const sentUnchanged = external && prior !== null && typeof prior === 'object' && after !== null && typeof after === 'object'
-        ? Object.keys(after).sort().filter((f) => canonicalJson((prior as Record<string, unknown>)[f]) === canonicalJson((after as Record<string, unknown>)[f]))
+        ? unchangedFields(prior as Record<string, unknown>, after as Record<string, unknown>, compared)
         : undefined;
-      const diff: TargetDiff = before === null || undecided ? { kind: 'none' } : diffTarget(before, after);
+      const diff: TargetDiff = before === null || undecided ? { kind: 'none' } : diffTarget(before, after, compared);
       const markupChanges = r.change === 'update' && after !== null && typeof after === 'object'
         ? htmlFields.flatMap((f) => {
           const next = (after as Record<string, unknown>)[f];
