@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
-import { InboxStateDb, RAISED_REASON_DE } from './state.js';
+import { InboxStateDb } from './state.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import { createInboxClassifierHook, type AccountResolver, type HookQueue } from './watcher-hook.js';
 import { reconcileOutboundReply } from './outbound-reconcile.js';
@@ -603,7 +603,9 @@ describe('a flagged follow-up brings its item back to where the owner sees it', 
   it('marks a raised item with why it is back, until the owner acts on it or snoozes it', async () => {
     const id = seed('auto_handled', 'archived');
     await hook()(ACCOUNT.id, envelope(OTP));
-    expect(inbox.getItem(id)).toMatchObject({ classifierVersion: 'sensitive-follow-up', reasonDe: RAISED_REASON_DE });
+    // The classifier's reason stays: the agent reads it as the first mail's, and the list says why
+    // the item is back from the version alone.
+    expect(inbox.getItem(id)).toMatchObject({ classifierVersion: 'sensitive-follow-up', reasonDe: 'Newsletter' });
     inbox.updateUserAction(id, 'archived');
     expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up:seen');
   });

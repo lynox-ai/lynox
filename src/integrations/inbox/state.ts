@@ -423,8 +423,6 @@ export const MAX_ITEM_BODY_CHARS = 8 * 1024;
  */
 export const RAISED_CLASSIFIER_VERSION = 'sensitive-follow-up';
 export const RAISED_SEEN_CLASSIFIER_VERSION = 'sensitive-follow-up:seen';
-/** The reason a raised item carries; the list says it in the viewer's language (`inbox.raised_reason`). */
-export const RAISED_REASON_DE = 'Wieder hier: Eine neue Nachricht in diesem Verlauf hat vertraulichen Inhalt.';
 
 export class InboxStateDb {
   constructor(private readonly db: Database.Database) {}
@@ -631,17 +629,17 @@ export class InboxStateDb {
   raiseToRequiresUser(id: string, tenantId: string, mailDate: Date, at: Date = new Date()): boolean {
     const now = at.getTime();
     const result = this.db
-      .prepare<[string, number, number, string, string, number], unknown>(
+      .prepare<[number, number, string, string, number], unknown>(
         `UPDATE inbox_items
             SET bucket = 'requires_user', user_action = NULL, user_action_at = NULL,
                 snooze_until = NULL, snooze_condition = NULL, notify_on_unsnooze = 0,
-                classifier_version = '${RAISED_CLASSIFIER_VERSION}', reason_de = ?,
+                classifier_version = '${RAISED_CLASSIFIER_VERSION}',
                 mail_date = ?, classified_at = ?
           WHERE id = ? AND tenant_id = ?
             AND NOT (bucket = 'requires_user' AND user_action IS NULL
                      AND (snooze_until IS NULL OR snooze_until <= ?))`,
       )
-      .run(RAISED_REASON_DE, mailDate.getTime(), now, id, tenantId, now) as { changes: number };
+      .run(mailDate.getTime(), now, id, tenantId, now) as { changes: number };
     return result.changes > 0;
   }
 
