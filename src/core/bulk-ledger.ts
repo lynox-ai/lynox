@@ -593,9 +593,24 @@ export type TargetDiff =
   | { kind: 'text'; from: number; removed: string[]; added: string[] }
   | { kind: 'fields'; fields: { field: string; before: unknown; after: unknown }[] };
 
+/** The most code points a stored target title keeps: Shopify's own limit for a product title. */
+export const BULK_TARGET_TITLE_MAX = 255;
+
+/** A read's title as stored: cut by code point, never inside a character, and NULL stays NULL
+ *  (no empty string is stored for a title the read did not answer). */
+export function bulkTargetTitleCell(title: string | null | undefined): string | null {
+  if (typeof title !== 'string' || title === '') return null;
+  const points = [...title];
+  return points.length > BULK_TARGET_TITLE_MAX ? points.slice(0, BULK_TARGET_TITLE_MAX).join('') : title;
+}
+
 export interface PreviewTarget {
   seq: number;
   key: string;
+  /** A Shopify product target's title as the store answered the preview's read: what the owner
+   *  knows the product by. Absent for an image target, a target read before titles were kept,
+   *  and a product without one. Text, never markup. */
+  title?: string | undefined;
   /** External targets: fields the write sends although their value does not change —
    *  because the source named them, or the provider requires them on every edit. Shown so
    *  an owner does not read them as a mistake; the undo writes them back too. */
@@ -1598,13 +1613,13 @@ export class BulkLedger {
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (((applied_at IS NOT NULL AND found_unsent = 0) OR (applied_at IS NULL AND write_sent = 1 AND undone_at IS NULL)) AND ${WRITING_SQL}) AS written,
          undone_at IS NOT NULL AS undone,
-         shop_added_markup, host_rewrote, context_secret_field, link_domain
+         shop_added_markup, host_rewrote, context_secret_field, link_domain, target_title
        FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
       deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
-      context_secret_field: number | null; link_domain: string | null;
+      context_secret_field: number | null; link_domain: string | null; target_title: string | null;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
@@ -1659,6 +1674,7 @@ export class BulkLedger {
         ...(r.error === 'secret_in_context' && r.context_secret_field !== null && contextNames[r.context_secret_field] !== undefined
           ? { contextField: contextNames[r.context_secret_field]! } : {}),
         ...(r.error === 'new_link_domain' && r.link_domain !== null ? { linkDomain: this.engineDb.dec(r.link_domain) } : {}),
+        ...(r.target_title !== null ? { title: this.engineDb.dec(r.target_title) } : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
@@ -2740,8 +2756,10 @@ export class BulkLedger {
     via: AttachedConnection | null = null,
     /** The after-state the read completed (a Shopify target's seo pair): stored with the image, in one transaction, and classified against. */
     completedAfter?: Readonly<Record<string, unknown>>,
-    /** The title the same read answered, on a run compared in its store's saved form
-     *  ({@link comparedInSavedForm}): classified with, never stored. */
+    /** The title the same read answered: on a run compared in its store's saved form
+     *  ({@link comparedInSavedForm}) classified with, and stored for the owner to see the target
+     *  by (`target_title`, at most {@link BULK_TARGET_TITLE_MAX} code points). Never the plan's
+     *  title and never a model's: only the store's answer to this read comes in here. */
     titleNow?: string | null,
     /** The context C the same read answered (PRD shopify-preset §20.2 item 7): stored beside the
      *  image for the judge, never part of it — not compared, not diffed, not undone. */
@@ -2769,10 +2787,12 @@ export class BulkLedger {
       && sameValue(read.before, shopifySavedForm(after, titleNow), html);
     const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : saved ? 'unchanged' : classifyChange(before, after, html);
     return db.transaction((): boolean => {
-      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ?, context = ? WHERE ${guard}`)
+      const title = bulkTargetTitleCell(titleNow);
+      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ?, context = ?, target_title = ? WHERE ${guard}`)
         .run(
           this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)),
-          context === undefined ? null : this.engineDb.enc(JSON.stringify(context)), runId, seq, runId,
+          context === undefined ? null : this.engineDb.enc(JSON.stringify(context)),
+          title === null ? null : this.engineDb.enc(title), runId, seq, runId,
         ).changes === 1;
       if (stored) this.noteConnection(runId, seq, 'read', via);
       return stored;

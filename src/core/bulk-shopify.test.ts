@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, BULK_HALT_REASONS, type BulkRunForPreview } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_TARGET_TITLE_MAX, bulkTargetTitleCell, type BulkRunForPreview } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { BulkHostBudget, externalClient, externalWriter, graphqlWriteAnswer, parseBulkContract, type ExternalClient, type ExternalRead } from './bulk-external.js';
 import {
@@ -2226,3 +2226,63 @@ describe('a Shopify preview naming SEO text a theme may show as an entity', () =
     expect(t).not.toHaveProperty('seoEntityFields');
   });
 });
+
+// The owner knows a product by its title. The preview keeps the title the store answered its read
+// with, encrypted like the before-image, and the targets route shows it; nothing else writes it.
+describe('a product target\'s title', () => {
+  async function previewed(src: BulkListSource = source()): Promise<string> {
+    const id = startedList(src);
+    await runBulkPreview(id, deps());
+    vi.stubEnv(FLAG, '1');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    return id;
+  }
+  const raw = (id: string): (string | null)[] => (engineDb.getDb()
+    .prepare('SELECT target_title FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(id) as { target_title: string | null }[]).map((r) => r.target_title);
+
+  it('is kept from the store\'s answer to the read, encrypted, and shown on the targets', async () => {
+    fill(3);
+    const id = await previewed();
+    expect(ledger.getPreview(id).map((t) => t.title)).toEqual(['T1', 'T2', 'T3']);
+    // Stored encrypted with the store's key: the row holds no title in clear.
+    const cells = raw(id);
+    expect(cells.every((c) => c !== null && !['T1', 'T2', 'T3'].includes(c))).toBe(true);
+    expect(cells.map((c) => engineDb.dec(c!))).toEqual(['T1', 'T2', 'T3']);
+  });
+
+  it('is the title the store answered, not the one a run that writes the title plans', async () => {
+    fill(2);
+    const id = await previewed(source({ title: 'Neuer Name' }));
+    expect(ledger.getPreview(id).map((t) => t.title)).toEqual(['T1', 'T2']);
+    expect(ledger.getPreview(id).map((t) => (t.after as Record<string, unknown>)['title'])).toEqual(['Neuer Name', 'Neuer Name']);
+  });
+
+  it('stays NULL where the store answered none, and an empty title is not stored either', async () => {
+    fill(2);
+    delete (s.products.get(10) as Record<string, unknown>)['title'];
+    (s.products.get(20) as Record<string, unknown>)['title'] = '';
+    const id = await previewed();
+    expect(raw(id)).toEqual([null, null]);
+    expect(ledger.getPreview(id).map((t) => 'title' in t)).toEqual([false, false]);
+  });
+
+  it('keeps at most 255 code points and never cuts inside a character', () => {
+    expect(BULK_TARGET_TITLE_MAX).toBe(255);
+    const emojiLast = `${'a'.repeat(254)}😀`;
+    expect(bulkTargetTitleCell(emojiLast)).toBe(emojiLast);
+    expect(bulkTargetTitleCell(`${emojiLast}b`)).toBe(emojiLast);
+    expect(bulkTargetTitleCell(`${'a'.repeat(255)}😀`)).toBe('a'.repeat(255));
+    expect(bulkTargetTitleCell(null)).toBeNull();
+    expect(bulkTargetTitleCell(undefined)).toBeNull();
+    expect(bulkTargetTitleCell('')).toBeNull();
+  });
+
+  it('is not part of what the judge reads', () => {
+    const src = readFileSync(join(__dirname, 'bulk-ledger.ts'), 'utf8');
+    const judge = src.slice(src.indexOf('  loadJudgeTarget('), src.indexOf('  loadJudgeTarget(') + 800);
+    expect(judge).toContain('SELECT target_key, before, context FROM bulk_targets');
+    expect(judge).not.toContain('target_title');
+  });
+});
+
