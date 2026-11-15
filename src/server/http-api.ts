@@ -387,11 +387,12 @@ const STOPPED_BY_DELETE: ReadonlySet<string> = new Set(['run_workflow', 'run_age
 
 /**
  * Close the run's own question when its wait failed (the store threw before the question
- * settled). Without it the row stays pending until its TTL, holds the thread's one open
- * question, and no Stop withdraws it any more. Fenced, like the withdraw on abort.
+ * settled). Without it the row stays pending until its TTL and holds the thread's one open
+ * question. Fenced, like the withdraw on abort; false when the write failed too, so the caller
+ * keeps the withdraw on abort as the one way left to close it.
  */
-export function expireFailedWait(store: { expirePrompt(id: string, reason: PromptClosedReason): boolean }, promptId: string): void {
-  try { store.expirePrompt(promptId, 'run_stopped'); } catch { /* the row stays pending until its TTL */ }
+export function expireFailedWait(store: { expirePrompt(id: string, reason: PromptClosedReason): boolean }, promptId: string): boolean {
+  try { store.expirePrompt(promptId, 'run_stopped'); return true; } catch { return false; }
 }
 
 /**
@@ -5313,17 +5314,19 @@ export class LynoxHTTPApi {
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
         let outcome: Awaited<ReturnType<typeof promptStore.waitForSettled>>;
+        let withdrawStays = false;
         try {
           outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
         } catch (err) {
           // The wait failed before the question settled (its first read of the row threw), so the
-          // row is still pending: close it here, or it holds the thread's one open question.
-          expireFailedWait(promptStore, promptId);
+          // row is still pending: close it here. When that write fails too, the withdraw on abort
+          // stays, so a later Stop can still close it.
+          withdrawStays = !expireFailedWait(promptStore, promptId);
           throw err;
         } finally {
           // Also when the wait throws (the store failed): the run no longer waits on this
           // question, so it must not read as parked on it.
-          releaseWithdraw();
+          if (!withdrawStays) releaseWithdraw();
           hasActivePendingPrompt = false;
           resumeWallClock(); // human answered/dismissed — resume the compute budget
         }
@@ -5355,16 +5358,18 @@ export class LynoxHTTPApi {
             res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
           }
           let outcome: Awaited<ReturnType<typeof promptStore.waitForSettled>>;
+          let withdrawStays = false;
           try {
             outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
           } catch (err) {
             // The wait failed before the question settled (its first read of the row threw), so the
-            // row is still pending: close it here, or it holds the thread's one open question.
-            expireFailedWait(promptStore, promptId);
+            // row is still pending: close it here. When that write fails too, the withdraw on abort
+            // stays, so a later Stop can still close it.
+            withdrawStays = !expireFailedWait(promptStore, promptId);
             throw err;
           } finally {
             // As for promptUser: a throwing wait leaves the run unparked.
-            releaseWithdraw();
+            if (!withdrawStays) releaseWithdraw();
             hasActivePendingPrompt = false;
             resumeWallClock(); // human answered/dismissed — resume the compute budget
           }
@@ -5435,16 +5440,18 @@ export class LynoxHTTPApi {
           res.write(`event: secret_prompt\ndata: ${data}\n\n`);
         }
         let row: Awaited<ReturnType<typeof promptStore.waitForAnswer>>;
+        let withdrawStays = false;
         try {
           row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
         } catch (err) {
           // The wait failed before the question settled (its first read of the row threw), so the
-          // row is still pending: close it here, or it holds the thread's one open question.
-          expireFailedWait(promptStore, promptId);
+          // row is still pending: close it here. When that write fails too, the withdraw on abort
+          // stays, so a later Stop can still close it.
+          withdrawStays = !expireFailedWait(promptStore, promptId);
           throw err;
         } finally {
           // As for promptUser: a throwing wait leaves the run unparked.
-          releaseWithdraw();
+          if (!withdrawStays) releaseWithdraw();
           hasActivePendingPrompt = false;
           resumeWallClock(); // human answered/dismissed — resume the compute budget
         }
@@ -5488,16 +5495,18 @@ export class LynoxHTTPApi {
           res.write(`event: mail_connect_prompt\ndata: ${payload}\n\n`);
         }
         let row: Awaited<ReturnType<typeof promptStore.waitForAnswer>>;
+        let withdrawStays = false;
         try {
           row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
         } catch (err) {
           // The wait failed before the question settled (its first read of the row threw), so the
-          // row is still pending: close it here, or it holds the thread's one open question.
-          expireFailedWait(promptStore, promptId);
+          // row is still pending: close it here. When that write fails too, the withdraw on abort
+          // stays, so a later Stop can still close it.
+          withdrawStays = !expireFailedWait(promptStore, promptId);
           throw err;
         } finally {
           // As for promptUser: a throwing wait leaves the run unparked.
-          releaseWithdraw();
+          if (!withdrawStays) releaseWithdraw();
           hasActivePendingPrompt = false;
           resumeWallClock(); // human answered/dismissed — resume the compute budget
         }

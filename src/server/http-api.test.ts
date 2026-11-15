@@ -4153,6 +4153,75 @@ describe('LynoxHTTPApi', () => {
           db.close();
         }
       });
+
+      // When closing the question fails too (the store is still locked), the withdraw on the
+      // tool's abort signal stays: once the store answers again, a Stop closes the question.
+      it(`a ${path} wait whose close fails too keeps the withdraw on abort, which closes the question later`, async () => {
+        repayRateWindow();
+        const sid = `wait-and-close-throw-${path}`;
+        const { db, store } = await promptDb();
+        const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+        const originalGetPromptStore = engineRef.getPromptStore;
+        engineRef.getPromptStore = (): unknown => store;
+        const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+        let ownId: string | undefined;
+        store.waitForSettled = (id: string): Promise<never> => {
+          ownId = id;
+          return Promise.reject(new Error('SQLITE_BUSY: database is locked'));
+        };
+        const realExpire = store.expirePrompt.bind(store);
+        let locked = true;
+        let refusedWrites = 0;
+        store.expirePrompt = (id, reason): boolean => {
+          if (locked) { refusedWrites++; throw new Error('SQLITE_BUSY: database is locked'); }
+          return realExpire(id, reason);
+        };
+        const toolAbort = new AbortController();
+        let finishWork!: () => void;
+        const work = new Promise<void>((r) => { finishWork = r; });
+        let waitError = '';
+        let asked = false;
+        try {
+          mockSessionRun.mockImplementationOnce(async () => {
+            const session = mockSessionInstance as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+            const ask = session[path]!;
+            const meta = { signal: toolAbort.signal };
+            try {
+              if (path === 'promptUser') await ask('Which repo did you mean?', ['lynox', 'other'], meta);
+              else if (path === 'promptTabs') await ask([{ question: 'Which repo?', options: ['lynox', 'other'] }], meta);
+              else if (path === 'promptSecret') await ask('SHOP_TOKEN', 'Paste the shop token', 'api_key', meta);
+              else await ask({ id: 'acc_test', displayName: 'Test', address: 'test@example.com', preset: 'custom' }, meta);
+            } catch (err) {
+              waitError = String(err);
+            }
+            asked = true;
+            await work;
+            return 'done';
+          });
+          mockSessionAbort.mockImplementation(() => { finishWork(); });
+          const runRes = jsonFetch(`/api/sessions/${sid}/run`, {
+            method: 'POST',
+            body: JSON.stringify({ task: 'sort the invoices', protocol: 2 }),
+          }).then((r) => r.text()).catch(() => undefined);
+          for (let i = 0; i < 400 && !asked; i++) await new Promise<void>((r) => setTimeout(r, 5));
+          expect(waitError, 'positive control: the wait threw into the run').toContain('SQLITE_BUSY');
+          expect(refusedWrites, 'positive control: closing the question failed too').toBe(1);
+          expect(store.getById(ownId!)?.status, 'still open after both failed').toBe('pending');
+          locked = false;
+          toolAbort.abort();
+          expect(store.getById(ownId!)?.status).toBe('expired');
+          const abortRes = await jsonFetch(`/api/sessions/${sid}/abort`, { method: 'POST' });
+          await abortRes.text();
+          await expectSlotReclaimed(slots, sid);
+          finishWork();
+          await runRes;
+        } finally {
+          finishWork();
+          mockSessionAbort.mockImplementation(() => undefined);
+          engineRef.getPromptStore = originalGetPromptStore;
+          db.close();
+        }
+      });
     }
 
     /** An in-memory prompt store with the real schema, for runs that share one thread. */
