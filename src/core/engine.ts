@@ -2643,7 +2643,8 @@ export class Engine {
           if (result.success) {
             process.stderr.write(`[lynox] Pre-update backup created: ${result.path}\n`);
           } else {
-            process.stderr.write(`[lynox] Pre-update backup failed: ${result.error ?? 'unknown'}\n`);
+            const { backupFailureDetail } = await import('./backup.js');
+            process.stderr.write(`[lynox] Pre-update backup failed${backupFailureDetail(result.error, 'unknown')}\n`);
           }
         }
 

@@ -6,7 +6,10 @@
  *
  * The census is by FORM, not by data flow: it sees the shapes listed in `rawText` and nothing
  * else (a helper that formats the error first, a body under another name, `const msg = err.message`
- * printed as `msg`, a sink that is not `console` or `process.stderr.write`, `errorText(err, <expression>)`). And it
+ * printed as `msg`, a sink that is not `console` or `process.stderr.write`, `errorText(err, <expression>)`,
+ * a method called on the error text such as `${f.error.slice(0, 200)}`, `+` concatenation, `?:` and
+ * `&&`, an error nested deeper in an object literal or held in an array, `JSON.stringify` of an
+ * object holding the error). And it
  * counts per file: one raw sink removed and another added in the same file passes. The existing sites are frozen per file with their count, NOT judged safe one by one:
  * most write internal state errors (SQLite, init, the file system) on paths that carry no
  * provider answer; the ones judged by hand are named in `JUDGED` (whole files) and
@@ -30,7 +33,7 @@ function sinkKind(call: ts.CallExpression): 'stderr' | 'console' | null {
 }
 
 /**
- * The value under wrappers that pass it on unchanged: parentheses, `!`, `as`, `satisfies`, `<T>`,
+ * The value under wrappers that keep its text: parentheses, `!`, `as`, `satisfies`, `<T>`,
  * and `String(…)`.
  */
 function unwrap(node: ts.Expression): ts.Expression {
@@ -79,8 +82,9 @@ function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean
   if (ts.isIdentifier(node) && BODYISH.test(node.text)) return node.text;
   // A console call formats a whole error object: message and stack, also inside an object literal.
   if (kind === 'console' && topLevelArg && ts.isExpression(node) && errish(node)) return node.getText();
-  if (kind === 'console' && topLevelArg && ts.isObjectLiteralExpression(node)) {
-    for (const p of node.properties) {
+  const literal = kind === 'console' && topLevelArg && ts.isExpression(node) ? unwrap(node) : null;
+  if (literal && ts.isObjectLiteralExpression(literal)) {
+    for (const p of literal.properties) {
       if (ts.isShorthandPropertyAssignment(p) && ERRISH.test(p.name.text)) return node.getText();
       if (ts.isPropertyAssignment(p) && errish(p.initializer)) return node.getText();
     }
@@ -258,10 +262,6 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'DuckDuckGo fallback init failed', count: 1, why: 'a module import, a constructor and a tool registration' },
     { marker: 'context-scoping tool wiring failed', count: 1, why: 'module imports, store constructors over engine.db and tool registration; the ledger prune catches its own' },
     { marker: 'wire snapshot prune failed', count: 1, why: 'a DELETE by capture time' },
-    { marker: '[lynox] Pre-update backup failed', count: 1, why: 'createBackup returns its verification errors (backup-relative paths, sizes, checksums) or the fs, SQLite-backup or encryption error of copying the lynox dir and workspace files: it can name a file path, never a row value; a failed Drive upload inside it is logged on its own line and does not reach result.error' },
-  ],
-  'core/backup.ts': [
-    { marker: 'Google Drive upload failed', count: 1, why: 'the Drive API answer to uploading this instance\'s own encrypted backup files (a status and Google\'s error body), a network or token failure, or a lynox text naming a backup-relative file; no store, run or model text is sent, so none can come back' },
   ],
   'server/http-api.ts': [
     { marker: 'are stored, but what this engine learned about them could not be recorded', count: 1, why: 'saved.reason is a refusal api-store builds from profile ids, vault names, hosts and file names; no error text enters it' },
@@ -317,11 +317,10 @@ it('names a judgement whose sink moved away or multiplied', () => {
 /** Raw sinks per file as of this change. A rise fails (a new sink); a drop asks to lower it here. */
 const FROZEN: Record<string, number> = {
   'core/api-store.ts': 6,
-  'core/backup.ts': 1,
   'core/config.ts': 1,
   'core/crm.ts': 1,
   'core/engine-init.ts': 1,
-  'core/engine.ts': 32,
+  'core/engine.ts': 31,
   'core/knowledge-layer.ts': 8,
   'core/knowledge-store.ts': 2,
   'core/llm-wire-rules.ts': 1,
@@ -400,6 +399,9 @@ it('sees every raw form it claims to see, and lets errorText through', () => {
     "console.error('r', { err });",
     'process.stderr.write(`s ${JSON.stringify(err)}\\n`);',
     "console.warn('t', err as Error);",
+    'process.stderr.write(`v ${(f.error satisfies string)}\\n`);',
+    'process.stderr.write(`w ${<string>f.error}\\n`);',
+    "console.error('x', { err } as const);",
     'process.stderr.write(`u ${note || reason}\\n`);',
     'process.stderr.write(`ok ${f.errorCount}\\n`);',
     "process.stderr.write(`ok ${f['errorCount']}\\n`);",
@@ -411,7 +413,7 @@ it('sees every raw form it claims to see, and lets errorText through', () => {
     "process.stderr.write('ok plain\\n');",
     'process.stderr.write(`ok ${processErrorText(err)}\\n`);',
   ].join('\n');
-  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23']);
+  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26']);
 });
 
 // Parses every source file under src/ with the TypeScript compiler. Under coverage in CI this test
