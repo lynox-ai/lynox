@@ -5,12 +5,7 @@
  * through `errorText` fails here, so none is added silently.
  *
  * The census is by FORM, not by data flow: it sees the shapes listed in `rawText` and nothing
- * else (a helper that formats the error first, a body under another name, `const msg = err.message`
- * printed as `msg`, a sink that is not `console` or `process.stderr.write`, `errorText(err, <expression>)`,
- * a method called on the error text such as `${f.error.slice(0, 200)}`, `+` concatenation, `?:` and
- * `&&`, an error nested deeper in an object literal or held in an array, `JSON.stringify` of an
- * object holding the error). And it
- * counts per file: one raw sink removed and another added in the same file passes. The existing sites are frozen per file with their count, NOT judged safe one by one:
+ * else, and only in calls `sinkKind` names; a shape not listed there passes. And it counts per file: one raw sink removed and another added in the same file passes. The existing sites are frozen per file with their count, NOT judged safe one by one:
  * most write internal state errors (SQLite, init, the file system) on paths that carry no
  * provider answer; the ones judged by hand are named in `JUDGED` (whole files) and
  * `JUDGED_SINKS` (single sinks). Neither exempts anything: the counts still hold, and a judgement
