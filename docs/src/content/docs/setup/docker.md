@@ -113,7 +113,7 @@ Mount `~/.lynox` to keep your data across container restarts:
 
 The compose file mounts `${HOME}/.lynox`, and `${HOME}` is read anew by every `docker compose` command. Run them all as the same user in the same environment. A shell where `HOME` is set differently mounts that other folder, or fails to start if it does not exist. `sudo docker compose …` does the same, and on rootless Docker it also talks to a different daemon.
 
-The container has to be able to write the folder (see the Quick Start). If it restarts in a loop and the log says `cannot create /home/lynox/.lynox/.volume-check: Permission denied` or `/home/lynox/.lynox is not writable`, it is running as someone other than the folder's owner. Stop it and do one of the following:
+The container has to be able to write the folder (see the Quick Start). If it restarts in a loop and the log says `/home/lynox/.lynox belongs to uid … this container runs as uid …`, `ERROR: cannot read the access token file` or `/home/lynox/.lynox is not writable`, it is running as someone other than the folder's owner (older images said `cannot create /home/lynox/.lynox/.volume-check: Permission denied`). Stop it and do one of the following:
 
 - Run the second line of the Quick Start, as shown above.
 - For data that an older setup wrote as uid 1001, leave `LYNOX_UID` unset and keep running as 1001.
