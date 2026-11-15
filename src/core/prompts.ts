@@ -516,6 +516,14 @@ export function withCurrentTimePrefix(
 export const SUBAGENT_NO_WEB_PROMPT_BLOCK = 'In this run you cannot search the web or open web pages: the network settings of this instance do not allow it. Say so in your report. Do not present facts as looked up. If you mention a web address you have not opened, write it as plain text, not as a link, and say that you have not checked it.';
 
 /**
+ * Added after `SUBAGENT_NO_WEB_PROMPT_BLOCK` for a workflow step (named or inline) only. A step is
+ * told to return structured data, and measured with the sentence alone it put an address it never
+ * opened into a Markdown link or a code span, with the "not checked" note on another line; told only
+ * what not to do, it put the note inside the link. An example of the plain form holds better.
+ */
+export const STEP_NO_WEB_STRUCTURED_PROMPT_BLOCK = 'This holds for structured output too: in a table, list or JSON, write such an address as plain text followed by "(not checked)", exactly like this: example.org (not checked). Never put the address inside square brackets, parentheses or backticks.';
+
+/**
  * Grounding & provenance discipline — factored out so EVERY engine agent
  * (main, sub-agents, pipeline steps) shares the same rules (PRD v3, Slice A2).
  *

@@ -20,6 +20,7 @@ import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.js';
+import { withNoWebSentence } from '../core/sub-agent-web.js';
 import { describeTurnUntrusted } from '../core/untrusted-signals.js';
 import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
 import { ConversationGrants } from '../core/conversation-grants.js';
@@ -979,9 +980,11 @@ export async function spawnViaAgent(
     modelPinnedByProfile: pinnedModel !== undefined,
     // A2: ground the named-agent pipeline path too. Prepend the block to the
     // agent definition's prompt (or use it standalone when none is defined).
-    systemPrompt: agentDef.systemPrompt
+    // A step the network settings keep off the web is told so, as a spawned child is
+    // (`withNoWebSentence`).
+    systemPrompt: withNoWebSentence(agentDef.systemPrompt
       ? `${GROUNDING_PROMPT_BLOCK}\n\n${agentDef.systemPrompt}`
-      : GROUNDING_PROMPT_BLOCK,
+      : GROUNDING_PROMPT_BLOCK, tools, parentToolContext, { step: true, ownCodeTools: true }),
     tools,
     thinking,
     // Default 'high' matches agent.ts:271 main-agent default (non-Haiku,
@@ -1370,7 +1373,8 @@ export async function spawnInline(
     changesetManager: parentChangeset,
     model: agentModel,
     modelPinnedByProfile: pinnedModel !== undefined,
-    systemPrompt,
+    // The same sentence for an inline step, read from the tools it is left with.
+    systemPrompt: withNoWebSentence(systemPrompt, tools, parentToolContext, { step: true }),
     tools,
     thinking,
     effort,
