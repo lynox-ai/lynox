@@ -72,8 +72,8 @@ jobs:
       # amd64-only: build with load+tag-for-scan so trivy can read the same
       # layers we ship. arm64's base image surface is platform-identical to
       # amd64's, so the arm64 scan would add zero CVE coverage. The
-      # push-by-digest build below re-uses the gha cache, so this is
-      # essentially free on its second invocation.
+      # push-by-digest build below runs in the same builder and reuses the
+      # layers this step builds, the fresh production stage included.
       - name: Build (load) for trivy scan
         if: matrix.platform == 'linux/amd64'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
@@ -84,6 +84,10 @@ jobs:
           tags: ghcr.io/lynox-ai/lynox:scan-staging
           build-args: |
             BUILD_SHA=${{ github.sha }}
+          # The production stage runs fresh, as in release.yml: its apt-get install then
+          # takes today's Debian versions instead of those of whichever build first wrote
+          # the cached layer. The push build below reuses this builder's layers.
+          no-cache-filters: production
           cache-from: type=gha,scope=staging-${{ matrix.arch_tag }}
           cache-to: type=gha,mode=max,scope=staging-${{ matrix.arch_tag }}
 

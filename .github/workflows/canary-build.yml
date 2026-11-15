@@ -96,7 +96,10 @@ jobs:
           # amd64), and writes none. The repo's gha cache sits at its 10 GB limit,
           # and a canary scope of its own evicts the release and staging layers. The
           # old unscoped read found nothing: a canary rebuilt every stage, whisper
-          # compile and model download included.
+          # compile and model download included. The production stage runs fresh, as
+          # in release.yml, so its apt packages are today's, not those of the cached
+          # staging layer; the other stages still come from the cache.
+          no-cache-filters: production
           cache-from: type=gha,scope=staging-amd64
 
       - name: Scan image for vulnerabilities
