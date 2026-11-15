@@ -100,6 +100,8 @@ const danger = (warning: string): { warning: string; prompt: PromptText } => ({ 
 import type { PromptText } from '../types/index.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
 import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
+import { SYSTEM_PROMPT, lockedTurnPrompt } from './prompts.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { getBetasForProvider } from '../types/index.js';
 import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
@@ -8032,5 +8034,99 @@ describe('a child agent under its parent\'s review', () => {
       manager.cleanup();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// A locked turn (a mandate's) gets a tool's locked definition and guidance, and the prompt with
+// its key-collecting parts swapped (U-185). Chosen per request: the agent an owner's run built
+// is reused by a mandate's run and back, and each turn gets its own texts.
+describe('a locked turn\'s request', () => {
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', mandateId: 'TEST-MANDATE-1' };
+  interface Sent { system: Array<{ text: string }>; tools: Array<{ name?: string; description?: string }>; messages: unknown[] }
+  const sent = (agent: Agent): Sent[] => (agent as unknown as {
+    client: { beta: { messages: { stream: { mock: { calls: unknown[][] } } } } };
+  }).client.beta.messages.stream.mock.calls.map((c) => c[0] as Sent);
+  // On the lock's surface, so a locked turn keeps it.
+  const guided = (): ToolEntry => ({
+    definition: { name: 'ask_secret', description: 'OWNER DESCRIPTION', input_schema: { type: 'object' as const, properties: { name: { type: 'string', description: 'n' } }, additionalProperties: true } },
+    lockedDefinition: { name: 'ask_secret', description: 'LOCKED DESCRIPTION', input_schema: { type: 'object' as const, properties: { name: { type: 'string', description: 'n' } }, additionalProperties: true } },
+    detailedGuidance: 'OWNER GUIDANCE',
+    lockedGuidance: 'LOCKED GUIDANCE',
+    handler: vi.fn().mockResolvedValue('ok'),
+  });
+  const OWNER_PART = SYSTEM_PROMPT.slice(SYSTEM_PROMPT.indexOf('1. Collect credentials ONLY via `ask_secret`.'), SYSTEM_PROMPT.indexOf('Never tabs.') + 'Never tabs.'.length);
+  const agentFor = (principal?: typeof MANDATE): Agent => new Agent({
+    name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [guided()], systemPrompt: SYSTEM_PROMPT,
+    briefing: 'Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup`',
+    ...(principal ? { principal } : {}),
+  });
+
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('sends the locked definition and prompt to a mandate, the owner\'s to the owner', async () => {
+    for (const principal of [undefined, MANDATE] as const) {
+      vi.clearAllMocks();
+      mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+      const agent = agentFor(principal);
+      await agent.send('hi');
+      const req = sent(agent).at(-1)!;
+      const desc = req.tools.find((t) => t.name === 'ask_secret')!.description;
+      const system = req.system.map((b) => b.text).join('');
+      const wire = JSON.stringify(req.messages);
+      if (principal === undefined) {
+        expect(desc).toBe('OWNER DESCRIPTION');
+        expect(system).toBe(SYSTEM_PROMPT);
+        expect(wire).toContain('have them store it with `ask_secret`');
+      } else {
+        expect(desc).toBe('LOCKED DESCRIPTION');
+        expect(system).toBe(lockedTurnPrompt(SYSTEM_PROMPT));
+        expect(system).not.toContain(OWNER_PART);
+        expect(wire).toContain('that the owner of this instance has to store it');
+        expect(wire).not.toContain('have them store it with `ask_secret`');
+      }
+    }
+  });
+
+  it('a thread a mandate starts and the owner continues: each turn its own guidance, the owner\'s byte for byte', async () => {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'ask_secret', input: { name: 'X_KEY' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'))
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_2', name: 'ask_secret', input: { name: 'X_KEY' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Done again'))
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_3', name: 'ask_secret', input: { name: 'X_KEY' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Third'));
+    const agent = agentFor(MANDATE);
+    await agent.send('use it');
+    agent.principal = OWNER_PRINCIPAL;
+    await agent.send('use it again');
+    await agent.send('and once more');
+    const wire = JSON.stringify(agent.getMessages());
+    expect(wire.split(`${TOOL_GUIDANCE_MARKER} ask_secret: LOCKED GUIDANCE`).length - 1).toBe(1);
+    // The owner gets the owner's guidance once, though the mandate's turn already had its own.
+    expect(wire.split(`${TOOL_GUIDANCE_MARKER} ask_secret: OWNER GUIDANCE`).length - 1).toBe(1);
+    // The owner's last request: the owner's definition and the owner's prompt, as if no mandate had been there.
+    const last = sent(agent).at(-1)!;
+    expect(last.tools.find((t) => t.name === 'ask_secret')!.description).toBe('OWNER DESCRIPTION');
+    expect(last.system.map((b) => b.text).join('')).toBe(SYSTEM_PROMPT);
+  });
+
+  it('an empty locked guidance sends none in a locked turn; the owner still gets the owner\'s', async () => {
+    const tool = { ...guided(), lockedGuidance: '' };
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'ask_secret', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], principal: MANDATE });
+    await agent.send('use it');
+    expect(JSON.stringify(agent.getMessages())).not.toContain(TOOL_GUIDANCE_MARKER);
+  });
+
+  it('a tool without a locked guidance gives a locked turn its detailedGuidance, as before', async () => {
+    const { lockedGuidance: _drop, ...tool } = guided();
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'ask_secret', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], principal: MANDATE });
+    await agent.send('use it');
+    expect(JSON.stringify(agent.getMessages())).toContain(`${TOOL_GUIDANCE_MARKER} ask_secret: OWNER GUIDANCE`);
   });
 });

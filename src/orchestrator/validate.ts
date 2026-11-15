@@ -220,9 +220,9 @@ export class AutonomousPipelineViolation extends Error {
  * `isSchedulableWorkflow` (human-in-the-loop.ts), asked by every planning
  * surface and again by the worker when the schedule fires.
  */
-export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: PipelineMode): void {
+export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: PipelineMode, locked = false): void {
   if (mode === 'interactive') return;
-  const issues = findAutonomousViolations(steps);
+  const issues = findAutonomousViolations(steps, locked);
   if (issues.length > 0) throw new AutonomousPipelineViolation(issues);
 }
 
@@ -265,8 +265,11 @@ export function assertDeclaredToolsAreValid(steps: InlinePipelineStep[]): void {
   }
 }
 
-/** Convenience overload that takes a stored PlannedPipeline. */
-export function assertPlannedPipelineIsValid(planned: PlannedPipeline): void {
-  assertPipelineModeIsValid(planned.steps, planned.mode);
+/**
+ * Convenience overload that takes a stored PlannedPipeline. `locked`: the save runs in a locked
+ * turn (`turnIsLocked`), which reads its own text for a step on `ask_secret`.
+ */
+export function assertPlannedPipelineIsValid(planned: PlannedPipeline, locked = false): void {
+  assertPipelineModeIsValid(planned.steps, planned.mode, locked);
   assertDeclaredToolsAreValid(planned.steps);
 }

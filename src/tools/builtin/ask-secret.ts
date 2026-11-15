@@ -40,20 +40,20 @@ const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROMPT_MAX_CHARS = 300;
 
 /**
- * What a mandate's turn gets instead of a dialog. The dialog would send what the person at the
- * screen types to the vault route, which only the owner may write, so the key would leave their
- * hands and be refused. It says who stores keys, what a saved profile does, and where the owner
- * acts on it: the owner sees a release request only when lynox answers in the owner's own chat
- * (`releaseRequestsNote`). It asks for nothing again: the refusal is prompt surface, and a retry
- * instruction here would teach a loop.
+ * What a mandate's turn gets instead of a dialog (U-185). The dialog would send what the person
+ * at the screen types to the vault route, which only the owner may write, so the key would leave
+ * their hands and be refused. One constant, answered before the store is read: it depends on no
+ * name, vault entry, request or profile, and none of the call's input reaches it, so it tells the
+ * model nothing about what the owner stores. It names no place to store the key (a built-in
+ * provider's app goes through the owner's connection form, others do not), claims no step that
+ * was not taken (the owner is told nothing), and asks for nothing again: the refusal is prompt
+ * surface, and a retry instruction here would teach a loop.
  */
 export const MANDATE_SECRET_REFUSAL =
-  'Refused: in this session no key or password is entered. Only the owner of this instance stores keys. ' +
-  'A profile you save here asks the owner to release the keys it reads, and until the owner does, the engine ' +
-  'sends nothing under those keys. Tell the user to ask the owner to do it in a chat of the owner\'s own: ' +
-  'store the key there if it is not stored yet, and, if a profile saved here reads it, ask lynox there to release ' +
-  'it to that profile, naming the key and the profile. Do not ask for the key again, and never ask the user to ' +
-  'paste it into this chat.';
+  'Not collected: in this session no key, token or password is entered, and this call stored nothing and ' +
+  'told the owner nothing. Only the owner of this instance stores keys. Tell the user that the owner of this ' +
+  'instance has to store this key and that they can ask the owner to do it. There is no other way to enter it ' +
+  'here: do not ask the user for the key in this chat in any form. You can go on with the steps that need no key.';
 
 /**
  * A name in the vault that holds a connection's token is used through that connection's API
@@ -119,6 +119,19 @@ function boundPromptText(s: string): string {
     : flat;
 }
 
+/**
+ * The definition a locked turn sends (U-185): the owner's, with the descriptions that offer a
+ * dialog replaced. Name, properties and `required` stay the owner's, so the handler and its input
+ * are the same; `name` and `key_type` keep their texts.
+ */
+const ASK_SECRET_LOCKED_DESCRIPTION =
+  'In this session ask_secret stores nothing and opens no input: it returns how a key gets stored here. ' +
+  'When a step needs a key, token or password, call it instead of asking the user for one.';
+const ASK_SECRET_LOCKED_ACTION =
+  'Optional, default "collect". In this session "collect" stores nothing and returns how a key gets stored here; "list" returns no names.';
+const ASK_SECRET_LOCKED_PROMPT =
+  'What the key is for, in a few words (e.g. "Stripe API key"). Not shown to the user in this session.';
+
 export const askSecretTool: ToolEntry<AskSecretInput> = {
   undo: 'restorable',
   definition: {
@@ -157,6 +170,9 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       required: [],
     },
   },
+  // A locked turn gets no carrier: this guidance orders the steps before the dialog, and a locked
+  // turn opens none.
+  lockedGuidance: '',
   detailedGuidance:
     'For a third-party API/integration credential, first confirm the consuming integration exists — ' +
     'you created/bootstrapped its api_setup profile this turn, or api_setup({action:"list"|"view"}) shows it registered. ' +
@@ -398,3 +414,22 @@ Reply rules — these are instructions for the agent, NOT content for the user:
     }
   },
 };
+
+/** The owner's definition with the three descriptions of a locked turn; nothing else differs. */
+function lockedAskSecretDefinition(owner: ToolEntry['definition']): ToolEntry['definition'] {
+  const schema = owner.input_schema as { properties: Record<string, Record<string, unknown>> } & Record<string, unknown>;
+  const props = schema.properties;
+  return {
+    ...owner,
+    description: ASK_SECRET_LOCKED_DESCRIPTION,
+    input_schema: {
+      ...schema,
+      properties: {
+        ...props,
+        action: { ...props['action'], description: ASK_SECRET_LOCKED_ACTION },
+        prompt: { ...props['prompt'], description: ASK_SECRET_LOCKED_PROMPT },
+      },
+    } as ToolEntry['definition']['input_schema'],
+  };
+}
+askSecretTool.lockedDefinition = lockedAskSecretDefinition(askSecretTool.definition);

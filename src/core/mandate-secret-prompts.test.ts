@@ -86,7 +86,7 @@ describe('mail_connect is withheld from a mandate, kept for the owner', () => {
   });
 });
 
-describe('ask_secret refuses a mandate before any dialog, and asks the owner', () => {
+describe('ask_secret refuses a mandate before any dialog, and says who stores keys', () => {
   it('answers a mandate\'s turn with the refusal, opens no dialog and stores no row', async () => {
     const { agent, promptSecret, rows, call } = promptingAgent(askSecretTool as ToolEntry, MANDATE);
     // It stays offered: the refusal is what tells the model who stores keys.
@@ -158,15 +158,14 @@ describe('ask_secret refuses a mandate before any dialog, and asks the owner', (
     expect(rows()).toEqual([{ prompt_type: 'ask_secret' }]);
   });
 
-  // The refusal is prompt surface: it teaches the model what to do next, so it must not teach a retry.
-  it('says who stores keys and asks for nothing again', () => {
+  // The refusal is prompt surface: it teaches the model what to do next, so it must not teach a
+  // retry, name a place, or claim a step nobody took (U-185, word for word).
+  it('says who stores keys, claims no step and asks for nothing again', () => {
     expect(MANDATE_SECRET_REFUSAL).toBe(
-      'Refused: in this session no key or password is entered. Only the owner of this instance stores keys. ' +
-      'A profile you save here asks the owner to release the keys it reads, and until the owner does, the engine ' +
-      'sends nothing under those keys. Tell the user to ask the owner to do it in a chat of the owner\'s own: ' +
-      'store the key there if it is not stored yet, and, if a profile saved here reads it, ask lynox there to release ' +
-      'it to that profile, naming the key and the profile. Do not ask for the key again, and never ask the user to ' +
-      'paste it into this chat.');
+      'Not collected: in this session no key, token or password is entered, and this call stored nothing and ' +
+      'told the owner nothing. Only the owner of this instance stores keys. Tell the user that the owner of this ' +
+      'instance has to store this key and that they can ask the owner to do it. There is no other way to enter it ' +
+      'here: do not ask the user for the key in this chat in any form. You can go on with the steps that need no key.');
     expect(MANDATE_SECRET_REFUSAL).not.toMatch(/\bretry\b|\btry again\b|corrected name|different name|settings/i);
   });
 });

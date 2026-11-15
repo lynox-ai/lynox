@@ -8,6 +8,7 @@ import { recordSessionCost } from '../../core/session-budget.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import type { PromptText } from '../../types/index.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
@@ -228,7 +229,7 @@ function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, his
 
   // Save-time gate. plan_task is the canonical save path for pipelines today;
   // future Workflows-editor save endpoints should call this gate too.
-  assertPlannedPipelineIsValid(planned);
+  assertPlannedPipelineIsValid(planned, turnIsLocked(by.principal));
 
   // Persist to pipeline_runs FIRST, then the in-memory store. plan_task is
   // decoupled from run (D4) — the returned workflow_id must survive an engine

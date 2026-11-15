@@ -65,7 +65,7 @@ import {
   modelIdentityContext,
   proactiveDeepGuidance,
   providerFamilyLabel,
-  withCurrentTimePrefix, languageOverrideSuffix } from './prompts.js';
+  withCurrentTimePrefix, languageOverrideSuffix, lockedTurnPrompt } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
 import { isFeatureEnabled } from './features.js';
 import { opensLoadedApprovalDraft, stripLoadedContext } from './chat-context.js';
@@ -92,6 +92,7 @@ import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
+import { turnIsLocked } from './mandate-tool-lock.js';
 import { ConversationGrants } from './conversation-grants.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
@@ -1157,7 +1158,10 @@ export class Session {
     const effectivePrompt = (this.agentOverrides.systemPromptSuffix
       ? snapshotBase + this.agentOverrides.systemPromptSuffix
       : snapshotBase) + runIdentityContext + this._proactiveDeepSuffix(runBaseProvider) + currentDateContext();
-    const promptHash = hashPrompt(effectivePrompt);
+    // A locked turn is sent the prompt with its key-collecting parts swapped (`Agent`, U-185):
+    // the hash records that one, the one actually sent.
+    const sentPrompt = turnIsLocked(this._principal) ? lockedTurnPrompt(effectivePrompt) : effectivePrompt;
+    const promptHash = hashPrompt(sentPrompt);
 
     // Record run start
     const runHistory = this.engine.getRunHistory();
@@ -1178,7 +1182,7 @@ export class Session {
           ...(runOptions?.triggerOrigin ? { triggerOrigin: runOptions.triggerOrigin } : {}),
         });
         // Snapshot prompt if this hash is new
-        runHistory.insertPromptSnapshot(promptHash, 'default', effectivePrompt);
+        runHistory.insertPromptSnapshot(promptHash, 'default', sentPrompt);
       } catch {
         this.currentRunId = null;
       }

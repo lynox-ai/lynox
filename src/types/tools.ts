@@ -44,6 +44,13 @@ export interface WarningPayload {
 
 export interface ToolEntry<TInput = unknown> {
   definition: BetaTool;
+  /**
+   * The definition a locked turn (a mandate's, `toolLockFor`) sends instead of `definition`,
+   * for a tool whose own text is written for the owner. The name and the input schema's
+   * properties stay those of `definition`: only descriptions differ, so a call the model makes
+   * reaches the same handler with the same input.
+   */
+  lockedDefinition?: BetaTool | undefined;
   handler:    ToolHandler<TInput>;
   /**
    * When true, the tool handles its own user confirmation via
@@ -183,6 +190,11 @@ export interface ToolEntry<TInput = unknown> {
    * stacks with a later tool-availability classifier.
    */
   detailedGuidance?: string | undefined;
+  /**
+   * The guidance a locked turn gets instead of `detailedGuidance`, for a tool whose guidance is
+   * written for the owner. `''` sends none. Left out, a locked turn gets `detailedGuidance`.
+   */
+  lockedGuidance?: string | undefined;
   /**
    * What reversing this tool's effect takes — the declaration half of the undo
    * contract (PRD bulk-changes-reversible §1.4). A SEPARATE axis from

@@ -4,8 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { apiSetupTool } from './api-setup.js';
-import { ApiStore, type ApiProfile } from '../../core/api-store.js';
+import { apiSetupTool, unnamedValueStep, askableValueStep } from './api-setup.js';
+import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
@@ -1431,5 +1431,123 @@ describe('connect refuses before the link what the route would refuse', () => {
     const owner = await connect(agentWith(ownerStore));
     expect(owner).toContain('It opens ');
     expect(owner).not.toContain('a button that continues to');
+  });
+});
+
+// A locked turn (a mandate's) collects no key with ask_secret, so the four answers that would send
+// it there read their own text (U-185); the owner's turn reads the text it read before.
+describe('connect and fetch_token in a locked turn send the model to no ask_secret', () => {
+  const MANDATE_P = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+  const as = (agent: never, principal: unknown): never => ({ ...(agent as object), principal }) as never;
+  const ownApp = (): ApiProfile => {
+    const p = shopProfile();
+    return { ...p, auth: { ...p.auth!, vault_keys: ['OWN_ID', 'OWN_SECRET'], oauth: { ...p.auth!.oauth!, preset_id: undefined, client_id_key: 'OWN_ID', client_secret_key: 'OWN_SECRET' } } };
+  };
+  const TAG = 'mandate:setup@example.org';
+  /** A mandate's agent whose profile the owner released the client pair to, as in the route tests above. */
+  const releasedTo = (store: ApiStore, secrets: Record<string, string>): never => {
+    const base = agentWith(store, secrets) as unknown as { secretStore: Record<string, unknown>; toolContext: Record<string, unknown> };
+    return {
+      ...base,
+      principal: MANDATE_P,
+      secretStore: { ...base.secretStore, resolve: (n: string) => secrets[n] ?? null, isEnvironmentSecret: () => false },
+      toolContext: {
+        ...base.toolContext,
+        mandateEnds: { isLive: (id: string) => id === 'M-1' },
+        secretReleases: {
+          releaseOf: (id: string, _author: string, name: string) => {
+            const p = store.get(id);
+            const binding = p && ['EXAMPLE_SHOP_CLIENT_ID', 'EXAMPLE_SHOP_CLIENT_SECRET', 'OWN_ID', 'OWN_SECRET', 'SHOP_API_REFRESH_TOKEN'].includes(name) ? releaseBinding(p, name) : null;
+            return binding === null || binding === undefined ? undefined : { binding, mandateId: 'M-1' };
+          },
+          pendingReleases: () => [],
+        },
+      },
+    } as never;
+  };
+  /** The same profile for each turn: the owner's own, and the helper's for the mandate. */
+  const pair = (profile: ApiProfile, secrets: Record<string, string> = {}): { owner: never; locked: never } => {
+    const ownerStore = new ApiStore();
+    ownerStore.register(profile);
+    const mandateStore = new ApiStore();
+    mandateStore.register({ ...profile, created_by: TAG });
+    return { owner: as(agentWith(ownerStore, secrets), OWNER_PRINCIPAL), locked: releasedTo(mandateStore, secrets) };
+  };
+  const both = async (p: { owner: never; locked: never }, run: (a: never) => Promise<string>): Promise<[string, string]> => [await run(p.owner), await run(p.locked)];
+  const fetchToken = (a: never): Promise<string> => apiSetupTool.handler({ action: 'fetch_token', id: 'shop-api' }, a) as Promise<string>;
+  const cases: Array<[string, () => Promise<[string, string]>]> = [
+    ['1 · no ORIGIN, a profile of its own app', async () => {
+      delete process.env['ORIGIN'];
+      return both(pair(ownApp()), (a) => connect(a));
+    }],
+    ['2 · no built-in provider', async () => {
+      const base = shopProfile();
+      return both(pair({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, preset_id: 'not-a-provider' } } }), (a) => connect(a));
+    }],
+    ['4 · the vault has no value', async () => both(pair(shopProfile()), (a) => connect(a))],
+    ['5 · fetch_token, the vault has no value', async () => {
+      const own = ownApp();
+      return both(pair({ ...own, auth: { ...own.auth!, oauth: { ...own.auth!.oauth!, grant_type: 'client_credentials', token_url: 'https://acme.shops.example.com/oauth/token' } } }), fetchToken);
+    }],
+  ];
+  // Word for word: the locked texts are U-185's (connect decided 08.11.); the owner's are today's.
+  const expected: Record<string, readonly [owner: string, locked: string]> = {
+    "1 · no ORIGIN, a profile of its own app": ["Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.", "Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Only the owner of this instance can set it or store the credentials: tell the user so, and use action=fetch_token once the credentials are stored."],
+    "2 · no built-in provider": ["Error: profile \"shop-api\" names no built-in provider, so there is no authorization page to send the user to. Known providers: broken-path, example-shop, lan-shop, vetted-shop. Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.", "Error: profile \"shop-api\" names no built-in provider, so there is no authorization page to send the user to. Known providers: broken-path, example-shop, lan-shop, vetted-shop. Set auth.oauth.preset_id with api_setup update, or use a key instead and tell the user that the owner of this instance has to store it."],
+    "4 · the vault has no value": ["Error: profile \"shop-api\" cannot authorize yet — the vault has no value for EXAMPLE_SHOP_CLIENT_ID and EXAMPLE_SHOP_CLIENT_SECRET. \"EXAMPLE_SHOP_CLIENT_SECRET\" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names \"EXAMPLE_SHOP_CLIENT_SECRET\" as its client secret and may read it. \"EXAMPLE_SHOP_CLIENT_ID\" is the client id of a built-in provider's app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret — not in the chat. Then connect.", "Error: profile \"shop-api\" cannot authorize yet — the vault has no value for EXAMPLE_SHOP_CLIENT_ID and EXAMPLE_SHOP_CLIENT_SECRET. \"EXAMPLE_SHOP_CLIENT_SECRET\" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names \"EXAMPLE_SHOP_CLIENT_SECRET\" as its client secret and may read it. \"EXAMPLE_SHOP_CLIENT_ID\" is the client id of a built-in provider's app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret — not in the chat. Once they are stored, connect."],
+    "5 · fetch_token, the vault has no value": ["Error: vault is missing the OAuth credentials for profile \"shop-api\": \"OWN_ID\", \"OWN_SECRET\". Call `ask_secret` for \"OWN_ID\", \"OWN_SECRET\" first. Then retry fetch_token.", "Error: vault is missing the OAuth credentials for profile \"shop-api\": \"OWN_ID\", \"OWN_SECRET\". The owner of this instance has to store \"OWN_ID\", \"OWN_SECRET\"; tell the user so. Once they are stored, retry fetch_token."],
+  };
+  it.each(cases)("%s: the owner reads today's text, a locked turn its own", async (name, run) => {
+    const [owner, locked] = await run();
+    expect(owner).toBe(expected[name]![0]);
+    expect(locked).toBe(expected[name]![1]);
+  });
+
+  // Two steps no caller reaches with a locked turn today: a check before them answers first. They
+  // decide by the turn themselves, so a locked turn that does arrive is held to its own text here.
+  it('the unnamed-value and askable steps give a locked turn its own text, the owner today\'s', () => {
+    const owner = { principal: OWNER_PRINCIPAL } as never;
+    const locked = { principal: MANDATE_P } as never;
+    expect(unnamedValueStep(owner)).toBe('then collect the value with ask_secret');
+    expect(unnamedValueStep(locked)).toBe('then tell the user that the owner of this instance has to store the value');
+    expect(askableValueStep(owner, ['A', 'B'])).toBe(' Call ask_secret for A and B.');
+    expect(askableValueStep(locked, ['A', 'B'])).toBe(' The owner of this instance has to store A and B; tell the user so.');
+    expect(askableValueStep(owner, [])).toBe('');
+    expect(askableValueStep(locked, [])).toBe('');
+  });
+
+  // The refresh token read from the derived access name: leaving output_secret_name out walks
+  // into the refresh refusal, whose advice sends the owner to ask_secret. A mandate reaches it on
+  // a profile of its own whose connection it made itself (`oauth_grant.connected_by` its tag,
+  // under its live grant): only then is the derived access name its own token, readable to it.
+  it('fetch_token, the refresh token read from the derived access name: the owner reads today\'s text, a locked turn its own', async () => {
+    // An OAuth profile of its own: its refresh slot is filled by hand. On a built-in provider the
+    // slot is filled by the sign-in, and the reply names no ask_secret (the case below).
+    const base = shopProfile();
+    const { preset_id: _p, preset_params: _pp, ...own } = base.auth!.oauth!;
+    const profile: ApiProfile = { ...base, auth: { ...base.auth!, oauth: { ...own, token_url: 'https://acme.shops.example.com/admin/oauth/access_token', refresh_token_key: 'SHOP_API_ACCESS_TOKEN' } } };
+    const secrets = { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE, SHOP_API_ACCESS_TOKEN: 'rt-in-the-access-slot' };
+    const ownerStore = new ApiStore();
+    ownerStore.register(profile);
+    const mandateStore = new ApiStore();
+    mandateStore.register({ ...profile, created_by: TAG, oauth_grant: { origin: 'callback', state: 'connected', connected_by: TAG, connected_mandate_id: 'M-1' } as OAuthGrantRecord });
+    const [owner, locked] = [await fetchToken(as(agentWith(ownerStore, secrets), OWNER_PRINCIPAL)), await fetchToken(releasedTo(mandateStore, secrets))];
+    const clash = 'Error: output_secret_name "SHOP_API_ACCESS_TOKEN" is where this profile keeps its refresh token — the access token would be written over it. Leaving output_secret_name out does not help: this profile reads its refresh token from "SHOP_API_ACCESS_TOKEN", the name its access token needs. Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and ';
+    expect(owner).toBe(`${clash}store the token there with ask_secret.`);
+    expect(locked).toBe(`${clash}tell the user that the owner of this instance has to store the token there.`);
+  });
+
+  it('fetch_token, the refresh token read from the derived access name on a built-in provider: a locked turn reads the owner\'s text, which names no ask_secret', async () => {
+    const base = shopProfile();
+    const profile: ApiProfile = { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'SHOP_API_ACCESS_TOKEN' } } };
+    const secrets = { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE, SHOP_API_ACCESS_TOKEN: 'rt-in-the-access-slot' };
+    const ownerStore = new ApiStore();
+    ownerStore.register(profile);
+    const mandateStore = new ApiStore();
+    mandateStore.register({ ...profile, created_by: TAG, oauth_grant: { origin: 'callback', state: 'connected', connected_by: TAG, connected_mandate_id: 'M-1' } as OAuthGrantRecord });
+    const [owner, locked] = [await fetchToken(as(agentWith(ownerStore, secrets), OWNER_PRINCIPAL)), await fetchToken(releasedTo(mandateStore, secrets))];
+    expect(owner).toContain('Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, call api_setup with action "connect" and id "shop-api"');
+    expect(locked).toBe(owner);
+    expect(locked).not.toContain('ask_secret');
   });
 });

@@ -108,7 +108,8 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
-import { collectVaultKeys, grantTokenNames, isMandateConnection } from './api-store.js';
+import { collectVaultKeys, grantTokenNames, isMandateConnection, lockedTurnBriefing } from './api-store.js';
+import { lockedTurnPrompt } from './prompts.js';
 import { MEMBER_CONNECTION_PREFIX, noteMemberConnection } from './member-connection-notes.js';
 import { boundCtx, memberRefusalCase, memberRefusalOwnerNote, memberRefusalText, slotMayReach, type BindingCtx, type MemberRefusal, type OwnerNote } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
@@ -3217,10 +3218,15 @@ export class Agent implements IAgent {
         const guidanceBlocks: Array<{ type: 'text'; text: string }> = [];
         if (results.length > 0 && !endsTurn) {
           const threadKey = this.currentThreadId ?? '';
+          // A locked turn gets a tool's locked guidance where it has one, and the key says which
+          // was given: an owner who continues the thread after a mandate's turn still gets the
+          // owner's guidance once, and the mandate's turn never the owner's (U-185).
+          const locked = this._toolLock !== null;
           for (const b of toolUses) {
-            const guidance = this.tools.find(t => t.definition.name === b.name)?.detailedGuidance;
+            const entry = this.tools.find(t => t.definition.name === b.name);
+            const guidance = locked && entry?.lockedGuidance !== undefined ? entry.lockedGuidance : entry?.detailedGuidance;
             if (guidance === undefined || guidance === '') continue;
-            const key = `${threadKey}::${b.name}`;
+            const key = `${threadKey}::${b.name}::${locked ? 'locked' : 'open'}`;
             if (this._guidanceInjected.has(key)) continue;
             this._guidanceInjected.add(key);
             guidanceBlocks.push({ type: 'text', text: `${TOOL_GUIDANCE_MARKER} ${b.name}: ${guidance}` });
@@ -3656,9 +3662,12 @@ export class Agent implements IAgent {
       ? []
       : this.tools
           .filter(t => !this._withheldEntry(t))
-          .map(t => (lazyToolsActive && LAZY_DEFERRED_TOOLS.has(t.definition.name)
-            ? { ...t.definition, defer_loading: true }
-            : t.definition));
+          // A locked turn sends a tool's locked definition where it has one: its owner text
+          // sends the model to collect a key there, where none is entered (U-185).
+          .map(t => (this._toolLock !== null && t.lockedDefinition !== undefined ? t.lockedDefinition : t.definition))
+          .map(d => (lazyToolsActive && LAZY_DEFERRED_TOOLS.has(d.name)
+            ? { ...d, defer_loading: true }
+            : d));
     const tenantTools: BetaTool[] = lazyToolsActive
       ? [...mappedTenantTools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
       : mappedTenantTools;
@@ -4066,7 +4075,12 @@ export class Agent implements IAgent {
     const cc = this.isCustomProxy ? undefined
       : { type: 'ephemeral', ttl: AGENT_CACHE_TTL } as unknown as BetaCacheControlEphemeral;
 
-    const staticPrompt = this.systemPrompt ?? `You are ${this.name}, an autonomous AI agent. Think carefully, use tools when needed, and provide clear answers.`;
+    const ownerPrompt = this.systemPrompt ?? `You are ${this.name}, an autonomous AI agent. Think carefully, use tools when needed, and provide clear answers.`;
+    // A locked turn reads the same prompt with the parts that send the model to collect a key
+    // swapped (U-185). Chosen here, per request, like the tool list: the principal is per run,
+    // and an agent built for an owner's run is reused by a mandate's. The locked turn has a prefix
+    // of its own already, since its tool list differs.
+    const staticPrompt = this._toolLock !== null ? lockedTurnPrompt(ownerPrompt) : ownerPrompt;
 
     // The system prompt MUST stay byte-stable across every turn of a thread —
     // it is the head of the cached prefix (tools + system), shared across ALL
@@ -4156,7 +4170,9 @@ export class Agent implements IAgent {
     // mandate reaches no owner secret by name (a `secret:` reference is refused under its lock),
     // so the names and their last characters would only tell it what the owner stores.
     const secrets = this._toolLock === null ? this.secretsBriefing : undefined;
-    const briefing = this.briefing ? (secrets ? `${this.briefing}\n\n${secrets}` : this.briefing) : secrets;
+    // The catalog's step that sends the model to collect a key is swapped in a locked turn too.
+    const base = this.briefing !== undefined && this._toolLock !== null ? lockedTurnBriefing(this.briefing) : this.briefing;
+    const briefing = base ? (secrets ? `${base}\n\n${secrets}` : base) : secrets;
     if (briefing) {
       // The engine's own blocks (an API profile's description) end in a closer that reads as a
       // boundary escape; scanning past them would warn on every turn of every instance with a
