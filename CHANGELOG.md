@@ -4,6 +4,12 @@
 
 ### Upgrade notes
 
+- `docker-compose.yml` and the compose file the installer writes no longer pin
+  `platform: linux/amd64`. ARM and Apple Silicon hosts get the native arm64 image
+  after `docker compose pull && docker compose up -d` instead of the amd64 image
+  under emulation; amd64 hosts are unchanged. A compose file from an earlier
+  release keeps its pin until you remove the line or run the installer again,
+  which rewrites the file.
 - Under `network_policy` `deny-all` or `allow-list` the agent is no longer
   offered the model provider's own web search (Anthropic's server-side
   `web_search`), which runs at the provider rather than through this
