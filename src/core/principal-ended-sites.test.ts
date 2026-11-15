@@ -226,9 +226,25 @@ const NOT_A_GRANT: Readonly<Record<string, string>> = {
 };
 
 /**
- * The calls of the liveness names in one source text that are not inside a function handed to a gate
- * as an argument.
+ * The calls of the liveness names in one source text that are not the whole of a function handed to a
+ * gate as an argument. Only a function that passes its parameters on and does nothing else counts as
+ * handed on: `(m) => ends?.isLive(m) ?? true` decides on its own, and is reported.
  */
+function passesOn(fn: ts.ArrowFunction | ts.FunctionExpression, node: ts.Node): boolean {
+  const body = fn.body;
+  const whole = body === node
+    || (ts.isBlock(body) && body.statements.length === 1 && ts.isReturnStatement(body.statements[0]!) && body.statements[0].expression === node);
+  if (!whole || !ts.isCallExpression(node)) return false;
+  // The store asked is named, `this`, or a field of `this`: `(ends ?? always).isLive(m)` brings a default of its own.
+  const callee = node.expression;
+  const receiver = ts.isPropertyAccessExpression(callee) ? callee.expression : undefined;
+  const named = (e: ts.Expression): boolean => ts.isIdentifier(e) || e.kind === ts.SyntaxKind.ThisKeyword
+    || (ts.isPropertyAccessExpression(e) && e.expression.kind === ts.SyntaxKind.ThisKeyword);
+  if (receiver !== undefined && !named(receiver)) return false;
+  const params = fn.parameters.map((p) => p.name.getText());
+  return node.arguments.length === params.length && node.arguments.every((arg, i) => ts.isIdentifier(arg) && arg.text === params[i]);
+}
+
 function directLiveness(file: string, text: string): string[] {
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   const found: string[] = [];
@@ -236,7 +252,8 @@ function directLiveness(file: string, text: string): string[] {
     for (let a: ts.Node | undefined = node.parent; a !== undefined && !ts.isSourceFile(a); a = a.parent) {
       if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) {
         const call = a.parent;
-        return ts.isCallExpression(call) && call.arguments.includes(a) && ts.isIdentifier(call.expression) && Object.hasOwn(GATES, call.expression.text);
+        const toGate = ts.isCallExpression(call) && call.arguments.includes(a) && ts.isIdentifier(call.expression) && Object.hasOwn(GATES, call.expression.text);
+        return toGate && passesOn(a, node);
       }
       if (ts.isFunctionDeclaration(a) || ts.isMethodDeclaration(a) || ts.isGetAccessor(a)) return false;
     }
@@ -436,7 +453,9 @@ describe('every call that asks whether an access has ended', () => {
     const direct = directLivenessInTree();
     const unnamed = direct.filter((k) => !Object.hasOwn(NOT_A_GRANT, k));
     const gone = Object.keys(NOT_A_GRANT).filter((k) => !direct.includes(k));
-    expect({ unnamed, gone }).toEqual({ unnamed: [], gone: [] });
+    // A second call under a listed name is a call the list has not looked at.
+    const twice = direct.filter((k, i) => direct.indexOf(k) !== i);
+    expect({ unnamed, gone, twice }).toEqual({ unnamed: [], gone: [], twice: [] });
   });
 });
 
@@ -484,7 +503,7 @@ describe('the scan the list is held against', () => {
     });
   });
 
-  it('finds a store of ends asked outside a gate, and not one asked inside a function handed to a gate', () => {
+  it('finds a store of ends asked outside a gate, or by a function handed to a gate that does more than pass it on', () => {
     const text = [
       'const a = grantHasEnded(id, (m) => ends.isLive(m));',
       `const b = ${PREDICATE}(p, function (m) { return this._mandateLive(m); });`,
@@ -492,12 +511,23 @@ describe('the scan the list is held against', () => {
       'const adapter = (id) => store.isMandateLive(id);',
       `const c = ${PREDICATE}(p, (m) => helper(() => ends.isLive(m)));`,
       'isLive(x);',
+      'const d = grantHasEnded(id, (m) => ends?.isLive(m) ?? true);',
+      'const e = grantHasEnded(id, (m) => ends.isLive(m) || owner);',
+      'const f = grantHasEnded(id, (m) => ends.isLive(other));',
+      'const g = grantHasEnded(id, (m) => { log(m); return ends.isLive(m); });',
+      'const h = grantHasEnded(id, (m) => (ends ?? always).isLive(m));',
+      'const i = grantHasEnded(id, (m) => this.ends.isLive(m));',
     ].join('\n');
     expect(directLiveness('src/z.ts', text)).toEqual([
       'src/z.ts · decide · ends?.isLive',
       'src/z.ts · adapter · store.isMandateLive',
       'src/z.ts · (top level) · ends.isLive',
       'src/z.ts · (top level) · isLive',
+      'src/z.ts · (top level) · ends?.isLive',
+      'src/z.ts · (top level) · ends.isLive',
+      'src/z.ts · (top level) · ends.isLive',
+      'src/z.ts · (top level) · ends.isLive',
+      'src/z.ts · (top level) · (ends??always).isLive',
     ]);
   });
 
