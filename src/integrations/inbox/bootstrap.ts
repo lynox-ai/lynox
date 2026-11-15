@@ -348,6 +348,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const notifier = opts.notificationRouter
     ? createInboxNotifier({
         router: opts.notificationRouter,
+        language: opts.language,
         isEnabled: () => state.getSetting('push.inbox_enabled', 'true') !== 'false',
         perMinute: () => parseIntSetting(state.getSetting('push.per_minute'), 1),
         perHour: () => parseIntSetting(state.getSetting('push.per_hour'), 10),

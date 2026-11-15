@@ -199,6 +199,22 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(JSON.parse(reopened.payloadJson)).toEqual({ trigger: 'inbound_mail', message_id: '<follow@x>' });
   });
 
+  it('tells the notifier when the follow-up that opens the item is flagged, and not otherwise', async () => {
+    seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: false });
+
+    mail.close();
+    mail = new MailStateDb({ path: ':memory:' });
+    mail.upsertAccount(ACCOUNT);
+    inbox = new InboxStateDb(mail.getConnection());
+    notifyNewItem.mockClear();
+    seedReplied();
+    await hook()(ACCOUNT.id, envelope({ subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' }));
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: true });
+  });
+
   it('notifies for a reopened requires_user item, not for another bucket', async () => {
     seedReplied();
     await hook()(ACCOUNT.id, envelope());
