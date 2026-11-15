@@ -1624,7 +1624,7 @@ export class BulkLedger {
     const contextNames = judged ? this.judgeRuleOf(run!).context ?? [] : [];
     // An undo's list is what it restores: the HTML fields of the run its family started from.
     const htmlFields = this.htmlFieldsOf(runId);
-    // The fields the list and the counts compare as HTML, as the run's own classification does
+    // The fields each target's diff and its sent-unchanged fields compare as HTML, as the run's own classification does
     // (`comparedAsHtml`): a description the store only re-serialised shows as no change.
     const compared = this.comparedAsHtml(runId);
     // An undo writes back a state the product held before: the owner's, or for an undo of an undo
