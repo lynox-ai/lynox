@@ -559,6 +559,43 @@ describe('a flagged follow-up brings its item back to where the owner sees it', 
     });
   });
 
+  it('raises once when two flagged messages arrive together, while one waits on its automatic-reply check', async () => {
+    const id = seed('auto_handled');
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const confirm = vi.fn(async () => { await gate; return false; });
+    const graph = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: { resolve: (a: string) => (a === ACCOUNT.id ? { address: ACCOUNT.address, displayName: ACCOUNT.displayName, authType: 'oauth_microsoft' as const } : null) },
+      confirmAutoReply: confirm,
+    });
+    const first = graph(ACCOUNT.id, envelope({ ...OTP, messageId: '<a@x>' }));
+    const second = graph(ACCOUNT.id, envelope({ ...OTP, messageId: '<b@x>' }));
+    release();
+    await Promise.all([first, second]);
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(raises(id)).toHaveLength(1);
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(open()).toEqual([id]);
+  });
+
+  it('an undo of a bulk action does not put a raised item back out of view', async () => {
+    const id = seed('auto_handled', 'archived');
+    inbox.insertBulkActionLog({ bulkId: 'b1', itemId: id, priorUserAction: 'archived', priorUserActionAt: new Date('2026-11-03T09:00:00Z'), action: 'archived' });
+    await hook()(ACCOUNT.id, envelope(OTP));
+    expect(inbox.undoBulkAction('b1')).toBe(1);
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    expect(open()).toEqual([id]);
+  });
+
+  it('an undo still puts back an item the bulk action left as it was (control)', () => {
+    const id = seed('auto_handled', 'replied');
+    inbox.insertBulkActionLog({ bulkId: 'b2', itemId: id, priorUserAction: 'replied', priorUserActionAt: new Date('2026-11-03T09:00:00Z'), action: 'archived' });
+    inbox.updateUserAction(id, 'archived', new Date());
+    expect(inbox.undoBulkAction('b2')).toBe(1);
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
+  });
+
   it('does not raise for our own mail coming back into the thread, or for a message older than the owner\'s action', async () => {
     const id = seed('auto_handled', 'archived');
     await hook()(ACCOUNT.id, envelope({ ...OTP, from: [{ address: ACCOUNT.address, name: 'Me' }], messageId: '<own@x>' }));

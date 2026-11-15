@@ -1027,8 +1027,8 @@ export class InboxStateDb {
   ): number {
     const earliest = now.getTime() - withinMs;
     const rows = this.db
-      .prepare<[string, number], { id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null }>(
-        `SELECT id, item_id, prior_user_action, prior_user_action_at
+      .prepare<[string, number], { id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null; action: string }>(
+        `SELECT id, item_id, prior_user_action, prior_user_action_at, action
          FROM inbox_user_action_log
          WHERE bulk_id = ? AND undone_at IS NULL AND performed_at >= ?`,
       )
@@ -1038,8 +1038,10 @@ export class InboxStateDb {
     const flipUndone = this.db.prepare(
       `UPDATE inbox_user_action_log SET undone_at = ? WHERE id = ?`,
     );
+    // Only an item still as the bulk action left it: one that changed since (a flagged message
+    // brought it back to "requires you") is not put back out of view.
     const restoreAction = this.db.prepare(
-      `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ?`,
+      `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ? AND user_action IS ?`,
     );
     const txn = this.db.transaction(() => {
       for (const row of rows) {
@@ -1048,6 +1050,7 @@ export class InboxStateDb {
           row.prior_user_action,
           row.prior_user_action_at,
           row.item_id,
+          row.action,
         );
       }
     });

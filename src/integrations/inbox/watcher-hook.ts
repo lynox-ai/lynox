@@ -138,6 +138,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     env: MailEnvelope,
     mode: SensitiveMode,
     account: { address: string; authType?: MailAuthType | undefined },
+    wokeForThis: boolean,
   ): Promise<void> => {
     const messageId = env.messageId;
     if (messageId === undefined || messageId.length === 0) return;
@@ -197,12 +198,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // bucket, user action or snooze, as a flagged first mail lands there: no classifier verdict, no
     // rule and no earlier "done" keeps it out of the owner's view. An automatic reply counts too,
     // since a flagged first mail is not let through for being one.
-    // Decided on the item as it was before this mail: the hook may have woken a snoozed item for it
-    // already (`unsnooze_on_reply`), which makes it look open now. An item that was open in
-    // "requires you" stays as it is, so a second flagged message writes and pushes nothing.
-    const openBefore = existing.bucket === 'requires_user' && existing.userAction === undefined
-      && !(existing.snoozeUntil !== undefined && existing.snoozeUntil.getTime() > Date.now());
-    const raises = sensitive.isSensitive && !own && !beforeUserAction && !openBefore;
+    const raises = sensitive.isSensitive && !own && !beforeUserAction;
     // Otherwise only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
     // An unknown answer reopens (see `confirmAutoReply`): only a known automatic reply does not.
     const opens = existing.userAction === 'replied' && autoReply !== true && !own && !beforeUserAction;
@@ -210,7 +206,14 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     const itemCategories = opts.state.sensitiveCategoriesAtIngest(existing);
     const outcome = opts.state.runInTransaction((): 'raised' | 'reopened' | 'none' => {
       opts.state.insertThreadMessage(input);
-      if (raises) {
+      // Decided on the row as it is now, inside the write, so two flagged messages arriving together
+      // raise it once. An item open in "requires you" stays as it is, unless this mail woke it from
+      // a snooze a moment ago (`unsnooze_on_reply` above): then it was out of view before.
+      const current = raises ? opts.state.getItem(existing.id, existing.tenantId) : undefined;
+      const openNow = current !== undefined && current !== null && current.bucket === 'requires_user'
+        && current.userAction === undefined
+        && !(current.snoozeUntil !== undefined && current.snoozeUntil.getTime() > Date.now());
+      if (raises && (!openNow || wokeForThis)) {
         opts.state.raiseToRequiresUser(existing.id, existing.tenantId, fields.mailDate ?? new Date());
         opts.state.appendAudit({
           tenantId: existing.tenantId,
@@ -297,7 +300,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           });
         });
       }
-      await recordFollowUp(existing, env, sensitiveMode, account);
+      await recordFollowUp(existing, env, sensitiveMode, account, stillSnoozed && existing.unsnoozeOnReply);
       return 'duplicate';
     }
 
