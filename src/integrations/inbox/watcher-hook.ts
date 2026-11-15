@@ -230,6 +230,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
             trigger: 'inbound_mail',
             message_id: messageId,
             prior_bucket: existing.bucket,
+            prior_classifier_version: existing.classifierVersion,
+            prior_reason_de: existing.reasonDe,
             prior_user_action: existing.userAction ?? null,
             prior_snooze_until: existing.snoozeUntil?.toISOString() ?? null,
             prior_sensitive_categories: itemCategories,

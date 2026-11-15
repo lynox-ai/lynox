@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
-import { InboxStateDb } from './state.js';
+import { InboxStateDb, RAISED_REASON_DE } from './state.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import { createInboxClassifierHook, type AccountResolver, type HookQueue } from './watcher-hook.js';
 import { reconcileOutboundReply } from './outbound-reconcile.js';
@@ -552,6 +552,8 @@ describe('a flagged follow-up brings its item back to where the owner sees it', 
       trigger: 'inbound_mail',
       message_id: '<follow@x>',
       prior_bucket: 'auto_handled',
+      prior_classifier_version: 'v1',
+      prior_reason_de: 'Newsletter',
       prior_user_action: 'archived',
       prior_snooze_until: until.toISOString(),
       prior_sensitive_categories: ['iban'],
@@ -596,6 +598,33 @@ describe('a flagged follow-up brings its item back to where the owner sees it', 
     expect(raises(id)).toHaveLength(1);
     expect(notifyNewItem).toHaveBeenCalledTimes(1);
     expect(open()).toEqual([id]);
+  });
+
+  it('marks a raised item with why it is back, until the owner acts on it or snoozes it', async () => {
+    const id = seed('auto_handled', 'archived');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    expect(inbox.getItem(id)).toMatchObject({ classifierVersion: 'sensitive-follow-up', reasonDe: RAISED_REASON_DE });
+    inbox.updateUserAction(id, 'archived');
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up:seen');
+  });
+
+  it('ends the mark on a snooze too, and a later plain reopen does not bring it back', async () => {
+    const id = seed('auto_handled', 'archived');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    inbox.setSnooze(id, new Date(Date.now() + 60_000), null);
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up:seen');
+    inbox.setSnooze(id, null, null);
+    inbox.updateUserAction(id, 'replied', new Date('2026-11-04T10:00:00Z'));
+    await hook()(ACCOUNT.id, envelope({ messageId: '<plain@x>', date: new Date('2026-11-05T10:00:00Z') }));
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up:seen');
+  });
+
+  it('keeps the mark when an owner action is cleared rather than set', async () => {
+    const id = seed('auto_handled', 'archived');
+    await hook()(ACCOUNT.id, envelope(OTP));
+    inbox.updateUserAction(id, null);
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up');
   });
 
   it('an undo of a bulk action does not put a raised item back out of view', async () => {

@@ -416,6 +416,16 @@ const MAX_LIST_LIMIT = 500;
  */
 export const MAX_ITEM_BODY_CHARS = 8 * 1024;
 
+/**
+ * The classifier version of an item a flagged follow-up raised to "requires you"
+ * (`raiseToRequiresUser`): the list shows why it is back while it has this value. The owner's next
+ * action or snooze turns it into {@link RAISED_SEEN_CLASSIFIER_VERSION}.
+ */
+export const RAISED_CLASSIFIER_VERSION = 'sensitive-follow-up';
+export const RAISED_SEEN_CLASSIFIER_VERSION = 'sensitive-follow-up:seen';
+/** The reason a raised item carries; the list says it in the viewer's language (`inbox.raised_reason`). */
+export const RAISED_REASON_DE = 'Wieder hier: Eine neue Nachricht in diesem Verlauf hat vertraulichen Inhalt.';
+
 export class InboxStateDb {
   constructor(private readonly db: Database.Database) {}
 
@@ -621,16 +631,17 @@ export class InboxStateDb {
   raiseToRequiresUser(id: string, tenantId: string, mailDate: Date, at: Date = new Date()): boolean {
     const now = at.getTime();
     const result = this.db
-      .prepare<[number, number, string, string, number], unknown>(
+      .prepare<[string, number, number, string, string, number], unknown>(
         `UPDATE inbox_items
             SET bucket = 'requires_user', user_action = NULL, user_action_at = NULL,
                 snooze_until = NULL, snooze_condition = NULL, notify_on_unsnooze = 0,
+                classifier_version = '${RAISED_CLASSIFIER_VERSION}', reason_de = ?,
                 mail_date = ?, classified_at = ?
           WHERE id = ? AND tenant_id = ?
             AND NOT (bucket = 'requires_user' AND user_action IS NULL
                      AND (snooze_until IS NULL OR snooze_until <= ?))`,
       )
-      .run(mailDate.getTime(), now, id, tenantId, now) as { changes: number };
+      .run(RAISED_REASON_DE, mailDate.getTime(), now, id, tenantId, now) as { changes: number };
     return result.changes > 0;
   }
 
@@ -1020,11 +1031,19 @@ export class InboxStateDb {
    * older than `now - withinMs` are NOT reverted; callers surface this
    * as 410 Gone to the UI.
    */
-  undoBulkAction(
+  undoBulkAction(bulkId: string, now: Date = new Date(), withinMs: number = 60_000): number {
+    return this.undoBulkActionCounted(bulkId, now, withinMs).total;
+  }
+
+  /**
+   * {@link undoBulkAction} with what it did: `total` log rows taken, `reverted` items put back,
+   * `skipped` items left as they are because they changed since the bulk action.
+   */
+  undoBulkActionCounted(
     bulkId: string,
     now: Date = new Date(),
     withinMs: number = 60_000,
-  ): number {
+  ): { total: number; reverted: number; skipped: number } {
     const earliest = now.getTime() - withinMs;
     const rows = this.db
       .prepare<[string, number], { id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null; action: string }>(
@@ -1033,7 +1052,7 @@ export class InboxStateDb {
          WHERE bulk_id = ? AND undone_at IS NULL AND performed_at >= ?`,
       )
       .all(bulkId, earliest);
-    if (rows.length === 0) return 0;
+    if (rows.length === 0) return { total: 0, reverted: 0, skipped: 0 };
     const undoMs = now.getTime();
     const flipUndone = this.db.prepare(
       `UPDATE inbox_user_action_log SET undone_at = ? WHERE id = ?`,
@@ -1043,19 +1062,21 @@ export class InboxStateDb {
     const restoreAction = this.db.prepare(
       `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ? AND user_action IS ?`,
     );
+    let reverted = 0;
     const txn = this.db.transaction(() => {
       for (const row of rows) {
         flipUndone.run(undoMs, row.id);
-        restoreAction.run(
+        const r = restoreAction.run(
           row.prior_user_action,
           row.prior_user_action_at,
           row.item_id,
           row.action,
-        );
+        ) as { changes: number };
+        reverted += r.changes;
       }
     });
     txn();
-    return rows.length;
+    return { total: rows.length, reverted, skipped: rows.length - reverted };
   }
 
   /**
@@ -1114,10 +1135,14 @@ export class InboxStateDb {
     tenantId: string = DEFAULT_TENANT_ID,
   ): boolean {
     const result = this.db
-      .prepare<[string | null, number | null, string, string], unknown>(
-        `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ? AND tenant_id = ?`,
+      .prepare<[string | null, number | null, string | null, string, string], unknown>(
+        // The owner's next action ends the "back here" of a raised item (`RAISED_CLASSIFIER_VERSION`).
+        `UPDATE inbox_items SET user_action = ?, user_action_at = ?,
+           classifier_version = CASE WHEN ? IS NOT NULL AND classifier_version = '${RAISED_CLASSIFIER_VERSION}'
+             THEN '${RAISED_SEEN_CLASSIFIER_VERSION}' ELSE classifier_version END
+         WHERE id = ? AND tenant_id = ?`,
       )
-      .run(action, action === null ? null : (at ?? new Date()).getTime(), id, tenantId) as { changes: number };
+      .run(action, action === null ? null : (at ?? new Date()).getTime(), action, id, tenantId) as { changes: number };
     return result.changes > 0;
   }
 
@@ -1157,7 +1182,9 @@ export class InboxStateDb {
     const result = this.db
       .prepare<[number, string | null, number, number, string, string], unknown>(
         `UPDATE inbox_items
-         SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?, notify_on_unsnooze = ?
+         SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?, notify_on_unsnooze = ?,
+             classifier_version = CASE WHEN classifier_version = '${RAISED_CLASSIFIER_VERSION}'
+               THEN '${RAISED_SEEN_CLASSIFIER_VERSION}' ELSE classifier_version END
          WHERE id = ? AND tenant_id = ?`,
       )
       .run(
