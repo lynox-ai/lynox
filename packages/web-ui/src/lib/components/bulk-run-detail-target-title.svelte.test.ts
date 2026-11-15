@@ -3,9 +3,11 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
+import { t, setLocale, getLocale } from '../i18n.svelte.js';
 
 // A Shopify product target is named by the title the store answered the preview's read with,
-// set as text, with the link into the admin below it. Without a title the link stands alone.
+// set as text, with the link into the admin below it. Without a title the link stands alone and
+// names the product by its number, the only thing that tells it apart then.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -76,11 +78,11 @@ const titles = (): string[] => [...target.querySelectorAll('[data-testid="bulk-t
 const links = (): HTMLAnchorElement[] => [...target.querySelectorAll<HTMLAnchorElement>('[data-testid="bulk-target-admin"]')];
 
 describe('a product target in the preview', () => {
-	it('is named by its title, with the admin link below it', async () => {
+	it('is named by its title, with a link below it that opens it in Shopify', async () => {
 		targets = [seo(1, 'Bio-Tee Rooibos'), seo(2, 'Grüntee Sencha')];
 		await render();
 		expect(titles()).toEqual(['Bio-Tee Rooibos', 'Grüntee Sencha']);
-		expect(links().map((a) => a.textContent)).toEqual(['Produkt 1↗', 'Produkt 2↗']);
+		expect(links().map((a) => a.textContent)).toEqual(['In Shopify öffnen↗', 'In Shopify öffnen↗']);
 		expect(links()[0]!.getAttribute('href')).toBe(`https://${HOST}/admin/products/1`);
 		const title = target.querySelector('[data-testid="bulk-target-title"]')!;
 		expect(title.compareDocumentPosition(links()[0]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -99,5 +101,19 @@ describe('a product target in the preview', () => {
 		await render();
 		expect(titles()).toEqual([]);
 		expect(links().map((a) => a.textContent)).toEqual(['Produkt 1↗', 'Produkt 2↗']);
+	});
+});
+
+describe('the link below a product\'s title', () => {
+	it('is "In Shopify öffnen" in German and "Open in Shopify" in English', () => {
+		const before = getLocale();
+		try {
+			setLocale('de');
+			expect(t('bulk.target.open_in_shop')).toBe('In Shopify öffnen');
+			setLocale('en');
+			expect(t('bulk.target.open_in_shop')).toBe('Open in Shopify');
+		} finally {
+			setLocale(before);
+		}
 	});
 });

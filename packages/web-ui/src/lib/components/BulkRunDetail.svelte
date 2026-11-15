@@ -466,7 +466,7 @@
 		<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
 	{:else if target.title}
 		<span class="block text-sm break-words" data-testid="bulk-target-title">{bulkVisibleText(target.title)}</span>
-		<a class="text-xs text-text-muted underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{tf('bulk.target.product', { n: name.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
+		<a class="text-xs text-text-muted underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{t('bulk.target.open_in_shop')}<span aria-hidden="true"> ↗</span></a>
 	{:else}
 		<a class="text-sm underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{tf('bulk.target.product', { n: name.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
 	{/if}

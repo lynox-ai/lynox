@@ -2507,11 +2507,11 @@ export class BulkLedger {
     }
     const external = externalHostOf(src.target_system) !== null;
     const rows = db.prepare(
-      `SELECT seq, target_key, change, before, after_planned, after_actual,
+      `SELECT seq, target_key, change, before, after_planned, after_actual, target_title,
          read_connection_id, read_grant_id, write_connection_id, write_grant_id FROM bulk_targets
        WHERE run_id = ? AND ${undoEligible(external)}
        ORDER BY seq DESC`,
-    ).all(sourceRunId) as ({ seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null } & ConnectionColumns)[];
+    ).all(sourceRunId) as ({ seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null; target_title: string | null } & ConnectionColumns)[];
     if (rows.length === 0) return { ok: false, reason: 'nothing_to_undo' };
 
     const htmlFields = this.htmlFieldsOf(sourceRunId);
@@ -2538,7 +2538,9 @@ export class BulkLedger {
       // Condition (b): a value the store kept with markup the run never sent was never the
       // owner's state, so it is not written back — wherever down the family it comes from.
       const tainted = htmlFields.length > 0 && !after.absent && this.restoresShopAddedMarkup(sourceRunId, r.seq, after.value, htmlFields);
-      return { key: t.key, sourceSeq: r.seq, expected, after, change, read, tainted };
+      // The title the source's read stored goes along as it is (the same key encrypts both rows), so
+      // the owner taking a run back sees each product by its name; NULL stays NULL.
+      return { key: t.key, sourceSeq: r.seq, expected, after, change, read, tainted, title: r.target_title };
     });
     const id = randomUUID();
     const undoKinds = new Set(planned.map((t) => undoFor(t.expected)));
@@ -2549,11 +2551,11 @@ export class BulkLedger {
       for (const t of planned) { yield String(t.sourceSeq); yield t.key; }
     }
     const insertTarget = db.prepare(
-      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, source_seq, read_connection_id, read_grant_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, source_seq, read_connection_id, read_grant_id, target_title)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertInvalid = db.prepare(
-      `INSERT INTO bulk_targets (run_id, seq, target_key, change, source_seq, error) VALUES (?, ?, ?, 'invalid', ?, ?)`,
+      `INSERT INTO bulk_targets (run_id, seq, target_key, change, source_seq, error, target_title) VALUES (?, ?, ?, 'invalid', ?, ?, ?)`,
     );
     db.transaction(() => {
       // An undo reads and writes what its source did: it is contained wherever its source is,
@@ -2569,7 +2571,7 @@ export class BulkLedger {
         planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json, ...planner(OWNER_PRINCIPAL));
       planned.forEach((t, seq) => {
         if (t.tainted) {
-          insertInvalid.run(id, seq, this.engineDb.enc(t.key), t.sourceSeq, 'shop_added_markup' satisfies BulkInvalidReason);
+          insertInvalid.run(id, seq, this.engineDb.enc(t.key), t.sourceSeq, 'shop_added_markup' satisfies BulkInvalidReason, t.title);
           return;
         }
         insertTarget.run(
@@ -2578,6 +2580,7 @@ export class BulkLedger {
           t.after.absent ? null : this.engineDb.enc(JSON.stringify(t.after.value ?? null)),
           t.sourceSeq,
           t.read?.id ?? null, t.read?.grantId ?? null,
+          t.title,
         );
       });
       // An undo is the owner's: the owner's rule, over all planners.

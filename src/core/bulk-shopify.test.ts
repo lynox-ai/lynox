@@ -2278,6 +2278,42 @@ describe('a product target\'s title', () => {
     expect(bulkTargetTitleCell('')).toBeNull();
   });
 
+  const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
+    ledger, trailFor: () => null,
+    writerFor: (run) => bulkWriterFor(run, null, (r) => {
+      const granted = ledger.shopifyApplyOf(r.id);
+      const stored = r.contractJson === null ? null : parseBulkContract(r.contractJson);
+      if (granted === null || stored === null) return null;
+      const c = client(withShopifyApply(stored, HOST, granted));
+      return externalWriter(c, { sleep: async () => {}, io: shopifyTargetIo(c, ENDPOINT) });
+    }),
+  });
+  async function undoneOnce(withoutTitle: boolean): Promise<string> {
+    fill(1);
+    const id = await previewed(source({ seo_title: 'Neu' }));
+    const approved = ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    if (!approved.ok) throw new Error(JSON.stringify(approved));
+    await apply(id);
+    if (withoutTitle) engineDb.getDb().prepare('UPDATE bulk_targets SET target_title = NULL WHERE run_id = ?').run(id);
+    const undo = ledger.planUndo(id);
+    if (!undo.ok) throw new Error(undo.reason);
+    return undo.status.id;
+  }
+
+  it('goes with an undo, from the target it takes back, still encrypted', async () => {
+    const undoId = await undoneOnce(false);
+    expect(ledger.getPreview(undoId).map((t) => t.title)).toEqual(['T1']);
+    const [cell] = raw(undoId);
+    expect(cell).not.toBe('T1');
+    expect(engineDb.dec(cell!)).toBe('T1');
+  });
+
+  it('stays NULL on an undo whose source target had none', async () => {
+    const undoId = await undoneOnce(true);
+    expect(raw(undoId)).toEqual([null]);
+    expect(ledger.getPreview(undoId).map((t) => 'title' in t)).toEqual([false]);
+  });
+
   it('is not part of what the judge reads', () => {
     const src = readFileSync(join(__dirname, 'bulk-ledger.ts'), 'utf8');
     const judge = src.slice(src.indexOf('  loadJudgeTarget('), src.indexOf('  loadJudgeTarget(') + 800);
