@@ -78,10 +78,17 @@ export function nothingToApprove(s: BulkRunStatus): boolean {
  *  says which one is gone. */
 export function formatDropped(dropped: readonly BulkDroppedRun[]): string[] {
   if (dropped.length === 0) return [];
-  const runs = dropped.map((d) => `run ${d.id} (${d.targetSystem}, created ${d.createdAt}${d.replaced ? ', already replaced by a run the user started' : ''})`).join('; ');
+  // Planned in another chat too: the planner knows nothing of the run but this. What the run
+  // changes is stored encrypted and is not named here.
+  const runs = dropped.map((d) => {
+    const size = d.listUnread ? 'its list not read yet' : `${String(d.targets)} target${d.targets === 1 ? '' : 's'}`;
+    // `datetime('now')` is UTC; to the minute is enough to tell plans apart for a person.
+    return `run ${d.id} (${d.targetSystem}, ${size}, created ${d.createdAt.slice(0, 16)} UTC${d.replaced ? ', already replaced by a run the user started' : ''})`;
+  }).join('; ');
   return [`To keep at most ${String(BULK_MAX_PREVIEWED_RUNS)} unapproved plans, recording this one discarded ` +
     `${dropped.length === 1 ? 'an older unapproved plan' : `${String(dropped.length)} older unapproved plans`}: ${runs}. ` +
-    'Nothing of a discarded plan is kept: tell the user which plans are gone, and plan again any that is still wanted and was not replaced.'];
+    'Nothing of a discarded plan is kept: tell the user which plans are gone, described by system, size and date rather than by run id, ' +
+    'and offer to plan again any that is still wanted and was not replaced.'];
 }
 
 export function formatStatus(s: BulkRunStatus): string {

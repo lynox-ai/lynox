@@ -488,7 +488,13 @@ export const BULK_MAX_PREVIEWED_RUNS = 10;
 /** An unapproved run a new planning dropped to stay under {@link BULK_MAX_PREVIEWED_RUNS}: what
  *  `bulk_status` shows of it, so the planner can say which plan is gone. */
 export interface BulkDroppedRun {
-  id: string; targetSystem: string; createdAt: string;
+  id: string; targetSystem: string;
+  /** `bulk_runs.created_at`: UTC, in `datetime('now')`'s form. */
+  createdAt: string;
+  /** Its targets; 0 for a list plan whose list was not read yet ({@link listUnread}). */
+  targets: number;
+  /** A list plan whose list was never read: how many targets it holds is not known. */
+  listUnread: boolean;
   /** Already replaced by another run the owner started with a judge (`superseded`): nothing of it
    *  was still waiting, so there is no plan to make again. */
   replaced: boolean;
@@ -1188,17 +1194,17 @@ export class BulkLedger {
   private pruneUnapproved(principal: RequestPrincipal, own = 0, newRun: string | null = null): BulkDroppedRun[] {
     const db = this.engineDb.getDb();
     const [tag, mandateId] = planner(principal);
-    type Doomed = { id: string; target_system: string; created_at: string; phase: BulkPhase };
+    type Doomed = { id: string; target_system: string; created_at: string; phase: BulkPhase; targets_total: number; list_state: ListState | null };
     const doomed = isOwnerPrincipal(principal)
       ? db.prepare(
-        `SELECT id, target_system, created_at, phase FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND id NOT IN (
+        `SELECT id, target_system, created_at, phase, targets_total, list_state FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND id NOT IN (
            SELECT id FROM bulk_runs WHERE ${PRUNABLE_RUNS}
            ORDER BY created_at DESC, rowid DESC LIMIT ?)
          ORDER BY created_at ASC, rowid ASC`,
       ).all(BULK_MAX_PREVIEWED_RUNS) as Doomed[]
       : own <= 0 ? []
       : db.prepare(
-        `SELECT id, target_system, created_at, phase FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND principal = ? AND mandate_id IS ? AND id IS NOT ?
+        `SELECT id, target_system, created_at, phase, targets_total, list_state FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND principal = ? AND mandate_id IS ? AND id IS NOT ?
          ORDER BY created_at ASC, rowid ASC LIMIT ?`,
       ).all(tag, mandateId, newRun, own) as Doomed[];
     const triggers = new TriggerStore(this.engineDb);
@@ -1208,7 +1214,10 @@ export class BulkLedger {
       drop.run(id);
     }
     // The only aborted runs the set holds are superseded ones (PRUNABLE_RUNS).
-    return doomed.map((d) => ({ id: d.id, targetSystem: d.target_system, createdAt: d.created_at, replaced: d.phase === 'aborted' }));
+    return doomed.map((d) => ({
+      id: d.id, targetSystem: d.target_system, createdAt: d.created_at, targets: d.targets_total,
+      listUnread: d.list_state === 'pending', replaced: d.phase === 'aborted',
+    }));
   }
 
   /**

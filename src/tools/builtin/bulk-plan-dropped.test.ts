@@ -64,7 +64,7 @@ afterEach(() => {
 });
 
 describe('a planning that drops unapproved runs over the cap', () => {
-  it('names the run it dropped, with its system and time, and says the plan is gone', async () => {
+  it('names the run it dropped, with its system, size and time in UTC, and says the plan is gone', async () => {
     const first = await planWorkspace();
     const firstId = runIdOf(first);
     const createdAt = ledger.getStatus(firstId)!.createdAt;
@@ -73,10 +73,11 @@ describe('a planning that drops unapproved runs over the cap', () => {
     expect(namedAsDropped(answer, firstId)).toBe(true);
     expect(answer).toContain(
       `To keep at most ${String(BULK_MAX_PREVIEWED_RUNS)} unapproved plans, recording this one discarded an older unapproved plan: ` +
-      `run ${firstId} (workspace, created ${createdAt}). Nothing of a discarded plan is kept: tell the user which plans are gone, and plan again any that is still wanted and was not replaced.`,
+      `run ${firstId} (workspace, 1 target, created ${createdAt.slice(0, 16)} UTC). Nothing of a discarded plan is kept: tell the user which plans are gone, ` +
+      'described by system, size and date rather than by run id, and offer to plan again any that is still wanted and was not replaced.',
     );
     // Only the run dropped is named as one: the new run is the one the status line reports.
-    expect(answer.match(/run [0-9a-f-]{36} \(workspace, created /g)).toHaveLength(1);
+    expect(answer.match(/run [0-9a-f-]{36} \(workspace, 1 target, created /g)).toHaveLength(1);
   });
 
   it('says nothing of dropping while the plans fit under the cap', async () => {
@@ -92,12 +93,12 @@ describe('a planning that drops unapproved runs over the cap', () => {
     // One unapproved run more than the cap already waits (planned while the cap was higher): the
     // next planning drops two. Inserted newest first, so rowid order cannot stand in for time.
     const insert = engineDb.getDb().prepare(
-      "INSERT INTO bulk_runs (id, created_at, rule_hash, target_system, undo, phase) VALUES (?, ?, 'h', 'workspace', 'restorable', 'previewed')",
+      "INSERT INTO bulk_runs (id, created_at, rule_hash, target_system, undo, phase, targets_total) VALUES (?, ?, 'h', 'workspace', 'restorable', 'previewed', ?)",
     );
-    for (let i = BULK_MAX_PREVIEWED_RUNS; i >= 0; i--) insert.run(`old-${String(i).padStart(2, '0')}`, `2000-01-01 00:00:${String(i).padStart(2, '0')}`);
+    for (let i = BULK_MAX_PREVIEWED_RUNS; i >= 0; i--) insert.run(`old-${String(i).padStart(2, '0')}`, `2000-01-01 00:${String(i).padStart(2, '0')}:30`, 12 - i);
     const answer = await planWorkspace();
-    expect(answer).toContain('discarded 2 older unapproved plans: run old-00 (workspace, created 2000-01-01 00:00:00); ' +
-      'run old-01 (workspace, created 2000-01-01 00:00:01).');
+    expect(answer).toContain('discarded 2 older unapproved plans: run old-00 (workspace, 12 targets, created 2000-01-01 00:00 UTC); ' +
+      'run old-01 (workspace, 11 targets, created 2000-01-01 00:01 UTC).');
     expect(namedAsDropped(answer, 'old-01')).toBe(true);
     expect(ledger.listRuns(50)).toHaveLength(BULK_MAX_PREVIEWED_RUNS);
   });
@@ -109,7 +110,7 @@ describe('a planning that drops unapproved runs over the cap', () => {
     ).run(BULK_HALT_REASONS.superseded);
     for (let i = 1; i < BULK_MAX_PREVIEWED_RUNS; i++) await planWorkspace();
     const answer = await planWorkspace();
-    expect(answer).toContain('discarded an older unapproved plan: run replaced-run (data_store, created 2000-01-01 00:00:00, already replaced by a run the user started).');
+    expect(answer).toContain('discarded an older unapproved plan: run replaced-run (data_store, 0 targets, created 2000-01-01 00:00 UTC, already replaced by a run the user started).');
     expect(namedAsDropped(answer, 'replaced-run')).toBe(true);
   });
 
@@ -119,15 +120,15 @@ describe('a planning that drops unapproved runs over the cap', () => {
     const answer = await planExternal();
     expect(answer).toContain('External dry run recorded');
     expect(namedAsDropped(answer, firstId)).toBe(true);
-    expect(answer).toContain(`run ${firstId} (http:${HOST}, created `);
+    expect(answer).toContain(`run ${firstId} (http:${HOST}, 1 target, created `);
   });
 
-  it('names it from a list plan', async () => {
+  it('names it from a list plan, whose size is not known before its list is read', async () => {
     const firstId = runIdOf(await planList());
     for (let i = 1; i < BULK_MAX_PREVIEWED_RUNS; i++) expect(await planList()).not.toContain('discarded');
     const answer = await planList();
     expect(answer).toContain('List dry run recorded');
     expect(namedAsDropped(answer, firstId)).toBe(true);
-    expect(answer).toContain(`run ${firstId} (http:${HOST}, created `);
+    expect(answer).toContain(`run ${firstId} (http:${HOST}, its list not read yet, created `);
   });
 });
