@@ -2425,6 +2425,44 @@ describe('httpRequestTool', () => {
       expect(result).toBe(U010_REQUEST_LIMIT);
     });
 
+    it('two calls of one turn at 99 send one request between them; the other gets the limit text', async () => {
+      // Started side by side, both calls pass the check at the top before either counts: the
+      // handler awaits between them (the engine-managed auth, the questions), and only then counts.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(async () => createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
+
+      const results = await Promise.allSettled([
+        handler({ url: 'http://example.com/a' }, makeAgent()),
+        handler({ url: 'http://example.com/b' }, makeAgent()),
+      ]);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(testCounters.httpRequests).toBe(MAX_REQUESTS_PER_SESSION);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      expect(refused).toHaveLength(1);
+      expect(refused[0]!.reason).toBeInstanceOf(ToolSoftFailure);
+      expect((refused[0]!.reason as ToolSoftFailure).agentVisibleResult).toBe(U010_REQUEST_LIMIT);
+    });
+
+    it('two calls of one turn at 98 both send: the check before sending refuses only past the limit', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(async () => createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 2;
+
+      const results = await Promise.allSettled([
+        handler({ url: 'http://example.com/a' }, makeAgent()),
+        handler({ url: 'http://example.com/b' }, makeAgent()),
+      ]);
+
+      expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(testCounters.httpRequests).toBe(MAX_REQUESTS_PER_SESSION);
+    });
+
     it('fresh Session counter object → counter starts at 0', async () => {
       // Replaces the legacy resetHttpRequestCount-based test. Counter now
       // lives on `agent.sessionCounters` (sourced from the per-test
