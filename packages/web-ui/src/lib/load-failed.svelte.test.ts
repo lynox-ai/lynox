@@ -39,7 +39,7 @@ describe('the sentence for a failed load', () => {
 	// it caught, an ok check throws through ensureOk.
 	function triesFeedingTheSentence(src: string): string[] {
 		const out: string[] = [];
-		const re = /\} catch \((\w+)\) \{/g;
+		const re = /\} catch \((\w+)(?::\s*\w+)?\) \{/g;
 		for (let m = re.exec(src); m !== null; m = re.exec(src)) {
 			const tail = src.slice(m.index, m.index + 400);
 			if (!tail.includes(`loadFailedText(${m[1]!})`)) continue;
@@ -52,7 +52,7 @@ describe('the sentence for a failed load', () => {
 		}
 		return out;
 	}
-	const BARE = /!\s*\w+\.ok\b[^;\n]*\)\s*throw new Error\(/;
+	const BARE = /!\s*\w+\??\.ok\b[^;\n]*\)\s*\{?\s*throw new Error\(/;
 
 	it('throws no failed response without its status where the sentence is written from it', () => {
 		const dir = join(__dirname, 'components');
@@ -65,7 +65,8 @@ describe('the sentence for a failed load', () => {
 	it('finds such a throw, and only in a try that feeds the sentence', () => {
 		const feeds = "try {\n\tconst r = await fetch(u);\n\tif (!r.ok) throw new Error(`${r.status}`);\n\tif (x) { y(); }\n} catch (e) {\n\terror = loadFailedText(e);\n}";
 		expect(triesFeedingTheSentence(feeds).some((b) => BARE.test(b))).toBe(true);
-		expect(BARE.test('if (!eRes.ok || !bRes.ok) throw new Error();')).toBe(true);
+		for (const bare of ['if (!eRes.ok || !bRes.ok) throw new Error();', 'if (!r?.ok) throw new Error();', 'if (!r.ok) { throw new Error(); }']) expect(BARE.test(bare), bare).toBe(true);
+		expect(triesFeedingTheSentence('try {\n\tif (!r.ok) throw new Error();\n} catch (e: unknown) {\n\terror = loadFailedText(e);\n}')).toHaveLength(1);
 		const own = "try {\n\tif (!r.ok) throw new Error();\n} catch {\n\terror = t('crm.remove_failed');\n}";
 		expect(triesFeedingTheSentence(own)).toEqual([]);
 	});

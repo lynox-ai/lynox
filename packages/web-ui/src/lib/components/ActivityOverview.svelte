@@ -114,15 +114,15 @@
 		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 	}
 
-	// The status of the last summary that did not load, so the overview can say which failure it was.
-	let summaryFailed: number | undefined;
-	async function fetchSummary(period: Period): Promise<UsageSummary | null> {
+	// A summary, or why it did not load: the response's status, or the error a failed fetch threw.
+	type SummaryRead = { summary: UsageSummary } | { summary: null; cause: unknown };
+	async function fetchSummary(period: Period): Promise<SummaryRead> {
 		try {
 			const res = await fetch(`${getApiBase()}/usage/summary?period=${period}`);
-			if (!res.ok) { summaryFailed = res.status; return null; }
-			return (await res.json()) as UsageSummary;
-		} catch {
-			return null;
+			if (!res.ok) return { summary: null, cause: res.status };
+			return { summary: (await res.json()) as UsageSummary };
+		} catch (e) {
+			return { summary: null, cause: e };
 		}
 	}
 
@@ -130,7 +130,7 @@
 		overviewLoading = true;
 		overviewError = '';
 		const tz = new Date().getTimezoneOffset();
-		const [mtd, sevenDay, thirtyDay, daily] = await Promise.all([
+		const [mtdRead, sevenDayRead, thirtyDayRead, daily] = await Promise.all([
 			fetchSummary('current'),
 			fetchSummary('7d'),
 			fetchSummary('30d'),
@@ -138,8 +138,12 @@
 				.then(r => r.ok ? r.json() as Promise<Array<{ day: string; cost_usd: number; run_count: number }>> : [])
 				.catch(() => []),
 		]);
+		const mtd = mtdRead.summary;
+		const sevenDay = sevenDayRead.summary;
+		const thirtyDay = thirtyDayRead.summary;
 		if (!mtd && !sevenDay && !thirtyDay) {
-			overviewError = loadFailedText(summaryFailed);
+			// All three failed in this load; the first one's cause names the failure.
+			overviewError = loadFailedText('cause' in mtdRead ? mtdRead.cause : undefined);
 		}
 		summaryMTD = mtd;
 		summary7d = sevenDay;
