@@ -579,6 +579,25 @@ describe('a flagged follow-up brings its item back to where the owner sees it', 
     expect(open()).toEqual([id]);
   });
 
+  it('raises once when the message that woke a snoozed item is overtaken by another flagged one', async () => {
+    const id = seed('auto_handled', undefined, new Date(Date.now() + 86_400_000), true);
+    let releaseA: () => void = () => {};
+    const gateA = new Promise<void>((r) => { releaseA = r; });
+    const confirm = vi.fn(async (_a: string, env: MailEnvelope) => { if (env.messageId === '<a@x>') await gateA; return false; });
+    const graph = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: { resolve: (a: string) => (a === ACCOUNT.id ? { address: ACCOUNT.address, displayName: ACCOUNT.displayName, authType: 'oauth_microsoft' as const } : null) },
+      confirmAutoReply: confirm,
+    });
+    const first = graph(ACCOUNT.id, envelope({ ...OTP, messageId: '<a@x>' }));
+    await graph(ACCOUNT.id, envelope({ ...OTP, messageId: '<b@x>' }));
+    releaseA();
+    await first;
+    expect(raises(id)).toHaveLength(1);
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(open()).toEqual([id]);
+  });
+
   it('an undo of a bulk action does not put a raised item back out of view', async () => {
     const id = seed('auto_handled', 'archived');
     inbox.insertBulkActionLog({ bulkId: 'b1', itemId: id, priorUserAction: 'archived', priorUserActionAt: new Date('2026-11-03T09:00:00Z'), action: 'archived' });

@@ -208,12 +208,15 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       opts.state.insertThreadMessage(input);
       // Decided on the row as it is now, inside the write, so two flagged messages arriving together
       // raise it once. An item open in "requires you" stays as it is, unless this mail woke it from
-      // a snooze a moment ago (`unsnooze_on_reply` above): then it was out of view before.
+      // a snooze a moment ago (`unsnooze_on_reply` above) and nothing has raised or reopened it since
+      // (both set `classified_at`): then it was out of view before, and this mail is what shows it.
       const current = raises ? opts.state.getItem(existing.id, existing.tenantId) : undefined;
       const openNow = current !== undefined && current !== null && current.bucket === 'requires_user'
         && current.userAction === undefined
         && !(current.snoozeUntil !== undefined && current.snoozeUntil.getTime() > Date.now());
-      if (raises && (!openNow || wokeForThis)) {
+      const wokeAndUntouched = wokeForThis && current !== undefined && current !== null
+        && current.classifiedAt.getTime() === existing.classifiedAt.getTime();
+      if (raises && (!openNow || wokeAndUntouched)) {
         opts.state.raiseToRequiresUser(existing.id, existing.tenantId, fields.mailDate ?? new Date());
         opts.state.appendAudit({
           tenantId: existing.tenantId,
