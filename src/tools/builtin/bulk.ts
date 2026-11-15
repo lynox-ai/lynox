@@ -81,7 +81,8 @@ export function formatDropped(dropped: readonly BulkDroppedRun[]): string[] {
   // Planned in another chat too: the planner knows nothing of the run but this. What the run
   // changes is stored encrypted and is not named here.
   const runs = dropped.map((d) => {
-    const size = d.listUnread ? 'its list not read yet' : `${String(d.targets)} target${d.targets === 1 ? '' : 's'}`;
+    const count = `${String(d.targets)} target${d.targets === 1 ? '' : 's'}`;
+    const size = !d.listUnread ? count : d.targets === 0 ? 'its list not read yet' : `${count} read so far, its list not read to the end`;
     // `datetime('now')` is UTC; to the minute is enough to tell plans apart for a person.
     return `run ${d.id} (${d.targetSystem}, ${size}, created ${d.createdAt.slice(0, 16)} UTC${d.replaced ? ', already replaced by a run the user started' : ''})`;
   }).join('; ');

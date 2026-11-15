@@ -131,4 +131,16 @@ describe('a planning that drops unapproved runs over the cap', () => {
     expect(namedAsDropped(answer, firstId)).toBe(true);
     expect(answer).toContain(`run ${firstId} (http:${HOST}, its list not read yet, created `);
   });
+
+  it('gives a list plan read in part the targets read so far, and says its list was not read to the end', async () => {
+    // A local planning does not wait for a list being read, and may drop it part read.
+    engineDb.getDb().prepare(
+      `INSERT INTO bulk_runs (id, created_at, rule_hash, target_system, undo, phase, targets_total, list_state, list_page)
+       VALUES ('part-read', '2000-01-01 00:00:00', 'h', 'http:${HOST}', 'restorable', 'planned', 5, 'pending', 1)`,
+    ).run();
+    for (let i = 1; i < BULK_MAX_PREVIEWED_RUNS; i++) await planWorkspace();
+    const answer = await planWorkspace();
+    expect(answer).toContain(`run part-read (http:${HOST}, 5 targets read so far, its list not read to the end, created 2000-01-01 00:00 UTC).`);
+    expect(namedAsDropped(answer, 'part-read')).toBe(true);
+  });
 });

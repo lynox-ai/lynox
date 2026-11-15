@@ -491,9 +491,9 @@ export interface BulkDroppedRun {
   id: string; targetSystem: string;
   /** `bulk_runs.created_at`: UTC, in `datetime('now')`'s form. */
   createdAt: string;
-  /** Its targets; 0 for a list plan whose list was not read yet ({@link listUnread}). */
+  /** Its targets: for a list plan whose list was not read to the end, the ones read so far. */
   targets: number;
-  /** A list plan whose list was never read: how many targets it holds is not known. */
+  /** A list plan whose list was not read to the end ({@link targets} then 0 when no page was). */
   listUnread: boolean;
   /** Already replaced by another run the owner started with a judge (`superseded`): nothing of it
    *  was still waiting, so there is no plan to make again. */
