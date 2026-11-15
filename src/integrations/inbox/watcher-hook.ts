@@ -216,7 +216,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       const item = opts.state.getItem(existing.id, existing.tenantId);
       // A snoozed item is not in the list until it wakes; a push now would lead nowhere.
       const snoozed = item?.snoozeUntil !== undefined && item.snoozeUntil.getTime() > Date.now();
-      if (item && !snoozed) void opts.notifier.notifyNewItem(item);
+      // The push names the item's own sender and subject, so its own mail's flag counts as well.
+      const flagged = sensitive.isSensitive || opts.state.sensitiveCategoriesAtIngest(existing).length > 0;
+      if (item && !snoozed) void opts.notifier.notifyNewItem(item, { flagged });
     }
   };
 
@@ -321,12 +323,13 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         threadKey,
         env,
         envelopeFields,
-        bodyMd: env.snippet,
+        // Under `skip` a flagged mail is stored without its text, as on the sensitive-skip branch.
+        bodyMd: sensitive.isSensitive && sensitiveMode === 'skip' ? undefined : env.snippet,
         inboxItemId: itemId,
       });
       if (opts.notifier && rule.bucket === 'requires_user') {
         const inserted = opts.state.getItem(itemId);
-        if (inserted) void opts.notifier.notifyNewItem(inserted);
+        if (inserted) void opts.notifier.notifyNewItem(inserted, { flagged: sensitive.isSensitive });
       }
       return 'rule_applied';
     }
@@ -373,7 +376,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       });
       if (opts.notifier) {
         const inserted = opts.state.getItem(itemId);
-        if (inserted) void opts.notifier.notifyNewItem(inserted);
+        if (inserted) void opts.notifier.notifyNewItem(inserted, { flagged: true });
       }
       return 'sensitive_skipped';
     }
@@ -466,7 +469,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     });
     if (opts.notifier) {
       const inserted = opts.state.getItem(deadLetterId);
-      if (inserted) void opts.notifier.notifyNewItem(inserted);
+      if (inserted) void opts.notifier.notifyNewItem(inserted, { flagged: sensitive.isSensitive });
     }
     return 'dead_lettered';
   };

@@ -340,7 +340,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       _writeThreadMessage(state, payload, itemId, body);
       if (opts.notifier && result.bucket === 'requires_user') {
         const item = state.getItem(itemId);
-        if (item) void opts.notifier.notifyNewItem(item);
+        if (item) void opts.notifier.notifyNewItem(item, { flagged: payload.sensitive !== undefined });
       }
     },
     onDeadLetter: (payload, error) => {
@@ -414,7 +414,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       _writeThreadMessage(state, payload, itemId, undefined);
       if (opts.notifier) {
         const item = state.getItem(itemId);
-        if (item) void opts.notifier.notifyNewItem(item);
+        if (item) void opts.notifier.notifyNewItem(item, { flagged: payload.sensitive !== undefined });
       }
     },
   };
