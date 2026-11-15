@@ -23,6 +23,7 @@ const PREDICATE = 'principalHasEnded';
  */
 const GATES: Readonly<Record<string, string>> = {
   [PREDICATE]: 'src/core/request-principal.ts',
+  grantHasEnded: 'src/core/request-principal.ts',
   '#planHasEnded': 'src/core/worker-loop.ts',
   '#stopIfStarterEnded': 'src/core/worker-loop.ts',
   sourceRefusal: 'src/orchestrator/run-source.ts',
@@ -145,7 +146,128 @@ const SITES: Readonly<Record<string, { ended: Witness; live: Witness }>> = {
     ended: ['src/orchestrator/workflow-author-liveness.test.ts', 'the library\'s run (runSavedWorkflow): the same end'],
     live: ['src/orchestrator/workflow-author-liveness.test.ts', 'runs it while the grant lives'],
   },
+  'src/core/bulk-ledger.ts · plannerHasEnded · grantHasEnded · row.mandate_id': {
+    ended: ['src/core/bulk-mandate-end.test.ts', 'withdraws an unapproved run of an ended grant, and only that'],
+    live: ['src/core/bulk-mandate-end.test.ts', 'leaves a live grant\'s run to be started'],
+  },
+  'src/core/plan-stamp.ts · stampEntriesFor · principalHasEnded · planOf': {
+    ended: ['src/core/member-connection.test.ts', 'lists only the connections the plan\'s mandate made under its access now'],
+    live: ['src/core/plan-stamp.test.ts', 'lists what a run may use, as listed, with the provider and the account'],
+  },
+  'src/core/plan-stamp.ts · stampListState · principalHasEnded · planOf': {
+    ended: ['src/core/plan-stamp.test.ts', 'once the mandate\'s access ended, every entry waits and the list says ended'],
+    live: ['src/core/plan-stamp.test.ts', 'a connection made since the stamp is new; nothing stored and nothing new shows nothing'],
+  },
+  'src/core/profile-secret-view.ts · releaseState · grantHasEnded · given.mandateId': {
+    ended: ['src/core/profile-secret-view.test.ts', 'ends with the grant: once it is no longer live, not even the owner\'s run reads it'],
+    live: ['src/core/profile-secret-view.test.ts', 'control: once released to it, a profile a mandate wrote gets the owner\'s name'],
+  },
+  'src/core/profile-secret-view.ts · connectionWaits · grantHasEnded · mandateId': {
+    ended: ['src/tools/builtin/api-setup-adopt.test.ts', 'a mandate connection waits once its mandate is no longer active'],
+    live: ['src/tools/builtin/api-setup-adopt.test.ts', 'does not wait while its mandate is active'],
+  },
+  'src/core/profile-secret-view.ts · memberConnectionReader · principalHasEnded · reader': {
+    ended: ['src/core/member-connection.test.ts', 'write: not once that grant has ended, not without ends, not another author'],
+    live: ['src/core/member-connection.test.ts', 'write: the profile\'s author under a grant live now, also a later grant of the same address'],
+  },
+  'src/core/prompt-store.ts · expireEndedMandates · grantHasEnded · row.mandate_id': {
+    ended: ['src/core/prompt-store.test.ts', 'closes the pending questions of an ended grant and of a mandate that names none, and nothing else'],
+    live: ['src/core/prompt-store.test.ts', 'closes the pending questions of an ended grant and of a mandate that names none, and nothing else'],
+  },
+  'src/core/worker-loop.ts · executeStandard · principalHasEnded · asker': {
+    ended: ['src/core/worker-loop.test.ts', '255-e twin: a mandate\'s answer from before v60 names no grant and is let go the same way'],
+    live: ['src/core/worker-loop.test.ts', '255-d: the run that picks up a mandate\'s answer after a restart runs under the mandate, never as a hand run'],
+  },
+  'src/integrations/push/web-push-channel.ts · grantState · grantHasEnded · mandateId': {
+    ended: ['src/integrations/push/web-push-channel.test.ts', 'refuses a mandate whose grant has already ended, or whose end was never recorded'],
+    live: ['src/integrations/push/web-push-channel.test.ts', 'reaches a live mandate\'s device, and after the grant ended neither reaches nor keeps it'],
+  },
+  'src/server/http-api.ts · _handleRequest · principalHasEnded · session.principal': {
+    ended: ['src/server/http-api.test.ts', 'refuses a revoked mandate with 403 and the code the browser logs out on'],
+    live: ['src/server/http-api.test.ts', 'reads the mandate the Web UI minted into the session as the request principal'],
+  },
+  'src/server/http-api.ts · mayStillConnect · grantHasEnded · by.mandateId': {
+    ended: ['src/server/http-api.test.ts', 'stores nothing when the mandate ended during the exchange'],
+    live: ['src/server/http-api.test.ts', 'stamps a mandate\'s consent with the mandate and its id'],
+  },
+  'src/tools/builtin/api-setup.ts · handler · grantHasEnded · request.mandateId': {
+    ended: ['src/tools/builtin/api-setup-release.test.ts', 'is refused once the mandate that asked is no longer active: its release could never be read'],
+    live: ['src/tools/builtin/api-setup-release.test.ts', 'asks the person, naming the profile, its author, every host and the name, and records the release'],
+  },
+  'src/tools/builtin/api-setup.ts · handler · grantHasEnded · request.mandateId #2': {
+    ended: ['src/tools/builtin/api-setup-release.test.ts', 'records nothing when the mandate that asked ended while the question was open'],
+    live: ['src/tools/builtin/api-setup-release.test.ts', 'keeps the answer when only what the engine rewrites changed while the question was open'],
+  },
+  'src/tools/builtin/api-setup.ts · releaseRequestsNote · grantHasEnded · r.mandateId': {
+    ended: ['src/tools/builtin/api-setup-release.test.ts', 'the owner hears of an open request in every answer, while the mandate that asked is active'],
+    live: ['src/tools/builtin/api-setup-release.test.ts', 'the owner hears of an open request in every answer, while the mandate that asked is active'],
+  },
 };
+
+/**
+ * The names a store of ends answers by (`isLive` and the adapters around it). Called anywhere but in
+ * the arguments of a gate, such a call decides on its own whether a grant has ended, with its own
+ * default for a missing store: the second test finds it. `liveIn` (mandate-ends.ts) is the one place
+ * that turns a store into the function a gate takes.
+ */
+const LIVENESS = new Set(['isLive', 'isMandateLive', 'mandateLive', '_mandateLive']);
+
+/** Where the rule itself is written: the store of ends, and the predicate. */
+const LIVENESS_HOME = new Set(['src/core/mandate-ends.ts', 'src/core/request-principal.ts']);
+
+/**
+ * Calls of those names that ask something else than a grant, by `<file> · <where> · <callee>`, with
+ * what they ask.
+ */
+const NOT_A_GRANT: Readonly<Record<string, string>> = {
+  'src/core/bulk-ledger.ts · deadReads · triggers.isLive': 'whether a preview trigger still fires',
+  'src/core/workspace-rel.ts · workspaceBase · isLive': 'whether a workspace anchor is still open',
+  'src/core/workspace-rel.ts · sidecarBase · isLive': 'whether a workspace anchor is still open',
+};
+
+/**
+ * The calls of the liveness names in one source text that are not inside a function handed to a gate
+ * as an argument.
+ */
+function directLiveness(file: string, text: string): string[] {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const found: string[] = [];
+  const handedToGate = (node: ts.Node): boolean => {
+    for (let a: ts.Node | undefined = node.parent; a !== undefined && !ts.isSourceFile(a); a = a.parent) {
+      if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) {
+        const call = a.parent;
+        return ts.isCallExpression(call) && call.arguments.includes(a) && ts.isIdentifier(call.expression) && Object.hasOwn(GATES, call.expression.text);
+      }
+      if (ts.isFunctionDeclaration(a) || ts.isMethodDeclaration(a) || ts.isGetAccessor(a)) return false;
+    }
+    return false;
+  };
+  const visit = (node: ts.Node, where: string | undefined): void => {
+    let here = where;
+    if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isGetAccessor(node)) && node.name) here = node.name.getText(sf);
+    else if ((ts.isVariableDeclaration(node) || ts.isPropertyAssignment(node) || ts.isPropertyDeclaration(node)) && node.initializer
+      && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) here = node.name.getText(sf);
+    if (ts.isCallExpression(node)) {
+      const e = node.expression;
+      const name = ts.isIdentifier(e) ? e.text : ts.isPropertyAccessExpression(e) ? e.name.text : undefined;
+      if (name !== undefined && LIVENESS.has(name) && !handedToGate(node)) {
+        found.push(`${file} · ${here ?? '(top level)'} · ${e.getText(sf).replace(/\s+/g, '')}`);
+      }
+    }
+    ts.forEachChild(node, (child) => visit(child, here));
+  };
+  visit(sf, undefined);
+  return found;
+}
+
+function directLivenessInTree(): string[] {
+  return sourceFiles(join(ROOT, 'src')).flatMap((path) => {
+    const file = relative(ROOT, path);
+    if (LIVENESS_HOME.has(file)) return [];
+    const text = readFileSync(path, 'utf8');
+    return [...LIVENESS].some((n) => text.includes(n)) ? directLiveness(file, text) : [];
+  });
+}
 
 interface Site { key: string; line: number }
 
@@ -176,10 +298,16 @@ function scan(file: string, text: string): { sites: Site[]; otherUses: string[] 
     if (route !== undefined) here = route;
     else if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isGetAccessor(node)) && node.name) here = node.name.getText(sf);
     else if (ts.isVariableDeclaration(node) && node.initializer && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) here = node.name.getText(sf);
+    else if (ts.isPropertyAssignment(node) && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) here = node.name.getText(sf);
     const line = (): number => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
     const site = (name: string, call: ts.CallExpression): void => {
+      // The predicate asks `grantHasEnded` for a mandate where both are defined: that is the rule itself.
+      if (here === PREDICATE && name === 'grantHasEnded' && file === GATES[PREDICATE]) return;
       const first = call.arguments[0]?.getText(sf).replace(/\s+/g, ' ') ?? '';
-      sites.push({ key: `${file} · ${here ?? '(top level)'} · ${name} · ${first}`, line: line() });
+      const key = `${file} · ${here ?? '(top level)'} · ${name} · ${first}`;
+      // The same call twice in one function: the second and later are numbered in source order.
+      const n = sites.filter((s) => s.key === key || s.key.startsWith(`${key} #`)).length;
+      sites.push({ key: n === 0 ? key : `${key} #${n + 1}`, line: line() });
     };
     if ((ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) && Object.hasOwn(GATES, node.text)) {
       const name = node.text;
@@ -303,6 +431,13 @@ describe('every call that asks whether an access has ended', () => {
       expect(testTitles(file).some((t) => t.includes(title)), `${file} has no test titled "${title}"`).toBe(true);
     }
   });
+
+  it('asks a store of ends only through a gate, outside the calls that ask something else', () => {
+    const direct = directLivenessInTree();
+    const unnamed = direct.filter((k) => !Object.hasOwn(NOT_A_GRANT, k));
+    const gone = Object.keys(NOT_A_GRANT).filter((k) => !direct.includes(k));
+    expect({ unnamed, gone }).toEqual({ unnamed: [], gone: [] });
+  });
 });
 
 describe('the scan the list is held against', () => {
@@ -312,6 +447,11 @@ describe('the scan the list is held against', () => {
     for (const [name, file] of Object.entries(GATES)) {
       const text = readFileSync(join(ROOT, file), 'utf8');
       expect(text, `${file} defines no ${name}`).toMatch(name.startsWith('#') ? `  ${name}(` : `export function ${name}(`);
+    }
+    // A file left out of the second scan holds the rule itself, and nothing else is left out.
+    for (const file of LIVENESS_HOME) {
+      expect(readFileSync(join(ROOT, file), 'utf8'), `${file} is left out of the scan but defines neither the store of ends nor the predicate`)
+        .toMatch(/^export (class MandateEnds\b|function principalHasEnded\()/m);
     }
   });
 
@@ -342,6 +482,23 @@ describe('the scan the list is held against', () => {
       ],
       otherUses: [],
     });
+  });
+
+  it('finds a store of ends asked outside a gate, and not one asked inside a function handed to a gate', () => {
+    const text = [
+      'const a = grantHasEnded(id, (m) => ends.isLive(m));',
+      `const b = ${PREDICATE}(p, function (m) { return this._mandateLive(m); });`,
+      'function decide(id) { return ends?.isLive(id) ?? true; }',
+      'const adapter = (id) => store.isMandateLive(id);',
+      `const c = ${PREDICATE}(p, (m) => helper(() => ends.isLive(m)));`,
+      'isLive(x);',
+    ].join('\n');
+    expect(directLiveness('src/z.ts', text)).toEqual([
+      'src/z.ts · decide · ends?.isLive',
+      'src/z.ts · adapter · store.isMandateLive',
+      'src/z.ts · (top level) · ends.isLive',
+      'src/z.ts · (top level) · isLive',
+    ]);
   });
 
   it('reads a test title as the string it is, also from an it.each table, and not under a skip', () => {

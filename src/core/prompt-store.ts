@@ -16,7 +16,7 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal, grantHasEnded } from './request-principal.js';
 import { MandateKeyInputError, mandateCredentialInput, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
 
 /**
@@ -801,7 +801,7 @@ export class PromptStore {
     let closed = 0;
     for (const row of rows) {
       if (!isMandateTag(row.created_by)) continue;
-      if (row.mandate_id !== null && isLive(row.mandate_id)) continue;
+      if (!grantHasEnded(row.mandate_id, isLive)) continue;
       if (close.run(row.id).changes > 0) {
         closed += 1;
         this._emitSettled(row.id);

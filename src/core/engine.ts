@@ -35,7 +35,7 @@ import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncCon
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
-import { MandateEnds } from './mandate-ends.js';
+import { MandateEnds, liveIn } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
 import { fireBeforeRunGate } from './metered-request.js';
@@ -1542,7 +1542,7 @@ export class Engine {
         // The sweep reads engine.db as well; it fails on its own, so a failure there leaves the
         // questions working and is tried again on the next sweep.
         const promptStore = this._promptStore;
-        const mandateLive = (mandateId: string): boolean => this._mandateEnds?.isLive(mandateId) ?? false;
+        const mandateLive = (mandateId: string): boolean => liveIn(this._mandateEnds)(mandateId);
         const sweepEnded = (): void => {
           try {
             promptStore.expireEndedMandates(mandateLive);
@@ -2873,7 +2873,7 @@ export class Engine {
         mail: () => this.getMailContext(),
         audit: () => this.getAuditLog(),
         threads: () => this.getThreadStore(),
-        isMandateLive: (id) => this._mandateEnds?.isLive(id) ?? false,
+        isMandateLive: (id) => liveIn(this._mandateEnds)(id),
       });
     }
     return this._approvalExecutor;
@@ -2953,7 +2953,7 @@ export class Engine {
 
   /** Ends what mandates whose grant has ended are running (§3.13 B8). See the sweep in `init`. */
   private endEndedMandateRuns(): void {
-    const isLive = (mandateId: string): boolean => this._mandateEnds?.isLive(mandateId) ?? false;
+    const isLive = (mandateId: string): boolean => liveIn(this._mandateEnds)(mandateId);
     const parts: ReadonlyArray<readonly [string, () => unknown]> = [
       // First, so a run of a plan paused now is stopped by the part after it.
       ['plan pauses', () => this.pausePlansOfEndedMandates()],
@@ -3019,7 +3019,7 @@ export class Engine {
   getBulkOwnership(): import('./bulk-ledger.js').BulkOwnership {
     const threads = this._threadStore;
     return {
-      isLive: (mandateId) => this._mandateEnds?.isLive(mandateId) ?? false,
+      isLive: (mandateId) => liveIn(this._mandateEnds)(mandateId),
       threadCreator: (threadId) => threads?.getThread(threadId)?.created_by,
       threadsKnown: threads !== null,
     };

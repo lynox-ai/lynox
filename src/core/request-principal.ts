@@ -110,6 +110,16 @@ export function ownedBy(row: { readonly created_by?: string | null | undefined }
 }
 
 /**
+ * Whether a mandate's grant has ended, asked where only the grant's id is at hand (a release, a
+ * question, a connection a mandate made): when there is no id, or the grant is not live. The rule
+ * {@link principalHasEnded} applies to a mandate, so a place that holds an id and not a principal
+ * asks the same question.
+ */
+export function grantHasEnded(mandateId: string | null | undefined, isLive: (mandateId: string) => boolean): boolean {
+  return mandateId === undefined || mandateId === null || !isLive(mandateId);
+}
+
+/**
  * Whether the grant a principal acts under has ended (PRD customer-granted-operator-access
  * §3.13 B8): never for the owner; for a mandate, when it names no grant or its grant is not
  * live. A mandate without a grant cannot be told apart from an ended one, so it counts as
@@ -119,7 +129,7 @@ export function ownedBy(row: { readonly created_by?: string | null | undefined }
 export function principalHasEnded(p: RequestPrincipal, isLive: (mandateId: string) => boolean): boolean {
   switch (p.kind) {
     case 'owner': return false;
-    case 'mandate': return p.mandateId === undefined || !isLive(p.mandateId);
+    case 'mandate': return grantHasEnded(p.mandateId, isLive);
     // It acts under no grant, so it counts as ended, like a mandate that names none: nothing that
     // asks for a live grant passes for it.
     case 'cp-admin': return true;

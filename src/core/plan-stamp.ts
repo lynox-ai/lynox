@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
+import { liveIn } from './mandate-ends.js';
 import type { ApiProfile, ApiStore } from './api-store.js';
 import { isMandateConnection } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import type { StampEntry } from './plan-run-context.js';
 import { bindingOf, connectionShown, connectionWaits, memberConnectionReader } from './profile-secret-view.js';
-import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalTag, type RequestPrincipal } from './request-principal.js';
+import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalTag, type RequestPrincipal, principalHasEnded } from './request-principal.js';
 import type { RunHistory } from './run-history.js';
 import type { TriggerRecord } from '../types/index.js';
 
@@ -37,8 +38,7 @@ export function stampEntriesFor(
 ): StampEntry[] {
   // A mandate whose access has ended lists nothing: its plans do not run, and a preview that
   // named its connections would show the owner a list that cannot be used.
-  const mandateId = planOf.kind === 'mandate' ? planOf.mandateId : undefined;
-  if (mandateId === undefined || ends === null || !ends.isLive(mandateId)) return [];
+  if (principalHasEnded(planOf, liveIn(ends))) return [];
   const entries: StampEntry[] = [];
   for (const p of apiStore.knownProfiles()) {
     const grant = p.oauth_grant?.grant_id;
@@ -208,8 +208,7 @@ export function stampListState(
   const stored = storedOf(raw);
   const storedEntries = stored?.entries ?? [];
   const lapsed = storedEntries.length > 0 && stampFromRow(raw, confirmedAt, workflowConfirmedAt) === null;
-  const mandateId = planOf.kind === 'mandate' ? planOf.mandateId : undefined;
-  const ended = mandateId === undefined || ends === null || !ends.isLive(mandateId);
+  const ended = principalHasEnded(planOf, liveIn(ends));
   const now = stampEntriesFor(planOf, apiStore, ends);
   const byId = new Map(apiStore.knownProfiles().map((p) => [p.id, p] as const));
   const shown = (id: string, state: StampEntryState): StampListShown['entries'][number] => {

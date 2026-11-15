@@ -14,7 +14,7 @@ import type {
   NotificationChannel,
   NotificationMessage,
 } from '../../core/notification-router.js';
-import { isMandateTag, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { isMandateTag, isOwnerPrincipal, principalTag, type RequestPrincipal, grantHasEnded } from '../../core/request-principal.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -267,7 +267,7 @@ export class WebPushNotificationChannel implements NotificationChannel {
    */
   private grantState(mandateId: string): 'live' | 'ended' | 'unknown' {
     try {
-      return this.isMandateLive(mandateId) ? 'live' : 'ended';
+      return grantHasEnded(mandateId, this.isMandateLive) ? 'ended' : 'live';
     } catch (err: unknown) {
       process.stderr.write(`[lynox] push: access grant could not be checked: ${err instanceof Error ? err.message : String(err)}\n`);
       return 'unknown';
