@@ -4077,6 +4077,71 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    // A wait on the run's own question that throws (the store failed, as on a locked database)
+    // must not leave the run marked as parked: a stop would then let the NEXT question in the
+    // thread lapse with it, though that one is a scheduled run's. Each of the four question paths.
+    for (const path of ['promptUser', 'promptTabs', 'promptSecret', 'promptMailConnect'] as const) {
+      it(`a ${path} wait that throws leaves the run unparked, so a stop spares a scheduled question asked after it`, async () => {
+        repayRateWindow();
+        const sid = `wait-throws-${path}`;
+        const { db, store } = await promptDb();
+        const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+        const originalGetPromptStore = engineRef.getPromptStore;
+        engineRef.getPromptStore = (): unknown => store;
+        const slots = (api as unknown as { runningSessions: Map<string, { parked?: () => boolean }> }).runningSessions;
+        // The question is settled in the store, then the wait throws: the thread's one open slot
+        // is free again, as after an answer the run never got to read.
+        store.waitForSettled = (id: string): Promise<never> => {
+          store.expirePrompt(id, 'run_stopped');
+          return Promise.reject(new Error('SQLITE_BUSY: database is locked'));
+        };
+        let finishWork!: () => void;
+        const work = new Promise<void>((r) => { finishWork = r; });
+        let waitError = '';
+        let scheduledId: string | undefined;
+        let parkedAfterThrow: boolean | undefined;
+        try {
+          mockSessionRun.mockImplementationOnce(async () => {
+            const session = mockSessionInstance as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+            const ask = session[path]!;
+            try {
+              if (path === 'promptUser') await ask('Which repo did you mean?', ['lynox', 'other']);
+              else if (path === 'promptTabs') await ask([{ question: 'Which repo?', options: ['lynox', 'other'] }]);
+              else if (path === 'promptSecret') await ask('SHOP_TOKEN', 'Paste the shop token', 'api_key');
+              else await ask({ id: 'acc_test', displayName: 'Test', address: 'test@example.com', preset: 'custom' });
+            } catch (err) {
+              waitError = String(err);
+            }
+            parkedAfterThrow = slots.get(sid)?.parked?.();
+            scheduledId = store.insertAskUser(sid, 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+            await work;
+            return 'done';
+          });
+          mockSessionAbort.mockImplementation(() => { finishWork(); });
+          const runRes = jsonFetch(`/api/sessions/${sid}/run`, {
+            method: 'POST',
+            body: JSON.stringify({ task: 'sort the invoices', protocol: 2 }),
+          }).then((r) => r.text()).catch(() => undefined);
+          for (let i = 0; i < 400 && scheduledId === undefined; i++) await new Promise<void>((r) => setTimeout(r, 5));
+          expect(waitError, 'positive control: the wait threw into the run').toContain('SQLITE_BUSY');
+          expect(parkedAfterThrow).toBe(false);
+          expect(scheduledId, 'positive control: the scheduled question was asked').toBeDefined();
+          const abortRes = await jsonFetch(`/api/sessions/${sid}/abort`, { method: 'POST' });
+          expect(abortRes.status).toBe(200);
+          await abortRes.text();
+          await expectSlotReclaimed(slots as Map<string, unknown>, sid);
+          expect(store.getById(scheduledId!)?.status).toBe('pending');
+          finishWork();
+          await runRes;
+        } finally {
+          finishWork();
+          mockSessionAbort.mockImplementation(() => undefined);
+          engineRef.getPromptStore = originalGetPromptStore;
+          db.close();
+        }
+      });
+    }
+
     /** An in-memory prompt store with the real schema, for runs that share one thread. */
     async function promptDb(): Promise<{ db: import('better-sqlite3').Database; store: import('../core/prompt-store.js').PromptStore }> {
       const Database = (await import('better-sqlite3')).default;

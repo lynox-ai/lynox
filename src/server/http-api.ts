@@ -5303,10 +5303,16 @@ export class LynoxHTTPApi {
           });
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
-        const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
-        releaseWithdraw();
-        hasActivePendingPrompt = false;
-        resumeWallClock(); // human answered/dismissed — resume the compute budget
+        let outcome: Awaited<ReturnType<typeof promptStore.waitForSettled>>;
+        try {
+          outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
+        } finally {
+          // Also when the wait throws (the store failed): the run no longer waits on this
+          // question, so it must not read as parked on it.
+          releaseWithdraw();
+          hasActivePendingPrompt = false;
+          resumeWallClock(); // human answered/dismissed — resume the compute budget
+        }
         if (outcome.status === 'answered') return outcome.row.answer ?? '__dismissed__';
         // Surface an explicit reason to the client — no silent 'n' default.
         if (!aborted && !res.writableEnded) {
@@ -5334,10 +5340,15 @@ export class LynoxHTTPApi {
             });
             res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
           }
-          const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
-          releaseWithdraw();
-          hasActivePendingPrompt = false;
-          resumeWallClock(); // human answered/dismissed — resume the compute budget
+          let outcome: Awaited<ReturnType<typeof promptStore.waitForSettled>>;
+          try {
+            outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
+          } finally {
+            // As for promptUser: a throwing wait leaves the run unparked.
+            releaseWithdraw();
+            hasActivePendingPrompt = false;
+            resumeWallClock(); // human answered/dismissed — resume the compute budget
+          }
           if (outcome.status === 'answered' && outcome.row.answer) {
             try {
               const parsed = JSON.parse(outcome.row.answer) as unknown;
@@ -5404,10 +5415,15 @@ export class LynoxHTTPApi {
           });
           res.write(`event: secret_prompt\ndata: ${data}\n\n`);
         }
-        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
-        releaseWithdraw();
-        hasActivePendingPrompt = false;
-        resumeWallClock(); // human answered/dismissed — resume the compute budget
+        let row: Awaited<ReturnType<typeof promptStore.waitForAnswer>>;
+        try {
+          row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        } finally {
+          // As for promptUser: a throwing wait leaves the run unparked.
+          releaseWithdraw();
+          hasActivePendingPrompt = false;
+          resumeWallClock(); // human answered/dismissed — resume the compute budget
+        }
         // answer_error wins over answer_saved when set — see SecretOutcome contract
         // (server-side rejection must not be mistranslated as a user cancel).
         if (row?.answer_error === 'managed_blocked') return 'managed_blocked';
@@ -5447,10 +5463,15 @@ export class LynoxHTTPApi {
           });
           res.write(`event: mail_connect_prompt\ndata: ${payload}\n\n`);
         }
-        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
-        releaseWithdraw();
-        hasActivePendingPrompt = false;
-        resumeWallClock(); // human answered/dismissed — resume the compute budget
+        let row: Awaited<ReturnType<typeof promptStore.waitForAnswer>>;
+        try {
+          row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        } finally {
+          // As for promptUser: a throwing wait leaves the run unparked.
+          releaseWithdraw();
+          hasActivePendingPrompt = false;
+          resumeWallClock(); // human answered/dismissed — resume the compute budget
+        }
         // answer_saved === 1 means the consent step POSTed the account and the
         // route accepted it. No row (expired / session aborted) or a 0 flag is
         // a dismissal — the agent must NOT fall back to asking for the password
