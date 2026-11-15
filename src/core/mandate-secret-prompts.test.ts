@@ -118,7 +118,7 @@ describe('ask_secret refuses a mandate before any dialog, and says who stores ke
 
   // The checks a connection's token brought in (scope, stored names, the API profiles that hold a
   // name) answer about the owner's vault too, so the refusal comes before every one of them.
-  it('refuses before the scope check, the stored names and the API profiles are read', async () => {
+  it('refuses before the scope check and the stored names are read; of the API profiles it reads only the list', async () => {
     const ask = async (principal: RequestPrincipal | undefined) => {
       const touched: string[] = [];
       const apiStore = new Proxy({}, {
@@ -141,7 +141,9 @@ describe('ask_secret refuses a mandate before any dialog, and says who stores ke
     expect(mandate.store.explainUnresolved).not.toHaveBeenCalled();
     expect(mandate.store.listAgentVisibleNames).not.toHaveBeenCalled();
     expect(mandate.store.findNameMatches).not.toHaveBeenCalled();
-    expect(mandate.touched).toEqual([]);
+    // The list is read only to find a token slot of the mandate's own profile on a built-in provider
+    // (none here): the answer stays the refusal, word for word.
+    expect(mandate.touched).toEqual(['apiStore.knownProfiles']);
     // control: the owner's same call reaches each of them
     const owner = await ask(undefined);
     expect(owner.store.explainUnresolved).toHaveBeenCalledWith('SHOPIFY_TOKEN');
