@@ -389,7 +389,8 @@ const STOPPED_BY_DELETE: ReadonlySet<string> = new Set(['run_workflow', 'run_age
  * Close the run's own question when its wait failed (the store threw before the question
  * settled). Without it the row stays pending until its TTL and holds the thread's one open
  * question. Fenced, like the withdraw on abort; false when the write failed too, so the caller
- * keeps the withdraw on abort as the one way left to close it.
+ * keeps the withdraw on abort: an abort of the tool's signal (when it has one) can then still
+ * close it, otherwise its TTL does.
  */
 export function expireFailedWait(store: { expirePrompt(id: string, reason: PromptClosedReason): boolean }, promptId: string): boolean {
   try { store.expirePrompt(promptId, 'run_stopped'); return true; } catch { return false; }
@@ -5320,7 +5321,7 @@ export class LynoxHTTPApi {
         } catch (err) {
           // The wait failed before the question settled (its first read of the row threw), so the
           // row is still pending: close it here. When that write fails too, the withdraw on abort
-          // stays, so a later Stop can still close it.
+          // stays: an abort of the tool's signal (when it has one) can still close it.
           withdrawStays = !expireFailedWait(promptStore, promptId);
           throw err;
         } finally {
@@ -5364,7 +5365,7 @@ export class LynoxHTTPApi {
           } catch (err) {
             // The wait failed before the question settled (its first read of the row threw), so the
             // row is still pending: close it here. When that write fails too, the withdraw on abort
-            // stays, so a later Stop can still close it.
+            // stays: an abort of the tool's signal (when it has one) can still close it.
             withdrawStays = !expireFailedWait(promptStore, promptId);
             throw err;
           } finally {
@@ -5446,7 +5447,7 @@ export class LynoxHTTPApi {
         } catch (err) {
           // The wait failed before the question settled (its first read of the row threw), so the
           // row is still pending: close it here. When that write fails too, the withdraw on abort
-          // stays, so a later Stop can still close it.
+          // stays: an abort of the tool's signal (when it has one) can still close it.
           withdrawStays = !expireFailedWait(promptStore, promptId);
           throw err;
         } finally {
@@ -5501,7 +5502,7 @@ export class LynoxHTTPApi {
         } catch (err) {
           // The wait failed before the question settled (its first read of the row threw), so the
           // row is still pending: close it here. When that write fails too, the withdraw on abort
-          // stays, so a later Stop can still close it.
+          // stays: an abort of the tool's signal (when it has one) can still close it.
           withdrawStays = !expireFailedWait(promptStore, promptId);
           throw err;
         } finally {
