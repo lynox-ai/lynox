@@ -278,7 +278,7 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       const apiStore = agent.toolContext?.apiStore;
       const signsIn = (apiStore ? sharedGrantOwner(apiStore, presetHolder) : undefined) ?? presetHolder;
       const id: unknown = signsIn.id;
-      const head = `"${input.name}" is a token slot of a profile connected through ${via}, so it is not collected ` +
+      const head = `"${input.name}" is a token slot of a profile on ${via}, so it is not collected ` +
         `through ask_secret: its tokens come only from the provider's sign-in, where the user sees what lynox may ` +
         `do there.`;
       // Asked here rather than left to the model, which wrote a link of its own instead (measured, U-195).
