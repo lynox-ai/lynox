@@ -514,6 +514,23 @@ describe('the fixed-notice detector', () => {
   });
 });
 
+describe('a question from a plan someone the owner let in set up or changed', () => {
+  // Its title is that person's text: none of these names it, and only the mandate's address,
+  // which the engine checked, goes in.
+  it.each(['en', 'de'] as const)('names the mandate as setter, as changer, or as someone let in (%s)', (lang) => {
+    const n = WORKER_NOTICES[lang];
+    const setUp = n.helperQuestionTitle({ address: 'eva@kanzlei.example', changed: false });
+    const changed = n.helperQuestionTitle({ address: 'eva@kanzlei.example', changed: true });
+    const someone = n.helperQuestionTitle(undefined);
+    expect(setUp).toContain('eva@kanzlei.example');
+    expect(changed).toContain('eva@kanzlei.example');
+    expect(changed).not.toBe(setUp);
+    expect(someone).not.toContain('@');
+    expect(new Set([setUp, changed, someone]).size).toBe(3);
+    expect(n.helperQuestionFrom).not.toBe(n.questionFrom(''));
+  });
+});
+
 describe('a title quoted in a turn the model reads', () => {
   // A title is set by the model or a delegated session: it must not close its quote and go on as
   // the turn's own words, nor start a line of its own.
