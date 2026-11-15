@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { IAgent, LynoxUserConfig } from '../types/index.js';
+import type { IAgent, LynoxUserConfig, ToolEntry } from '../types/index.js';
 
 /**
  * A workflow step is handed its parent's context (`parentToolContext`) and judged by the same gate
@@ -13,13 +13,13 @@ import type { IAgent, LynoxUserConfig } from '../types/index.js';
  * `web_research`, the case where the gate alone decides.
  */
 
-const sent = vi.hoisted(() => ({ requests: [] as Array<{ tools?: Array<{ type?: string }> }> }));
+const sent = vi.hoisted(() => ({ requests: [] as Array<{ tools?: Array<{ type?: string }>; system?: unknown }> }));
 
 vi.mock('@anthropic-ai/sdk', () => {
   class MockAnthropic {
     beta = {
       messages: {
-        stream: vi.fn((params: { tools?: Array<{ type?: string }> }) => {
+        stream: vi.fn((params: { tools?: Array<{ type?: string }>; system?: unknown }) => {
           sent.requests.push(params);
           return {};
         }),
@@ -53,6 +53,7 @@ import { runManifest, buildRunCtx } from './runner.js';
 import { Agent } from '../core/agent.js';
 import { applyNetworkPolicy, createToolContext } from '../core/tool-context.js';
 import type { ToolContext } from '../core/tool-context.js';
+import { STEP_NO_WEB_STRUCTURED_PROMPT_BLOCK, SUBAGENT_NO_WEB_PROMPT_BLOCK } from '../core/prompts.js';
 
 const config: LynoxUserConfig = { api_key: 'test-key', durable_memory_enabled: false };
 
@@ -77,11 +78,17 @@ function unreadContext(): ToolContext {
   return new Agent({ name: 'library', model: 'claude-sonnet-4-6', apiKey: 'test-key' }).toolContext;
 }
 
-function engineContext(policy?: 'deny-all' | 'allow-all'): ToolContext {
+function engineContext(policy?: 'deny-all' | 'allow-all' | 'allow-list'): ToolContext {
   const ctx = createToolContext(config);
-  if (policy) applyNetworkPolicy(ctx, policy, []);
+  if (policy) applyNetworkPolicy(ctx, policy, policy === 'allow-list' ? ['api.example.com'] : []);
   return ctx;
 }
+
+/** Whether the step was told the network settings keep it off the web (`withNoWebSentence`). */
+const sentSystem = (text: string): boolean => sent.requests.some((r) => JSON.stringify(r.system ?? '').includes(JSON.stringify(text).slice(1, -1)));
+/** Both sentences a step gets: the one a spawned child gets, and the one for structured output. */
+const toldNoWeb = (): boolean => sentSystem(SUBAGENT_NO_WEB_PROMPT_BLOCK) && sentSystem(STEP_NO_WEB_STRUCTURED_PROMPT_BLOCK);
+const toldAnyNoWeb = (): boolean => sentSystem(SUBAGENT_NO_WEB_PROMPT_BLOCK) || sentSystem(STEP_NO_WEB_STRUCTURED_PROMPT_BLOCK);
 
 const offered = (): boolean => sent.requests.some((r) => (r.tools ?? []).some((t) => t.type === 'web_search_20250305'));
 
@@ -108,6 +115,20 @@ describe('the provider-side web search in a workflow step', () => {
       agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'look', task: 'Look it up.' }] }],
       gate_points: [], on_failure: 'stop',
     }, config, { ...buildRunCtx({ autonomy: undefined, parentTools: [], parentToolContext: parent.toolContext }), source: { kind: 'adhoc' as const } });
+  };
+
+  /** An inline step that names `tools` from the parent's set, under `disabled` tool toggles. */
+  const runInlineWith = async (ctx: ToolContext, names: string[], disabled: string[] = []): Promise<void> => {
+    const parent = parentWith(ctx);
+    const parentTools = names.map((name) => ({
+      definition: { name, description: name, input_schema: { type: 'object' as const, properties: {} } },
+      handler: async () => 'ok',
+    })) as unknown as ToolEntry[];
+    await runManifest({
+      manifest_version: '1.0', name: 'search-probe-tools', triggered_by: 'test', context: {},
+      agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'look', task: 'Look it up.', tools: names }] }],
+      gate_points: [], on_failure: 'stop',
+    }, { ...config, disabled_tools: disabled }, { ...buildRunCtx({ autonomy: undefined, parentTools, parentToolContext: parent.toolContext }), source: { kind: 'adhoc' as const } });
   };
 
   /** A named agent's step (runtime-adapter, agent). */
@@ -138,5 +159,62 @@ describe('the provider-side web search in a workflow step', () => {
   it.each([['an inline step', runInline], ['a named agent\'s step', runNamed]] as const)('%s under the engine\'s allow-all: offered (control)', async (_name, run) => {
     await run(engineContext('allow-all'));
     expect(offered()).toBe(true);
+  });
+
+  // A step with no web tool under a policy that keeps it off the web is told so, as a spawned
+  // child is: the same sentence, from the same helper, and one more for structured output.
+  it.each([['an inline step', runInline], ['a named agent\'s step', runNamed]] as const)('%s with no web tool under deny-all: told it cannot reach the web', async (_name, run) => {
+    await run(engineContext('deny-all'));
+    expect(sent.requests.length).toBeGreaterThan(0);
+    expect(toldNoWeb()).toBe(true);
+  });
+
+  it.each([['an inline step', runInline], ['a named agent\'s step', runNamed]] as const)('%s with no web tool under an allow-list: told it cannot reach the web', async (_name, run) => {
+    await run(engineContext('allow-list'));
+    expect(toldNoWeb()).toBe(true);
+  });
+
+  // The sentence is read from the tools the step is left with, after the tool toggles: a web tool
+  // that is turned off does not count, one that stays does, and so does bash under deny-all.
+  it('an inline step under an allow-list: not told while it keeps http_request, told once it is turned off', async () => {
+    await runInlineWith(engineContext('allow-list'), ['http_request']);
+    expect(sent.requests.length).toBeGreaterThan(0);
+    expect(toldAnyNoWeb()).toBe(false);
+    sent.requests = [];
+    await runInlineWith(engineContext('allow-list'), ['http_request'], ['http_request']);
+    expect(sent.requests.length).toBeGreaterThan(0);
+    expect(toldNoWeb()).toBe(true);
+  });
+
+  // A named agent's own tools run their own code, which the network policy does not reach: such a
+  // step may open pages through one of them, so it is not told it cannot.
+  it('a named agent\'s step that brings a tool of its own, under deny-all: not told', async () => {
+    const agentsDir = join(dir, 'agents');
+    mkdirSync(join(agentsDir, 'fetcher'), { recursive: true });
+    writeFileSync(join(agentsDir, 'fetcher', 'index.js'), `export default { name: 'fetcher', version: '1.0.0', defaultTier: 'balanced', systemPrompt: 'You look.', tools: [{ name: 'lookup_company', description: 'Look a company up.', input_schema: { type: 'object', properties: {} }, execute: async () => 'ok' }] };\n`);
+    const parent = parentWith(engineContext('deny-all'));
+    await runManifest({
+      manifest_version: '1.0', name: 'named-tool-probe', triggered_by: 'test', context: {},
+      agents: [{ id: 'f', agent: 'fetcher', task: 'Look it up.' }],
+      gate_points: [], on_failure: 'stop',
+    }, config, { ...buildRunCtx({ source: { kind: 'adhoc' as const }, autonomy: undefined, parentToolContext: parent.toolContext }), agentsDir });
+    expect(sent.requests.length).toBeGreaterThan(0);
+    expect(toldAnyNoWeb()).toBe(false);
+  });
+
+  it('an inline step under deny-all that keeps bash: not told, as bash runs past the policy', async () => {
+    await runInlineWith(engineContext('deny-all'), ['bash']);
+    expect(sent.requests.length).toBeGreaterThan(0);
+    expect(toldAnyNoWeb()).toBe(false);
+  });
+
+  it.each([['an inline step', runInline], ['a named agent\'s step', runNamed]] as const)('%s under allow-all, or a context without the policy: not told (control)', async (_name, run) => {
+    await run(engineContext('allow-all'));
+    expect(sent.requests.length).toBeGreaterThan(0);
+    expect(toldAnyNoWeb()).toBe(false);
+    sent.requests = [];
+    await run(unreadContext());
+    expect(sent.requests.length).toBeGreaterThan(0);
+    expect(toldAnyNoWeb()).toBe(false);
   });
 });
