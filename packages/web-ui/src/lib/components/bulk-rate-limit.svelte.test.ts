@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 import { t } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
+import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // The engine answers a burst of requests with 429. The bulk pages then say that, not "Is the
 // engine reachable?", and the list does not add "no runs yet" under a failed load.
@@ -20,7 +21,17 @@ type SvelteClient = {
 };
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 
-type Answer = 'ok-empty' | 'rate-limited' | 'network';
+const PREVIEWED: BulkRunDetailData = {
+	id: 'r1', createdAt: '2026-10-28T00:00:00Z', targetSystem: 'http:demo.myshopify.com', phase: 'previewed', total: 1,
+	changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 }, applied: 0, failed: 0, conflicts: 0, sentUnknown: 0, undone: 0,
+	kind: 'apply', atomic: false, sourceRunId: null, writeMethod: null, probeConfirmed: true, writeForm: 'measured', haltReason: null, haltKey: null,
+	costUsd: 0, costCapUsd: null, judge: null, maxTargets: null, failedOnce: null, failureLimit: 0, resumeOpen: 0, resumeTries: 0, resumeSends: 0, deselected: 0,
+	checksum: 'c1', writeFormNote: null, writeFormConfirmation: null, judgeModel: null, resumesAt: null, probe: null, undoable: 0,
+	listFirstPage: null, listStartChecksum: null, listNote: null, listFilters: null, judgeRule: null, judgeRuleHash: null, judgeServedBy: null, judgeOwnKey: false,
+};
+const TARGET: BulkTarget = { seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: { kind: 'fields', fields: [{ field: 'title', before: 'Alt', after: 'Neu' }] } as BulkTarget['diff'], error: null, deselected: false };
+
+type Answer = 'ok-empty' | 'rate-limited' | 'network' | 'act-rate-limited';
 let answer: Answer;
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
@@ -29,10 +40,17 @@ beforeEach(() => {
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	resetSettingsViewer();
-	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
+		if (answer === 'act-rate-limited') {
+			if (init?.method === 'POST') return new Response(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '4' } });
+			const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+			if (page) return reply({ targets: [TARGET] });
+			if (u.endsWith('/bulk/runs/r1')) return reply(PREVIEWED);
+			return reply({}, 404);
+		}
 		if (answer === 'network') throw new TypeError('Failed to fetch');
 		if (answer === 'rate-limited') return new Response(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '4' } });
 		if (u.endsWith('/bulk/runs')) return reply({ runs: [] });
@@ -99,4 +117,19 @@ describe('a run\'s page', () => {
 			expect(target.textContent).not.toContain(t(notSaid));
 		});
 	}
+});
+
+describe('an act on a run\'s page', () => {
+	it('says a 429 is too many requests, not the engine\'s English', async () => {
+		answer = 'act-rate-limited';
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		component = mount(BulkRunDetail, { target, props: { runId: 'r1', onBack: () => {}, onOpen: () => {} } });
+		await settle();
+		const off = [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === t('bulk.deselect.off'));
+		expect(off).toBeDefined();
+		off!.click();
+		await settle();
+		expect(target.textContent).toContain(t('common.rate_limited'));
+		expect(target.textContent).not.toContain('Too many requests');
+	});
 });

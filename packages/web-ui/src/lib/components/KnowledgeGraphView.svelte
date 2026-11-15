@@ -81,7 +81,7 @@
 			if (query) params.set('q', query);
 			if (typeFilter) params.set('type', typeFilter);
 			const res = await fetch(`${getApiBase()}/kg/entities?${params}`);
-			if (!res.ok) throw new Error(`${res.status}`);
+			ensureOk(res);
 			const data = (await res.json()) as { entities: Entity[] };
 			if (append) {
 				entities = [...entities, ...data.entities];

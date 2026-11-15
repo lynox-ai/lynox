@@ -114,10 +114,12 @@
 		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 	}
 
+	// The status of the last summary that did not load, so the overview can say which failure it was.
+	let summaryFailed: number | undefined;
 	async function fetchSummary(period: Period): Promise<UsageSummary | null> {
 		try {
 			const res = await fetch(`${getApiBase()}/usage/summary?period=${period}`);
-			if (!res.ok) return null;
+			if (!res.ok) { summaryFailed = res.status; return null; }
 			return (await res.json()) as UsageSummary;
 		} catch {
 			return null;
@@ -137,7 +139,7 @@
 				.catch(() => []),
 		]);
 		if (!mtd && !sevenDay && !thirtyDay) {
-			overviewError = loadFailedText();
+			overviewError = loadFailedText(summaryFailed);
 		}
 		summaryMTD = mtd;
 		summary7d = sevenDay;

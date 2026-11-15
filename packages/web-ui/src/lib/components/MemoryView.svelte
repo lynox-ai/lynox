@@ -102,7 +102,8 @@
 				fetch(`${getApiBase()}/knowledge/entries`),
 				fetch(`${getApiBase()}/knowledge/blocks`)
 			]);
-			if (!eRes.ok || !bRes.ok) throw new Error();
+			ensureOk(eRes);
+			ensureOk(bRes);
 			const eBody = (await eRes.json()) as { entries: DkEntry[] };
 			const bBody = (await bRes.json()) as { profile: string; playbook: string };
 			dkEntries = eBody.entries;

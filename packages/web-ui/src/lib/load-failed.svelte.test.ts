@@ -33,4 +33,41 @@ describe('the sentence for a failed load', () => {
 			.filter((f) => readFileSync(join(dir, f), 'utf8').includes("t('common.load_failed')"));
 		expect(direct).toEqual([]);
 	});
+
+	// A failure thrown without its status reaches loadFailedText as a plain Error and reads as
+	// the general sentence, a 429 included. In each try whose catch writes the sentence from what
+	// it caught, an ok check throws through ensureOk.
+	function triesFeedingTheSentence(src: string): string[] {
+		const out: string[] = [];
+		const re = /\} catch \((\w+)\) \{/g;
+		for (let m = re.exec(src); m !== null; m = re.exec(src)) {
+			const tail = src.slice(m.index, m.index + 400);
+			if (!tail.includes(`loadFailedText(${m[1]!})`)) continue;
+			// Walk back from the `}` that closes the try to the `{` that opens it.
+			let depth = 0;
+			for (let i = m.index; i >= 0; i--) {
+				if (src[i] === '}') depth++;
+				else if (src[i] === '{' && --depth === 0) { out.push(src.slice(i, m.index)); break; }
+			}
+		}
+		return out;
+	}
+	const BARE = /!\s*\w+\.ok\b[^;\n]*\)\s*throw new Error\(/;
+
+	it('throws no failed response without its status where the sentence is written from it', () => {
+		const dir = join(__dirname, 'components');
+		const found = readdirSync(dir, { recursive: true, encoding: 'utf8' })
+			.filter((f) => f.endsWith('.svelte') || (f.endsWith('.ts') && !f.endsWith('.test.ts')))
+			.filter((f) => triesFeedingTheSentence(readFileSync(join(dir, f), 'utf8')).some((body) => BARE.test(body)));
+		expect(found).toEqual([]);
+	});
+
+	it('finds such a throw, and only in a try that feeds the sentence', () => {
+		const feeds = "try {\n\tconst r = await fetch(u);\n\tif (!r.ok) throw new Error(`${r.status}`);\n\tif (x) { y(); }\n} catch (e) {\n\terror = loadFailedText(e);\n}";
+		expect(triesFeedingTheSentence(feeds).some((b) => BARE.test(b))).toBe(true);
+		expect(BARE.test('if (!eRes.ok || !bRes.ok) throw new Error();')).toBe(true);
+		const own = "try {\n\tif (!r.ok) throw new Error();\n} catch {\n\terror = t('crm.remove_failed');\n}";
+		expect(triesFeedingTheSentence(own)).toEqual([]);
+	});
+
 });
