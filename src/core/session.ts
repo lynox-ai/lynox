@@ -31,7 +31,8 @@ import { effectiveContextWindow, profileNamed } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError, raceRunAbort } from './agent.js';
+import { currentCallSignal } from './call-connection.js';
 import { isInputRequired } from './input-required.js';
 import { loopGuardStopReason } from './loop-guard-stop.js';
 import type { SendStop } from './agent.js';
@@ -339,11 +340,29 @@ export interface RunUsageSummary {
  * it also dropped `detailedGuidance`, so #1006's on-use guidance never fired on a
  * plugin-enabled instance. The spread keeps those, and any field added to ToolEntry later.
  */
+/** How long a plugin's tool gate may take before the call is refused. The gate sits in front of
+ *  every tool, also the ones without the per-tool time limit (`ask_user`, `run_workflow`, …), so
+ *  without its own bound a gate that never answers would hold the call, and a stopped run, open. */
+export const PLUGIN_GATE_TIMEOUT_MS = 30_000;
+
 export function applyPluginToolGate(entries: ToolEntry[], pluginManager: PluginManager): ToolEntry[] {
   return entries.map(entry => ({
     ...entry,
     handler: async (input: unknown, agent: IAgent): Promise<string> => {
-      const gate = await pluginManager.fireToolGate(entry.definition.name, input);
+      // The gate is plugin code and gets no signal, so the wait on it hears the run's stop here
+      // and ends at its own bound; a gate that gives no answer in time refuses the call.
+      const call = currentCallSignal();
+      const bound = new AbortController();
+      const timer = setTimeout(() => { bound.abort(); }, PLUGIN_GATE_TIMEOUT_MS);
+      let gate: boolean | undefined;
+      try {
+        gate = await raceRunAbort(pluginManager.fireToolGate(entry.definition.name, input), call ? AbortSignal.any([call, bound.signal]) : bound.signal);
+      } catch (err: unknown) {
+        if (call?.aborted === true) throw err;
+        throw new Error(`Tool "${entry.definition.name}" blocked: the plugin gate gave no answer within ${String(PLUGIN_GATE_TIMEOUT_MS / 1000)} s; the call was not made.`);
+      } finally {
+        clearTimeout(timer);
+      }
       if (gate === false) {
         throw new Error(`Tool "${entry.definition.name}" blocked by plugin gate`);
       }

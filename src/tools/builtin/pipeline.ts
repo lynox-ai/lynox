@@ -505,6 +505,9 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     // step's durable-write routing. See RunTaint in runtime-adapter.ts.
     const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
+      // The chat's run ending (its stop, its time limit): without it a stop between steps, or under `on_failure:
+      // continue`, lets the next step start (the scope below only ends the agents already in it).
+      endSignal: deps.parentAgent?.runSignal,
       // Steps this agent wrote for the run, which no saved workflow shaped.
       source: { kind: 'adhoc' },
       autonomy: deps.autonomy,
@@ -1307,6 +1310,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       if (prevGrants !== undefined) for (const id of prevGrants.members()) retryGrants?.add(id);
       else retryGrants?.add(UNKNOWN_GRANT);
       const state = await asPlanOfAuthor(retryTrail, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+        // The chat's run ending (its stop, its time limit): without it a stop between steps, or under `on_failure:
+        // continue`, lets the next step start (the scope below only ends the agents already in it).
+        endSignal: deps.parentAgent?.runSignal,
         source,
         autonomy: deps.autonomy,
         parentTools: deps.tools,
@@ -1437,6 +1443,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const runTaint = newRunTaint(deps.parentAgent);
     const state = await asPlanOfAuthor(trail, () => runManifest(manifest, deps.config, buildRunCtx({
+      // The chat's run ending (its stop, its time limit): without it a stop between steps, or under `on_failure:
+      // continue`, lets the next step start (the scope below only ends the agents already in it).
+      endSignal: deps.parentAgent?.runSignal,
       source,
       autonomy: deps.autonomy,
       parentTools: deps.tools,

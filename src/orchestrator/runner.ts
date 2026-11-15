@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_CALLER_ENDED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { join } from 'node:path';
@@ -213,6 +213,13 @@ export interface RunManifestOptions {
    */
   stopSignal?: AbortSignal | undefined;
   /**
+   * Aborted when the run that started this one ended, whatever ended it (a chat's stop, its time
+   * limit, the timeout of the step that ran it). Read where `stopSignal` is read, after it, so an
+   * owner's stop keeps its own cause; the run then starts no further step and ends with
+   * {@link WORKFLOW_CALLER_ENDED_ERROR}. Set by the in-session path, which has no owner-only stop.
+   */
+  endSignal?: AbortSignal | undefined;
+  /**
    * The question channel's state, for a scheduled run whose steps may ask its owner (PRD 3b-2
    * §4.5, G5): a question that went unanswered halts the run, after the owner's stop, and the
    * time spent waiting for answers does not count against the wall clock. Absent for every run
@@ -300,6 +307,13 @@ export interface RunCtxInput {
    * ending the step agents in flight is `abortScope`'s job, so a caller passes both.
    */
   stopSignal?: AbortSignal | undefined;
+  /**
+   * Aborted when the run that started this one ended, whatever ended it (a chat's stop, its time
+   * limit, the timeout of the step that ran it). Read where `stopSignal` is read, after it, so an
+   * owner's stop keeps its own cause; the run then starts no further step and ends with
+   * {@link WORKFLOW_CALLER_ENDED_ERROR}. Set by the in-session path, which has no owner-only stop.
+   */
+  endSignal?: AbortSignal | undefined;
   /** See `RunManifestOptions.questionWait`. */
   questionWait?: import('../core/workflow-questions.js').WorkflowQuestionWait | undefined;
   /** See `RunManifestOptions.chatOrigin`. */
@@ -348,6 +362,7 @@ export function buildRunCtx(input: RunCtxInput): StartedRunOptions {
     runTaint: input.runTaint,
     abortScope: input.abortScope,
     stopSignal: input.stopSignal,
+    endSignal: input.endSignal,
     questionWait: input.questionWait,
     chatOrigin: input.chatOrigin,
     parentChangeset: input.parentChangeset,
@@ -363,6 +378,16 @@ function stoppedByOwner(options: RunManifestOptions, state: RunState): boolean {
   if (state.status !== 'running') return true;
   state.status = 'failed';
   state.error = WORKFLOW_STOPPED_ERROR;
+  state.completedAt = new Date().toISOString();
+  return true;
+}
+
+/** Whether the run that started this one ended; if so, end this one with that cause. */
+function endedWithCaller(options: RunManifestOptions, state: RunState): boolean {
+  if (options.endSignal?.aborted !== true) return false;
+  if (state.status !== 'running') return true;
+  state.status = 'failed';
+  state.error = WORKFLOW_CALLER_ENDED_ERROR;
   state.completedAt = new Date().toISOString();
   return true;
 }
@@ -1102,6 +1127,7 @@ async function executeStep(
   // next sequential step, the first step of the next phase, and a step of a wide phase the
   // pool hands out after the stop (the scope can only abort agents that already exist).
   if (stoppedByOwner(options, state)) return 'halt';
+  if (endedWithCaller(options, state)) return 'halt';
   if (questionUnanswered(options, state)) return 'halt';
   // A run already ended for its makers' access — by a sibling's sub-run, or by a check that threw
   // once — starts no further step, even when reading the access again would now let it: the
@@ -1347,6 +1373,7 @@ async function executeStep(
     // A step that failed while the owner's stop is out ended because of it (its agent was
     // aborted) or ends the run anyway: a stopped run does not carry on to the next step.
     if (stoppedByOwner(options, state)) return 'halt';
+    if (endedWithCaller(options, state)) return 'halt';
     if (questionUnanswered(options, state)) return 'halt';
     // …and so does a sub-run that stopped for its makers' access: the run that holds it ends with
     // that cause as the sub-run read it, whatever `on_failure` says. Only that error: a step that

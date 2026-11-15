@@ -8,7 +8,7 @@ import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
 import type { IAgent, LynoxUserConfig } from '../../types/index.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR } from '../../orchestrator/run-source.js';
-import { WORKFLOW_STOPPED_ERROR } from '../../orchestrator/workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_CALLER_ENDED_ERROR } from '../../orchestrator/workflow-stop.js';
 import { GateExpiredError, GateRejectedError } from '../../types/orchestration.js';
 
 const mockConfig = { api_key: 'test-key' } as LynoxUserConfig;
@@ -143,6 +143,14 @@ describe('diagnose_workflow_run (Slice C2)', () => {
     history.insertPipelineStepResult({ pipelineRunId: 'run-s', stepId: 's0', status: 'completed', costUsd: 0 });
     const lines = (await diagnoseWorkflowTool.handler({ run_id: 'run-s' }, makeAgent(history))).split('\n');
     expect(lines).toContain(`Run error: ${WORKFLOW_ENDED_MID_RUN_ERROR}`);
+    expect(lines).not.toContain(DIAGNOSE_ERRORS_QUOTED);
+  });
+
+  it('the end of the run that started it is lynox\'s own account, shown plain', async () => {
+    history.insertPipelineRun({ id: 'run-c', manifestName: 'C', status: 'failed', manifestJson: '{}', error: WORKFLOW_CALLER_ENDED_ERROR });
+    history.insertPipelineStepResult({ pipelineRunId: 'run-c', stepId: 's0', status: 'completed', costUsd: 0 });
+    const lines = (await diagnoseWorkflowTool.handler({ run_id: 'run-c' }, makeAgent(history))).split('\n');
+    expect(lines).toContain(`Run error: ${WORKFLOW_CALLER_ENDED_ERROR}`);
     expect(lines).not.toContain(DIAGNOSE_ERRORS_QUOTED);
   });
 
