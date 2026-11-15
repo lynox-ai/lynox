@@ -400,6 +400,7 @@ it('sees every raw form it claims to see, and lets errorText through', () => {
     "console.error('r', { err });",
     'process.stderr.write(`s ${JSON.stringify(err)}\\n`);',
     "console.warn('t', err as Error);",
+    'process.stderr.write(`u ${note || reason}\\n`);',
     'process.stderr.write(`ok ${f.errorCount}\\n`);',
     "process.stderr.write(`ok ${f['errorCount']}\\n`);",
     'process.stderr.write(`ok ${count ?? 0}\\n`);',
@@ -410,7 +411,7 @@ it('sees every raw form it claims to see, and lets errorText through', () => {
     "process.stderr.write('ok plain\\n');",
     'process.stderr.write(`ok ${processErrorText(err)}\\n`);',
   ].join('\n');
-  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22']);
+  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23']);
 });
 
 // Parses every source file under src/ with the TypeScript compiler. Under coverage in CI this test
