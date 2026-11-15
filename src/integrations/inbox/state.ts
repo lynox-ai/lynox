@@ -1284,6 +1284,22 @@ export class InboxStateDb {
     return id;
   }
 
+  /**
+   * The categories the sensitive check found in an item's own mail, from its audit: every branch
+   * that files a flagged mail records them there. A reader withholds the item's mail by this, and a
+   * push names no sender or subject for it.
+   */
+  sensitiveCategoriesAtIngest(item: Pick<InboxItem, 'id' | 'tenantId'>): string[] {
+    const found = new Set<string>();
+    for (const entry of this.listAuditForItem(item.id, item.tenantId)) {
+      let payload: unknown;
+      try { payload = JSON.parse(entry.payloadJson); } catch { continue; }
+      const cats = (payload as { sensitive_categories?: unknown } | null)?.sensitive_categories;
+      if (Array.isArray(cats)) for (const c of cats) if (typeof c === 'string' && c.length > 0) found.add(c);
+    }
+    return [...found];
+  }
+
   listAuditForItem(
     itemId: string,
     tenantId: string = DEFAULT_TENANT_ID,

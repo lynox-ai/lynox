@@ -103,7 +103,7 @@ describe('bootstrapInbox — wiring', () => {
     insert('t-plain', 'Vertrag prüfen', false);
     await vi.waitFor(() => expect(bodies).toHaveLength(2));
     await runtime.shutdown();
-    expect([...bodies].sort()).toEqual(['Neue Mail mit vertraulichem Inhalt. Absender und Betreff siehst du in lynox.', 'Vertrag prüfen']);
+    expect([...bodies].sort()).toEqual(['Eine Mail mit vertraulichem Inhalt. Absender und Betreff siehst du in lynox.', 'Vertrag prüfen']);
   });
 
   it('returns a runtime bundle with all parts populated', () => {

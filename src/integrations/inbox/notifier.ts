@@ -124,6 +124,12 @@ export const FLAGGED_PUSH_TEXT: Readonly<Record<NoticeLanguage, string>> = {
   en: 'New mail with confidential content. Sender and subject are in lynox.',
 };
 
+/** The same for a reminder about such a mail: its title already says it is a reminder. */
+export const FLAGGED_REMINDER_TEXT: Readonly<Record<NoticeLanguage, string>> = {
+  de: 'Eine Mail mit vertraulichem Inhalt. Absender und Betreff siehst du in lynox.',
+  en: 'A mail with confidential content. Sender and subject are in lynox.',
+};
+
 export interface InboxNotifyOptions {
   /** The sensitive check flagged this mail: the push names no subject or reason taken from it. */
   flagged?: boolean;

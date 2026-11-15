@@ -215,6 +215,14 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: true });
   });
 
+  it('tells the notifier the item is flagged when its own mail was, even for a plain follow-up', async () => {
+    const id = seedReplied();
+    inbox.appendAudit({ itemId: id, action: 'classified', actor: 'rule_engine', payloadJson: JSON.stringify({ sensitive_categories: ['health'] }) });
+    await hook()(ACCOUNT.id, envelope());
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+    expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: true });
+  });
+
   it('notifies for a reopened requires_user item, not for another bucket', async () => {
     seedReplied();
     await hook()(ACCOUNT.id, envelope());

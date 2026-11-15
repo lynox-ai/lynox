@@ -428,17 +428,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   // The store as the inbox view reads it (api.ts handleGetCounts / handleListItems /
   // handleGetItemFull / handleGetItemThread), scoped to this runtime's tenant.
   const readerTenant = opts.tenantId ?? DEFAULT_TENANT_ID;
-  // The categories the sensitive check found in an item's own mail, from its audit.
-  const sensitiveAtIngest = (item: InboxItem): string[] => {
-    const found = new Set<string>();
-    for (const entry of state.listAuditForItem(item.id, item.tenantId)) {
-      let payload: unknown;
-      try { payload = JSON.parse(entry.payloadJson); } catch { continue; }
-      const cats = (payload as { sensitive_categories?: unknown } | null)?.sensitive_categories;
-      if (Array.isArray(cats)) for (const c of cats) if (typeof c === 'string' && c.length > 0) found.add(c);
-    }
-    return [...found];
-  };
+  const sensitiveAtIngest = (item: InboxItem): string[] => state.sensitiveCategoriesAtIngest(item);
   const inboxReader: InboxReader = {
     countByBucket: (exclude) => state.countItemsByBucket(readerTenant, exclude),
     listItems: (bucket, limit, offset, exclude, ruleId) =>

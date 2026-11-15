@@ -60,7 +60,7 @@ describe('inbox-reminder-poller', () => {
     const poller = startReminderPoller({ state, router, language: () => 'en', isFlagged: (item) => item.id === flagged });
     await poller.tickNow();
     poller.stop();
-    expect(captured.map((m) => m.body).sort()).toEqual(['New mail with confidential content. Sender and subject are in lynox.', 'Vertrag prüfen']);
+    expect(captured.map((m) => m.body).sort()).toEqual(['A mail with confidential content. Sender and subject are in lynox.', 'Vertrag prüfen']);
   });
 
   it('fires a notification for each wakeable reminder + stamps notified_at', async () => {

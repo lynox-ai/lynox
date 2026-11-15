@@ -216,7 +216,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       const item = opts.state.getItem(existing.id, existing.tenantId);
       // A snoozed item is not in the list until it wakes; a push now would lead nowhere.
       const snoozed = item?.snoozeUntil !== undefined && item.snoozeUntil.getTime() > Date.now();
-      if (item && !snoozed) void opts.notifier.notifyNewItem(item, { flagged: sensitive.isSensitive });
+      // The push names the item's own sender and subject, so its own mail's flag counts as well.
+      const flagged = sensitive.isSensitive || opts.state.sensitiveCategoriesAtIngest(existing).length > 0;
+      if (item && !snoozed) void opts.notifier.notifyNewItem(item, { flagged });
     }
   };
 

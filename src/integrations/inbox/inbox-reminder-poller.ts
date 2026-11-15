@@ -18,7 +18,7 @@
 import type { NotificationRouter } from '../../core/notification-router.js';
 import type { InboxItem } from '../../types/index.js';
 import type { InboxStateDb } from './state.js';
-import { FLAGGED_PUSH_TEXT } from './notifier.js';
+import { FLAGGED_REMINDER_TEXT } from './notifier.js';
 import { noticeLanguage } from '../../core/notice-language.js';
 import { WORKER_NOTICES } from '../../core/worker-notices.js';
 
@@ -70,7 +70,7 @@ export function startReminderPoller(opts: ReminderPollerOptions): ReminderPoller
           // Pre-v13 rows with empty subject fall back to the classifier
           // reason which is always populated. A flagged mail's subject stays off the lock screen,
           // as in the inbox push.
-          body: opts.isFlagged?.(item) === true ? FLAGGED_PUSH_TEXT[language] : item.subject || item.reasonDe,
+          body: opts.isFlagged?.(item) === true ? FLAGGED_REMINDER_TEXT[language] : item.subject || item.reasonDe,
           priority: 'normal',
         });
       } catch {
