@@ -599,6 +599,22 @@ const MIGRATIONS: string[] = [
      FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
    );
    COMMIT;`,
+
+  // v21: rules the owner confirms, named, and the rule that filed an item. `name` is what a rule
+  // is called and the topic an item was filed under; `confirmed_at` is set when the owner confirms
+  // a rule, and the loader reads only confirmed rules; `run_id` names the run that proposed a
+  // rule. Every rule that exists today was made by the owner through the owner-only route, so it
+  // is confirmed as of its creation. `matched_rule_id` names the rule that filed an item;
+  // deleting the rule clears it. One transaction, as v17.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (21);
+   ALTER TABLE inbox_rules ADD COLUMN name TEXT;
+   ALTER TABLE inbox_rules ADD COLUMN confirmed_at INTEGER;
+   ALTER TABLE inbox_rules ADD COLUMN run_id TEXT;
+   UPDATE inbox_rules SET confirmed_at = created_at;
+   ALTER TABLE inbox_items ADD COLUMN matched_rule_id TEXT;
+   CREATE INDEX IF NOT EXISTS idx_inbox_items_matched_rule ON inbox_items(tenant_id, matched_rule_id);
+   COMMIT;`,
 ];
 
 export interface MailStateDbOptions {

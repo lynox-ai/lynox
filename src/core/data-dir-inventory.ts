@@ -139,7 +139,7 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     why: 'secrets travel as their own encrypted chunk, re-wrapped under the DESTINATION vault key — copying the source database would move ciphertext the destination cannot open',
   },
   {
-    name: 'push-subscriptions.db', kind: 'sqlite', secret: false, backup: true, migrate: false, export: named('device push endpoints, bound to this deployment'), erase: STEP,
+    name: 'push-subscriptions.db', kind: 'sqlite', secret: false, backup: true, migrate: false, export: named('the addresses your browsers use to receive notifications; they only work on this installation'), erase: STEP,
     why: 'a push subscription names a browser endpoint bound to THIS deployment\'s VAPID identity; migrated, every one of them is dead on arrival',
   },
   {
@@ -153,7 +153,7 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
 
   // ── Carried by neither, each for a stated reason ───────────────────────────
   {
-    name: 'backups', kind: 'dir', secret: true, backup: false, migrate: false, export: named('copies of the stores above'), erase: REMOVE,
+    name: 'backups', kind: 'dir', secret: true, backup: false, migrate: false, export: named('backup copies of your data from earlier points in time, kept for 30 days unless the setting backup_retention_days says otherwise; they can still hold things you have changed or deleted since'), erase: REMOVE,
     why: 'the backup destination — including it would make every backup contain its predecessors',
   },
   {
@@ -161,8 +161,13 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     why: 'the key an encrypted backup is derived FROM (`deriveBackupKey`); shipping it alongside the ciphertext would defeat the encryption entirely',
   },
   {
-    name: 'export-staging', kind: 'dir', secret: true, backup: false, migrate: false, export: named('the export\'s own staging'), erase: REMOVE,
-    why: 'a workspace export staged on its way out (`workspace-export.ts`), one directory per request, removed when the request ends and by the boot sweep after a crash — a copy of the workspace, not a store, so carrying it would only duplicate what `workspace` already carries',
+    name: 'export-staging', kind: 'dir', secret: true, backup: false, migrate: false, export: named('temporary space used while this export is made'), erase: REMOVE,
+    why: 'an export staged on its way out (`workspace-export.ts`, `export-archive.ts`), one directory per request, removed when the request ends and by the boot sweep after a crash. The full archive stages DECRYPTED copies of the stores here (snapshots and parts), so it is `secret` and never backed up; both erasures refuse while a staged archive exists (`export-slot.ts`). Not a store: carrying it would only duplicate what the stores already carry',
+  },
+  {
+    name: 'export-slot.lock', kind: 'file', secret: false, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'),
+    erase: keep('the slot an export and an erasure share, held by the erasure that is running; it names a job and a time, no content'),
+    why: 'who holds the one slot an export and an erasure share (`export-slot.ts`): across processes, since the export command runs beside the HTTP API. Bound to this container\'s running jobs, so it never travels',
   },
   {
     name: 'secrets.json', kind: 'file', secret: true, backup: false, migrate: false, export: NEVER, erase: REMOVE,
@@ -173,44 +178,44 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     why: 'this deployment\'s API bearer; a restore or a migration must not silently re-point existing clients at a new instance holding the old secret',
   },
   {
-    name: '.cache-salt', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: keep('a random partition salt for the provider cache key, regenerated on demand; no user content'),
+    name: '.cache-salt', kind: 'file', secret: false, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'), erase: keep('a random partition salt for the provider cache key, regenerated on demand; no user content'),
     why: 'per-tenant partition for a shared provider cache key — regenerated on demand, and MIGRATING it would be a defect: two instances sharing a salt collide in exactly the partition it exists to separate',
   },
   {
-    name: '.last_version', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: keep('upgrade bookkeeping (a version string)'),
+    name: '.last_version', kind: 'file', secret: false, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'), erase: keep('upgrade bookkeeping (a version string)'),
     why: 'derived upgrade bookkeeping, rewritten on every boot',
   },
   {
     // Found by the scan, not by anyone remembering it — which is the point of the scan.
-    name: '.tos-accepted-1', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: keep('the operator\'s acceptance of the terms, a marker without content'),
+    name: '.tos-accepted-1', kind: 'file', secret: false, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'), erase: keep('the operator\'s acceptance of the terms, a marker without content'),
     why: 'records that THIS installation\'s operator accepted the terms; an acceptance is personal to the person who gave it and must not ride a restore or a migration into an installation whose operator never saw the dialog',
   },
   {
-    name: 'plugins', kind: 'dir', secret: false, backup: false, migrate: false, export: named('third-party code; which plugins are enabled is in config.json'), erase: keep('installed third-party code, not authored here; which plugins are enabled lives in config.json, which the erasure resets'),
+    name: 'plugins', kind: 'dir', secret: false, backup: false, migrate: false, export: named('add-on software from third parties; which add-ons are switched on is in config.redacted.json'), erase: keep('installed third-party code, not authored here; which plugins are enabled lives in config.json, which the erasure resets'),
     why: 'third-party code, installed rather than authored here; a restore should re-install it, not resurrect whatever binary was on disk',
   },
   {
-    name: 'pricing.json', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: keep('a cached provider price catalogue'),
+    name: 'pricing.json', kind: 'file', secret: false, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'), erase: keep('a cached provider price catalogue'),
     why: 'a cached provider catalogue — restoring a stale copy would bill against prices that no longer exist',
   },
   {
-    name: 'batch-index.json', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: REMOVE,
+    name: 'batch-index.json', kind: 'file', secret: false, backup: false, migrate: false, export: named('a list of requests still being processed by the AI provider in batches, with ids, times and sometimes a short label; it only works on this installation'), erase: REMOVE,
     why: 'in-flight provider batch handles; they do not survive a move to another host',
   },
   {
-    name: 'wire-sink', kind: 'dir', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
+    name: 'wire-sink', kind: 'dir', secret: false, backup: false, migrate: false, export: named('copies of what was sent to and received from the AI model, written only while troubleshooting is switched on; while it is, they hold parts of your conversations'), erase: REMOVE,
     why: 'operator debug capture, off by default and gated off entirely on provisioned containers',
   },
   {
-    name: 'wire-sink-on', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: keep('an arming marker for the debug capture; the capture itself is removed'),
+    name: 'wire-sink-on', kind: 'file', secret: false, backup: false, migrate: false, export: named('a switch that turns those troubleshooting copies on; it holds none of your content'), erase: keep('an arming marker for the debug capture; the capture itself is removed'),
     why: 'the arming marker for the debug capture above — an arming state must never be restored implicitly',
   },
   {
-    name: 'wire-sink-raw', kind: 'dir', secret: true, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
+    name: 'wire-sink-raw', kind: 'dir', secret: true, backup: false, migrate: false, export: named('copies of what was sent to and received from the AI model, written only while troubleshooting is switched on; while it is, they hold parts of your conversations'), erase: REMOVE,
     why: 'raw variant of the debug capture',
   },
   {
-    name: 'wire-sink-raw-on', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: keep('an arming marker for the raw debug capture; the capture itself is removed'),
+    name: 'wire-sink-raw-on', kind: 'file', secret: false, backup: false, migrate: false, export: named('a switch that turns those troubleshooting copies on; it holds none of your content'), erase: keep('an arming marker for the raw debug capture; the capture itself is removed'),
     why: 'arming marker for the raw debug capture',
   },
   // ── Opt-in measurement logs (`bounded-jsonl-log.ts`) ──────────────────────
@@ -219,27 +224,27 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   // `data-dir-erase.ts` treats as part of the live file. Neither backed up nor migrated:
   // they describe this container's measurement window, not the user's data.
   {
-    name: 'capture-telemetry.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
+    name: 'capture-telemetry.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('measurement logs, written only while measuring is switched on; they hold internal ids and counts, not your texts'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`capture-telemetry.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'context-cost.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
+    name: 'context-cost.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('measurement logs, written only while measuring is switched on; they hold internal ids and counts, not your texts'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`context-cost-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'memory-write.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
+    name: 'memory-write.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('measurement logs, written only while measuring is switched on; they hold internal ids and counts, not your texts'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`memory-write-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'memory-write-decision.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
+    name: 'memory-write-decision.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('measurement logs, written only while measuring is switched on; they hold internal ids and counts, not your texts'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`memory-write-decision-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'retrieval-shadow.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
+    name: 'retrieval-shadow.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('measurement logs, written only while measuring is switched on; they hold internal ids and counts, not your texts'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`retrieval-shadow-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'untrusted-cause.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
+    name: 'untrusted-cause.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('measurement logs, written only while measuring is switched on; they hold internal ids and counts, not your texts'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`untrusted-cause-log.ts`); a measurement window does not travel with the data',
   },
   {
@@ -259,7 +264,7 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   {
     name: '.volume-check', kind: 'file', secret: false, backup: false, migrate: false, sourceInvisible: true,
     why: 'a probe the entrypoint writes and removes at once to test that the volume is writable',
-    export: named('a cache or marker without customer content'), erase: keep('a transient write probe with no content'),
+    export: named('a technical note or cache the software keeps for itself; it holds none of your content'), erase: keep('a transient write probe with no content'),
   },
 ];
 

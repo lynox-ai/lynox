@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { UntrustedCause } from './untrusted-signals.js';
 import type { RunHistory } from './run-history.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
@@ -204,6 +205,9 @@ export interface TaskUpdateParams {
    *  string or null clears the choice. Only a `run_agent` trigger takes one (see
    *  {@link TriggerTierUnsupportedError}); a TODO has no runs, so it ignores this. */
   modelTier?: ModelTier | '' | null | undefined;
+  /** What the editing turn had taken in (`describeTurnUntrusted`). On a trigger whose title or
+   *  description this changes, anything but `none` is recorded as its mark; it never clears one. */
+  untrusted?: UntrustedCause | undefined;
 }
 
 /** Whether a trigger with this effect starts an agent session, the only kind of run a
@@ -583,8 +587,10 @@ export class TaskManager {
         nextRunAt?: string | null | undefined;
         scheduleCron?: string | null | undefined;
         modelTier?: ModelTier | null | undefined;
+        editedUntrusted?: string | null | undefined;
       } = {};
       if (params.title !== undefined) triggerUpdate.title = params.title;
+      if (params.untrusted !== undefined && params.untrusted !== 'none') triggerUpdate.editedUntrusted = params.untrusted;
       if (params.modelTier !== undefined) {
         // Clearing is allowed on any trigger; setting only where a run would read it.
         if (params.modelTier && !triggerTakesModelTier(trigger.effect)) throw new TriggerTierUnsupportedError(trigger.effect);
@@ -1071,8 +1077,10 @@ export class TaskManager {
    *   per request"). A retry carries no request, so it would run as the schedule's run, not
    *   the request's.
    * @param opts.keepSchedule Record the run and leave the schedule as it is: no status, no next
-   *   run, no retry. Only for a run the plan's pause ended (`plan-pause.ts`): a paused plan keeps
-   *   its due time for when it is taken over, and is not in `getDue` meanwhile.
+   *   run, no retry. For a run the plan's pause ended (`plan-pause.ts`): a paused plan keeps
+   *   its due time for when it is taken over, and is not in `getDue` meanwhile. And for a
+   *   one-shot whose workflow waits for the owner's stamp, switched off with its time kept
+   *   (`worker-loop.ts`), so switching it on again makes it due.
    * @returns Whether this scheduled a retry of the run. The caller reports a failure only
    *   when it did not, so this is the one place that decides — a second copy of the retry
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
@@ -1223,3 +1231,6 @@ export class TaskManager {
 }
 
 const MAX_RUN_RESULT_CHARS = 10_000;
+
+/** After "its address" or "watch_url": why an address a server may run as a write is not watched (`readAddressWrites`). */
+export const WATCH_OVERRIDE_REFUSAL = 'carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page.';

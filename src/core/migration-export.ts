@@ -22,7 +22,7 @@
 
 import { existsSync, readFileSync, unlinkSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import Database from 'better-sqlite3';
+import { snapshotSqlite } from './sqlite-snapshot.js';
 import { getLynoxDir } from './config.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey } from './memory-file.js';
@@ -366,14 +366,7 @@ export class MigrationExporter {
 
     // VACUUM INTO creates a consistent, defragmented copy
     const tmpPath = join(this.lynoxDir, `${dbName}.migration-tmp`);
-    let db: InstanceType<typeof Database> | null = null;
-    try {
-      db = new Database(srcPath, { readonly: true });
-      const safePath = tmpPath.replace(/'/g, "''");
-      db.exec(`VACUUM INTO '${safePath}'`);
-    } finally {
-      try { db?.close(); } catch { /* ignore */ }
-    }
+    snapshotSqlite(srcPath, tmpPath);
 
     try {
       return splitIntoChunks(readFileSync(tmpPath), 'sqlite_db', dbName);

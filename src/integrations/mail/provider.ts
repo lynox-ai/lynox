@@ -76,6 +76,13 @@ export interface MailEnvelope {
    * to prevent reply loops with autoresponders.
    */
   isAutoReply: boolean;
+  /**
+   * True when Auto-Submitted is `auto-replied` (RFC 3834: a reply to a message, such as an
+   * out-of-office note), as opposed to `auto-generated` mail (a dunning letter, a shop notice).
+   * False when the header is absent — on Microsoft 365's watch envelope, which carries no headers,
+   * always.
+   */
+  isAutoReplied?: boolean | undefined;
 }
 
 // ── Attachment metadata ────────────────────────────────────────────────────

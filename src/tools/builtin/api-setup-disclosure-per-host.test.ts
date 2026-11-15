@@ -23,6 +23,8 @@ function agentFor(store: ApiStore, promptUser: (question: string) => Promise<str
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
     promptUser,
+    // An empty vault the save can read: a built-in provider's profile is not saved where its slots cannot be seen.
+    secretStore: { resolve: (): string | null => null, listNames: (): string[] => [] },
     toolContext: {
       auditLog: testAuditLog().log,
       apiStore: store,

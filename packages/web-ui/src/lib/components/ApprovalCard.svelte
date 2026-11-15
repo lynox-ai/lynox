@@ -111,7 +111,7 @@
 		})}</p>
 	{/if}
 	{#if card.afterUntrusted}
-		<p class="text-xs text-text-muted" data-note="after-untrusted">{t('approvals.after_untrusted')}</p>
+		<p class="text-xs text-text-muted" data-note="after-untrusted">{t(card.afterUntrustedBy === 'instruction' ? 'approvals.after_untrusted_instruction' : card.afterUntrustedBy === 'both' ? 'approvals.after_untrusted_both' : 'approvals.after_untrusted')}</p>
 	{/if}
 
 	{#if mail !== null}
