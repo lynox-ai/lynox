@@ -1078,10 +1078,13 @@ describe('what the preview says about a target lynox leaves out', () => {
 	// (WooCommerce and bexio only).
 	const NOT_SHOPIFY = new Set(['path_outside_workspace', 'unreadable', 'target_too_large', 'after_not_text', 'not_text',
 		'unknown_column', 'subject_column', 'bad_value', 'bad_key', 'effect_field',
-		// The HTML check's reasons: a Shopify run writes no HTML field until descriptions are
-		// written (descriptionHtml is refused at planning), so these reach WooCommerce only, by code.
-		'element_not_allowed', 'attribute_not_allowed', 'content_changed', 'comment_added', 'new_img', 'new_link_domain',
-		'url_scheme', 'url_control_char', 'not_canonical']);
+		// The HTML check's link and form refusals: a Shopify run writes no HTML field until
+		// descriptions are written (descriptionHtml is refused at planning), so these reach
+		// WooCommerce only, by code, until they are worded.
+		'new_link_domain', 'url_scheme', 'url_control_char', 'not_canonical']);
+	// What the HTML check refuses in elements, attributes, code and comments: any run with an
+	// HTML field, a Shopify description as a WooCommerce one, so each has its sentence on either.
+	const HTML_CHECK = ['element_not_allowed', 'attribute_not_allowed', 'content_changed', 'comment_added', 'new_img'];
 	const i18nSource = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 
 	it('has a sentence of its own for every reason a Shopify run can record, in both languages', () => {
@@ -1092,6 +1095,21 @@ describe('what the preview says about a target lynox leaves out', () => {
 			expect(key, reason).not.toBe('bulk.invalid.other');
 			expect(i18nSource, reason).toMatch(new RegExp(`'${key.replace(/\./g, '\\.')}': \\{ de: .+, en: .+ \\}`));
 		}
+	});
+	it('has the HTML check\'s sentence on a run that is not Shopify too, in both languages', () => {
+		for (const reason of HTML_CHECK) {
+			expect(reasons, reason).toContain(reason);
+			const key = bulkInvalidText(reason, false, true, i18n);
+			expect(key, reason).toMatch(/^bulk\.invalid\.[a-z_]+$/);
+			expect(key, reason).not.toBe('bulk.invalid.other');
+			expect(i18nSource, reason).toMatch(new RegExp(`'${key.replace(/\./g, '\\.')}': \\{ de: .+, en: .+ \\}`));
+		}
+	});
+	it('puts where the products are managed into the image sentence', () => {
+		const table: Record<string, string> = { 'bulk.invalid.new_img': 'add it {where}', 'bulk.invalid.where_shopify': 'in Shopify', 'bulk.invalid.where_other': 'elsewhere' };
+		const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => Object.entries(v).reduce((x, [n, w]) => x.replace(`{${n}}`, w), table[k] ?? k) };
+		expect(bulkInvalidText('new_img', true, true, own)).toBe('add it in Shopify');
+		expect(bulkInvalidText('new_img', false, true, own)).toBe('add it elsewhere');
 	});
 	it('names the reason by its code with the next step on a run that is not Shopify', () => {
 		expect(bulkInvalidText('not_found', false, true, i18n)).toBe('bulk.invalid.other');
