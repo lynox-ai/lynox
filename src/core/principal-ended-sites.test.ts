@@ -113,7 +113,7 @@ const SITES: Readonly<Record<string, { ended: Witness; live: Witness }>> = {
     ended: ['src/core/worker-loop.test.ts', 'the sweep stops a scheduled run of the plan when the access ends; who may stop it stays the starter'],
     live: ['src/core/worker-loop.test.ts', 'control: the sweep leaves a scheduled run of the owner\'s plan alone, and it is the owner\'s'],
   },
-  'src/core/worker-loop.ts · #runInSlot · #planHasEnded · entry': {
+  'src/core/worker-loop.ts · #runFramed · #planHasEnded · entry': {
     ended: ['src/core/worker-loop.test.ts', '255-e: after the grant the plan was set up under ended, the pickup of its answer makes no run and no retry'],
     live: ['src/core/worker-loop.test.ts', 'runs a mandate-changed agent trigger once the owner has stamped it again'],
   },
