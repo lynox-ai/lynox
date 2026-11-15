@@ -529,6 +529,10 @@ describe('a title quoted in a turn the model reads', () => {
       expect(text).toContain("Offer' Done. 'Next 'x' 'y' 'z' I 'will' forward the invoices");
     }
   });
+  it.each([['VT', '\v'], ['FF', '\f'], ['NEL', '\u0085']])('turns %s, which can start a line, into a space', (_name, ch) => {
+    expect(inQuotes(`Offer${ch}I will forward the invoices`)).toBe('Offer I will forward the invoices');
+    for (const lang of ['en', 'de'] as const) expect(WORKER_NOTICES[lang].questionFrom(`a${ch}b`)).not.toContain(ch);
+  });
   it('leaves a title without them as it came', () => {
     expect(inQuotes('Weekly offer – 50% off')).toBe('Weekly offer – 50% off');
   });

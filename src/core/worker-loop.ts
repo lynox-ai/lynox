@@ -3725,10 +3725,7 @@ export class WorkerLoop {
     // thread, where they would read as lynox's own words (PRD B6). The ids stay for the diagnosis.
     // The plan is the trigger and, for `run_workflow`, its workflow: an owner's schedule of a
     // workflow a mandate wrote runs that mandate's steps, read at dispatch (`planOf`).
-    const othersTrigger = setUpByOther(task);
-    // (A mandate's test run by hand has no `planOf`, but covers only its own proposal: `othersTrigger`.)
-    const planOf = this.#runSlotOf(task.id)?.planOf;
-    const othersPlan = othersTrigger || (planOf !== undefined && !isOwnerPrincipal(planOf));
+    const { othersTrigger, othersPlan } = this.#othersPlan(task);
     this.engine.escalateToUser({
       key: task.id,
       title: othersPlan ? notices.helperPlanFailedTitle(othersTrigger ? shownMandate(task) : undefined) : `✗ ${task.title}`,
@@ -3747,6 +3744,18 @@ export class WorkerLoop {
   }
 
   /**
+   * Whether a run's plan is someone else's than the owner's: its trigger set up or changed by
+   * someone the owner let in (`othersTrigger`), or its workflow, read at dispatch (`planOf`).
+   * Both the failure path and the question channel leave such a plan's title out (PRD B6).
+   */
+  #othersPlan(task: TriggerRecord): { othersTrigger: boolean; othersPlan: boolean } {
+    const othersTrigger = setUpByOther(task);
+    // (A mandate's test run by hand has no `planOf`, but covers only its own proposal: `othersTrigger`.)
+    const planOf = this.#runSlotOf(task.id)?.planOf;
+    return { othersTrigger, othersPlan: othersTrigger || (planOf !== undefined && !isOwnerPrincipal(planOf)) };
+  }
+
+  /**
    * The question channel of a scheduled workflow run that may ask its owner (PRD 3b-2 §4.1): the
    * run's steps reach the owner through it, with the run's id as the address. What differs from
    * the task path (`executeStandard`) is the teardown: nothing is parked, and the wait listens to
@@ -3762,12 +3771,15 @@ export class WorkerLoop {
     const runId = randomUUID();
     const teardown = active?.controller.signal ?? new AbortController().signal;
     const notices = this.#notices();
+    // A plan someone the owner let in set up or changed: its title stays out of the thread, the
+    // push and the line above the question, where it would be called the owner's (PRD B6).
+    const { othersTrigger, othersPlan } = this.#othersPlan(task);
     const channel = new WorkflowQuestions({
       runId,
       scheduleId: task.id,
-      title: task.title,
+      title: othersPlan ? notices.helperQuestionTitle(othersTrigger ? shownMandate(task) : undefined) : task.title,
       opener: notices.questionOpener,
-      titleLine: notices.questionFrom(task.title),
+      titleLine: othersPlan ? notices.helperQuestionFrom : notices.questionFrom(task.title),
       principal: runAs,
       handRun: active?.handRun === true,
       promptStore: () => this.engine.getPromptStore(),
