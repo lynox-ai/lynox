@@ -27,6 +27,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCostCents, shortModel } from '../format.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { loadFailedText } from '../load-failed.js';
 	import HistoryView from './HistoryView.svelte';
 	import WorkflowsView from './WorkflowsView.svelte';
 	import BulkRunsView from './BulkRunsView.svelte';
@@ -136,7 +137,7 @@
 				.catch(() => []),
 		]);
 		if (!mtd && !sevenDay && !thirtyDay) {
-			overviewError = t('common.load_failed');
+			overviewError = loadFailedText();
 		}
 		summaryMTD = mtd;
 		summary7d = sevenDay;

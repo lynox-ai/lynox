@@ -2,6 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
@@ -29,10 +30,10 @@
 		loading = true; error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/crm/contacts?limit=50`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { contacts: Contact[] };
 			contacts = data.contacts;
-		} catch { error = t('common.load_failed'); }
+		} catch (e) { error = loadFailedText(e); }
 		loading = false;
 	}
 
@@ -40,10 +41,10 @@
 		loading = true; error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/crm/deals?limit=50`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { deals: Deal[] };
 			deals = data.deals;
-		} catch { error = t('common.load_failed'); }
+		} catch (e) { error = loadFailedText(e); }
 		loading = false;
 	}
 

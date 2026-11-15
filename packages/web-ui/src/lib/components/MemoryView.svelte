@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
@@ -82,7 +83,7 @@
 			// refreshes. Telling them to try again would be advice that can never succeed, next
 			// to a row that stays on screen. Reload instead; the row disappears and they see why.
 			if (res.status === 404) { await loadDurable(); return; }
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			await loadDurable();
 		} catch {
 			dkError = t('knowledge.active.retire_failed');
@@ -107,8 +108,8 @@
 			dkEntries = eBody.entries;
 			dkProfile = bBody.profile;
 			dkPlaybook = bBody.playbook;
-		} catch {
-			dkError = t('common.load_failed');
+		} catch (e) {
+			dkError = loadFailedText(e);
 		}
 		dkLoading = false;
 	}
@@ -118,11 +119,11 @@
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/memory/${selectedNs}`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { content: string | null };
 			content = data.content;
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 		editing = false;
@@ -137,7 +138,7 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ content: editContent })
 			});
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			await loadNamespace();
 		} catch {
 			error = t('common.save_failed');
@@ -155,7 +156,7 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ text: '\n' + appendText })
 			});
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			appendText = '';
 			await loadNamespace();
 		} catch {
@@ -174,7 +175,7 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ old_content: oldLine, new_content: newText })
 			});
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			editingIdx = null;
 			editingText = '';
 			await loadNamespace();
@@ -199,7 +200,7 @@
 			const res = await fetch(`${getApiBase()}/memory/${selectedNs}?pattern=${encodeURIComponent(pattern)}`, {
 				method: 'DELETE'
 			});
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			deletePattern = '';
 			await loadNamespace();
 		} catch {
@@ -219,7 +220,7 @@
 			const res = await fetch(`${getApiBase()}/memory/${selectedNs}?pattern=${encodeURIComponent(line)}`, {
 				method: 'DELETE'
 			});
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			await loadNamespace();
 		} catch {
 			error = t('common.save_failed');

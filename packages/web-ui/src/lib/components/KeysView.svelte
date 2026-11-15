@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { clearError } from '../stores/chat.svelte.js';
 	import { secretWriteRefusal } from '../utils/secret-write-refusal.js';
 	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
@@ -32,11 +33,11 @@
 			const res = await fetch(`${getApiBase()}/secrets`);
 			await viewerRead;
 			if (isMandateSession()) { loading = false; return; }
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { names: string[] };
 			names = data.names;
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 	}
@@ -107,7 +108,7 @@
 	async function deleteSecret(name: string) {
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' });
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			if (editingName === name) cancelEdit();
 			await loadSecrets();
 		} catch {

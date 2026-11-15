@@ -8,6 +8,7 @@
 	// engine only says whether one is stored.
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { presetProviderLabel } from '../utils/preset-provider-label.js';
 
 	let { profileId }: { profileId: string } = $props();
@@ -53,7 +54,7 @@
 		try {
 			const res = await fetch(url());
 			if (res.status === 403) { notOwner = true; return; }
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as ClientState;
 			client = data;
 			clientId = data.client_id ?? '';
@@ -109,7 +110,7 @@
 {#if notOwner}
 	<p class="text-xs text-text-muted">{t('integrations.preset_client_owner_only')}</p>
 {:else if loadFailed}
-	<p class="text-xs text-danger">{t('common.load_failed')}</p>
+	<p class="text-xs text-danger">{loadFailedText()}</p>
 {:else if client?.reads_other_names}
 	<p class="text-xs text-warning" data-testid="preset-client-other-names">{t('integrations.preset_client_other_names')}</p>
 {:else if client}

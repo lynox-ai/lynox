@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { pickBackupConfig, fetchBackupConfig, requestRestore, restoreSkippedLines, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
 	import { backupCoverageNotice, type BackupCoverageFields } from '../backup-coverage.js';
@@ -46,10 +47,10 @@
 		loading = true; error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/backups`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { backups: Backup[] };
 			backups = data.backups;
-		} catch { error = t('common.load_failed'); }
+		} catch (e) { error = loadFailedText(e); }
 		loading = false;
 	}
 
@@ -62,7 +63,7 @@
 		if (loaded) {
 			config = loaded;
 			neverDelete = loaded.backup_retention_days === 0;
-		} else configError = t('common.load_failed');
+		} else configError = loadFailedText();
 		configLoading = false;
 	}
 
@@ -115,7 +116,7 @@
 		creating = true;
 		try {
 			const res = await fetch(`${getApiBase()}/backups`, { method: 'POST' });
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			addToast(t('backups.create'), 'success');
 			await loadBackups();
 		} catch { addToast(t('common.error'), 'error'); }

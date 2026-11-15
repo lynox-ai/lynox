@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { loadFailedText } from '../load-failed.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { recordRowSummary } from '../utils/footprint.js';
@@ -84,7 +85,7 @@
 		});
 		if (result === null) {
 			if (!append) subjects = [];
-			error = t('common.load_failed');
+			error = loadFailedText();
 		} else {
 			subjects = append ? [...subjects, ...result.subjects] : result.subjects;
 			hasMore = offset + result.subjects.length < result.total;
@@ -228,7 +229,7 @@
 		{#if footprintLoading}
 			<p class="mt-4 text-text-subtle text-sm">{t('common.loading')}</p>
 		{:else if !footprint}
-			<p class="mt-4 text-text-subtle text-sm">{t('common.load_failed')}</p>
+			<p class="mt-4 text-text-subtle text-sm">{loadFailedText()}</p>
 		{:else if footprint.timeline.length === 0 && footprint.memories.length === 0 && footprint.tasks.length === 0}
 			<p class="mt-4 text-text-subtle text-sm">{t('subjects.empty_footprint')}</p>
 		{:else}

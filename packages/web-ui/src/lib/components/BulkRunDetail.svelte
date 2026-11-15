@@ -8,6 +8,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
+	import { LoadFailedError, loadFailedText } from '../load-failed.js';
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
@@ -65,7 +66,8 @@
 	 *  with fewer targets than the approval covers. */
 	async function loadTargets(offset: number, limit: number): Promise<BulkTarget[]> {
 		const r = await json<{ targets?: BulkTarget[] }>(`/bulk/runs/${encodeURIComponent(runId)}/targets?offset=${offset}&limit=${limit}`);
-		if (!r.ok || !Array.isArray(r.body.targets)) throw new Error('targets');
+		if (!r.ok) throw new LoadFailedError(r.status);
+		if (!Array.isArray(r.body.targets)) throw new Error('targets');
 		return r.body.targets;
 	}
 
@@ -141,7 +143,7 @@
 		try {
 			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
 			if (id !== runId) return false;
-			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
+			if (!r.ok) { if (!quiet) error = loadFailedText(r.status); loading = false; return false; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
@@ -156,7 +158,7 @@
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
 			if (id !== runId) return false;
-			if (whole && shown.length !== r.body.total) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
+			if (whole && shown.length !== r.body.total) { if (!quiet) error = loadFailedText(); loading = false; return false; }
 			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
 			// A load for a run the page no longer shows writes nothing: the newer load owns the page.
 			if (id !== runId) return false;
@@ -168,9 +170,9 @@
 			unmeasuredOk = false;
 			probeOk = false;
 			supersedable = null;
-		} catch {
+		} catch (e) {
 			if (id !== runId) return false;
-			if (!quiet) error = t('common.load_failed');
+			if (!quiet) error = loadFailedText(e);
 			loading = false;
 			return false;
 		}
@@ -183,8 +185,8 @@
 		if (!run) return;
 		try {
 			targets = [...targets, ...(await loadFrom(targets.length, run.total))];
-		} catch {
-			actionError = t('common.load_failed');
+		} catch (e) {
+			actionError = loadFailedText(e);
 		}
 	}
 
@@ -195,19 +197,20 @@
 			const refusal = await fn();
 			if (refusal !== null) actionError = refusal;
 			else await load();
-		} catch {
-			actionError = t('common.load_failed');
+		} catch (e) {
+			actionError = loadFailedText(e);
 		}
 		busy = false;
 	}
 
 	// A run no one can be shown to have planned is refused a resume by its code, worded here.
-	const refusalOf = (r: { ok: boolean; body: { error?: string; code?: string } }): string | null =>
-		r.ok ? null : r.body.code === 'planner_unknown' ? t('bulk.resume.refused.planner_unknown') : (r.body.error ?? t('common.load_failed'));
+	// A 429 is the engine's rate limit, not a refusal of this act: its own sentence, not the engine's English.
+	const refusalOf = (r: { ok: boolean; status: number; body: { error?: string; code?: string } }): string | null =>
+		r.ok ? null : r.status === 429 ? loadFailedText(429) : r.body.code === 'planner_unknown' ? t('bulk.resume.refused.planner_unknown') : (r.body.error ?? loadFailedText(r.status));
 
 	function approve(oneFirst: boolean): Promise<void> {
 		return act(async () => {
-			if (!run?.checksum) return t('common.load_failed');
+			if (!run?.checksum) return loadFailedText();
 			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/approve`, {
 				checksum: run.checksum,
 				maxTargets: oneFirst ? 1 : maxTargets,
@@ -220,7 +223,7 @@
 	 *  each moves the checksum, so the page reloads and approves only the run as it now is. */
 	function toggleSelected(target: BulkTarget): Promise<void> {
 		return act(async () => {
-			if (!run?.checksum) return t('common.load_failed');
+			if (!run?.checksum) return loadFailedText();
 			const verb = target.deselected ? 'reselect' : 'deselect';
 			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/targets/${target.seq}/${verb}`, { checksum: run.checksum });
 			// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
@@ -232,7 +235,7 @@
 
 	function approveUndo(): Promise<void> {
 		return act(async () => {
-			if (!run?.checksum) return t('common.load_failed');
+			if (!run?.checksum) return loadFailedText();
 			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/approve`, { checksum: run.checksum }));
 		});
 	}
@@ -242,7 +245,7 @@
 	 *  not move it; a run that changed since it was shown is refused, never resumed. */
 	function confirmProbeAndResume(): Promise<void> {
 		return act(async () => {
-			if (!run?.checksum) return t('common.load_failed');
+			if (!run?.checksum) return loadFailedText();
 			const shown = run.checksum;
 			const confirmed = await post(`/bulk/runs/${encodeURIComponent(runId)}/confirm-probe`);
 			if (!confirmed.ok) return refusalOf(confirmed);
@@ -256,19 +259,19 @@
 	 *  it has spent, and only a second click with its id ends it. */
 	function start(supersedes?: string): Promise<void> {
 		return act(async () => {
-			if (!run) return t('common.load_failed');
+			if (!run) return loadFailedText();
 			const kind = bulkStartKind(run);
 			let body: Record<string, unknown> = {};
 			if (kind === 'list') {
-				if (!run.listStartChecksum) return t('common.load_failed');
+				if (!run.listStartChecksum) return loadFailedText();
 				body = { listChecksum: run.listStartChecksum };
 			} else if (kind === 'judge') {
 				const cap = bulkCostCap(capInput);
 				if (cap === null) return t('bulk.start.cap_invalid');
-				if (!run.judgeRuleHash) return t('common.load_failed');
+				if (!run.judgeRuleHash) return loadFailedText();
 				body = { judgeRuleHash: run.judgeRuleHash, costCapUsd: cap, ...(supersedes !== undefined ? { supersedes } : {}) };
 			} else if (kind !== 'read') {
-				return t('common.load_failed');
+				return loadFailedText();
 			}
 			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body);
 			if (!r.ok && r.body.code === 'supersede_required' && r.body.supersedable) {
@@ -295,14 +298,14 @@
 	 *  with. A judged restart ends another started judged run only as a start does: named first. */
 	function restart(supersedes?: string): Promise<void> {
 		return act(async () => {
-			if (!run) return t('common.load_failed');
+			if (!run) return loadFailedText();
 			const kind = bulkRestartKind(run);
 			let body: Record<string, unknown> = {};
 			if (kind === 'list') {
-				if (!run.listStartChecksum) return t('common.load_failed');
+				if (!run.listStartChecksum) return loadFailedText();
 				body = { listChecksum: run.listStartChecksum };
 			} else if (kind === 'judge' || kind === 'judge_cap') {
-				if (!run.judgeRuleHash) return t('common.load_failed');
+				if (!run.judgeRuleHash) return loadFailedText();
 				body = { judgeRuleHash: run.judgeRuleHash, ...(supersedes !== undefined ? { supersedes } : {}) };
 				if (kind === 'judge_cap') {
 					const cap = bulkRestartCap(capInput, run.costCapUsd);
@@ -310,7 +313,7 @@
 					body['costCapUsd'] = cap;
 				}
 			} else if (kind !== 'read') {
-				return t('common.load_failed');
+				return loadFailedText();
 			}
 			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body);
 			if (!r.ok && r.body.code === 'supersede_required' && r.body.supersedable) {
@@ -334,7 +337,7 @@
 	 *  the same resume: its pass would send nothing and only reads the unclear targets. */
 	function resume(): Promise<void> {
 		return act(async () => {
-			if (!run?.checksum) return t('common.load_failed');
+			if (!run?.checksum) return loadFailedText();
 			const kind = bulkResumeKind(run);
 			const body: Record<string, unknown> = { checksum: run.checksum };
 			if (kind === 'max') {
@@ -342,7 +345,7 @@
 				if (max === null) return tf('bulk.resume.max_more', { max: String(run.maxTargets ?? 0), all: String(bulkWriting(run)) });
 				body['maxTargets'] = max;
 			} else if (kind !== 'write' && kind !== 'check') {
-				return t('common.load_failed');
+				return loadFailedText();
 			}
 			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body));
 		});
@@ -490,7 +493,7 @@
 	{#if loading && run === null}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else if error || run === null}
-		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">{error || t('common.load_failed')}</div>
+		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">{error || loadFailedText()}</div>
 	{:else}
 		<section class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-4">
 			<h1 class="text-lg font-medium">{bulkLabel(run, i18n)}</h1>

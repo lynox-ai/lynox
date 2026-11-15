@@ -17,6 +17,7 @@
 	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { loadFailedText } from '../load-failed.js';
 	import { clearError } from '../stores/chat.svelte.js';
 	import { secretWriteRefusal, type SecretWriteRefusal } from '../utils/secret-write-refusal.js';
 	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
@@ -102,15 +103,15 @@
 				// instead of silently showing an empty list.
 				error = t('secrets.no_admin');
 			} else {
-				error = t('common.load_failed');
+				error = loadFailedText(secretsRes);
 			}
 			if (configRes.ok) {
 				const cfg = (await configRes.json()) as { managed?: string };
 				managed = cpSuppliesLLMKey(cfg.managed);
 				noteViewer(cfg);
 			}
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 	}

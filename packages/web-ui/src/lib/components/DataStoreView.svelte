@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 
 	interface Collection { name: string; columns: { name: string; type: string }[]; recordCount: number; createdAt: string; updatedAt: string; }
 
@@ -17,11 +18,11 @@
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/datastore/collections`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { collections: Collection[] };
 			collections = data.collections;
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 	}
@@ -32,12 +33,12 @@
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/datastore/${encodeURIComponent(collection)}?limit=20`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { rows: Record<string, unknown>[]; total: number };
 			rows = data.rows;
 			total = data.total;
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 			rows = [];
 			total = 0;
 		}

@@ -3,6 +3,7 @@
 	import { formatCost } from '../format.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
+	import { ensureOk, loadFailedText } from '../load-failed.js';
 	import { unarchiveThread } from '../stores/threads.svelte.js';
 	import { runLabel } from '../utils/scheduled-task-turn.js';
 
@@ -194,7 +195,7 @@
 				fetch(`${getApiBase()}/history/stats`),
 				fetch(`${getApiBase()}/threads?limit=50&includeArchived=true`),
 			]);
-			if (!runsRes.ok) throw new Error();
+			ensureOk(runsRes);
 			const runsData = (await runsRes.json()) as { runs: RunRecord[] };
 			runs = runsData.runs;
 			hasMore = runsData.runs.length >= PAGE_SIZE;
@@ -203,8 +204,8 @@
 				const td = (await threadsRes.json()) as { threads: ThreadInfo[] };
 				threads = td.threads;
 			}
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loading = false;
 	}
@@ -215,12 +216,12 @@
 		try {
 			const offset = runs.length;
 			const res = await fetch(`${getApiBase()}/history/runs?${buildQueryParams(offset)}`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { runs: RunRecord[] };
 			runs = [...runs, ...data.runs];
 			hasMore = data.runs.length >= PAGE_SIZE;
-		} catch {
-			error = t('common.load_failed');
+		} catch (e) {
+			error = loadFailedText(e);
 		}
 		loadingMore = false;
 	}
@@ -239,7 +240,7 @@
 		expandedInputs = new Set();
 		try {
 			const res = await fetch(`${getApiBase()}/history/runs/${id}/tool-calls`);
-			if (!res.ok) throw new Error();
+			ensureOk(res);
 			const data = (await res.json()) as { toolCalls: ToolCall[] };
 			toolCalls = data.toolCalls;
 		} catch {
