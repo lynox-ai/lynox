@@ -997,6 +997,11 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
 	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
 	shortcode_changed: 'shortcode_changed',
+	// What the HTML check (`bulk-html.ts`) refuses in the new value's elements, attributes, code and
+	// comments, on any run with an HTML field (U-273). The link and form refusals are worded with
+	// the checks that widen them.
+	element_not_allowed: 'element_not_allowed', attribute_not_allowed: 'attribute_not_allowed',
+	content_changed: 'content_changed', comment_added: 'comment_added', new_img: 'new_img',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
