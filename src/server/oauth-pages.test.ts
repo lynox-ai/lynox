@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
   OAUTH_BACK_PATHS, OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_PAGE_CSS, OAUTH_PAGE_STYLE_HASH, OAUTH_RESULT_TEXTS,
-  ENGINE_LESS_PAGE_CLOSE, engineLessPageText, connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack,
+  ENGINE_LESS_PAGE_CLOSE, engineLessPageText, connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, oauthResultText, type OAuthBack,
 } from './oauth-pages.js';
 
 describe('the OAuth page frame', () => {
@@ -203,3 +203,57 @@ describe('the pages of an engine without engine.db', () => {
 function escapeForTest(s: string): string {
   return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
+
+// A session under a mandate stores no value: where the owner's way on is storing one, the helper
+// is told who can (approved wording, U-287). Written out here, so a changed text fails.
+describe('the result pages whose way on is storing a value', () => {
+  const PAGES = {
+    clientIdBesideCredential: {
+      owner: {
+        en: 'The client id of this profile is stored under a name that also holds a credential, and a client id is sent in the link. Store the client id under its own name, then ask for a new link. Nothing was sent to the provider.',
+        de: 'Die Client-ID dieses Profils ist unter einem Namen gespeichert, unter dem auch ein Zugangsschlüssel liegt, und eine Client-ID steht im Link. Speichere die Client-ID unter einem eigenen Namen und fordere dann einen neuen Link an. An den Anbieter wurde nichts gesendet.',
+      },
+      helper: {
+        en: 'The client id of this profile is stored in a way that lynox may not put into the link. Only the owner of this instance can change that. Let the owner know, then ask for a new link. Nothing was sent to the provider.',
+        de: 'Die Client-ID dieses Profils ist so gespeichert, dass lynox sie nicht in den Link setzen darf. Ändern kann das nur der Inhaber dieser Instanz. Sag dem Inhaber Bescheid und fordere danach einen neuen Link an. An den Anbieter wurde nichts gesendet.',
+      },
+    },
+    clientIdMissing: {
+      owner: {
+        en: 'The client id for this profile is no longer in the vault. Set it again, then ask for a new link.',
+        de: 'Die Client-ID für dieses Profil liegt nicht mehr im Tresor. Speichere sie erneut und fordere dann einen neuen Link an.',
+      },
+      helper: {
+        en: 'The client id for this profile is no longer in the vault. Only the owner of this instance can store it again. Let the owner know, then ask for a new link.',
+        de: 'Die Client-ID für dieses Profil liegt nicht mehr im Tresor. Erneut speichern kann sie nur der Inhaber dieser Instanz. Sag dem Inhaber Bescheid und fordere danach einen neuen Link an.',
+      },
+    },
+    credentialsMissing: {
+      owner: {
+        en: 'The credentials for this connection are no longer in the vault. Set them again, then ask for a new link.',
+        de: 'Die Zugangsdaten für diese Verbindung liegen nicht mehr im Tresor. Speichere sie erneut und fordere dann einen neuen Link an.',
+      },
+      helper: {
+        en: 'The credentials for this connection are no longer in the vault. Only the owner of this instance can store them again. Let the owner know, then ask for a new link.',
+        de: 'Die Zugangsdaten für diese Verbindung liegen nicht mehr im Tresor. Erneut speichern kann sie nur der Inhaber dieser Instanz. Sag dem Inhaber Bescheid und fordere danach einen neuen Link an.',
+      },
+    },
+  } as const;
+  for (const [key, page] of Object.entries(PAGES) as [keyof typeof PAGES, (typeof PAGES)[keyof typeof PAGES]][]) {
+    for (const who of ['owner', 'helper'] as const) {
+      for (const lang of ['de', 'en'] as const) {
+        it(`${key}, ${who}, ${lang}: the page says its own version, verbatim, and not the other`, () => {
+          const html = oauthResultHtml(lang, 409, oauthResultText(key, who === 'owner'), 'apis');
+          const other = who === 'owner' ? page.helper : page.owner;
+          expect(html).toContain(`<p>${escapeForTest(page[who][lang])}</p>`);
+          expect(html).not.toContain(escapeForTest(other[lang]));
+        });
+      }
+    }
+  }
+
+  it('control: a text without a helper version reads the same in both sessions', () => {
+    expect(oauthResultText('clientIdWithheld', false)).toBe(OAUTH_RESULT_TEXTS.clientIdWithheld);
+    expect(oauthResultText('clientIdWithheld', true)).toBe(OAUTH_RESULT_TEXTS.clientIdWithheld);
+  });
+});

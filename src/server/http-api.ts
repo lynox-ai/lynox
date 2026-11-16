@@ -41,7 +41,7 @@ import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
-import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
+import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, oauthResultText, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
@@ -12157,7 +12157,7 @@ export class LynoxHTTPApi {
       // The client id travels in the link, to the browser and on to the provider. A name some
       // profile reads as a credential would put that credential there instead.
       if (clientIdKey && slotApis && !mayServeAsClientId(slotApis, clientIdKey)) {
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.clientIdBesideCredential, 'apis');
+        sendOAuthHtml(res, 409, oauthResultText('clientIdBesideCredential', isOwnerPrincipal(principal)), 'apis');
         return;
       }
       // Through the profile's view of the vault, as every other read for a profile: one a
@@ -12181,7 +12181,7 @@ export class LynoxHTTPApi {
           && withheldFrom(rawStore, profile, connectApis, [clientIdKey], { principal, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() }).length > 0);
         sendOAuthHtml(res, 409, withheld
           ? OAUTH_RESULT_TEXTS.clientIdWithheld
-          : OAUTH_RESULT_TEXTS.clientIdMissing, 'apis');
+          : oauthResultText('clientIdMissing', isOwnerPrincipal(principal)), 'apis');
         return;
       }
 
@@ -12392,7 +12392,7 @@ export class LynoxHTTPApi {
           sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialsWithheld, 'apis');
           return;
         }
-        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialsMissing, 'apis');
+        sendOAuthHtml(res, 409, oauthResultText('credentialsMissing', isOwnerPrincipal(reader)), 'apis');
         return;
       }
 
