@@ -21,7 +21,9 @@
 import { parseFragment, serialize, defaultTreeAdapter, html as p5 } from 'parse5';
 import type { DefaultTreeAdapterTypes } from 'parse5';
 import { HIDDEN_ALLOWED_MAX, hiddenCharIndexes } from './hidden-chars.js';
+import { withinReadingBounds } from './html-tree.js';
 import type { BulkListSourceForm } from './bulk-list.js';
+import { htmlEqual } from './html-tree.js';
 
 export type HtmlFragment = DefaultTreeAdapterTypes.DocumentFragment;
 type Node = DefaultTreeAdapterTypes.Node;
@@ -160,7 +162,7 @@ const NAMESPACES: Readonly<Record<string, MarkupNamespace>> = {
  *  `style` in every namespace: in SVG and MathML their body hangs below them as text nodes,
  *  and an inline SVG `<script>` runs. Wider than the PRD's list where the parser has more
  *  raw-text elements (`iframe`, `noframes`, `plaintext`); wider only errs toward refusing. */
-const TEXT_CARRIERS = new Set([
+export const TEXT_CARRIERS: ReadonlySet<string> = new Set([
   'script', 'style', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'plaintext', 'textarea', 'title',
 ]);
 
@@ -517,6 +519,9 @@ export function shortcodeRefusalOf(after: string, before: string | null): string
 /** Whether a verdict's or a plan's value for an HTML field adds markup the owner does not read. */
 export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
   try {
+    if (!withinReadingBounds(input.after) || (input.before !== null && !withinReadingBounds(input.before))) {
+      return refused('not_canonical', 'The value or its before-image is larger or nested deeper than this check reads.');
+    }
     const canonical = canonicalHtml(input.after);
     if (canonicalHtml(canonical) !== canonical) {
       return refused('not_canonical', 'The value parses to another tree once serialised.');
@@ -575,6 +580,11 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
  */
 export function markupAddedByHost(input: { sent: string; back: string; storeHost: string; startDomains: readonly string[] }): MarkupCheckResult {
   try {
+    // The bytes sent read back unchanged add nothing, whatever their size.
+    if (input.back === input.sent) return { ok: true };
+    if (!withinReadingBounds(input.sent) || !withinReadingBounds(input.back)) {
+      return refused('not_canonical', 'The value read back or the value sent is larger or nested deeper than this check reads.');
+    }
     // A tag, comment or attribute value left open at the end falls away from the fragment's tree,
     // so no tree check sees it, nor what the host writes into it; the theme's next `>` closes it,
     // live. A value read back open counts as added unless it is the bytes sent: a before-image an
@@ -609,6 +619,40 @@ const OPEN_AT_END = new Set(['p', 'ul', 'ol', 'li', 'h2', 'h3', 'h4']);
  * So a mark is appended and must come out as the last node of the tree, below allowed blocks
  * only; and a form appended must come out as a form, which it does not while one is still open.
  */
+/** Elements below which a store shows whitespace as it is: there a line break or a second space is
+ *  part of what the page shows. `pre`, `textarea`, `listing`, `plaintext` and `xmp`. */
+const WHITESPACE_SHOWN = new Set(['pre', 'textarea', 'listing', 'plaintext', 'xmp']);
+
+/**
+ * Whether a value holds an element that shows its whitespace: one of {@link WHITESPACE_SHOWN}, or
+ * any element whose `style` names `white-space` or `display` (an inline `li` shows its
+ * line break as a space), or holds a backslash (a CSS escape the name test does not read), or a
+ * `style` element in the value itself, whose rules no name test reads.
+ */
+export function showsWhitespace(value: string): boolean {
+  for (const [c] of descendants(parseHtmlFragment(value), false)) {
+    if (!isElement(c)) continue;
+    if (c.tagName === 'style') return true;
+    if (c.namespaceURI === p5.NS.HTML && WHITESPACE_SHOWN.has(c.tagName)) return true;
+    if (c.attrs.some((a) => a.name === 'style' && (/white-space|display/i.test(a.value) || a.value.includes('\\')))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether two values of an HTML field are the same: under `htmlEqual`, except where either side ends open (`endsClosed`), holds a stretch the parser drops
+ * (`droppedTagsOf`), or shows its whitespace ({@link showsWhitespace}). Those compare byte for
+ * byte: the tree does not see what the page does with them. `sameHtmlField` parses neither side
+ * beyond the reading bounds ({@link withinReadingBounds}): such a value compares byte for byte too.
+ */
+export function sameHtmlField(a: string, b: string): boolean {
+  if (!withinReadingBounds(a) || !withinReadingBounds(b)) return a === b;
+  if (a === b) return true;
+  if (!endsClosed(a) || !endsClosed(b) || droppedTagsOf(a).length > 0 || droppedTagsOf(b).length > 0) return false;
+  if (showsWhitespace(a) || showsWhitespace(b)) return false;
+  return htmlEqual(a, b);
+}
+
 export function endsClosed(value: string): boolean {
   const count = (tree: HtmlFragment, name: string): number => {
     let n = 0;
@@ -1121,6 +1165,10 @@ export interface FieldMarkupChange {
    *  element) counts as outside here. It does not judge a link's domain, which depends on what
    *  the product pointed to before: a link to a domain new to the product counts as within. */
   addsOutsideAllowlist: boolean;
+  /** Set where the value or its before-image lies beyond {@link withinReadingBounds}: nothing is
+   *  listed, the page says the field's markup could not be listed, and `addsOutsideAllowlist` is
+   *  set, so an undo still says it may write back a script. */
+  unread?: true;
 }
 
 /** A base for resolving a relative `href`: the scheme and character checks do not read the host. */
@@ -1150,6 +1198,9 @@ function toItem(o: Occurrence): MarkupItem {
 /** The elements and comments the after-state of one field adds and removes, over the tree of
  *  the bytes sent (sec-core M3: a rewrite to the allowlist must not delete an image unseen). */
 export function markupChangesOf(field: string, before: string | null, after: string): FieldMarkupChange {
+  if (!withinReadingBounds(after) || (before !== null && !withinReadingBounds(before))) {
+    return { field, added: [], removed: [], addsOutsideAllowlist: true, unread: true };
+  }
   const b = markupOf(parseHtmlFragment(before ?? '')).occurrences.filter(named);
   const a = markupOf(parseHtmlFragment(after)).occurrences.filter(named);
   const added = multisetMinus(a, b).map(toItem);

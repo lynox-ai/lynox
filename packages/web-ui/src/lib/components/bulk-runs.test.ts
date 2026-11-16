@@ -315,6 +315,13 @@ describe('the approved unchecked-change texts', () => {
 			BULK_UNMEASURED_NOTE_ONE));
 	});
 
+	it('gives the marked-before sentence the date and the session\'s wording', () => {
+		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
+		// The mandate's wording (`view`), not the owner's (`i18n`), and the date from the target.
+		expect(page).toContain('bulkInvalidText(target.error, shopify, managed, view, {');
+		expect(page).toContain('markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null');
+	});
+
 	it('holds the confirmation', () => {
 		expect(line('bulk.approve.unmeasured_confirm')).toBe(entry('bulk.approve.unmeasured_confirm',
 			'Ich weiss, dass lynox diese Art Änderung nicht geprüft hat, und gebe sie trotzdem frei.',
@@ -1314,6 +1321,20 @@ describe('the markup list of a target (1010)', () => {
 		expect([en.head, en.lines.map((l) => [l.label, l.template]), en.note]).toEqual([
 			'Markup that changes in Description:', [['added:', '(inside a <template> block)'], ['removed:', null]],
 			'Plain formatting such as paragraphs, bold text or lists is not listed.',
+		]);
+	});
+
+	it('says a field it could not read was not listed, instead of calling the list complete', () => {
+		const de = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: false, unread: true }, false, 'Beschreibung', DE);
+		expect([de.head, de.lines, de.note]).toEqual([
+			'Geändertes Markup in Beschreibung:', [],
+			'Das Markup dieses Felds ist zu gross oder zu tief verschachtelt, um hier aufgelistet zu werden.',
+		]);
+		// On an undo the engine sets addsOutsideAllowlist with it, so the undo still says it may write back a script.
+		const en = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, unread: true }, true, 'Description', EN);
+		expect([en.head, en.restoresNote, en.note]).toEqual([
+			null, 'This markup was in your shop before the run. The undo writes it back, a script included.',
+			'The markup of this field is too large or nested too deeply to be listed here.',
 		]);
 	});
 

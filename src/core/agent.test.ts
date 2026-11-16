@@ -3465,6 +3465,11 @@ describe('Agent', () => {
         expect(await resultOf(makeTool('local_write', vi.fn(async () => 'Stored the note.')))).toBe('Stored the note.');
       }, 3000);
 
+      it('an answer a reader (failureOf) calls a failure keeps the sentence: the model reads what it read before', async () => {
+        const read: ToolEntry = { ...reader(vi.fn(async () => 'Error: two of five pages, then the fetch failed.')), failureOf: (a: string) => (a.startsWith('Error:') ? a : null) };
+        expect(await resultOf(read)).toBe(`Error: two of five pages, then the fetch failed.\n\n${TOOL_STOPPED_RESULT_NOTE}`);
+      }, 3000);
+
       it('a soft failure gets no sentence: a failure is no result that may be partial', async () => {
         const failing = reader(vi.fn(async () => { throw new ToolSoftFailure('Search failed: This operation was aborted', 'search failed'); }));
         expect(await resultOf(failing)).toBe('Search failed: This operation was aborted');
