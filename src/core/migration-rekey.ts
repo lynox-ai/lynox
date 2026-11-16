@@ -105,7 +105,6 @@ export interface PlainHeader<T> {
 /** Why the import refuses a plaintext store; the message names what the operator needs. */
 export class PlainRefusal extends Error {}
 
-const UPDATE_FIRST = 'the source runs a newer version than this instance; update this instance first, then migrate again';
 
 /**
  * Check a `sqlite_db_plain` chunk's column list against this build (at `setManifest`, before any
@@ -128,7 +127,8 @@ export function checkPlainColumns(store: PlainStore, columns: unknown): PlainCol
     if (seen.has(key)) throw new PlainRefusal(`The manifest's column list for ${store} names ${JSON.stringify(key.slice(0, 128))} twice.`);
     seen.add(key);
     if (!PLAIN_COLUMNS[store].get(table)?.has(column)) {
-      throw new PlainRefusal(`The manifest names ${JSON.stringify(key.slice(0, 128))} in ${store} as plaintext, which this instance does not know as an encrypted column: ${UPDATE_FIRST}.`);
+      // Read on the source, which relays it: "the target" is this instance.
+      throw new PlainRefusal(`The target instance runs an older version than the source and cannot encrypt ${JSON.stringify(key.slice(0, 128))} in ${store}. None of the data was transferred, and the target instance is unchanged. Update the target instance first, then migrate again.`);
     }
     out.push(absent === true ? { table, column, absent: true } : { table, column });
   }
@@ -221,6 +221,8 @@ export interface RekeyOptions {
    * system temp directory). It holds only ciphertext and is removed before the call returns.
    */
   scratchDir?: string | undefined;
+  /** Called with the in-memory connection once it is set up as untrusted, before anything reads the image; a test uses it. */
+  onOpen?: ((db: Database.Database) => void) | undefined;
 }
 
 /** The names SQLite resolves to the rowid unless a column takes them. */
@@ -253,7 +255,7 @@ function refuseUntrustedTables(db: Database.Database, refuse: (what: string) => 
   try {
     kinds = db.prepare('PRAGMA table_list').all() as Array<{ name: string; type: string }>;
   } catch {
-    throw refuse('has a table this instance cannot read');
+    throw refuse('has a table the target instance cannot read');
   }
   const odd = kinds.find((k) => k.type === 'virtual' || k.type === 'shadow');
   if (odd) throw refuse(`carries a virtual table (${odd.name.slice(0, 64)})`);
@@ -428,12 +430,17 @@ export function reencryptImage(
     throw new PlainRefusal(`Refusing to restore: ${store} in the bundle does not open as a database — import aborted before anything was replaced.`, { cause: err });
   }
   try {
+    // Without effect on today's rewrite (it calls no function the schema could name). It keeps the
+    // source's schema (a view, a trigger, a default, an index) from calling a function this
+    // connection registers later, e.g. if the rewrite moves into SQL with `db.function`: those are
+    // not innocuous, and SQLite refuses them in schema code at prepare.
     db.pragma('trusted_schema = OFF');
     db.pragma('foreign_keys = OFF');
     // A CHECK runs on every row `quick_check` reads and on every rewrite; the source wrote them.
     db.pragma('ignore_check_constraints = ON');
     db.pragma('temp_store = MEMORY');
     db.pragma('secure_delete = ON');
+    options.onOpen?.(db);
     refuseUntrustedTables(db, (what) => new PlainRefusal(`Refusing to restore: ${store} in the bundle ${what} — import aborted before anything was replaced.`));
     let check: unknown[];
     try {

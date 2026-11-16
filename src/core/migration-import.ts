@@ -562,7 +562,7 @@ export class MigrationImporter {
       if (types.size > 1) throw new Error(`The manifest carries ${store} both raw and as plaintext.`);
     }
     if (!this.acceptPlainStores && [...typesByStore.values()].some((t) => t.has('sqlite_db_plain'))) {
-      throw new Error('The manifest carries a store as plaintext, which this instance does not take yet; the source has to send it raw.');
+      throw new Error('The manifest carries a store as plaintext, which the target instance does not take yet; the source has to send it raw.');
     }
     for (const [store, types] of typesByStore) {
       if (types.has('sqlite_db_plain') && !manifest.chunks.some(c => c.type === 'sqlite_db_plain' && base(c) === store && isFirst(c))) {
@@ -573,7 +573,7 @@ export class MigrationImporter {
     const sweepsFirst = manifest.chunks.find(c => c.type === 'sweeps' && isFirst(c));
     const sweepsTravel = manifest.chunks.filter(c => c.type === 'sweeps').reduce((n, c) => n + c.originalSize, 0);
     if (sweepsFirst?.ledgerForm !== undefined && sweepsFirst.ledgerForm !== 'plain') {
-      throw new Error('The manifest names a ledger form this instance does not know.');
+      throw new Error('The manifest names a ledger form the target instance does not know.');
     }
     const ledgersPlain = sweepsFirst?.ledgerForm === 'plain';
     const enginePlain = typesByStore.get('engine.db')?.has('sqlite_db_plain') ?? false;
@@ -603,7 +603,7 @@ export class MigrationImporter {
     for (const store of plainStores) {
       const storeBytes = manifest.chunks.filter(c => c.type === 'sqlite_db_plain' && base(c) === store).reduce((n, c) => n + c.originalSize, 0);
       if (storePath(ceiling, { bundleBytes, restBytes, storeBytes }) !== 'plain') {
-        throw new Error(`The manifest carries ${store} as plaintext, but with this bundle it does not fit this instance's memory to be re-encrypted (${String(ceiling.import_limit_mb)} MiB). The source has to send it as it does for an older instance.`);
+        throw new Error(`The manifest carries ${store} as plaintext, but with this bundle it does not fit the target instance's memory to be re-encrypted (${String(ceiling.import_limit_mb)} MiB). The source has to send it as it does for an older instance.`);
       }
     }
     if (enginePlain && ledgersPlain && Math.max(sweepsTravel, sweepsRaw) > MAX_MEMORY_BUNDLE_BYTES) {

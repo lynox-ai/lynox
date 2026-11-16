@@ -422,14 +422,14 @@ describe('setManifest refuses what the plaintext path cannot take, before any ch
   const fake = (type: MigrationChunkMeta['type'], name: string, meta?: Partial<MigrationChunkMeta>, bytes = 16): Part => ({ type, name, data: Buffer.alloc(bytes, 1), meta });
   const memories: PlainColumn[] = [{ table: 'memories', column: 'text' }];
 
-  it('a column this instance does not know, with the update-first message', () => {
-    refused([fake('sqlite_db_plain', 'engine.db', { columns: [{ table: 'memories', column: 'mood' }] })], /update this instance first, then migrate again/);
+  it('a column the target instance does not know, refused at the manifest with the update-first message', () => {
+    refused([fake('sqlite_db_plain', 'engine.db', { columns: [{ table: 'memories', column: 'mood' }] })], /^The target instance runs an older version than the source and cannot encrypt "memories\.mood" in engine\.db\. None of the data was transferred, and the target instance is unchanged\. Update the target instance first, then migrate again\.$/);
   });
   it('a raw-only column named as plaintext', () => {
-    refused([fake('sqlite_db_plain', 'engine.db', { columns: [{ table: 'approval_entries', column: 'payload_json' }] })], /does not know as an encrypted column/);
+    refused([fake('sqlite_db_plain', 'engine.db', { columns: [{ table: 'approval_entries', column: 'payload_json' }] })], /cannot encrypt/);
   });
   it('a history column named for engine.db', () => {
-    refused([fake('sqlite_db_plain', 'engine.db', { columns: [{ table: 'runs', column: 'task_text' }] })], /does not know as an encrypted column/);
+    refused([fake('sqlite_db_plain', 'engine.db', { columns: [{ table: 'runs', column: 'task_text' }] })], /cannot encrypt/);
   });
   it('a plaintext store without its column list', () => {
     refused([fake('sqlite_db_plain', 'engine.db')], /without its column list/);
@@ -441,7 +441,7 @@ describe('setManifest refuses what the plaintext path cannot take, before any ch
   it('a plaintext store without its first part', () => {
     refused([fake('sqlite_db_plain', 'engine.db:part1')], /without its first part/);
   });
-  it('a ledger form this instance does not know, and a raw size on raw ledgers', () => {
+  it('a ledger form the target instance does not know, and a raw size on raw ledgers', () => {
     refused([fake('sqlite_db_plain', 'engine.db', { columns: memories }), fake('sweeps', 'sweeps', { ledgerForm: 'sealed' as 'plain', ledgerRawBytes: 16 })], /does not know/);
     refused([fake('sqlite_db', 'engine.db'), fake('sweeps', 'sweeps', { ledgerRawBytes: 16 })], /raw size for merge ledgers that travel raw/);
   });
@@ -464,7 +464,7 @@ describe('setManifest refuses what the plaintext path cannot take, before any ch
     // B = 2 + S, R = 2: 4 + 2S <= 10 → S <= 3 MiB.
     const fits = fake('sqlite_db_plain', 'engine.db', { columns: memories }, 3 * MIB);
     const over = fake('sqlite_db_plain', 'engine.db', { columns: memories }, 3 * MIB + 2);
-    refused([over, rest], /does not fit this instance's memory/, tight);
+    refused([over, rest], /does not fit the target instance's memory/, tight);
     const imp = importer(tmp(), tight);
     expect(() => imp.setManifest(bundle([fits, rest], handshake(imp)).manifest)).not.toThrow();
     // The rule sums the parts: two parts each well under the bound, together over it.
@@ -812,7 +812,7 @@ describe('the image is the source\'s and is opened as untrusted', () => {
     const src = tmp(); const dst = tmp();
     seedStores(src, SRC);
     const imp = new MigrationImporter({ lynoxDir: dst, vaultKey: DST, migrationCeiling: ROOMY });
-    expect(() => imp.setManifest(bundle([plainPart(src, 'engine.db')], handshake(imp)).manifest)).toThrow(/carries a store as plaintext, which this instance does not take yet/);
+    expect(() => imp.setManifest(bundle([plainPart(src, 'engine.db')], handshake(imp)).manifest)).toThrow(/carries a store as plaintext, which the target instance does not take yet/);
     imp.cleanup();
     const raw = new MigrationImporter({ lynoxDir: dst, vaultKey: DST, migrationCeiling: ROOMY });
     expect(() => raw.setManifest(bundle([rawPart(src, 'engine.db')], handshake(raw)).manifest)).not.toThrow();
@@ -953,6 +953,19 @@ describe('the image is the source\'s and is opened as untrusted', () => {
   it('takes SQLite\'s own tables', () => {
     const img = image("CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT); INSERT INTO memories (text) VALUES ('x'); CREATE INDEX by_text ON memories (text); ANALYZE;");
     expect(rekey(img).counts.reencrypted).toBe(1);
+  });
+
+  it('lets no view of the source call a function the connection registers', () => {
+    const img = image("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT); CREATE TABLE other (a INT); CREATE VIEW v AS SELECT leak(a) AS x FROM other; INSERT INTO memories VALUES ('m', 'x'); INSERT INTO other VALUES (1);");
+    let outcome = '';
+    reencryptImage(img, 'engine.db', MEM, NONE, {
+      key: deriveEngineEncKey(DST),
+      onOpen: (db) => {
+        db.function('leak', (a: unknown) => a);
+        try { db.prepare('SELECT x FROM v').all(); outcome = 'ran'; } catch (err) { outcome = (err as Error).message; }
+      },
+    });
+    expect(outcome).toMatch(/unsafe use of leak/);
   });
 
   it('removes a scratch directory an earlier import left behind', () => {
