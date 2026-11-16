@@ -1410,11 +1410,13 @@ describe('connect refuses before the link what the route would refuse', () => {
   const FIXED = 'On the built-in "example-shop" provider that name is fixed: change the other profile so it reads its credential under a name of its own, then connect.';
   const OWN_NAME = 'Store the client id under a name of its own, update auth.oauth.client_id_key, then connect.';
   const OWNER_ONLY = 'Nothing was sent. Only the owner of this instance can change that; tell the owner.';
+  // True whichever profile reads the name, this one or another; a mandate is not told which (U-288).
+  const MANDATE_TEXT = `Error: profile "shop-api" reads its client id from a name that is also read as a credential, so the route would refuse it. ${OWNER_ONLY}`;
   it.each([
     ['the owner, another profile reading the name', false, true, `Error: profile "shop-api" reads its client id from "EXAMPLE_SHOP_CLIENT_ID", and another profile reads that name as a credential. A client id is sent in the link, so the route would refuse it. ${FIXED}`, [OWN_NAME, OWNER_ONLY]],
     ['the owner, only this profile reading the name', false, false, OWN_NAME, [FIXED, OWNER_ONLY]],
-    ['a mandate, another profile reading the name', true, true, `Error: profile "shop-api" reads its client id from a name another profile reads as a credential, so the route would refuse it. ${OWNER_ONLY}`, [FIXED, OWN_NAME]],
-    ['a mandate, only this profile reading the name', true, false, OWNER_ONLY, [FIXED, OWN_NAME]],
+    ['a mandate, another profile reading the name', true, true, MANDATE_TEXT, [FIXED, OWN_NAME]],
+    ['a mandate, only this profile reading the name', true, false, MANDATE_TEXT, [FIXED, OWN_NAME]],
   ] as const)('says the way past a client id another credential shares, for %s', async (_label, asMandate, otherReads, says, saysNot) => {
     const store = new ApiStore();
     const p = scoped(asMandate ? { created_by: TAG } : {});

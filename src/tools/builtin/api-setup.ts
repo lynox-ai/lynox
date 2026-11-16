@@ -2785,7 +2785,7 @@ ${draftJson}
       // changes the other profile instead.
       if (clientIdKey && !mayServeAsClientId(apiStore, clientIdKey)) {
         if (!isOwnerPrincipal(agent.principal)) {
-          return `Error: profile "${id}" reads its client id from a name another profile reads as a credential, so the route would refuse it. Nothing was sent. Only the owner of this instance can change that; tell the owner.`;
+          return `Error: profile "${id}" reads its client id from a name that is also read as a credential, so the route would refuse it. Nothing was sent. Only the owner of this instance can change that; tell the owner.`;
         }
         if (appOfProvider && clientIdCredentialReader(apiStore, clientIdKey, profile.id) !== undefined) {
           return `Error: profile "${id}" reads its client id from "${clientIdKey}", and another profile reads that name as a credential. A client id is sent in the link, so the route would refuse it. On the built-in "${appOfProvider.id}" provider that name is fixed: change the other profile so it reads its credential under a name of its own, then connect.`;
