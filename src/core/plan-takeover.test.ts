@@ -243,6 +243,64 @@ describe('the workflow’s side', () => {
     expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))).toBeUndefined();
   });
 
+  // Two plans on one workflow: taking the first over covers the workflow's mark, so nothing on it is
+  // left to take over with the second. The second's member still holds its workflow role from the
+  // pause, and the line for it names the workflow: the preview keeps the name, with nobody to take
+  // it from and nothing taken over.
+  it('a workflow whose marks are all covered keeps its name in the preview, taken over from nobody', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p1', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    plan(b, 'p2', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p1', 'h@x.ch');
+    pause(b, 'p2', 'h@x.ch');
+    take(b, 'p1');
+    expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))).toBeUndefined();
+    const p = takeoverPreview(deps(b), 'p2');
+    expect(p.kind === 'preview' && [p.preview.workflow, p.preview.members.map((m) => [m.name, m.roles])])
+      .toEqual([{ id: 'w', name: 'W', takenOver: false, from: null }, [['h@x.ch', ['created', 'workflow-created']]]]);
+  });
+
+  it('control: a plan without a workflow has none in the preview, and none gone', () => {
+    const b = box();
+    plan(b, 'p', { by: 'h@x.ch' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.workflow, p.preview.workflowGone]).toEqual([null, false]);
+  });
+
+  // Deleting a workflow clears the plan's reference (`ON DELETE SET NULL`) and leaves it a workflow
+  // plan: the preview says the workflow is gone, so the owner does not take over a plan that runs nothing unawares.
+  // A reference that matches more than one workflow is stored empty when the plan is written: the
+  // plan never had its workflow, and the preview says the same as after a deletion.
+  it('a workflow plan bound to no workflow (an ambiguous short id) is said to miss its workflow', () => {
+    const b = box();
+    workflow(b, 'wf-a1', { email: 'h@x.ch' });
+    workflow(b, 'wf-a2', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'wf-a' });
+    expect(row(b, 'p')['target_workflow_id']).toBeNull();
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.workflow, p.preview.workflowGone]).toEqual([null, true]);
+  });
+
+  it('a workflow plan whose workflow was deleted is said to use one that is gone', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const before = takeoverPreview(deps(b), 'p');
+    expect(before.kind === 'preview' && before.preview.workflowGone).toBe(false);
+    b.db.prepare("DELETE FROM workflows WHERE id = 'w'").run();
+    expect(row(b, 'p')['target_workflow_id']).toBeNull();
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.workflow, p.preview.workflowGone]).toEqual([null, true]);
+  });
+
   it('a pause from a login whose workflow read failed knows no roles: the preview reads them, so the owner is told the workflow moves', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });

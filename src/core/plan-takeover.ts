@@ -92,11 +92,22 @@ export interface TakeoverPreview {
   readonly members: readonly TakeoverMember[];
   /** `owner`, or the tag of the workflow's member, which stays. */
   readonly runsAs: string;
-  /** `from`: whose mark on the workflow the takeover reads (`planMandate`), by address, and as which role: F2 names that member. */
+  /**
+   * The plan's workflow; null only without one. `from`: whose mark on the workflow the takeover
+   * reads (`planMandate`), by address, and as which role: F2 names that member. With no mark left
+   * to take over (all covered, or none was a mandate's) `from` is null and `takenOver` false, and
+   * the name stays: a member's workflow role still names the workflow it is about.
+   */
   readonly workflow: {
     readonly id: string; readonly name: string; readonly takenOver: boolean;
     readonly from: { readonly name: string; readonly role: 'workflow-edited' | 'workflow-created' } | null;
   } | null;
+  /**
+   * A workflow plan without its workflow, which then runs nothing: deleting a workflow clears the
+   * plan's reference to it (`ON DELETE SET NULL`), and a reference that matched no workflow, or
+   * more than one, was stored empty (`TriggerStore`). Either way the plan stays a workflow plan.
+   */
+  readonly workflowGone: boolean;
   readonly memberChanges: readonly TakeoverMemberChange[];
   readonly alsoReleased: ReadonlyArray<{ readonly id: string; readonly title: string }>;
   readonly connections: readonly StampEntry[];
@@ -385,12 +396,12 @@ export function workflowsCoveredByTakeover(deps: TakeoverDeps): Map<string, numb
   return covered;
 }
 
-/** The preview's workflow: null without one, or when no mandate's mark on it is left to take over. */
+/** The preview's workflow: null without one; with no mandate's mark left on it, its name and nobody it is taken from. */
 function workflowOfPreview(wf: WorkflowRow | undefined, coverWorkflow: boolean): TakeoverPreview['workflow'] {
   if (wf === undefined) return null;
   const a = planAuthorshipOf(wf);
   const mark = planMandate(a);
-  if (mark === undefined) return null;
+  if (mark === undefined) return { id: wf.id, name: wf.name, takenOver: false, from: null };
   // `planMandate` reads the editor's mark first, when it is not covered; else the creator's.
   const role = isMandateTag(a.mandate_editor) && !editorCovered(a) ? 'workflow-edited' : 'workflow-created';
   const from = mark.principal.kind === 'mandate' ? { name: mark.principal.email, role } as const : null;
@@ -410,6 +421,7 @@ export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreview
       members: plan.members,
       runsAs: principalTag(plan.runsAs),
       workflow: workflowOfPreview(plan.wf, plan.coverWorkflow),
+      workflowGone: plan.trigger.effect === 'run_workflow' && plan.wf === undefined,
       memberChanges: plan.memberChanges,
       alsoReleased: plan.released.map((r) => ({ id: r.id, title: r.title })),
       connections: plan.connections,
