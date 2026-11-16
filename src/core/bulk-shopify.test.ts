@@ -1157,7 +1157,7 @@ describe('a product run\'s description classified as HTML (PRD shopify-preset §
   const REFORMATTED = '<P>x<br/></P>';
   const CANONICAL = '<p>x<br></p>';
   /** One product listed and read, then set back to unread with a description in its planned after-state. */
-  async function unreadWithDescription(): Promise<[string, number]> {
+  async function unreadWithDescription(after: Record<string, unknown> = { seo_title: null, seo_description: 'D1', descriptionHtml: CANONICAL }): Promise<[string, number]> {
     vi.stubEnv(FLAG, '1');
     fill(1);
     const id = startedList();
@@ -1168,9 +1168,31 @@ describe('a product run\'s description classified as HTML (PRD shopify-preset §
     const db = engineDb.getDb();
     db.prepare(`UPDATE bulk_runs SET phase = 'planned', halt_reason = NULL WHERE id = ?`).run(id);
     db.prepare('UPDATE bulk_targets SET before = NULL, change = ?, after_planned = ? WHERE run_id = ? AND seq = ?')
-      .run('update', engineDb.enc(JSON.stringify({ seo_title: null, seo_description: 'D1', descriptionHtml: CANONICAL })), id, seq);
+      .run('update', engineDb.enc(JSON.stringify(after)), id, seq);
     return [id, seq];
   }
+
+  it('shows only the other field as changed when the product holds the description in another form', async () => {
+    const [id, seq] = await unreadWithDescription({ seo_title: 'Neu', seo_description: 'D1', descriptionHtml: CANONICAL });
+    expect(ledger.recordRead(id, seq, { before: { seo_title: null, seo_description: 'D1', descriptionHtml: REFORMATTED } })).toBe(true);
+    const [t] = ledger.getPreview(id);
+    expect(t!.change).toBe('update');
+    expect(t!.diff).toEqual({ kind: 'fields', fields: [{ field: 'seo_title', before: null, after: 'Neu' }] });
+    expect(t!.changedFields).toBe(1);
+    expect(t!.sentUnchanged).toEqual(['descriptionHtml', 'seo_description']);
+  });
+
+  it('still shows a description with one character changed as changed', async () => {
+    const [id, seq] = await unreadWithDescription({ seo_title: 'Neu', seo_description: 'D1', descriptionHtml: '<p>y<br></p>' });
+    expect(ledger.recordRead(id, seq, { before: { seo_title: null, seo_description: 'D1', descriptionHtml: REFORMATTED } })).toBe(true);
+    const [t] = ledger.getPreview(id);
+    expect(t!.diff).toEqual({ kind: 'fields', fields: [
+      { field: 'descriptionHtml', before: REFORMATTED, after: '<p>y<br></p>' },
+      { field: 'seo_title', before: null, after: 'Neu' },
+    ] });
+    expect(t!.changedFields).toBe(2);
+    expect(t!.sentUnchanged).toEqual(['seo_description']);
+  });
 
   it('is unchanged at the preview when the product holds the planned description in another form', async () => {
     const [id, seq] = await unreadWithDescription();
