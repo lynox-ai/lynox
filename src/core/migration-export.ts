@@ -46,6 +46,8 @@ import {
   computeManifestHash,
   sha256,
   MAX_CHUNK_BYTES,
+  MIGRATION_MAX_CHUNKS,
+  MIGRATION_MAX_TOTAL_BYTES,
   type MigrationManifest,
   type MigrationChunkMeta,
   type EncryptedChunk,
@@ -122,6 +124,12 @@ interface PlaintextChunk {
 // has data: the export loop skips any that doesn't exist (existsSync guard below).
 const SQLITE_DBS = MIGRATE_SQLITE_DBS;
 
+/** Bytes as MiB with one decimal for a refusal a person reads, or as bytes where that would read equal to `other`. */
+function size(bytes: number, other: number): string {
+  const mib = (n: number) => (n / (1024 * 1024)).toFixed(1);
+  return mib(bytes) === mib(other) ? `${String(bytes)} bytes` : `${mib(bytes)} MiB`;
+}
+
 /**
  * Split a payload into `MAX_CHUNK_BYTES`-bounded chunks. `encryptChunk` throws
  * above that ceiling, so every collector whose payload can grow past it must
@@ -184,6 +192,8 @@ export class MigrationExporter {
    * exactly how a cap ends up shipping untested.
    */
   private readonly portableDirLimits: { maxEntries: number; maxBytes: number } | undefined;
+  /** Overrides for the migration's bounds, for the same reason: a test cannot build 500 MiB. */
+  private readonly bounds: { maxChunks: number; maxTotalBytes: number };
   /** Workspace entries the current export left out; reset per `export()`. */
   private skipped: string[] = [];
   /** Set by `collectWorkspace` when it left the workspace out; reset per `export()`. */
@@ -193,8 +203,10 @@ export class MigrationExporter {
     lynoxDir?: string | undefined;
     vaultKey?: string | undefined;
     portableDirLimits?: { maxEntries: number; maxBytes: number } | undefined;
+    bounds?: { maxChunks: number; maxTotalBytes: number } | undefined;
   } | undefined) {
     this.portableDirLimits = options?.portableDirLimits;
+    this.bounds = options?.bounds ?? { maxChunks: MIGRATION_MAX_CHUNKS, maxTotalBytes: MIGRATION_MAX_TOTAL_BYTES };
     this.lynoxDir = options?.lynoxDir ?? getLynoxDir();
     const key = options?.vaultKey ?? process.env['LYNOX_VAULT_KEY'];
     if (!key) {
@@ -270,6 +282,21 @@ export class MigrationExporter {
       ...c.meta,
       seq: i,
     }));
+
+    // The destination refuses a manifest over either bound only after it arrives; check here,
+    // before anything is encrypted or sent, and say which bound it is.
+    const totalBytes = chunkMetas.reduce((sum, c) => sum + c.originalSize, 0);
+    const over: string[] = [];
+    if (chunkMetas.length > this.bounds.maxChunks) {
+      over.push(`it needs ${String(chunkMetas.length)} chunks, and a migration carries at most ${String(this.bounds.maxChunks)} (each kind of data starts its own chunks of up to ${String(MAX_CHUNK_BYTES / (1024 * 1024))} MiB)`);
+    }
+    if (totalBytes > this.bounds.maxTotalBytes) {
+      over.push(`it is ${size(totalBytes, this.bounds.maxTotalBytes)}, and a migration carries at most ${size(this.bounds.maxTotalBytes, totalBytes)}`);
+    }
+    if (over.length > 0) {
+      for (const pc of plaintextChunks) pc.data.fill(0);
+      throw new Error(`This instance's data does not fit one migration: ${over.join('; ')}. None of your data was sent, and the data on this instance is unchanged. A migration cannot move only part of it; write to support@lynox.ai with this message and we will look at it with you.`);
+    }
 
     // Build manifest (without hash first, then compute)
     let lynoxVersion = 'unknown';

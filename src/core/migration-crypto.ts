@@ -49,6 +49,16 @@ const ECDH_CURVE = 'x25519';
 /** Maximum chunk payload size (8 MB — leaves room for base64 overhead within 30 MB body limit). */
 export const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Most chunks one migration carries. The destination refuses a manifest with more (it bounds the
+ * memory a transfer may hold), and the source checks it before it encrypts anything. Each kind
+ * of data starts its own chunks, so a part-filled chunk per kind uses up count without size.
+ */
+export const MIGRATION_MAX_CHUNKS = 64;
+
+/** Most bytes one migration carries, summed over the chunks' original sizes; checked on both sides like the count. */
+export const MIGRATION_MAX_TOTAL_BYTES = 500 * 1024 * 1024;
+
 /** Migration token TTL (30 minutes). */
 export const MIGRATION_TOKEN_TTL_MS = 30 * 60 * 1000;
 
