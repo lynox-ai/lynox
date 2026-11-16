@@ -56,6 +56,14 @@ describe('the cap of unapproved runs', () => {
     expect(ids).toContain(next);
   });
 
+  it('a delegated session\'s planning returns the run of its own it dropped, and only that one', () => {
+    fill(OWNER_PRINCIPAL, 5);
+    const helpers = fill(HELPER, BULK_MAX_PREVIEWED_RUNS - 5);
+    const at = ledger.getStatus(helpers[0]!)!.createdAt;
+    const out = ledger.recordDryRun({ createdBy: 't', principal: HELPER, targetSystem: 'workspace', scope: 'w', targets: local() });
+    expect(out.dropped).toEqual([{ id: helpers[0], targetSystem: 'workspace', createdAt: at, targets: 1, listUnread: false, replaced: false }]);
+  });
+
   it('refuses a delegated session\'s planning, and records nothing, when it has no run of its own to drop', () => {
     fill(OWNER_PRINCIPAL, BULK_MAX_PREVIEWED_RUNS);
     const before = runs();

@@ -1,5 +1,5 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import { BULK_HALT_REASONS, BulkPreviewCapError, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_MAX_PREVIEWED_RUNS, BulkPreviewCapError, bulkFoundAsPlannedNote, type BulkDroppedRun, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
 import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { SHOPIFY_MEDIA_WRITE_SCOPES, shopifyBulkReadEnabled, shopifyMediaWritable } from '../../core/bulk-shopify.js';
@@ -71,6 +71,25 @@ export function nothingToApprove(s: BulkRunStatus): boolean {
     && s.changes.update + s.changes.create + s.changes.delete === 0
     && s.changes.invalid > 0 && s.deselected === 0
     && (s.judge === null || s.judge.unjudged === 0);
+}
+
+/** The line a planning's answer carries for the unapproved runs it dropped to stay under the cap
+ *  (none: no line). The run is deleted with its preview, so this answer is the only place left that
+ *  says which one is gone. */
+export function formatDropped(dropped: readonly BulkDroppedRun[]): string[] {
+  if (dropped.length === 0) return [];
+  // Planned in another chat too: the planner knows nothing of the run but this. What the run
+  // changes is stored encrypted and is not named here.
+  const runs = dropped.map((d) => {
+    const count = `${String(d.targets)} target${d.targets === 1 ? '' : 's'}`;
+    const size = !d.listUnread ? count : d.targets === 0 ? 'its list not read yet' : `${count} read so far, its list not read to the end`;
+    // `datetime('now')` is UTC; to the minute is enough to tell plans apart for a person.
+    return `run ${d.id} (${d.targetSystem}, ${size}, created ${d.createdAt.slice(0, 16)} UTC${d.replaced ? ', already replaced by a run the user started' : ''})`;
+  }).join('; ');
+  return [`To keep at most ${String(BULK_MAX_PREVIEWED_RUNS)} unapproved plans, recording this one discarded ` +
+    `${dropped.length === 1 ? 'an older unapproved plan' : `${String(dropped.length)} older unapproved plans`}: ${runs}. ` +
+    'Nothing of a discarded plan is kept: tell the user which plans are gone, described by system, size and date rather than by run id, ' +
+    'and offer to plan again any that is still wanted and was not replaced.'];
 }
 
 export function formatStatus(s: BulkRunStatus): string {
@@ -287,6 +306,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
   return [
     'List dry run recorded — nothing was sent, read or written. Nothing is read until the user starts it outside this chat.',
     formatStatus(out.status),
+    ...formatDropped(out.status.dropped),
     ...(judge ? [JUDGE_NOTE] : []),
     'Once started, the engine reads the list page by page with the host\'s stored API credential and stops, so the user sees how many targets it holds. ' +
       'Each target is read only after the user starts the run a second time; bulk_status shows phase previewed when that is done. ' +
@@ -319,7 +339,7 @@ const JUDGE_NOTE = 'With judge, no model is called until the user starts the run
 export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
   // Writes only the ledger — but recording a run also drops the oldest unapproved
   // previews beyond the cap (a planner who is not the owner: only its own, else it is
-  // refused), and nothing keeps what was dropped.
+  // refused), and nothing keeps what was dropped: the answer names each dropped run.
   undo: 'none',
   definition: {
     name: 'bulk_plan',
@@ -473,6 +493,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             ? 'External dry run recorded — nothing was sent or written. Nothing is read either until the user starts it outside this chat.'
             : 'Dry run recorded — nothing was written, and no target was valid, so there is nothing to read.',
           formatStatus(out.status),
+          ...formatDropped(out.status.dropped),
           // With no valid target there is nothing to judge: the judge note would promise verdicts.
           ...(judge && !nothingToApprove(out.status) ? [JUDGE_NOTE] : []),
           ...(nothingToApprove(out.status) ? [] : ['Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
@@ -492,6 +513,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       return [
         'Dry run recorded — nothing was written to any target.',
         formatStatus(status),
+        ...formatDropped(status.dropped),
         ...(judge ? [JUDGE_NOTE] : []),
         nothingToApprove(status)
           ? 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you.'

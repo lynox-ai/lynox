@@ -485,6 +485,24 @@ export const BULK_APPROVAL_MAX_MS = 24 * 60 * 60_000;
  *  approve. */
 export const BULK_MAX_PREVIEWED_RUNS = 10;
 
+/** An unapproved run a new planning dropped to stay under {@link BULK_MAX_PREVIEWED_RUNS}: what
+ *  `bulk_status` shows of it, so the planner can say which plan is gone. */
+export interface BulkDroppedRun {
+  id: string; targetSystem: string;
+  /** `bulk_runs.created_at`: UTC, in `datetime('now')`'s form. */
+  createdAt: string;
+  /** Its targets: for a list plan whose list was not read to the end, the ones read so far. */
+  targets: number;
+  /** A list plan whose list was not read to the end ({@link targets} then 0 when no page was). */
+  listUnread: boolean;
+  /** Already replaced by another run the owner started with a judge (`superseded`): nothing of it
+   *  was still waiting, so there is no plan to make again. */
+  replaced: boolean;
+}
+
+/** A run just recorded, with the runs its planning dropped (empty when none was). */
+export type BulkRecordedRun = BulkRunStatus & { dropped: readonly BulkDroppedRun[] };
+
 /** The runs {@link BULK_MAX_PREVIEWED_RUNS} counts and a new planning may drop: unapproved apply
  *  runs, previewed or still to be read, and ones replaced by another judged start. A run whose
  *  judge was started holds paid verdicts: not dropped for a newer plan (PRD bulk-loop §3.1) — its
@@ -1072,7 +1090,7 @@ export class BulkLedger {
      *  `planned` and halted until the owner starts it, every target planned with
      *  {@link judgeTemplate} as its after-state until its verdict; a data-store run only. */
     judge?: JudgeRule | undefined;
-  }): BulkRunStatus {
+  }): BulkRecordedRun {
     if (params.judge !== undefined && params.targetSystem !== 'data_store') {
       // A workspace target is text, not fields: a verdict over F has nothing to replace in it.
       throw new Error('A judged bulk run needs a data-store or an external target system.');
@@ -1100,7 +1118,7 @@ export class BulkLedger {
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    db.transaction(() => {
+    const dropped = db.transaction((): BulkDroppedRun[] => {
       const own = this.capRoomFor(params.principal);
       // Contained before the row it governs, in the same transaction (`containment.ts`).
       containRunFromThread(db, this.mirror, params.planningThread, id);
@@ -1128,9 +1146,9 @@ export class BulkLedger {
           this.engineDb.enc(JSON.stringify(t.before)), this.engineDb.enc(JSON.stringify(t.after ?? null)), null,
         );
       });
-      this.pruneUnapproved(params.principal, own, id);
+      return this.pruneUnapproved(params.principal, own, id);
     })();
-    return this.getStatus(id)!;
+    return { ...this.getStatus(id)!, dropped };
   }
 
   /** The two judge columns of a new run: the rule encrypted, and its keyed hash. */
@@ -1171,27 +1189,35 @@ export class BulkLedger {
    * Q3(b)); an effect already running finds no run on its next target and stops.
    * The owner's planning drops over all planners; anyone else's drops `own` runs of its own
    * planner, which {@link capRoomFor} counted before the new run was inserted (never that one).
+   * Returns the dropped runs, oldest first, so the planning can name them: nothing else keeps them.
    */
-  private pruneUnapproved(principal: RequestPrincipal, own = 0, newRun: string | null = null): void {
+  private pruneUnapproved(principal: RequestPrincipal, own = 0, newRun: string | null = null): BulkDroppedRun[] {
     const db = this.engineDb.getDb();
     const [tag, mandateId] = planner(principal);
+    type Doomed = { id: string; target_system: string; created_at: string; phase: BulkPhase; targets_total: number; list_state: ListState | null };
     const doomed = isOwnerPrincipal(principal)
       ? db.prepare(
-        `SELECT id FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND id NOT IN (
+        `SELECT id, target_system, created_at, phase, targets_total, list_state FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND id NOT IN (
            SELECT id FROM bulk_runs WHERE ${PRUNABLE_RUNS}
-           ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
-      ).all(BULK_MAX_PREVIEWED_RUNS) as { id: string }[]
+           ORDER BY created_at DESC, rowid DESC LIMIT ?)
+         ORDER BY created_at ASC, rowid ASC`,
+      ).all(BULK_MAX_PREVIEWED_RUNS) as Doomed[]
       : own <= 0 ? []
       : db.prepare(
-        `SELECT id FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND principal = ? AND mandate_id IS ? AND id IS NOT ?
+        `SELECT id, target_system, created_at, phase, targets_total, list_state FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND principal = ? AND mandate_id IS ? AND id IS NOT ?
          ORDER BY created_at ASC, rowid ASC LIMIT ?`,
-      ).all(tag, mandateId, newRun, own) as { id: string }[];
+      ).all(tag, mandateId, newRun, own) as Doomed[];
     const triggers = new TriggerStore(this.engineDb);
     const drop = db.prepare('DELETE FROM bulk_runs WHERE id = ?');
     for (const { id } of doomed) {
       triggers.remove(bulkPreviewTriggerId(id));
       drop.run(id);
     }
+    // The only aborted runs the set holds are superseded ones (PRUNABLE_RUNS).
+    return doomed.map((d) => ({
+      id: d.id, targetSystem: d.target_system, createdAt: d.created_at, targets: d.targets_total,
+      listUnread: d.list_state === 'pending', replaced: d.phase === 'aborted',
+    }));
   }
 
   /**
@@ -1217,7 +1243,7 @@ export class BulkLedger {
     contract: CapabilityContract;
     /** A rule a model applies per target; the targets are planned with its template. */
     judge?: JudgeRule | undefined;
-  }): { ok: true; status: BulkRunStatus } | { ok: false; reason: 'external_in_progress' } {
+  }): { ok: true; status: BulkRecordedRun } | { ok: false; reason: 'external_in_progress' } {
     const seen = new Set<string>();
     for (const t of params.targets) {
       if (seen.has(t.key)) throw new Error('A bulk plan names the same target twice.');
@@ -1231,12 +1257,12 @@ export class BulkLedger {
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
        VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
     );
-    const recorded = db.transaction((): boolean => {
+    const recorded = db.transaction((): BulkDroppedRun[] | null => {
       this.haltDeadReads();
       const reading = db.prepare(
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
-      if (reading.n > 0) return false;
+      if (reading.n > 0) return null;
       const own = this.capRoomFor(params.principal);
       containRunFromThread(db, this.mirror, params.planningThread, id);
       db.prepare(
@@ -1264,11 +1290,10 @@ export class BulkLedger {
         // `update` until the preview reads the target; `unread` in the status says so.
         insertTarget.run(id, seq, key, 'update', 'restorable', this.engineDb.enc(JSON.stringify(t.after)), null);
       });
-      this.pruneUnapproved(params.principal, own, id);
-      return true;
+      return this.pruneUnapproved(params.principal, own, id);
     })();
-    if (!recorded) return { ok: false, reason: 'external_in_progress' };
-    return { ok: true, status: this.getStatus(id)! };
+    if (recorded === null) return { ok: false, reason: 'external_in_progress' };
+    return { ok: true, status: { ...this.getStatus(id)!, dropped: recorded } };
   }
 
   /**
@@ -1291,17 +1316,17 @@ export class BulkLedger {
     readContract: CapabilityContract;
     /** A rule a model applies per listed target; `source.after` is then its template. */
     judge?: JudgeRule | undefined;
-  }): { ok: true; status: BulkRunStatus } | { ok: false; reason: 'external_in_progress' } {
+  }): { ok: true; status: BulkRecordedRun } | { ok: false; reason: 'external_in_progress' } {
     const db = this.engineDb.getDb();
     const id = randomUUID();
     const targetSystem = `http:${params.host}`;
     const sourceJson = canonicalJson(params.source);
-    const recorded = db.transaction((): boolean => {
+    const recorded = db.transaction((): BulkDroppedRun[] | null => {
       this.haltDeadReads();
       const reading = db.prepare(
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
-      if (reading.n > 0) return false;
+      if (reading.n > 0) return null;
       const own = this.capRoomFor(params.principal);
       containRunFromThread(db, this.mirror, params.planningThread, id);
       db.prepare(
@@ -1317,11 +1342,10 @@ export class BulkLedger {
         ...planner(params.principal), this.engineDb.enc(sourceJson),
         ...this.judgeColumns(params.judge),
       );
-      this.pruneUnapproved(params.principal, own, id);
-      return true;
+      return this.pruneUnapproved(params.principal, own, id);
     })();
-    if (!recorded) return { ok: false, reason: 'external_in_progress' };
-    return { ok: true, status: this.getStatus(id)! };
+    if (recorded === null) return { ok: false, reason: 'external_in_progress' };
+    return { ok: true, status: { ...this.getStatus(id)!, dropped: recorded } };
   }
 
   /**
