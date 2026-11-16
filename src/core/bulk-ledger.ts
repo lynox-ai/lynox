@@ -2727,7 +2727,8 @@ export class BulkLedger {
    * the store's or lynox's own and marks nothing. The fields come from the marked write, not from
    * the run asking, so a run of another form reads the same marks. Its `applied_at`, or null when
    * there is none. A marked row whose key does not decrypt is read for every target, its value
-   * deciding; one whose value does not decrypt or parse counts as equal: its value is not known. Marked rows are few, and the key is stored encrypted, so they are read and compared here.
+   * deciding; one whose value does not decrypt or parse counts as equal: its value is not known.
+   * Marked rows are few, and the key is stored encrypted, so they are read and compared here.
    */
   private shopMarkedWriteOf(key: string, value: unknown, exceptRun: string): { appliedAt: string | null } | null {
     if (value === null || typeof value !== 'object') return null;
