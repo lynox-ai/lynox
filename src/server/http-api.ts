@@ -12157,8 +12157,8 @@ export class LynoxHTTPApi {
       // The client id travels in the link, to the browser and on to the provider. A name some
       // profile reads as a credential would put that credential there instead.
       if (clientIdKey && slotApis && !mayServeAsClientId(slotApis, clientIdKey)) {
-        // On a built-in provider the name is fixed, so the owner is pointed at the other profile
-        // that reads it; read by this profile only, the save path's fixed name is the way on.
+        // On a built-in provider the name is fixed, so when another profile reads it the owner is
+        // pointed at that profile. Read by this profile only, the page keeps its earlier text.
         const reader = isOwnerPrincipal(principal) && profile !== undefined && builtInPresetOf(profile) !== undefined
           ? clientIdCredentialReader(slotApis, clientIdKey, profile.id) : undefined;
         sendOAuthHtml(res, 409, reader !== undefined
