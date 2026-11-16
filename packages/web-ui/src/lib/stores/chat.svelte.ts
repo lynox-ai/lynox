@@ -1275,7 +1275,8 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 	// The thread was deleted meanwhile (another tab, another device): the server answered, and it
 	// will answer the same to every turn queued behind this one, so none of them is started. The
 	// message stays on screen, failed, to be copied into a new chat.
-	// A session the server refused is not a lost connection: say what the server said.
+	// A session the server refused is not a lost connection. A rate limit says so; other refusals
+	// get the text their status maps to (often the general one), since the body is not read.
 	chatError = threadDeleted ? t('chat.error_thread_deleted')
 		: refusedStatus !== null ? mapApiError(refusedStatus, '')
 		: t('chat.error_connection');
@@ -1415,20 +1416,37 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	}
 	if (sendBlockedByReview()) return;
 	if (!await askBeforeResend()) return;
+	const shown = messages.includes(msg);
+	if (!shown) {
+		msg.failed = false;
+		msg.sendUnconfirmed = false;
+		// A typed message sent again is still the user's own words.
+		await sendMessage(text, undefined, undefined, msg.typed === true ? { typed: true } : undefined);
+		return;
+	}
+	// The message on screen is the one sent again, not a copy added under it: it goes out as a
+	// queued turn, which the run finds by its id, as the automatic re-send does. The checks
+	// sendMessage makes are made again here, after the question to the server: a review may
+	// have opened meanwhile.
+	if (isStreaming) {
+		addToast(t('chat.still_running'), 'info', 6000);
+		return;
+	}
+	if (sendBlockedByReview()) return;
+	threadReadRefusal = null;
+	const id = newQueueId();
 	msg.failed = false;
 	msg.sendUnconfirmed = false;
-	// The message on screen is the one sent again, not a copy added under it: it goes out as a
-	// queued turn, which the run finds by its id, as the automatic re-send does.
-	const shown = messages.includes(msg);
-	if (shown) {
-		msg.queued = true;
-		msg.queueId = newQueueId();
+	msg.queued = true;
+	msg.queueId = id;
+	await _executeRun(text, undefined, undefined, undefined, id);
+	// A turn that stopped before its run took the message (offline, a signed-out session) leaves
+	// it queued with an id no queue holds: nothing would ever send it. It is failed again, so the
+	// tap and the reconnect can.
+	if (msg.queued === true && msg.queueId === id) {
+		msg.queued = false;
+		msg.failed = true;
 	}
-	threadReadRefusal = null;
-	// A typed message sent again is still the user's own words.
-	const options = msg.typed === true ? { typed: true } : undefined;
-	if (shown) await _executeRun(text, undefined, undefined, options, msg.queueId);
-	else await sendMessage(text, undefined, undefined, options);
 }
 
 async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {

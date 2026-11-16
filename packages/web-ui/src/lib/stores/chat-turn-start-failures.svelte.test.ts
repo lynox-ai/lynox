@@ -135,6 +135,20 @@ describe('a turn that cannot start', () => {
 		await settle();
 	});
 
+	it('sent again with a tap while offline, the failed message stays failed, not queued with nothing to send it', async () => {
+		serve((url, n) => (url.endsWith('/sessions') && n === 1 ? new Response('Too many requests', { status: 429 }) : undefined));
+		await store.sendMessage('go');
+		const failed = store.getMessages().find((m) => m.role === 'user' && m.content === 'go')!;
+		vi.stubGlobal('navigator', { onLine: false });
+		await store.retryFailedTurn(failed, 'go');
+		await settle();
+		const users = store.getMessages().filter((m) => m.role === 'user');
+		expect(users).toHaveLength(1);
+		expect(users[0]!.failed).toBe(true);
+		expect(users[0]!.queued).toBeFalsy();
+		expect(runPosts()).toBe(0);
+	});
+
 	it('when the request that starts it fails', async () => {
 		serve((url) => (url.endsWith('/run') ? offline() : undefined));
 		await expect(store.sendMessage('go')).resolves.toBeUndefined();
