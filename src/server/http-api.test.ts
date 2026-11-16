@@ -20062,7 +20062,8 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
   // A store's exchange that got no pass is not sent (`exchangeToken` refuses it), and starting the
   // connection again changes nothing for most causes: the page names the cause instead.
   describe('when the store\'s exchange got no pass, the page names why', () => {
-    const refusedExchange = { ok: false, message: 'token exchange refused: no pass' };
+    // What `exchangeToken` answers a store's exchange without a pass (oauth-token-exchange.ts).
+    const refusedExchange = { ok: false, message: 'token exchange refused: no pass', unsentForPass: true };
     it.each([
       ['switched_off', 'Shopify connections are switched off on this instance. Nothing was stored. Trying again does not change that; only lynox can switch them on.'],
       ['self_hosted', 'lynox reaches Shopify stores only on an instance run by lynox. You run this instance yourself. Nothing was stored.'],
@@ -20093,6 +20094,21 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       }
     });
 
+    it('an exchange that failed on the way (no answer) keeps the plain failure, whatever the cause would say', async () => {
+      // Only the refusal for want of a pass is the pass's; a timeout or a refused redirect is not.
+      repayRateWindow();
+      const { cookie } = await arrange();
+      mockExchangeToken.mockResolvedValue({ ok: false, message: 'token exchange to https://api.openai.com/token failed: timeout.' });
+      exchangePassFor.standIn = async () => 'switched_off';
+      try {
+        const page = await (await call(signed(good()), cookie)).text();
+        expect(page).toContain('You can start the connection again.');
+        expect(page).not.toContain('switched off');
+      } finally {
+        exchangePassFor.standIn = null;
+      }
+    });
+
     it('an exchange that was sent and failed keeps the plain failure, whatever the cause would say', async () => {
       // `exchanged.ok` means the request went out: its failure is the provider's, not the pass's.
       repayRateWindow();
@@ -20118,7 +20134,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       config.mockReturnValue({ default_tier: 'deep', language: 'de' });
       try {
         const { cookie } = await arrange();
-        mockExchangeToken.mockResolvedValue(refusedExchange);
+          mockExchangeToken.mockResolvedValue(refusedExchange);
         const page = await (await call(signed(good()), cookie)).text();
         expect(page).toContain('<p>Shopify-Verbindungen sind auf dieser Instanz ausgeschaltet. Es wurde nichts gespeichert. Ein neuer Versuch ändert daran nichts; einschalten kann sie nur lynox.</p>');
         expect(page).not.toContain('neu starten');

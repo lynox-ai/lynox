@@ -12409,9 +12409,11 @@ export class LynoxHTTPApi {
         // error body is the one place a client secret has been seen echoed back.
         // Nor is the exchange's own message: a redirect the loop refused says "Write possibly
         // landed" for the model, and here nothing landed that the person would have to check.
-        // A store's exchange without a pass was not sent (`exchangeToken` refuses it): the page
-        // names why there was no pass, since starting again changes nothing for most causes.
-        sendOAuthHtml(res, 502, exchanged.ok ? OAUTH_RESULT_TEXTS.exchangeFailed : exchangeRefusedText(exchangeRefused), 'apis');
+        // An exchange to a store without a pass was not sent (`exchangeToken` refuses it before
+        // sending): the page names why there was no pass, since starting again changes nothing
+        // for most causes. Only then: any other failure is not the pass's.
+        const unsentForPass = !exchanged.ok && exchanged.unsentForPass === true;
+        sendOAuthHtml(res, 502, unsentForPass ? exchangeRefusedText(exchangeRefused) : OAUTH_RESULT_TEXTS.exchangeFailed, 'apis');
         return;
       }
 

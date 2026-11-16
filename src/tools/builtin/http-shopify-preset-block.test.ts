@@ -43,7 +43,7 @@ describe('a connected Shopify preset profile is still refused', () => {
     const vetted = vetTokenEndpoint(endpoints.tokenUrl, profile.custom_endpoint_ack);
     if (isTokenEndpointRefused(vetted)) throw new Error('fixture endpoint is not vetted');
     const result = await exchangeToken({ endpoint: vetted, params: { client_secret: 's' }, bodyFormat: 'form' }, undefined);
-    expect(result).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
+    expect(result).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}`, unsentForPass: true });
   });
 
   it('at the pinned fetch under both', async () => {

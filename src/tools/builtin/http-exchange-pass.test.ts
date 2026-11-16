@@ -120,7 +120,7 @@ describe('with the switch off, the exchange is refused as before', () => {
     expect(cpCalls).toBe(0);
     expect(markerSets).toBe(0);
     const r = await exchange(undefined);
-    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
+    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}`, unsentForPass: true });
     expect(sent).toHaveLength(0);
   });
 });
@@ -211,7 +211,7 @@ describe('exchangeToken under the pass', () => {
   it('a credential pass does not open the exchange', async () => {
     const { mintStorePass } = await import('../../core/store-pass.js');
     const r = await exchange(mintStorePass(ORIGIN, 'X-Shopify-Access-Token', 'shpat_x'));
-    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
+    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}`, unsentForPass: true });
     expect(sent).toHaveLength(0);
   });
 
