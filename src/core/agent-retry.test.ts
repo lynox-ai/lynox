@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { APIError } from '@anthropic-ai/sdk';
 import { isRetryable } from './agent.js';
 
 const named = (name: string, message = 'x'): Error => Object.assign(new Error(message), { name });
@@ -62,5 +63,63 @@ describe('isRetryable — stream-transport failures', () => {
     expect(isRetryable(new Error('OpenAI-compatible API error 503: overloaded'))).toBe(true);
     // a mid-message "terminated" in a plain (non-adapter) error is not undici's shape either
     expect(isRetryable(new Error('subscription terminated by admin'))).toBe(false);
+  });
+});
+
+describe('isRetryable — provider errors inside the stream (status undefined)', () => {
+  // The shape the SDK's stream parser throws for an `error` event: status undefined, the whole
+  // event as the body, and the event's error type as `type` (core/streaming.js).
+  const envelope = (type: string): { type: string; error: { type: string; message: string } } =>
+    ({ type: 'error', error: { type, message: 'mid-stream failure' } });
+  const midStream = (type: string): APIError => new APIError(undefined, envelope(type), undefined, new Headers(), type);
+
+  it('retries the three transient types, like their HTTP twins', () => {
+    expect(isRetryable(midStream('overloaded_error'))).toBe(true);
+    expect(isRetryable(midStream('rate_limit_error'))).toBe(true);
+    expect(isRetryable(midStream('api_error'))).toBe(true);
+  });
+
+  it('does not retry any other type', () => {
+    for (const type of ['invalid_request_error', 'authentication_error', 'permission_error', 'not_found_error', 'request_too_large', 'billing_error', 'error']) {
+      expect(isRetryable(midStream(type)), type).toBe(false);
+    }
+  });
+
+  it('reads `type` alone, without a body', () => {
+    expect(isRetryable(new APIError(undefined, undefined, 'x', new Headers(), 'overloaded_error'))).toBe(true);
+  });
+
+  it('reads the envelope alone, for an APIError built without the type argument', () => {
+    expect(isRetryable(new APIError(undefined, envelope('overloaded_error'), undefined, new Headers(), undefined))).toBe(true);
+    expect(isRetryable(new APIError(undefined, envelope('invalid_request_error'), undefined, new Headers(), undefined))).toBe(false);
+  });
+});
+
+describe('isRetryable — a typed provider error is decided by its type, never by its text', () => {
+  const event = (type: string, message: string): APIError =>
+    new APIError(undefined, { type: 'error', error: { type, message } }, undefined, new Headers(), type);
+  const untyped = (message: string): APIError => new APIError(400, { message }, undefined, new Headers(), undefined);
+
+  it('does not retry a non-transient type whose provider text names a transport failure or an AWS throttle', () => {
+    for (const text of ['upstream read ECONNRESET', 'fetch failed', 'socket hang up', 'ThrottlingException', 'InternalServerException']) {
+      expect(isRetryable(event('invalid_request_error', text)), text).toBe(false);
+    }
+  });
+
+  it('still retries a transient type, whatever its text', () => {
+    expect(isRetryable(event('overloaded_error', 'bad request'))).toBe(true);
+  });
+
+  it('reads the text of an APIError without a type: AWS names and transport words', () => {
+    expect(isRetryable(untyped('ThrottlingException: rate exceeded'))).toBe(true);
+    expect(isRetryable(untyped('read ECONNRESET'))).toBe(true);
+    expect(isRetryable(untyped('bad request'))).toBe(false);
+  });
+
+  it('reads the cause chain of an APIError without a type (the SDK connection error)', () => {
+    const conn = Object.assign(new APIError(undefined, undefined, 'Connection error.', undefined), {
+      cause: Object.assign(new TypeError('fetch failed'), { cause: new Error('read ECONNRESET') }),
+    });
+    expect(isRetryable(conn)).toBe(true);
   });
 });

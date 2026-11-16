@@ -24,9 +24,10 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
+import { hiddenAddsOf, targetHiddenAdds, type FieldHiddenAdds } from './bulk-hidden-adds.js';
 import { checkMarkup, sameHtmlField, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
-import { canonicalHtml, htmlEqual } from './html-tree.js';
+import { canonicalHtml, htmlEqual, withinReadingBounds } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter, shopifySeoEntityFields } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
@@ -130,8 +131,8 @@ export type BulkInvalidReason =
   | 'list_item_mismatch'
   /** a product held more media than its list page reads: those past it are not listed */
   | 'list_item_truncated'
-  /** a filtered Shopify list's search listed a product whose product type or vendor is not the
-   *  filter's value up to ASCII letter case (Shopify folds diacritics; PRD shopify-preset §22.4) */
+  /** a filtered Shopify list's search listed a product whose product type, vendor or status is not
+   *  the filter's value up to ASCII letter case (Shopify folds diacritics; PRD shopify-preset §22.4) */
   | 'not_in_filter'
   /** An undo would write back an `actual` whose read-back held markup the write never sent
    *  (`shop_added_markup`, PRD shopify-preset §21.2 item 7 (b)): never the owner's state. */
@@ -262,7 +263,9 @@ export interface BulkRunStatus {
    *  to them again. Counted from the halt that left them so, not only once a later pass has
    *  recorded them `sent_unknown`. */
   sentUnknown: number;
-  /** Applied targets taken back since — by an undo run, or an atomic run's rollback. */
+  /** Targets taken back since — by an undo run, or an atomic run's rollback. Applied ones, and
+   *  for a run that is not atomic also one an external undo took back after a send that was
+   *  never recorded. Not one an atomic rollback found unrecorded and settled. */
   undone: number;
   kind: BulkRunKind;
   atomic: boolean;
@@ -308,7 +311,7 @@ export interface BulkRunStatus {
 export interface BulkListStatus {
   state: ListState;
   path: string;
-  filters: Record<string, string>;
+  filters: BulkListSource['filters'];
   idField: string;
   /** Null for a Shopify list, which only reads. */
   method: string | null;
@@ -616,6 +619,10 @@ export interface PreviewTarget {
    *  and removes, each with its full value (PRD shopify-preset §20.2 item 5, M3). Computed here
    *  from the parser's tree, so the view shows it and computes nothing. */
   markupChanges?: FieldMarkupChange[] | undefined;
+  /** Per text field an `update` or `create` target writes: the hidden characters its after-state
+   *  holds more of than its before-image, where real text may carry one and the page would not
+   *  show it (`bulk-hidden-adds.ts`). The view marks every occurrence of each in that field. */
+  hiddenAdds?: FieldHiddenAdds[] | undefined;
   /** A target refused for `new_link_domain` (1010): the domain the refused link points to, as the
    *  check read it (ASCII, lower case, Punycode). Absent on a row recorded before it was kept. */
   linkDomain?: string | undefined;
@@ -624,7 +631,7 @@ export interface PreviewTarget {
    *  target refused at its read holds none), with its whole value as the planner or the judge
    *  wrote it. Nothing is written for the target, so the owner copies these values into the shop
    *  themselves. Set only where one holds. */
-  refusedValues?: { field: string; value: string }[] | undefined;
+  refusedValues?: { field: string; value: string; codePoints?: number[] | undefined }[] | undefined;
   /** Written, and its read-back held markup the write never sent (PRD shopify-preset §21.2
    *  item 6): the target the halt `markupAddedByShop` is about. Set only where it holds. */
   shopAddedMarkup?: true | undefined;
@@ -644,7 +651,8 @@ export interface PreviewTarget {
   contextField?: string | undefined;
   /** The owner took this target out of the write before approving (`deselectTarget`). */
   deselected: boolean;
-  /** This run wrote the target: recorded as applied, and not found already as planned. */
+  /** This run wrote the target: recorded as applied, and not found already as planned. Or it may
+   *  have: sent to and never recorded, and not settled by a rollback since. */
   written: boolean;
   /** A rollback or an undo took this run's write back (`undone_at`). After a rollback that did
    *  not complete, a target that is `written` and not `undone` is one lynox left as it was. */
@@ -846,6 +854,7 @@ function isPlainRecord(v: unknown): v is Record<string, unknown> {
 /** Whether the shortcode check refuses this value of one field. A value the parser cannot read
  *  is refused by `checkMarkup` for another reason, so it is not one the preview shows to copy. */
 function refusesShortcode(value: string, was: string | null): boolean {
+  if (!withinReadingBounds(value)) return false;
   try {
     return shortcodeRefusalOf(value, was) !== null;
   } catch {
@@ -985,7 +994,8 @@ export function canonicalJson(value: unknown): string {
  * shows its whitespace (`showsWhitespace`), all in `sameHtmlField`: the tree never
  * sees a tag left open at the end, a `<body onload>` or a stray end tag, nor where it sits, nor a
  * line break a `white-space: pre` shows, while the page does, so such a value compares byte for byte. A field
- * one side holds and the other does not differs; every other field stays byte-equal.
+ * one side holds and the other does not differs; every other field stays byte-equal. A value beyond
+ * the reading bounds ({@link withinReadingBounds}) is not parsed and compares byte for byte too.
  */
 export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] = []): boolean {
   const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -1597,9 +1607,12 @@ export class BulkLedger {
    */
   getPreview(runId: string, opts: { offset?: number | undefined; limit?: number | undefined } = {}): PreviewTarget[] {
     const rows = this.engineDb.getDb().prepare(
-      // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test.
+      // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test, and
+      // a target sent to and never recorded (`listSentUnrecordedDesc`) while the rollback has not
+      // settled it: the run may have changed it, and a rollback that left it must mark it.
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
-         (applied_at IS NOT NULL AND found_unsent = 0 AND ${WRITING_SQL}) AS written, undone_at IS NOT NULL AS undone,
+         (((applied_at IS NOT NULL AND found_unsent = 0) OR (applied_at IS NULL AND write_sent = 1 AND undone_at IS NULL)) AND ${WRITING_SQL}) AS written,
+         undone_at IS NOT NULL AS undone,
          shop_added_markup, host_rewrote, context_secret_field, link_domain
        FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
@@ -1636,7 +1649,7 @@ export class BulkLedger {
           const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
           if (typeof next !== 'string' || next === was) return [];
           const c = markupChangesOf(f, typeof was === 'string' ? was : null, next);
-          return c.added.length + c.removed.length > 0 ? [c] : [];
+          return c.added.length + c.removed.length > 0 || c.unread === true ? [c] : [];
         })
         : [];
       // The fields a `shortcode_changed` refusal is about, each with the whole value written for it:
@@ -1648,7 +1661,11 @@ export class BulkLedger {
         ? htmlFields.flatMap((f) => {
           const value = (after as Record<string, unknown>)[f];
           const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
-          return typeof value === 'string' && value !== was && refusesShortcode(value, typeof was === 'string' ? was : null) ? [{ field: f, value }] : [];
+          if (typeof value !== 'string' || value === was || !refusesShortcode(value, typeof was === 'string' ? was : null)) return [];
+          // The owner pastes this value into the shop by hand: a hidden character it adds is marked
+          // there as in the list.
+          const codePoints = hiddenAddsOf(typeof was === 'string' ? was : null, value, true);
+          return [{ field: f, value, ...(codePoints.length > 0 ? { codePoints } : {}) }];
         })
         : [];
       const seoEntityFields = seoNoted && r.change === 'update' ? shopifySeoEntityFields(prior, after) : [];
@@ -1656,6 +1673,7 @@ export class BulkLedger {
         : run !== undefined && prior !== null && typeof prior === 'object'
           ? this.shopMarkedWriteOf(this.engineDb.dec(r.target_key), prior, runId)?.appliedAt ?? null
           : null;
+      const hiddenAdds = (r.change === 'update' || r.change === 'create') && after !== null ? targetHiddenAdds(prior, after, htmlFields) : [];
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
@@ -1670,8 +1688,32 @@ export class BulkLedger {
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
         ...(seoEntityFields.length > 0 ? { seoEntityFields } : {}),
         ...(shopMarkedAt !== undefined ? { shopMarkedAt } : {}),
+        ...(hiddenAdds.length > 0 ? { hiddenAdds } : {}),
       };
     });
+  }
+
+  /** How many targets the owner has not taken out add hidden characters a page would not show
+   *  ({@link PreviewTarget.hiddenAdds}): the line an approval and a probe's confirmation show, so
+   *  that a mark among hundreds of targets is not left to be found. Decrypts
+   *  every writing target, as the checksum does, and computes only this: iterated, not loaded,
+   *  for a run's images can reach 32 MB. A judged target without its verdict counts as none, as
+   *  {@link getPreview} shows it. */
+  hiddenAddsTargets(runId: string): number {
+    const judged = (this.runRow(runId)?.judge_rule ?? null) !== null;
+    const htmlFields = this.htmlFieldsOf(runId);
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT before, after_planned, judged_at FROM bulk_targets
+       WHERE run_id = ? AND deselected_at IS NULL AND change IN ('update', 'create')`,
+    ).iterate(runId) as IterableIterator<{ before: string | null; after_planned: string | null; judged_at: string | null }>;
+    let n = 0;
+    for (const r of rows) {
+      if (r.after_planned === null || (judged && r.judged_at === null)) continue;
+      const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
+      const prior = before !== null && !before.absent ? before.value : null;
+      if (targetHiddenAdds(prior, JSON.parse(this.engineDb.dec(r.after_planned)), htmlFields).length > 0) n++;
+    }
+    return n;
   }
 
   private toStatus(row: RunRow): BulkRunStatus {
@@ -1686,11 +1728,14 @@ export class BulkLedger {
       `SELECT error, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change = 'invalid' GROUP BY error`,
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
-      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone, SUM(found_unsent = 1 AND write_sent = 0) AS foundAsPlanned,
+      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL AND (applied_at IS NOT NULL OR ? = 0)) AS undone, SUM(found_unsent = 1 AND write_sent = 0) AS foundAsPlanned,
          SUM(change != 'invalid' AND before IS NULL) AS unread, SUM(shop_added_markup) AS shopAddedMarkup, SUM(host_rewrote) AS hostRewrote,
          SUM(${UNCLEAR_SQL}) AS sentUnknown
        FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
+    // An atomic run's rollback also settles targets it sent to and never recorded
+    // (`recordUnrecordedSettled`); they were never counted as applied, so not as undone either.
+    // An external undo takes such a target back for real, and it counts.
+    ).get(row.atomic, row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent,
@@ -2035,6 +2080,8 @@ export class BulkLedger {
     if (fields.length === 0) return after;
     const out: Record<string, unknown> = { ...after };
     for (const f of fields) {
+      // A value beyond the reading bounds is left as it is: the markup check refuses it.
+      if (!withinReadingBounds(after[f] as string)) continue;
       const canonical = canonicalHtml(after[f] as string);
       if (canonicalHtml(canonical) === canonical) out[f] = canonical;
     }
@@ -2204,6 +2251,22 @@ export class BulkLedger {
     return (this.engineDb.getDb().prepare(
       `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(run.target_system) !== null)}`,
     ).get(runId) as { n: number }).n;
+  }
+
+  /** The undo that took an undone run back, for the owner's page: the last finished undo started
+   *  from it, and when its last target was taken back. Null for a run that is not `undone`.
+   *  Only an undo carries a `source_run_id` ({@link planUndo}), so the source link alone finds it.
+   *  Only a finished one counts: a second undo planned beside it stays previewed for good. Two
+   *  planned in the same second are told apart by insertion order, as the prune does. */
+  undoneBy(runId: string): { runId: string; at: string } | null {
+    const run = this.runRow(runId);
+    if (!run || run.phase !== 'undone') return null;
+    const db = this.engineDb.getDb();
+    const undo = db.prepare(
+      `SELECT id FROM bulk_runs WHERE source_run_id = ? AND phase = 'done' ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    ).get(runId) as { id: string } | undefined;
+    const at = (db.prepare('SELECT MAX(undone_at) AS at FROM bulk_targets WHERE run_id = ?').get(runId) as { at: string | null }).at;
+    return undo === undefined || at === null ? null : { runId: undo.id, at };
   }
 
   /** Targets the run writes: `update`, `create`, `delete`. */
@@ -2595,7 +2658,8 @@ export class BulkLedger {
           if (htmlFields.some((f) => {
             const a = restored[f];
             const k = held[f];
-            return typeof a === 'string' && typeof k === 'string' && htmlEqual(a, k);
+            // Beyond the reading bounds the two are not parsed: counted as the same, the strict direction.
+            return typeof a === 'string' && typeof k === 'string' && (!withinReadingBounds(a) || !withinReadingBounds(k) || htmlEqual(a, k));
           })) return true;
         }
       }
@@ -2713,8 +2777,11 @@ export class BulkLedger {
       if (value === was) return true;
       // Canonical bytes: the parser drops what it cannot place (a `<body onload>`), so a value the
       // check passes must also be the bytes it reads.
-      if (typeof value !== 'string' || canonicalHtml(value) !== value) return false;
-      return checkMarkup({ before: typeof was === 'string' ? was : null, after: value, storeHost: host, startDomains }).ok;
+      // The check first: it reads the value only within the reading bounds, and the canonical
+      // form is parsed only for a value it passed.
+      if (typeof value !== 'string') return false;
+      if (!checkMarkup({ before: typeof was === 'string' ? was : null, after: value, storeHost: host, startDomains }).ok) return false;
+      return canonicalHtml(value) === value;
     });
   }
 
@@ -2747,7 +2814,10 @@ export class BulkLedger {
       const held = kept as Record<string, unknown>;
       const marked = this.htmlFieldsOf(r.run_id).filter((f) => typeof sent[f] === 'string' && typeof held[f] === 'string'
         && !sameHtmlField(sent[f] as string, held[f] as string));
-      if (marked.some((f) => typeof now[f] === 'string' && htmlEqual(now[f] as string, held[f] as string))) {
+      // A value beyond the reading bounds is not parsed: it counts as the marked value, as down an
+      // undo chain.
+      if (marked.some((f) => typeof now[f] === 'string' && (!withinReadingBounds(now[f] as string)
+        || !withinReadingBounds(held[f] as string) || htmlEqual(now[f] as string, held[f] as string)))) {
         return { appliedAt: r.applied_at };
       }
     }
@@ -3143,6 +3213,13 @@ export class BulkLedger {
     this.engineDb.getDb().prepare('UPDATE bulk_runs SET cost_usd = cost_usd + ? WHERE id = ?').run(usd, runId);
   }
 
+  /** Replace a call's provisional booking (its worst case, booked with `addJudgeCost` before the
+   *  call) by what it cost: `usd` 0 takes it back. Never below zero. */
+  settleJudgeCost(runId: string, provisionalUsd: number, usd: number): void {
+    if (!Number.isFinite(provisionalUsd) || !Number.isFinite(usd) || provisionalUsd < 0 || usd < 0) return;
+    this.engineDb.getDb().prepare('UPDATE bulk_runs SET cost_usd = MAX(0, cost_usd - ? + ?) WHERE id = ?').run(provisionalUsd, usd, runId);
+  }
+
   /**
    * Record one target's verdict — its after-state and the change that follows — or why it has
    * none. Only under the claim's own token (compare-and-set), only while the target has no
@@ -3435,6 +3512,17 @@ export class BulkLedger {
   }
 
   /**
+   * Mark a target the run sent to but never recorded ({@link listSentUnrecordedDesc}) as settled
+   * by the rollback: written back, or found as before the run, so nothing of the run is left on
+   * it. One left `undone_at` NULL is what the owner's view marks ({@link getPreview} `written`).
+   * Not counted as undone: it was never counted as applied either.
+   */
+  recordUnrecordedSettled(runId: string, seq: number, now: number = Date.now()): void {
+    this.engineDb.getDb().prepare('UPDATE bulk_targets SET undone_at = ? WHERE run_id = ? AND seq = ? AND applied_at IS NULL AND write_sent = 1')
+      .run(new Date(now).toISOString(), runId, seq);
+  }
+
+  /**
    * Mark a target written by this run as taken back (an atomic run's rollback). For an
    * undo run the rollback restores what the source wrote, so the source target stands
    * again: its `undone_at` is cleared in the same transaction.
@@ -3460,6 +3548,20 @@ export class BulkLedger {
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
        WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 AND undone_at IS NULL AND ${WRITING_SQL}
+       ORDER BY seq DESC`,
+    ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
+    return rows.map((r) => this.toApplyTarget(r));
+  }
+
+  /** Targets this run sent its write to but never recorded as written, newest first: a loop
+   *  marked the send and died before {@link recordApplied}, or the write failed after it may
+   *  have landed. Whether it holds on the target only a read can tell. Not one a rollback
+   *  settled already ({@link recordUnrecordedSettled}). For an atomic run's rollback, beside
+   *  {@link listAppliedDesc}. */
+  listSentUnrecordedDesc(runId: string): ApplyTarget[] {
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
+       WHERE run_id = ? AND write_sent = 1 AND applied_at IS NULL AND undone_at IS NULL AND ${WRITING_SQL}
        ORDER BY seq DESC`,
     ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
     return rows.map((r) => this.toApplyTarget(r));

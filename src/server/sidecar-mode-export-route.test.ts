@@ -146,4 +146,22 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(events.get('done')).toBeUndefined();
     expect((events.get('error') as { message: string }).message).toMatch(/EACCES|permission/i);
   });
+
+  it('zeroizes the transfer key when the export refuses', async () => {
+    const { MigrationExporter } = await import('../core/migration-export.js');
+    let key: Buffer | undefined;
+    const spy = vi.spyOn(MigrationExporter.prototype, 'export').mockImplementation((transferKey: Buffer) => {
+      key = transferKey;
+      expect(transferKey.some(b => b !== 0)).toBe(true);
+      throw new Error('This instance\'s data does not fit one migration');
+    });
+    try {
+      const events = await exportTo();
+      expect((events.get('error') as { message: string }).message).toMatch(/does not fit one migration/);
+      expect(key).toBeDefined();
+      expect(key!.every(b => b === 0)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

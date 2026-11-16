@@ -15,7 +15,7 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
   const backing = new Map<string, OAuthPreset>(real.OAUTH_PRESETS.ids().map((id) => [id, real.OAUTH_PRESETS.get(id)!] as const));
   for (const p of [named('bearer', 'Authorization'), named('shaping', 'X-Forwarded-Host'), named('broken', 'Not A Header')]) backing.set(p.id, p);
   const register = Object.freeze({ get: (id: string) => backing.get(id), ids: () => [...backing.keys()].sort() });
-  return { ...real, OAUTH_PRESETS: register };
+  return { ...real, OAUTH_PRESETS: register, builtInPresetOf: (profile: Parameters<typeof real.builtInPresetOf>[0]) => real.builtInPresetOf(profile, register) };
 });
 
 const { attachStoredCredential } = await import('./http.js');

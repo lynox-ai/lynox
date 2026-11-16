@@ -102,7 +102,7 @@ function harness(): { deps: BulkJudgeDeps; calls: { user: string; system: string
       resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as Anthropic }),
       gate: async () => ({ runId: 'gate', blockedReason: null }),
       report: () => {},
-      bookSpend: () => {},
+      bookSpend: () => undefined, settleSpend: () => {},
       budgetAllows: () => true,
       scanSecret: scan,
       maskVault: noVault,

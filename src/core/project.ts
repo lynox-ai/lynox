@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, lstatSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { runTaskTitle } from './run-task-turn.js';
 import { dirname, resolve, join, relative, sep } from 'node:path';
 import { sha256Short } from './utils.js';
 import type { RunHistory, RunRecord } from './run-history.js';
@@ -95,9 +96,11 @@ export function generateBriefing(
   }
 
   const lines = runs.map((r: RunRecord) => {
-    const taskRaw = r.task_text.length > 80
-      ? r.task_text.slice(0, 77) + '...'
-      : r.task_text;
+    // A scheduled run is named by its task, not by the engine's lead above it.
+    const text = runTaskTitle(r.task_text) ?? r.task_text;
+    const taskRaw = text.length > 80
+      ? text.slice(0, 77) + '...'
+      : text;
     const task = detectInjectionAttempt(taskRaw).detected ? '[redacted]' : taskRaw;
     const cost = r.cost_usd > 0 ? ` | $${r.cost_usd.toFixed(4)}` : '';
     return `- [${r.status}] ${r.model_tier}: "${task}"${cost}`;

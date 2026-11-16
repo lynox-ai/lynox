@@ -43,6 +43,11 @@ describe('verifyShopifyCallback', () => {
     expect(verifyShopifyCallback(reordered, PUBLISHED.secret, PUBLISHED.nowMs).ok).toBe(true);
   });
 
+  it('takes a store label of 63 characters and refuses one of 64, signed as it is', () => {
+    expect(verifyShopifyCallback(signed({ ...BASE, shop: `${'a'.repeat(63)}.myshopify.com` }, SECRET), SECRET, NOW).ok).toBe(true);
+    expect(verifyShopifyCallback(signed({ ...BASE, shop: `${'a'.repeat(64)}.myshopify.com` }, SECRET), SECRET, NOW)).toEqual({ ok: false, reason: 'bad-shop' });
+  });
+
   it('refuses the published example under another secret', () => {
     expect(verifyShopifyCallback(PUBLISHED.query, 'hushh', PUBLISHED.nowMs)).toEqual({ ok: false, reason: 'signature-mismatch' });
   });

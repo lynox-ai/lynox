@@ -292,10 +292,10 @@ describe('speak facade — text-prep pipeline', () => {
 });
 
 describe('VOXTRAL_TTS_MODEL pin', () => {
-  it('is pinned to the concrete v26.03 tag, never a floating -latest alias', () => {
+  it('is pinned to the concrete v3.0 tag, never a floating -latest alias', () => {
     // Guards the no-floating-tag rule: a `-latest` alias silently follows a
     // server-side model bump (and its rate limits). Re-pin here on each upgrade.
-    expect(facade.VOXTRAL_TTS_MODEL).toBe('voxtral-mini-tts-2603');
+    expect(facade.VOXTRAL_TTS_MODEL).toBe('voxtral-mini-tts-3-0');
     expect(facade.VOXTRAL_TTS_MODEL).not.toContain('latest');
   });
 });

@@ -28,7 +28,7 @@ describe('the open chat\'s `contained` flag in the chat store', () => {
 		expect(src).toContain('function runEnded(answer: ChatMessage | null): void {\n\tvoid refreshThreadContained({ afterRun: true, answer });\n}');
 		// `endStreaming` is the only way to clear `isStreaming` and reaches it; the two resets of a
 		// new or reopened chat are not run ends and stay as they are.
-		expect(src).toContain('function endStreaming(answer: ChatMessage | null = null): void {\n\tisStreaming = false;\n\trunEnded(answer);\n}');
+		expect(src).toContain('function endStreaming(answer: ChatMessage | null = null): void {\n\tisStreaming = false;\n\trunEnded(answer);\n\tsignalRunEnded();\n}');
 		const fnOf = (at: number): string => {
 			const m = [...src.slice(0, at).matchAll(/\n(?:export )?(?:async )?function (\w+)/g)].at(-1);
 			return m?.[1] ?? '';
@@ -37,7 +37,7 @@ describe('the open chat\'s `contained` flag in the chat store', () => {
 		expect(clears.sort()).toEqual(['endStreaming', 'newChat', 'resumeThread']);
 		// Where no stream was open, the run's end is said directly: a re-attach that found the run
 		// finished (404), a re-attach that lost ownership, and a reconcile.
-		expect(src).toContain('if (!res.ok || !res.body) { runEnded(null); return; }');
+		expect(src).toContain('if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); return; }');
 		expect(src).toMatch(/export async function reconcileThread\(\): Promise<void> \{\n\tconst tid = sessionId;\n\tif \(!tid\) return;\n(\t\/\/[^\n]*\n)*\trunEnded\(null\);/);
 		expect(src).toContain('\t\t\tendStreaming(answer);\n\t\t\tstreamingActivity = \'idle\';\n\t\t\tstreamingToolName = null;\n\t\t\tstreamingToolPhase = null;\n\t\t} else {\n\t\t\trunEnded(answer);\n\t\t}');
 	});

@@ -423,6 +423,12 @@ function snippetFrom(text: string, max: number): string {
   return (lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd();
 }
 
+/** RFC 3834 `auto-replied` only (an out-of-office note), as `isAutoRepliedHeader` in imap-smtp.ts. */
+function isAutoRepliedHeader(value: string | undefined): boolean {
+  if (!value) return false;
+  return /^auto-replied\b/.test(value.toLowerCase().trim());
+}
+
 function isAutoSubmitted(value: string | undefined): boolean {
   if (!value) return false;
   const lower = value.toLowerCase().trim();
@@ -790,6 +796,7 @@ export class OAuthGmailProvider implements MailProvider {
       attachmentCount: attachments.length,
       sizeBytes: msg.sizeEstimate,
       isAutoReply: isAutoSubmitted(header(headers, 'Auto-Submitted')),
+      isAutoReplied: isAutoRepliedHeader(header(headers, 'Auto-Submitted')),
     };
   }
 

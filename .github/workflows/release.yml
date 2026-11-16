@@ -11,9 +11,13 @@ env:
   # Skipping it removes a CDN dependency from every install.
   ONNXRUNTIME_NODE_INSTALL: skip
 
+# Every job carries timeout-minutes (dispatch-pro-release on its one step), set well above its
+# duration in past release runs; without one a stalled job holds the release run until the 6 h
+# runner default. tests/ci-job-timeouts.test.ts checks it.
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     # Scoped for the same reason as ci.yml's `test`: this job downloads a
     # third-party executable, runs it over the checkout, and hands the install
     # action a token.
@@ -52,7 +56,8 @@ jobs:
   # Protects against token drift — see scripts/pre-release-check.sh for history.
   pre-release-check:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify NPM_TOKEN is valid
@@ -84,6 +89,7 @@ jobs:
             runner: ubuntu-24.04-arm
             arch_tag: arm64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -103,14 +109,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # amd64-only: build with load+tag-for-scan so trivy can read the same
-      # layers we ship. arm64 builds from the same node:22-slim digest, the
-      # same Debian release for both architectures, so the scan stays
-      # amd64-only (per-architecture package lists not compared). The
-      # push-by-digest build below re-uses the gha cache, so this step is
-      # essentially free on its second invocation.
+      # Both architectures: build with load+tag-for-scan so trivy reads the layers this
+      # leg ships. `no-cache-filters: production` runs the production stage fresh, so the
+      # packages its apt-get install adds come at their current Debian versions instead of
+      # those of whichever release first wrote the cached layer (the layer's cache key does
+      # not change when Debian publishes a fix). Packages already in the base image move only
+      # when its digest is bumped; the scan below judges them like the rest. The push-by-digest
+      # build below runs in the same builder and reuses the layers this step just built, so
+      # the scan sees the layers that ship; cache-to writes them for the next release.
       - name: Build (load) for trivy scan
-        if: matrix.platform == 'linux/amd64'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
@@ -119,11 +126,11 @@ jobs:
           tags: ghcr.io/lynox-ai/lynox:scan
           build-args: |
             BUILD_SHA=${{ github.sha }}
+          no-cache-filters: production
           cache-from: type=gha,scope=${{ matrix.arch_tag }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch_tag }}
 
       - name: Scan image for vulnerabilities
-        if: matrix.platform == 'linux/amd64'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/lynox-ai/lynox:scan
@@ -136,7 +143,6 @@ jobs:
       # blindness itself instead of guessing at its cause: list every package trivy
       # found, and fail when the OS share is empty.
       - name: List what the scan saw
-        if: matrix.platform == 'linux/amd64'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/lynox-ai/lynox:scan
@@ -147,7 +153,6 @@ jobs:
           exit-code: '0'
 
       - name: The scan saw the OS packages
-        if: matrix.platform == 'linux/amd64'
         run: |
           set -euo pipefail
           n=$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length' trivy-packages.json)
@@ -212,6 +217,7 @@ jobs:
   docker-manifest:
     needs: docker-build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -304,6 +310,7 @@ jobs:
   docker-attest:
     needs: docker-manifest
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -384,7 +391,8 @@ jobs:
 
   npm:
     needs: pre-release-check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -405,7 +413,8 @@ jobs:
   # fires on a release tag and maps to the production custom domain.
   deploy-docs-prod:
     needs: [docker-manifest, npm]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -466,7 +475,10 @@ jobs:
   dispatch-pro-release:
     needs: [docker-manifest, npm]
     environment: production
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # The bound sits on the step, not the job: this job waits hours for the approval above, and
+    # it is not established whether a job-level timeout-minutes counts that wait. A step's bound
+    # counts only the step's own run.
     permissions:
       contents: read
       # Kept although the explicit record step is gone: before core#142 this job
@@ -476,6 +488,7 @@ jobs:
       deployments: write
     steps:
       - name: Dispatch release to lynox-pro
+        timeout-minutes: 10
         env:
           PRO_DISPATCH_TOKEN: ${{ secrets.PRO_DISPATCH_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}

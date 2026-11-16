@@ -50,7 +50,7 @@ import { resolveGuardedAckHosts } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
 import { isVettedEgressHost, isEndpointAcked } from './llm/endpoint-allowlist.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
-import { isShopifyAdminUrl, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { isShopifyAdminUrl, SHOPIFY_FETCH_TOKEN } from './shopify-host.js';
 import { isStorePass, type StorePass } from './store-pass.js';
 
 /** 15 s per leg; the wall timer sits one second beyond it. */
@@ -243,7 +243,7 @@ export async function exchangeToken(
   // exchange pass: the connect callback's, minted by `storeExchangePassFor`. Here, not in the
   // vetting: every exchange, the connect callback, `fetch_token` and a renewal, ends here.
   if (isShopifyAdminUrl(req.endpoint.url) && !(isStorePass(pass) && pass.kind === 'exchange')) {
-    return { ok: false, message: `token exchange refused: ${SHOPIFY_UNAVAILABLE}` };
+    return { ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` };
   }
 
   const headers: Record<string, string> = {

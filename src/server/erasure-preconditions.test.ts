@@ -256,6 +256,8 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
       const res = await claim;
       expect(res.status).toBe(409);
       expect(res.body['code']).toBe('erasure_in_progress');
+      // The control plane answered, so its nonce is spent: the page must not park it again.
+      expect(res.body['claim_kept']).toBeUndefined();
       expect(google().isAuthenticated()).toBe(false);
       expect(google().grantPending).toBe(false);
     } finally {
@@ -273,6 +275,8 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
       expect(early.status).toBe(409);
       expect(early.body['code']).toBe('erasure_in_progress');
       expect(cpFetchMock.mock.calls.length).toBe(callsBefore);
+      // Never sent, so the nonce is unspent there and the page may park it again.
+      expect(early.body['claim_kept']).toBe(true);
     } finally {
       internals().erasureInProgress = false;
       for (const k of MANAGED) delete process.env[k];

@@ -8,6 +8,7 @@ import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { EXPORT_STAGING_DIR } from '../core/workspace-export.js';
+import { acquireSlot, readSlot } from '../core/export-slot.js';
 import { resetShellIsolationForTest, setShellIsolationForTest, type ShellIsolation } from '../core/shell-isolation.js';
 
 /**
@@ -106,15 +107,15 @@ describe('workspace files in the export (real engine)', () => {
     expect((await fetch(`${baseUrl}/api/export/workspace`)).status).toBe(401);
   });
 
-  it('answers 409 while another workspace export runs, and serves again once it is over', async () => {
-    const flag = api as unknown as { workspaceExportInProgress: boolean };
-    flag.workspaceExportInProgress = true;
+  it('answers 409 while another export holds the slot (the export command, another process), and serves again once it is over', async () => {
+    const taken = acquireSlot(dir, 'export', 'command');
+    if (!taken.ok) throw new Error('fixture: slot held');
     try {
       const res = await get('/api/export/workspace');
       expect(res.status).toBe(409);
       expect(((await res.json()) as { code: string }).code).toBe('export_in_progress');
     } finally {
-      flag.workspaceExportInProgress = false;
+      taken.slot.release();
     }
     expect(await fullExport()).toBe(200);
   });
@@ -131,9 +132,39 @@ describe('workspace files in the export (real engine)', () => {
     }
   });
 
-  it('refuses an erasure while a workspace export runs, and erases nothing', async () => {
-    const flag = api as unknown as { workspaceExportInProgress: boolean };
-    flag.workspaceExportInProgress = true;
+  it('keeps its slot live by a heartbeat while it streams, so a download slower than the slot\'s TTL still holds the erasures off', async () => {
+    const api2 = api as unknown as { exportSlotHeartbeatMs: number };
+    const saved = api2.exportSlotHeartbeatMs;
+    api2.exportSlotHeartbeatMs = 20;
+    const ac = new AbortController();
+    // Large enough that the unread download cannot finish into the socket buffers: it stays open
+    // while the test watches the heartbeat.
+    const big = join(dir, 'workspace', 'big.bin');
+    writeFileSync(big, randomBytes(48 * 1024 * 1024));
+    try {
+      const res = await fetch(`${baseUrl}/api/export/workspace`, { headers: { Authorization: `Bearer ${SECRET}` }, signal: ac.signal });
+      expect(res.status).toBe(200);
+      const first = readSlot(dir);
+      expect(first?.kind).toBe('export');
+      await new Promise(r => setTimeout(r, 150));
+      const later = readSlot(dir);
+      expect(later?.job).toBe(first?.job);
+      expect(later!.at).toBeGreaterThan(first!.at);
+      ac.abort();
+      await res.body?.cancel().catch(() => {});
+    } finally {
+      api2.exportSlotHeartbeatMs = saved;
+      rmSync(big, { force: true });
+    }
+    await stagingEmptied();
+    const deadline = Date.now() + 5000;
+    while (readSlot(dir) !== null && Date.now() < deadline) await new Promise(r => setTimeout(r, 25));
+    expect(readSlot(dir)).toBeNull();
+  });
+
+  it('refuses an erasure while an export holds the slot (the export command, another process), and erases nothing', async () => {
+    const taken = acquireSlot(dir, 'export', 'command');
+    if (!taken.ok) throw new Error('fixture: slot held');
     try {
       const res = await fetch(`${baseUrl}/api/data`, {
         method: 'DELETE',
@@ -143,7 +174,7 @@ describe('workspace files in the export (real engine)', () => {
       expect(res.status).toBe(409);
       expect(((await res.json()) as { code: string }).code).toBe('workspace_export_running');
     } finally {
-      flag.workspaceExportInProgress = false;
+      taken.slot.release();
     }
     expect(existsSync(join(dir, 'workspace', 'out', 'report.md'))).toBe(true);
   });

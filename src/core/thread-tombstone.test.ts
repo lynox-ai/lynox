@@ -74,10 +74,10 @@ describe('an escalation after its thread was deleted', () => {
   it('opens a new thread instead of reviving the deleted one, and points the push at it', () => {
     const { threads } = freshHistory();
     const r = router();
-    expect(escalateToUser(threads, r.router, { key: 'abc123', title: 'Watcher', body: 'first change' })).toEqual({ threadId: 'escalation-abc123' });
+    expect(escalateToUser(threads, r.router, { key: 'abc123', title: 'Watcher', opener: 'What happened?', body: 'first change' })).toEqual({ threadId: 'escalation-abc123' });
     threads.deleteThread('escalation-abc123');
 
-    const second = escalateToUser(threads, r.router, { key: 'abc123', title: 'Watcher', body: 'second change' });
+    const second = escalateToUser(threads, r.router, { key: 'abc123', title: 'Watcher', opener: 'What happened?', body: 'second change' });
 
     expect(second).toEqual({ threadId: 'escalation-abc123-2' });
     expect(threads.getThread('escalation-abc123'), 'the deleted thread stays deleted').toBeUndefined();
@@ -90,12 +90,12 @@ describe('an escalation after its thread was deleted', () => {
   it('keeps bumping the new thread, and moves on again when that one is deleted', () => {
     const { threads } = freshHistory();
     const r = router();
-    escalateToUser(threads, r.router, { key: 'k9', title: 'Job', body: 'one' });
+    escalateToUser(threads, r.router, { key: 'k9', title: 'Job', opener: 'What happened?', body: 'one' });
     threads.deleteThread('escalation-k9');
-    escalateToUser(threads, r.router, { key: 'k9', title: 'Job', body: 'two' });
-    expect(escalateToUser(threads, r.router, { key: 'k9', title: 'Job', body: 'three' }), 'one thread per key while it lives').toEqual({ threadId: 'escalation-k9-2' });
+    escalateToUser(threads, r.router, { key: 'k9', title: 'Job', opener: 'What happened?', body: 'two' });
+    expect(escalateToUser(threads, r.router, { key: 'k9', title: 'Job', opener: 'What happened?', body: 'three' }), 'one thread per key while it lives').toEqual({ threadId: 'escalation-k9-2' });
     threads.deleteThread('escalation-k9-2');
-    expect(escalateToUser(threads, r.router, { key: 'k9', title: 'Job', body: 'four' })).toEqual({ threadId: 'escalation-k9-3' });
+    expect(escalateToUser(threads, r.router, { key: 'k9', title: 'Job', opener: 'What happened?', body: 'four' })).toEqual({ threadId: 'escalation-k9-3' });
     expect(threads.getThread('escalation-k9-2')).toBeUndefined();
   });
 });
