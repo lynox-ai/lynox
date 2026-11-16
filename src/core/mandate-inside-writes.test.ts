@@ -107,6 +107,8 @@ const { SubjectStore } = await import('./subject-store.js');
 const { RunHistory } = await import('./run-history.js');
 const { TaskManager } = await import('./task-manager.js');
 const { ApiStore } = await import('./api-store.js');
+const { DataStore } = await import('./data-store.js');
+const { OWNER_PRINCIPAL } = await import('./request-principal.js');
 const { ConnectionStore } = await import('./connection-store.js');
 const { GrantLedger } = await import('./grant-ledger.js');
 const { setTenantWorkspace, clearTenantWorkspace, _resetCache: resetWorkspaceCache } = await import('./workspace.js');
@@ -152,6 +154,9 @@ const outcomeOf = (db: Database.Database, site: string): boolean =>
   db.prepare(`SELECT 1 FROM audit_log WHERE phase IN ('returned', 'failed') AND action LIKE ?`).get(`instance:${site}:%`) !== undefined;
 const attemptOf = (db: Database.Database, site: string): boolean =>
   db.prepare(`SELECT 1 FROM audit_log WHERE phase = 'attempt' AND action LIKE ?`).get(`instance:${site}:%`) !== undefined;
+
+/** The opaque id the data-store fixtures give the table `leads`. */
+const LEADS_ID = 'dsc_0123456789abcdef';
 
 interface Call { on: string; method: string; read: boolean; own: boolean; any: boolean }
 interface GuardState { calls: Call[]; violations: string[]; open: () => { own: boolean; any: boolean } }
@@ -482,15 +487,15 @@ const FIXTURES: Fixture[] = [
     } },
 
   // data store, contacts, artifacts, files, threads
-  { site: 'data_store_create#create', branch: 'create', row: { verb: 'create', target: 'data_store' }, tool: dataStoreCreateTool as ToolEntry, input: { name: 'leads', columns: [{ name: 'email', type: 'string' }] },
-    build: () => ({ ctx: { dataStore: { obj: { createCollection: vi.fn(() => ({ name: 'leads', columns: [{ name: 'email', type: 'string' }], scopeType: 'context', scopeId: '' })) }, reads: [] } }, spy: 'ctx.dataStore.createCollection' }) },
-  { site: 'data_store_insert#save', branch: 'insert', row: { verb: 'save', target: 'data_store' }, tool: dataStoreInsertTool as ToolEntry, input: { collection: 'leads', records: [{ email: 'a@b.c' }] },
-    build: () => ({ ctx: { dataStore: { obj: { insertRecords: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: [] } }, spy: 'ctx.dataStore.insertRecords' }) },
-  { site: 'data_store_delete#delete', branch: 'delete', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDeleteTool as ToolEntry, input: { collection: 'leads', filter: { email: 'a@b.c' } },
+  { site: 'data_store_create#create', branch: 'create', row: { verb: 'create', target: /^data_store collection=dsc_[0-9a-f]{16}$/ }, tool: dataStoreCreateTool as ToolEntry, input: { name: 'leads', columns: [{ name: 'email', type: 'string' }] },
+    build: () => ({ ctx: { dataStore: { obj: { hasCollectionIdColumn: () => true, createCollection: vi.fn(() => ({ name: 'leads', columns: [{ name: 'email', type: 'string' }], scopeType: 'context', scopeId: '' })) }, reads: ['hasCollectionIdColumn'] } }, spy: 'ctx.dataStore.createCollection' }) },
+  { site: 'data_store_insert#save', branch: 'insert', row: { verb: 'save', target: `data_store collection=${LEADS_ID}` }, tool: dataStoreInsertTool as ToolEntry, input: { collection: 'leads', records: [{ email: 'a@b.c' }] },
+    build: () => ({ ctx: { dataStore: { obj: { collectionIdOf: () => LEADS_ID, insertRecords: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: ['collectionIdOf'] } }, spy: 'ctx.dataStore.insertRecords' }) },
+  { site: 'data_store_delete#delete', branch: 'delete', row: { verb: 'delete', target: `data_store collection=${LEADS_ID}` }, tool: dataStoreDeleteTool as ToolEntry, input: { collection: 'leads', filter: { email: 'a@b.c' } },
     hit: ['records=2', 'id=7', 'id=9'],
-    build: () => ({ ctx: { dataStore: { obj: { deleteRecordsReturningIds: vi.fn(() => ({ deleted: 2, ids: [7, 9] })) }, reads: [] } }, spy: 'ctx.dataStore.deleteRecordsReturningIds' }) },
-  { site: 'data_store_drop#delete', branch: 'drop', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
-    build: () => ({ ctx: { dataStore: { obj: { dropCollection: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.dataStore.dropCollection' }) },
+    build: () => ({ ctx: { dataStore: { obj: { collectionIdOf: () => LEADS_ID, deleteRecordsReturningIds: vi.fn(() => ({ deleted: 2, ids: [7, 9] })) }, reads: ['collectionIdOf'] } }, spy: 'ctx.dataStore.deleteRecordsReturningIds' }) },
+  { site: 'data_store_drop#delete', branch: 'drop', row: { verb: 'delete', target: `data_store collection=${LEADS_ID}` }, tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
+    build: () => ({ ctx: { dataStore: { obj: { collectionIdOf: () => LEADS_ID, dropCollection: vi.fn(() => true) }, reads: ['collectionIdOf'] } }, spy: 'ctx.dataStore.dropCollection' }) },
   { site: 'contacts_save#save', branch: 'save', row: { verb: 'save', target: 'contacts' }, tool: contactsSaveTool as ToolEntry, input: { name: 'Ada', email: 'ada@x.example' },
     build: () => ({ ctx: { crm: { obj: { upsertContact: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: [] } }, spy: 'ctx.crm.upsertContact' }) },
   { site: 'artifact_save#save', branch: 'create', created: true, row: { verb: 'create', target: 'artifacts' }, tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# x' },
@@ -859,7 +864,7 @@ describe('the refusal reaches the model whatever the handler made of it', () => 
     const trail = await freshTrail('data_store_drop#delete');
     const drop = vi.fn(() => true);
     const toolContext = createToolContext({} as never);
-    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { dropCollection: drop };
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { collectionIdOf: () => LEADS_ID, dropCollection: drop };
     toolContext.auditLog = trail.log;
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dataStoreDropTool as ToolEntry], toolContext, principal: MANDATE });
     // Called alone, outside a call's slot: the handler's catch answers in its own words.
@@ -874,7 +879,7 @@ describe('the refusal reaches the model whatever the handler made of it', () => 
   it('a mandate whose session has no log at all is refused the same', async () => {
     const drop = vi.fn(() => true);
     const toolContext = createToolContext({} as never);
-    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { dropCollection: drop };
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { collectionIdOf: () => LEADS_ID, dropCollection: drop };
     toolContext.auditLog = null;
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dataStoreDropTool as ToolEntry], toolContext, principal: MANDATE });
     const r = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
@@ -887,7 +892,7 @@ describe('the refusal reaches the model whatever the handler made of it', () => 
     const trail = await freshTrail('data_store_drop#delete');
     const drop = vi.fn(() => true);
     const toolContext = createToolContext({} as never);
-    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { dropCollection: drop };
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { collectionIdOf: () => LEADS_ID, dropCollection: drop };
     toolContext.auditLog = trail.log;
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dataStoreDropTool as ToolEntry], toolContext });
     const r = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
@@ -1088,5 +1093,117 @@ describe('a mandate\'s row names an API profile by its opaque id', () => {
     expect(result.is_error, `precondition: the save went through; ${JSON.stringify(result.content)}`).not.toBe(true);
     expect(attemptTarget(trail, 'api_setup#save')).toBe('api_profiles profile=apf_00000000000000aa');
     expect(rawRow(made!.engine, 'mueller-crm').trail_id).toBe('apf_00000000000000aa');
+  });
+});
+
+// A mandate's row names a table by its opaque id, never by its name, and the id a create names is
+// the one the table carries afterwards. On a real store, through the handlers.
+describe('a mandate\'s row names a table by its opaque id', () => {
+  const ID = /^dsc_[0-9a-f]{16}$/;
+  const SECRET_NAME = 'projekt_geheim';
+  let dir: string;
+  let store: InstanceType<typeof DataStore>;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'lynox-ds-trail-')); });
+  afterEach(() => { vi.restoreAllMocks(); try { store.close(); } catch { /* closed */ } rmSync(dir, { recursive: true, force: true }); });
+
+  /** A store on a file from before the id column, when `legacy`. */
+  const open = async (legacy = false): Promise<void> => {
+    const path = join(dir, 'datastore.db');
+    if (legacy) {
+      const { default: Sqlite } = await import('better-sqlite3');
+      const raw = new Sqlite(path);
+      raw.exec(`CREATE TABLE ds_collections (name TEXT PRIMARY KEY, scope_type TEXT NOT NULL DEFAULT 'project', scope_id TEXT NOT NULL DEFAULT '',
+        schema_json TEXT NOT NULL, unique_key TEXT, record_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+      raw.close();
+    }
+    store = new DataStore(path);
+  };
+  const run = async (tool: ToolEntry, input: unknown, principal: RequestPrincipal = MANDATE): Promise<{ db: Database.Database; out: unknown }> => {
+    const { runInCallSlot } = await import('./call-connection.js');
+    const { instanceTrailFor } = await import('./instance-trail.js');
+    const trail = await freshTrail(null);
+    const toolContext = createToolContext({} as never);
+    toolContext.auditLog = trail.log;
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = store;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], toolContext, principal, currentRunId: 'run-1' });
+    const out = await runInCallSlot({ instanceTrail: instanceTrailFor(agent, tool.definition.name) }, () => tool.handler(input as never, agent));
+    return { db: trail.db, out };
+  };
+  const targets = (db: Database.Database): string[] => (db.prepare('SELECT target FROM audit_log ORDER BY id').all() as Array<{ target: string }>).map(r => r.target);
+  const COLS = [{ name: 'email', type: 'string' }];
+
+  it('every write names the id the table carries, and its name in no row', async () => {
+    await open();
+    const created = await run(dataStoreCreateTool as ToolEntry, { name: SECRET_NAME, columns: COLS });
+    const id = store.collectionIdOf(SECRET_NAME);
+    expect(id).toMatch(ID);
+    expect(targets(created.db)[0]).toBe(`data_store collection=${id!}`);
+    const all = [...targets(created.db)];
+    for (const [tool, input] of [
+      [dataStoreInsertTool, { collection: SECRET_NAME, records: [{ email: 'a@b.c' }] }],
+      [dataStoreDeleteTool, { collection: SECRET_NAME, filter: { email: 'a@b.c' } }],
+      [dataStoreDropTool, { collection: SECRET_NAME }],
+    ] as const) {
+      const r = await run(tool as ToolEntry, input);
+      expect(targets(r.db)[0]).toBe(`data_store collection=${id!}`);
+      all.push(...targets(r.db));
+    }
+    expect(all.length).toBeGreaterThanOrEqual(8);
+    expect(all.join('\n')).not.toContain(SECRET_NAME);
+  });
+
+  it('a table that does not exist is named by the kind only', async () => {
+    await open();
+    const r = await run(dataStoreInsertTool as ToolEntry, { collection: 'missing', records: [{ email: 'a@b.c' }] });
+    expect(targets(r.db)[0]).toBe('data_store');
+  });
+
+  it('a table whose id is NULL (created by an older build on a migrated file) is named by the kind only, never "null"', async () => {
+    await open();
+    store.createCollection({ name: 'leads', scope: { type: 'global', id: '' }, columns: COLS as never });
+    (store['db'] as Database.Database).prepare("UPDATE ds_collections SET collection_id = NULL WHERE name = 'leads'").run();
+    const r = await run(dataStoreInsertTool as ToolEntry, { collection: 'leads', records: [{ email: 'a@b.c' }] });
+    expect(targets(r.db)[0]).toBe('data_store');
+  });
+
+  it('on a file before its boot migration a create and an insert run, named by the kind only', async () => {
+    await open(true);
+    const c = await run(dataStoreCreateTool as ToolEntry, { name: 'leads', columns: COLS });
+    expect(targets(c.db)[0]).toBe('data_store');
+    expect(store.listCollections().map(x => x.name)).toContain('leads');
+    const i = await run(dataStoreInsertTool as ToolEntry, { collection: 'leads', records: [{ email: 'a@b.c' }] });
+    expect(targets(i.db)[0]).toBe('data_store');
+    expect(store.queryRecords({ collection: 'leads' }).rows).toHaveLength(1);
+  });
+
+  it('a failing column check before a create: the table is created, the row names the kind only', async () => {
+    await open();
+    vi.spyOn(store, 'hasCollectionIdColumn').mockImplementation(() => { throw new Error('disk I/O error'); });
+    const c = await run(dataStoreCreateTool as ToolEntry, { name: 'leads', columns: COLS });
+    expect(targets(c.db)[0]).toBe('data_store');
+    expect(store.listCollections().map(x => x.name)).toContain('leads');
+  });
+
+  it('a table id that cannot be read for another reason refuses the write instead of recording it without saying where', async () => {
+    await open();
+    store.createCollection({ name: 'leads', scope: { type: 'global', id: '' }, columns: COLS as never });
+    const db = store['db'] as Database.Database;
+    const real = db.prepare.bind(db);
+    vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      if (sql.startsWith('SELECT collection_id FROM ds_collections')) throw new Error('disk I/O error');
+      return real(sql);
+    }) as never);
+    const r = await run(dataStoreInsertTool as ToolEntry, { collection: 'leads', records: [{ email: 'a@b.c' }] });
+    vi.restoreAllMocks();
+    expect(String(r.out)).toContain(INSTANCE_WRITE_UNRECORDED);
+    expect(targets(r.db)).toEqual([]);
+    expect(store.queryRecords({ collection: 'leads' }).rows).toHaveLength(0);
+  });
+
+  it('control: the owner\'s create writes no row, and the table still gets its id', async () => {
+    await open();
+    const r = await run(dataStoreCreateTool as ToolEntry, { name: 'leads', columns: COLS }, OWNER_PRINCIPAL);
+    expect(targets(r.db)).toEqual([]);
+    expect(store.collectionIdOf('leads')).toMatch(ID);
   });
 });

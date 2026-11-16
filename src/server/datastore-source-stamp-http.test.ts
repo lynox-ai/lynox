@@ -41,10 +41,11 @@ describe('DataStore source columns on a real engine', () => {
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-ds-stamp-http-'));
-    // What an older build left: a collection without the source columns, with one row.
-    const seed = new DataStore(join(dir, 'datastore.db'));
-    seed.close();
+    // What an older build left: a collection without the source columns, with one row, in a
+    // registry without the id column (built by hand: a DataStore constructor now brings it).
     const raw = new Database(join(dir, 'datastore.db'));
+    raw.exec(`CREATE TABLE ds_collections (name TEXT PRIMARY KEY, scope_type TEXT NOT NULL DEFAULT 'project', scope_id TEXT NOT NULL DEFAULT '',
+      schema_json TEXT NOT NULL, unique_key TEXT, record_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
     raw.exec('CREATE TABLE "ds_legacy" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, "v" TEXT)');
     raw.prepare("INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at) VALUES ('legacy', 'global', '', ?, NULL, 1, 'x', 'x')")
       .run(JSON.stringify([{ name: 'v', type: 'string' }]));
@@ -90,6 +91,15 @@ describe('DataStore source columns on a real engine', () => {
       { v: 'old', _source_grants: null, _source_run_id: null },
       { v: 'new', _source_grants: '["g-a"]', _source_run_id: 'run-1' },
     ]);
+  });
+
+  it('the boot gives the older table an id, and the tables the CRM creates later in the same boot get theirs', () => {
+    const ds = dataStoreOf();
+    expect(ds.hasCollectionIdColumn()).toBe(true);
+    expect(ds.collectionIdOf('legacy')).toMatch(/^dsc_[0-9a-f]{16}$/);
+    const names = ds.listCollections().map(c => c.name);
+    expect(names).toEqual(expect.arrayContaining(['contacts', 'deals', 'interactions']));
+    for (const n of ['contacts', 'deals', 'interactions']) expect(ds.collectionIdOf(n)).toMatch(/^dsc_[0-9a-f]{16}$/);
   });
 
   it('data_store_insert in a real Session writes the thread\'s grant set', async () => {

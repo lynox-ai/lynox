@@ -27,9 +27,11 @@
  * The owner leaves no row, and its target and kind are never evaluated. Every other principal
  * kind is recorded, a kind added later included.
  *
- * A row names the store, ids, counts and fixed words. A table and a contact are named by
- * their kind only: a table's name is content. An API profile is named by its opaque id (`apf_`),
- * never by its slug, which the model chooses and which can carry a name.
+ * A row names the store, ids, counts and fixed words. A table is named by its opaque id (`dsc_`),
+ * never by its name, which is content; a table without an id yet, or one that does not exist, by
+ * its kind only. A create names the id it is about to write, so a create that fails names an id no
+ * table ever carried. A contact is named by its kind only. An API profile is named by its opaque
+ * id (`apf_`), never by its slug, which the model chooses and which can carry a name.
  */
 import { type AuditLog, INSTANCE_WRITE_UNRECORDED, TARGET_MAX, namedTarget, newCorrelationId } from './audit-log.js';
 import { currentInstanceTrail, inCallSlot, isInstanceRefused, noteInstanceRefused, type InstanceTrail } from './call-connection.js';
