@@ -22,8 +22,10 @@ const target: {
   claimsPlain?: boolean;
   /** Answer the handshake completion with 500. */
   failCompletion?: boolean;
-  /** Refuse the manifest with this `error`. */
-  manifestError?: string;
+  /** Refuse the manifest with this `error` (any JSON value). */
+  manifestError?: unknown;
+  /** Refuse the manifest with this raw body. */
+  manifestRaw?: string | undefined;
   /** Refuse the chunk at this index with this `error`. */
   chunkError?: { at: number; error: string } | undefined;
   /** Refuse the restore with this `error`. */
@@ -52,6 +54,7 @@ vi.mock('../core/network-guard.js', async (original) => {
           if (target.failCompletion) return json({ error: 'completion refused' }, 500);
           imp.completeHandshake((body as { clientPubKey: string }).clientPubKey); return json({ ready: true });
         }
+        if (path === '/api/migration/manifest' && target.manifestRaw !== undefined) return new Response(target.manifestRaw, { status: 422 });
         if (path === '/api/migration/manifest' && target.manifestError !== undefined) return json({ error: target.manifestError }, 422);
         if (path === '/api/migration/manifest') { target.manifest = body as MigrationManifest; imp.setManifest(target.manifest); return json({ accepted: true }); }
         if (path === '/api/migration/chunk' && target.chunkError && (body as { seq: number }).seq === target.chunkError.at) return json({ error: target.chunkError.error }, 422);
@@ -128,6 +131,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.claimsPlain = false;
     target.failCompletion = false;
     target.manifestError = undefined;
+    target.manifestRaw = undefined;
     target.chunkError = undefined;
     target.restoreError = undefined;
     derivedKeys.length = 0;
@@ -232,10 +236,23 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: ${'x'.repeat(500)}`);
   });
 
+  it('keeps the raw answer, named by its step, when the destination gives no usable error text', async () => {
+    setShellIsolationForTest(sidecar);
+    for (const error of ['', 42, null]) {
+      target.manifestError = error;
+      expect(((await exportTo()).get('error') as { message: string }).message).toBe(`Manifest rejected: ${JSON.stringify({ error })}`);
+    }
+    target.manifestError = undefined;
+    target.manifestRaw = 'bad gateway';
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: bad gateway');
+  });
+
   it('says which part of the data the destination refused, counted from 1, and that it could not restore', async () => {
     setShellIsolationForTest(sidecar);
     target.chunkError = { at: 0, error: 'chunk refused' };
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of the data. It says: chunk refused');
+    target.chunkError = { at: 2, error: 'chunk refused' };
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 3 of the data. It says: chunk refused');
     target.chunkError = undefined;
     target.restoreError = 'restore refused';
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: restore refused');
