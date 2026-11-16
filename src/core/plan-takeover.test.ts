@@ -244,9 +244,9 @@ describe('the workflow’s side', () => {
   });
 
   // Two plans on one workflow: taking the first over covers the workflow's mark, so nothing on it is
-  // left to take over with the second. The second's member still holds its workflow role from the
-  // pause, and the line for it names the workflow: the preview keeps the name, with nobody to take
-  // it from and nothing taken over.
+  // left to take over with the second. The preview still reads the member's workflow role from the
+  // workflow's columns, and the line for it names the workflow: the preview keeps the name, with
+  // nobody to take it from and nothing taken over.
   it('a workflow whose marks are all covered keeps its name in the preview, taken over from nobody', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });
