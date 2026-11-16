@@ -353,6 +353,7 @@ export function applyPluginToolGate(entries: ToolEntry[], pluginManager: PluginM
       // and ends at its own bound; a gate that gives no answer in time refuses the call.
       const call = currentCallSignal();
       const bound = new AbortController();
+      // run-group-starter: cleared in this handler's `finally`; it only ends the wait on this gate and reports no spend.
       const timer = setTimeout(() => { bound.abort(); }, PLUGIN_GATE_TIMEOUT_MS);
       let gate: boolean | undefined;
       try {
