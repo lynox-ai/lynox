@@ -3693,7 +3693,11 @@ export class LynoxHTTPApi {
         await this._handleRequest(req, res, secret, clientIp, trustProxy);
       } catch (err: unknown) {
         if (!res.headersSent) {
-          errorResponse(res, 500, 'Internal server error');
+          // A saved tier that holds a model this engine does not know holds every session back
+          // (`assertNoLockedSlot`): its own sentence names the tier and the way out in Settings.
+          // Matched by name: some suites stand in for the config module.
+          if (err instanceof Error && err.name === 'LockedSlotError') errorResponse(res, 409, err.message);
+          else errorResponse(res, 500, 'Internal server error');
         }
         // No thread is known here: on an instance that holds an exact connection every route's
         // error goes out as class and status (`error-egress.ts`).
@@ -7570,7 +7574,7 @@ export class LynoxHTTPApi {
 
     // ── Config ──
     this.addStatic('user', 'GET /api/config', async (req, res) => {
-      const { readUserConfig, loadConfig: loadEffectiveConfig, replacedTierSlots } = await import('../core/config.js');
+      const { readUserConfig, loadConfig: loadEffectiveConfig, replacedTierSlots, lockedTierSlots } = await import('../core/config.js');
       const config = readUserConfig();
       // The loader's OWN output. `readUserConfig()` above is the raw file;
       // `loadConfig()` additionally merges the CP-pinned env layers and applies
@@ -7950,6 +7954,9 @@ export class LynoxHTTPApi {
       // ignored pin above, so the replacement does not read as the user's choice.
       const replacedSlots = replacedTierSlots();
       if (replacedSlots.length > 0) redacted['replaced_tier_slots'] = replacedSlots;
+      // The slots that keep this lynox from running anything until they are changed here.
+      const lockedSlots = lockedTierSlots();
+      if (lockedSlots.length > 0) redacted['locked_tier_slots'] = lockedSlots;
       if (wireCaptureEnvOn) {
         redacted['debug_wire_capture'] = true;
       } else if (wireCaptureEnvOff) {
@@ -8226,7 +8233,7 @@ export class LynoxHTTPApi {
       if (candidate.error !== undefined) {
         // To the log, not the client: the first line only, masked like an error sent to a client,
         // since a loader message may quote an environment value and operators read these logs.
-        if (candidate.unknownModel === undefined) process.stderr.write(`[lynox] PUT /api/config refused a configuration the loader rejects: ${maskForClient(candidate.error.split('\n')[0] ?? '', { includeGeneric: true })}\n`);
+        if (candidate.unknownModel === undefined) process.stderr.write(`[lynox] PUT /api/config refused a configuration the loader rejects: ${maskForClient(candidate.error.split(/[\r\n\v\f\u0085\u2028\u2029]/)[0] ?? '', { includeGeneric: true })}\n`);
         errorResponse(res, 400, candidate.unknownModel !== undefined
           ? `A tier names the model '${candidate.unknownModel}', which this version does not know. Choose a listed model for that tier.`
           : 'This configuration could not be loaded, so it was not saved.');

@@ -12,6 +12,11 @@ const { mockCheckPersistentBudget, mockRunSavedWorkflow } = vi.hoisted(() => ({
 
 vi.mock('./session-budget.js', () => ({ checkPersistentBudget: mockCheckPersistentBudget }));
 vi.mock('../tools/builtin/pipeline.js', () => ({ runSavedWorkflow: mockRunSavedWorkflow }));
+const mockLockedTierSlots = vi.hoisted(() => vi.fn((): Array<{ tier: string; model_id: string }> => []));
+vi.mock('./config.js', async (importActual) => ({
+  ...(await importActual<typeof import('./config.js')>()),
+  lockedTierSlots: mockLockedTierSlots,
+}));
 
 const { runGuardedSavedWorkflow, assertSingleTenantContext, _resetTenantInvariantForTests } = await import('./saved-workflow-runner.js');
 
@@ -25,6 +30,31 @@ function makeEngine(hooks: LynoxHooks[]): Engine {
     getMemory: () => null,
   } as unknown as Engine;
 }
+
+describe('runGuardedSavedWorkflow — a locked saved tier', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCheckPersistentBudget.mockReturnValue({ allowed: true });
+    mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-l', status: 'completed', costUsd: 0 });
+    _resetTenantInvariantForTests();
+  });
+
+  it.each([
+    ['locked: the run is refused before any step, naming the tier and the way out', true],
+    ['not locked: the run goes on', false],
+  ] as const)('%s', async (_what, locked) => {
+    mockLockedTierSlots.mockReturnValue(locked ? [{ tier: 'deep', model_id: 'my-local-model' }] : []);
+    const result = await runGuardedSavedWorkflow(makeEngine([]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
+    if (locked) {
+      expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/the Deep tier has a saved model, "my-local-model".*Settings → LLM Provider/);
+    } else {
+      expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(1);
+    }
+    mockLockedTierSlots.mockReturnValue([]);
+  });
+});
 
 describe('runGuardedSavedWorkflow — the headless pool is the engine set, on purpose', () => {
   beforeEach(() => {

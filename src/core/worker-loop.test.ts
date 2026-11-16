@@ -51,6 +51,13 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
+// The locked-slot gate reads the loader; here it reads what a case sets, never the machine's own config.
+const mockLockedTierSlots = vi.fn((): Array<{ tier: string; model_id: string }> => []);
+vi.mock('./config.js', async (importActual) => {
+  const actual = await importActual<typeof import('./config.js')>();
+  return { ...actual, lockedTierSlots: () => mockLockedTierSlots() };
+});
+
 import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers, planRunTrail, PLAN_RUN_UNRECORDED_RESULT, PLAN_OF_ANOTHER_RESULT } from './worker-loop.js';
 import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
 import { encodeStamp } from './plan-stamp.js';
@@ -5639,6 +5646,89 @@ describe('a test run by hand while the stamp changes underneath it', () => {
  * test, and it is still a turn the mandate started. The lock itself is the Agent's
  * (agent.test.ts); these pin that the worker hands the starter to every build site.
  */
+describe('nothing that calls a model runs while a saved tier is locked', () => {
+  type Exec = { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+  afterEach(() => { mockLockedTierSlots.mockReset(); mockLockedTierSlots.mockReturnValue([]); });
+  const LOCK = [{ tier: 'deep', model_id: 'my-local-model' }];
+
+  function setup(over: Partial<TriggerRecord>): { loop: WorkerLoop; engine: Engine; session: Session; task: TriggerRecord; router: NotificationRouter; setEnabled: ReturnType<typeof vi.fn> } {
+    const task = makeTask({ id: 'lk-1', effect: 'run_agent', created_by: 'owner', confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', schedule_cron: undefined, next_run_at: undefined, ...over });
+    const session = makeSession('Ran.');
+    const tm = makeTaskManager([task]);
+    const setEnabled = vi.fn();
+    (tm as unknown as { setEnabled: typeof setEnabled }).setEnabled = setEnabled;
+    const engine = makeEngine({ taskManager: tm, session });
+    // A workflow run reads its plan's authors before the gate: a workflow nobody else shaped.
+    if (task.effect === 'run_workflow') {
+      (engine as unknown as { getRunHistory: () => unknown }).getRunHistory = () => ({ workflowStampState: STAMPED_IF_CONFIRMED, getPlannedPipeline: () => undefined });
+    }
+    const router = makeNotificationRouter(true);
+    return { loop: new WorkerLoop(engine, router, 60_000), engine, session, task, router, setEnabled };
+  }
+  const recorded = (engine: Engine): unknown[] | undefined =>
+    (engine.getTaskManager()!.recordTaskRun as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1);
+
+  it.each(['run_agent', 'run_workflow', 'bulk_judge'] as const)('a scheduled %s waits: no session, recorded halted with the tier, left on and not told to switch on', async (effect) => {
+    vi.useRealTimers();
+    mockLockedTierSlots.mockReturnValue(LOCK);
+    const { loop, engine, session, task, setEnabled } = setup({ effect, schedule_cron: '0 9 * * *', ...(effect === 'run_workflow' ? { pipeline_id: 'wf-1' } : {}) });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(engine.createSession).not.toHaveBeenCalled();
+    expect(session.run).not.toHaveBeenCalled();
+    const call = recorded(engine);
+    expect(call?.[0]).toBe('lk-1');
+    expect(call?.[2]).toBe('halted');
+    expect(String(call?.[1])).toMatch(/„Tief“|the Deep tier/);
+    expect(String(call?.[1])).not.toMatch(/switched off|ausgeschaltet/);
+    expect(setEnabled).not.toHaveBeenCalled();
+  });
+
+  it('a watch (a run_agent trigger with a watched page) waits like a schedule: left on, no page read', async () => {
+    vi.useRealTimers();
+    mockLockedTierSlots.mockReturnValue(LOCK);
+    mockFetchPinned.mockClear();
+    const { loop, engine, session, task, setEnabled } = setup({ watch_config: { url: 'https://a.example/p', interval_minutes: 5 } as never });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(mockFetchPinned).not.toHaveBeenCalled();
+    expect(session.run).not.toHaveBeenCalled();
+    expect(recorded(engine)?.[2]).toBe('halted');
+    expect(setEnabled).not.toHaveBeenCalled();
+  });
+
+  it('a one-shot is switched off with its time kept, and says so', async () => {
+    vi.useRealTimers();
+    mockLockedTierSlots.mockReturnValue(LOCK);
+    const { loop, engine, task, setEnabled } = setup({});
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(setEnabled).toHaveBeenCalledWith('lk-1', false);
+    const call = recorded(engine);
+    expect(call?.[2]).toBe('halted');
+    expect(call?.[3]).toEqual({ keepSchedule: true });
+    expect(String(call?.[1])).toMatch(/This trigger was switched off\. Switch it on again under Automation → Triggers|Dieser Auslöser wurde ausgeschaltet\. Schalte ihn unter Automation → Trigger wieder ein/);
+  });
+
+  it('the owner is told once per tier, not at every run', async () => {
+    vi.useRealTimers();
+    mockLockedTierSlots.mockReturnValue(LOCK);
+    const { loop, engine, task, router } = setup({ schedule_cron: '*/5 * * * *' });
+    await (loop as unknown as Exec).executeTask(task, null);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect((engine.getTaskManager()!.recordTaskRun as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    // Another tier locked is news: told again.
+    mockLockedTierSlots.mockReturnValue([{ tier: 'fast', model_id: 'other-model' }]);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(router.notify).toHaveBeenCalledTimes(2);
+  });
+
+  it('not locked: the run goes on', async () => {
+    vi.useRealTimers();
+    const { loop, session, task } = setup({});
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(session.run).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('hand runs carry the starter\'s principal', () => {
   const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
   /** The grant Eva set a plan up under, apart from the one she starts it under: the cases about

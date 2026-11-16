@@ -697,13 +697,56 @@ describe('Config', () => {
       expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p3'); // preset slot kept
     });
 
-    it('a config tier_set override with an UNREGISTERED model FAILS CLOSED (post-merge guard)', async () => {
-      writeUserConfig({
-        tier_preset: 'balanced',
-        tier_set: { deep: { provider: 'openai', model_id: 'ghost-override-model' } },
-      });
-      const { loadConfig } = await import('./config.js');
-      expect(() => loadConfig()).toThrow(/unregistered model "ghost-override-model"/);
+    it('a config tier_set override with an UNREGISTERED model on another provider LOCKS the instance (post-merge guard)', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        writeUserConfig({
+          tier_preset: 'balanced',
+          tier_set: { deep: { provider: 'openai', model_id: 'ghost-override-model' } },
+        });
+        const { loadConfig, lockedTierSlots, assertNoLockedSlot, LockedSlotError } = await import('./config.js');
+        // It loads, so the settings that can change the slot stay reachable, and it keeps the
+        // user's slot as stored: the band is not handed to the preset's provider.
+        expect(loadConfig().tier_set?.deep).toEqual({ provider: 'openai', model_id: 'ghost-override-model' });
+        expect(lockedTierSlots()).toEqual([{ tier: 'deep', model_id: 'ghost-override-model' }]);
+        expect(() => assertNoLockedSlot()).toThrow(LockedSlotError);
+        expect(() => assertNoLockedSlot()).toThrow(/Deep tier has a saved model, "ghost-override-model".*Custom/);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a configuration without such a slot is not locked', async () => {
+      writeUserConfig({ tier_preset: 'balanced', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-4-8' } } });
+      const { lockedTierSlots, assertNoLockedSlot } = await import('./config.js');
+      expect(lockedTierSlots()).toEqual([]);
+      expect(() => assertNoLockedSlot()).not.toThrow();
+    });
+
+    it('the lock is read off the file\'s own slot: a managed instance that drops the slot is still locked', async () => {
+      // The managed constraints drop a slot on a host off their list, and its band would then run
+      // on the base provider: the one the user chose against for it.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'cp-key';
+      try {
+        writeUserConfig({
+          tier_preset: 'max-quality',
+          tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } },
+        });
+        const { loadConfig, lockedTierSlots } = await import('./config.js');
+        expect(loadConfig().tier_set?.deep?.model_id).not.toBe('my-local-model');
+        expect(lockedTierSlots()).toEqual([{ tier: 'deep', model_id: 'my-local-model' }]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a slot that would lock is still not stored: checkCandidateConfig refuses it and names the model', async () => {
+      const { checkCandidateConfig } = await import('./config.js');
+      const result = checkCandidateConfig({ tier_preset: 'balanced', tier_set: { deep: { provider: 'openai', model_id: 'ghost-override-model' } } } as never);
+      expect(result.unknownModel).toBe('ghost-override-model');
+      expect(result.error).toMatch(/unregistered model "ghost-override-model"/);
     });
 
     it('an unregistered config slot on the preset\'s own provider runs the preset\'s model, and keeps the user\'s key', async () => {
@@ -742,22 +785,29 @@ describe('Config', () => {
       }
     });
 
-    it('an unregistered config slot on ANOTHER endpoint still fails closed: its band is not sent elsewhere', async () => {
+    it('an unregistered config slot on ANOTHER endpoint locks the instance: its band is not sent elsewhere', async () => {
       writeUserConfig({
         tier_preset: 'balanced',
         tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } },
       });
-      const { loadConfig } = await import('./config.js');
-      expect(() => loadConfig()).toThrow(/unregistered model "my-local-model"/);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const { loadConfig, lockedTierSlots } = await import('./config.js');
+      expect(() => loadConfig()).not.toThrow();
+      expect(lockedTierSlots()).toEqual([{ tier: 'deep', model_id: 'my-local-model' }]);
+      expect(loadConfig().tier_set?.deep?.api_base_url).toBe('https://llm.example.internal/v1');
+      warn.mockRestore();
     });
 
-    it('an unregistered config slot on ANOTHER provider still fails closed, even with no endpoint on either side', async () => {
+    it('an unregistered config slot on ANOTHER provider locks the instance, even with no endpoint on either side', async () => {
       writeUserConfig({
         tier_preset: 'max-quality',
         tier_set: { deep: { provider: 'mistral', model_id: 'mistral-retired-model' } },
       });
-      const { loadConfig } = await import('./config.js');
-      expect(() => loadConfig()).toThrow(/unregistered model "mistral-retired-model"/);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const { loadConfig, lockedTierSlots } = await import('./config.js');
+      expect(() => loadConfig()).not.toThrow();
+      expect(lockedTierSlots()).toEqual([{ tier: 'deep', model_id: 'mistral-retired-model' }]);
+      warn.mockRestore();
     });
 
     it('checkCandidateConfig leaves the candidate as it was, even where the build deletes nested entries', async () => {
