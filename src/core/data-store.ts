@@ -192,12 +192,13 @@ export function coercePlainColumnValue(val: unknown, col: DataStoreColumnDef): u
   }
 }
 
+/** The shape of a collection id; a stored value of any other shape is not named and is replaced. */
+export const COLLECTION_ID_RE = /^dsc_[0-9a-f]{16}$/;
+
 /**
  * A fresh opaque id for a collection: `dsc_` and 16 hex. A label with no secret value, so a
  * mandate's row in the instance trail can say which collection it wrote without its name.
  */
-export const COLLECTION_ID_RE = /^dsc_[0-9a-f]{16}$/;
-
 export function newCollectionId(): string {
   return `dsc_${randomBytes(8).toString('hex')}`;
 }
@@ -294,8 +295,9 @@ export class DataStore {
    * not one. Runs at every engine boot,
    * never in the constructor, for the same reason as {@link ensureSourceColumns}.
    *
-   * One IMMEDIATE transaction adds the column when it is missing, fills every row without an
-   * id (by rowid: a name stored as a BLOB would never match a string parameter), and gives a
+   * One IMMEDIATE transaction adds the column when it is missing, gives a new id to every row
+   * whose value is not one (by rowid: a name stored as a BLOB would never match a string
+   * parameter), and gives a
    * new id to every row but the first (lowest rowid) that shares one with another — a copied
    * or hand-merged file can carry duplicates. The unique index follows in a step of its own,
    * so a failing index leaves the ids in place. Nothing is thrown: each step reports its error.
