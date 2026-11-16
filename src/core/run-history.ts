@@ -2159,6 +2159,24 @@ export class RunHistory {
    * Ordered by run creation, then `rowid` to disambiguate same-second runs
    * (`runs.created_at` has second granularity), then per-run sequence.
    */
+  /**
+   * The tool_use ids of this session's calls the ledger records as failed: thrown and soft
+   * failures alike (`is_error = 1`). Calls written before `tool_use_id` and `is_error` existed
+   * have neither and are not in it. Workflow steps' replayed calls are left out, as in
+   * `getSessionToolCalls`.
+   */
+  getFailedToolUseIds(sessionId: string): Set<string> {
+    const rows = this.db.prepare(`
+      SELECT tc.tool_use_id AS id FROM run_tool_calls tc
+      JOIN runs r ON r.id = tc.run_id
+      WHERE r.session_id = ?
+        AND r.run_type != 'pipeline_step'
+        AND tc.is_error = 1
+        AND tc.tool_use_id IS NOT NULL
+    `).all(sessionId) as Array<{ id: string }>;
+    return new Set(rows.map((r) => r.id));
+  }
+
   getSessionToolCalls(sessionId: string): ToolCallRecord[] {
     const rows = this.db.prepare(`
       SELECT tc.* FROM run_tool_calls tc

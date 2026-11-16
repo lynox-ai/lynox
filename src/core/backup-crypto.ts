@@ -11,6 +11,8 @@ const BACKUP_HKDF_INFO = 'lynox-backup-encryption';
 const BACKUP_HKDF_SALT = 'lynox-backup';
 /** A second key from the same vault key: the manifest's MAC never shares a key with the files' cipher. */
 const MANIFEST_HKDF_INFO = 'lynox-backup-manifest-auth';
+/** A third: the list's kept answers are authenticated under a key of their own. */
+const LIST_PROOF_HKDF_INFO = 'lynox-backup-list-proof';
 
 /** File header: 'NBAK' + version byte (for future format changes). */
 const FILE_MAGIC = Buffer.from('NBAK');
@@ -30,6 +32,26 @@ export function deriveBackupKey(vaultKey: string): Buffer {
 /** Derive the key that authenticates a backup's manifest. */
 export function deriveManifestKey(vaultKey: string): Buffer {
   return Buffer.from(hkdfSync('sha256', vaultKey, BACKUP_HKDF_SALT, MANIFEST_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
+
+/**
+ * Derive the key that authenticates the backup list's kept answers (`backup.ts`, `.list-provenance.json`).
+ * Its own key, so a MAC made for that file never passes as a manifest's MAC, or the other way round.
+ */
+export function deriveListProofKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, BACKUP_HKDF_SALT, LIST_PROOF_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
+
+/** HMAC-SHA256 over the canonical JSON of `value`. Hex. */
+export function canonicalMac(value: unknown, key: Buffer): string {
+  return createHmac('sha256', key).update(canonicalJson(value)).digest('hex');
+}
+
+/** Whether `mac` is `value`'s canonical MAC under `key`, compared in constant time. */
+export function canonicalMacMatches(value: unknown, mac: string, key: Buffer): boolean {
+  const expected = Buffer.from(canonicalMac(value, key), 'hex');
+  const given = Buffer.from(mac, 'hex');
+  return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
 /** JSON with object keys sorted at every level, so the MAC does not depend on key order or spacing. */
