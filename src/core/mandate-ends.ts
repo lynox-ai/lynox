@@ -142,3 +142,12 @@ export class MandateEnds {
     return this.select.get(mandateId) as { ends_at: number; revoked_at: number | null } | undefined;
   }
 }
+
+/**
+ * `isLive` of `ends` as the function {@link principalHasEnded} and {@link grantHasEnded} take, for a
+ * check made now: without a store of ends no grant counts as live. Read once, here: a place that
+ * hands the function on to run later reads its store at that time itself.
+ */
+export function liveIn(ends: Pick<MandateEnds, 'isLive'> | null | undefined): (mandateId: string) => boolean {
+  return (mandateId) => ends?.isLive(mandateId) ?? false;
+}

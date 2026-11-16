@@ -15,6 +15,7 @@
  */
 
 import { join } from 'node:path';
+import { liveIn } from '../../core/mandate-ends.js';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
@@ -37,7 +38,7 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { isOwnerPrincipal, principalTag, type RequestPrincipal, grantHasEnded } from '../../core/request-principal.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
@@ -3638,7 +3639,7 @@ ${draftJson}
       // The request names the grant that asked. Once that mandate is no longer active, a release
       // for it could never be read, and a yes would change nothing.
       const ends = agent.toolContext?.mandateEnds ?? null;
-      if (ends === null || !ends.isLive(request.mandateId)) {
+      if (grantHasEnded(request.mandateId, liveIn(ends))) {
         return `The mandate that asked for ${shownName} on API profile "${id}" is no longer active, so a release would not be read by anyone. Nothing was changed. If it is still wanted, the profile asks again when it is next saved in a mandate's session.`;
       }
       const promptUser = agent.promptUser;
@@ -3668,7 +3669,7 @@ ${draftJson}
         || releaseObstacle(agent.secretStore, apiStore, current, name) !== null) {
         return `API profile "${id}" changed while the question was open, so the answer no longer covers it. Nothing was released; ask again if it is still wanted.`;
       }
-      if (!ends.isLive(request.mandateId)) {
+      if (grantHasEnded(request.mandateId, liveIn(ends))) {
         return `The mandate that asked for ${shownName} ended while the question was open. Nothing was released.`;
       }
       if (!recordOwnerAct(agent, 'secret.release', `${id} ${name}`)) {
@@ -3857,7 +3858,7 @@ export function releaseRequestsNote(agent: IAgent): string {
   const releases = agent.toolContext?.secretReleases ?? null;
   const ends = agent.toolContext?.mandateEnds ?? null;
   if (!releases || !ends) return '';
-  const open = releases.pendingReleases().filter((r) => ends.isLive(r.mandateId));
+  const open = releases.pendingReleases().filter((r) => !grantHasEnded(r.mandateId, liveIn(ends)));
   if (open.length === 0) return '';
   // A registered profile's id has passed the id pattern; a name is shaped as a vault name.
   const shown = open.slice(0, 10).map((r) => `${JSON.stringify(shapedForLog(r.name, VAULT_NAME_SHAPE, 64))} for "${r.profileId}"`).join(', ');

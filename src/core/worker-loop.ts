@@ -9,6 +9,7 @@
  */
 
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
+import { liveIn } from './mandate-ends.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { noticeLanguage } from './notice-language.js';
@@ -1034,7 +1035,7 @@ export class WorkerLoop {
   }
 
   /** Whether a mandate the run's plan depends on has ended (`principalHasEnded`). */
-  #planHasEnded(entry: ActiveTask, isLive: (mandateId: string) => boolean = (id) => this.engine.getMandateEnds()?.isLive(id) ?? false): boolean {
+  #planHasEnded(entry: ActiveTask, isLive: (mandateId: string) => boolean = (id) => liveIn(this.engine.getMandateEnds())(id)): boolean {
     return entry.planMembers.some((m) => principalHasEnded(m, isLive));
   }
 
@@ -1046,7 +1047,7 @@ export class WorkerLoop {
    * and one that lands before the run's session exists has nothing to abort.
    */
   #stopIfStarterEnded(entry: ActiveTask | undefined, starter: RequestPrincipal | undefined, id?: string): void {
-    const isLive = (mid: string): boolean => this.engine.getMandateEnds()?.isLive(mid) ?? false;
+    const isLive = liveIn(this.engine.getMandateEnds());
     const starterEnded = starter !== undefined && principalHasEnded(starter, isLive);
     // A plan paused while its run went on stops too, even when an extension made its member live again.
     const planEnded = entry !== undefined && (this.#planHasEnded(entry, isLive) || (id !== undefined && this.#pausedNow(id)));
@@ -2793,8 +2794,7 @@ export class WorkerLoop {
     // without it, and a run that only the answer started is not made in the mandate's name;
     // it is recorded as failed, with no retry, like any run a mandate started.
     const asker = answered !== undefined && isMandateTag(answered.created_by) ? principalOfPrompt(answered) : undefined;
-    if (answered !== undefined && asker?.kind === 'mandate'
-      && !(asker.mandateId !== undefined && (this.engine.getMandateEnds()?.isLive(asker.mandateId) ?? false))) {
+    if (answered !== undefined && asker?.kind === 'mandate' && principalHasEnded(asker, liveIn(this.engine.getMandateEnds()))) {
       this.engine.getPromptStore()?.releaseTrigger(answered.id);
       // An asker who is a member of the plan pauses it once its end is proven (`plan-pause.ts`).
       const askerIsMember = this.activeTasks.get(task.id)?.planMembers.some((m) => principalTag(m) === principalTag(asker)) === true;

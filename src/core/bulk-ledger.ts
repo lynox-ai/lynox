@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type { EngineDb } from './engine-db.js';
 import type { UndoKind } from '../types/index.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, principalTag, type RequestPrincipal, grantHasEnded } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
@@ -740,7 +740,7 @@ export function plannerHasEnded(
   if (row.principal !== null) {
     if (row.principal === owner) return false;
     if (!isMandateTag(row.principal)) return true;
-    return row.mandate_id === null || !own.isLive(row.mandate_id);
+    return grantHasEnded(row.mandate_id, (id) => own.isLive(id));
   }
   if (row.created_by === null || row.created_at <= BULK_OWNER_THREADS_SINCE) return true;
   return own.threadCreator(row.created_by) !== owner;

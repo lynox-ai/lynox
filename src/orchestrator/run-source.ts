@@ -7,7 +7,7 @@
  * through, and every caller has to say what it runs: `source` is a required field, so a new caller
  * does not compile until it decides.
  */
-import type { MandateEnds } from '../core/mandate-ends.js';
+import { liveIn, type MandateEnds } from '../core/mandate-ends.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal, planAuthorshipOfWorkflow, planMandate, mandateIdOf, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import type { WorkflowAuthorship } from '../core/workflow-store.js';
 
@@ -200,7 +200,7 @@ export function sourceRefusal(source: RunSource, depth: number): string | undefi
     case 'nested': return depth > 0 ? undefined : NESTED_AT_TOP_REFUSAL;
     case 'saved': {
       if (source.authors === 'unreadable') return WORKFLOW_UNREADABLE_REFUSAL;
-      const isLive = (id: string): boolean => source.ends?.isLive(id) ?? false;
+      const isLive = liveIn(source.ends);
       return source.authors.some((p) => principalHasEnded(p, isLive)) ? WORKFLOW_ENDED_REFUSAL : undefined;
     }
     default: {

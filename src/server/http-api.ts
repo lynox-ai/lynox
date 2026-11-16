@@ -7,6 +7,7 @@
  */
 
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
+import { liveIn } from '../core/mandate-ends.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -101,7 +102,7 @@ import { sweepStaleExports } from '../core/export-archive.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded , toMistralEuBase } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
-import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
+import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal, grantHasEnded } from '../core/request-principal.js';
 import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orchestrator/run-source.js';
 import { runAsPlanOf } from '../core/plan-run-context.js';
 import { MEMBER_CONNECTION_PREFIX } from '../core/member-connection-notes.js';
@@ -2393,7 +2394,7 @@ export class LynoxHTTPApi {
       const engine = this.engine!;
       // A subscription a mandate added ends with its grant; with no store of ends, every mandate counts as ended.
       this.pushChannel = new WebPushNotificationChannel(dataDir, {
-        isMandateLive: (mandateId) => engine.getMandateEnds()?.isLive(mandateId) ?? false,
+        isMandateLive: (mandateId) => liveIn(engine.getMandateEnds())(mandateId),
       });
       this.engine!.getNotificationRouter().register(this.pushChannel);
     } catch (err: unknown) {
@@ -2533,7 +2534,7 @@ export class LynoxHTTPApi {
    * and a revoked mandate. Only a mandate's cookie is asked: the owner's verifies to no principal.
    */
   private _mandateLive(mandateId: string): boolean {
-    return this.engine?.getMandateEnds()?.isLive(mandateId) ?? false;
+    return liveIn(this.engine?.getMandateEnds())(mandateId);
   }
 
   /**
@@ -2555,7 +2556,7 @@ export class LynoxHTTPApi {
     return {
       db: engineDb.getDb(),
       triggers: new TriggerStore(engineDb),
-      isLive: (mandateId) => ends?.isLive(mandateId) ?? false,
+      isLive: liveIn(ends),
       audit: engine.getAuditLog(),
       prompts: engine.getPromptStore(),
     };
@@ -2631,7 +2632,7 @@ export class LynoxHTTPApi {
     // workflow would still run for that mandate. `workflow` when that mandate ended (its workflow
     // goes too); `workflow_other` when it is still live and another member ended — the note then
     // leaves the live member's workflow alone and does not say the ended person wrote it.
-    const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
+    const isLive = liveIn(ends);
     const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
     const wf = plan.workflowMember;
     const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : principalHasEnded(wf, isLive) ? 'workflow' : 'workflow_other';
@@ -4086,7 +4087,7 @@ export class LynoxHTTPApi {
             this._sessionPrincipal.set(req, session.principal);
             this._recordMandateEnd(session.principal, session.iat);
             // Recorded first: `record` never moves a revoked end, so a revoke stays a revoke.
-            if (!this._mandateLive(session.principal.mandateId)) {
+            if (principalHasEnded(session.principal, (id) => this._mandateLive(id))) {
               errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
               return;
             }
@@ -12282,8 +12283,7 @@ export class LynoxHTTPApi {
         if (by.tag === 'owner') return true;
         const store = engine.getSecretStore();
         return current.created_by === by.tag
-          && by.mandateId !== undefined
-          && engine.getMandateEnds()?.isLive(by.mandateId) === true
+          && !grantHasEnded(by.mandateId, liveIn(engine.getMandateEnds()))
           && store !== null && store !== undefined
           && mandateMayConnect(store, apiStore, by.tag, current, readCtx);
       };

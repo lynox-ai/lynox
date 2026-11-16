@@ -17,13 +17,14 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
+import { liveIn } from './mandate-ends.js';
 import { accessTokenKey, collectVaultKeys, oneLineInBriefing, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, lapsedSlots, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
 import { currentPlanOf, currentPlanOwnerStarted, currentPlanStamp } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
-import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal, grantHasEnded, principalHasEnded } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
 import { collapseToSingleLine } from './sanitize.js';
 import type { SecretReleases } from './secret-releases.js';
@@ -870,7 +871,7 @@ export function releaseState(
   const given = ctx.releases?.releaseOf(via.id, via.created_by!, name);
   if (given === undefined) return 'not-released';
   if (given.binding !== releaseBinding(via, name)) return 'lapsed';
-  if (ctx.ends === null || !ctx.ends.isLive(given.mandateId)) return 'lapsed';
+  if (grantHasEnded(given.mandateId, liveIn(ctx.ends))) return 'lapsed';
   if (ctx.principal.kind === 'mandate' && ctx.principal.mandateId !== given.mandateId) return 'lapsed';
   return 'released';
 }
@@ -1139,7 +1140,7 @@ export function resolveGuardAllows(
 export function connectionWaits(profile: ApiProfile, ends: Pick<MandateEnds, 'isLive'> | null): boolean {
   if (!isMandateConnection(profile)) return false;
   const mandateId = profile.oauth_grant?.connected_mandate_id;
-  return mandateId === undefined || ends === null || !ends.isLive(mandateId);
+  return grantHasEnded(mandateId, liveIn(ends));
 }
 
 /**
@@ -1162,7 +1163,7 @@ export function memberConnectionReader(
   if (mode === 'read') return consented;
   // Writing: the one who connected it renews it, also on a profile whose author an owner's save
   // removed before such saves were refused; the author connects it again under a later grant.
-  return (consented || profile.created_by === tag) && ends !== null && ends.isLive(reader.mandateId);
+  return (consented || profile.created_by === tag) && !principalHasEnded(reader, liveIn(ends));
 }
 
 /** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` and `connected_by_reader` exist only there, never in the store. */
