@@ -2726,8 +2726,8 @@ export class BulkLedger {
    * than `sameHtmlField` explains. A field the write did not send, or that came back as sent, is
    * the store's or lynox's own and marks nothing. The fields come from the marked write, not from
    * the run asking, so a run of another form reads the same marks. Its `applied_at`, or null when
-   * there is none. A marked row that does not decrypt or parse counts as equal: its value is not
-   * known. Marked rows are few, and the key is stored encrypted, so they are read and compared here.
+   * there is none. A marked row whose key does not decrypt is read for every target, its value
+   * deciding; one whose value does not decrypt or parse counts as equal: its value is not known. Marked rows are few, and the key is stored encrypted, so they are read and compared here.
    */
   private shopMarkedWriteOf(key: string, value: unknown, exceptRun: string): { appliedAt: string | null } | null {
     if (value === null || typeof value !== 'object') return null;
@@ -2737,9 +2737,11 @@ export class BulkLedger {
         WHERE shop_added_markup = 1 AND after_actual IS NOT NULL AND run_id != ? ORDER BY applied_at DESC`,
     ).all(exceptRun) as { run_id: string; target_key: string; after_planned: string | null; after_actual: string; applied_at: string | null }[];
     for (const r of rows) {
-      let rowKey: string;
-      try { rowKey = this.engineDb.dec(r.target_key); } catch { return { appliedAt: r.applied_at }; }
-      if (rowKey !== key) continue;
+      // `dec` hands back the stored text where it cannot decrypt, which never equals a key: the mark
+      // would be skipped. A key that does not decrypt could be this target's, so the row is read as
+      // one: its value decides, and only a target holding the marked value is refused.
+      const rowKey = this.engineDb.decStrict(r.target_key);
+      if (rowKey.ok && rowKey.text !== key) continue;
       const kept = (() => { try { return (JSON.parse(this.engineDb.dec(r.after_actual)) as ActualImage).value; } catch { return undefined; } })();
       const sent = r.after_planned === null ? undefined : this.parsedObject(r.after_planned);
       if (kept === undefined || sent === undefined) return { appliedAt: r.applied_at };

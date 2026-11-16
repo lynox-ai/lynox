@@ -418,6 +418,20 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     expect(byKey(next, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
   });
 
+  it('reads a marked row whose product key does not decrypt for every product: the marked value is refused, another is planned', async () => {
+    const { id } = await markedRun();
+    // A key encrypted under this database's key, its last bytes broken: it does not decrypt.
+    const sealed = engineDb.enc(`${LIST}/1`);
+    const broken = `${sealed.slice(0, -6)}AAAAAA`;
+    expect(engineDb.decStrict(broken).ok).toBe(false);
+    engineDb.getDb().prepare('UPDATE bulk_targets SET target_key = ? WHERE run_id = ? AND shop_added_markup = 1').run(broken, id);
+    // Whose mark it is cannot be read, so it is read for each product. Product 2 holds the marked
+    // value now (the key is unknown, it could be its), product 1 another value.
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>Meins</p>' }, { description: `<p>Neu</p>${SCRIPT}` }]);
+    expect(byKey(next, `${LIST}/2`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+    expect(byKey(next, `${LIST}/1`).change).toBe('update');
+  });
+
   it('mints no undo that restores a value another family left marked, read while that write was still unmarked', async () => {
     // r2 read the product before the refusal could see the mark: its before-image is the marked value.
     const { id } = await markedRun();

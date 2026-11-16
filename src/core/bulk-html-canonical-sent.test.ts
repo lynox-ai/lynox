@@ -9,7 +9,7 @@ import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import { runBulkJudge, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
-import { checkMarkup, droppedTagsOf, shortcodeChangedBy, shortcodeRefusalOf, shortcodeTextOf } from './bulk-html.js';
+import { checkMarkup, droppedTagsOf, endsClosed, shortcodeChangedBy, shortcodeRefusalOf, shortcodeTextOf } from './bulk-html.js';
 import { canonicalHtml } from './html-tree.js';
 import { formatStatus } from '../tools/builtin/bulk.js';
 import { rawHtmlField, runBulkEffect, type TargetWriter } from './bulk-apply.js';
@@ -546,5 +546,39 @@ describe('a write sends what the ledger stored, and never raw HTML (1130)', () =
     const out = await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: () => s.writer });
     expect(out.status).toBe('done');
     expect(s.sent).toEqual([{ description: '<p>a<br>b</p>' }, { description: own }]);
+  });
+});
+
+// A value the engine sends is its canonical form, and only one that stays itself under it (the send
+// refuses the rest, above). Such a value ends closed and holds no stretch the parser drops, so the
+// strict byte-for-byte side of the comparison is never needed for what lynox sent: a store that
+// re-serialises a value left open (measured on Shopify) never meets one from lynox.
+describe('a value the engine sends ends closed', () => {
+  const OPEN = [
+    '<p>x', '<p>a</p><p', '<p>a</p></p>', '<p>a</p><body class="x">b', '<b>x', '<ul><li>x', '<table><tr><td>x',
+    '<a href="https://shop.example.com/x">x', '<!-- x', '<textarea>x', '<script>x', '<template>x', '<p>a</p><p class="',
+    '<p>a</p></br>', '<p>x</div>', '<html><p>x', '<head><p>x', '<select><option>x', '<svg><desc>x', '<math><mi>x',
+    '<p>a<', '<p>a</', '<plaintext>x',
+  ];
+
+  it('closes every open input it can send, and holds no dropped stretch in it', () => {
+    const unstable: string[] = [];
+    for (const raw of OPEN) {
+      const sent = canonicalHtml(raw);
+      if (canonicalHtml(sent) !== sent) { unstable.push(raw); continue; }
+      expect(endsClosed(sent), raw).toBe(true);
+      expect(droppedTagsOf(sent), raw).toEqual([]);
+    }
+    // The one input whose canonical form is not itself again: never sent.
+    expect(unstable).toEqual(['<plaintext>x']);
+  });
+
+  it('CONTROL: the open inputs do end open before the canonical form', () => {
+    for (const raw of ['<b>x', '<p>a</p><p', '<textarea>x', '<!-- x', '<a href="https://shop.example.com/x">x']) expect(endsClosed(raw), raw).toBe(false);
+  });
+
+  it('refuses the one input it cannot send in the markup check too', () => {
+    const sent = canonicalHtml('<plaintext>x');
+    expect(checkMarkup({ before: null, after: sent, storeHost: HOST, startDomains: [] }).ok).toBe(false);
   });
 });
