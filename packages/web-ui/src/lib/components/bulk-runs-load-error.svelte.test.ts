@@ -49,6 +49,9 @@ const TARGETS: BulkTarget[] = [
 type Answer = number | 'throw' | 'bad';
 let answers: { run: Answer; targets: Answer; runs: Answer; merges: Answer };
 let listed: BulkRun[];
+// While set, each ask for the run list waits until the test answers it, in the order asked.
+let holdRuns: boolean;
+let heldRuns: ((a: Answer) => void)[];
 // Answers for the next asks for targets, one each, before `answers.targets` applies again.
 let targetQueue: Answer[];
 let detailRun: BulkRunDetailData;
@@ -68,6 +71,8 @@ beforeEach(() => {
 	pageStore.store?.set({ url: new URL(LIST_URL) });
 	answers = { run: 200, targets: 200, runs: 200, merges: 200 };
 	listed = [];
+	holdRuns = false;
+	heldRuns = [];
 	targetQueue = [];
 	detailRun = makeRun();
 	served = TARGETS;
@@ -82,7 +87,10 @@ beforeEach(() => {
 				: new Response(JSON.stringify({ error: 'Too many requests' }), { status: a, headers: { 'Content-Type': 'application/json', 'Retry-After': '4' } });
 		};
 		if (u.endsWith('/config')) return reply(200, { managed: true, viewer: 'owner' });
-		if (u.endsWith('/bulk/runs')) return reply(answers.runs, { runs: listed });
+		if (u.endsWith('/bulk/runs')) {
+			if (holdRuns) return new Promise<Response>((res, rej) => heldRuns.push((a) => { try { res(reply(a, { runs: listed })); } catch (e) { rej(e); } }));
+			return reply(answers.runs, { runs: listed });
+		}
 		if (u.endsWith('/merges')) return reply(answers.merges, { merges: [] });
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
 		if (page) targetLimits.push(Number(page[2]));
@@ -282,6 +290,19 @@ describe('the run list that could not load', () => {
 		answers.runs = 'bad';
 		await renderList();
 		expect(target.textContent).toContain(t('common.load_failed'));
+		expect(target.textContent).not.toContain(t('bulk.empty'));
+	});
+
+	it('says only the error when an earlier load read an empty list and a later one, ending last, got a 429', async () => {
+		holdRuns = true;
+		await renderList();
+		await reloadList();
+		expect(heldRuns.length).toBe(2);
+		heldRuns[0]!(200);
+		await settle();
+		heldRuns[1]!(429);
+		await settle();
+		expect(target.textContent).toContain(RATE);
 		expect(target.textContent).not.toContain(t('bulk.empty'));
 	});
 
