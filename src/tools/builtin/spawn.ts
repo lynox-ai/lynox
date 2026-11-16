@@ -24,7 +24,7 @@ import { resolveTools } from '../resolve-tools.js';
 import { adjustSessionCost, checkSessionBudget } from '../../core/session-budget.js';
 import { compose, engineText, escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
-import { withNoWebSentence } from '../../core/sub-agent-web.js';
+import { withNoWebSentence, withoutUnopenedLinks } from '../../core/sub-agent-web.js';
 import { childFilingContext } from '../../core/approval-filing.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
@@ -1929,7 +1929,11 @@ async function executeThinker(
     });
 
     // Same per-turn time anchor as top-level chat / pipeline steps.
-    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), { disposableDeadline: deadline?.signal });
+    // A child kept off the web hands on no link to an address it was not given (`withoutUnopenedLinks`).
+    const result = withoutUnopenedLinks(
+      await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), { disposableDeadline: deadline?.signal }),
+      tools, parentAgent.toolContext, task, userConfig.language,
+    );
     // Built HERE, not at the return: `runHistory.updateRun` below stores
     // `responseText`, and appending the note only on the way out left the run row
     // holding a version of the result the parent never saw — the one place

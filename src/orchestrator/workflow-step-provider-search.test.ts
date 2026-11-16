@@ -90,6 +90,9 @@ const sentSystem = (text: string): boolean => sent.requests.some((r) => JSON.str
 const toldNoWeb = (): boolean => sentSystem(SUBAGENT_NO_WEB_PROMPT_BLOCK) && sentSystem(STEP_NO_WEB_STRUCTURED_PROMPT_BLOCK);
 const toldAnyNoWeb = (): boolean => sentSystem(SUBAGENT_NO_WEB_PROMPT_BLOCK) || sentSystem(STEP_NO_WEB_STRUCTURED_PROMPT_BLOCK);
 
+/** Every step result of a run, as one string. */
+const outputsOf = (state: { outputs: Map<string, { result: string }> }): string => [...state.outputs.values()].map((o) => o.result).join('\n');
+
 const offered = (): boolean => sent.requests.some((r) => (r.tools ?? []).some((t) => t.type === 'web_search_20250305'));
 
 describe('the provider-side web search in a workflow step', () => {
@@ -108,13 +111,13 @@ describe('the provider-side web search in a workflow step', () => {
   });
 
   /** A nested pipeline's inline step (runtime-adapter, inline). */
-  const runInline = async (ctx: ToolContext): Promise<void> => {
+  const runInline = async (ctx: ToolContext): Promise<string> => {
     const parent = parentWith(ctx);
-    await runManifest({
+    return outputsOf(await runManifest({
       manifest_version: '1.0', name: 'search-probe', triggered_by: 'test', context: {},
       agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'look', task: 'Look it up.' }] }],
       gate_points: [], on_failure: 'stop',
-    }, config, { ...buildRunCtx({ autonomy: undefined, parentTools: [], parentToolContext: parent.toolContext }), source: { kind: 'adhoc' as const } });
+    }, config, { ...buildRunCtx({ autonomy: undefined, parentTools: [], parentToolContext: parent.toolContext }), source: { kind: 'adhoc' as const } }));
   };
 
   /** An inline step that names `tools` from the parent's set, under `disabled` tool toggles. */
@@ -132,16 +135,16 @@ describe('the provider-side web search in a workflow step', () => {
   };
 
   /** A named agent's step (runtime-adapter, agent). */
-  const runNamed = async (ctx: ToolContext): Promise<void> => {
+  const runNamed = async (ctx: ToolContext): Promise<string> => {
     const agentsDir = join(dir, 'agents');
     mkdirSync(join(agentsDir, 'looker'), { recursive: true });
     writeFileSync(join(agentsDir, 'looker', 'index.js'), `export default { name: 'looker', version: '1.0.0', defaultTier: 'balanced', systemPrompt: 'You look.', tools: [] };\n`);
     const parent = parentWith(ctx);
-    await runManifest({
+    return outputsOf(await runManifest({
       manifest_version: '1.0', name: 'named-search-probe', triggered_by: 'test', context: {},
       agents: [{ id: 'l', agent: 'looker', task: 'Look it up.' }],
       gate_points: [], on_failure: 'stop',
-    }, config, { ...buildRunCtx({ source: { kind: 'adhoc' as const }, autonomy: undefined, parentToolContext: parent.toolContext }), agentsDir });
+    }, config, { ...buildRunCtx({ source: { kind: 'adhoc' as const }, autonomy: undefined, parentToolContext: parent.toolContext }), agentsDir }));
   };
 
   it.each([['an inline step', runInline], ['a named agent\'s step', runNamed]] as const)('%s under a parent with no policy of its own: withheld', async (_name, run) => {
@@ -216,5 +219,48 @@ describe('the provider-side web search in a workflow step', () => {
     await run(unreadContext());
     expect(sent.requests.length).toBeGreaterThan(0);
     expect(toldAnyNoWeb()).toBe(false);
+  });
+
+  // A step kept off the web hands on no link to an address it was not given, and the result the
+  // run stores is that text, so chat and run report show the same (`withoutUnopenedLinks`).
+  describe('a link to an address the step never opened', () => {
+    const LINK = 'Gold: [Kitco](https://www.kitco.com/gold), see https://kitco.com/chart';
+    beforeEach(() => {
+      mockProcess.mockResolvedValue({ content: [{ type: 'text', text: LINK }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } });
+    });
+
+    it.each([['an inline step', runInline], ['a named agent\'s step', runNamed]] as const)('%s under deny-all: stored as plain text', async (_name, run) => {
+      const out = await run(engineContext('deny-all'));
+      expect(out).toContain('Gold: Kitco (kitco.com/gold, not checked), see kitco.com/chart (not checked)');
+      expect(out).not.toContain('https://');
+    });
+
+    it.each([['an inline step', runInline], ['a named agent\'s step', runNamed]] as const)('%s under allow-all: left as it is (control)', async (_name, run) => {
+      expect(await run(engineContext('allow-all'))).toContain(LINK);
+    });
+
+    it('a named agent\'s step that brings a tool of its own: left as it is, as it is not told either', async () => {
+      const agentsDir = join(dir, 'agents');
+      mkdirSync(join(agentsDir, 'fetcher'), { recursive: true });
+      writeFileSync(join(agentsDir, 'fetcher', 'index.js'), `export default { name: 'fetcher', version: '1.0.0', defaultTier: 'balanced', systemPrompt: 'You look.', tools: [{ name: 'lookup_company', description: 'Look a company up.', input_schema: { type: 'object', properties: {} }, execute: async () => 'ok' }] };\n`);
+      const parent = parentWith(engineContext('deny-all'));
+      const out = outputsOf(await runManifest({
+        manifest_version: '1.0', name: 'named-tool-links', triggered_by: 'test', context: {},
+        agents: [{ id: 'f', agent: 'fetcher', task: 'Look it up.' }],
+        gate_points: [], on_failure: 'stop',
+      }, config, { ...buildRunCtx({ source: { kind: 'adhoc' as const }, autonomy: undefined, parentToolContext: parent.toolContext }), agentsDir }));
+      expect(out).toContain(LINK);
+    });
+
+    it('an inline step keeps a link to an address its task gave it', async () => {
+      const parent = parentWith(engineContext('deny-all'));
+      const out = outputsOf(await runManifest({
+        manifest_version: '1.0', name: 'given-link', triggered_by: 'test', context: {},
+        agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'look', task: 'Summarise https://www.kitco.com/gold' }] }],
+        gate_points: [], on_failure: 'stop',
+      }, config, { ...buildRunCtx({ autonomy: undefined, parentTools: [], parentToolContext: parent.toolContext }), source: { kind: 'adhoc' as const } }));
+      expect(out).toContain('[Kitco](https://www.kitco.com/gold)');
+      expect(out).toContain('kitco.com/chart (not checked)');
+    });
   });
 });
