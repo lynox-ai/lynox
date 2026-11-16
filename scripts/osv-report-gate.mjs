@@ -60,6 +60,37 @@ import { fileURLToPath } from 'node:url';
 
 /** Bands that block. core's policy is high+critical hard-fail, the rest warn. */
 const BLOCKING_BANDS = new Set(['HIGH', 'CRITICAL']);
+
+/**
+ * Blocking findings accepted for a limited time, each because the vulnerable code path is shown
+ * not to be reachable in this repo. An entry matches one advisory id on one package at the exact
+ * versions listed, and only until its `expires` date (inclusive, UTC); after that the finding
+ * blocks again and says that its acceptance ran out. A matched finding is still printed. An entry
+ * that matches nothing in a run is reported, so a resolved one gets removed.
+ *
+ * Every entry has a premise check in tests/osv-accepted-premise.test.ts that fails as soon as the
+ * code starts using what the advisory needs; an entry without one fails that test.
+ */
+export const ACCEPTED = [
+  {
+    id: 'GHSA-3r8g-jcqq-3p5j',
+    package: '@sveltejs/kit',
+    versions: ['2.61.1'],
+    expires: '2026-12-15',
+    reason:
+      'DoS while parsing remote-function form data; the advisory affects only apps that enable the ' +
+      'experimental remote functions flag and use form, query or command. core enables neither ' +
+      '(no flag in svelte.config.js, no .remote files, no $app/server import). The fix is kit 3.1.1, ' +
+      'a major upgrade, planned before the expiry.',
+  },
+];
+
+/** The entry that accepts this finding today, or the expired one that would have, or null. */
+function acceptanceFor(id, name, version, accepted, today) {
+  const hit = accepted.find((a) => a.id === id && a.package === name && a.versions.includes(version));
+  if (!hit) return null;
+  return { entry: hit, expired: today > hit.expires };
+}
 const KNOWN_BANDS = new Set(['LOW', 'MODERATE', 'MEDIUM', 'HIGH', 'CRITICAL']);
 
 /**
@@ -133,10 +164,11 @@ function asArray(value, errors, what) {
  * is not a list: nothing below it can be counted, so the exit-code cross-check
  * that follows would be comparing against a fiction.
  */
-export function evaluate({ doc, rc }) {
+export function evaluate({ doc, rc, accepted = ACCEPTED, today = new Date().toISOString().slice(0, 10) }) {
   const errors = [];
   const blocking = [];
   const below = [];
+  const acceptedHits = [];
 
   if (!Number.isInteger(rc)) {
     errors.push(`the scanner exit code was not handed in (got ${JSON.stringify(rc)})`);
@@ -152,7 +184,7 @@ export function evaluate({ doc, rc }) {
       `the report has no \`results\` array (got ${JSON.stringify(doc?.results ?? null)}) — ` +
         `an envelope this gate cannot read is not an empty one`,
     );
-    return { ok: false, errors, blocking, below };
+    return { ok: false, errors, blocking, below, accepted: acceptedHits };
   }
 
   // Every level is array-checked, not null-checked, and the reason is one level
@@ -173,7 +205,11 @@ export function evaluate({ doc, rc }) {
         if (band === null) {
           blocking.push({ ...entry, severity: 'UNRESOLVED' });
         } else if (BLOCKING_BANDS.has(band)) {
-          blocking.push(entry);
+          // Only a finding that would block can be accepted; an unresolved severity never is.
+          const acc = acceptanceFor(entry.id, pkg?.package?.name, pkg?.package?.version, accepted, today);
+          if (acc && !acc.expired) acceptedHits.push({ ...entry, until: acc.entry.expires, reason: acc.entry.reason });
+          else if (acc) blocking.push({ ...entry, expired: acc.entry.expires });
+          else blocking.push(entry);
         } else {
           below.push(entry);
         }
@@ -181,7 +217,7 @@ export function evaluate({ doc, rc }) {
     }
   }
 
-  const total = blocking.length + below.length;
+  const total = blocking.length + below.length + acceptedHits.length;
   if (Number.isInteger(rc)) {
     if (rc === 1 && total === 0) {
       errors.push('osv-scanner exited 1 but the report lists no findings — the two disagree');
@@ -191,7 +227,7 @@ export function evaluate({ doc, rc }) {
     }
   }
 
-  return { ok: errors.length === 0 && blocking.length === 0, errors, blocking, below };
+  return { ok: errors.length === 0 && blocking.length === 0, errors, blocking, below, accepted: acceptedHits };
 }
 
 /**
@@ -245,6 +281,7 @@ export function main(argv) {
   const errors = [];
   const blocking = [];
   const below = [];
+  const accepted = [];
   for (const [i, report] of reports.entries()) {
     const rc = rcs[i];
     let doc;
@@ -265,23 +302,31 @@ export function main(argv) {
     errors.push(...one.errors.map((e) => (reports.length > 1 ? `${report}: ${e}` : e)));
     blocking.push(...one.blocking);
     below.push(...one.below);
+    accepted.push(...one.accepted);
   }
   const ok = errors.length === 0 && blocking.length === 0;
+  // Over all reports: an entry no finding matched is due for removal. It does not block.
+  const unused = ACCEPTED.filter((a) => !accepted.some((h) => h.id === a.id)).map((a) => `${a.package} ${a.id}`);
 
   // The daily watch needs the same classification as the merge gate but files
   // an issue instead of failing, so it reads counts rather than an exit code.
   // One classifier, two consumers — the alternative is a second copy of the
   // severity rules that drifts the moment either is edited.
   if (format === 'json') {
-    console.log(JSON.stringify({ ok, blocking, below, errors }));
+    console.log(JSON.stringify({ ok, blocking, below, accepted, unused, errors }));
     return ok ? 0 : 1;
   }
 
   for (const e of errors) console.error(`::error::osv-report-gate: ${e}`);
   for (const b of blocking) {
     const label = b.severity === 'UNRESOLVED' ? 'UNRESOLVED SEVERITY' : b.severity;
-    console.error(`::error::${b.source}: ${b.package} ${b.id} — ${label}`);
+    const ran = b.expired ? ` (its acceptance expired ${b.expired})` : '';
+    console.error(`::error::${b.source}: ${b.package} ${b.id} — ${label}${ran}`);
   }
+  for (const a of accepted) {
+    console.log(`::warning::${a.source}: ${a.package} ${a.id} (${a.severity}) accepted until ${a.until}: ${a.reason}`);
+  }
+  for (const u of unused) console.log(`::warning::osv-report-gate: accepted entry ${u} matched no finding; remove it`);
   for (const b of below) console.log(`  below the floor: ${b.package} ${b.id} (${b.severity})`);
   // An annotation, as the step it replaces emitted: a line in a 3000-line log
   // that nobody scrolls to is not a report.
@@ -290,7 +335,7 @@ export function main(argv) {
   }
 
   console.log(
-    `osv-report-gate: ${blocking.length + below.length} finding(s), ${blocking.length} blocking`,
+    `osv-report-gate: ${blocking.length + below.length + accepted.length} finding(s), ${blocking.length} blocking, ${accepted.length} accepted`,
   );
   return ok ? 0 : 1;
 }
