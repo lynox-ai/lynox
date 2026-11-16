@@ -100,11 +100,15 @@ describe('friendlyMailError — the IMAP branch is untouched', () => {
 		expect(text).not.toMatch(/Couldn't reach/);
 	});
 
-	it('names a dropped connection and says the next check retries, as the watcher stores it (no raw text)', () => {
-		const text = friendlyMailError('connection_dropped', undefined);
-		expect(text).toMatch(/dropped/);
-		expect(text).toMatch(/next check/);
-		expect(text).not.toBe('Unknown error');
-		expect(text).not.toMatch(/Couldn't reach/);
+	it('names a dropped connection in the background check and says the next check retries (no raw text)', () => {
+		const text = friendlyMailError('connection_dropped', undefined, { background: true });
+		expect(text).toBe('The connection to the mail server dropped during a check. lynox tries again on the next check, and this message goes away once one succeeds.');
+	});
+
+	it('does not promise a next check for a dropped connection during a test the user started', () => {
+		for (const ctx of [{ stage: 'imap' as const }, {}]) {
+			const text = friendlyMailError('connection_dropped', 'IMAP search INBOX: the connection dropped', ctx);
+			expect(text).toBe('lynox reached the mail server and signed in, then the connection dropped during the test. Try again.');
+		}
 	});
 });

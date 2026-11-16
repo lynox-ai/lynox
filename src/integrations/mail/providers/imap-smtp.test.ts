@@ -484,7 +484,7 @@ describe('ImapSmtpProvider — fetch', () => {
       const err = await provider.fetch({ uid: 999 }).then(() => null, (e: unknown) => e);
       expect(err, `fetchOne → ${String(result)}`).toBeInstanceOf(MailError);
       expect((err as MailError).code).toBe('connection_dropped');
-      expect((err as MailError).message, 'says what to do next').toContain('Try again');
+      expect((err as MailError).message, 'says what to do next').toBe('IMAP fetch INBOX: the connection dropped before message uid=999 was read. Nothing was read. Try again in a moment.');
       expect((err as MailError).message).toContain('the connection dropped before message uid=999 was read');
     }
   });
@@ -671,6 +671,23 @@ describe('ImapSmtpProvider — search', () => {
       expect(err, name).toBeInstanceOf(MailError);
       expect((err as MailError).code).toBe('connection_dropped');
       expect((err as MailError).message).toContain('the connection dropped before the messages were fetched');
+    }
+  });
+
+  it('reports a server BYE before the search as a dropped connection, in list and search', async () => {
+    // After a BYE imapflow keeps `mailbox` set, and its SEARCH answers `false` without running.
+    probe.search.mockImplementation(async () => {
+      probe.state = probe.states.LOGOUT;
+      return false;
+    });
+    probe.mailbox = { path: 'INBOX' };
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    for (const [name, run] of [['list', () => provider.list({ limit: 10 })], ['search', () => provider.search({ from: 'alice' })]] as const) {
+      probe.state = probe.states.SELECTED;
+      const err = await run().then(() => null, (e: unknown) => e);
+      expect(err, name).toBeInstanceOf(MailError);
+      expect((err as MailError).code).toBe('connection_dropped');
+      expect((err as MailError).message).toContain('the connection dropped before the search ran');
     }
   });
 

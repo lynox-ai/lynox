@@ -12,6 +12,8 @@ export interface MailErrorContext {
 	stage?: 'imap' | 'smtp' | undefined;
 	/** The SMTP port the form is currently showing, when the user set one. */
 	smtpPort?: number | undefined;
+	/** The error comes from the background check of a saved account, which runs again on its own. */
+	background?: boolean | undefined;
 }
 
 /**
@@ -66,10 +68,14 @@ export function friendlyMailError(
 			return "Couldn't reach the mail server. Check the hostname and that the IMAP port is open on your network.";
 		case 'timeout':
 			return 'The server took too long to respond. Try again, or check your network.';
-		// The mail watcher stores this code when the session was lost mid-read. It clears the
-		// error on its next successful check, so the next step is to wait, not to change settings.
+		// The session was lost mid-read: the code is only raised after connect, login and SELECT
+		// (imap-smtp.ts, the search and fetch paths). The background check clears its error on the
+		// next successful check, so there the next step is to wait; a test the user started does
+		// not run again by itself, so there it is to start it again.
 		case 'connection_dropped':
-			return 'The connection to the mail server dropped during a check. lynox tries again on the next check, and this message goes away once one succeeds.';
+			return ctx.background
+				? 'The connection to the mail server dropped during a check. lynox tries again on the next check, and this message goes away once one succeeds.'
+				: 'lynox reached the mail server and signed in, then the connection dropped during the test. Try again.';
 		case 'not_found':
 			return 'No matching mail server found for that address.';
 		case 'rate_limited':

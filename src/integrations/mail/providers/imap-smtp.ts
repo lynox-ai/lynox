@@ -378,14 +378,16 @@ function wrapImapError(err: unknown, fallback: string): MailError {
  * mail". Reading `false` and `undefined` as empty told the model there was no mail, and
  * turned a failed poll into an `ok` that cleared the account's error state.
  *
- * `undefined` is `connection_dropped`. `false` stays `unknown`, not `connection_failed` nor
- * `connection_dropped`: it also covers a server that refused the search, and the owner's text
- * for `connection_failed` says the server could not be reached. The message says which of the
- * two it was.
+ * `undefined`, or any answer once the session has left the mailbox, is `connection_dropped`.
+ * Otherwise `false` stays `unknown`, not `connection_failed`: it also covers a server that
+ * refused the search, and the owner's text for `connection_failed` says the server could not be
+ * reached. The message says which of the two it was.
  */
-function searchUidsOrThrow(result: number[] | false | undefined, folder: string): number[] {
+function searchUidsOrThrow(result: number[] | false | undefined, folder: string, client: ImapFlow): number[] {
   if (Array.isArray(result)) return result;
-  if (result === undefined) {
+  // A server BYE before the search leaves `mailbox` set; imapflow's SEARCH then answers `false`
+  // without sending anything, so `false` with the session out of the mailbox is the drop too.
+  if (result === undefined || mailboxLost(client)) {
     throw new MailError('connection_dropped', `IMAP search ${folder}: the connection dropped before the search ran.${DROPPED_NEXT_STEP}`);
   }
   throw new MailError('unknown', `IMAP search ${folder}: the search failed (the server refused it, or the connection dropped while it ran)`);
@@ -725,7 +727,7 @@ export class ImapSmtpProvider implements MailProvider {
       if (opts.unseenOnly) search.seen = false;
       if (Object.keys(search).length === 0) search.all = true;
 
-      const uids = searchUidsOrThrow(await this.readCommand(client, () => client.search(search, { uid: true })), folder);
+      const uids = searchUidsOrThrow(await this.readCommand(client, () => client.search(search, { uid: true })), folder, client);
       if (uids.length === 0) return [];
 
       // Take the most recent N (search returns ascending)
@@ -909,7 +911,7 @@ export class ImapSmtpProvider implements MailProvider {
       if (query.flagged) search.flagged = true;
       if (Object.keys(search).length === 0) search.all = true;
 
-      const uids = searchUidsOrThrow(await this.readCommand(client, () => client.search(search, { uid: true })), folder);
+      const uids = searchUidsOrThrow(await this.readCommand(client, () => client.search(search, { uid: true })), folder, client);
       if (uids.length === 0) return [];
 
       const slice = uids.slice(-limit);

@@ -178,3 +178,18 @@ describe('MailSettings surfaces which leg of the connection failed', () => {
     expect(saveFn).toMatch(/checked: err\.stage \?/);
   });
 });
+
+// The background check's error and a test the user started get different advice for a dropped
+// connection: only the background check runs again by itself. Asserted against the source, as
+// above; the control requires the form's wrapper to stay without the flag.
+describe('MailSettings error text: background check vs. a test the user started', () => {
+  it('marks the saved account’s polling error as coming from the background check', () => {
+    expect(source).toMatch(/friendlyMailError\(account\.lastError\.code, undefined, \{ background: true \}\)/);
+  });
+
+  it('control: the form’s own error wrapper does not claim to be the background check', () => {
+    const wrapper = source.match(/function friendlyError\([\s\S]*?\n\t\}/)?.[0] ?? '';
+    expect(wrapper).toContain('friendlyMailError(');
+    expect(wrapper).not.toContain('background');
+  });
+});
