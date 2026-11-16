@@ -2117,6 +2117,9 @@ const RUN_CTX_KEYS = [
   // The owner's stop of a scheduled workflow; dropped, the worker reports a stop the run
   // never reads (the value witness is the stop-seam test above).
   'stopSignal',
+  // The end of the run that started an in-session workflow; dropped, a chat's stop lets the next
+  // step start (the value witness is 'the calling chat's run reaches the run' below).
+  'endSignal',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -2518,6 +2521,43 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
       mockRetryManifest.mockResolvedValueOnce(makeRunState());
       await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
       expect((mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>)['abortScope']).toBe(scope);
+    });
+  });
+
+  // The chat's stop reaches the run as its `stopSignal`, so a stop that lands between steps, or
+  // under `on_failure: continue`, starts no further step (`stoppedByOwner` reads only this). The
+  // scope above ends the step agents already running; it cannot hold back the next one.
+  describe('the calling chat\'s stop reaches the run', () => {
+    function agentWithStop(): { agent: IAgent; signal: AbortSignal } {
+      const agent = makeAutonomyAgent(undefined);
+      const signal = new AbortController().signal;
+      (agent as unknown as { runSignal: unknown }).runSignal = signal;
+      return { agent, signal };
+    }
+
+    it('inline run', async () => {
+      const { agent, signal } = agentWithStop();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ name: 'inline', steps: [makeStep('s1', 'do thing')] }, agent);
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['endSignal']).toBe(signal);
+    });
+
+    it('stored run', async () => {
+      const { agent, signal } = agentWithStop();
+      const id = seedStoredPipeline();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id }, agent);
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['endSignal']).toBe(signal);
+    });
+
+    it('retry', async () => {
+      const { agent, signal } = agentWithStop();
+      const id = seedStoredPipeline();
+      mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+      await runWorkflowTool.handler({ workflow_id: id }, agent);
+      mockRetryManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+      expect((mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>)['endSignal']).toBe(signal);
     });
   });
 
