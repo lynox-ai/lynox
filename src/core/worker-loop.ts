@@ -3802,7 +3802,7 @@ export class WorkerLoop {
       try {
         return this.engine.getTaskManager()?.startEscalation(triggerId, startedAt, retry) ?? false;
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${processErrorText(err)}\n`);
         return false;
       }
     };
