@@ -562,7 +562,7 @@
 			{#if (run.kind === 'apply' || undoApproving) && listed.length > 0}
 				<div>
 					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(listed.length), n: String(run.total - (targets.length - listed.length)) })}</h2>
-					{#if undoApproving && run.atomic}
+					{#if undoApproving && run.atomic && ownerActs}
 						<p class="text-sm mb-2" data-testid="bulk-undo-atomic">{t('bulk.deselect.refused.atomic_undo')}</p>
 					{/if}
 					{#if skipped.text && !skipped.nothing}
@@ -572,7 +572,7 @@
 						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-seo-entity-count">{seoEntity === 1 ? t('bulk.preview.seo_entity_one') : tf('bulk.preview.seo_entity', { n: String(seoEntity) })}</p>
 					{/if}
 					<div class="overflow-x-auto">
-						<table class="w-full text-sm">
+						<table class="w-full text-sm" role="table">
 							<!-- On a narrow screen each target is one block: name and link first, its fields below (U-266). -->
 							<thead class="hidden sm:table-header-group">
 								<tr class="text-left text-xs text-text-subtle border-b border-border">
@@ -582,8 +582,8 @@
 							</thead>
 							<tbody>
 								{#each shownTargets as target (target.seq)}
-									<tr class="block sm:table-row border-b border-border align-top {target.deselected ? 'opacity-60' : ''}" data-testid="bulk-target-row">
-										<td class="block sm:table-cell pt-1.5 sm:pb-1.5 pr-3">
+									<tr role="row" class="block sm:table-row border-b border-border align-top {target.deselected ? 'opacity-60' : ''}" data-testid="bulk-target-row">
+										<td role="cell" class="block sm:table-cell pt-1.5 sm:pb-1.5 pr-3">
 											{@render targetName(target)}
 											{#if target.shopAddedMarkup}
 												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
@@ -598,7 +598,7 @@
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
 											{/if}
 										</td>
-										<td class="block sm:table-cell pb-1.5 pt-1 sm:pt-1.5">
+										<td role="cell" class="block sm:table-cell pb-1.5 pt-1 sm:pt-1.5">
 											<div class="sm:hidden text-xs text-text-subtle">{t(undoApproving ? 'bulk.undo.now_back' : 'bulk.preview.before_after')}</div>
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}
@@ -908,7 +908,7 @@
 						</div>
 					{/if}
 					<div class="flex flex-wrap gap-2">
-						<button type="button" class={btnPrimary} disabled={busy || creates.length !== run.changes.delete} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
+						<button type="button" class={btnPrimary} disabled={busy || creates.length !== run.changes.delete || bulkWriting(run) === 0} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
 				</div>

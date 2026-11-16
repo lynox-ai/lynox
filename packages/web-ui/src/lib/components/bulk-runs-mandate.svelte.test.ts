@@ -171,6 +171,21 @@ describe('a run\'s page as a mandate sees it', () => {
 	});
 });
 
+describe('an undo\'s approval as a reader who is not the owner sees it', () => {
+	const UNDO: BulkTarget[] = [{ seq: 0, key: 'gid://shopify/Product/1', change: 'update', diff: { kind: 'fields', fields: [{ field: 'title', before: 'Neu', after: 'Alt' }] } as BulkTarget['diff'], error: null, deselected: false, title: 'Snowboard Blau' }];
+	for (const [name, answer] of [['a mandate', 'mandate'], ['no answer', null]] as const) {
+		it(`lists the targets of an atomic undo to ${name}, without the sentence on the owner's taking one out`, async () => {
+			viewer = answer;
+			run = makeRun({ kind: 'undo', sourceRunId: 'r0', atomic: true });
+			shownTargets = UNDO;
+			await renderDetail();
+			expect(target.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
+			expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
+			expect(target.querySelector('[data-testid="bulk-undo-atomic"]')).toBeNull();
+		});
+	}
+});
+
 describe('a session whose reader the server has not named as the owner', () => {
 	for (const [name, answer] of [['no answer', null], ['a viewer that is neither', 'none']] as const) {
 		it(`offers no act and says nothing about the owner on ${name}`, async () => {

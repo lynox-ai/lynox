@@ -791,6 +791,21 @@ describe('approving an undo, per target', () => {
 		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
 	});
 
+	it('offers no approval once every target is taken out and nothing is left to write back', async () => {
+		run = undoRun({ total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change !== 'delete');
+		await render();
+		const approve = (): HTMLButtonElement | undefined => buttonByText(t('bulk.undo.approve'));
+		takeOut()[0]!.click();
+		await settle();
+		// One target left: the approval still writes it back.
+		expect(approve()?.disabled).toBe(false);
+		takeOut()[0]!.click();
+		await settle();
+		expect(target.textContent).toContain(tf('bulk.undo.approve_explain', { n: '0' }));
+		expect(approve()?.disabled).toBe(true);
+	});
+
 	it('offers no target out of the undo of an atomic run, and says why once above the list', async () => {
 		run = undoRun({ atomic: true });
 		targets = undoTargets();
