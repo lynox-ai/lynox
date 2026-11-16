@@ -9719,8 +9719,8 @@ export class LynoxHTTPApi {
         listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : hasListPageUrl(listRun.source) ? listPageUrl(listRun.host, listRun.source, 1) : listRun.host) : null,
         listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
         listNote: status.list ? BULK_LIST_NOTE : null,
-        // A Shopify list narrowed to one product type and/or vendor: shown wherever the run is started
-        // or approved, so the owner sees which group the run reads (PRD shopify-preset §22.2 item 5).
+        // A Shopify product list's filters ({} for every product): shown wherever the run is started or
+        // approved, so the owner sees which group and which statuses it reads (PRD shopify-preset §22.2 item 5).
         listFilters: shopifyListFiltersOf(status.list === null ? null : ledger.getListRun(params['id']!)),
         // An unmeasured apply run writes one target first and is approved only with this
         // confirmation. An undo is neither: it restores what its source wrote, under the

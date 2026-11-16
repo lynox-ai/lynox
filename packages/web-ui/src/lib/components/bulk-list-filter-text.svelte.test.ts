@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
-import { bulkListFilterFolded, bulkListFilterText } from './bulk-runs.js';
+import { bulkListFilterFolded, bulkListFilterText, bulkListStatusText } from './bulk-runs.js';
 
 // The line naming a filtered Shopify list's group, rendered with the real texts (ux U-175): every
 // value in its own quotes, the last after "or". One value reads byte for byte as it did before
@@ -60,5 +60,39 @@ describe('the filter line of a Shopify list, word for word', () => {
 		expect(tf('bulk.list.showAll', { n: '57' })).toBe('Alle 57 zeigen');
 		setLocale('en');
 		expect(tf('bulk.list.showAll', { n: '57' })).toBe('Show all 57');
+	});
+});
+
+// A store's search lists drafts, archived products and gift cards unless a status narrows it, and
+// the targets name none of them as such: a line of its own says which statuses are read, under
+// the group's line, which reads as it always did.
+describe('the status line of a Shopify list, word for word', () => {
+	const before = getLocale();
+	afterEach(() => setLocale(before));
+	const line = (lang: 'de' | 'en', filters: Record<string, string | readonly string[]> | null): string | null => {
+		setLocale(lang);
+		return bulkListStatusText(filters, { t, tf });
+	};
+
+	it('names every status where no filter names one, with a group or without', () => {
+		expect(line('de', {})).toBe('Gelesen wird jedes Produkt des Shops, in jedem Status, auch „Entwurf“ und „archiviert“, und auch Geschenkgutscheine.');
+		expect(line('en', {})).toBe('Every product of the store is read, in every status, “draft” and “archived” too, and gift cards as well.');
+		expect(line('de', { product_type: 'Tee' })).toBe('Gelesen wird jeder Status, auch „Entwurf“ und „archiviert“.');
+		expect(line('en', { vendor: ['A', 'B'] })).toBe('Every status is read, “draft” and “archived” too.');
+		expect(line('de', { status: 'unlisted' })).toBe('Gelesen werden nur Produkte mit dem Status „nicht gelistet“.');
+	});
+
+	it('names the statuses a filter reads, by their names in the page\'s language', () => {
+		expect(line('de', { status: 'active' })).toBe('Gelesen werden nur Produkte mit dem Status „aktiv“.');
+		expect(line('en', { product_type: 'Tee', status: ['draft', 'archived'] })).toBe('Only products with status “draft” or “archived” are read.');
+		expect(line('de', { status: ['active', 'draft', 'archived'] })).toBe('Gelesen werden nur Produkte mit dem Status „aktiv“, „Entwurf“ oder „archiviert“.');
+	});
+
+	it('says nothing for a list that is not a store\'s products, and leaves the group\'s line as it was', () => {
+		expect(line('de', null)).toBeNull();
+		setLocale('de');
+		expect(bulkListFilterText({}, { t, tf })).toBeNull();
+		expect(bulkListFilterText({ product_type: 'Tee', status: 'active' }, { t, tf })).toBe('Gelesen werden nur die Produkte vom Produkttyp „Tee“.');
+		expect(bulkListFilterFolded({ status: ['active', 'draft'] })).toBe(0);
 	});
 });

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
-	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead, bulkOne,
+	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -210,6 +210,37 @@ describe('a Shopify run\'s field names and note', () => {
 		expect(bulkListFilterText({ vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"[Ac⟨U+202E⟩me]"}');
 		expect(bulkListFilterText(null, t)).toBeNull();
 		expect(bulkListFilterText({}, t)).toBeNull();
+		expect(bulkListFilterText({ status: 'active' }, t)).toBeNull();
+	});
+
+	it('names the statuses a store\'s product list reads, on a line of its own: every one without a status filter, else the ones it names', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		expect(bulkListStatusText(null, t)).toBeNull();
+		expect(bulkListStatusText({}, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ product_type: 'Tee' }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ vendor: 'Acme' }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ status: 'active' }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>]"}');
+		expect(bulkListStatusText({ product_type: 'Tee', status: ['draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
+		// A status no store has stays as it came, its hidden characters shown.
+		expect(bulkListStatusText({ status: 'pub\u200Blished' }, t)).toBe('bulk.list.filter_status{"status":"[pub⟨U+200B⟩lished]"}');
+		expect(bulkListStatusText({ status: 'unlisted' }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.unlisted>]"}');
+	});
+
+	it('reads a status filter naming every status as none: no "only" beside the whole set', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		const every = ['active', 'draft', 'archived', 'unlisted'];
+		expect(bulkListStatusText({ status: every }, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ status: [...every].reverse() }, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ product_type: 'Tee', status: every }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ vendor: 'Acme', status: every }, t)).toBe('<bulk.list.any_status>');
+		// A stored list the engine reads nothing for (another value, or one twice) is named as it came.
+		expect(bulkListStatusText({ status: [...every, 'published'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>], [<bulk.list.status.unlisted>] <bulk.list.or> [published]"}');
+		expect(bulkListStatusText({ status: ['active', ...every] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>] <bulk.list.or> [<bulk.list.status.unlisted>]"}');
+		// Four entries that are not the four: one unknown, or one twice.
+		expect(bulkListStatusText({ status: ['active', 'draft', 'archived', 'published'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>] <bulk.list.or> [published]"}');
+		expect(bulkListStatusText({ status: ['active', 'active', 'draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.active>], [<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
+		// Three of the four still narrow: the line names them.
+		expect(bulkListStatusText({ status: ['active', 'draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
 	});
 
 	it('names every value of a list, each in its own quotes and with its hidden characters shown, the last after "or"', () => {
@@ -1172,7 +1203,7 @@ describe('the context C the judge only reads (U-140)', () => {
 			"'bulk.invalid.secret_in_context_column': { de: 'Die Spalte {field} dieser Zeile enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt die Zeile deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es in der Tabelle, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Spalten neu zu planen.', en: 'The column {field} of this row contains something that looks like a password or key. lynox does not judge this row and sends nothing of it to the AI model. Remove it in the table, or ask lynox in the chat to plan the run again without {field} among the columns it reads.' }",
 			"'bulk.invalid.secret_in_context_field': { de: 'Das Feld {field} dieses Eintrags enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt den Eintrag deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es dort, wo du diesen Eintrag pflegst, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Feldern neu zu planen.', en: 'The field {field} of this entry contains something that looks like a password or key. lynox does not judge this entry and sends nothing of it to the AI model. Remove it where you keep this entry, or ask lynox in the chat to plan the run again without {field} among the fields it reads.' }",
 			// U-142: the way out holds in both directions, whichever spelling is the typo.
-			"'bulk.invalid.not_in_filter': { de: 'Die Shopify-Suche hat dieses Produkt mitgeliefert, aber sein Produkttyp oder Anbieter ist anders geschrieben als im Filter (etwa ü statt u). lynox ändert es nicht. Gehört es in die Gruppe, schreib den Wert in Shopify bei allen Produkten der Gruppe gleich und bitte lynox dann im Chat, den Lauf mit genau dieser Schreibweise neu zu planen.', en: 'Shopify\\'s search returned this product, but its product type or vendor is spelled differently from the filter (for example ü instead of u). lynox does not change it. If it belongs to the group, spell the value the same way on every product of the group in Shopify, then ask lynox in the chat to plan the run again with exactly that spelling.' }",
+			"'bulk.invalid.not_in_filter': { de: 'Die Shopify-Suche hat dieses Produkt mitgeliefert, aber sein Produkttyp oder Anbieter ist anders geschrieben als im Filter (etwa ü statt u), oder es hat einen anderen Status als im Filter. lynox ändert es nicht. Liegt es am Status, gehört es nicht in diesen Lauf. Gehört es in die Gruppe, schreib den Wert in Shopify bei allen Produkten der Gruppe gleich und bitte lynox dann im Chat, den Lauf mit genau dieser Schreibweise neu zu planen.', en: 'Shopify\\'s search returned this product, but its product type or vendor is spelled differently from the filter (for example ü instead of u), or its status is not the filter\\'s. lynox does not change it. If the status is the reason, it does not belong in this run. If it belongs to the group, spell the value the same way on every product of the group in Shopify, then ask lynox in the chat to plan the run again with exactly that spelling.' }",
 			// U-146: the mark and its line name only &, which is all the engine counts.
 			"'bulk.target.seo_entity': { de: '& neu in Titel oder SEO-Text', en: 'New & in title or SEO text' }",
 			"'bulk.preview.seo_entity': { de: 'Bei {n} Produkten kommt ein & neu in den Titel, den Browser-Tab und Suchergebnisse zeigen, oder in die Beschreibung im Suchergebnis. Manche Shop-Themes zeigen es dort als &amp;. Willst du das vermeiden, bitte lynox im Chat, den Lauf mit „und“ statt & neu zu planen, oder wähl bei diesen Produkten vor dem Freigeben „Nicht schreiben“. Sonst prüf nach dem Schreiben im Browser-Tab einer Produktseite, ob das & richtig erscheint.', en: 'In {n} products, an & is added to the title that the browser tab and search results show, or to the description in search results. Some store themes show it there as &amp;. To avoid this, ask lynox in a chat to plan the run again with \"and\" instead of &, or choose \"Don\\'t write\" on these products before you approve. Otherwise, after the write, check in the browser tab of a product page that the & shows correctly.' }",

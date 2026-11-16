@@ -126,6 +126,44 @@ describe('approving a preview', () => {
 		expect(line()!.textContent).toBe(full);
 		expect(buttonByText(tf('bulk.list.showAll', { n: '57' }))).toBeUndefined();
 		expect(document.activeElement).toBe(line());
+		// The statuses the list reads stand on a line of their own, after the group's: never between it and its button.
+		const lines = [...target.querySelectorAll('p')].map((p) => p.textContent);
+		expect(lines[lines.indexOf(full) + 1]).toBe(t('bulk.list.any_status'));
+	});
+
+	describe('the statuses a store\'s product list reads, where it is approved', () => {
+		const texts = (): (string | null)[] => [...target.querySelectorAll('p')].map((p) => p.textContent);
+		const german = (): void => {
+			const before = getLocale();
+			setLocale('de');
+			onTestFinished(() => setLocale(before));
+		};
+		it('names every status for a list without a filter', async () => {
+			german();
+			run = makeRun({ listFilters: {} });
+			await render();
+			expect(texts()).toContain('Gelesen wird jedes Produkt des Shops, in jedem Status, auch „Entwurf“ und „archiviert“, und auch Geschenkgutscheine.');
+		});
+		it('names the status a filter names, on its own line after the group\'s', async () => {
+			german();
+			run = makeRun({ listFilters: { product_type: 'Tee', status: 'active' } });
+			await render();
+			const all = texts();
+			expect(all[all.indexOf('Gelesen werden nur die Produkte vom Produkttyp „Tee“.') + 1]).toBe('Gelesen werden nur Produkte mit dem Status „aktiv“.');
+			expect(target.textContent).not.toContain(t('bulk.list.all_status'));
+		});
+		it('names the status where a listed run is started, before its list is read', async () => {
+			german();
+			run = makeRun({ phase: 'planned', haltKey: 'listed', haltReason: 'engine English', total: 1, listFirstPage: 'https://demo.myshopify.com/products.json', listStartChecksum: 'l1', listFilters: { status: 'active' }, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+			await render();
+			expect(texts()).toContain('Gelesen werden nur Produkte mit dem Status „aktiv“.');
+		});
+		it('names no status for a list that is not a store\'s products', async () => {
+			german();
+			run = makeRun({ listFilters: null });
+			await render();
+			expect(target.textContent).not.toContain('Status');
+		});
 	});
 
 	it('shows why lynox leaves a product out, and folds the unchanged one until asked', async () => {
