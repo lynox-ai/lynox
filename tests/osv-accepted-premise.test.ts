@@ -33,7 +33,7 @@ export function remoteFunctionUse(tree: Array<[string, string]>): string[] {
   for (const [path, text] of tree) {
     if (/\.remote\.(ts|js)$/.test(path)) found.push(`${path}: a remote functions module`);
     if (/(^|\/)svelte\.config\.(js|ts|mjs)$/.test(path) && /\bremoteFunctions\b/.test(text)) found.push(`${path}: the remoteFunctions flag`);
-    if (/\.(ts|js|mjs|svelte)$/.test(path) && /from\s+['"]\$app\/server['"]|import\(\s*['"]\$app\/server['"]\s*\)/.test(text)) found.push(`${path}: an import from $app/server`);
+    if (/\.(ts|js|mjs|svelte)$/.test(path) && /from\s+['"]\$app\/server['"]|import\s*\(?\s*['"]\$app\/server['"]/.test(text)) found.push(`${path}: an import from $app/server`);
   }
   return found;
 }
@@ -64,6 +64,7 @@ describe('the premise of each accepted OSV finding holds in this tree', () => {
     expect(remoteFunctionUse([['packages/web-ui/src/routes/data.remote.ts', 'export const x = 1;']])).toHaveLength(1);
     expect(remoteFunctionUse([['packages/web-ui/src/lib/a.ts', "import { form } from '$app/server';"]])).toHaveLength(1);
     expect(remoteFunctionUse([['packages/web-ui/src/lib/b.svelte', "const m = await import('$app/server');"]])).toHaveLength(1);
+    expect(remoteFunctionUse([['packages/web-ui/src/lib/d.ts', "import '$app/server';"]])).toHaveLength(1);
     expect(remoteFunctionUse([['packages/web-ui/svelte.config.js', 'export default { kit: { experimental: { remoteFunctions: true } } };']])).toHaveLength(1);
     expect(remoteFunctionUse([['packages/web-ui/src/lib/c.ts', "import { browser } from '$app/environment';"]])).toEqual([]);
   });
