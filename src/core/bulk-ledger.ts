@@ -2887,7 +2887,7 @@ export class BulkLedger {
     const row = db.prepare('SELECT target_key, after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { target_key: string; after_planned: string | null } | undefined;
     if (!row || row.after_planned === null) return false;
     const before: BeforeImage = { absent: false, value: read.before };
-    // Row 1121: a before-image an earlier write left marked is the store's addition, not the
+    // A before-image an earlier write left marked is the store's addition, not the
     // owner's state. Refused with the image kept, so the preview can name that write.
     const run = this.runRow(runId);
     if (run !== undefined && run.kind !== 'undo'
