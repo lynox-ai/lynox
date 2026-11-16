@@ -121,6 +121,75 @@ describe('defuseUnopenedLinks — addresses the agent was given', () => {
   });
 });
 
+describe('defuseUnopenedLinks — what the first pass does not recognise is sealed', () => {
+  // Each of these went past a filter that only recognised the forms above (review of the first
+  // version): the renderer reads more than the patterns do.
+  const LEAKS = [
+    '[x](//evil.example/(a(b)))',
+    '[x](&#104;ttps://evil.example/(a(b)))',
+    '[x](https:/\\/evil.example/(a(b)))',
+    '[x](https://x.example/(a(b)))',
+    '[[y](//evil.example)](https://z.example)',
+    '[![i](//evil.example/a.png)](https://z.example)',
+    '[![i](https://x.example/i.png)](https://z.example)',
+    '<img src="//evil.example/a.png">',
+    '<img src=//evil.example/x.png>',
+    '<img src="&#104;ttps://evil.example/a.png">',
+    '<img src="https://x.example/a.png">',
+    '- [x]: //evil.example/a\n\n[x]',
+    '![x][y]\n\n- [y]: //evil.example/i.png',
+    '> [x]: https://x.example/a\n\n[x]',
+    'xwww.x.example',
+    '<video poster="https://evil.example/p.png"></video>',
+    '<svg><image href="https://evil.example/i.svg"/></svg>',
+    '\\[x\\](https://evil.example)',
+    '[x\\\\](//evil.example)',
+    '[x\\](//evil.example)',
+    '> [x]: //evil.example/a\n\n[x]',
+    '[x](//evil.example/a((b)))',
+    '<map name="m"><area href="https://evil.example/a" shape="default"></map>',
+    '<area href=//evil.example>',
+  ];
+
+  it.each(LEAKS)('%s renders with no link and no image', (md) => {
+    const html = render(en(md));
+    expect(html).not.toMatch(/<a\b/i);
+    expect(html).not.toMatch(/<(img|video|svg|image|area)\b/i);
+  });
+
+  it('keeps ordinary text as it reads', () => {
+    expect(render(en('Item [x]: done'))).toContain('Item [x]: done');
+    expect(en('Map<a, b> and List<abc>')).not.toBe('Map and ');
+    // `<a` opens an anchor only with white space or `>` after it: a generic before a closing tag stays.
+    expect(en('Map<a, b> and </a>')).toBe('Map&lt;a, b> and &lt;/a>');
+    expect(render(en('Map<a, b> and 1 < 2'))).toContain('Map&lt;a, b&gt; and 1 &lt; 2');
+  });
+
+  it('stays fast on a long output of brackets and tags', () => {
+    for (const md of ['[\\'.repeat(50_000), '[x\\'.repeat(33_000), '<a>'.repeat(33_000), '<a href=x>'.repeat(20_000), '[a]('.repeat(30_000)]) {
+      const start = Date.now();
+      defuseUnopenedLinks(md, '', 'en');
+      expect(Date.now() - start).toBeLessThan(1500);
+    }
+  });
+});
+
+describe('defuseUnopenedLinks — a given address is matched by its real host', () => {
+  it('does not keep an address whose host only looks like the given one', () => {
+    const given = 'Read https://kitco.com/gold';
+    for (const md of ['[k](https://evil.example.https://kitco.com/gold)', '[k](https://kitco.www.evil.example/gold)', '[k](https://user@kitco.com.evil.example/gold)']) {
+      expect(render(en(md, given))).not.toMatch(/<a\b/i);
+    }
+    expect(en('[k](https://evil.example.https://kitco.com/gold)', given)).not.toMatch(/^k \(kitco\.com\/gold/);
+  });
+
+  it('reads a workflow step\'s JSON input and a child\'s escaped context as the agent did', () => {
+    const json = JSON.stringify({ task: 'Use https://kitco.com/gold\nthen sum', context: { a: 'see "https://b.example/x?a=1&b=2"' } });
+    expect(en('[k](https://kitco.com/gold) and https://b.example/x?a=1&b=2', json)).toBe('[k](https://kitco.com/gold) and https://b.example/x?a=1&b=2');
+    expect(en('[k](https://b.example/x?a=1&b=2)', '<context>https://b.example/x?a=1&amp;b=2</context>')).toBe('[k](https://b.example/x?a=1&b=2)');
+  });
+});
+
 describe('shownAddress — nothing the autolinker could pick up again', () => {
   it('drops user info, embedded schemes and www., and an @', () => {
     expect(shownAddress('https://user:pw@evil.example/x')).toBe('evil.example/x');
