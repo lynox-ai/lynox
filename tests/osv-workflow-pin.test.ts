@@ -312,7 +312,8 @@ const PINNED: Readonly<Record<string, readonly string[]>> = {
     "jq -r '.errors[]? | \"::error::osv watch: \" + .' /tmp/osv-verdict.json",
     "jq -e 'has(\"blocking\") and has(\"below\") and ((.errors // [\"no verdict\"]) | length == 0)' /tmp/osv-verdict.json > /dev/null",
     "HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)",
-    "TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)",
+    "ACCEPTED=$(jq '(.accepted // []) | length' /tmp/osv-verdict.json)",
+    "TOTAL=$(jq '(.blocking | length) + (.below | length) + ((.accepted // []) | length)' /tmp/osv-verdict.json)",
   ],
 };
 
