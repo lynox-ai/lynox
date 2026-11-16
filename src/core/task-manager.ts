@@ -96,6 +96,41 @@ function refuseBulkTrigger(trigger: TriggerRecord): void {
   if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
 }
 
+/** The `task_update` fields a scheduled plan can change, by the names the tool takes. A test
+ *  holds this to the tool's schema, so a field added there fails until it is named here or listed
+ *  as a to-do's. The refusal below names them, so the model is told what it can do instead. A
+ *  plan started by a webhook takes no run time or schedule (`WebhookTriggerScheduleError`). */
+export const PLAN_UPDATE_FIELDS: readonly string[] = ['title', 'description', 'status', 'assignee', 'run_at', 'schedule'];
+const WEBHOOK_PLAN_UPDATE_FIELDS: readonly string[] = PLAN_UPDATE_FIELDS.filter((f) => f !== 'run_at' && f !== 'schedule');
+
+/**
+ * A change of a trigger that names only fields a trigger does not carry (a priority, a due date,
+ * tags: those are a to-do's). Nothing would be written, so it is refused rather than answered
+ * as a missing row.
+ */
+export class TriggerFieldsNotCarriedError extends Error {
+  /** What the model reads: the refusal plus what it can do instead, in the tool's field names
+   *  (U-284). An API client reads only `message`: its field names are not the tool's. */
+  readonly forModel: string;
+  constructor(readonly fields: readonly string[], webhook = false) {
+    super(fields.length > 0
+      ? `This is a scheduled plan, not a to-do: it has no ${fields.join(', ')}. Nothing was changed.`
+      : 'This change names no field of a scheduled plan. Nothing was changed.');
+    const can = `A scheduled plan can change ${(webhook ? WEBHOOK_PLAN_UPDATE_FIELDS : PLAN_UPDATE_FIELDS).join(', ')}.`;
+    this.forModel = fields.length > 0
+      ? `${this.message} ${can} Tell the user that ${fields.join(', ')} ${fields.length === 1 ? 'belongs' : 'belong'} to to-dos rather than trying again.`
+      : `${this.message} ${can}`;
+    this.name = 'TriggerFieldsNotCarriedError';
+  }
+}
+
+/**
+ * Called by `update` and `complete` with the trigger they are about to write, after every check
+ * they make and before the write. A request marks its change here (`markEditedBy`), so a change
+ * the manager refuses leaves no mark and takes no stamp off.
+ */
+export type BeforeTriggerWrite = (trigger: TriggerRecord) => void;
+
 /** A schedule on a `webhook` trigger: it would make the trigger due without an event. */
 export class WebhookTriggerScheduleError extends Error {
   constructor() {
@@ -456,8 +491,9 @@ export class TaskManager {
   }
 
   /** @param by The request's principal, when a request completes it: a mandate completes only
-   *  a to-do of its own, and only its own subtasks with it. Absent for the engine. */
-  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
+   *  a to-do of its own, and only its own subtasks with it. Absent for the engine.
+   *  @param beforeTriggerWrite See {@link BeforeTriggerWrite}; not called for a to-do. */
+  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal, beforeTriggerWrite?: BeforeTriggerWrite): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
     // An AGENT-TRIGGER has no subtask cascade — just flip its status. Carry
@@ -467,6 +503,7 @@ export class TaskManager {
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
       refuseBulkTrigger(trigger);
+      beforeTriggerWrite?.(trigger);
       const ok = this.history.updateTrigger(trigger.id, { status: 'completed' }, scopeOpts);
       if (!ok) return undefined;
       return this.history.getTrigger(trigger.id, scopeOpts);
@@ -537,8 +574,9 @@ export class TaskManager {
   }
 
   /** @param by The request's principal, when a request changes it: a mandate changes only a
-   *  to-do of its own. Absent for the engine. */
-  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
+   *  to-do of its own. Absent for the engine.
+   *  @param beforeTriggerWrite See {@link BeforeTriggerWrite}; not called for a to-do. */
+  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal, beforeTriggerWrite?: BeforeTriggerWrite): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
     if (params.status && !VALID_STATUSES.has(params.status)) {
@@ -626,6 +664,17 @@ export class TaskManager {
         }
       }
 
+      // Only these reach a column (`trigger-store.ts` › `updateFields`; an assignee counts as a
+      // touch there). Without one the write would set nothing and its `false` would read as
+      // a missing row.
+      const { title, description, status, assignee, nextRunAt, scheduleCron, modelTier } = triggerUpdate;
+      if ([title, description, status, assignee, nextRunAt, scheduleCron, modelTier].every((v) => v === undefined)) {
+        const named = ([['priority', params.priority], ['due date', params.dueDate], ['tags', params.tags]] as const)
+          .filter(([, v]) => v !== undefined).map(([name]) => name);
+        throw new TriggerFieldsNotCarriedError(named, trigger.source === 'webhook');
+      }
+
+      beforeTriggerWrite?.(trigger);
       const ok = this.history.updateTrigger(trigger.id, triggerUpdate, scopeOpts);
       if (!ok) return undefined;
       return this.history.getTrigger(trigger.id, scopeOpts);

@@ -9,7 +9,7 @@ import { isOwnerPrincipal, mandateIdOf, mandateNeedsOwnerStamp, principalTag } f
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
-import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
+import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, type BeforeTriggerWrite } from '../../core/task-manager.js';
 import { readAddressWrites } from '../../core/outbound-write.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
@@ -652,12 +652,13 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         }
       }
       // A mandate's change of a schedule — any field, the schedule, completion — takes the
-      // owner's stamp off it, the rule the HTTP routes apply (`_markMandateEdit`), so a stamped
-      // schedule stops until the owner stamps it again (PRD §3.12 point 3, H2). Resolved under
-      // the same scope as the write below, and before it: the mark must land on the trigger
-      // the write changes. A TODO is not a trigger and carries no mark: a mandate changes only a
-      // to-do of its own, which `complete` and `update` check on the row they resolve, as the
-      // HTTP routes do.
+      // owner's stamp off it, the rule the HTTP routes apply, so a stamped schedule stops until
+      // the owner stamps it again (PRD §3.12 point 3, H2). The manager calls the mark with the
+      // trigger it is about to write, after its own checks and before the write: the mark lands
+      // on the trigger the write changes, and a change it refuses (an invalid cron or status,
+      // fields a trigger does not carry) leaves the owner's stamp where it was. A TODO is not a
+      // trigger and carries no mark: a mandate changes only a to-do of its own, which `complete`
+      // and `update` check on the row they resolve, as the HTTP routes do.
       // A paused plan (`plan-pause.ts`) changes only by its takeover: a mandate changes nothing on
       // it, and the owner may complete it but not edit it. Before the mark, so a refusal marks nothing.
       const pausedTarget = managerRef.getTrigger(input.task_id, scopeFilter);
@@ -671,12 +672,11 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         target: () => [['task', managerRef.getTrigger(input.task_id, scopeFilter)?.id]],
         main: ['apply'],
       }, (w) => {
-        if (!isOwnerPrincipal(agent.principal)) {
-          const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
-          if (trigger) w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue);
-        }
+        const mark: BeforeTriggerWrite | undefined = isOwnerPrincipal(agent.principal)
+          ? undefined
+          : (trigger) => { w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue); };
         if (input.status === 'completed') {
-          const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal), ifNonNull);
+          const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal, mark), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
           return `Task completed: ${formatTaskLine(task)}`;
         }
@@ -694,7 +694,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
           // A trigger's instruction rewritten here carries what this turn had taken in, as one
           // created here does; the manager records it only with a title or description change.
           untrusted: describeTurnUntrusted(agent),
-        }, scopeFilter, agent.principal), ifNonNull);
+        }, scopeFilter, agent.principal, mark), ifNonNull);
         if (!task) return `Task not found: ${input.task_id}`;
         // Surface the new schedule when it changed so the agent can confirm
         // the reschedule landed (mirrors the create path's "scheduled for …"
@@ -713,6 +713,8 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);
+      // A plan's missing fields: the model also reads what it can change instead (U-284).
+      if (e instanceof TriggerFieldsNotCarriedError) return `Error: ${e.forModel}`;
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
     }
   },
