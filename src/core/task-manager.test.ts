@@ -261,19 +261,32 @@ describe('TaskManager', () => {
       expect(tm.update(reminder.id, { modelTier: null })?.model_tier).toBeUndefined();
     });
 
-    it('calls the hook before the write only once every check passed: not for a refused tier, schedule on a webhook, or fields a plan does not carry', () => {
+    it('calls the hook before the write only once every check passed: not for a refused tier, schedule on a webhook, cron, status, or fields a plan does not carry', () => {
       const hook = vi.fn();
       const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
       expect(() => tm.update(reminder.id, { modelTier: 'deep' }, undefined, undefined, hook)).toThrow(TriggerTierUnsupportedError);
       history.insertTrigger({ id: 'wh-hook', title: 'On delivery', source: 'webhook', effect: 'run_agent' });
       expect(() => tm.update('wh-hook', { scheduleCron: '0 9 * * *' }, undefined, undefined, hook)).toThrow(WebhookTriggerScheduleError);
+      expect(() => tm.update(reminder.id, { scheduleCron: 'every now and then' }, undefined, undefined, hook)).toThrow('Invalid schedule');
+      expect(() => tm.update(reminder.id, { status: 'done' as never }, undefined, undefined, hook)).toThrow('Invalid status');
       expect(() => tm.update(reminder.id, { priority: 'high' }, undefined, undefined, hook)).toThrow(TriggerFieldsNotCarriedError);
       expect(hook).not.toHaveBeenCalled();
+    });
+
+    it('calls the hook while the stored row is still unchanged, and a hook that throws leaves it so', () => {
+      const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      // What the hook reads is the stored row at that moment, not the trigger it was handed.
+      const seen: Array<[string | undefined, string | undefined]> = [];
+      const hook = vi.fn(() => { const row = tm.getTrigger(reminder.id); seen.push([row?.title, row?.status]); });
       tm.update(reminder.id, { title: 'Ping, daily' }, undefined, undefined, hook);
-      expect(hook).toHaveBeenCalledTimes(1);
-      expect(hook.mock.calls[0]![0]).toMatchObject({ id: reminder.id, title: 'Ping' });
       tm.complete(reminder.id, undefined, undefined, hook);
-      expect(hook).toHaveBeenCalledTimes(2);
+      expect(seen).toEqual([['Ping', 'open'], ['Ping, daily', 'open']]);
+      expect(tm.getTrigger(reminder.id)).toMatchObject({ title: 'Ping, daily', status: 'completed' });
+      const other = tm.create({ title: 'Pong', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      const fails = (): void => { throw new Error('mark failed'); };
+      expect(() => tm.update(other.id, { title: 'Pong, daily' }, undefined, undefined, fails)).toThrow('mark failed');
+      expect(() => tm.complete(other.id, undefined, undefined, fails)).toThrow('mark failed');
+      expect(tm.getTrigger(other.id)).toMatchObject({ title: 'Pong', status: 'open' });
     });
 
     it('refuses a model tier it does not know, legacy aliases included', () => {
