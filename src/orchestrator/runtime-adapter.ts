@@ -20,7 +20,7 @@ import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.js';
-import { withNoWebSentence } from '../core/sub-agent-web.js';
+import { withNoWebSentence, withoutUnopenedLinks } from '../core/sub-agent-web.js';
 import { describeTurnUntrusted } from '../core/untrusted-signals.js';
 import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
 import { ConversationGrants } from '../core/conversation-grants.js';
@@ -1072,7 +1072,12 @@ export async function spawnViaAgent(
     // Sub-agent gets the same per-turn time anchor as top-level chat,
     // so a pipeline step that schedules "in 5 min" via run_at lands at
     // wallclock + 5 min, not session-start + 5 min.
-    const result = await agent.send(withCurrentTimePrefix(JSON.stringify(stepContext), userTimezone));
+    const stepInput = JSON.stringify(stepContext);
+    // A step kept off the web hands on no link to an address it was not given (`withoutUnopenedLinks`).
+    const result = withoutUnopenedLinks(
+      await agent.send(withCurrentTimePrefix(stepInput, userTimezone)),
+      tools, parentToolContext, stepInput, config.language, { ownCodeTools: true },
+    );
     if (stepTimeout.fired) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
@@ -1467,7 +1472,11 @@ export async function spawnInline(
   try {
     // See `spawnViaAgent`: inside the try that releases it, so add and delete are paired.
     abortScope?.members.add(agent);
-    const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task, context: stepContext }), userTimezone));
+    const stepInput = JSON.stringify({ task, context: stepContext });
+    const result = withoutUnopenedLinks(
+      await agent.send(withCurrentTimePrefix(stepInput, userTimezone)),
+      tools, parentToolContext, stepInput, config.language,
+    );
     if (stepTimeout.fired) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }

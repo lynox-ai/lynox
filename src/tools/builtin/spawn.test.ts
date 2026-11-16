@@ -4466,6 +4466,35 @@ describe('spawn_agent tool', () => {
       expect(await childPrompt(tc.markPolicyUnread(tc.createToolContext({})), ['read_file'])).not.toContain(SUBAGENT_NO_WEB_PROMPT_BLOCK);
     });
 
+    // A child kept off the web hands on no link to an address it was not given; the parent gets the
+    // plain form (`withoutUnopenedLinks`), and so does the child's run row.
+    const childResult = async (parentCtx: import('../../core/tool-context.js').ToolContext, task = 'Look something up'): Promise<string> => {
+      mockSend.mockResolvedValueOnce('Gold: [Kitco](https://www.kitco.com/gold)');
+      return String(await spawnAgentTool.handler(
+        { agents: [{ name: 'narrow', task, tools: ['read_file'] }] },
+        makeAgent({ toolContext: parentCtx }),
+      ));
+    };
+
+    it('hands on a child\'s link to an address it never opened as plain text under deny-all', async () => {
+      const { tc } = await actual();
+      const deny = tc.createToolContext({});
+      tc.applyNetworkPolicy(deny, 'deny-all', []);
+      const out = await childResult(deny);
+      expect(out).toContain('Gold: Kitco (kitco.com/gold, not checked)');
+      expect(out).not.toContain('](https://');
+    });
+
+    it('leaves the link under an open policy, and where the task gave the address', async () => {
+      const { tc } = await actual();
+      const open = tc.createToolContext({});
+      tc.applyNetworkPolicy(open, 'allow-all', []);
+      expect(await childResult(open)).toContain('[Kitco](https://www.kitco.com/gold)');
+      const deny = tc.createToolContext({});
+      tc.applyNetworkPolicy(deny, 'deny-all', []);
+      expect(await childResult(deny, 'Summarise https://kitco.com/gold')).toContain('[Kitco](https://www.kitco.com/gold)');
+    });
+
     it('decides by the policy and by web_research in the child\'s tools', async () => {
       const { tc } = await actual();
       const { subAgentLacksWebSearch } = await vi.importActual<typeof import('./spawn.js')>('./spawn.js');
