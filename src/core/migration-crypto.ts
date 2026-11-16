@@ -32,6 +32,7 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
+import type { PlainColumn } from './migration-rekey.js';
 import {
   CRYPTO_ALGORITHM,
   CRYPTO_KEY_LENGTH,
@@ -103,18 +104,40 @@ export interface MigrationManifest {
  * the table is derived from this list, so it cannot lag behind it.
  */
 export const MIGRATION_CHUNK_TYPES = [
-  'secrets', 'sqlite_db', 'artifacts', 'config', 'memory', 'sweeps', 'portable_dir',
+  'secrets', 'sqlite_db', 'sqlite_db_plain', 'artifacts', 'config', 'memory', 'sweeps', 'portable_dir',
 ] as const;
 
 /** A chunk type, derived from the list above so the two can never disagree. */
 export type MigrationChunkType = (typeof MIGRATION_CHUNK_TYPES)[number];
 
+/**
+ * The fields below `checksum` are optional and live on the meta, not on the manifest, on
+ * purpose: `computeManifestHash` covers the whole `chunks` array and so every field of a meta,
+ * which binds them into every chunk's additional data. A new top-level manifest field would not
+ * be covered.
+ */
 export interface MigrationChunkMeta {
   seq: number;
   type: MigrationChunkType;
   name: string;                     // e.g. 'history.db', 'vault_secrets'
   originalSize: number;             // bytes before encryption
   checksum: string;                 // SHA-256 of plaintext
+  /**
+   * `sqlite_db_plain` only, on its first (or only) part: the columns the source decrypted, and
+   * those its image does not have (`migration-rekey.ts`).
+   */
+  columns?: PlainColumn[] | undefined;
+  /** `sweeps` only, on its first (or only) part: `plain` when the ledgers' cells travel decrypted. Absent: raw. */
+  ledgerForm?: 'plain' | undefined;
+  /**
+   * With `ledgerForm: 'plain'`: the bytes the sweeps chunk takes in its raw form, which the
+   * destination's re-encrypted bundle must match exactly. The source computes it over the same
+   * files it sends in plaintext, each parsed and written back as `JSON.stringify(ledger, null, 2)`
+   * with its cells still encrypted, as `Buffer.byteLength(JSON.stringify({ files }))`: the
+   * destination writes each ledger that way, and a cell's ciphertext length depends only on its
+   * plaintext's.
+   */
+  ledgerRawBytes?: number | undefined;
 }
 
 // ── Key Generation ──

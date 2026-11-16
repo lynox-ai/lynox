@@ -15,7 +15,7 @@
  *  - Migration token is one-time use
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync, accessSync, constants as fsConstants } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync, rmSync, accessSync, constants as fsConstants } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -39,6 +39,13 @@ import { shellIsolation } from './shell-isolation.js';
 import { importRefusal } from './sidecar-refusals.js';
 import { removeStaleStages, stageIn, statEntry, type StageEntry } from './workspace-fd.js';
 import type { ExportedSecret } from './migration-export.js';
+import { deriveEngineEncKey } from './engine-db.js';
+import { deriveHistoryEncKey } from './run-history.js';
+import { migrationCeiling, storePath, type MigrationCeiling } from './migration-ceiling.js';
+import {
+  checkPlainColumns, countEncryptedPlainColumns, decodePlainPayload, isListedLedgerCell, isListedValue,
+  isPlainStore, reencryptImage, reencryptLedgers, type PlainStore, type RekeyCounts,
+} from './migration-rekey.js';
 import type { SecretScope } from '../types/index.js';
 import {
   generateEphemeralKeypair,
@@ -91,6 +98,17 @@ export interface ImportVerification {
   configApplied: boolean;
   /** Store connections (Shopify) whose tokens the import removed: each has to be connected again. Absent when none. */
   reconnectStores?: string[] | undefined;
+  /**
+   * How the encrypted columns of engine.db and history.db, and the merge ledgers' contact cells,
+   * arrived: `plain` re-encrypted under this instance's key, `raw` under the source's key, as
+   * before. Absent when the bundle carries neither store.
+   */
+  encryptedColumns?: EncryptedColumnsReport[] | undefined;
+}
+
+export interface EncryptedColumnsReport extends RekeyCounts {
+  what: PlainStore | 'merge ledgers';
+  path: 'plain' | 'raw';
 }
 
 /** `name` or `name:partN` → the part index; `0` when the payload was not split. */
@@ -123,6 +141,8 @@ interface StagedDatabase {
   destPath: string;
   /** The database in place cannot be opened by SQLite; phase 2 moves it aside first. */
   unreadable: boolean;
+  /** engine.db or history.db: how its encrypted columns arrived. */
+  columns?: EncryptedColumnsReport | undefined;
 }
 
 /**
@@ -180,7 +200,7 @@ interface PreparedRest {
   artifacts: Array<{ meta: MigrationChunkMeta; index: unknown[]; files: Record<string, unknown> }>;
   /** `files` is null when the bundle carries none: nothing is written, nothing is checked. */
   memory: { meta: MigrationChunkMeta; files: Record<string, unknown> | null } | null;
-  sweeps: { meta: MigrationChunkMeta; files: Record<string, unknown> | null } | null;
+  sweeps: { meta: MigrationChunkMeta; files: Record<string, unknown> | null; columns?: EncryptedColumnsReport | undefined } | null;
   portable: Array<{ meta: MigrationChunkMeta; dir: string; entries: Array<[string, unknown]> }>;
   secrets: Array<{ meta: MigrationChunkMeta; secrets: ExportedSecret[]; data: Buffer }>;
 }
@@ -332,15 +352,32 @@ export class MigrationImporter {
    * the real one is 128 MiB.
    */
   private readonly portableBundleMaxBytes: number;
+  /**
+   * The numbers a plaintext store is checked against at `setManifest` (`migration-ceiling.ts`).
+   * Production reads them as `/api/health` publishes them; a test lowers them.
+   */
+  private readonly ceiling: () => MigrationCeiling;
+  /**
+   * Whether `setManifest` takes a store as plaintext. Off in production: the memory a re-encrypt
+   * needs grows with the number and shortness of the values, which the source chooses, and the
+   * factor the ceiling rule uses is one run, not a bound. It stays off until the source half has
+   * measured the factor and the rule holds against values the source chooses; a test turns it on.
+   */
+  private readonly acceptPlainStores: boolean;
 
   constructor(options: {
     lynoxDir?: string | undefined;
     vaultKey: string;
     portableBundleMaxBytes?: number | undefined;
+    migrationCeiling?: MigrationCeiling | undefined;
+    acceptPlainStores?: boolean | undefined;
   }) {
     this.lynoxDir = options.lynoxDir ?? getLynoxDir();
     this.vaultKey = options.vaultKey;
     this.portableBundleMaxBytes = options.portableBundleMaxBytes ?? MAX_PORTABLE_DIR_BYTES * 2;
+    const ceiling = options.migrationCeiling;
+    this.ceiling = ceiling ? () => ceiling : migrationCeiling;
+    this.acceptPlainStores = options.acceptPlainStores === true;
   }
 
   /** Whether a migration session is currently active. */
@@ -475,16 +512,105 @@ export class MigrationImporter {
         );
       }
 
-      // Validate DB names against whitelist (path traversal prevention)
-      if (chunk.type === 'sqlite_db') {
+      // Validate DB names against whitelist (path traversal prevention). The plaintext path is
+      // for engine.db and history.db only: the two stores whose columns this build re-encrypts.
+      if (chunk.type === 'sqlite_db' || chunk.type === 'sqlite_db_plain') {
         const baseName = chunk.name.split(':')[0]!;
-        if (!ALLOWED_DB_NAMES.has(baseName)) {
+        if (!ALLOWED_DB_NAMES.has(baseName) || (chunk.type === 'sqlite_db_plain' && !isPlainStore(baseName))) {
           throw new Error(`Disallowed database name: "${baseName}"`);
         }
       }
     }
 
+    this.checkPlainManifest(manifest);
+
     this.session.manifest = manifest;
+  }
+
+  /**
+   * The plaintext path's checks at `setManifest`, before any chunk is transferred and before the
+   * engine shuts down:
+   * - a store travels once: as `sqlite_db` or as `sqlite_db_plain`, never as both (the two would
+   *   stage to one path and swap partially);
+   * - a plaintext store's column list is on its first part only and names only columns this
+   *   build re-encrypts; the sweeps form fields are on the first sweeps part only;
+   * - the merge ledgers' form follows engine.db's: plaintext cells with a plaintext engine.db,
+   *   raw with a raw one, so a rollback compares cells under one key;
+   * - each plaintext store fits this instance's memory by the ceiling rule (`storePath`), with
+   *   the numbers this instance publishes; engine.db's ledgers fit the sweeps cap in both forms.
+   * A source that follows the rule never trips these: it chose the path with the same numbers,
+   * over the chunks as they travel. A plaintext store's size is its framed payload (length, header,
+   * image), so the source decides after it has decrypted and knows its lists; deciding on the
+   * image alone would put an honest store near the bound over it here.
+   */
+  private checkPlainManifest(manifest: MigrationManifest): void {
+    const isFirst = (c: MigrationChunkMeta): boolean => !c.name.includes(':part') || c.name.endsWith(':part0');
+    const base = (c: MigrationChunkMeta): string => c.name.split(':')[0]!;
+
+    const typesByStore = new Map<string, Set<MigrationChunkType>>();
+    for (const c of manifest.chunks) {
+      if (c.columns !== undefined && !(c.type === 'sqlite_db_plain' && isFirst(c))) {
+        throw new Error(`The manifest carries a column list on ${JSON.stringify(c.name.slice(0, 64))}, which is not the first part of a plaintext store.`);
+      }
+      if ((c.ledgerForm !== undefined || c.ledgerRawBytes !== undefined) && !(c.type === 'sweeps' && isFirst(c))) {
+        throw new Error(`The manifest carries a ledger form on ${JSON.stringify(c.name.slice(0, 64))}, which is not the first part of the merge ledgers.`);
+      }
+      if (c.type !== 'sqlite_db' && c.type !== 'sqlite_db_plain') continue;
+      const store = base(c);
+      typesByStore.set(store, (typesByStore.get(store) ?? new Set()).add(c.type));
+      if (c.type === 'sqlite_db_plain' && isFirst(c)) checkPlainColumns(store as PlainStore, c.columns);
+    }
+    for (const [store, types] of typesByStore) {
+      if (types.size > 1) throw new Error(`The manifest carries ${store} both raw and as plaintext.`);
+    }
+    if (!this.acceptPlainStores && [...typesByStore.values()].some((t) => t.has('sqlite_db_plain'))) {
+      throw new Error('The manifest carries a store as plaintext, which the target instance does not take yet; the source has to send it raw.');
+    }
+    for (const [store, types] of typesByStore) {
+      if (types.has('sqlite_db_plain') && !manifest.chunks.some(c => c.type === 'sqlite_db_plain' && base(c) === store && isFirst(c))) {
+        throw new Error(`The manifest carries ${store} as plaintext without its first part.`);
+      }
+    }
+
+    const sweepsFirst = manifest.chunks.find(c => c.type === 'sweeps' && isFirst(c));
+    const sweepsTravel = manifest.chunks.filter(c => c.type === 'sweeps').reduce((n, c) => n + c.originalSize, 0);
+    if (sweepsFirst?.ledgerForm !== undefined && sweepsFirst.ledgerForm !== 'plain') {
+      throw new Error('The manifest names a ledger form the target instance does not know.');
+    }
+    const ledgersPlain = sweepsFirst?.ledgerForm === 'plain';
+    const enginePlain = typesByStore.get('engine.db')?.has('sqlite_db_plain') ?? false;
+    if (sweepsFirst && ledgersPlain !== enginePlain) {
+      throw new Error(`The manifest carries the merge ledgers ${ledgersPlain ? 'as plaintext' : 'raw'} but engine.db ${enginePlain ? 'as plaintext' : 'raw'}; both must take the same path.`);
+    }
+    const rawBytes = sweepsFirst?.ledgerRawBytes;
+    if (ledgersPlain && !(typeof rawBytes === 'number' && Number.isSafeInteger(rawBytes) && rawBytes >= 0)) {
+      throw new Error('The manifest carries the merge ledgers as plaintext without their raw size.');
+    }
+    if (!ledgersPlain && rawBytes !== undefined) {
+      throw new Error('The manifest carries a raw size for merge ledgers that travel raw.');
+    }
+
+    const plainStores = [...typesByStore].filter(([, t]) => t.has('sqlite_db_plain')).map(([s]) => s);
+    if (plainStores.length === 0) return;
+    // The sizes as the source counted them: the sweeps chunk at the larger of its two forms in the
+    // bundle, and at its raw form in the rest. The rest is the original size of every chunk that
+    // is not a database, as the measurement of its factor counted it.
+    const sweepsRaw = ledgersPlain ? rawBytes! : sweepsTravel;
+    const total = manifest.chunks.reduce((n, c) => n + c.originalSize, 0);
+    const bundleBytes = total - sweepsTravel + Math.max(sweepsTravel, sweepsRaw);
+    const restBytes = manifest.chunks
+      .filter(c => c.type !== 'sqlite_db' && c.type !== 'sqlite_db_plain' && c.type !== 'sweeps')
+      .reduce((n, c) => n + c.originalSize, 0) + sweepsRaw;
+    const ceiling = this.ceiling();
+    for (const store of plainStores) {
+      const storeBytes = manifest.chunks.filter(c => c.type === 'sqlite_db_plain' && base(c) === store).reduce((n, c) => n + c.originalSize, 0);
+      if (storePath(ceiling, { bundleBytes, restBytes, storeBytes }) !== 'plain') {
+        throw new Error(`The manifest carries ${store} as plaintext, but with this bundle it does not fit the target instance's memory to be re-encrypted (${String(ceiling.import_limit_mb)} MiB). The source has to send it as it does for an older instance.`);
+      }
+    }
+    if (enginePlain && ledgersPlain && Math.max(sweepsTravel, sweepsRaw) > MAX_MEMORY_BUNDLE_BYTES) {
+      throw new Error(`The manifest carries the merge ledgers as plaintext above their cap (${String(MAX_MEMORY_BUNDLE_BYTES)} bytes); with them engine.db has to travel raw.`);
+    }
   }
 
   /**
@@ -518,6 +644,16 @@ export class MigrationImporter {
     const expectedMeta = manifest.chunks.find(c => c.seq === chunk.seq);
     if (!expectedMeta) {
       throw new Error(`No manifest entry for chunk seq ${String(chunk.seq)}`);
+    }
+
+    // The declared size is what the ceiling at `setManifest` judged; a chunk shorter or longer
+    // than it would make that check say nothing. `decryptChunk` caps a chunk at its maximum, not
+    // at its declared size.
+    if (plaintext.length !== expectedMeta.originalSize) {
+      throw new Error(
+        `Size mismatch for chunk "${expectedMeta.name}" (seq ${String(chunk.seq)}): ` +
+        `declared ${String(expectedMeta.originalSize)}, got ${String(plaintext.length)}`,
+      );
     }
 
     const actualChecksum = sha256(plaintext);
@@ -618,12 +754,15 @@ export class MigrationImporter {
     // with every database, the config and the rest as they were. A write that fails after the
     // swap for another reason (permissions, space, I/O) still stops it there.
     const rest = this.prepareRest(chunksByType);
+    // The plaintext stores, re-encrypted under this instance's key in memory: what is staged
+    // below is ciphertext, as for a raw store. A refusal here also comes before any write.
+    const plainStores = this.prepareStores(chunksByType.sqlite_db_plain);
     this.checkDestination(rest);
 
     // 1. SQLite databases, in two phases. The first stages every copy and checks it and the
     // database it replaces; if anything fails there, every database and the config stay as they
     // were. The second swaps them all in.
-    const staged = this.stageDatabases(chunksByType.sqlite_db, (meta) => {
+    const staged = this.stageDatabases([...chunksByType.sqlite_db, ...plainStores], (meta) => {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: meta.name });
     });
     // An instance that holds the exact marker keeps it (cut S3-E): the bundle's engine.db and
@@ -641,12 +780,16 @@ export class MigrationImporter {
       for (const { tmpPath } of staged) dropStagedCopy(tmpPath);
       throw err;
     }
-    for (const { baseName, tmpPath, destPath, unreadable } of staged) {
+    const columns: EncryptedColumnsReport[] = [];
+    for (const { baseName, tmpPath, destPath, unreadable, columns: report } of staged) {
       // The unreadable database goes first, its `-wal` with it: the copy must not land next to it.
       if (unreadable) moveAsideUnreadable(destPath);
       renameSync(tmpPath, destPath);
       verification.databasesRestored.push(baseName);
+      if (report) columns.push(report);
     }
+    if (rest.sweeps?.columns) columns.push(rest.sweeps.columns);
+    if (columns.length > 0) verification.encryptedColumns = columns;
 
     // 2. Config
     for (const { meta, fields } of rest.config) {
@@ -854,7 +997,7 @@ export class MigrationImporter {
       return { meta: chunks[0]!.meta, files: asObject(bundle['files']) };
     };
     const memory = filesBundle(chunksByType.memory, 'Memory');
-    const sweeps = filesBundle(chunksByType.sweeps, 'Merge-ledger');
+    const sweeps = this.prepareLedgers(chunksByType.sweeps, filesBundle);
     // Bound the ledger FILE COUNT, not only the bytes. A minimal entry costs ~43 bytes, so the
     // byte cap alone permits ~1.4M files — each one a separate write, and each one then
     // copied + SHA-256'd + manifested by every future backup, which would brick the
@@ -917,6 +1060,49 @@ export class MigrationImporter {
     });
 
     return { config, artifacts, memory, sweeps, portable, secrets };
+  }
+
+  /**
+   * The merge ledgers. Raw, as before. In plaintext form (4.6) the payload is framed like a
+   * plaintext store's; every contact cell not listed as failed on the source is re-encrypted
+   * under engine.db's key here, and the re-encrypted bundle must be exactly as large as the raw
+   * form the source declared, and within the cap. A refusal comes before any database is swapped.
+   */
+  private prepareLedgers(
+    chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>,
+    raw: (chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>, label: string) => { meta: MigrationChunkMeta; files: Record<string, unknown> | null } | null,
+  ): PreparedRest['sweeps'] {
+    const first = chunks.find(c => !c.meta.name.includes(':part') || c.meta.name.endsWith(':part0'));
+    if (first?.meta.ledgerForm !== 'plain') return raw(chunks, 'Merge-ledger');
+    const malformed = (): Error => new Error('Refusing to restore: the plaintext merge ledgers in the bundle are malformed — import aborted before anything was replaced.');
+    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
+    if (totalBytes > MAX_MEMORY_BUNDLE_BYTES) {
+      throw new Error(`Merge-ledger bundle too large: ${String(totalBytes)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`);
+    }
+    const payload = reassemble(chunks);
+    try {
+      const { header, body } = decodePlainPayload(payload, 'merge ledgers', isListedLedgerCell);
+      let bundle: Record<string, unknown> | null;
+      try { bundle = asObject(JSON.parse(body.toString('utf-8'))); } catch { throw malformed(); }
+      const files = asObject(bundle?.['files']);
+      if (!files) throw malformed();
+      const key = deriveEngineEncKey(this.vaultKey);
+      try {
+        const { files: reencrypted, counts } = reencryptLedgers(files, header, { key });
+        const size = Buffer.byteLength(JSON.stringify({ files: reencrypted }), 'utf-8');
+        if (size !== first.meta.ledgerRawBytes) {
+          throw new Error(`Refusing to restore merge ledgers: re-encrypted they take ${String(size)} bytes, the source declared ${String(first.meta.ledgerRawBytes)} — import aborted before anything was replaced.`);
+        }
+        if (size > MAX_MEMORY_BUNDLE_BYTES) {
+          throw new Error(`Merge-ledger bundle too large: ${String(size)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`);
+        }
+        return { meta: first.meta, files: reencrypted, columns: { what: 'merge ledgers', path: 'plain', ...counts } };
+      } finally {
+        zeroize(key);
+      }
+    } finally {
+      if (chunks.length > 1) payload.fill(0);
+    }
   }
 
   /**
@@ -1109,7 +1295,59 @@ export class MigrationImporter {
       }
     }
 
-    return { baseName, tmpPath, destPath, unreadable: false };
+    // How the encrypted columns arrived: a plaintext store carries its counts from the
+    // re-encryption; a raw one is counted on the staged copy, read-only.
+    let columns: EncryptedColumnsReport | undefined = this.plainCounts.get(baseName);
+    if (!columns && isPlainStore(baseName)) {
+      columns = { what: baseName, path: 'raw', reencrypted: 0, failedOnSource: 0, carriedUnreadable: countEncryptedPlainColumns(tmpPath, baseName) };
+    }
+
+    return { baseName, tmpPath, destPath, unreadable: false, columns };
+  }
+
+  /** Counts of the plaintext stores this restore re-encrypted (`prepareStores`), by store. */
+  private plainCounts = new Map<string, EncryptedColumnsReport>();
+
+  /**
+   * Re-encrypt every `sqlite_db_plain` store under this instance's key, in memory (4.3): join its
+   * parts, split its payload, re-encrypt the columns its meta names with a round trip, serialize.
+   * Returns each as a single ciphertext entry for the staging the raw path uses. Nothing is
+   * written; a refusal leaves the data directory as it was.
+   */
+  private prepareStores(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): Array<{ meta: MigrationChunkMeta; data: Buffer }> {
+    this.plainCounts = new Map();
+    // A process that ended between a re-encrypt's `VACUUM INTO` and its cleanup leaves the scratch
+    // directory behind (ciphertext only); the next import removes it.
+    for (const entry of existsSync(this.lynoxDir) ? readdirSync(this.lynoxDir) : []) {
+      if (entry.startsWith('.rekey-')) rmSync(join(this.lynoxDir, entry), { recursive: true, force: true });
+    }
+    const byStore = new Map<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>>();
+    for (const c of chunks) {
+      const store = c.meta.name.split(':')[0]!;
+      byStore.set(store, [...(byStore.get(store) ?? []), c]);
+    }
+    const out: Array<{ meta: MigrationChunkMeta; data: Buffer }> = [];
+    for (const [store, parts] of byStore) {
+      if (!isPlainStore(store)) throw new Error(`Disallowed database name: "${store}"`);
+      const first = parts.find(c => !c.meta.name.includes(':part') || c.meta.name.endsWith(':part0'))!;
+      const columns = checkPlainColumns(store, first.meta.columns);
+      const payload = reassemble(parts);
+      try {
+        const { header, body } = decodePlainPayload(payload, store, isListedValue);
+        const key = store === 'engine.db' ? deriveEngineEncKey(this.vaultKey) : deriveHistoryEncKey(this.vaultKey);
+        try {
+          const { image, counts } = reencryptImage(body, store, columns, header, { key, scratchDir: this.lynoxDir });
+          this.plainCounts.set(store, { what: store, path: 'plain', ...counts });
+          out.push({ meta: { ...first.meta, type: 'sqlite_db', name: store, originalSize: image.length, columns: undefined }, data: image });
+        } finally {
+          zeroize(key);
+        }
+      } finally {
+        // A joined copy holds plaintext the session's cleanup does not reach.
+        if (parts.length > 1) payload.fill(0);
+      }
+    }
+    return out;
   }
 
   /**
