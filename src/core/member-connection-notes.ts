@@ -27,13 +27,19 @@ interface Collector {
   readonly notes: Set<string>;
   readonly said: Map<string, string>;
   readonly plan: string | undefined;
+  /** The collector of the run this one runs in, given each line as it is noted (`forward`). */
+  readonly parent: Collector | undefined;
 }
 
 const collecting = new AsyncLocalStorage<Collector>();
 
-/** Run `fn` with a collector for the member-connection lines its requests produce. */
-export function runCollectingMemberNotes<T>(fn: () => Promise<T>, plan?: string): { notes: ReadonlySet<string>; said: ReadonlyMap<string, string>; done: Promise<T> } {
-  const collector: Collector = { notes: new Set(), said: new Map(), plan };
+/**
+ * Run `fn` with a collector for the member-connection lines its requests produce. `forward`: each
+ * line also goes to the collector of the run in progress as it is noted, not once `fn` ends, so a
+ * run that stops waiting for `fn` (`raceRunAbort`) still ends with the lines noted until then.
+ */
+export function runCollectingMemberNotes<T>(fn: () => Promise<T>, plan?: string, opts?: { readonly forward: true }): { notes: ReadonlySet<string>; said: ReadonlyMap<string, string>; done: Promise<T> } {
+  const collector: Collector = { notes: new Set(), said: new Map(), plan, parent: opts?.forward === true ? collecting.getStore() : undefined };
   return { notes: collector.notes, said: collector.said, done: collecting.run(collector, fn) };
 }
 
@@ -89,8 +95,11 @@ export function noteMemberConnection(line: string, owner?: (plan: string | undef
   if (store === undefined) return;
   const note = owner?.(store.plan) ?? null;
   const recorded = note?.en ?? line;
-  store.notes.add(recorded);
-  if (!store.said.has(recorded)) store.said.set(recorded, note?.de ?? line);
+  const said = note?.de ?? line;
+  for (let at: Collector | undefined = store; at !== undefined; at = at.parent) {
+    at.notes.add(recorded);
+    if (!at.said.has(recorded)) at.said.set(recorded, said);
+  }
 }
 
 /** Pass the lines of an inner collector on to the run in progress, each with its German. */
