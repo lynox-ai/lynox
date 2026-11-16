@@ -1439,7 +1439,9 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	msg.sendUnconfirmed = false;
 	msg.queued = true;
 	msg.queueId = id;
-	await _executeRun(text, undefined, undefined, undefined, id);
+	// A typed message sent again is still the user's own words, also if the run cannot find it
+	// by its id (the list was replaced meanwhile) and adds it anew.
+	await _executeRun(text, undefined, undefined, msg.typed === true ? { typed: true } : undefined, id);
 	// A turn that stopped before its run took the message (offline, a signed-out session) leaves
 	// it queued with an id no queue holds: nothing would ever send it. It is failed again, so the
 	// tap and the reconnect can.
