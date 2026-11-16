@@ -2873,6 +2873,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'markdown.mermaid_reloading': { de: 'Neue Version verfügbar — Seite wird neu geladen, um dieses Diagramm anzuzeigen…', en: 'A newer version is available — reloading to render this diagram…' },
 	'tool.command': { de: 'Befehl', en: 'Command' },
 	'tool.api_request': { de: 'API-Anfrage', en: 'API request' },
+	'tool.api_profiles': { de: 'API-Profile', en: 'API profiles' },
 	'tool.web_search': { de: 'Web-Recherche', en: 'Web search' },
 	'tool.pipeline': { de: 'Workflow', en: 'Workflow' },
 	'tool.question': { de: 'Frage an dich', en: 'Question for you' },
