@@ -16,6 +16,7 @@
 		run_workflow: 'tool.pipeline', ask_user: 'tool.question',
 		task_create: 'tool.task_created', plan_task: 'tool.plan_created',
 		artifact_save: 'tool.artifact_saved', google_calendar: 'tool.calendar',
+		api_setup: 'tool.api_profiles',
 	};
 
 	function meta(name: string) {

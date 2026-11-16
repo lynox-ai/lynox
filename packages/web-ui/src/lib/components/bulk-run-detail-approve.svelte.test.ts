@@ -881,6 +881,50 @@ describe('a hidden character a target adds in place', () => {
 		expect(count()).toBe(t('bulk.hidden.count_products_one'));
 	});
 
+	// U-294: a field too large or too complex to check is said to be unchecked, under the field and
+	// in a count of its own; it is never counted or marked as one that adds.
+	const unchecked = (): Element[] => [...target.querySelectorAll('[data-testid="bulk-unchecked"]')];
+	const uncheckedCount = (): string | null | undefined => target.querySelector('[data-testid="bulk-unchecked-count"]')?.textContent;
+	it('says under an unchecked field that it was not checked, offers taking the target out, and counts it on its own', async () => {
+		run = makeRun({ hiddenAddsTargets: 0, hiddenUncheckedTargets: 2, total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [1, 2].map((seq) => ({ seq, key: `gid://shopify/Product/${String(seq)}`, change: 'update' as const, error: null, deselected: seq === 2,
+			diff: { kind: 'fields', fields: [{ field: 'descriptionHtml', before: '<p>a</p>', after: '<p>b</p>' }] } as BulkTarget['diff'],
+			hiddenUnchecked: ['descriptionHtml'] }));
+		await render();
+		expect(unchecked().map((e) => e.textContent)).toEqual([t('bulk.unchecked.field_take_out'), t('bulk.unchecked.field')]);
+		expect(uncheckedCount()).toBe(tf('bulk.unchecked.count_products', { n: '2' }));
+		// Nothing claims a mark or a character added.
+		expect(marks()).toHaveLength(0);
+		expect(legend()).toBeNull();
+		expect(count()).toBeUndefined();
+	});
+
+	it('says nothing of an unchecked field for a run without one', async () => {
+		run = makeRun({ hiddenAddsTargets: 0, hiddenUncheckedTargets: 0 });
+		await render();
+		expect(unchecked()).toHaveLength(0);
+		expect(uncheckedCount()).toBeUndefined();
+	});
+
+	it('holds the released unchecked sentences word for word, in both languages (U-294)', () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		const released: Record<string, [string, string]> = {
+			'bulk.unchecked.count': ['Bei {n} Zielen konnte lynox nicht prüfen, ob sie unsichtbare Zeichen hinzufügen: Ein Feld ist dafür zu gross oder zu komplex aufgebaut. Fehlt bei ihnen eine Markierung, heisst das nicht, dass sie keine hinzufügen.', 'For {n} targets, lynox could not check whether they add invisible characters: a field is too large or too complex for it. If they show no mark, that does not mean they add none.'],
+			'bulk.unchecked.count_one': ['Bei 1 Ziel konnte lynox nicht prüfen, ob es unsichtbare Zeichen hinzufügt: Ein Feld ist dafür zu gross oder zu komplex aufgebaut. Fehlt bei ihm eine Markierung, heisst das nicht, dass es keine hinzufügt.', 'For 1 target, lynox could not check whether it adds invisible characters: a field is too large or too complex for it. If it shows no mark, that does not mean it adds none.'],
+			'bulk.unchecked.count_products': ['Bei {n} Produkten konnte lynox nicht prüfen, ob sie unsichtbare Zeichen hinzufügen: Ein Feld ist dafür zu gross oder zu komplex aufgebaut. Fehlt bei ihnen eine Markierung, heisst das nicht, dass sie keine hinzufügen.', 'For {n} products, lynox could not check whether they add invisible characters: a field is too large or too complex for it. If they show no mark, that does not mean they add none.'],
+			'bulk.unchecked.count_products_one': ['Bei 1 Produkt konnte lynox nicht prüfen, ob es unsichtbare Zeichen hinzufügt: Ein Feld ist dafür zu gross oder zu komplex aufgebaut. Fehlt bei ihm eine Markierung, heisst das nicht, dass es keine hinzufügt.', 'For 1 product, lynox could not check whether it adds invisible characters: a field is too large or too complex for it. If it shows no mark, that does not mean it adds none.'],
+			'bulk.unchecked.field': ['lynox konnte nicht prüfen, ob hier unsichtbare Zeichen hinzukommen: Der bisherige oder der neue Inhalt ist dafür zu gross oder zu komplex aufgebaut.', 'lynox could not check whether invisible characters are added here: the current or the new content is too large or too complex for it.'],
+			'bulk.unchecked.field_take_out': ['lynox konnte nicht prüfen, ob hier unsichtbare Zeichen hinzukommen: Der bisherige oder der neue Inhalt ist dafür zu gross oder zu komplex aufgebaut. Willst du sichergehen, nimm dieses Ziel aus dem Lauf.', 'lynox could not check whether invisible characters are added here: the current or the new content is too large or too complex for it. To be sure, leave this target out of the run.'],
+		};
+		for (const [key, [de, en]] of Object.entries(released)) {
+			setLocale('de');
+			expect(t(key), key).toBe(de);
+			setLocale('en');
+			expect(t(key), key).toBe(en);
+		}
+	});
+
 	it('shows no mark, legend or count for a target that adds none', async () => {
 		run = makeRun({ hiddenAddsTargets: 0 });
 		await render();

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkHiddenSegments, bulkHiddenCountText, bulkRawText,
+	bulkHiddenSegments, bulkHiddenCountText, bulkRawText, bulkUncheckedCountText, bulkHiddenUnchecked,
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
@@ -1481,6 +1481,23 @@ describe('bulkHiddenSegments', () => {
 		for (const v of ['Wasser\u00adfilter', '<p title="a\u00adb">Wa\u00adsser</p>', 'x ❤\ufe0f \u200b', 'Ketab\u200cha\u200e.', '']) {
 			expect(textOf(bulkHiddenSegments(v, [0x00ad, 0x200c, 0x200e, 0xfe0f], i18n)), v).toBe(bulkValueText(v) === '' ? '' : bulkValueText(v));
 		}
+	});
+});
+
+describe('bulkUncheckedCountText', () => {
+	const i18n = { t: (k: string) => k, tf: (k: string, v: Record<string, string>) => `${k}:${v['n'] ?? ''}` };
+	it('names targets or products, one in the singular, and none at zero or unknown', () => {
+		expect(bulkUncheckedCountText(3, false, i18n)).toBe('bulk.unchecked.count:3');
+		expect(bulkUncheckedCountText(1, false, i18n)).toBe('bulk.unchecked.count_one:1');
+		expect(bulkUncheckedCountText(3, true, i18n)).toBe('bulk.unchecked.count_products:3');
+		expect(bulkUncheckedCountText(1, true, i18n)).toBe('bulk.unchecked.count_products_one:1');
+		expect(bulkUncheckedCountText(0, true, i18n)).toBeNull();
+		expect(bulkUncheckedCountText(undefined, true, i18n)).toBeNull();
+	});
+	it('reads a field as unchecked only where the engine named it', () => {
+		expect(bulkHiddenUnchecked({ hiddenUnchecked: ['descriptionHtml'] }, 'descriptionHtml')).toBe(true);
+		expect(bulkHiddenUnchecked({ hiddenUnchecked: ['descriptionHtml'] }, 'title')).toBe(false);
+		expect(bulkHiddenUnchecked({}, 'descriptionHtml')).toBe(false);
 	});
 });
 
