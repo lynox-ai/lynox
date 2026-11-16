@@ -177,6 +177,15 @@
 	function ownerStamps(trigger: Trigger): boolean {
 		return ownerActs && stampable(trigger);
 	}
+	// The line above a waiting row names the way this row offers (U-276): the confirm block where the
+	// owner can stamp it, the takeover at a paused plan, the run's preview at a bulk run's trigger
+	// (its approval is there; the view never stamps one). Anyone else is told who confirms.
+	function awaitingHintKey(trigger: Trigger): string {
+		if (!ownerActs) return 'triggers.confirm_owner_only_notice';
+		if (stampable(trigger)) return 'triggers.awaiting_hint';
+		if ((trigger.effect ?? '').startsWith('bulk_')) return 'triggers.awaiting_hint_bulk';
+		return 'triggers.awaiting_hint_paused';
+	}
 	// "Check connections": a confirmed schedule whose run can use a connection, opened on demand,
 	// so the preview is not asked for on every refresh (ux U-058, ii-c-min).
 	let checking = $state<Record<string, boolean>>({});
@@ -635,7 +644,7 @@
 								     never outlive the thing it consents to. -->
 								<div class="mt-2 space-y-1.5" data-trigger-consent>
 									<!-- Only a known owner confirms here; anyone else is told who does, in place of the hint and the button. -->
-									<p class="text-xs text-warning" data-trigger-awaits>{t(ownerActs ? 'triggers.awaiting_hint' : 'triggers.confirm_owner_only_notice')}</p>
+									<p class="text-xs text-warning" data-trigger-awaits>{t(awaitingHintKey(trigger))}</p>
 									{#if ownerStamps(trigger)}
 										<!-- The owner's block reads the schedule from the stamp preview, so what
 										     is shown is what the stamp holds (`StampConfirm`). -->

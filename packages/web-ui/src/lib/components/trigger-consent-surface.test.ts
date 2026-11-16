@@ -123,7 +123,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const shape = body.split('\n').map((l) => l.trim()).filter((l) => l !== '').join('\n');
 		expect(shape).toBe([
 			'<div class="mt-2 space-y-1.5" data-trigger-consent>',
-			`<p class="text-xs text-warning" data-trigger-awaits>{t(ownerActs ? 'triggers.awaiting_hint' : 'triggers.confirm_owner_only_notice')}</p>`,
+			`<p class="text-xs text-warning" data-trigger-awaits>{t(awaitingHintKey(trigger))}</p>`,
 			'{#if ownerStamps(trigger)}',
 			'<StampConfirm id={trigger.id} mode="held" cronText={cronToHuman} onstamped={() => void stamped(trigger)} />',
 			'{:else if showsInstruction(trigger)}',
