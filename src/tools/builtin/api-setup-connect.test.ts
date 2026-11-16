@@ -1402,6 +1402,33 @@ describe('connect refuses before the link what the route would refuse', () => {
     expect(result).not.toContain('/api/oauth/connect/');
   });
 
+  // The way on, by who asks and whose profile reads the name. On a built-in provider the client
+  // id's name is fixed, so the owner is pointed at the other profile; a mandate's session changes
+  // nothing of the owner's and is told who can. A profile without a built-in provider is refused
+  // earlier (no authorization page), so these are all on one.
+  const OTHER_READS_IT: ApiProfile = { id: 'shop-pat', name: 'Shop PAT', base_url: 'https://acme.shops.example.com/admin', description: 'd', auth: { type: 'bearer', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'] } };
+  const FIXED = 'On the built-in "example-shop" provider that name is fixed: change the other profile so it reads its credential under a name of its own, then connect.';
+  const OWN_NAME = 'Store the client id under a name of its own, update auth.oauth.client_id_key, then connect.';
+  const OWNER_ONLY = 'Nothing was sent. Only the owner of this instance can change that; tell the owner.';
+  // True whichever profile reads the name, this one or another; a mandate is not told which (U-288).
+  const MANDATE_TEXT = `Error: profile "shop-api" reads its client id from a name that is also read as a credential, so the route would refuse it. ${OWNER_ONLY}`;
+  it.each([
+    ['the owner, another profile reading the name', false, true, `Error: profile "shop-api" reads its client id from "EXAMPLE_SHOP_CLIENT_ID", and another profile reads that name as a credential. A client id is sent in the link, so the route would refuse it. ${FIXED}`, [OWN_NAME, OWNER_ONLY]],
+    ['the owner, only this profile reading the name', false, false, OWN_NAME, [FIXED, OWNER_ONLY]],
+    ['a mandate, another profile reading the name', true, true, MANDATE_TEXT, [FIXED, OWN_NAME]],
+    ['a mandate, only this profile reading the name', true, false, MANDATE_TEXT, [FIXED, OWN_NAME]],
+  ] as const)('says the way past a client id another credential shares, for %s', async (_label, asMandate, otherReads, says, saysNot) => {
+    const store = new ApiStore();
+    const p = scoped(asMandate ? { created_by: TAG } : {});
+    store.register(otherReads ? p : { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, client_id_key: 'EXAMPLE_SHOP_CLIENT_SECRET' } } });
+    // Held back by the admission or not, it is stored, and the check reads stored profiles.
+    if (otherReads) store.register(OTHER_READS_IT);
+    const result = await connect(asMandate ? mandateAgent(store) : agentWith(store));
+    expect(result).toContain(says);
+    for (const not of saysNot) expect(result).not.toContain(not);
+    expect(result).not.toContain('/api/oauth/connect/');
+  });
+
   it('hands a mandate no link when its token slot is a name the owner\'s profile reads', async () => {
     const store = new ApiStore();
     store.register({ ...scoped(), created_by: TAG });

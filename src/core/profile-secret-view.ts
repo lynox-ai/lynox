@@ -1040,7 +1040,16 @@ export function unboundNameText(name: string, profileId: string): string {
  */
 export function mayServeAsClientId(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string): boolean {
   if (isProtectedSecretWrite(name)) return false;
-  return !apiStore.knownProfiles().some((p) => credentialNames(p).has(name));
+  return clientIdCredentialReader(apiStore, name) === undefined;
+}
+
+/**
+ * A profile that reads `name` as a credential, which is why {@link mayServeAsClientId} refuses
+ * it as a client id; not the profile `except`, when given. Undefined when none does (the name may
+ * still be refused as a guarded key, or be read only by `except` itself).
+ */
+export function clientIdCredentialReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string, except?: string): ApiProfile | undefined {
+  return apiStore.knownProfiles().find((p) => p.id !== except && credentialNames(p).has(name));
 }
 
 /**

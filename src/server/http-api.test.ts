@@ -5875,7 +5875,7 @@ describe('LynoxHTTPApi', () => {
 
     async function connect(
       author: string | undefined, asMandate: boolean, id = 'books',
-      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; noClientId?: boolean; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string } = {},
+      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; noClientId?: boolean; readers?: import('../core/api-store.js').ApiProfile[]; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string } = {},
     ): Promise<{ status: number; text: string; state: string | null; location: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
@@ -5888,6 +5888,8 @@ describe('LynoxHTTPApi', () => {
       // Every `others` here names the connection's token slot: the admission holds it back now,
       // still stored, and the checks read stored profiles.
       for (const other of opts.others ?? []) expect(store.register(other)).toBe(false);
+      // Held back by the admission or not, these are stored, and the checks read stored profiles.
+      for (const reader of opts.readers ?? []) store.register(reader);
       mockGetApiStore.mockReturnValue(store);
       mockSecretResolve.mockImplementation((n: string) => (n === 'BOOKS_CLIENT_ID' && !opts.noClientId ? 'client-id-stored' : n === 'BOOKS_CLIENT_SECRET' ? 'client-secret-stored' : null));
       const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
@@ -6114,6 +6116,21 @@ describe('LynoxHTTPApi', () => {
       expect(r.location).not.toContain('client-secret-stored');
       expect(r.text).toContain(says);
       expect(r.text).not.toContain(saysNot);
+      expect(r.state).toBeNull();
+    });
+
+    // On a built-in provider the client id's name is fixed: when another profile reads it as a
+    // credential, the owner is pointed at that profile, by name. A mandate's session is told who can.
+    const OTHER_READS_IT = { id: 'books-pat', name: 'Books PAT', base_url: 'https://api.bexio.com/3.0', description: 'd', auth: { type: 'bearer' as const, vault_keys: ['BOOKS_CLIENT_ID'] } };
+    const POINTS_AT_OTHER = 'The client id of this profile is stored under a name that another profile &quot;Books PAT&quot; reads as a credential. On this provider the name is fixed, so change the name the other profile reads its credential from, then ask for a new link. Nothing was sent to the provider.';
+    it.each([
+      ['the owner\'s session is pointed at the other profile', undefined, false, POINTS_AT_OTHER, [STORE_IT, OWNER_STORES_IT]],
+      ['a mandate\'s session is told who can', TAG, true, OWNER_STORES_IT, [POINTS_AT_OTHER, STORE_IT]],
+    ] as const)('refuses a client id another profile reads as a credential: %s', async (_label, author, asMandate, says, saysNot) => {
+      const r = await connect(author, asMandate, 'books', { readers: [OTHER_READS_IT] });
+      expect(r.status).toBe(409);
+      expect(r.text).toContain(says);
+      for (const not of saysNot) expect(r.text).not.toContain(not);
       expect(r.state).toBeNull();
     });
 
