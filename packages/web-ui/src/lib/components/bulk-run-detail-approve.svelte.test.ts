@@ -831,6 +831,16 @@ describe('approving an undo, per target', () => {
 		expect(buttonByText(t('bulk.undo.approve'))?.disabled).toBe(false);
 	});
 
+	it('does not say a target was taken out on the undo of a run that only created entries', async () => {
+		run = undoRun({ total: 1, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change === 'delete');
+		await render();
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')).toBeNull();
+		expect(target.querySelector('[data-testid="bulk-undo-all-taken-out"]')).toBeNull();
+		expect(target.textContent).toContain(t('bulk.undo.creates_one'));
+		expect(buttonByText(t('bulk.undo.approve'))?.disabled).toBe(false);
+	});
+
 	it('names several entries left to delete by their number, and the box in the plural', async () => {
 		run = undoRun({ total: 4, deselected: 2, changes: { update: 0, create: 0, delete: 2, unchanged: 0, invalid: 0 } });
 		targets = [...undoTargets().map((x) => (x.change === 'delete' ? x : { ...x, deselected: true })),
@@ -838,6 +848,7 @@ describe('approving an undo, per target', () => {
 		await render();
 		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')?.textContent).toBe(tf('bulk.undo.only_deletes', { n: '2' }));
 		expect(target.textContent).toContain(tf('bulk.undo.creates', { k: '2' }));
+		expect(buttonByText(t('bulk.undo.approve'))?.disabled).toBe(false);
 	});
 
 	it('offers no target out of the undo of an atomic run, and says why once above the list', async () => {
