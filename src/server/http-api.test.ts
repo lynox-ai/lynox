@@ -20134,7 +20134,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       config.mockReturnValue({ default_tier: 'deep', language: 'de' });
       try {
         const { cookie } = await arrange();
-          mockExchangeToken.mockResolvedValue(refusedExchange);
+        mockExchangeToken.mockResolvedValue(refusedExchange);
         const page = await (await call(signed(good()), cookie)).text();
         expect(page).toContain('<p>Shopify-Verbindungen sind auf dieser Instanz ausgeschaltet. Es wurde nichts gespeichert. Ein neuer Versuch ändert daran nichts; einschalten kann sie nur lynox.</p>');
         expect(page).not.toContain('neu starten');
