@@ -279,6 +279,7 @@ export function choosePlainPaths(input: PathInput): Map<PlainStore, { path: 'pla
     const plainLedgers = input.sweeps.plainBytes;
     if (plainLedgers === null || Math.max(plainLedgers, input.sweeps.rawBytes) > input.sweepsCapBytes) out.set('engine.db', { path: 'raw', reason: 'ledgers' });
   }
+  // run-group-starter: a loop that ends within this call; it starts nothing that outlives it.
   for (;;) {
     const enginePlain = out.get('engine.db')?.path === 'plain';
     const sweepsTravel = input.sweeps ? (enginePlain && input.sweeps.plainBytes !== null ? input.sweeps.plainBytes : input.sweeps.rawBytes) : 0;
@@ -330,6 +331,7 @@ export async function readDestinationHealth(
     const reader = res.body.getReader();
     const parts: Uint8Array[] = [];
     let size = 0;
+    // run-group-starter: reads one bounded body within this call; it starts nothing that outlives it.
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
