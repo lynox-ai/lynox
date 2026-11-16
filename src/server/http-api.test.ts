@@ -875,20 +875,9 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
-  // ── T1-1 · npx/bare-node first run must be authenticatable ───────────────
-  //
-  // The SvelteKit Web UI handler snapshots process.env into
-  // $env/dynamic/private at module-init time (build/handler.js `server.init()`
-  // → `set_private_env`). If LYNOX_HTTP_SECRET is not in process.env when the
-  // handler is import()-ed, the Web UI auth gate sees no secret and disables
-  // itself, while the engine API (which reads process.env live) keeps
-  // enforcing — a fresh npx/bare-node first run then lands on /app with every
-  // /api/* 401ing ("Sitzung abgelaufen" wall) and /login bouncing to /app.
-  // The fix calls ensureHttpSecret() inside _tryLoadWebUiHandler() BEFORE the
-  // handler import(); this test pins that ordering.
   describe('boot order: push before the worker loop', () => {
     // The loop ticks as soon as it starts. A scheduled question it escalates before the push
-    // channel is registered finds no channel and is recorded as "no push channel", on an
+    // channel is registered finds no channel at all and is recorded as `no_channel`, on an
     // instance where push works.
     // Its own instance: the shared one booted before beforeEach cleared every mock's calls.
     it('registers the push channel with the router before it starts the worker loop', async () => {
@@ -907,6 +896,17 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  // ── T1-1 · npx/bare-node first run must be authenticatable ───────────────
+  //
+  // The SvelteKit Web UI handler snapshots process.env into
+  // $env/dynamic/private at module-init time (build/handler.js `server.init()`
+  // → `set_private_env`). If LYNOX_HTTP_SECRET is not in process.env when the
+  // handler is import()-ed, the Web UI auth gate sees no secret and disables
+  // itself, while the engine API (which reads process.env live) keeps
+  // enforcing — a fresh npx/bare-node first run then lands on /app with every
+  // /api/* 401ing ("Sitzung abgelaufen" wall) and /login bouncing to /app.
+  // The fix calls ensureHttpSecret() inside _tryLoadWebUiHandler() BEFORE the
+  // handler import(); this test pins that ordering.
   describe('T1-1 · Web UI handler import vs. ensureHttpSecret ordering', () => {
     // A stub that mimics the SvelteKit handler: at module-init time it records
     // whatever LYNOX_HTTP_SECRET is currently in process.env to a sentinel file.
