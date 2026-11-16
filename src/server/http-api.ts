@@ -9356,8 +9356,7 @@ export class LynoxHTTPApi {
       if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
       // The fields a person types; not the ids, which a random-looking id would fail.
       if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
-      // Checked here rather than left to `update`, which throws: a thrown error answers
-      // 500, and a refused request must not mark the trigger as a mandate's edit either.
+      // Checked here rather than left to `update`, which throws: a thrown error answers 500.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {
         errorResponse(res, 400, 'Invalid modelTier: use fast, balanced or deep, or null to clear it.');
         return;

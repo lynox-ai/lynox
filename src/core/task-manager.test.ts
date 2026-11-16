@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier, TriggerFieldsNotCarriedError, WebhookTriggerScheduleError } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { stampFromRow } from './plan-stamp.js';
 import { runAsHandRun } from './hand-run-door.js';
@@ -259,6 +259,21 @@ describe('TaskManager', () => {
       expect(() => tm.update(reminder.id, { modelTier: 'deep' })).toThrow(TriggerTierUnsupportedError);
       expect(tm.getTrigger(reminder.id)?.model_tier).toBeUndefined();
       expect(tm.update(reminder.id, { modelTier: null })?.model_tier).toBeUndefined();
+    });
+
+    it('calls the hook before the write only once every check passed: not for a refused tier, schedule on a webhook, or fields a plan does not carry', () => {
+      const hook = vi.fn();
+      const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      expect(() => tm.update(reminder.id, { modelTier: 'deep' }, undefined, undefined, hook)).toThrow(TriggerTierUnsupportedError);
+      history.insertTrigger({ id: 'wh-hook', title: 'On delivery', source: 'webhook', effect: 'run_agent' });
+      expect(() => tm.update('wh-hook', { scheduleCron: '0 9 * * *' }, undefined, undefined, hook)).toThrow(WebhookTriggerScheduleError);
+      expect(() => tm.update(reminder.id, { priority: 'high' }, undefined, undefined, hook)).toThrow(TriggerFieldsNotCarriedError);
+      expect(hook).not.toHaveBeenCalled();
+      tm.update(reminder.id, { title: 'Ping, daily' }, undefined, undefined, hook);
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect(hook.mock.calls[0]![0]).toMatchObject({ id: reminder.id, title: 'Ping' });
+      tm.complete(reminder.id, undefined, undefined, hook);
+      expect(hook).toHaveBeenCalledTimes(2);
     });
 
     it('refuses a model tier it does not know, legacy aliases included', () => {

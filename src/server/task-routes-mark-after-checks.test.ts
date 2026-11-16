@@ -94,10 +94,11 @@ describe('the task routes mark a helper\'s change of a schedule only once it pas
   const untouched = { edited_by: null, mandate_editor: null, confirmed_at: STAMP };
   const marked = { edited_by: 'mandate:ida@example.invalid', mandate_editor: 'mandate:ida@example.invalid', confirmed_at: null };
 
-  it('PATCH with an invalid schedule is refused and leaves the stamp; a valid one marks it', async () => {
+  it('PATCH with an invalid schedule changes nothing and leaves the stamp; a valid one marks it', async () => {
     seed('mark-cron');
     const refused = await ask('PATCH', '/api/tasks/mark-cron', mandateCookie, { scheduleCron: 'every now and then' });
-    expect(refused.status).toBeGreaterThanOrEqual(400);
+    // A plain error from `update`, answered 500 as before this change; what this test holds is the row.
+    expect(refused.status).toBe(500);
     expect(row('mark-cron')).toEqual(untouched);
     const ok = await ask('PATCH', '/api/tasks/mark-cron', mandateCookie, { scheduleCron: '0 10 * * 1' });
     expect(ok.status, 'positive control: the helper may change it').toBe(200);
