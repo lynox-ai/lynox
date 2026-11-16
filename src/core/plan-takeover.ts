@@ -33,7 +33,7 @@ import {
 import type { StampEntry } from './plan-run-context.js';
 import { stampExpect, stampFromRow } from './plan-stamp.js';
 import {
-  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag,
+  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, editorCovered, isMandateTag, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag,
   type PlanMandate, type RequestPrincipal,
 } from './request-principal.js';
 import type { TriggerStore } from './trigger-store.js';
@@ -92,7 +92,11 @@ export interface TakeoverPreview {
   readonly members: readonly TakeoverMember[];
   /** `owner`, or the tag of the workflow's member, which stays. */
   readonly runsAs: string;
-  readonly workflow: { readonly id: string; readonly name: string; readonly takenOver: boolean } | null;
+  /** `from`: whose mark on the workflow the takeover reads (`planMandate`), by address, and as which role: F2 names that member. */
+  readonly workflow: {
+    readonly id: string; readonly name: string; readonly takenOver: boolean;
+    readonly from: { readonly name: string; readonly role: 'workflow-edited' | 'workflow-created' } | null;
+  } | null;
   readonly memberChanges: readonly TakeoverMemberChange[];
   readonly alsoReleased: ReadonlyArray<{ readonly id: string; readonly title: string }>;
   readonly connections: readonly StampEntry[];
@@ -254,11 +258,11 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
     const principal = { kind: 'mandate' as const, email: e.email, mandateId: e.mandateId };
     const ended = principalHasEnded(principal, isLive);
     // A login whose workflow read failed pauses for its mandate knowing only its roles on the plan
-    // itself (`pauseEndedPlans`). Its workflow roles are read here, where the workflow reads — on
-    // the same grant only — so F2 says the workflow moves, and the member that stays is said to
-    // have changed it when it did. A pause that knew a workflow role keeps its roles.
-    const knewWorkflow = e.roles.some(isWorkflowRole);
-    const added = knewWorkflow ? [] : roles(principal).filter(isWorkflowRole);
+    // itself (`pauseEndedPlans`), and a pause that knew a workflow role knew it as of the pause.
+    // The workflow roles are read here, where the workflow reads — on the same grant only — and
+    // added to the pause's, which stay: so F2 says the workflow moves, and a member who changed it
+    // after a pause that knew only its creation is said to have changed it.
+    const added = roles(principal).filter((r) => isWorkflowRole(r) && !e.roles.includes(r));
     return { name: e.email, roles: [...e.roles, ...added], ended, reason: ended ? e.reason : null };
   });
   const coveredMarks: Array<{ tag: string | undefined; id: string | undefined }> = [
@@ -381,6 +385,18 @@ export function workflowsCoveredByTakeover(deps: TakeoverDeps): Map<string, numb
   return covered;
 }
 
+/** The preview's workflow: null without one, or when no mandate's mark on it is left to take over. */
+function workflowOfPreview(wf: WorkflowRow | undefined, coverWorkflow: boolean): TakeoverPreview['workflow'] {
+  if (wf === undefined) return null;
+  const a = planAuthorshipOf(wf);
+  const mark = planMandate(a);
+  if (mark === undefined) return null;
+  // `planMandate` reads the editor's mark first, when it is not covered; else the creator's.
+  const role = isMandateTag(a.mandate_editor) && !editorCovered(a) ? 'workflow-edited' : 'workflow-created';
+  const from = mark.principal.kind === 'mandate' ? { name: mark.principal.email, role } as const : null;
+  return { id: wf.id, name: wf.name, takenOver: coverWorkflow, from };
+}
+
 /** What the owner is shown before taking the plan over: one read, no await. */
 export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreviewResult {
   if (!planPauseOn()) return { kind: 'refused', refusal: 'not_available' };
@@ -393,8 +409,7 @@ export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreview
       expect: plan.expect,
       members: plan.members,
       runsAs: principalTag(plan.runsAs),
-      workflow: plan.wf === undefined || planMandate(planAuthorshipOf(plan.wf)) === undefined
-        ? null : { id: plan.wf.id, name: plan.wf.name, takenOver: plan.coverWorkflow },
+      workflow: workflowOfPreview(plan.wf, plan.coverWorkflow),
       memberChanges: plan.memberChanges,
       alsoReleased: plan.released.map((r) => ({ id: r.id, title: r.title })),
       connections: plan.connections,

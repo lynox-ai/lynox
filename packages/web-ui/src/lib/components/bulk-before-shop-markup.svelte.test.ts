@@ -17,7 +17,7 @@ const initial = getLocale();
 afterEach(() => { setLocale(initial); });
 
 describe('before_has_shop_markup: the sentence under the product', () => {
-	it('words it as ux decided, in German, for the owner and a mandate, with and without the date', () => {
+	it('words it in German, for the owner and a mandate, with and without the date', () => {
 		setLocale('de');
 		const tail = 'Pass die Beschreibung im Shopify-Admin so an, wie sie sein soll; soll sie so bleiben, ändere trotzdem ein Wort oder Satzzeichen, dann gilt sie als deine. Bitte lynox danach im Chat, den Lauf neu zu planen.';
 		expect(said(owner, '03.11.2026')).toBe(`Diese Beschreibung hat der lynox-Lauf vom 03.11.2026 geschrieben, und dein Shop hat dabei Markup ergänzt, das lynox nicht gesendet hat. Sie war nie dein Stand, deshalb ändert lynox dieses Produkt nicht. ${tail}`);
@@ -27,7 +27,7 @@ describe('before_has_shop_markup: the sentence under the product', () => {
 		expect(said(mandate, null)).toBe(`Diese Beschreibung hat der lynox-Lauf geschrieben, und der Shop hat dabei Markup ergänzt, das lynox nicht gesendet hat. Sie war nie der Stand des Inhabers, deshalb ändert lynox dieses Produkt nicht. ${mandateTail}`);
 	});
 
-	it('words it as ux decided, in English, for the owner and a mandate, with and without the date', () => {
+	it('words it in English, for the owner and a mandate, with and without the date', () => {
 		setLocale('en');
 		const tail = 'Edit the description in the Shopify admin to what it should be; if it should stay as it is, still change one word or punctuation mark, and it counts as yours. Then ask lynox in the chat to plan the run again.';
 		expect(said(owner, '11/03/2026')).toBe(`This description was written by the lynox run of 11/03/2026, and your shop added markup to it that lynox did not send. It was never your version, so lynox does not change this product. ${tail}`);

@@ -7,6 +7,7 @@ import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolCallImitationError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
+import { copyToolContext } from '../../core/tool-context.js';
 import { loopGuardStopReason } from '../../core/loop-guard-stop.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
@@ -42,8 +43,9 @@ const SPAWN_TIMEOUT = 10 * 60 * 1000;
  * from outside is left out: a grandchild it delegated to records and debits its own spend,
  * and an in-run helper call debits itself (spawned children run none, see
  * `recordExternalCost`). The child's ceiling still counts it (`estimatedCostUSD`, which
- * `onSettled` hands to the delegating run). The child's run row adds one display term on
- * top, see {@link childRowCostUSD}.
+ * `onSettled` hands to the delegating run, together with the bounds of the child's ended calls
+ * for its ceiling only). The child's run row adds one display term on top, see
+ * {@link childRowCostUSD}.
  */
 function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
   if (!snap) return 0;
@@ -1514,8 +1516,13 @@ async function executeThinker(
    * The child's actual spend, reported once it stops for ANY reason — done,
    * failed, or aborted. A child that dies halfway still spent what it spent,
    * and the caller needs that number even though it never receives a result.
+   *
+   * `capOnlyUsd` is the rest of the child's ceiling figure: the upper bounds of its calls
+   * that were ended (a stop, its guard, its stream timeout), which its own ceiling counted
+   * and `costUsd` leaves out. The caller books it onto the delegating run's ceiling only;
+   * `costUsd` alone is what is shown for the child.
    */
-  onSettled?: (costUsd: number) => void,
+  onSettled?: (costUsd: number, capOnlyUsd: number) => void,
   /**
    * The slice of the PARENT run's remaining ceiling this child was granted, or
    * `undefined` when the parent has no ceiling to divide — then the child keeps its own
@@ -1796,7 +1803,9 @@ async function executeThinker(
     // also write-reachable — a child can mutate parent state through
     // dataStore / apiStore / runHistory (e.g. updateRun on the parent's
     // row). Acceptable because the child IS trusted code, but not hidden.
-    toolContext: { ...parentAgent.toolContext },
+    // `copyToolContext` keeps the mark of a context that does not carry the instance's network
+    // policy, so the provider-side web search stays withheld for the child as for its parent.
+    toolContext: copyToolContext(parentAgent.toolContext),
     // T2-X1 part 2: share the parent's SecretStore so `ask_secret`, vault
     // reads, and tool credential lookups work in the child. Documented
     // reach delta: a child's `http_request` will auto-inject `Bearer` tokens
@@ -2089,7 +2098,7 @@ async function executeThinker(
     // One place for all three exits. The success and failure branches above
     // each read the same snapshot for their own bookkeeping; reporting it here
     // means an abort — which takes neither branch's `return` — is still counted.
-    onSettled?.(childAgent?.getCostSnapshot()?.estimatedCostUSD ?? 0);
+    onSettled?.(childAgent?.getCostSnapshot()?.estimatedCostUSD ?? 0, childAgent?.getCapOnlyCostUsd() ?? 0);
   }
 }
 
@@ -2555,7 +2564,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         const childStart = Date.now();
         const sub = subAgents[i]!;
 
-        return executeThinker(spec, agent, makeChildStream(sub), childDepth, (usd) => {
+        return executeThinker(spec, agent, makeChildStream(sub), childDepth, (usd, capOnlyUsd) => {
           costBySub[sub.id] = usd;
           // ⛔ The hold goes back BEFORE the actual cost is booked, and the order is not
           // cosmetic: holding and spending at once would count this child twice against
@@ -2590,6 +2599,15 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           // softened for. The real `Agent` cannot throw here; an `IAgent` from outside
           // this repo can.
           try { agent.chargeExternalCost?.(usd); } catch { /* never mask the child's own outcome */ }
+          // ⛔ The bounds of the child's ended calls, onto the same ceiling and onto the ceiling
+          // ONLY. The child's own ceiling counted them against its share; `usd` (its snapshot)
+          // leaves them out, so without this line the share comes back above and the
+          // delegating run sees room the child used. Cap-only, because an ended call is never
+          // debited: as spend it would reach this run's snapshot, which its cost warning shows.
+          // Each bound is booked once, here: a child cannot spawn (`SPAWN_EXCLUDED`), and the
+          // session-counter take-back in `executeThinker` is a different counter. Fenced like
+          // the line above.
+          try { agent.chargeExternalCapOnlyCost?.(capOnlyUsd); } catch { /* never mask the child's own outcome */ }
         }, shares === null ? undefined : shares[i], deadline)
           .then(
             (value) => {

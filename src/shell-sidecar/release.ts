@@ -44,6 +44,21 @@ export async function killUntilEmpty(uid: number, ops: ReleaseOps, maxPasses = M
   return null;
 }
 
+/**
+ * The residue as counts per place, never its names: a call chose the names of what it left in
+ * the calls dir, /dev/shm and /dev/mqueue, and the reason reaches the log as a QUARANTINE line.
+ * A path entry counts under its directory, a System V entry (`shm 7`) under its kind.
+ */
+export function residueSummary(residue: readonly string[]): string {
+  const by = new Map<string, number>();
+  for (const entry of residue) {
+    const place = entry.startsWith('/') ? entry.slice(0, Math.max(1, entry.lastIndexOf('/'))) : (entry.split(' ')[0] ?? '?');
+    by.set(place, (by.get(place) ?? 0) + 1);
+  }
+  const parts = [...by].map(([place, n]) => `${place} ${n}`).join(', ');
+  return `${residue.length} ${residue.length === 1 ? 'entry' : 'entries'} (${parts})`;
+}
+
 export async function releaseUid(uid: number, ops: ReleaseOps, maxPasses = MAX_KILL_PASSES): Promise<ReleaseResult> {
   const first = await killUntilEmpty(uid, ops, maxPasses);
   if (first === null) return { ok: false, reason: `uid ${uid}: processes left after ${maxPasses} kill passes` };
@@ -51,6 +66,6 @@ export async function releaseUid(uid: number, ops: ReleaseOps, maxPasses = MAX_K
   const second = await killUntilEmpty(uid, ops, maxPasses);
   if (second === null) return { ok: false, reason: `uid ${uid}: processes left after the sweep and ${maxPasses} kill passes` };
   const residue = await ops.residue(uid);
-  if (residue.length > 0) return { ok: false, reason: `uid ${uid}: residue after the sweep: ${residue.slice(0, 5).join(', ')}` };
+  if (residue.length > 0) return { ok: false, reason: `uid ${uid}: residue after the sweep: ${residueSummary(residue)}` };
   return { ok: true, passes: first + second };
 }

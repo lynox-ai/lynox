@@ -86,6 +86,14 @@ export interface ToolEntry<TInput = unknown> {
    */
   redactInputForAudit?: ((input: TInput) => unknown) | undefined;
   /**
+   * For a tool that answers a call it did not carry out with an ordinary string (a refusal, a
+   * failed check): the reason, read from that answer, or null when the call was done. A reason
+   * makes the returned answer a soft failure, exactly as a thrown `ToolSoftFailure` with that
+   * answer would: the model reads the same text, the ledger records the reason, and the call is
+   * not shown as done. The tool reads only its own answer's form, never content it passed on.
+   */
+  failureOf?: ((answer: string) => string | null) | undefined;
+  /**
    * For a tool that writes a file named by its `path` field: the file it would write for that
    * path, resolved as its handler resolves it (the workspace, a link in it, the artifacts
    * directory), or `null` when the handler would refuse the path. The Permission Guard reads its
@@ -292,7 +300,10 @@ export type StreamEvent =
   // child and forwarded by `spawn` — same stamp as `tool_call`/`tool_result`.
   | { type: 'error';       message: string; fatal?: boolean | undefined; agent: string; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
-  | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }
+  // `afterTurnEnd`: the failed attempt had already sent its `turn_end` (its reply reached
+  // `message_delta`), so a consumer that marks call boundaries at `turn_end` knows the end it
+  // saw was this attempt's own, not the previous call's.
+  | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string; afterTurnEnd?: boolean | undefined }
   | { type: 'cost_warning';  snapshot: CostSnapshot;               agent: string }
   | { type: 'continuation';  iteration: number; max: number;       agent: string }
 

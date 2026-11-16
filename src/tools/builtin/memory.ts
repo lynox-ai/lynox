@@ -290,6 +290,9 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     if (!agent.memory) {
       return 'Memory is not configured for this agent.';
     }
+    // Without engine.db, before anything is written (see `Memory.refuseChangesWithoutStore`).
+    const engineLess = agent.memory.engineLessRefusal?.('model') ?? null;
+    if (engineLess !== null) return engineLess;
     if (agent.secretStore?.containsSecret(input.content)) {
       return 'Cannot store content containing secret values in memory. Remove secrets and try again.';
     }
@@ -437,6 +440,9 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
     if (!agent.memory) {
       return 'Memory is not configured for this agent.';
     }
+    // Without engine.db, before anything is written (see `Memory.refuseChangesWithoutStore`).
+    const engineLess = agent.memory.engineLessRefusal?.('model') ?? null;
+    if (engineLess !== null) return engineLess;
 
     // An empty/whitespace pattern would substring-match (and thus remove) EVERYTHING —
     // never the intent, and a prompt-injected empty pattern must not wipe the notebook.
@@ -519,6 +525,9 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     if (!agent.memory) {
       return 'Memory is not configured for this agent.';
     }
+    // Without engine.db, before anything is written (see `Memory.refuseChangesWithoutStore`).
+    const engineLess = agent.memory.engineLessRefusal?.('model') ?? null;
+    if (engineLess !== null) return engineLess;
     if (agent.secretStore?.containsSecret(input.new_content)) {
       return 'Cannot store content containing secret values in memory. Remove secrets and try again.';
     }
@@ -800,6 +809,9 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
     if (!agent.memory) {
       return 'Memory is not configured for this agent.';
     }
+    // Without engine.db, before anything is written (see `Memory.refuseChangesWithoutStore`).
+    const engineLess = agent.memory.engineLessRefusal?.('model') ?? null;
+    if (engineLess !== null) return engineLess;
 
     // An empty/whitespace pattern substring-matches (and would then delete) EVERY
     // line — an injected empty promote must not wipe the source namespace. Mirror

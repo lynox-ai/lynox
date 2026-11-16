@@ -35,6 +35,8 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
   }]);
   return {
     ...real,
+    // Its default register is bound inside the real module, so it is handed this one too.
+    builtInPresetOf: (profile: Parameters<typeof real.builtInPresetOf>[0]) => real.builtInPresetOf(profile, register),
     derivePresetEndpoints: (id: string, params: Readonly<Record<string, unknown>> | undefined) => real.derivePresetEndpoints(id, params, register),
     presetIds: () => register.ids(),
     OAUTH_PRESETS: register,

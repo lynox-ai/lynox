@@ -100,6 +100,15 @@ export interface AgentConfig {
    */
   principal?:          import('../core/request-principal.js').RequestPrincipal | undefined;
   /**
+   * A workflow step's own `fail_step` tool (runtime-adapter.ts, `createFailStepTool`), when this
+   * agent runs a step. Matched by IDENTITY of this entry, never by its name: it passes the
+   * mandate lock (it has no effect beyond ending its own step), it runs alone in the model
+   * response that calls it (the other calls of that response are skipped, not run), and it is
+   * not handed on to children (`getAvailableTools`). A different tool that happens to carry the
+   * same name gets none of the three. Absent for every agent that is not a step agent.
+   */
+  stepFailTool?:       import('./tools.js').ToolEntry | undefined;
+  /**
    * Sink for this agent's own tool calls — the ONE owner of tool-call
    * persistence. The agent calls it with the run id it is currently working
    * under, so a spawned child (which carries its OWN `currentRunId`) books onto
@@ -123,6 +132,11 @@ export interface AgentConfig {
    *  add `unknown` to {@link conversationGrants}; a step or sub-agent turn is built from what
    *  the root already took in. */
   conversationRoot?: boolean | undefined;
+  /** True when {@link onStream} adds each `turn_end` event's usage into the run's own usage,
+   *  which the run's cost line and debit are priced from (the Session's handler does). A model
+   *  call ended after its `turn_end` then books no estimate on top. Default false: a consumer
+   *  that drops `turn_end` (a spawned child's stream) leaves that usage on no line. */
+  turnEndUsageCounted?: boolean | undefined;
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
   /** The `<secrets>` listing of the vault, given with the briefing but only to an owner's turn:

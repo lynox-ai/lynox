@@ -4001,3 +4001,32 @@ describe('contractGrants on a GraphQL endpoint', () => {
     expect(grants('POST', 'https://h.example/v1/a')).toBe(true);
   });
 });
+
+describe('contractGrants on a GraphQL API whose URL does not say so', () => {
+  const contract = (origin?: 'reviewed') => ({
+    version: 7, ...(origin ? { origin } : {}), grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+    hostPatterns: ['api.monday.com'], pathPatterns: ['/v2'], paramConstraints: {},
+  });
+  const JSON_CT = { 'content-type': 'application/json' };
+  const grants = (body: string | undefined, origin?: 'reviewed', headers: Record<string, string> = JSON_CT): boolean =>
+    contractGrants('http_request', { method: 'POST', url: 'https://api.monday.com/v2', headers, body }, contract(origin) as never);
+
+  it('grants no mutation a POST to the path would carry, nor a persisted query', () => {
+    expect(grants(JSON.stringify({ query: 'mutation { delete_item (item_id: 1) { id } }' }))).toBe(false);
+    expect(grants(JSON.stringify({ query: 'mutation { a }' }), 'reviewed')).toBe(false);
+    expect(grants(JSON.stringify({ documentId: 'abc' }))).toBe(false);
+  });
+
+  it('grants no write whose URL carries a mutation, whatever the body; CONTROL: a GET with one is not read here', () => {
+    const at = (method: string, url: string): boolean => contractGrants('http_request', { method, url, headers: JSON_CT, body: method === 'GET' ? undefined : '{}' }, contract() as never);
+    expect(at('POST', 'https://api.monday.com/v2?query=mutation%7Bx%7D')).toBe(false);
+    expect(at('POST', 'https://api.monday.com/v2?q=x')).toBe(true);
+    expect(at('GET', 'https://api.monday.com/v2?query=mutation%7Bx%7D')).toBe(true);
+  });
+
+  it('CONTROL: grants a read there, and a REST POST whose data names a subscription under a reviewed contract', () => {
+    expect(grants(JSON.stringify({ query: '{ boards { id } }' }))).toBe(true);
+    expect(grants('{"subscription":"premium"}', 'reviewed')).toBe(true);
+    expect(grants(undefined)).toBe(true);
+  });
+});

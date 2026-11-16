@@ -19,6 +19,7 @@
  */
 import { effectiveWriteMethod, gateReading, isGraphqlEndpoint, isOutboundEffectWrite, isReadMethod, normalizeWritePath, outboundEffectField } from './outbound-write.js';
 import { shopifyReadRequest, shopifyWriteRequest, type ShopifyRead, type ShopifyWrite } from './shopify-graphql.js';
+import { TARGET_MAX, httpTarget } from './audit-log.js';
 import { isMeasuredWriteForm } from './bulk-write-forms.js';
 import { canonicalHost } from './canonical-host.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
@@ -412,7 +413,9 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // The records decide the body, and a top-level `_method` field in it is read by some
     // servers as the request's method: the contract is checked against what such a server does.
     const gated = effectiveWriteMethod(method, { 'content-type': 'application/json' }, url, payload);
-    const asked = graphql !== undefined
+    // The body goes to the contract too: on an API whose URL does not say it speaks GraphQL, the
+    // body decides whether a write runs a mutation (`bodyMayWriteGraphql`).
+    const asked = payload !== undefined
       ? { url, method: gated, headers: { 'content-type': 'application/json' }, body: payload }
       : { url, method: gated };
     if (gated === null || !contractGrants('http_request', asked, deps.contract)) return { kind: 'not_granted' };
@@ -501,7 +504,8 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     get: (url, signal, maxBytes) => send('GET', url, undefined, signal, undefined, undefined, maxBytes),
     write: (url, method, body, signal, onSend, onRefused) => send(method, url, body, signal, onSend, onRefused),
     graphqlRead: (url, read, signal, maxBytes) => {
-      const request = shopifyReadRequest(read);
+      // The room its trail row has for the search: the row is `POST <url> <form> <search>`.
+      const request = shopifyReadRequest(read, TARGET_MAX - `${httpTarget('POST', url)} ${read.form} `.length);
       return request === null ? Promise.resolve({ kind: 'not_granted' }) : send('POST', url, undefined, signal, undefined, undefined, maxBytes, request);
     },
     graphqlWrite: (url, write, signal, onSend, onRefused) => {

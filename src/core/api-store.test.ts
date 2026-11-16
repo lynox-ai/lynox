@@ -988,7 +988,7 @@ describe('ApiStore', () => {
      * documentation. Prose around them stays free.
      */
     const REQUIRED_IN_VALUE_PROP: ReadonlyArray<readonly [string, readonly string[]]> = [
-      ['bexio', ['https://api.bexio.com/2.0/', 'preset_id: "bexio"', 'auth.vault_keys listing those same two names', '60 days', 'full access to the company']],
+      ['bexio', ['https://api.bexio.com/2.0/', 'preset_id: "bexio"', 'auth.vault_keys listing those same two names', 'a profile with a personal token or another sign-in for bexio is refused']],
       ['notion', ['https://api.notion.com/v1/', 'Notion-Version']],
       ['hubspot', ['https://api.hubapi.com/', 'Legacy apps', 'no automatic expiry']],
       ['airtable', ['https://api.airtable.com/v0/', '403 Forbidden']],

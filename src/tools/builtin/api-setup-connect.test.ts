@@ -65,6 +65,8 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
   }]);
   return {
     ...real,
+    // Its default register is bound inside the real module, so it is handed this one too.
+    builtInPresetOf: (profile: Parameters<typeof real.builtInPresetOf>[0]) => real.builtInPresetOf(profile, register),
     derivePresetEndpoints: (id: string, params: Readonly<Record<string, unknown>> | undefined) =>
       real.derivePresetEndpoints(id, params, register),
     presetIds: () => register.ids(),
@@ -141,6 +143,8 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { EXAMPLE_
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
     secretStore: {
+      resolve: (name: string): string | null => secrets[name] ?? null,
+      listNames: (): string[] => Object.keys(secrets),
       extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)].map((m) => m[1]!),
       resolveSecretRefs: (input: unknown): unknown => {
         const text = JSON.stringify(input);
@@ -675,6 +679,29 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain('https://tenant.lynox.example');
   });
 
+  it('A1 preset · tells a built-in provider\'s profile that fetch_token is no way around it', async () => {
+    // fetch_token posts no app-level grant for a built-in provider's profile and sends it back
+    // to connect, so the old advice "use action=fetch_token" sent the model in a circle.
+    delete process.env['ORIGIN'];
+    const store = new ApiStore();
+    store.register(shopProfile());
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toBe(`Error: profile "${shopProfile().id}" cannot be authorized now: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to after they authorize lynox at Example Shop. There is no other way to connect Example Shop here: this engine connects Example Shop only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. fetch_token cannot do that authorization either; it only renews a profile that was authorized before and still holds its refresh token. Tell the user that this profile cannot be connected until whoever runs this engine sets its public address (ORIGIN).`);
+  });
+
+  it('A1 own app · still points a profile of its own at fetch_token, which serves it', async () => {
+    delete process.env['ORIGIN'];
+    const store = new ApiStore();
+    const p = shopProfile();
+    store.register({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: undefined } } });
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toBe('Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.');
+  });
+
   it('A2 · refuses an id it does not know', async () => {
     const result = await connect(agentWith(new ApiStore()), 'nope');
     expect(result).toContain('not found');
@@ -746,10 +773,67 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shop-api' }, agentWith(store, {})) as string;
 
     expect(result).toContain('vault is missing the OAuth credentials');
-    // Only the refresh token is the model's to collect.
-    expect(result).toContain('Call `ask_secret` for "SHOP_API_REFRESH_TOKEN" first.');
+    // Nothing is the model's to collect: the refresh token of a built-in provider comes from its sign-in.
+    expect(result).not.toContain('ask_secret` for');
+    expect(result).toContain('The tokens of a profile on the built-in "example-shop" provider come only from its sign-in: to connect it, call api_setup with action "connect" and id "shop-api"; that call returns the sign-in link for the user, or says why there is none. Do not ask the user for a token.');
+    expect(result, 'no retry before the sign-in').not.toContain('Then retry fetch_token');
     expect(result).toContain('"EXAMPLE_SHOP_CLIENT_ID" is the client id of a built-in provider\'s app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret — not in the chat.');
     expect(result).toContain('"EXAMPLE_SHOP_CLIENT_SECRET" is the OAuth client secret of a built-in provider.');
+  });
+
+  it('A5b fetch_token clash · a built-in provider\'s profile reading its refresh token from the access name is sent to connect, not to ask_secret', async () => {
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register(shopProfile({ auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'SHOP_API_ACCESS_TOKEN' } } }));
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shop-api' }, agentWith(store, { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE, SHOP_API_ACCESS_TOKEN: 'not-a-real-refresh-token' })) as string;
+
+    expect(result).toContain('Leaving output_secret_name out does not help');
+    expect(result).toContain('Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, call api_setup with action "connect" and id "shop-api"; that call returns the sign-in link for the user, or says why there is none.');
+    expect(result).not.toContain('with ask_secret');
+  });
+
+  it('A5c create · the owner\'s new profile on a built-in provider is refused over a token slot that already holds a value', async () => {
+    // Collected while no profile claimed the name, then saved as the provider's profile: it would
+    // be sent as the connection's token though nobody signed in.
+    const held = { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE, SHOP_API_ACCESS_TOKEN: 'pasted-not-a-real-token' };
+    const save = (store: ApiStore, secrets: Record<string, string>): Promise<string> =>
+      apiSetupTool.handler({ action: 'create', profile: { ...shopProfile(), endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'] } }, agentWith(store, secrets)) as Promise<string>;
+
+    const store = new ApiStore();
+    const out = await save(store, held);
+    expect(out).toBe('Error: "SHOP_API_ACCESS_TOKEN", where the tokens of "shop-api" would go, already holds a value that did not come from the sign-in of the built-in "example-shop" provider. Nothing was saved. A profile on that provider takes its tokens only from that sign-in. Do not ask the user for a token. Tell the user that the stored value has to go first: they can delete it in Settings → API Keys, and then this profile can be saved and connected.');
+    expect(out, 'another id is no way out on the provider\'s host').not.toContain('different id');
+    expect(store.get('shop-api')).toBeUndefined();
+    // Control: with the slots empty the same save is not refused for them (it goes on to the
+    // egress question, which comes after this check).
+    const { SHOP_API_ACCESS_TOKEN: _drop, ...empty } = held;
+    const ok = await save(new ApiStore(), empty);
+    expect(ok).not.toContain('already holds a value');
+  });
+
+  it('A5c update · an OAuth profile of its own moved onto a built-in provider is refused over a filled slot, the owner\'s too', async () => {
+    // A token its own sign-in wrote (or one pasted while it was custom) would become the provider
+    // connection's token with no sign-in at the provider.
+    const store = new ApiStore();
+    const base = shopProfile();
+    const { preset_id: _p, preset_params: _pp, ...own } = base.auth!.oauth!;
+    store.register(shopProfile({ auth: { ...base.auth!, oauth: { ...own, token_url: 'https://acme.shops.example.com/admin/oauth/access_token' } } }));
+    const held = { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE, SHOP_API_ACCESS_TOKEN: 'written-by-its-own-sign-in' };
+    const out = await apiSetupTool.handler({ action: 'update', id: 'shop-api', profile: { ...shopProfile(), endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'] } }, agentWith(store, held)) as string;
+    expect(out).toContain('"SHOP_API_ACCESS_TOKEN", where the tokens of "shop-api" would go, already holds a value that did not come from the sign-in of the built-in "example-shop" provider. Nothing was saved.');
+    expect(store.get('shop-api')?.auth?.oauth?.preset_id).toBeUndefined();
+  });
+
+  it.each([
+    ['a session without a store', (a: Record<string, unknown>) => ({ ...a, secretStore: undefined })],
+    ['a session whose store is scoped', (a: Record<string, unknown>) => ({ ...a, secretStore: { ...(a['secretStore'] as object), [Symbol.for('lynox.vaultScope')]: ['EXAMPLE_SHOP_CLIENT_ID'] } })],
+  ] as const)('A5c create · refuses the owner a new profile on a built-in provider from %s, which cannot see the slots', async (_label, shape) => {
+    const store = new ApiStore();
+    const agent = shape(agentWith(store) as unknown as Record<string, unknown>) as never;
+    const out = await apiSetupTool.handler({ action: 'create', profile: { ...shopProfile(), endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'] } }, agent) as string;
+    expect(out).toContain('the token slots of "shop-api" cannot be checked from here');
+    expect(store.get('shop-api')).toBeUndefined();
   });
 
   it('A5 unnamed · sends a built-in provider\'s profile that names no app to an update, which sets the names', async () => {
@@ -899,6 +983,9 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).toContain('defined wrongly in this engine');
     expect(result).not.toContain('preset_params.');
     expect(result).not.toContain('/api/oauth/connect/');
+    // fetch_token is no way around a built-in provider either: it sends the profile back here.
+    expect(result).not.toContain('use action=fetch_token');
+    expect(result).toBe('Error: profile "shop-api" cannot be authorized: the built-in provider it uses is defined wrongly in this engine (one of its paths does not start with a slash, so it would merge into the host instead of following it). There is no other way to connect Broken Path here: this engine connects Broken Path only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. There is nothing to set on the profile, and fetch_token cannot do the authorization this provider\'s tokens come from. Tell the user that this profile cannot be connected because of an error in lynox itself, not in their settings.');
   });
 
   it('A9b · will not read a data-egress acceptance as agreement to be sent somewhere', async () => {
@@ -1329,5 +1416,20 @@ describe('connect refuses before the link what the route would refuse', () => {
     const store = new ApiStore();
     store.register({ ...scoped(), created_by: TAG });
     expect(await connect(mandateAgent(store))).toContain('/api/oauth/connect/shop-api');
+  });
+
+  // The route shows a mandate's session the note page before every connect; the reply says so,
+  // so the model does not tell the helper they go straight to the provider.
+  it('tells a mandate the instance page comes first, and the owner that the provider opens', async () => {
+    const store = new ApiStore();
+    store.register({ ...scoped(), created_by: TAG });
+    const helper = await connect(mandateAgent(store));
+    expect(helper).toMatch(/It first opens a page on this instance with a button that continues to [^\s,]+, where they authorize this engine\./);
+    expect(helper).not.toContain('It opens ');
+    const ownerStore = new ApiStore();
+    ownerStore.register(scoped());
+    const owner = await connect(agentWith(ownerStore));
+    expect(owner).toContain('It opens ');
+    expect(owner).not.toContain('a button that continues to');
   });
 });

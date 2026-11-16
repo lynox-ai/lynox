@@ -471,8 +471,9 @@ export class TriggerStore {
         max_retries = excluded.max_retries,
         retry_count = excluded.retry_count,
         confirmed_at = excluded.confirmed_at,
-        -- One way: a re-write may record a creator's taint, never clear one already recorded.
-        created_untrusted = COALESCE(excluded.created_untrusted, triggers.created_untrusted),
+        -- One way: a re-write may record a creator's taint, never clear one already recorded,
+        -- also not by writing the clean cause 'none' over it.
+        created_untrusted = COALESCE(NULLIF(excluded.created_untrusted, 'none'), triggers.created_untrusted),
         -- The creator is set once: a re-write never replaces it. edited_by is not
         -- written here at all; only markEditedBy writes it.
         created_by = COALESCE(triggers.created_by, excluded.created_by),
@@ -827,6 +828,9 @@ export class TriggerStore {
     waitingUntil?: string | null | undefined;
     /** The model tier the user chose for this trigger's runs; null clears the choice. */
     modelTier?: ModelTier | null | undefined;
+    /** What the turn that edits the instruction had taken in (`describeTurnUntrusted`), or
+     *  null/absent for a clean one. Read only with a title/description edit; it only ever adds. */
+    editedUntrusted?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     const sets: string[] = [];
     const values: unknown[] = [];
@@ -845,6 +849,11 @@ export class TriggerStore {
     // pins the set of files that may name the setter, so a new one shows up red.
     if (params.title !== undefined || params.description !== undefined) {
       sets.push('confirmed_at = NULL', 'confirmed_by = NULL', `consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}`);
+      // An instruction rewritten in a turn that had read outside content carries that mark, as
+      // one created there does (task_create). Add-only: a clean edit leaves a mark standing, or
+      // creating clean and editing later would shed it.
+      sets.push('created_untrusted = COALESCE(?, created_untrusted)');
+      values.push(params.editedUntrusted ?? null);
     }
     if (params.status !== undefined) {
       sets.push('status = ?');

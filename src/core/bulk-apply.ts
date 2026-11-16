@@ -27,7 +27,7 @@ import {
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
-import { canonicalHtml } from './html-tree.js';
+import { canonicalHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
@@ -161,7 +161,8 @@ export function rawHtmlField(t: Pick<ApplyTarget, 'after' | 'expected'>, fields:
   const was = !t.expected.absent && typeof t.expected.value === 'object' && t.expected.value !== null ? t.expected.value as Record<string, unknown> : {};
   for (const f of fields) {
     const v = (after as Record<string, unknown>)[f];
-    if (typeof v === 'string' && v !== was[f] && canonicalHtml(v) !== v) return f;
+    // A value beyond the reading bounds is not parsed: it counts as not canonical.
+    if (typeof v === 'string' && v !== was[f] && (!withinReadingBounds(v) || canonicalHtml(v) !== v)) return f;
   }
   return null;
 }
@@ -497,13 +498,26 @@ async function rollBack(
   cause: 'failed' | 'stopped' | 'time' = 'failed',
 ): Promise<BulkEffectOutcome> {
   let complete = true;
-  for (const t of ledger.listAppliedDesc(run.id)) {
+  // A target a dead loop sent to and never recorded is taken back too: its write may hold there,
+  // and a rollback that skipped it would call itself complete over a target the run changed.
+  const targets = [
+    ...ledger.listAppliedDesc(run.id).map((t) => ({ t, recorded: true })),
+    ...ledger.listSentUnrecordedDesc(run.id).map((t) => ({ t, recorded: false })),
+  ].sort((a, b) => b.t.seq - a.t.seq);
+  for (const { t, recorded } of targets) {
     try {
       // Local only (an external run is never atomic), so there are no fields to project on.
       const cur = await writer.read(t.key, null);
+      // Still as before the run: the unrecorded send never landed, and there is nothing to take back.
+      if (!recorded && cur !== 'path_changed' && cur !== 'foreign' && sameImage(cur, t.expected)) {
+        ledger.recordUnrecordedSettled(run.id, t.seq, now());
+        continue;
+      }
+      // Left as it is, and unmarked: the owner's view marks it as one to check by hand.
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
       await writer.write(t.key, t.expected);
-      ledger.recordRolledBack(run, t.seq, now());
+      if (recorded) ledger.recordRolledBack(run, t.seq, now());
+      else ledger.recordUnrecordedSettled(run.id, t.seq, now());
     } catch {
       complete = false;
     }
