@@ -99,6 +99,7 @@ beforeEach(() => {
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
 		const pageOf = /\/bulk\/runs\/([^/?]+)\/targets\?/.exec(u)?.[1];
 		if (page && pageOf !== undefined && holds[`${pageOf}/targets`] !== undefined) await holds[`${pageOf}/targets`];
+		if (page && pageOf !== undefined && failIds[`${pageOf}/targets`] === 'throw') throw new Error('network');
 		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		const id = /\/bulk\/runs\/([^/?]+)$/.exec(u)?.[1];
 		// A held run answers once, for the first load that asks; a later load of it goes through.
@@ -1243,6 +1244,26 @@ describe('the allowed link domains of a judged list run', () => {
 		await settle();
 		// r2 still shows its first page and the button for the rest.
 		expect(showAll()).toBeDefined();
+	});
+
+	it('shows no failed ask for more of a run the page has left on the run that loads in its place', async () => {
+		targets = Array.from({ length: 8 }, (_, i) => ({ ...TARGETS[1]!, seq: i + 1, key: `gid://shopify/Product/${i + 1}` }));
+		run = makeRun({ phase: 'done', total: 8 });
+		const open = await renderSwitchable();
+		runsById['r2'] = makeRun({ id: 'r2', phase: 'done', total: 8 });
+		const releaseMore = held('r1/targets');
+		failIds['r1/targets'] = 'throw';
+		buttonByText(tf('bulk.preview.show_all', { n: '8' }))!.click();
+		await tick();
+		// r2 loads while r1's ask for more fails.
+		const releaseR2 = held('r2');
+		await open('r2', false);
+		releaseMore();
+		await settle();
+		expect(target.textContent).not.toContain(t('common.load_failed'));
+		releaseR2();
+		await settle();
+		expect(target.textContent).not.toContain(t('common.load_failed'));
 	});
 
 	it('asks for no more of a run while another run loads in its place', async () => {

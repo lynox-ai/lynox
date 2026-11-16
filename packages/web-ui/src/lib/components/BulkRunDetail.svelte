@@ -201,11 +201,11 @@
 	async function showMore(): Promise<void> {
 		// While another run loads, the page still shows the one before: its rest is not asked for.
 		if (!run || run.id !== runId) return;
-		// A page that a load has replaced since, of this run or another, is not appended.
+		// A list that a load has replaced since, or a run the page has left, is not appended to; a
+		// load of this run that failed and replaced nothing does not drop it.
 		const id = run.id;
-		const gen = loadGen;
-		// A run switch begins a load, so the generation covers it too.
-		const left = (): boolean => gen !== loadGen;
+		const shown = targets;
+		const left = (): boolean => runId !== id || targets !== shown;
 		try {
 			const more = await loadFrom(id, targets.length, run.total);
 			if (left()) return;
