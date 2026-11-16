@@ -9,7 +9,7 @@ import { taskUpdateTool, taskListTool, triggerDetailLine } from './task.js';
 import type { IAgent } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
-import { PAUSED_DONE_MODEL_TEXT, PAUSED_DONE_UPDATE_REFUSAL, PAUSED_MODEL_TEXT, setPlanPauseForTests } from '../../core/plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PAUSED_DONE_MODEL_TEXT, PAUSED_DONE_UPDATE_REFUSAL, PAUSED_MODEL_TEXT, setPlanPauseForTests } from '../../core/plan-pause.js';
 
 /**
  * What the model reads of a paused plan (`plan-pause.ts`), and what its tools may do to one.
@@ -100,6 +100,16 @@ describe('a paused plan in the task tools', () => {
     const done = triggerDetailLine({ effect: 'run_agent', status: 'completed', last_run_status: 'success', last_run_result: 'x', paused_at: 1 });
     expect(done).toContain(`PAUSED — ${PAUSED_DONE_MODEL_TEXT}`);
     expect(done).not.toContain(PAUSED_MODEL_TEXT);
+    // A stop that paused it stored the takeover sentence; completed since, it is read without it.
+    const stopped = { effect: 'run_agent', last_run_status: 'stopped', last_run_result: ACCESS_ENDED_PAUSED_RESULT, paused_at: 1 };
+    const doneStopped = triggerDetailLine({ ...stopped, status: 'completed' });
+    expect(doneStopped).toContain(`: ${ACCESS_ENDED_RESULT}`);
+    expect(doneStopped).not.toMatch(/takes it over/);
+    expect(triggerDetailLine({ ...stopped, status: 'open' }), 'control: an open paused plan keeps it').toContain(ACCESS_ENDED_PAUSED_RESULT);
+    // Taken over (no pause any more), the same stored stop no longer says the plan is paused.
+    const takenOver = triggerDetailLine({ ...stopped, status: 'open', paused_at: undefined });
+    expect(takenOver).toContain(`: ${ACCESS_ENDED_RESULT}`);
+    expect(takenOver).not.toMatch(/takes it over/);
     seed('a', true);
     seed('b', true);
     engine.getDb().prepare("UPDATE triggers SET status = 'completed' WHERE id = 'a'").run();

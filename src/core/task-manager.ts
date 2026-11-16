@@ -13,7 +13,7 @@ import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from '
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
-import { isPaused, pausedModelText } from './plan-pause.js';
+import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
 import { stripHidden } from './hidden-text.js';
 
 /**
@@ -780,7 +780,7 @@ export class TaskManager {
         // These are AGENT-TRIGGERs — no `due_date` column; surface the next
         // scheduled fire instead when present.
         // A paused plan says so instead of a next run that will not come (`plan-pause.ts`).
-        const next = isPaused(t) ? `, ${pausedModelText(t)}` : t.next_run_at ? `, next run ${t.next_run_at}` : '';
+        const next = isPaused(t) ? `, ${PAUSED_MODEL_TEXT}` : t.next_run_at ? `, next run ${t.next_run_at}` : '';
         parts.push(`  - "${stripHidden(t.title)}" [${t.status}]${next}`);
       }
     }

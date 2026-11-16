@@ -6,7 +6,7 @@ import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidde
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
-import { PAUSED_DONE_UPDATE_REFUSAL, isPaused, pausedModelText } from '../../core/plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PAUSED_DONE_UPDATE_REFUSAL, isPaused, pausedModelText } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
@@ -153,7 +153,14 @@ export function triggerDetailLine(t: {
     // as another field — two workflow attributions on one line, at the moment
     // the reader is deciding which workflow a repair must preserve. It costs a
     // middle dot in a provider's prose and removes the ambiguity entirely.
-    const raw = clean(t.last_run_result ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
+    // A stop that paused the plan stored "paused until the owner takes it over". That half holds only
+    // while the plan is paused and open: taken over or with the switch off it is not paused, and
+    // completed it has no takeover (`pausedModelText`). Otherwise the stored sentence is read without
+    // it; the stored value stays, the takeover reads it (`plan-takeover.ts`).
+    const stored = (!paused || t.status === 'completed') && t.last_run_result === ACCESS_ENDED_PAUSED_RESULT
+      ? ACCESS_ENDED_RESULT
+      : t.last_run_result;
+    const raw = clean(stored ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
     const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
     parts.push(`last run ${ENDED_LABEL.get(t.last_run_status ?? '') ?? 'FAILED'}${when}: ${reason}`);
     // …and whether that failure was the last word. `last run FAILED` alone does
