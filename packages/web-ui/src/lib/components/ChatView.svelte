@@ -530,7 +530,7 @@
 	type GroupedBlock =
 		| { type: 'text'; text: string }
 		| { type: 'thinking'; text: string }
-		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status'] }
+		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status']; unsuccessful: boolean }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'spawn'; spawnId: string };
 
@@ -662,8 +662,10 @@
 				if (last && last.type === 'tools' && last.action === label.action) {
 					if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
 					last.status = worstStatus(last.status, tc.status);
+					// One member that did not succeed makes the row say so, as one error makes it ✗.
+					if (tc.unsuccessful === true) last.unsuccessful = true;
 				} else {
-					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status });
+					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status, unsuccessful: tc.unsuccessful === true });
 				}
 			}
 		}
@@ -2931,8 +2933,14 @@
 										</svg>
 									{/if}
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
-									{#if !isRunning}
-										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}">{isError ? '✗' : '✓'}</span>
+									{#if isError}
+										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] text-danger">✗</span><span class="sr-only">{t('chat.tool.status_error')}</span>
+									{:else if !isRunning && gBlock.unsuccessful}
+										<!-- A call that returned without doing what was asked: muted, in the row's own colour,
+										     not danger. The model reads the failure and usually deals with it in its answer. -->
+										<span class="ml-auto md:ml-1 text-[11px] md:text-[10px]">{t('chat.tool.unsuccessful')}</span>
+									{:else if !isRunning}
+										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] text-success">✓</span><span class="sr-only">{t('chat.tool.status_done')}</span>
 									{/if}
 								</div>
 							{:else if gBlock.type === 'spawn'}

@@ -286,6 +286,27 @@ describe('RunHistory', () => {
     });
   });
 
+  it('getFailedToolUseIds names the failed calls of one session, by tool_use id', () => {
+    const h = createHistory();
+    const run = h.insertRun({ sessionId: 'thread-1', taskText: 't', modelTier: 'balanced', modelId: 'm' });
+    h.insertToolCall({ runId: run, toolName: 'api_setup', inputJson: '{}', outputJson: 'Error: x', durationMs: 1, sequenceOrder: 0, toolUseId: 'tu-failed', isError: true });
+    h.insertToolCall({ runId: run, toolName: 'api_setup', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 1, toolUseId: 'tu-done', isError: false });
+    // Written before `is_error` was recorded: neither failed nor known to be done.
+    h.insertToolCall({ runId: run, toolName: 'bash', inputJson: '{}', outputJson: 'old', durationMs: 1, sequenceOrder: 2, toolUseId: 'tu-unrecorded' });
+    // Failed, but without a tool_use id: nothing to attach it to.
+    h.insertToolCall({ runId: run, toolName: 'bash', inputJson: '{}', outputJson: 'x', durationMs: 1, sequenceOrder: 3, isError: true });
+    // A workflow step's replayed call in the same session is left out, as in getSessionToolCalls.
+    const step = h.insertRun({ sessionId: 'thread-1', taskText: 'step', modelTier: 'balanced', modelId: 'm', runType: 'pipeline_step' });
+    h.insertToolCall({ runId: step, toolName: 'bash', inputJson: '{}', outputJson: 'x', durationMs: 1, sequenceOrder: 0, toolUseId: 'tu-step', isError: true });
+    const other = h.insertRun({ sessionId: 'thread-2', taskText: 't', modelTier: 'balanced', modelId: 'm' });
+    h.insertToolCall({ runId: other, toolName: 'bash', inputJson: '{}', outputJson: 'x', durationMs: 1, sequenceOrder: 0, toolUseId: 'tu-other', isError: true });
+
+    expect([...h.getFailedToolUseIds('thread-1')]).toEqual(['tu-failed']);
+    expect([...h.getFailedToolUseIds('thread-2')]).toEqual(['tu-other']);
+    expect(h.getFailedToolUseIds('nope').size).toBe(0);
+    h.close();
+  });
+
   it('getSessionToolCalls gathers tool calls across all runs in a session', () => {
     const h = createHistory();
     // Two runs in the SAME session (one conversation, two turns).
