@@ -300,6 +300,8 @@ describe('the run list that could not load', () => {
 		expect(heldRuns.length).toBe(2);
 		heldRuns[0]!(200);
 		await settle();
+		// The earlier load read the empty list: until the later one ends, the page says so.
+		expect(target.textContent).toContain(t('bulk.empty'));
 		heldRuns[1]!(429);
 		await settle();
 		expect(target.textContent).toContain(RATE);
