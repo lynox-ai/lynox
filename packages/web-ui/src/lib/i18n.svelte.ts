@@ -2385,7 +2385,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'triggers.paused': { de: 'Pausiert', en: 'Paused' },
 	'triggers.awaiting_confirmation': { de: 'Wartet auf Bestätigung', en: 'Awaiting confirmation' },
 	'triggers.awaiting_hint': { de: 'Läuft erst, wenn du ihn bestätigst.', en: "It won't run until you confirm it." },
-	'triggers.awaiting_hint_paused': { de: 'Pausiert, weil ein Zugang endete. Übernimm ihn, dann läuft er wieder.', en: 'Paused because an access ended. Take it over to let it run again.' },
+	'triggers.awaiting_hint_paused': { de: 'Pausiert, weil ein Zugang endete. Übernimm den Plan, dann läuft er wieder.', en: 'Paused because an access ended. Take the plan over to let it run again.' },
 	'triggers.awaiting_hint_bulk': { de: 'Gehört zu einem Bulk-Lauf. Freigeben kannst du ihn in der Vorschau des Laufs.', en: "Belongs to a bulk run. You approve it in the run's preview." },
 	'triggers.escalation_delivered': { de: 'Meldung verschickt', en: 'Alert sent' },
 	'triggers.escalation_not_delivered': { de: 'Keine Push-Benachrichtigung angekommen: keines deiner Geräte hat sie erhalten. Push-Benachrichtigungen schaltest du unter Einstellungen › Kanäle › Push-Benachrichtigungen ein oder prüfst sie dort.', en: 'No push notification arrived: none of your devices received it. Turn on or check push notifications under Settings › Channels › Push notifications.' },

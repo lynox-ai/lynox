@@ -592,7 +592,9 @@
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
 								{/if}
-								{#if held(trigger)}
+								<!-- Only where a confirmation is the way: a paused plan says its takeover, a bulk run's
+								     trigger its run's preview (U-276). -->
+								{#if held(trigger) && stampable(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-held>{t('triggers.awaiting_confirmation')}</span>
 								{/if}
 								{#if trigger.running === true}
