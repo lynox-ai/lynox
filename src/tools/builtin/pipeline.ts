@@ -1124,9 +1124,9 @@ export const RETRY_OTHER_PRINCIPAL_REFUSAL = 'The last run of this workflow was 
   + 'such as sending mail or writing data, and start it only if they want that done again.';
 // The same refusal for a workflow that runs only once and has run: a new run of it is refused too
 // ("already been executed"), so it may not be offered as the way out (U-278).
-export const RETRY_OTHER_PRINCIPAL_ONE_SHOT_REFUSAL = 'The last run of this workflow was for someone else, so it cannot be retried here: a retry would continue from what that run read. '
-  + 'This workflow runs only once and has already run, so it cannot be started again either. If the user wants it done again, offer to plan it anew. '
-  + 'A new plan does every step from the start, so first tell the user that steps of the last run may already have changed something, such as sending mail or writing data.';
+export const RETRY_OTHER_PRINCIPAL_ONE_SHOT_REFUSAL = 'This workflow runs only once and has already run, so it cannot be retried and cannot be run again from the start either; do not offer either. '
+  + '(The last run was for someone else, and a retry would continue from what that run read.) If the user wants it done again, offer to plan it anew as a new workflow. '
+  + 'That new workflow does every step from the start, so first tell the user that steps of the last run may already have changed something, such as sending mail or writing data.';
 
 /** Whom a run was for, as one string: the person's tag and, for a mandate, its grant. */
 function principalKey(p: RequestPrincipal): string {
