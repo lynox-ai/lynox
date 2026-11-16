@@ -9,7 +9,7 @@ import { taskUpdateTool, taskListTool, triggerDetailLine } from './task.js';
 import type { IAgent } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
-import { PAUSED_MODEL_TEXT, setPlanPauseForTests } from '../../core/plan-pause.js';
+import { PAUSED_DONE_MODEL_TEXT, PAUSED_DONE_UPDATE_REFUSAL, PAUSED_MODEL_TEXT, setPlanPauseForTests } from '../../core/plan-pause.js';
 
 /**
  * What the model reads of a paused plan (`plan-pause.ts`), and what its tools may do to one.
@@ -88,6 +88,31 @@ describe('a paused plan in the task tools', () => {
     seed('a', true);
     expect(await taskUpdateTool.handler({ task_id: 'a', title: 'Renamed' }, agent())).toContain(PAUSED_MODEL_TEXT);
     expect(await taskUpdateTool.handler({ task_id: 'a', status: 'completed' }, agent())).toContain('Task completed');
+  });
+
+  it('the completed plan\'s model text, exactly, offers a new plan and no takeover (U-275)', () => {
+    expect(PAUSED_DONE_MODEL_TEXT).toBe("completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan.");
+    expect(PAUSED_DONE_UPDATE_REFUSAL).toBe("Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan.");
+    for (const text of [PAUSED_DONE_MODEL_TEXT, PAUSED_DONE_UPDATE_REFUSAL]) expect(text).not.toMatch(/takes? it over|until the owner/);
+  });
+
+  it('a completed plan that keeps its pause reads its own sentence in the detail line, task_list and task_update; an open one the takeover', async () => {
+    const done = triggerDetailLine({ effect: 'run_agent', status: 'completed', last_run_status: 'success', last_run_result: 'x', paused_at: 1 });
+    expect(done).toContain(`PAUSED — ${PAUSED_DONE_MODEL_TEXT}`);
+    expect(done).not.toContain(PAUSED_MODEL_TEXT);
+    seed('a', true);
+    seed('b', true);
+    engine.getDb().prepare("UPDATE triggers SET status = 'completed' WHERE id = 'a'").run();
+    const list = await taskListTool.handler({ status: 'paused' }, agent());
+    // One entry is its head line and the detail lines indented under it.
+    const lineOf = (title: string): string => list.split(/\n(?=\S)/).find((l) => l.includes(title)) ?? '';
+    expect(lineOf('Plan a')).toContain(PAUSED_DONE_MODEL_TEXT);
+    expect(lineOf('Plan a')).not.toContain(PAUSED_MODEL_TEXT);
+    expect(lineOf('Plan b')).toContain(PAUSED_MODEL_TEXT);
+    for (const who of [agent(), agent(MANDATE)]) {
+      expect(await taskUpdateTool.handler({ task_id: 'a', title: 'Renamed' }, who)).toBe(PAUSED_DONE_UPDATE_REFUSAL);
+      expect(await taskUpdateTool.handler({ task_id: 'b', title: 'Renamed' }, who)).toBe(`Error: this plan is ${PAUSED_MODEL_TEXT}. It cannot be changed until then.`);
+    }
   });
 
   it('with the switch off a paused_at is not read', async () => {

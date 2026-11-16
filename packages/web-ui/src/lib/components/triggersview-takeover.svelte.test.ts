@@ -141,6 +141,31 @@ describe('a completed plan that keeps its pause', () => {
 	});
 });
 
+describe('a completed plan that keeps its pause (U-275)', () => {
+	const mark = (): Element | null => target.querySelector('[data-trigger-paused-done]');
+	const hint = (): Element | null => target.querySelector('[data-trigger-paused-done-hint]');
+	it('is marked completed and paused, and its line names the way there is: a new plan', async () => {
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		expect(mark()?.textContent).toBe('Abgeschlossen · pausiert');
+		expect(hint()?.textContent).toBe('Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.');
+		expect(target.querySelector('[data-trigger-paused]')).toBeNull();
+	});
+	it('an open paused plan keeps the takeover mark, and neither the completed mark nor its line', async () => {
+		await render();
+		expect(target.querySelector('[data-trigger-paused]')).not.toBeNull();
+		expect(mark()).toBeNull();
+		expect(hint()).toBeNull();
+	});
+	it('a completed plan without a pause has neither', async () => {
+		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await render();
+		expect(target.textContent).toContain('Wochenreport');
+		expect(mark()).toBeNull();
+		expect(hint()).toBeNull();
+	});
+});
+
 describe('Run now at a paused plan (ux U-179)', () => {
 	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
 	it('is not offered at a completed plan that keeps its pause', async () => {

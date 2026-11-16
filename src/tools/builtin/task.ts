@@ -6,7 +6,7 @@ import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidde
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
-import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
+import { PAUSED_DONE_UPDATE_REFUSAL, isPaused, pausedModelText } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
@@ -118,7 +118,7 @@ export function triggerDetailLine(t: {
   const parts: string[] = [];
   // A paused plan says so first; it has no next run until it is taken over (`plan-pause.ts`).
   const paused = isPaused(t);
-  if (paused) parts.push(`PAUSED — ${PAUSED_MODEL_TEXT}`);
+  if (paused) parts.push(`PAUSED — ${pausedModelText(t)}`);
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
   // 1, so `=== 0` is the test, not falsiness. A todo has no such field at all.
   if (t.enabled === 0) parts.push('SCHEDULE OFF — it will not fire');
@@ -663,7 +663,9 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       const pausedTarget = managerRef.getTrigger(input.task_id, scopeFilter);
       if (pausedTarget !== undefined && isPaused(pausedTarget)
         && !(isOwnerPrincipal(agent.principal) && input.status === 'completed')) {
-        return `Error: this plan is ${PAUSED_MODEL_TEXT}. It cannot be changed until then.`;
+        return pausedTarget.status === 'completed'
+          ? PAUSED_DONE_UPDATE_REFUSAL
+          : `Error: this plan is ${pausedModelText(pausedTarget)}. It cannot be changed until then.`;
       }
       return withInstanceWrite(agent, {
         site: 'task_update#change', kind: 'change', store: 'tasks',
