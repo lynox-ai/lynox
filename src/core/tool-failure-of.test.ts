@@ -65,9 +65,9 @@ describe('failureOf', () => {
   it('a reason makes the answer a soft failure: same text for the model, failure in the ledger and on the event', async () => {
     const answer = 'Error: nothing was saved.';
     const { events, recs, modelSaw } = await run(toolAnswering(answer, (a) => (a.startsWith('Error:') ? a : null)));
-    // The tool_result the next model call carries is the answer as it was, without an is_error.
-    expect(modelSaw).toContain(JSON.stringify(answer).slice(1, -1));
-    expect(modelSaw).not.toContain('"is_error":true');
+    // The tool_result the model reads is the answer as it was, without an is_error.
+    expect(JSON.parse(modelSaw)).toEqual([expect.objectContaining({ type: 'tool_result', tool_use_id: 'tu-1', content: answer })]);
+    expect(modelSaw).not.toContain('"is_error"');
     expect(events[0]!.result).toBe(answer);
     expect(events[0]!.isError).toBeUndefined();
     expect(events[0]!.softFailure).toBe(true);

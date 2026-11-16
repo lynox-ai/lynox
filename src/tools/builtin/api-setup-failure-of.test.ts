@@ -30,6 +30,10 @@ describe('apiSetupFailure', () => {
 
   it('control: a done action is not a failure', () => {
     expect(apiSetupFailure('API profile "shop" saved.')).toBeNull();
+    // An empty list is a done list.
+    expect(apiSetupFailure('No API profiles registered. Use action "bootstrap" with an OpenAPI URL, or "create" with a profile object.')).toBeNull();
+    // A name is not the handler's sentence.
+    expect(apiSetupFailure('Created API profile "Nothing was sent" (shop).')).toBeNull();
     expect(apiSetupFailure('{"id":"shop","base_url":"https://example.com"}')).toBeNull();
   });
 
@@ -73,8 +77,12 @@ describe('api_setup answers the reader reads as done', () => {
   // ones it reads as done are held to this list, so a new refusal that reads as done fails here
   // instead of showing a ✓. What this cannot see: a `${…}` that opens an answer is rendered as
   // "x", so such an answer is read at run time by what the value opens with (`x Check …` below is
-  // `Token exchange failed …`); a string handed back through a variable or a ternary arm that is
-  // not itself a `return` is not read.
+  // `Token exchange failed …`); a string handed back through a variable, a ternary arm that is
+  // not itself a `return`, a `return compose([...])`, or a helper outside the handler (the
+  // binding and member refusals, the limit and revoked-grant messages) is not read here; and a
+  // template's `\n` stays two characters, so a refusal whose "Nothing was" stands after a line
+  // break would pass here and read as done at run time. The helper texts are pinned in the
+  // reader's own cases above.
   const source = readFileSync(fileURLToPath(new URL('./api-setup.ts', import.meta.url)), 'utf8');
   const from = source.indexOf('const apiSetupEntry: ToolEntry<ApiSetupInput> = {');
   const to = source.indexOf('\n};', from);

@@ -3795,7 +3795,7 @@ const DECIDED_BY_THE_PERSON = /— user declined\.$|— the owner did not allow 
 
 /** How an answer that says the action was not done opens: a label, or one of the handler's own
  *  openings for a refusal or a failed exchange. */
-const NOT_DONE_OPENING = /^(?:(Error|Refused|Blocked|Validation error)(?::| after )|Token exchange (?:failed|returned HTTP|completed, but)|API profile "[^"\n]*" not found\.|No API profiles registered\.|Profile is incomplete|Unknown action\.)/;
+const NOT_DONE_OPENING = /^(?:(Error|Refused|Blocked|Validation error)(?::| after )|Token exchange (?:failed|returned HTTP|completed, but)|API profile "[^"\n]*" not found\.|No API profiles registered\.$|Profile is incomplete|Unknown action\.)/;
 /** The sentence a refusal ends on when it opens without a label. */
 const NOTHING_DONE = /\bNothing was (?:changed|released|adopted|sent|saved|deleted)\b/;
 
@@ -3804,13 +3804,15 @@ const NOTHING_DONE = /\bNothing was (?:changed|released|adopted|sent|saved|delet
  * first line is read: the notes added after it, and any fetched content, never stand there. It
  * says "not done" when it opens with a label (`Error:`, `Refused:`, `Blocked:`, `Validation
  * error`), with one of the handler's own refusal or exchange-failure openings, or when it says
- * "Nothing was …". A guard test renders every string return in this file and holds the ones
+ * "Nothing was …" outside a quoted name. An empty `list` ("No API profiles registered. Use …")
+ * is a done list; only the bare sentence, where there is no store, is a refusal. A guard test renders every string return in this file and holds the ones
  * read as done to a known list, so a new refusal that reads as done is not missed silently. A
  * person's decline and a stop of the run are not failures of the call (`DECIDED_BY_THE_PERSON`).
  */
 export function apiSetupFailure(answer: string): string | null {
   const firstLine = answer.split('\n', 1)[0] ?? answer;
-  if (!NOT_DONE_OPENING.test(firstLine) && !NOTHING_DONE.test(firstLine)) return null;
+  // A quoted name is the model's or the user's text, not the handler's: it never says what happened.
+  if (!NOT_DONE_OPENING.test(firstLine) && !NOTHING_DONE.test(firstLine.replace(/"[^"]*"/g, '""'))) return null;
   if (firstLine.startsWith('Blocked:') && DECIDED_BY_THE_PERSON.test(firstLine)) return null;
   return firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
 }
