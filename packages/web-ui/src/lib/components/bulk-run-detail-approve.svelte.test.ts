@@ -838,7 +838,19 @@ describe('approving an undo, per target', () => {
 		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')).toBeNull();
 		expect(target.querySelector('[data-testid="bulk-undo-all-taken-out"]')).toBeNull();
 		expect(target.textContent).toContain(t('bulk.undo.creates_one'));
+		// It says what the undo does instead: no value back, only the entry below.
+		expect(target.querySelector('[data-testid="bulk-undo-deletes-only"]')?.textContent).toBe(t('bulk.undo.deletes_only_one'));
+		expect(target.textContent).not.toContain(tf('bulk.undo.approve_explain', { n: '0' }));
 		expect(buttonByText(t('bulk.undo.approve'))?.disabled).toBe(false);
+	});
+
+	it('names several entries an undo only deletes by their number', async () => {
+		run = undoRun({ total: 2, changes: { update: 0, create: 0, delete: 2, unchanged: 0, invalid: 0 } });
+		targets = [...undoTargets().filter((x) => x.change === 'delete'),
+			{ seq: 3, key: 'gid://shopify/Product/4', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false }];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-undo-deletes-only"]')?.textContent).toBe(tf('bulk.undo.deletes_only', { n: '2' }));
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')).toBeNull();
 	});
 
 	it('names several entries left to delete by their number, and the box in the plural', async () => {
@@ -884,10 +896,14 @@ describe('approving an undo, per target', () => {
 		expect(t('bulk.undo.only_deletes_one')).toBe('Du hast alle Ziele herausgenommen; die Rücknahme löscht nur noch den Eintrag unten.');
 		expect(tf('bulk.undo.only_deletes', { n: '3' })).toBe('Du hast alle Ziele herausgenommen; die Rücknahme löscht nur noch die 3 Einträge unten.');
 		expect(t('bulk.undo.creates_one')).toBe('Der ursprüngliche Lauf hat einen Eintrag neu angelegt. Die Rücknahme löscht ihn, ausser jemand hat ihn seither geändert:');
+		expect(t('bulk.undo.deletes_only_one')).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur den Eintrag unten.');
+		expect(tf('bulk.undo.deletes_only', { n: '3' })).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur die 3 Einträge unten.');
 		setLocale('en');
 		expect(t('bulk.undo.only_deletes_one')).toBe('You took out every target; the undo now only deletes the entry below.');
 		expect(tf('bulk.undo.only_deletes', { n: '3' })).toBe('You took out every target; the undo now only deletes the 3 entries below.');
 		expect(t('bulk.undo.creates_one')).toBe('The original run created one new entry. The undo deletes it unless someone has changed it since:');
+		expect(t('bulk.undo.deletes_only_one')).toBe('This undo writes no value back; it only deletes the entry below.');
+		expect(tf('bulk.undo.deletes_only', { n: '3' })).toBe('This undo writes no value back; it only deletes the 3 entries below.');
 	});
 
 	it('heads the column "Jetzt → zurück auf" in German and "Now → back to" in English', () => {

@@ -909,6 +909,9 @@
 						     are left, and the approval deletes them. An undo whose source only created entries has
 						     taken nothing out, so it is not told it did. -->
 						<p class="text-sm" data-testid="bulk-undo-only-deletes">{tf(bulkOne('bulk.undo.only_deletes', run.changes.delete), { n: String(run.changes.delete) })}</p>
+					{:else if run.changes.update + run.changes.create === 0}
+						<!-- Its source only created entries: nothing gets a value back, the approval deletes them. -->
+						<p class="text-sm" data-testid="bulk-undo-deletes-only">{tf(bulkOne('bulk.undo.deletes_only', run.changes.delete), { n: String(run.changes.delete) })}</p>
 					{:else}
 						<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
 					{/if}
