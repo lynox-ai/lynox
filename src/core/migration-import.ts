@@ -355,18 +355,27 @@ export class MigrationImporter {
    * Production reads them as `/api/health` publishes them; a test lowers them.
    */
   private readonly ceiling: () => MigrationCeiling;
+  /**
+   * Whether `setManifest` takes a store as plaintext. Off in production: the memory a re-encrypt
+   * needs grows with the number and shortness of the values, which the source chooses, and the
+   * factor the ceiling rule uses is one run, not a bound. It stays off until the source half has
+   * measured the factor and the rule holds against values the source chooses; a test turns it on.
+   */
+  private readonly acceptPlainStores: boolean;
 
   constructor(options: {
     lynoxDir?: string | undefined;
     vaultKey: string;
     portableBundleMaxBytes?: number | undefined;
     migrationCeiling?: MigrationCeiling | undefined;
+    acceptPlainStores?: boolean | undefined;
   }) {
     this.lynoxDir = options.lynoxDir ?? getLynoxDir();
     this.vaultKey = options.vaultKey;
     this.portableBundleMaxBytes = options.portableBundleMaxBytes ?? MAX_PORTABLE_DIR_BYTES * 2;
     const ceiling = options.migrationCeiling;
     this.ceiling = ceiling ? () => ceiling : migrationCeiling;
+    this.acceptPlainStores = options.acceptPlainStores === true;
   }
 
   /** Whether a migration session is currently active. */
@@ -551,6 +560,9 @@ export class MigrationImporter {
     }
     for (const [store, types] of typesByStore) {
       if (types.size > 1) throw new Error(`The manifest carries ${store} both raw and as plaintext.`);
+    }
+    if (!this.acceptPlainStores && [...typesByStore.values()].some((t) => t.has('sqlite_db_plain'))) {
+      throw new Error('The manifest carries a store as plaintext, which this instance does not take yet; the source has to send it raw.');
     }
     for (const [store, types] of typesByStore) {
       if (types.has('sqlite_db_plain') && !manifest.chunks.some(c => c.type === 'sqlite_db_plain' && base(c) === store && isFirst(c))) {
@@ -1317,7 +1329,7 @@ export class MigrationImporter {
         const { header, body } = decodePlainPayload(payload, store, isListedValue);
         const key = store === 'engine.db' ? deriveEngineEncKey(this.vaultKey) : deriveHistoryEncKey(this.vaultKey);
         try {
-          const { image, counts } = reencryptImage(body, store, columns, header, { key });
+          const { image, counts } = reencryptImage(body, store, columns, header, { key, scratchDir: this.lynoxDir });
           this.plainCounts.set(store, { what: store, path: 'plain', ...counts });
           out.push({ meta: { ...first.meta, type: 'sqlite_db', name: store, originalSize: image.length, columns: undefined }, data: image });
         } finally {

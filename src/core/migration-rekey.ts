@@ -28,6 +28,9 @@
  * engine.db, framed the same way, and are re-encrypted here too (`reencryptLedgers`).
  */
 import { createCipheriv, randomBytes } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { CRYPTO_ALGORITHM, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
@@ -213,6 +216,11 @@ export interface RekeyOptions {
   decrypt?: ((stored: string, key: Buffer) => StrictDecryptResult) | undefined;
   /** Rows per transaction (default 1,000). */
   stepRows?: number | undefined;
+  /**
+   * Where `reencryptImage` writes the rewritten image for a moment to compact it (default: the
+   * system temp directory). It holds only ciphertext and is removed before the call returns.
+   */
+  scratchDir?: string | undefined;
 }
 
 /** The names SQLite resolves to the rowid unless a column takes them. */
@@ -221,9 +229,16 @@ const ROWID_NAMES: ReadonlySet<string> = new Set(['rowid', 'oid', '_rowid_']);
 const quoted = (name: string): string => `"${name.replace(/"/g, '""')}"`;
 const listKey = (table: string, column: string, pk: ReadonlyArray<unknown>): string => JSON.stringify([table, column, pk]);
 
-function tableColumns(db: Database.Database, table: string): Array<{ name: string; pk: number }> {
-  return db.prepare(`PRAGMA table_info(${quoted(table)})`).all() as Array<{ name: string; pk: number }>;
+/** A table's columns with hidden and generated ones (`table_xinfo`; `hidden` is 0 for an ordinary column). */
+function tableColumns(db: Database.Database, table: string): Array<{ name: string; pk: number; hidden: number }> {
+  return db.prepare(`PRAGMA table_xinfo(${quoted(table)})`).all() as Array<{ name: string; pk: number; hidden: number }>;
 }
+
+/**
+ * A table's column names in lower case: SQLite matches identifiers without regard to case. The
+ * set's own names are lower case (a test holds it), so they compare with these as they are.
+ */
+const columnNames = (db: Database.Database, table: string): Set<string> => new Set(tableColumns(db, table).map((c) => c.name.toLowerCase()));
 
 /**
  * Re-encrypt a received image's columns of the set, in place, on an open in-memory connection.
@@ -263,14 +278,33 @@ export function reencryptColumns(
   const setTables = [...PLAIN_COLUMNS[store].keys()];
   const trigger = db.prepare(`SELECT tbl_name AS t FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN (${setTables.map(() => '?').join(', ')}) LIMIT 1`).get(...setTables.map((t) => t.toLowerCase())) as { t: string } | undefined;
   if (trigger) throw refuse(`carries a trigger on ${trigger.t}`);
+  // A virtual table's writes run its module's code on data the source chose; a store of this build has none.
+  let kinds: Array<{ name: string; type: string }>;
+  try {
+    kinds = db.prepare('PRAGMA table_list').all() as Array<{ name: string; type: string }>;
+  } catch {
+    throw refuse('has a table this instance cannot read');
+  }
+  const odd = kinds.find((k) => k.type === 'virtual' || k.type === 'shadow');
+  if (odd) throw refuse(`carries a virtual table (${odd.name.slice(0, 64)})`);
+  // On a table of the set, a rewrite also computes its generated columns and expression indexes.
+  for (const table of setTables) {
+    const info = tableColumns(db, table);
+    if (info.some((c) => c.hidden !== 0)) throw refuse(`has a generated or hidden column in ${table}`);
+    const indexes = db.prepare(`PRAGMA index_list(${quoted(table)})`).all() as Array<{ name: string; partial: number }>;
+    for (const index of indexes) {
+      const parts = db.prepare(`PRAGMA index_xinfo(${quoted(index.name)})`).all() as Array<{ cid: number }>;
+      if (index.partial !== 0 || parts.some((c) => c.cid === -2)) throw refuse(`has an index on an expression or a partial index on ${table}`);
+    }
+  }
 
   for (const { table, column, absent } of columns) {
-    const info = tableColumns(db, table);
+    const has = columnNames(db, table);
     if (absent) {
-      if (info.some((c) => c.name === column)) throw refuse(`names ${table}.${column} as absent, but its image has that column`);
+      if (has.has(column)) throw refuse(`names ${table}.${column} as absent, but its image has that column`);
       continue;
     }
-    if (!info.some((c) => c.name === column)) {
+    if (!has.has(column)) {
       throw refuse(`names ${table}.${column} as rewritten, but its image has no such column`);
     }
   }
@@ -317,7 +351,7 @@ export function reencryptColumns(
   };
 
   // The set, named columns first in the order the chunk lists them, then the ones it does not name.
-  const present = (table: string): Set<string> => new Set(tableColumns(db, table).map((c) => c.name));
+  const present = (table: string): Set<string> => columnNames(db, table);
   for (const { table, column, absent } of columns) if (!absent) rewrite(table, column, true);
   for (const [table, cols] of PLAIN_COLUMNS[store]) {
     const has = present(table);
@@ -350,17 +384,19 @@ export function reencryptColumns(
 
 /**
  * The received plaintext image of `store`, re-encrypted under `options.key`, as a ciphertext image
- * for the existing staging. Opened from the Buffer in memory with `temp_store=MEMORY`, so no file
- * holding plaintext is written; the caller writes only the returned image.
+ * for the existing staging. Opened from the Buffer in memory with `temp_store=MEMORY`; the image
+ * is the source's, so it is opened as untrusted: `trusted_schema` and `foreign_keys` off (a
+ * cascade would run a child table's trigger on the rewrite), and a `quick_check` before anything
+ * is written.
  *
- * `secure_delete` is on: a cell grows when its plaintext is replaced by ciphertext and moves, and
- * without it the old plaintext stays in the page's free space, which `serialize` copies to the
- * staged file (measured 2026-11-16 over 3,000 rows: 2 left without, 0 with, on an image made the
- * way the source makes it). Free space the image arrives with is the source's: it sends a
- * `VACUUM INTO` snapshot whose cells it rewrote in place (a plaintext is never longer than its
- * ciphertext), so only ciphertext lies there. `VACUUM` here would also clear that, but it
- * renumbers the rowids of a table without an index or an INTEGER PRIMARY KEY, which a migration
- * keeps today.
+ * The result is a `VACUUM INTO` copy of the rewritten image, read back and removed. It carries
+ * the live content only: no free page or free block, so neither a plaintext a rewrite displaced
+ * nor anything the image arrived with in its free space (measured 2026-11-16: a `serialize` of
+ * the rewritten image still held a replaced plaintext without `secure_delete`, the `VACUUM INTO`
+ * copy did not). Unlike `VACUUM`, which renumbers the rowids of a table without an INTEGER PRIMARY
+ * KEY, `VACUUM INTO` keeps them (measured on SQLite 3.53.4; the import's rowid test holds it).
+ * The copy is written only after every column of the set passed the final check, so it holds
+ * ciphertext. `secure_delete` stays on for the in-memory rewrite.
  */
 export function reencryptImage(
   image: Buffer,
@@ -378,10 +414,28 @@ export function reencryptImage(
     throw new PlainRefusal(`Refusing to restore: ${store} in the bundle does not open as a database — import aborted before anything was replaced.`, { cause: err });
   }
   try {
+    db.pragma('trusted_schema = OFF');
+    db.pragma('foreign_keys = OFF');
     db.pragma('temp_store = MEMORY');
     db.pragma('secure_delete = ON');
+    let check: unknown[];
+    try {
+      check = db.pragma('quick_check', { simple: false }) as unknown[];
+    } catch (err: unknown) {
+      throw new PlainRefusal(`Refusing to restore: ${store} in the bundle fails its integrity check — import aborted before anything was replaced.`, { cause: err });
+    }
+    if (check.length !== 1 || (check[0] as { quick_check?: unknown }).quick_check !== 'ok') {
+      throw new PlainRefusal(`Refusing to restore: ${store} in the bundle fails its integrity check — import aborted before anything was replaced.`);
+    }
     const counts = reencryptColumns(db, store, columns, header, options);
-    return { image: db.serialize(), counts };
+    const dir = mkdtempSync(join(options.scratchDir ?? tmpdir(), '.rekey-'));
+    try {
+      const out = join(dir, 'image.db');
+      db.prepare('VACUUM INTO ?').run(out);
+      return { image: readFileSync(out), counts };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   } finally {
     db.close();
     copy.fill(0);
@@ -399,7 +453,7 @@ export function countEncryptedPlainColumns(path: string, store: PlainStore): num
   try {
     let n = 0;
     for (const [table, cols] of PLAIN_COLUMNS[store]) {
-      const present = new Set(tableColumns(db, table).map((c) => c.name));
+      const present = columnNames(db, table);
       for (const column of cols) {
         if (!present.has(column)) continue;
         const row = db.prepare(`SELECT count(*) AS n FROM ${quoted(table)} WHERE typeof(${quoted(column)}) = 'text' AND substr(${quoted(column)}, 1, ${String(ENCRYPTED_PREFIX.length)}) = ?`).get(ENCRYPTED_PREFIX) as { n: number };
@@ -439,11 +493,20 @@ export function reencryptLedgers(
     try { ledger = JSON.parse(content) as Record<string, unknown>; } catch { throw refuse(`${JSON.stringify(file.slice(0, 128))} does not parse`); }
     if (ledger?.['version'] !== 1 || ledger['phase'] !== 'merge') throw refuse(`${JSON.stringify(file.slice(0, 128))} is not a merge ledger`);
     const detail = (ledger['entry'] as Record<string, unknown> | undefined)?.['detail'] as Record<string, unknown> | null | undefined;
-    const cols = typeof detail?.['table'] === 'string' ? LEDGER_COLUMNS.get(detail['table']) : undefined;
+    const table = detail?.['table'];
+    const cols = typeof table === 'string' ? LEDGER_COLUMNS.get(table) : undefined;
+    // A rollback writes these names into SQL, which matches them without regard to case; a name
+    // that differs from the known one only in case would carry a contact cell past this rewrite.
+    if (typeof table === 'string' && !cols && [...LEDGER_COLUMNS.keys()].some((t) => t.toLowerCase() === table.toLowerCase())) {
+      throw refuse(`${JSON.stringify(file.slice(0, 128))} names its table in another case`);
+    }
     if (detail && cols) {
       for (const side of ['dupRow', 'canonicalRow'] as const) {
         const row = detail[side] as Record<string, unknown> | null | undefined;
         if (!row) continue;
+        if (Object.keys(row).some((k) => !cols.has(k) && [...cols].some((c) => c.toLowerCase() === k.toLowerCase()))) {
+          throw refuse(`${JSON.stringify(file.slice(0, 128))} names a contact column in another case`);
+        }
         for (const column of cols) {
           const value = row[column];
           if (typeof value !== 'string' || value === '') continue;

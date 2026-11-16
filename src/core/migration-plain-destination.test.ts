@@ -22,7 +22,8 @@ import {
 } from './migration-crypto.js';
 import { strictDecrypt } from './strict-decrypt.js';
 import {
-  ENCRYPTED_COLUMNS, PLAIN_COLUMNS, encodePlainPayload, encryptStoredText, patchWalHeader, reencryptColumns, reencryptImage,
+  ENCRYPTED_COLUMNS, PLAIN_COLUMNS, countEncryptedPlainColumns, encodePlainPayload, encryptStoredText, patchWalHeader,
+  reencryptColumns, reencryptImage, reencryptLedgers,
   type ListedLedgerCell, type ListedValue, type PlainColumn, type PlainHeader, type PlainStore,
 } from './migration-rekey.js';
 import type { MigrationCeiling } from './migration-ceiling.js';
@@ -196,7 +197,7 @@ function rawPart(dir: string, store: string): Part {
 }
 
 function importer(dst: string, ceiling: MigrationCeiling = ROOMY): MigrationImporter {
-  return new MigrationImporter({ lynoxDir: dst, vaultKey: DST, migrationCeiling: ceiling });
+  return new MigrationImporter({ lynoxDir: dst, vaultKey: DST, migrationCeiling: ceiling, acceptPlainStores: true });
 }
 
 function run(dst: string, parts: Part[], ceiling?: MigrationCeiling): ReturnType<MigrationImporter['restore']> {
@@ -791,5 +792,158 @@ describe('plaintext merge ledgers are re-encrypted with engine.db', () => {
     expect(readdirSync(dst)).toEqual([]);
     const body = Buffer.from(JSON.stringify({ files: { [FILE]: JSON.stringify({ version: 1, phase: 'archive' }) } }));
     expect(() => run(tmp(), withLedgers(src, encodePlainPayload({ failed: [], looksEncrypted: [] }, body), 1))).toThrow(/not a merge ledger/);
+  });
+});
+
+describe('the image is the source\'s and is opened as untrusted', () => {
+  const NONE = { failed: [], looksEncrypted: [] };
+  const MEM: PlainColumn[] = [{ table: 'memories', column: 'text' }];
+  const image = (ddl: string, fill?: (db: Database.Database) => void): Buffer => {
+    const db = new Database(':memory:');
+    db.exec(ddl);
+    fill?.(db);
+    const out = db.serialize();
+    db.close();
+    return out;
+  };
+  const rekey = (img: Buffer, columns: PlainColumn[] = MEM) => reencryptImage(img, 'engine.db', columns, NONE, { key: deriveEngineEncKey(DST) });
+
+  it('does not take a plaintext store by default; a raw one still goes through', () => {
+    const src = tmp(); const dst = tmp();
+    seedStores(src, SRC);
+    const imp = new MigrationImporter({ lynoxDir: dst, vaultKey: DST, migrationCeiling: ROOMY });
+    expect(() => imp.setManifest(bundle([plainPart(src, 'engine.db')], handshake(imp)).manifest)).toThrow(/carries a store as plaintext, which this instance does not take yet/);
+    imp.cleanup();
+    const raw = new MigrationImporter({ lynoxDir: dst, vaultKey: DST, migrationCeiling: ROOMY });
+    expect(() => raw.setManifest(bundle([rawPart(src, 'engine.db')], handshake(raw)).manifest)).not.toThrow();
+    raw.cleanup();
+    expect(readdirSync(dst)).toEqual([]);
+  });
+
+  it('runs no cascade: a child table\'s trigger does not fire on the rewrite', () => {
+    const img = image(`CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT UNIQUE);
+      CREATE TABLE child (ref TEXT REFERENCES memories(text) ON UPDATE CASCADE);
+      CREATE TABLE fired (n INTEGER);
+      CREATE TRIGGER on_child AFTER UPDATE ON child BEGIN INSERT INTO fired VALUES (1); END;
+      INSERT INTO memories VALUES ('a', 'plain words'); INSERT INTO child VALUES ('plain words');`);
+    const back = new Database(rekey(img).image);
+    try {
+      expect(back.prepare('SELECT count(*) AS n FROM fired').get()).toEqual({ n: 0 });
+      expect(back.prepare('SELECT ref FROM child').get()).toEqual({ ref: 'plain words' });
+    } finally { back.close(); }
+  });
+
+  it('refuses a virtual table anywhere in the image', () => {
+    const img = image("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT); CREATE VIRTUAL TABLE notes USING fts5(body); INSERT INTO memories VALUES ('a', 'x')");
+    expect(() => rekey(img)).toThrow(/carries a virtual table \(notes/);
+  });
+
+  it('refuses a generated column on a table of the set', () => {
+    const img = image("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, shout TEXT GENERATED ALWAYS AS (upper(text)) STORED); INSERT INTO memories (id, text) VALUES ('a', 'x')");
+    expect(() => rekey(img)).toThrow(/has a generated or hidden column in memories/);
+  });
+
+  it.each([
+    ['an expression index', 'CREATE INDEX ix ON memories (lower(text))'],
+    ['a partial index', "CREATE INDEX ix ON memories (id) WHERE text <> ''"],
+  ])('refuses %s on a table of the set', (_label, ddl) => {
+    const img = image(`CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT); ${ddl}; INSERT INTO memories VALUES ('a', 'x')`);
+    expect(() => rekey(img)).toThrow(/has an index on an expression or a partial index on memories/);
+  });
+
+  it('takes an ordinary index on a table of the set', () => {
+    const img = image("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT); CREATE INDEX ix ON memories (text); INSERT INTO memories VALUES ('a', 'x')");
+    expect(rekey(img).counts.reencrypted).toBe(1);
+  });
+
+  it('refuses an image that fails its integrity check', () => {
+    const img = image('CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT)', (db) => {
+      const insert = db.prepare('INSERT INTO memories VALUES (?, ?)');
+      for (let i = 0; i < 200; i++) insert.run(`m${String(i)}`, 'x'.repeat(100));
+    });
+    // A cell pointer of the last page out of range: the image opens, the check finds it.
+    const last = img.length - 4096;
+    img[last + 8] = 0xff; img[last + 9] = 0xff;
+    expect(() => rekey(img)).toThrow(/fails its integrity check/);
+    // A fault the check reports without throwing: a NULL under a NOT NULL the schema names.
+    const nulled = image("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, note TEXT); INSERT INTO memories VALUES ('a', 'x', NULL)", (db) => {
+      db.unsafeMode(true);
+      db.pragma('writable_schema = ON');
+      db.prepare("UPDATE sqlite_master SET sql = 'CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, note TEXT NOT NULL)' WHERE name = 'memories'").run();
+      db.pragma('writable_schema = OFF');
+    });
+    expect(() => rekey(nulled)).toThrow(/fails its integrity check/);
+  });
+
+  it('names the set in lower case, so a name from the image compares in lower case', () => {
+    for (const store of ['engine.db', 'history.db'] as const) {
+      for (const [table, cols] of PLAIN_COLUMNS[store]) {
+        expect(table).toBe(table.toLowerCase());
+        for (const c of cols) expect(c).toBe(c.toLowerCase());
+      }
+    }
+  });
+
+  it('carries nothing of the free space the image arrived with', () => {
+    const img = image("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT); INSERT INTO memories VALUES ('a', 'kept')", (db) => {
+      db.prepare('INSERT INTO memories VALUES (?, ?)').run('gone', `freespace-needle-${'y'.repeat(6000)}`);
+      db.prepare("DELETE FROM memories WHERE id = 'gone'").run();
+    });
+    // The control: the deleted plaintext is still in the arriving image.
+    expect(img.includes('freespace-needle')).toBe(true);
+    const out = rekey(img).image;
+    expect(out.includes('freespace-needle')).toBe(false);
+    const back = new Database(out);
+    try { expect(back.pragma('freelist_count', { simple: true })).toBe(0); } finally { back.close(); }
+  });
+
+  it('leaves no scratch file behind', () => {
+    const dir = tmp();
+    const img = image("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT); INSERT INTO memories VALUES ('a', 'x')");
+    reencryptImage(img, 'engine.db', MEM, NONE, { key: deriveEngineEncKey(DST), scratchDir: dir });
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  describe('a column named in another case is the same column', () => {
+    it('refuses a column marked absent that the image has in another case', () => {
+      const img = image("CREATE TABLE memories (id TEXT PRIMARY KEY, TEXT TEXT); INSERT INTO memories VALUES ('a', 'plain words')");
+      expect(() => rekey(img, [{ table: 'memories', column: 'text', absent: true }])).toThrow(/as absent, but its image has that column/);
+    });
+
+    it('encrypts a column of the set the source did not name, in another case', () => {
+      const img = image("CREATE TABLE memories (id TEXT PRIMARY KEY, TEXT TEXT); INSERT INTO memories VALUES ('a', 'plain words')");
+      const { image: out, counts } = rekey(img, []);
+      expect(counts.reencrypted).toBe(1);
+      const back = new Database(out);
+      try { expect(strictDecrypt((back.prepare('SELECT TEXT AS v FROM memories').get() as { v: string }).v, deriveEngineEncKey(DST))).toMatchObject({ ok: true, text: 'plain words' }); } finally { back.close(); }
+    });
+
+    it('checks such a column after the rewrite, a row the paging does not reach included', () => {
+      const img = image('CREATE TABLE memories (id TEXT PRIMARY KEY, TEXT TEXT)', (db) => {
+        db.prepare('INSERT INTO memories (rowid, id, TEXT) VALUES (0, ?, ?)').run('z', 'at rowid 0');
+      });
+      expect(() => rekey(img, [])).toThrow(/still holds 1 unencrypted value/);
+    });
+
+    it('counts the encrypted values of a raw store in such a column', () => {
+      const dir = tmp();
+      const db = new Database(join(dir, 'engine.db'));
+      db.exec('CREATE TABLE memories (id TEXT PRIMARY KEY, TEXT TEXT)');
+      db.prepare('INSERT INTO memories VALUES (?, ?)').run('a', encryptStoredText('x', deriveEngineEncKey(SRC)));
+      db.close();
+      expect(countEncryptedPlainColumns(join(dir, 'engine.db'), 'engine.db')).toBe(1);
+    });
+
+    const ledgerFile = (detail: Record<string, unknown>): Record<string, unknown> => ({
+      'merge-x.json': JSON.stringify({ version: 1, phase: 'merge', entry: { detail } }),
+    });
+    it('refuses a ledger that names its table in another case', () => {
+      expect(() => reencryptLedgers(ledgerFile({ table: 'People', dupRow: { email: 'd@example.org' } }), NONE, { key: deriveEngineEncKey(DST) }))
+        .toThrow(/names its table in another case/);
+    });
+    it('refuses a ledger that names a contact column in another case', () => {
+      expect(() => reencryptLedgers(ledgerFile({ table: 'people', dupRow: { EMAIL: 'd@example.org' } }), NONE, { key: deriveEngineEncKey(DST) }))
+        .toThrow(/names a contact column in another case/);
+    });
   });
 });
