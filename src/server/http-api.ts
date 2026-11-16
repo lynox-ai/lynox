@@ -15315,28 +15315,46 @@ export class LynoxHTTPApi {
           'X-Migration-Token': migrationToken,
         };
 
-        const completeRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
-          method: 'POST',
-          headers: migrationHeaders,
-          body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
-        });
-        if (!completeRes.ok) throw new Error('Handshake completion failed');
-
-        sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
-
-        // 3. Export + Encrypt
-        sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
-        // The transfer key is zeroized once the chunks are encrypted, and also when the export
-        // refuses (a bundle over the destination's bounds) or fails.
+        // The transfer key is zeroized once the chunks are encrypted, and also when the handshake
+        // completion or the export fails or refuses (a bundle over the destination's bounds).
         let exported: ReturnType<typeof exporter.export>;
         try {
+          const completeRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
+            method: 'POST',
+            headers: migrationHeaders,
+            body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
+          });
+          if (!completeRes.ok) throw new Error('Handshake completion failed');
+
+          sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
+
+          // A destination that takes plaintext stores says so in its handshake; its numbers come
+          // from its health route. Anything short of both is the raw path, as for an older one.
+          const { plainOffer, readDestinationHealth } = await import('../core/migration-plain-source.js');
+          const ceiling = (handshake as { acceptsPlainStores?: unknown }).acceptsPlainStores === true
+            ? plainOffer(handshake, await readDestinationHealth(fetchPinned, targetUrl))
+            : null;
+
+          // 3. Export + Encrypt
+          sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
           exported = exporter.export(transferKey, (p) => {
             sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
-          });
+          }, ceiling ? { plain: { ceiling } } : undefined);
         } finally {
           crypto.zeroize(transferKey);
         }
-        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace } = exported;
+        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace, plain: exportPlain } = exported;
+        // A refusal from the destination is shown as its own text, which is written for the
+        // person migrating; the raw response only when it carries none.
+        // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
+        // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
+        const refusal = async (r: Response, step: string, told: string): Promise<Error> => {
+          const text = await r.text();
+          let message: unknown;
+          try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
+          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${text.slice(0, 500)}`);
+          return new Error(`${told} It says: ${message.length > 500 ? `${message.slice(0, 500)}…` : message}`);
+        };
 
         // 4. Send manifest
         sendEvent('progress', { phase: 'transferring', message: 'Sending manifest...' });
@@ -15345,7 +15363,7 @@ export class LynoxHTTPApi {
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
         });
-        if (!mRes.ok) throw new Error(`Manifest rejected: ${await mRes.text()}`);
+        if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
 
         // 5. Send chunks
         for (let i = 0; i < chunks.length; i++) {
@@ -15361,7 +15379,7 @@ export class LynoxHTTPApi {
             headers: migrationHeaders,
             body: JSON.stringify(chunks[i]),
           });
-          if (!cRes.ok) throw new Error(`Chunk ${String(i)} rejected: ${await cRes.text()}`);
+          if (!cRes.ok) throw await refusal(cRes, `Chunk ${String(i)} rejected`, `The target instance refused part ${String(i + 1)} of the data.`);
         }
 
         // 6. Restore
@@ -15370,7 +15388,7 @@ export class LynoxHTTPApi {
           method: 'POST',
           headers: migrationHeaders,
         });
-        if (!rRes.ok) throw new Error(`Restore failed: ${await rRes.text()}`);
+        if (!rRes.ok) throw await refusal(rRes, 'Restore failed', 'The target instance could not restore the data.');
 
         const result = await rRes.json() as { success: boolean; verification: unknown };
         // Files the export could not carry (a link, a name that cannot travel) are named in the result,
@@ -15379,6 +15397,8 @@ export class LynoxHTTPApi {
           success: true, verification: result.verification,
           ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}),
           ...(exportWorkspace !== undefined ? { workspace: exportWorkspace } : {}),
+          // Per store the path it took and why a store took the raw path, for the report.
+          ...(exportPlain !== undefined ? { plain: exportPlain } : {}),
         });
       } catch (err: unknown) {
         sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
