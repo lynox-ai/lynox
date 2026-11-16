@@ -132,16 +132,24 @@ describe('the export zeroes every plaintext buffer it made, whichever path a sto
   it('when a chunk fails to encrypt', () => {
     source();
     failEncrypt.on = true;
+    // A chunk outside the stores, held to see that it is zeroed too.
+    const proto = MigrationExporter.prototype as unknown as { collectConfig: () => { data: Buffer } | null };
+    const original = proto.collectConfig;
+    const config: Buffer[] = [];
+    vi.spyOn(proto, 'collectConfig').mockImplementation(function (this: unknown) { const c = original.call(this); if (c) config.push(c.data); return c; });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
     expect(() => new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT }).export(key(), undefined, { plain: { ceiling: ROOMY } })).toThrow('encrypt failed');
     expectZeroed();
+    expect(config).toHaveLength(1);
+    expect(zero(config[0]!)).toBe(true);
   });
 
-  it('when a later collector throws', () => {
-    source();
+  it('when a later collector throws, the merge ledgers\' plaintext form included', () => {
+    source({ filler: true });
     const proto = MigrationExporter.prototype as unknown as { collectConfig: () => unknown };
     vi.spyOn(proto, 'collectConfig').mockImplementation(() => { throw new Error('config unreadable'); });
     expect(() => new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT }).export(key(), undefined, { plain: { ceiling: ROOMY } })).toThrow('config unreadable');
-    expectZeroed();
+    expectZeroed(3);
   });
 });
 
