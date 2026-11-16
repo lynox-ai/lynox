@@ -184,7 +184,12 @@ describe('MailSettings surfaces which leg of the connection failed', () => {
 // above; the control requires the form's wrapper to stay without the flag.
 describe('MailSettings error text: background check vs. a test the user started', () => {
   it('marks the saved account’s polling error as coming from the background check', () => {
-    expect(source).toMatch(/friendlyMailError\(account\.lastError\.code, undefined, \{ background: true \}\)/);
+    // Read inside the block that renders it, with comments taken out, so a line that is
+    // commented out or moved elsewhere does not count.
+    const live = source.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\/[^\n]*/g, '');
+    const blocks = [...live.matchAll(/\{#if account\.lastError\}([\s\S]*?)\{\/if\}/g)].map(m => m[1] ?? '');
+    expect(blocks.length).toBeGreaterThanOrEqual(1);
+    expect(blocks.some(b => /friendlyMailError\(account\.lastError\.code, undefined, \{ background: true \}\)/.test(b))).toBe(true);
   });
 
   it('control: the form’s own error wrapper does not claim to be the background check', () => {
