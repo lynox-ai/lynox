@@ -41,7 +41,7 @@ import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../cor
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, clientIdCredentialReader, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -2780,7 +2780,16 @@ ${draftJson}
         return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then connect.`;
       }
       // The two refusals the route gives before anything is sent, asked here as well.
+      // The way on differs by who asks: nothing a mandate's session stores or changes reaches the
+      // owner's names, and on a built-in provider the client id's name is fixed, so the owner
+      // changes the other profile instead.
       if (clientIdKey && !mayServeAsClientId(apiStore, clientIdKey)) {
+        if (!isOwnerPrincipal(agent.principal)) {
+          return `Error: profile "${id}" reads its client id from a name another profile reads as a credential, so the route would refuse it. Nothing was sent. Only the owner of this instance can change that; tell the owner.`;
+        }
+        if (appOfProvider && clientIdCredentialReader(apiStore, clientIdKey, profile.id) !== undefined) {
+          return `Error: profile "${id}" reads its client id from "${clientIdKey}", and another profile reads that name as a credential. A client id is sent in the link, so the route would refuse it. On the built-in "${appOfProvider.id}" provider that name is fixed: change the other profile so it reads its credential under a name of its own, then connect.`;
+        }
         return `Error: profile "${id}" names "${clientIdKey}" as its client id, and another profile reads that name as a credential. A client id is sent in the link, so the route would refuse it. Store the client id under a name of its own, update auth.oauth.client_id_key, then connect.`;
       }
       if (!isOwnerPrincipal(agent.principal) && agent.secretStore

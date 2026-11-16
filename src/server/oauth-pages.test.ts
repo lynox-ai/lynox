@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
   OAUTH_BACK_PATHS, OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_PAGE_CSS, OAUTH_PAGE_STYLE_HASH, OAUTH_RESULT_TEXTS,
-  ENGINE_LESS_PAGE_CLOSE, engineLessPageText, connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, oauthResultText, type OAuthBack,
+  ENGINE_LESS_PAGE_CLOSE, engineLessPageText, connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, oauthResultText, clientIdOnFixedNameText, type OAuthBack,
 } from './oauth-pages.js';
 
 describe('the OAuth page frame', () => {
@@ -255,5 +255,26 @@ describe('the result pages whose way on is storing a value', () => {
   it('control: a text without a helper version reads the same in both sessions', () => {
     expect(oauthResultText('clientIdWithheld', false)).toBe(OAUTH_RESULT_TEXTS.clientIdWithheld);
     expect(oauthResultText('clientIdWithheld', true)).toBe(OAUTH_RESULT_TEXTS.clientIdWithheld);
+  });
+});
+
+// The owner's page on a built-in provider, where the client id's name is fixed (U-288).
+describe('the owner\'s page when another profile reads the client id\'s fixed name', () => {
+  const CASES = [
+    ['Books PAT', 'en', 'The client id of this profile is stored under a name that another profile "Books PAT" reads as a credential. On this provider the name is fixed, so change the name the other profile reads its credential from, then ask for a new link. Nothing was sent to the provider.'],
+    ['Books PAT', 'de', 'Die Client-ID dieses Profils liegt unter einem Namen, den ein anderes Profil „Books PAT“ als Zugangsschlüssel liest. Bei diesem Anbieter ist der Name fest; ändere darum beim anderen Profil den Namen, unter dem es seinen Schlüssel liest, und fordere dann einen neuen Link an. An den Anbieter wurde nichts gesendet.'],
+    [undefined, 'en', 'The client id of this profile is stored under a name that another profile reads as a credential. On this provider the name is fixed, so change the name the other profile reads its credential from, then ask for a new link. Nothing was sent to the provider.'],
+    [undefined, 'de', 'Die Client-ID dieses Profils liegt unter einem Namen, den ein anderes Profil als Zugangsschlüssel liest. Bei diesem Anbieter ist der Name fest; ändere darum beim anderen Profil den Namen, unter dem es seinen Schlüssel liest, und fordere dann einen neuen Link an. An den Anbieter wurde nichts gesendet.'],
+  ] as const;
+  for (const [other, lang, text] of CASES) {
+    it(`${other === undefined ? 'without' : 'with'} the other profile's name, ${lang}: verbatim`, () => {
+      expect(oauthResultHtml(lang, 409, clientIdOnFixedNameText(other), 'apis')).toContain(`<p>${escapeForTest(text)}</p>`);
+    });
+  }
+
+  it('escapes the other profile\'s name, and keeps it in one paragraph', () => {
+    const html = oauthResultHtml('en', 409, clientIdOnFixedNameText('<b>x</b>\n\ny'), 'apis');
+    expect(html).toContain('another profile &quot;&lt;b&gt;x&lt;/b&gt;');
+    expect(html.match(/<p>/g)?.length).toBe(1);
   });
 });

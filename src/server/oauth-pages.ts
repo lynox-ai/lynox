@@ -245,6 +245,21 @@ export function oauthResultText(key: keyof typeof OAUTH_RESULT_TEXTS, owner: boo
   return OAUTH_RESULT_TEXTS[key];
 }
 
+/**
+ * The owner's page when the client id's name is another profile's credential, on a built-in
+ * provider. There the name is fixed (the save path allows no other), so storing the client id
+ * under a name of its own is not a way on; changing the other profile is. `other` is that
+ * profile's name where the route found it; the page is the owner's, so it may name it.
+ */
+export function clientIdOnFixedNameText(other: string | undefined): OAuthText {
+  const en = other === undefined ? '' : ` "${other}"`;
+  const de = other === undefined ? '' : ` „${other}“`;
+  return {
+    en: `The client id of this profile is stored under a name that another profile${en} reads as a credential. On this provider the name is fixed, so change the name the other profile reads its credential from, then ask for a new link. Nothing was sent to the provider.`,
+    de: `Die Client-ID dieses Profils liegt unter einem Namen, den ein anderes Profil${de} als Zugangsschlüssel liest. Bei diesem Anbieter ist der Name fest; ändere darum beim anderen Profil den Namen, unter dem es seinen Schlüssel liest, und fordere dann einen neuen Link an. An den Anbieter wurde nichts gesendet.`,
+  };
+}
+
 /** The 200 page's text: which provider is now connected. */
 export function connectedText(provider: string): OAuthText {
   return { en: `${provider} is connected to lynox.`, de: `${provider} ist mit lynox verbunden.` };
