@@ -39,11 +39,11 @@
 	let notice = $state<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
 	const provider = $derived(client ? presetProviderLabel(client.preset) : '');
-	// Not while another app is being entered: the connect would use the stored one.
-	const connectFirst = $derived(connectHref !== null && client !== null && client.client_secret_set && !secretInputShown);
 	// A different client id is a different app, whose secret is not the stored one: the field opens.
 	const idDiffers = $derived(client !== null && client.client_id !== null && clientId.trim() !== client.client_id);
 	const secretInputShown = $derived(client !== null && (!client.client_secret_set || replacing || idDiffers));
+	// Not while another app is being entered: the connect would use the stored one.
+	const connectFirst = $derived(connectHref !== null && client !== null && client.client_secret_set && !secretInputShown);
 	const canSave = $derived(
 		client !== null && !saving && clientId.trim() !== '' && (secretInputShown ? clientSecret.trim() !== '' : true),
 	);
