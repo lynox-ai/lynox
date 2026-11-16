@@ -93,7 +93,7 @@ describe('DataStore source columns on a real engine', () => {
     ]);
   });
 
-  it('the boot gives the older table an id, and the tables the CRM creates later in the same boot get theirs', () => {
+  it('the boot gives the older table an id, and the CRM tables carry theirs after the same boot', () => {
     const ds = dataStoreOf();
     expect(ds.hasCollectionIdColumn()).toBe(true);
     expect(ds.collectionIdOf('legacy')).toMatch(/^dsc_[0-9a-f]{16}$/);

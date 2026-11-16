@@ -196,6 +196,8 @@ export function coercePlainColumnValue(val: unknown, col: DataStoreColumnDef): u
  * A fresh opaque id for a collection: `dsc_` and 16 hex. A label with no secret value, so a
  * mandate's row in the instance trail can say which collection it wrote without its name.
  */
+export const COLLECTION_ID_RE = /^dsc_[0-9a-f]{16}$/;
+
 export function newCollectionId(): string {
   return `dsc_${randomBytes(8).toString('hex')}`;
 }
@@ -271,7 +273,8 @@ export class DataStore {
    * The opaque id of a collection, as a mandate's row in the instance trail names it, never by
    * its name. Undefined for a collection that does not exist, one without an id yet (created
    * without the column, or by an older build on a migrated file; the next boot assigns one),
-   * and a file whose column was never added. Any other failure is thrown: the trail then
+   * one whose stored value is not an id of this shape (a hand-edited file; the next boot replaces
+   * it), and a file whose column was never added. Any other failure is thrown: the trail then
    * refuses the write instead of recording it without saying where.
    */
   collectionIdOf(name: string): string | undefined {
@@ -283,11 +286,12 @@ export class DataStore {
       throw err;
     }
     const id = row?.collection_id;
-    return typeof id === 'string' && id !== '' ? id : undefined;
+    return typeof id === 'string' && COLLECTION_ID_RE.test(id) ? id : undefined;
   }
 
   /**
-   * Gives every collection an opaque id ({@link newCollectionId}). Runs at every engine boot,
+   * Gives every collection an opaque id ({@link newCollectionId}), replacing a value that is
+   * not one. Runs at every engine boot,
    * never in the constructor, for the same reason as {@link ensureSourceColumns}.
    *
    * One IMMEDIATE transaction adds the column when it is missing, fills every row without an
@@ -317,8 +321,14 @@ export class DataStore {
           this.db.prepare('ALTER TABLE ds_collections ADD COLUMN collection_id TEXT').run();
         }
         const set = this.db.prepare('UPDATE ds_collections SET collection_id = ? WHERE rowid = ?');
-        const blank = this.db.prepare("SELECT rowid AS r FROM ds_collections WHERE collection_id IS NULL OR collection_id = ''").all() as Array<{ r: number }>;
-        for (const { r } of blank) { set.run(newCollectionId(), r); assigned++; }
+        // NULL, empty, and anything not of the id's shape (a hand-edited or foreign file): a value
+        // a trail row would not name is replaced, so every table ends with an id it can name.
+        const rows = this.db.prepare('SELECT rowid AS r, collection_id AS id FROM ds_collections').all() as Array<{ r: number; id: unknown }>;
+        for (const { r, id } of rows) {
+          if (typeof id === 'string' && COLLECTION_ID_RE.test(id)) continue;
+          set.run(newCollectionId(), r);
+          assigned++;
+        }
         const dupes = this.db.prepare(`
           SELECT rowid AS r, name, collection_id AS id FROM ds_collections c
           WHERE EXISTS (SELECT 1 FROM ds_collections o WHERE o.collection_id = c.collection_id AND o.rowid < c.rowid)

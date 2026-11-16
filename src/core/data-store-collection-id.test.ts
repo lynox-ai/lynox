@@ -161,6 +161,26 @@ describe('DataStore collection id', () => {
       expect(new Set(ids(ds).map(x => x.collection_id)).size).toBe(3);
     });
 
+    it('an empty value or one not of the id\'s shape is replaced, and never named', () => {
+      legacyFile(path, ['a', 'b', 'c', 'd']);
+      const raw = new Database(path);
+      raw.exec('ALTER TABLE ds_collections ADD COLUMN collection_id TEXT');
+      raw.prepare("UPDATE ds_collections SET collection_id = '' WHERE name IN ('a', 'b')").run();
+      raw.prepare("UPDATE ds_collections SET collection_id = 'mueller_crm' WHERE name = 'c'").run();
+      raw.prepare("UPDATE ds_collections SET collection_id = 'dsc_00000000000000cc' WHERE name = 'd'").run();
+      raw.close();
+      ds = new DataStore(path);
+      expect(ds.collectionIdOf('c')).toBeUndefined();
+      expect(ds.collectionIdOf('d')).toBe('dsc_00000000000000cc');
+      const r = ds.ensureCollectionIds();
+      expect(r.assigned).toBe(3);
+      expect(r.renumbered).toEqual([]);
+      const after = ids(ds);
+      expect(after.every(x => typeof x.collection_id === 'string' && ID.test(x.collection_id))).toBe(true);
+      expect(new Set(after.map(x => x.collection_id)).size).toBe(4);
+      expect(ds.collectionIdOf('d')).toBe('dsc_00000000000000cc');
+    });
+
     it('a failing index leaves the column and the ids in place', () => {
       legacyFile(path, ['a']);
       // An index cannot take a name a table already has.
