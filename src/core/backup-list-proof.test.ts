@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -166,6 +166,18 @@ describe('the backup list across a restart', () => {
     expect(checks).toHaveBeenCalledTimes(1);
   });
 
+  it('does not read a file over the bound whose first bytes alone would parse', async () => {
+    const first = manager();
+    await first.createBackup();
+    first.listBackups();
+    writeFileSync(proofPath(), readFileSync(proofPath(), 'utf8') + ' '.repeat(1024 * 1024));
+    expect(statSync(proofPath()).size).toBeGreaterThan(1024 * 1024);
+
+    const { m, checks } = fresh();
+    expect(m.listBackups()[0]?.provenance).toBe('verified');
+    expect(checks).toHaveBeenCalledTimes(1);
+  });
+
   it('does not follow a symlink in the file\'s place', async () => {
     const first = manager();
     await first.createBackup();
@@ -260,9 +272,20 @@ describe('the backup list across a restart', () => {
     const first = manager();
     await first.createBackup();
     execFileSync('mkfifo', [proofPath()]);
-    const { m, checks } = fresh();
-    expect(m.listBackups()[0]?.provenance).toBe('verified');
-    expect(checks).toHaveBeenCalledTimes(1);
+    // A blocking open would stall the event loop, so the test timeout could
+    // never fire. A child opens the FIFO read-write after 2 s (that open never
+    // blocks), which releases a stalled reader; the elapsed time then shows
+    // whether the list waited for it.
+    const releaser = spawn('sh', ['-c', 'sleep 2; exec 3<> "$1"', 'sh', proofPath()], { stdio: 'ignore' });
+    try {
+      const { m, checks } = fresh();
+      const started = Date.now();
+      expect(m.listBackups()[0]?.provenance).toBe('verified');
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(checks).toHaveBeenCalledTimes(1);
+    } finally {
+      releaser.kill('SIGKILL');
+    }
   }, 5_000);
 
   it('takes away a temporary file a crashed write left, on its next write', async () => {
