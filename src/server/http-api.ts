@@ -9991,7 +9991,12 @@ export class LynoxHTTPApi {
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
         // The targets that add hidden characters the page marks but does not otherwise show: a
         // line wherever the run is approved or its probe confirmed.
-        hiddenAddsTargets: actionable ? ledger.hiddenAddsTargets(params['id']!) : null,
+        ...(() => {
+          // One pass for both counts; a target with a field past the reading bounds is counted
+          // on its own, as not checked, never as one that adds.
+          const hidden = actionable ? ledger.hiddenCounts(params['id']!) : null;
+          return { hiddenAddsTargets: hidden?.adds ?? null, hiddenUncheckedTargets: hidden?.unchecked ?? null };
+        })(),
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
         // the engine's own documents. It stands here so the owner sees where the read goes. A stored
         // source with no address to build (a form without a spec, a filter holding a list) shows its

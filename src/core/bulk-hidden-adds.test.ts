@@ -8,6 +8,8 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { hiddenAddsOf, targetHiddenAdds } from './bulk-hidden-adds.js';
+import { htmlTextsOf, htmlTextsOfTree } from './bulk-html.js';
+import { readWithinBounds, withinReadingBounds } from './html-tree.js';
 import { IN_PLACE_CHARS, inPlaceReferences } from './hidden-chars.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
@@ -91,17 +93,46 @@ describe('an HTML value past the reading bounds', () => {
     expect(hiddenAddsOf('<p>Wasserfilter</p>', '<p>Wasser\u00adfilter</p>', true)).toEqual([SHY]);
   });
 
-  it('holds nothing as a before-image, so each such character the new value holds counts as added', () => {
-    expect(hiddenAddsOf(deep('<p>Wasser\u00adfilter</p>'), '<p>Wasser\u00adfilter</p>', true)).toEqual([SHY]);
-    // CONTROL: within the bounds, the before-image's soft hyphen is held.
-    expect(hiddenAddsOf('<p>Wasser\u00adfilter</p>', '<p>Wasser\u00adfilter</p>', true)).toEqual([]);
+  it('leaves a field whose before-image is past them unread too, claiming nothing it adds', () => {
+    expect(targetHiddenAdds({ description: deep('<p>Wasserfilter</p>') }, { description: '<p>Wasser\u00adfilter</p>' }, ['description']))
+      .toEqual([{ field: 'description', codePoints: [], html: true, unread: true }]);
+    // CONTROL: within the bounds, the soft hyphen the field adds is named.
+    expect(targetHiddenAdds({ description: '<p>Wasserfilter</p>' }, { description: '<p>Wasser\u00adfilter</p>' }, ['description']))
+      .toEqual([{ field: 'description', codePoints: [SHY], html: true }]);
   });
 
-  it('is named as a field that adds, unread and with nothing to mark, so the count leaves it in', () => {
+  it('is named as an unread field with nothing to mark, so it is never left out', () => {
     expect(targetHiddenAdds({ description: '<p>a</p>' }, { description: deep('<p>a</p>') }, ['description']))
       .toEqual([{ field: 'description', codePoints: [], html: true, unread: true }]);
     // A plain field is no HTML and is read as it is, however deep its text looks.
     expect(targetHiddenAdds({ name: 'a' }, { name: deep('a') }, [])).toEqual([]);
+  });
+});
+
+// The count reads the tree of the one counted parse: it has to be the tree a plain parse builds.
+describe('the tree the reading bounds return', () => {
+  const values = [
+    '<p>Wa&shy;sser &amp; <b title="a&shy;b">Filter</b></p><!-- c\u00ad -->',
+    '<table><tr><td>a\u200cb</td></tr><p>moved</p></table>',
+    '<svg><title>t\u00ad</title><foreignObject><p>x\u200d</p></foreignObject></svg>',
+    '<template><p>t&#173;</p></template><textarea>&shy;</textarea><script>a\u00ad</script>',
+    '<p>unclosed <i>nest <b>ed</i> text</b>',
+    '[button url="/a?x=1&y=2"]Wa\u00adsser[/button]',
+    // The one construct whose tree the scripting flag decides: with it on, the content is raw text.
+    '<noscript><p>a&shy;b</p></noscript>',
+  ];
+  it('carries the same texts as a plain parse of the value', () => {
+    for (const v of values) {
+      const tree = readWithinBounds(v);
+      expect(tree, v).not.toBeNull();
+      expect(htmlTextsOfTree(tree!), v).toEqual(htmlTextsOf(v));
+    }
+  });
+  it('is null for a value the bounds refuse, and a tree for one they take', () => {
+    const deep = `${'<div>'.repeat(600)}x`;
+    expect(readWithinBounds(deep)).toBeNull();
+    expect(withinReadingBounds(deep)).toBe(false);
+    expect(withinReadingBounds(values[0]!)).toBe(true);
   });
 });
 
@@ -172,12 +203,32 @@ describe('the preview and the run\'s count', () => {
     expect(ledger.hiddenAddsTargets(id)).toBe(1);
   });
 
-  it('names a description nested past the reading bounds as unread in the preview, and counts its target', () => {
-    const deep = `${'<div>'.repeat(600)}<p>Wasserfilter</p>`;
-    const id = previewed({ description: deep }, [{ description: '<p>Wasserfilter</p>' }]);
+  it('names a description nested past the reading bounds as unchecked in the preview, and counts its target on its own', () => {
+    const deep = `${'<div>'.repeat(600)}<p>Wasser\u00adfilter</p>`;
+    const id = previewed({ description: deep }, [{ description: '<p>Wasserfilter</p>' }, { description: '<p>Filter</p>' }]);
     const [t] = ledger.getPreview(id);
-    expect(t!.hiddenAdds).toEqual([{ field: 'description', codePoints: [], html: true, unread: true }]);
-    expect(ledger.hiddenAddsTargets(id)).toBe(1);
+    expect(t!.hiddenUnchecked).toEqual(['description']);
+    expect(t!.hiddenAdds).toBeUndefined();
+    expect(ledger.hiddenCounts(id)).toEqual({ adds: 0, unchecked: 2 });
+    expect(ledger.hiddenAddsTargets(id)).toBe(0);
+  });
+
+  it('counts a target that adds one and a target left unchecked each in its own count', () => {
+    const id = previewed({ description: '<p>Wasser\u00adfilter</p>' }, [{ description: '<p>Wasserfilter</p>' }, { description: `${'<div>'.repeat(600)}<p>x</p>` }]);
+    const [a, b] = ledger.getPreview(id);
+    expect(a!.hiddenAdds).toEqual([{ field: 'description', codePoints: [SHY], html: true }]);
+    expect(a!.hiddenUnchecked).toBeUndefined();
+    expect(b!.hiddenUnchecked).toEqual(['description']);
+    expect(ledger.hiddenCounts(id)).toEqual({ adds: 1, unchecked: 1 });
+  });
+
+  it('counts a target in both counts when one field adds and another is unchecked', () => {
+    const id = previewed({ description: '<p>Wasser\u00adfilter</p>', short_description: `${'<div>'.repeat(600)}<p>x</p>` },
+      [{ description: '<p>Wasserfilter</p>', short_description: '<p>x</p>' }]);
+    const [t] = ledger.getPreview(id);
+    expect(t!.hiddenAdds).toEqual([{ field: 'description', codePoints: [SHY], html: true }]);
+    expect(t!.hiddenUnchecked).toEqual(['short_description']);
+    expect(ledger.hiddenCounts(id)).toEqual({ adds: 1, unchecked: 1 });
   });
 
   it('counts only the targets that add one, and none the owner took out', () => {

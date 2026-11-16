@@ -9,8 +9,8 @@
 // cannot be told without an alignment, and an alignment can be gamed. As many or fewer: none.
 
 import { IN_PLACE_CHARS } from './hidden-chars.js';
-import { htmlTextsOf } from './bulk-html.js';
-import { withinReadingBounds } from './html-tree.js';
+import { htmlTextsOfTree } from './bulk-html.js';
+import { readWithinBounds } from './html-tree.js';
 
 /** A field whose after-state holds more of these code points than its before-image. `field` is
  *  `''` for a target whose value is one text, not an object of fields. `html`: an HTML field, whose
@@ -19,8 +19,9 @@ export interface FieldHiddenAdds {
   field: string;
   codePoints: number[];
   html?: true | undefined;
-  /** An HTML value past the reading bounds: not parsed, so what it adds is not known. Counted as a
-   *  field that adds, with no code point to mark. */
+  /** An HTML field whose before-image or after-state is past the reading bounds: not parsed, so
+   *  whether it adds one is not known. It names no code point, and is counted on its own, never
+   *  as a field that adds. */
   unread?: true | undefined;
 }
 
@@ -31,10 +32,16 @@ export interface FieldHiddenAdds {
  *  page does not show it as text, in a comment or an attribute, counts as held all the same. The
  *  page places its marks by `inPlaceReferences`, which may mark one more; it counts nothing. */
 function counts(text: string, html: boolean): Map<number, number> | null {
-  // An HTML value past the reading bounds is not parsed: it reads as unread, never as empty.
-  if (html && !withinReadingBounds(text)) return null;
+  // An HTML value is parsed once, within the reading bounds; past them it reads as unread, never
+  // as empty.
+  let texts: string[] = [text];
+  if (html) {
+    const tree = readWithinBounds(text);
+    if (tree === null) return null;
+    texts = htmlTextsOfTree(tree);
+  }
   const out = new Map<number, number>();
-  for (const t of html ? htmlTextsOf(text) : [text]) {
+  for (const t of texts) {
     for (const c of t) {
       const cp = c.codePointAt(0)!;
       if (IN_PLACE_CHARS.has(cp)) out.set(cp, (out.get(cp) ?? 0) + 1);
@@ -49,13 +56,13 @@ export function hiddenAddsOf(before: string | null, after: string, html = false)
   return hiddenAddsRead(before, after, html) ?? [];
 }
 
-/** {@link hiddenAddsOf}, or `null` when `after` is an HTML value past the reading bounds and was
- *  not read. A before-image past them holds nothing that counts: every one of these characters
- *  `after` holds is then counted as added. */
+/** {@link hiddenAddsOf}, or `null` when either side is an HTML value past the reading bounds and
+ *  was not read: what it adds is then not known, in neither direction. */
 function hiddenAddsRead(before: string | null, after: string, html: boolean): number[] | null {
   const added = counts(after, html);
   if (added === null) return null;
-  const held = counts(before ?? '', html) ?? new Map<number, number>();
+  const held = counts(before ?? '', html);
+  if (held === null) return null;
   return [...added].filter(([cp, n]) => n > (held.get(cp) ?? 0)).map(([cp]) => cp).sort((a, b) => a - b);
 }
 
@@ -78,7 +85,8 @@ export function targetHiddenAdds(prior: unknown, after: unknown, htmlFields: rea
     if (text === null || text === held) return [];
     const html = typeof next === 'string' && htmlFields.includes(field);
     const codePoints = hiddenAddsRead(held, text, html);
-    // A field past the reading bounds is counted as one that adds: the count leaves no field out.
+    // A field past the reading bounds is named as unread: it is never left out, and never counted
+    // as one that adds.
     if (codePoints === null) return [{ field, codePoints: [], html: true as const, unread: true as const }];
     return codePoints.length > 0 ? [{ field, codePoints, ...(html ? { html: true as const } : {}) }] : [];
   };

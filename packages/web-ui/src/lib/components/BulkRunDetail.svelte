@@ -14,7 +14,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -155,7 +155,9 @@
 			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0
 				// A run whose targets add hidden characters: its count says they are marked in the
 				// preview, at a probe too, so each has to be on the page.
-				|| (r.body.hiddenAddsTargets ?? 0) > 0;
+				|| (r.body.hiddenAddsTargets ?? 0) > 0
+				// So does one with a field that could not be checked for them: its sentence stands under it.
+				|| (r.body.hiddenUncheckedTargets ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
 			if (id !== runId) return false;
@@ -438,12 +440,17 @@
 	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
 	const foldedUnchanged = $derived(targets.length - shownTargets.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
+	// The sentence under a field not checked for hidden characters: the way out only where the owner
+	// can take the target out on this page (U-294).
+	const uncheckedNoteKey = (x: BulkTarget): string =>
+		approving && ownerActs && writes(x) && !x.deselected ? 'bulk.unchecked.field_take_out' : 'bulk.unchecked.field';
 	// Hidden characters a target adds where text may carry one: the legend over the list
 	// once any shown target is marked, and the count wherever the run is approved or confirmed.
 	// A value taken back no longer holds what the legend says will be written (U-218): its mark
 	// turns grey with it, and it calls for no legend.
 	const hiddenMarked = $derived(run !== null && shownTargets.some((x) => (x.hiddenAdds?.length ?? 0) > 0 && !bulkAfterTakenBack(run!, x)));
 	const hiddenCount = $derived(run ? bulkHiddenCountText(run.hiddenAddsTargets, shopify, view) : null);
+	const uncheckedCount = $derived(run ? bulkUncheckedCountText(run.hiddenUncheckedTargets, shopify, view) : null);
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -606,6 +613,10 @@
 														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
 														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{#if bulkHiddenAddsOf(target, f.field).length > 0}{@render markedValue(bulkRawText(f.after), bulkHiddenAddsOf(target, f.field), bulkHiddenHtml(target, f.field), bulkAfterTakenBack(run, target))}{:else}{bulkValueText(f.after)}{/if}</ins>
+														{#if bulkHiddenUnchecked(target, f.field)}
+															<!-- Not checked for hidden characters: said under the field, and the way out only where the owner can take the target out here. -->
+															<div class="text-xs text-text-subtle" data-testid="bulk-unchecked">{view.t(uncheckedNoteKey(target))}</div>
+														{/if}
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
@@ -846,6 +857,9 @@
 					{#if hiddenCount}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-hidden-count">{hiddenCount}</p>
 					{/if}
+					{#if uncheckedCount}
+						<p class="text-sm" data-testid="bulk-unchecked-count">{uncheckedCount}</p>
+					{/if}
 					{#if bulkIsShopifyHost(host)}
 						<p class="text-sm">{t('bulk.approve.shopify_visible')}</p>
 					{/if}
@@ -881,6 +895,9 @@
 						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider })}</p>
 					{#if hiddenCount}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-hidden-count">{hiddenCount}</p>
+					{/if}
+					{#if uncheckedCount}
+						<p class="text-sm" data-testid="bulk-unchecked-count">{uncheckedCount}</p>
 					{/if}
 					{#if probeName?.adminUrl}
 						<a class="text-sm underline hover:text-text" href={probeName.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-probe-admin">{tf('bulk.target.product', { n: probeName.number ?? '' })}<span aria-hidden="true"> ↗</span></a>

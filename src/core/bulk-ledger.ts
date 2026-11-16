@@ -619,6 +619,9 @@ export interface PreviewTarget {
    *  holds more of than its before-image, where real text may carry one and the page would not
    *  show it (`bulk-hidden-adds.ts`). The view marks every occurrence of each in that field. */
   hiddenAdds?: FieldHiddenAdds[] | undefined;
+  /** HTML fields whose before-image or after-state is past the reading bounds: not checked for
+   *  hidden characters, named so the page says so instead of showing no mark. */
+  hiddenUnchecked?: string[] | undefined;
   /** A target refused for `new_link_domain` (1010): the domain the refused link points to, as the
    *  check read it (ASCII, lower case, Punycode). Absent on a row recorded before it was kept. */
   linkDomain?: string | undefined;
@@ -1662,7 +1665,9 @@ export class BulkLedger {
         })
         : [];
       const seoEntityFields = seoNoted && r.change === 'update' ? shopifySeoEntityFields(prior, after) : [];
-      const hiddenAdds = (r.change === 'update' || r.change === 'create') && after !== null ? targetHiddenAdds(prior, after, htmlFields) : [];
+      const hiddenFields = (r.change === 'update' || r.change === 'create') && after !== null ? targetHiddenAdds(prior, after, htmlFields) : [];
+      const hiddenAdds = hiddenFields.filter((h) => h.unread !== true);
+      const hiddenUnchecked = hiddenFields.filter((h) => h.unread === true).map((h) => h.field);
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
@@ -1677,6 +1682,7 @@ export class BulkLedger {
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
         ...(seoEntityFields.length > 0 ? { seoEntityFields } : {}),
         ...(hiddenAdds.length > 0 ? { hiddenAdds } : {}),
+        ...(hiddenUnchecked.length > 0 ? { hiddenUnchecked } : {}),
       };
     });
   }
@@ -1688,20 +1694,30 @@ export class BulkLedger {
    *  for a run's images can reach 32 MB. A judged target without its verdict counts as none, as
    *  {@link getPreview} shows it. */
   hiddenAddsTargets(runId: string): number {
+    return this.hiddenCounts(runId).adds;
+  }
+
+  /** {@link hiddenAddsTargets}, and beside it how many such targets hold a field that could not be
+   *  checked ({@link PreviewTarget.hiddenUnchecked}); one pass over the run. A target counts in
+   *  both when one field adds and another is unchecked. */
+  hiddenCounts(runId: string): { adds: number; unchecked: number } {
     const judged = (this.runRow(runId)?.judge_rule ?? null) !== null;
     const htmlFields = this.htmlFieldsOf(runId);
     const rows = this.engineDb.getDb().prepare(
       `SELECT before, after_planned, judged_at FROM bulk_targets
        WHERE run_id = ? AND deselected_at IS NULL AND change IN ('update', 'create')`,
     ).iterate(runId) as IterableIterator<{ before: string | null; after_planned: string | null; judged_at: string | null }>;
-    let n = 0;
+    let adds = 0;
+    let unchecked = 0;
     for (const r of rows) {
       if (r.after_planned === null || (judged && r.judged_at === null)) continue;
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
       const prior = before !== null && !before.absent ? before.value : null;
-      if (targetHiddenAdds(prior, JSON.parse(this.engineDb.dec(r.after_planned)), htmlFields).length > 0) n++;
+      const fields = targetHiddenAdds(prior, JSON.parse(this.engineDb.dec(r.after_planned)), htmlFields);
+      if (fields.some((f) => f.unread !== true)) adds++;
+      if (fields.some((f) => f.unread === true)) unchecked++;
     }
-    return n;
+    return { adds, unchecked };
   }
 
   private toStatus(row: RunRow): BulkRunStatus {

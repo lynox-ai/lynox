@@ -730,6 +730,11 @@ export function htmlTextsOf(value: string): string[] {
   return textsOf(parseHtmlFragment(value));
 }
 
+/** {@link htmlTextsOf} over a tree already parsed, such as the one `readWithinBounds` returns. */
+export function htmlTextsOfTree(tree: HtmlFragment): string[] {
+  return textsOf(tree);
+}
+
 /** Every text a tree carries: text nodes, attribute values, comments. */
 function textsOf(n: Node): string[] {
   const out: string[] = [];

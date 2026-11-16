@@ -212,12 +212,13 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'description', value: after.description, codePoints: [0x00ad] }]);
   });
 
-  // A value past the reading bounds is not parsed for them: it is shown to copy, with no mark.
-  it('names no hidden character with a value to copy that is nested past the reading bounds', () => {
+  // A value past the reading bounds is not read by the shortcode check, so it is no value to copy,
+  // and nothing parses it for hidden characters either.
+  it('offers no value to copy that is nested past the reading bounds', () => {
     const after = { description: `${'<div>'.repeat(600)}[button url="/a?x=1&y=2"]Wa\u00adsser[/button]` };
     const { id, seq } = listed(after);
     expect(ledger.recordRead(id, seq, { invalid: 'shortcode_changed' })).toBe(true);
-    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'description', value: after.description }]);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toBeUndefined();
   });
 
   it('CONTROL: a target refused for another reason carries no value to copy', () => {
