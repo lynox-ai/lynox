@@ -278,6 +278,13 @@ describe('the run list that could not load', () => {
 		expect(target.textContent).toContain(t('bulk.empty'));
 	});
 
+	it('does not say there are no runs when the run list answer could not be read', async () => {
+		answers.runs = 'bad';
+		await renderList();
+		expect(target.textContent).toContain(t('common.load_failed'));
+		expect(target.textContent).not.toContain(t('bulk.empty'));
+	});
+
 	it('says there are no runs once it read an empty list', async () => {
 		await renderList();
 		expect(target.textContent).toContain(t('bulk.empty'));

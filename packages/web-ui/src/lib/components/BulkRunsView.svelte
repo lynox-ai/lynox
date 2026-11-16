@@ -49,8 +49,8 @@
 	async function load(): Promise<void> {
 		loading = true;
 		error = '';
-		// Read until the run list says otherwise: a load that fails before it is parsed has not read it.
-		runsRead = false;
+		// Whether this load read the run list; written once, after its answers, like the rest.
+		let read = false;
 		try {
 			const [runRes, mergeRes] = await Promise.all([
 				fetch(`${getApiBase()}/bulk/runs`),
@@ -60,10 +60,10 @@
 			// failure keeps the list as it was, as for the merges below.
 			if (runRes.ok) {
 				runs = ((await runRes.json()) as { runs: BulkRun[] }).runs;
-				runsRead = true;
+				read = true;
 			} else if (runRes.status === 404) {
 				runs = [];
-				runsRead = true;
+				read = true;
 			}
 			// No subject store answers 404: no merges. Any other failure keeps the list as it was
 			// and says so, so an answer read against it is not read against an empty list.
@@ -74,6 +74,7 @@
 		} catch {
 			error = t(bulkLoadErrorKey([null]));
 		}
+		runsRead = read;
 		loading = false;
 	}
 
