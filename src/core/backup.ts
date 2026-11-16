@@ -12,9 +12,9 @@ import { dirname, join, relative } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { snapshotSqlite } from './sqlite-snapshot.js';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
-import { deriveBackupKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
+import { canonicalMac, canonicalMacMatches, deriveBackupKey, deriveListProofKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
-import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
+import { BACKUP_LIST_PROOF_FILE, BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 import { OMITTED_SIDECAR, restoreRefusal } from './sidecar-refusals.js';
@@ -128,6 +128,32 @@ export type BackupListEntry = BackupManifest & {
   file_count: number;
   total_bytes: number;
 };
+
+/** The list's file of kept answers is read only below this size; a larger one is not trusted to be ours. */
+const LIST_PROOF_MAX_BYTES = 1024 * 1024;
+
+type KeptProvenance = { digest: string; provenance: BackupProvenance };
+
+/**
+ * The entries of the list's file of kept answers, or null when the file is not one this vault key
+ * wrote: wrong shape, other version, or a MAC that does not match. An entry of a shape this code
+ * does not write is left out. `no-key` is never kept (without a key nothing is), so it is refused.
+ */
+function readListProof(value: unknown, key: Buffer): Map<string, KeptProvenance> | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { v, entries, mac } = value as { v?: unknown; entries?: unknown; mac?: unknown };
+  if (v !== 1 || typeof mac !== 'string' || !/^[0-9a-f]{64}$/.test(mac)) return null;
+  if (typeof entries !== 'object' || entries === null || Array.isArray(entries)) return null;
+  if (!canonicalMacMatches({ v, entries }, mac, key)) return null;
+  const out = new Map<string, KeptProvenance>();
+  for (const [name, entry] of Object.entries(entries as Record<string, unknown>)) {
+    const { digest, provenance } = (typeof entry === 'object' && entry !== null ? entry : {}) as { digest?: unknown; provenance?: unknown };
+    if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) continue;
+    if (provenance !== 'verified' && provenance !== 'none' && provenance !== 'mismatch') continue;
+    out.set(name, { digest, provenance });
+  }
+  return out;
+}
 
 /** The totals of a manifest's `files`; an entry without a usable size counts as 0 bytes. */
 function fileTotals(files: unknown): { file_count: number; total_bytes: number } {
@@ -524,7 +550,16 @@ export class BackupManager {
    * neither mtime nor ctime. Only the list reads it: a restore checks the manifest it is about to
    * act on afresh.
    */
-  private readonly _listProvenance = new Map<string, { digest: string; provenance: BackupProvenance }>();
+  private readonly _listProvenance = new Map<string, KeptProvenance>();
+  /**
+   * The same answers kept across restarts, in `BACKUP_LIST_PROOF_FILE` at the backup dir's root,
+   * MACed under a key from the vault key: the first list after a start checks only what changed.
+   * Read once per manager; written after a list that changed what is kept. A file this key did not
+   * write, or none, means every manifest is checked afresh. Not in any backup's folder, so a Drive
+   * upload of a backup does not carry it.
+   */
+  private _listProofRead = false;
+  private _listProofChanged = false;
 
   constructor(lynoxDir: string, config: BackupConfig, vaultKey: string | null) {
     this.lynoxDir = lynoxDir;
@@ -1124,7 +1159,44 @@ export class BackupManager {
     if (cached !== undefined && cached.digest === digest) return cached.provenance;
     const provenance = this.provenanceOf(manifest);
     this._listProvenance.set(name, { digest, provenance });
+    this._listProofChanged = true;
     return provenance;
+  }
+
+  /** Take the kept answers from the file into the cache, once per manager; see `_listProofRead`. */
+  private readListProofFile(vaultKey: string): void {
+    this._listProofRead = true;
+    const path = join(this.backupDir, BACKUP_LIST_PROOF_FILE);
+    try {
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.size > LIST_PROOF_MAX_BYTES) return;
+      const kept = readListProof(JSON.parse(readFileSync(path, 'utf-8')) as unknown, deriveListProofKey(vaultKey));
+      if (kept === null) return;
+      for (const [name, entry] of kept) if (!this._listProvenance.has(name)) this._listProvenance.set(name, entry);
+    } catch {
+      // No file, or one that cannot be read: every manifest is checked afresh.
+    }
+  }
+
+  /**
+   * Write the kept answers to the file. A write that fails leaves the old file or none, and the
+   * next start checks afresh what the file does not hold; it never fails the list.
+   */
+  private writeListProofFile(vaultKey: string): void {
+    this._listProofChanged = false;
+    // `Object.fromEntries` defines each name as an own property, `__proto__` included.
+    const entries = Object.fromEntries([...this._listProvenance].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+    const body = { v: 1, entries };
+    const text = JSON.stringify({ ...body, mac: canonicalMac(body, deriveListProofKey(vaultKey)) });
+    if (Buffer.byteLength(text) > LIST_PROOF_MAX_BYTES) return;
+    const path = join(this.backupDir, BACKUP_LIST_PROOF_FILE);
+    const tmp = `${path}.${String(process.pid)}.${randomBytes(6).toString('hex')}.tmp`;
+    try {
+      writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
+      renameSync(tmp, path);
+    } catch {
+      try { rmSync(tmp, { force: true }); } catch { /* nothing more to do */ }
+    }
   }
 
   private provenanceOf(manifest: BackupManifest): BackupProvenance {
@@ -1149,6 +1221,7 @@ export class BackupManager {
     const entries = readdirSync(this.backupDir, { withFileTypes: true });
     const manifests: BackupListEntry[] = [];
     const seen = new Set<string>();
+    if (this.vaultKey && !this._listProofRead) this.readListProofFile(this.vaultKey);
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -1169,7 +1242,12 @@ export class BackupManager {
       }
     }
     // A backup that is gone takes its cached answer with it.
-    for (const name of this._listProvenance.keys()) if (!seen.has(name)) this._listProvenance.delete(name);
+    for (const name of this._listProvenance.keys()) {
+      if (seen.has(name)) continue;
+      this._listProvenance.delete(name);
+      this._listProofChanged = true;
+    }
+    if (this.vaultKey && this._listProofChanged) this.writeListProofFile(this.vaultKey);
 
     // Sort newest first
     manifests.sort((a, b) => b.created_at.localeCompare(a.created_at));
