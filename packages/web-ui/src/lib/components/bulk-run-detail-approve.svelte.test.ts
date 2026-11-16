@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
-import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
+import { bulkStartButtonKey, type BulkRunDetailData, type BulkTarget } from './bulk-runs.js';
+import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 // The approval of a preview: the owner sees every target, why lynox leaves one out, can take one
 // out of the write, and cannot press an approval the engine would refuse for want of a target.
@@ -46,6 +47,13 @@ let posts: { url: string; body: unknown }[];
 let gets: string[];
 let refuseDeselect: string | null;
 let refuseResume: string | null;
+// A run's own answer, by id, and an answer held back until the test lets it through.
+let runsById: Record<string, BulkRunDetailData>;
+let holds: Record<string, Promise<void>>;
+// A run whose own answer fails: 'status' answers 500, 'throw' never answers.
+let failIds: Record<string, 'status' | 'throw'>;
+// Who the server says reads the page.
+let viewerOf: 'owner' | 'mandate';
 
 beforeEach(() => {
 	target = document.createElement('div');
@@ -56,15 +64,27 @@ beforeEach(() => {
 	gets = [];
 	refuseDeselect = null;
 	refuseResume = null;
+	runsById = {};
+	holds = {};
+	failIds = {};
+	viewerOf = 'owner';
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 		if (init?.method === 'POST') {
 			const body = JSON.parse(String(init.body)) as unknown;
 			posts.push({ url: u, body });
+			// A held act (`<run>/resume`, `<run>/deselect`, …) answers once the test lets it through.
+			const act = /\/bulk\/runs\/([^/?]+)\/(?:.*\/)?([a-z-]+)$/.exec(u);
+			if (act && holds[`${act[1]}/${act[2]}`] !== undefined) await holds[`${act[1]}/${act[2]}`];
 			const m = /\/targets\/(\d+)\/deselect$/.exec(u);
 			if (m && refuseDeselect !== null) return reply({ error: 'engine English', code: refuseDeselect }, 409);
-			if (u.endsWith('/resume') && refuseResume !== null) return reply({ error: 'engine English', code: refuseResume }, 409);
+			if (u.endsWith('/resume') && refuseResume !== null) {
+				const code = refuseResume;
+				// The engine names the run a judged start would end once; the start that names it passes.
+				if (code === 'supersede_required') refuseResume = null;
+				return reply({ error: 'engine English', code, ...(code === 'supersede_required' ? { supersedable: { id: 'r0', costUsd: 0.5 } } : {}) }, 409);
+			}
 			if (m) {
 				const seq = Number(m[1]);
 				targets = targets.map((x) => (x.seq === seq ? { ...x, deselected: true } : x));
@@ -75,10 +95,17 @@ beforeEach(() => {
 		}
 		gets.push(u);
 		// The owner's session: the page offers its acts only once the server says so.
-		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
+		if (u.endsWith('/config')) return reply({ managed: true, viewer: viewerOf });
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+		const pageOf = /\/bulk\/runs\/([^/?]+)\/targets\?/.exec(u)?.[1];
+		if (page && pageOf !== undefined && holds[`${pageOf}/targets`] !== undefined) await holds[`${pageOf}/targets`];
 		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
-		return reply(run);
+		const id = /\/bulk\/runs\/([^/?]+)$/.exec(u)?.[1];
+		// A held run answers once, for the first load that asks; a later load of it goes through.
+		if (id !== undefined && holds[id] !== undefined) { const h = holds[id]; delete holds[id]; await h; }
+		if (id !== undefined && failIds[id] === 'status') return reply({ error: 'engine English' }, 500);
+		if (id !== undefined && failIds[id] === 'throw') throw new Error('network');
+		return reply((id !== undefined ? runsById[id] : undefined) ?? run);
 	}));
 });
 
@@ -210,14 +237,33 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('short_description:');
 	});
 
-	for (const judged of [true, false]) {
-		it(`words a new link domain under the product for a run ${judged ? 'with' : 'without'} a judge, naming no field for allowed domains`, async () => {
-			if (judged) run = makeRun({ judgeRuleHash: 'h1' });
-			targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'new_link_domain' } : x));
+	// The sentence names the field for allowed link domains only where it is a way out: a judged
+	// list run on a shop, read by the owner, who alone starts judging (U-157).
+	const listed: Partial<BulkRunDetailData> = { judge: { tier: 'standard', unjudged: 0 }, judgeRuleHash: 'h1', list: { state: 'done' }, startDomains: null };
+	const linkCases: { name: string; o: Partial<BulkRunDetailData>; viewer: 'owner' | 'mandate'; judged: boolean; domain?: string }[] = [
+		{ name: 'a run without a judge', o: {}, viewer: 'owner', judged: false },
+		{ name: 'a judged list run, for the owner, to an address the field does not take', o: listed, viewer: 'owner', judged: false, domain: '192.0.2.1' },
+		{ name: 'a judged run without a list', o: { judge: { tier: 'standard', unjudged: 0 }, judgeRuleHash: 'h1', list: null }, viewer: 'owner', judged: false },
+		{ name: 'a judged list run, for the owner', o: { judge: { tier: 'standard', unjudged: 0 }, judgeRuleHash: 'h1', list: { state: 'done' }, startDomains: null }, viewer: 'owner', judged: true },
+		{ name: 'a judged list run, for a mandate', o: { judge: { tier: 'standard', unjudged: 0 }, judgeRuleHash: 'h1', list: { state: 'done' }, startDomains: null }, viewer: 'mandate', judged: false },
+	];
+	for (const c of linkCases) {
+		it(`words a new link domain under the product for ${c.name}${c.judged ? ', naming the field for allowed domains' : ', naming no field for allowed domains'}`, async () => {
+			run = makeRun(c.o);
+			viewerOf = c.viewer;
+			resetSettingsViewer();
+			targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'new_link_domain', linkDomain: c.domain ?? 'video.example' } : x));
 			await render();
-			expect(target.textContent).toContain(t('bulk.invalid.new_link_domain').split('{where}')[0]!);
-			// No page mounts the field for allowed link domains yet, so no sentence names it.
-			expect(target.textContent).not.toContain(t('bulk.start_domains.label'));
+			const where = t('bulk.invalid.where_shopify');
+			const text = target.textContent ?? '';
+			if (c.judged) {
+				expect(text).toContain(t('bulk.invalid.new_link_domain_judged').replace('{where}', where));
+				expect(text).not.toContain(t('bulk.invalid.new_link_domain').replace('{where}', where));
+			} else {
+				expect(text).toContain(t('bulk.invalid.new_link_domain').replace('{where}', where));
+				expect(text).not.toContain(t('bulk.invalid.new_link_domain_judged').split('{where}')[0]!.slice(0, 120));
+			}
+			resetSettingsViewer();
 		});
 	}
 
@@ -906,5 +952,407 @@ describe('a hidden character a target adds in place', () => {
 		await render();
 		expect(target.querySelector('[data-testid="bulk-refused-value-text"]')).not.toBeNull();
 		expect(target.querySelector('[data-testid="bulk-refused-value-hidden"]')).toBeNull();
+	});
+});
+
+describe('the allowed link domains of a judged list run', () => {
+	const judged = (o: Partial<BulkRunDetailData> = {}): BulkRunDetailData => makeRun({
+		phase: 'planned', haltKey: 'listed', haltReason: 'engine English', checksum: null,
+		judge: { tier: 'standard', unjudged: 3 }, judgeRuleHash: 'h1',
+		judgeServedBy: { provider: 'anthropic', label: 'Modell' },
+		judgeRule: { rule: 'Schreib die Beschreibung neu.', schema: { properties: { body_html: { type: 'string' } } }, tier: 'standard' },
+		list: { state: 'done' }, startDomains: null,
+		...o,
+	});
+	const field = (): HTMLTextAreaElement | null => target.querySelector('[data-testid="bulk-start-domains"] textarea');
+	const type = (el: HTMLInputElement | HTMLTextAreaElement, value: string): void => {
+		el.value = value;
+		el.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+	};
+	const capField = (): HTMLInputElement => target.querySelector('input[inputmode="decimal"]')!;
+	const startButton = (): HTMLButtonElement | undefined => buttonByText(t(bulkStartButtonKey(run, 'judge', false) ?? 'bulk.start.judge'));
+	const resumes = (): Record<string, unknown>[] => posts.filter((p) => p.url.endsWith('/resume')).map((p) => p.body as Record<string, unknown>);
+
+	it('sends the domains typed in the start field with the judged start', async () => {
+		run = judged();
+		await render();
+		expect(field()).not.toBeNull();
+		type(field()!, 'mein-shop.ch\nb.example');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		expect(resumes()).toEqual([{ judgeRuleHash: 'h1', costCapUsd: 5, startDomains: ['mein-shop.ch', 'b.example'] }]);
+	});
+
+	it('sends no list when the field is left empty', async () => {
+		run = judged();
+		await render();
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		expect(resumes()).toEqual([{ judgeRuleHash: 'h1', costCapUsd: 5 }]);
+	});
+
+	it('holds the start while a line does not read as a domain', async () => {
+		run = judged();
+		await render();
+		type(field()!, 'https://mein-shop.ch/pfad');
+		type(capField(), '5');
+		expect(startButton()!.disabled).toBe(true);
+		expect(target.textContent).toContain(t('bulk.start_domains.invalid'));
+		type(field()!, 'mein-shop.ch');
+		expect(startButton()!.disabled).toBe(false);
+	});
+
+	it('keeps the list when the start names the run it ends, and holds that start on a wrong line', async () => {
+		run = judged();
+		refuseResume = 'supersede_required';
+		await render();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		const supersede = (): HTMLButtonElement => buttonByText(t(bulkStartButtonKey(run, 'judge', true) ?? 'bulk.start.supersede_yes'))!;
+		type(field()!, 'mein-shop.ch/pfad');
+		expect(supersede().disabled).toBe(true);
+		type(field()!, 'mein-shop.ch');
+		supersede().click();
+		await settle();
+		expect(resumes()).toEqual([
+			{ judgeRuleHash: 'h1', costCapUsd: 5, startDomains: ['mein-shop.ch'] },
+			{ judgeRuleHash: 'h1', costCapUsd: 5, startDomains: ['mein-shop.ch'], supersedes: 'r0' },
+		]);
+	});
+
+	it('offers no field on a judged run without a list, which takes none', async () => {
+		run = judged({ list: null });
+		await render();
+		expect(startButton()).toBeDefined();
+		expect(target.querySelector('[data-testid="bulk-start-domains"]')).toBeNull();
+	});
+
+	it('words a list the engine refuses as fixed in the page\'s own sentence', async () => {
+		run = judged();
+		refuseResume = 'start_domains_frozen';
+		await render();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		expect(target.textContent).toContain(t('bulk.start_domains.frozen'));
+		expect(target.textContent).not.toContain('engine English');
+	});
+
+	it('words the engine\'s start_domains_invalid in the page\'s own sentence', async () => {
+		run = judged();
+		refuseResume = 'start_domains_invalid';
+		await render();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		expect(target.textContent).toContain(t('bulk.start_domains.invalid'));
+		expect(target.textContent).not.toContain('engine English');
+	});
+
+	// The page opens another run in the same component: what was typed for one run is not the other's.
+	async function renderSwitchable(): Promise<(id: string, wait?: boolean) => Promise<void>> {
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		return async (id: string, wait = true) => { props.runId = id; if (wait) await settle(); else { await tick(); flushSync(); } };
+	}
+	const held = (id: string): (() => void) => {
+		let release = (): void => {};
+		holds[id] = new Promise<void>((r) => { release = r; });
+		return () => { delete holds[id]; release(); };
+	};
+	const resumeUrls = (): string[] => posts.filter((p) => p.url.endsWith('/resume')).map((p) => p.url);
+
+	it('sends no domains typed for another run with the start of this one', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		type(field()!, 'mein-shop.ch');
+		run = judged({ id: 'r2' });
+		await open('r2');
+		expect(field()!.value).toBe('');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		expect(resumes()).toEqual([{ judgeRuleHash: 'h1', costCapUsd: 5 }]);
+		expect(resumeUrls()).toEqual([expect.stringContaining('/bulk/runs/r2/resume')]);
+	});
+
+	it('sends nothing while another run loads, though the page still shows the one before', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		const release = held('r2');
+		run = judged({ id: 'r2' });
+		await open('r2', false);
+		startButton()!.click();
+		await settle();
+		expect(resumes()).toEqual([]);
+		release();
+		await settle();
+		expect(field()!.value).toBe('');
+		expect(resumes()).toEqual([]);
+	});
+
+	for (const fail of ['status', 'throw'] as const) {
+		it(`shows no error for the failed late answer (${fail}) of a run the page has left`, async () => {
+			run = judged();
+			const open = await renderSwitchable();
+			const release = held('r2');
+			failIds['r2'] = fail;
+			await open('r2', false);
+			await open('r1');
+			release();
+			await settle();
+			expect(target.textContent).not.toContain(t('common.load_failed'));
+			expect(startButton()).toBeDefined();
+		});
+	}
+
+	it('drops a run the page has left while its targets loaded', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		const release = held('r2/targets');
+		runsById['r2'] = judged({ id: 'r2', judgeRuleHash: 'h2' });
+		await open('r2', false);
+		await settle();
+		await open('r1');
+		release();
+		await settle();
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		expect(resumes()).toEqual([{ judgeRuleHash: 'h1', costCapUsd: 5 }]);
+		expect(resumeUrls()).toEqual([expect.stringContaining('/bulk/runs/r1/resume')]);
+	});
+
+	it('shows no error for a short target list of a run the page has left', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		const release = held('r2/targets');
+		// A preview loads whole; its list comes back shorter than its count.
+		runsById['r2'] = makeRun({ id: 'r2', phase: 'previewed', total: TARGETS.length + 2 });
+		await open('r2', false);
+		await settle();
+		await open('r1');
+		release();
+		await settle();
+		expect(target.textContent).not.toContain(t('common.load_failed'));
+		expect(startButton()).toBeDefined();
+	});
+
+	it('shows no error for the first load of a run the page left and opened again', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		runsById['r2'] = judged({ id: 'r2', judgeRuleHash: 'h2' });
+		await open('r2');
+		const release = held('r1');
+		await open('r1', false);
+		await open('r2');
+		// The second load of r1 answers at once; the first one answers last, with a failure.
+		await open('r1');
+		expect(startButton()).toBeDefined();
+		failIds['r1'] = 'throw';
+		release();
+		await settle();
+		expect(target.textContent).not.toContain(t('common.load_failed'));
+		expect(startButton()).toBeDefined();
+	});
+
+	it('shows a start refused for a run the page has left neither on the run it shows nor later', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		runsById['r2'] = judged({ id: 'r2', judgeRuleHash: 'h2' });
+		refuseResume = 'planner_unknown';
+		const release = held('r1/resume');
+		type(capField(), '5');
+		startButton()!.click();
+		await tick();
+		await open('r2');
+		release();
+		await settle();
+		expect(resumeUrls()).toEqual([expect.stringContaining('/bulk/runs/r1/resume')]);
+		expect(target.textContent).not.toContain(t('bulk.resume.refused.planner_unknown'));
+		// The refusal is r1's: shown nowhere once the page has left r1.
+		await open('r1');
+		expect(target.textContent).not.toContain(t('bulk.resume.refused.planner_unknown'));
+	});
+
+	it('asks to end no other run on a start answered after the page left its run', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		runsById['r2'] = judged({ id: 'r2', judgeRuleHash: 'h2' });
+		refuseResume = 'supersede_required';
+		const release = held('r1/resume');
+		type(capField(), '5');
+		startButton()!.click();
+		await tick();
+		await open('r2');
+		release();
+		await settle();
+		expect(target.textContent).not.toContain(t('bulk.start.supersede').split('{cost}')[0]!);
+	});
+
+	it('shows a take-out refused after the page left its run on neither run', async () => {
+		run = makeRun();
+		const open = await renderSwitchable();
+		runsById['r2'] = makeRun({ id: 'r2' });
+		refuseDeselect = 'not_writing';
+		const release = held('r1/deselect');
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await tick();
+		await open('r2');
+		release();
+		await settle();
+		expect(posts.map((p) => p.url)).toEqual([expect.stringContaining('/bulk/runs/r1/targets/1/deselect')]);
+		expect(target.textContent).not.toContain(t('bulk.deselect.refused.not_writing'));
+	});
+
+	it('leaves a refusal shown on one run behind when another opens', async () => {
+		run = makeRun();
+		const open = await renderSwitchable();
+		runsById['r2'] = makeRun({ id: 'r2' });
+		refuseDeselect = 'not_writing';
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(target.textContent).toContain(t('bulk.deselect.refused.not_writing'));
+		await open('r2');
+		expect(target.textContent).not.toContain(t('bulk.deselect.refused.not_writing'));
+	});
+
+	it('appends no page of a run the page has left to the run it shows', async () => {
+		targets = Array.from({ length: 8 }, (_, i) => ({ ...TARGETS[1]!, seq: i + 1, key: `gid://shopify/Product/${i + 1}` }));
+		run = makeRun({ phase: 'done', total: 8 });
+		const open = await renderSwitchable();
+		runsById['r2'] = makeRun({ id: 'r2', phase: 'done', total: 8 });
+		const showAll = (): HTMLButtonElement | undefined => buttonByText(tf('bulk.preview.show_all', { n: '8' }));
+		expect(showAll()).toBeDefined();
+		const release = held('r1/targets');
+		showAll()!.click();
+		await tick();
+		await open('r2');
+		release();
+		await settle();
+		// r2 still shows its first page and the button for the rest.
+		expect(showAll()).toBeDefined();
+	});
+
+	it('asks for no more of a run while another run loads in its place', async () => {
+		targets = Array.from({ length: 8 }, (_, i) => ({ ...TARGETS[1]!, seq: i + 1, key: `gid://shopify/Product/${i + 1}` }));
+		run = makeRun({ phase: 'done', total: 8 });
+		const open = await renderSwitchable();
+		runsById['r2'] = makeRun({ id: 'r2', phase: 'done', total: 8 });
+		const showAll = (): HTMLButtonElement | undefined => buttonByText(tf('bulk.preview.show_all', { n: '8' }));
+		const release = held('r2');
+		await open('r2', false);
+		// r1 still shows while r2 loads; its button asks for nothing.
+		const asked = gets.length;
+		showAll()!.click();
+		await tick();
+		expect(gets.slice(asked).filter((u) => u.includes('/bulk/runs/r1/'))).toEqual([]);
+		release();
+		await settle();
+		expect(showAll()).toBeDefined();
+	});
+
+	it('keeps the failed load of the run it shows, not the refusal of a start on the run before', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		runsById['r2'] = judged({ id: 'r2', judgeRuleHash: 'h2' });
+		refuseResume = 'planner_unknown';
+		failIds['r2'] = 'status';
+		// The refused start reloads r1; that reload waits while the page moves to r2, whose load fails.
+		const release = held('r1');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		await open('r2');
+		release();
+		await settle();
+		expect(target.textContent).toContain(t('common.load_failed'));
+		expect(target.textContent).not.toContain(t('bulk.resume.refused.planner_unknown'));
+	});
+
+	it('drops the late answer of a run the page has left, and starts the run it shows', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		const release = held('r2');
+		runsById['r2'] = judged({ id: 'r2', judgeRuleHash: 'h2' });
+		await open('r2', false);
+		await open('r1');
+		release();
+		await settle();
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		expect(resumes()).toEqual([{ judgeRuleHash: 'h1', costCapUsd: 5 }]);
+		expect(resumeUrls()).toEqual([expect.stringContaining('/bulk/runs/r1/resume')]);
+	});
+
+	it('does not hold the start of this run on a wrong line typed for another', async () => {
+		run = judged();
+		const open = await renderSwitchable();
+		type(field()!, 'mein-shop.ch/pfad');
+		run = judged({ id: 'r2' });
+		await open('r2');
+		expect(target.textContent).not.toContain(t('bulk.start_domains.invalid'));
+		type(capField(), '5');
+		expect(startButton()!.disabled).toBe(false);
+	});
+
+	it('shows the fixed list at a restart of the judge and sends none with it', async () => {
+		run = judged({ haltKey: 'unavailable', startDomains: ['mein-shop.ch'] });
+		await render();
+		expect(field()).toBeNull();
+		expect(target.querySelector('[data-testid="bulk-start-domains"]')!.textContent!.trim())
+			.toBe(tf('bulk.start_domains.shown', { list: 'mein-shop.ch', store: 'demo.myshopify.com' }));
+		buttonByText(t('bulk.restart.judge'))!.click();
+		await settle();
+		expect(resumes()).toEqual([{ judgeRuleHash: 'h1' }]);
+	});
+
+	it('shows the fixed list at a restart over the spend limit and sends none with the higher limit', async () => {
+		run = judged({ haltKey: 'costCap', costCapUsd: 1, startDomains: ['mein-shop.ch', 'b.example'] });
+		await render();
+		expect(field()).toBeNull();
+		expect(target.querySelector('[data-testid="bulk-start-domains"]')!.textContent!.trim())
+			.toBe(tf('bulk.start_domains.shown', { list: 'mein-shop.ch, b.example', store: 'demo.myshopify.com' }));
+		type(capField(), '5');
+		buttonByText(t('bulk.restart.judge'))!.click();
+		await settle();
+		expect(resumes()).toEqual([{ judgeRuleHash: 'h1', costCapUsd: 5 }]);
+	});
+
+	it('shows the list in the approval of a judged list run, and none on a run without a list', async () => {
+		run = makeRun({ judge: { tier: 'standard', unjudged: 0 }, list: { state: 'done' }, startDomains: ['mein-shop.ch', 'b.example'] });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-start-domains"]')!.textContent!.trim())
+			.toBe(tf('bulk.start_domains.shown', { list: 'mein-shop.ch, b.example', store: 'demo.myshopify.com' }));
+		// The approval covers the list as it stands: it sends none of its own. One target to write,
+		// so the approval is the whole run's.
+		buttonByText(t('bulk.approve.write_only'))!.click();
+		await settle();
+		const approvals = posts.filter((p) => p.url.endsWith('/approve'));
+		expect(approvals).toHaveLength(1);
+		expect(approvals[0]!.body).not.toHaveProperty('startDomains');
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ judge: { tier: 'standard', unjudged: 0 }, list: { state: 'done' }, startDomains: null });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-start-domains"]')!.textContent!.trim())
+			.toBe(tf('bulk.start_domains.none', { store: 'demo.myshopify.com' }));
+		unmount(component!);
+		component = undefined;
+		run = makeRun({ judge: { tier: 'standard', unjudged: 0 }, list: null });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-start-domains"]')).toBeNull();
 	});
 });
