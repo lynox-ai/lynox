@@ -58,6 +58,8 @@ import {
   type MigrationChunkType,
   type EncryptedChunk,
   MIGRATION_CHUNK_TYPES,
+  MIGRATION_MAX_CHUNKS,
+  MIGRATION_MAX_TOTAL_BYTES,
 } from './migration-crypto.js';
 
 // ── Types ──
@@ -275,11 +277,11 @@ interface MigrationSession {
 /** Migration session timeout — 30 minutes from handshake start. */
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
-/** Maximum number of chunks to accept (prevents memory DoS). */
-const MAX_CHUNKS = 64;
+/** Maximum number of chunks to accept (prevents memory DoS); the source checks the same bound. */
+const MAX_CHUNKS = MIGRATION_MAX_CHUNKS;
 
-/** Maximum total plaintext size across all chunks (500 MB). */
-const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
+/** Maximum total plaintext size across all chunks (500 MiB); the source checks the same bound. */
+const MAX_TOTAL_BYTES = MIGRATION_MAX_TOTAL_BYTES;
 
 /**
  * Ceiling for the reassembled flat-file memory bundle. A legitimate tree is

@@ -28,7 +28,7 @@ What does **not** get migrated:
 
 1. **Preview** — wizard inspects the source instance, lists data sizes per category. You confirm before anything moves.
 2. **Handshake** — source + destination perform an X25519 ECDH handshake, deriving a shared AES-256-GCM key. Handshake message is HMAC-signed against a one-shot migration token (rotated per attempt, expires in 30 minutes).
-3. **Encrypted transfer** — data flows in up to 64 chunks of 8 MB each (~512 MB total ceiling), AES-256-GCM-encrypted with the derived key. Browser orchestrates over SSE; chunks stream source → destination directly.
+3. **Encrypted transfer** — data flows in at most 64 chunks of up to 8 MiB each and at most 500 MiB in total, AES-256-GCM-encrypted with the derived key. Each kind of data starts its own chunks, so the usable size is below 500 MiB and depends on how your data is spread. The source checks both bounds before it sends any of your data, and names each one it exceeds. If your data does not fit, write to support@lynox.ai; a migration cannot move only part of it. Browser orchestrates over SSE; chunks stream source → destination directly.
 4. **Provisioning poll** — destination provisions the new tenant container, applies migrations, indexes the migrated data. Progress shown live.
 5. **Switchover** — you log into the destination with email OTP / Passkey. The source instance stays online (read-only) for 7 days so you can verify nothing is missing before the source is decommissioned.
 
@@ -48,4 +48,4 @@ For the reverse direction (managed → self-hosted), use the export tooling unde
 
 ## Status
 
-The wizard is in active rollout for new managed signups. Existing customers can request migration via [hello@lynox.ai](mailto:hello@lynox.ai); we run the wizard with you on a call to verify the data carries over cleanly.
+The wizard is in active rollout for new managed signups. Existing customers can request migration via [support@lynox.ai](mailto:support@lynox.ai); we run the wizard with you on a call to verify the data carries over cleanly.
