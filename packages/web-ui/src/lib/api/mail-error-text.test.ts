@@ -99,4 +99,12 @@ describe('friendlyMailError — the IMAP branch is untouched', () => {
 		expect(text).toMatch(/refused/);
 		expect(text).not.toMatch(/Couldn't reach/);
 	});
+
+	it('names a dropped connection and says the next check retries, as the watcher stores it (no raw text)', () => {
+		const text = friendlyMailError('connection_dropped', undefined);
+		expect(text).toMatch(/dropped/);
+		expect(text).toMatch(/next check/);
+		expect(text).not.toBe('Unknown error');
+		expect(text).not.toMatch(/Couldn't reach/);
+	});
 });

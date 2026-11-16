@@ -66,6 +66,10 @@ export function friendlyMailError(
 			return "Couldn't reach the mail server. Check the hostname and that the IMAP port is open on your network.";
 		case 'timeout':
 			return 'The server took too long to respond. Try again, or check your network.';
+		// The mail watcher stores this code when the session was lost mid-read. It clears the
+		// error on its next successful check, so the next step is to wait, not to change settings.
+		case 'connection_dropped':
+			return 'The connection to the mail server dropped during a check. lynox tries again on the next check, and this message goes away once one succeeds.';
 		case 'not_found':
 			return 'No matching mail server found for that address.';
 		case 'rate_limited':

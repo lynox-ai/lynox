@@ -378,14 +378,15 @@ function wrapImapError(err: unknown, fallback: string): MailError {
  * mail". Reading `false` and `undefined` as empty told the model there was no mail, and
  * turned a failed poll into an `ok` that cleared the account's error state.
  *
- * The code is `unknown`, not `connection_failed`: `false` also covers a server that refused
- * the search, and the owner's text for `connection_failed` says the server could not be
- * reached. The message says which of the two it was.
+ * `undefined` is `connection_dropped`. `false` stays `unknown`, not `connection_failed` nor
+ * `connection_dropped`: it also covers a server that refused the search, and the owner's text
+ * for `connection_failed` says the server could not be reached. The message says which of the
+ * two it was.
  */
 function searchUidsOrThrow(result: number[] | false | undefined, folder: string): number[] {
   if (Array.isArray(result)) return result;
   if (result === undefined) {
-    throw new MailError('unknown', `IMAP search ${folder}: the connection dropped before the search ran`);
+    throw new MailError('connection_dropped', `IMAP search ${folder}: the connection dropped before the search ran.${DROPPED_NEXT_STEP}`);
   }
   throw new MailError('unknown', `IMAP search ${folder}: the search failed (the server refused it, or the connection dropped while it ran)`);
 }
@@ -401,9 +402,22 @@ function searchUidsOrThrow(result: number[] | false | undefined, folder: string)
  * answer there stays empty.
  */
 function assertFetchRan(client: ImapFlow, fetched: number, folder: string): void {
-  if (fetched === 0 && client.mailbox === false) {
-    throw new MailError('unknown', `IMAP fetch ${folder}: the connection dropped before the messages were fetched`);
+  if (fetched === 0 && mailboxLost(client)) {
+    throw new MailError('connection_dropped', `IMAP fetch ${folder}: the connection dropped before the messages were fetched.${DROPPED_NEXT_STEP}`);
   }
+}
+
+/** What the model reads after a drop: nothing was read, and a second call can succeed. */
+const DROPPED_NEXT_STEP = ' Nothing was read. Try again in a moment.';
+
+/**
+ * Whether the session has left the mailbox a read was started in. imapflow clears `mailbox` on
+ * close, but a server BYE only moves `state` to LOGOUT and leaves `mailbox` set until the socket
+ * closes. Its FETCH then answers nothing (it runs only in SELECTED), and `fetchOne` reads that
+ * as `false`, the same value as a message that is not there. So both are checked.
+ */
+function mailboxLost(client: ImapFlow): boolean {
+  return client.mailbox === false || client.state !== client.states.SELECTED;
 }
 
 // ── A stop of the run ──────────────────────────────────────────────────────
@@ -776,10 +790,11 @@ export class ImapSmtpProvider implements MailProvider {
 
       // `fetchOne` answers `undefined` when no mailbox is selected any more, and `false` when the
       // FETCH found nothing or was sent after the mailbox had been deselected. With no mailbox
-      // selected the read never happened: that is not an absent message.
+      // selected the read never happened: that is not an absent message. A server BYE leaves the
+      // mailbox set but the session out of SELECTED (`mailboxLost`), with the same `false`.
       if (!msg) {
-        if (msg === undefined || client.mailbox === false) {
-          throw new MailError('unknown', `IMAP fetch ${folder}: the connection dropped before message uid=${String(opts.uid)} was read`);
+        if (msg === undefined || mailboxLost(client)) {
+          throw new MailError('connection_dropped', `IMAP fetch ${folder}: the connection dropped before message uid=${String(opts.uid)} was read.${DROPPED_NEXT_STEP}`);
         }
         throw new MailError('not_found', `Message uid=${String(opts.uid)} not found in ${folder}`);
       }
@@ -865,8 +880,8 @@ export class ImapSmtpProvider implements MailProvider {
       // The generator ends without yielding when no mailbox is selected any more (as in
       // `assertFetchRan`): the connection dropped, and the part was never read. A message that
       // came back with an empty part is empty.
-      if (fetched === 0 && client.mailbox === false) {
-        throw new MailError('unknown', `IMAP fetch uid=${String(uid)}: the connection dropped before part ${partId} was read`);
+      if (fetched === 0 && mailboxLost(client)) {
+        throw new MailError('connection_dropped', `IMAP fetch uid=${String(uid)}: the connection dropped before part ${partId} was read.${DROPPED_NEXT_STEP}`);
       }
       return '';
     });
