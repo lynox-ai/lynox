@@ -9,7 +9,7 @@ import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import { runBulkJudge, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
-import { checkMarkup, droppedTagsOf, shortcodeChangedBy, shortcodeRefusalOf, shortcodeTextOf } from './bulk-html.js';
+import { checkMarkup, droppedTagsOf, endsClosed, shortcodeChangedBy, shortcodeRefusalOf, shortcodeTextOf } from './bulk-html.js';
 import { canonicalHtml } from './html-tree.js';
 import { formatStatus } from '../tools/builtin/bulk.js';
 import { rawHtmlField, runBulkEffect, type TargetWriter } from './bulk-apply.js';
@@ -212,6 +212,15 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'description', value: after.description, codePoints: [0x00ad] }]);
   });
 
+  // A value past the reading bounds is not read by the shortcode check, so it is no value to copy,
+  // and nothing parses it for hidden characters either.
+  it('offers no value to copy that is nested past the reading bounds', () => {
+    const after = { description: `${'<div>'.repeat(600)}[button url="/a?x=1&y=2"]Wa\u00adsser[/button]` };
+    const { id, seq } = listed(after);
+    expect(ledger.recordRead(id, seq, { invalid: 'shortcode_changed' })).toBe(true);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toBeUndefined();
+  });
+
   it('CONTROL: a target refused for another reason carries no value to copy', () => {
     const { id, seq } = listed({ description: '[button url="/a?x=1&y=2"]Neu[/button]' });
     expect(ledger.recordRead(id, seq, { invalid: 'markup_dropped' })).toBe(true);
@@ -259,6 +268,23 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     const kept = { description: raw.description, short_description: verdict.short_description };
     const { id, seq } = await judge(kept, {}, raw);
     expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'short_description', value: verdict.short_description }]);
+  });
+
+  // A value to copy with a before-image past the reading bounds does not arise here: the markup
+  // check refuses that field first, and a refused value exists only once every field passed every
+  // other check. `hiddenAddsToCopy` still counts such a before as empty (bulk-hidden-adds.test.ts).
+  it('refuses a verdict whose field has a before-image past the reading bounds before any value to copy', async () => {
+    const shy = { ...verdict, short_description: '[pbutton url="/b?x=1&y=2"]Lo\u00ads[/pbutton]' };
+    const { id, seq } = await judge(shy, {}, { ...before, short_description: `${'<div>'.repeat(600)}<p>kurz</p>` });
+    const t = ledger.getPreview(id).find((p) => p.seq === seq)!;
+    expect([t.change, t.error, t.refusedValues]).toEqual(['invalid', 'not_canonical', undefined]);
+  });
+
+  it('marks the same verdict as a value to copy when its before-image is within the bounds', async () => {
+    // CONTROL to the test above: one run per test.
+    const shy = { ...verdict, short_description: '[pbutton url="/b?x=1&y=2"]Lo\u00ads[/pbutton]' };
+    const read = await judge(shy);
+    expect(ledger.getPreview(read.id).find((p) => p.seq === read.seq)!.refusedValues).toEqual([{ field: 'short_description', value: shy.short_description, codePoints: [0x00ad] }]);
   });
 
   it('shows each field the check refuses when both are', async () => {
@@ -563,6 +589,42 @@ describe('a write sends what the ledger stored, and never raw HTML (1130)', () =
     const out = await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: () => s.writer });
     expect(out.status).toBe('done');
     expect(s.sent).toEqual([{ description: '<p>a<br>b</p>' }, { description: own }]);
+  });
+});
+
+// A value the engine sends is its canonical form, and only one that stays itself under it (the send
+// refuses the rest, above). Such a value ends closed and holds no stretch the parser drops, so the
+// strict byte-for-byte side of the comparison is never needed for what lynox sent: a store that
+// re-serialises a value left open (measured on Shopify) never meets one from lynox.
+describe('a value the engine sends ends closed', () => {
+  const OPEN = [
+    '<p>x', '<p>a</p><p', '<p>a</p></p>', '<p>a</p><body class="x">b', '<b>x', '<ul><li>x', '<table><tr><td>x',
+    '<a href="https://shop.example.com/x">x', '<!-- x', '<textarea>x', '<script>x', '<template>x', '<p>a</p><p class="',
+    '<p>a</p></br>', '<p>x</div>', '<html><p>x', '<head><p>x', '<select><option>x', '<svg><desc>x', '<math><mi>x',
+    '<p>a<', '<p>a</', '<plaintext>x',
+  ];
+
+  it('leaves every open input it can send ending closed as the comparison reads it, with no dropped stretch', () => {
+    // `endsClosed` allows an element whose end tag the page may leave out (a paragraph, a list item)
+    // to stand open at the end; what it refuses is a value the next bytes would land inside.
+    const unstable: string[] = [];
+    for (const raw of OPEN) {
+      const sent = canonicalHtml(raw);
+      if (canonicalHtml(sent) !== sent) { unstable.push(raw); continue; }
+      expect(endsClosed(sent), raw).toBe(true);
+      expect(droppedTagsOf(sent), raw).toEqual([]);
+    }
+    // The one input whose canonical form is not itself again: never sent.
+    expect(unstable).toEqual(['<plaintext>x']);
+  });
+
+  it('CONTROL: the open inputs do end open before the canonical form', () => {
+    for (const raw of ['<b>x', '<p>a</p><p', '<textarea>x', '<!-- x', '<a href="https://shop.example.com/x">x']) expect(endsClosed(raw), raw).toBe(false);
+  });
+
+  it('refuses the one input it cannot send in the markup check too', () => {
+    const sent = canonicalHtml('<plaintext>x');
+    expect(checkMarkup({ before: null, after: sent, storeHost: HOST, startDomains: [] }).ok).toBe(false);
   });
 });
 

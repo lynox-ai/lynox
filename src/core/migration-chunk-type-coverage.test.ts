@@ -121,7 +121,7 @@ describe('a manifest naming a type this build does not know is refused', () => {
     try {
       for (const bad of ['', 'Memory', 'memory ', 'sqlite', 'portable-dir', '__proto__']) {
         const importer = armed(dir);
-        expect(() => importer.setManifest(manifestWith([bad])), `"${bad}" was accepted`).toThrow(/Unknown chunk type/);
+        expect(() => importer.setManifest(manifestWith([bad])), `"${bad}" was accepted`).toThrow(/^Unknown chunk type .* newer lynox than the target instance — update the target instance before migrating\./);
       }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });

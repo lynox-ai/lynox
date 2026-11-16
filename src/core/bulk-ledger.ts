@@ -24,7 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
-import { hiddenAddsOf, targetHiddenAdds, type FieldHiddenAdds } from './bulk-hidden-adds.js';
+import { hiddenAddsToCopy, targetHiddenAdds, type FieldHiddenAdds } from './bulk-hidden-adds.js';
 import { checkMarkup, sameHtmlField, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual, withinReadingBounds } from './html-tree.js';
@@ -623,6 +623,9 @@ export interface PreviewTarget {
    *  holds more of than its before-image, where real text may carry one and the page would not
    *  show it (`bulk-hidden-adds.ts`). The view marks every occurrence of each in that field. */
   hiddenAdds?: FieldHiddenAdds[] | undefined;
+  /** HTML fields whose before-image or after-state is past the reading bounds: not checked for
+   *  hidden characters, named so the page says so instead of showing no mark. */
+  hiddenUnchecked?: string[] | undefined;
   /** A target refused for `new_link_domain` (1010): the domain the refused link points to, as the
    *  check read it (ASCII, lower case, Punycode). Absent on a row recorded before it was kept. */
   linkDomain?: string | undefined;
@@ -1663,8 +1666,8 @@ export class BulkLedger {
           const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
           if (typeof value !== 'string' || value === was || !refusesShortcode(value, typeof was === 'string' ? was : null)) return [];
           // The owner pastes this value into the shop by hand: a hidden character it adds is marked
-          // there as in the list.
-          const codePoints = hiddenAddsOf(typeof was === 'string' ? was : null, value, true);
+          // there as in the list, and against an empty before where the before-image was not read.
+          const codePoints = hiddenAddsToCopy(typeof was === 'string' ? was : null, value);
           return [{ field: f, value, ...(codePoints.length > 0 ? { codePoints } : {}) }];
         })
         : [];
@@ -1673,7 +1676,9 @@ export class BulkLedger {
         : run !== undefined && prior !== null && typeof prior === 'object'
           ? this.shopMarkedWriteOf(this.engineDb.dec(r.target_key), prior, runId)?.appliedAt ?? null
           : null;
-      const hiddenAdds = (r.change === 'update' || r.change === 'create') && after !== null ? targetHiddenAdds(prior, after, htmlFields) : [];
+      const hiddenFields = (r.change === 'update' || r.change === 'create') && after !== null ? targetHiddenAdds(prior, after, htmlFields) : [];
+      const hiddenAdds = hiddenFields.filter((h) => h.unread !== true);
+      const hiddenUnchecked = hiddenFields.filter((h) => h.unread === true).map((h) => h.field);
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
@@ -1689,6 +1694,7 @@ export class BulkLedger {
         ...(seoEntityFields.length > 0 ? { seoEntityFields } : {}),
         ...(shopMarkedAt !== undefined ? { shopMarkedAt } : {}),
         ...(hiddenAdds.length > 0 ? { hiddenAdds } : {}),
+        ...(hiddenUnchecked.length > 0 ? { hiddenUnchecked } : {}),
       };
     });
   }
@@ -1700,20 +1706,30 @@ export class BulkLedger {
    *  for a run's images can reach 32 MB. A judged target without its verdict counts as none, as
    *  {@link getPreview} shows it. */
   hiddenAddsTargets(runId: string): number {
+    return this.hiddenCounts(runId).adds;
+  }
+
+  /** {@link hiddenAddsTargets}, and beside it how many such targets hold a field that could not be
+   *  checked ({@link PreviewTarget.hiddenUnchecked}); one pass over the run. A target counts in
+   *  both when one field adds and another is unchecked. */
+  hiddenCounts(runId: string): { adds: number; unchecked: number } {
     const judged = (this.runRow(runId)?.judge_rule ?? null) !== null;
     const htmlFields = this.htmlFieldsOf(runId);
     const rows = this.engineDb.getDb().prepare(
       `SELECT before, after_planned, judged_at FROM bulk_targets
        WHERE run_id = ? AND deselected_at IS NULL AND change IN ('update', 'create')`,
     ).iterate(runId) as IterableIterator<{ before: string | null; after_planned: string | null; judged_at: string | null }>;
-    let n = 0;
+    let adds = 0;
+    let unchecked = 0;
     for (const r of rows) {
       if (r.after_planned === null || (judged && r.judged_at === null)) continue;
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
       const prior = before !== null && !before.absent ? before.value : null;
-      if (targetHiddenAdds(prior, JSON.parse(this.engineDb.dec(r.after_planned)), htmlFields).length > 0) n++;
+      const fields = targetHiddenAdds(prior, JSON.parse(this.engineDb.dec(r.after_planned)), htmlFields);
+      if (fields.some((f) => f.unread !== true)) adds++;
+      if (fields.some((f) => f.unread === true)) unchecked++;
     }
-    return n;
+    return { adds, unchecked };
   }
 
   private toStatus(row: RunRow): BulkRunStatus {
@@ -2800,8 +2816,9 @@ export class BulkLedger {
    * than `sameHtmlField` explains. A field the write did not send, or that came back as sent, is
    * the store's or lynox's own and marks nothing. The fields come from the marked write, not from
    * the run asking, so a run of another form reads the same marks. Its `applied_at`, or null when
-   * there is none. A marked row that does not decrypt or parse counts as equal: its value is not
-   * known. Marked rows are few, and the key is stored encrypted, so they are read and compared here.
+   * there is none. A marked row whose key does not decrypt is read for every target, its value
+   * deciding; one whose value does not decrypt or parse counts as equal: its value is not known.
+   * Marked rows are few, and the key is stored encrypted, so they are read and compared here.
    */
   private shopMarkedWriteOf(key: string, value: unknown, exceptRun: string): { appliedAt: string | null } | null {
     if (value === null || typeof value !== 'object') return null;
@@ -2811,15 +2828,21 @@ export class BulkLedger {
         WHERE shop_added_markup = 1 AND after_actual IS NOT NULL AND run_id != ? ORDER BY applied_at DESC`,
     ).all(exceptRun) as { run_id: string; target_key: string; after_planned: string | null; after_actual: string; applied_at: string | null }[];
     for (const r of rows) {
-      let rowKey: string;
-      try { rowKey = this.engineDb.dec(r.target_key); } catch { return { appliedAt: r.applied_at }; }
-      if (rowKey !== key) continue;
+      // `dec` hands back the stored text where it cannot decrypt, which never equals a key: the mark
+      // would be skipped. A key that does not decrypt could be this target's, so the row is read as
+      // one: its value decides, and only a target holding the marked value is refused.
+      const rowKey = this.engineDb.decStrict(r.target_key);
+      if (rowKey.ok && rowKey.text !== key) continue;
       const kept = (() => { try { return (JSON.parse(this.engineDb.dec(r.after_actual)) as ActualImage).value; } catch { return undefined; } })();
       const sent = r.after_planned === null ? undefined : this.parsedObject(r.after_planned);
       if (kept === undefined || sent === undefined) return { appliedAt: r.applied_at };
       if (kept === null || typeof kept !== 'object') continue;
       const held = kept as Record<string, unknown>;
-      const marked = this.htmlFieldsOf(r.run_id).filter((f) => typeof sent[f] === 'string' && typeof held[f] === 'string'
+      // Which fields the marked run sent as HTML is read from its list form; one that does not decrypt
+      // or parse leaves them unknown, so the row counts as equal, like a value that cannot be read.
+      let fields: readonly string[];
+      try { fields = this.htmlFieldsOf(r.run_id); } catch { return { appliedAt: r.applied_at }; }
+      const marked = fields.filter((f) => typeof sent[f] === 'string' && typeof held[f] === 'string'
         && !sameHtmlField(sent[f] as string, held[f] as string));
       // A value beyond the reading bounds is not parsed: it counts as the marked value, as down an
       // undo chain.

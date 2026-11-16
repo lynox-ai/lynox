@@ -136,7 +136,7 @@ export function checkPlainColumns(store: PlainStore, columns: unknown): PlainCol
 }
 
 /** Bytes of a header the import parses at most; a real one lists the values that did not decrypt. */
-const MAX_HEADER_BYTES = 16 * 1024 * 1024;
+export const MAX_HEADER_BYTES = 16 * 1024 * 1024;
 
 /** The framed payload: a 4-byte big-endian header length, the JSON header, the body. */
 export function encodePlainPayload<T>(header: PlainHeader<T>, body: Buffer): Buffer {

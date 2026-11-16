@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { getLynoxDir } from './config.js';
@@ -191,6 +192,17 @@ export function coercePlainColumnValue(val: unknown, col: DataStoreColumnDef): u
   }
 }
 
+/** The shape of a collection id; a stored value of any other shape is not named and is replaced. */
+export const COLLECTION_ID_RE = /^dsc_[0-9a-f]{16}$/;
+
+/**
+ * A fresh opaque id for a collection: `dsc_` and 16 hex. A label with no secret value, so a
+ * mandate's row in the instance trail can say which collection it wrote without its name.
+ */
+export function newCollectionId(): string {
+  return `dsc_${randomBytes(8).toString('hex')}`;
+}
+
 export class DataStore {
   private db: Database.Database;
 
@@ -240,9 +252,106 @@ export class DataStore {
         unique_key TEXT,
         record_count INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        collection_id TEXT
       )
     `);
+  }
+
+  /**
+   * Whether `ds_collections` has its `collection_id` column: a new file has it from
+   * `_initMeta`, an older one once {@link ensureCollectionIds} ran. Asked on every call and
+   * never cached — the column can appear while a store is open (another process booted the
+   * engine on the same file), but it is never removed. Throws when the question cannot be
+   * answered; each caller decides what that means.
+   */
+  hasCollectionIdColumn(): boolean {
+    const cols = this.db.prepare("SELECT name FROM pragma_table_info('ds_collections')").all() as Array<{ name: string }>;
+    return cols.some(c => c.name === 'collection_id');
+  }
+
+  /**
+   * The opaque id of a collection, as a mandate's row in the instance trail names it, never by
+   * its name. Undefined for a collection that does not exist, one without an id yet (created
+   * without the column, or by an older build on a migrated file; the next boot assigns one),
+   * one whose stored value is not an id of this shape (a hand-edited file; the next boot replaces
+   * it), and a file whose column was never added. Any other failure is thrown: the trail then
+   * refuses the write instead of recording it without saying where.
+   */
+  collectionIdOf(name: string): string | undefined {
+    let row: { collection_id: unknown } | undefined;
+    try {
+      row = this.db.prepare('SELECT collection_id FROM ds_collections WHERE name = ?').get(name) as { collection_id: unknown } | undefined;
+    } catch (err) {
+      if (getErrorMessage(err).includes('no such column: collection_id')) return undefined;
+      throw err;
+    }
+    const id = row?.collection_id;
+    return typeof id === 'string' && COLLECTION_ID_RE.test(id) ? id : undefined;
+  }
+
+  /**
+   * Gives every collection an opaque id ({@link newCollectionId}), replacing a value that is
+   * not one. Runs at every engine boot,
+   * never in the constructor, for the same reason as {@link ensureSourceColumns}.
+   *
+   * One IMMEDIATE transaction adds the column when it is missing, gives a new id to every row
+   * whose value is not one (by rowid: a name stored as a BLOB would never match a string
+   * parameter), and gives a
+   * new id to every row but the first (lowest rowid) that shares one with another — a copied
+   * or hand-merged file can carry duplicates. The unique index follows in a step of its own,
+   * so a failing index leaves the ids in place. Nothing is thrown: each step reports its error.
+   *
+   * `renumbered` names each collection whose id changed, by its name only when that name is a
+   * valid collection name: the names come from the file and are written to the engine's log.
+   *
+   * The ids are random, so a file restored from before its first migration gets new ones, and a
+   * row written in between names an id no table carries any more.
+   */
+  ensureCollectionIds(): {
+    assigned: number;
+    renumbered: Array<{ name: string | null; from: string; to: string }>;
+    failed: string | null;
+    indexFailed: string | null;
+  } {
+    let assigned = 0;
+    const renumbered: Array<{ name: string | null; from: string; to: string }> = [];
+    let indexFailed: string | null = null;
+    try {
+      this.db.transaction(() => {
+        if (!this.hasCollectionIdColumn()) {
+          this.db.prepare('ALTER TABLE ds_collections ADD COLUMN collection_id TEXT').run();
+        }
+        const set = this.db.prepare('UPDATE ds_collections SET collection_id = ? WHERE rowid = ?');
+        // NULL, empty, and anything not of the id's shape (a hand-edited or foreign file): a value
+        // a trail row would not name is replaced, so every table ends with an id it can name.
+        const rows = this.db.prepare('SELECT rowid AS r, collection_id AS id FROM ds_collections').all() as Array<{ r: number; id: unknown }>;
+        for (const { r, id } of rows) {
+          if (typeof id === 'string' && COLLECTION_ID_RE.test(id)) continue;
+          set.run(newCollectionId(), r);
+          assigned++;
+        }
+        const dupes = this.db.prepare(`
+          SELECT rowid AS r, name, collection_id AS id FROM ds_collections c
+          WHERE EXISTS (SELECT 1 FROM ds_collections o WHERE o.collection_id = c.collection_id AND o.rowid < c.rowid)
+          ORDER BY rowid
+        `).all() as Array<{ r: number; name: unknown; id: string }>;
+        for (const d of dupes) {
+          const to = newCollectionId();
+          set.run(to, d.r);
+          const valid = typeof d.name === 'string' && COLLECTION_NAME_RE.test(d.name) && !RESERVED_NAMES.has(d.name);
+          renumbered.push({ name: valid ? d.name as string : null, from: d.id, to });
+        }
+      }).immediate();
+    } catch (err) {
+      return { assigned: 0, renumbered: [], failed: getErrorMessage(err), indexFailed: null };
+    }
+    try {
+      this.db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_ds_collections_collection_id ON ds_collections(collection_id)').run();
+    } catch (err) {
+      indexFailed = getErrorMessage(err);
+    }
+    return { assigned, renumbered, failed: null, indexFailed };
   }
 
   /**
@@ -339,6 +448,15 @@ export class DataStore {
     scope: MemoryScopeRef;
     columns: DataStoreColumnDef[];
     uniqueKey?: string[] | undefined;
+    /**
+     * The id a mandate's row in the instance trail already names (`newCollectionId`). Given, it
+     * is written as is, without asking whether the column exists: when it does not, the insert
+     * fails and no collection is created, so the row never names an id the collection lacks.
+     * Without it the store mints one when the column exists and creates the collection without
+     * one otherwise, or when that cannot be told — the CRM creates its tables here at boot and
+     * must not fail on it; the next boot fills the id in.
+     */
+    collectionId?: string | undefined;
   }): DataStoreCollectionInfo {
     const { name, scope, columns, uniqueKey } = params;
 
@@ -399,6 +517,13 @@ export class DataStore {
       }
     }
 
+    let collectionId = params.collectionId;
+    if (collectionId === undefined) {
+      let hasColumn = false;
+      try { hasColumn = this.hasCollectionIdColumn(); } catch { /* created without an id; the next boot assigns one */ }
+      if (hasColumn) collectionId = newCollectionId();
+    }
+
     const now = new Date().toISOString();
     // SECURITY: tableName is safe because `name` is validated by COLLECTION_NAME_RE (/^[a-z][a-z0-9_]{0,62}$/).
     // Do NOT relax COLLECTION_NAME_RE without reviewing all SQL string interpolations below.
@@ -433,18 +558,18 @@ export class DataStore {
       // Secondary index on every subject column so per-subject FILTER isn't a full scan.
       this._createSubjectIndexes(name, tableName, columns);
 
-      this.db.prepare(`
-        INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-      `).run(
-        name,
-        scope.type,
-        scope.id,
-        JSON.stringify(columns),
-        uniqueKey ? uniqueKey.join(',') : null,
-        now,
-        now,
-      );
+      const values = [name, scope.type, scope.id, JSON.stringify(columns), uniqueKey ? uniqueKey.join(',') : null, now, now] as const;
+      if (collectionId !== undefined) {
+        this.db.prepare(`
+          INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at, collection_id)
+          VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+        `).run(...values, collectionId);
+      } else {
+        this.db.prepare(`
+          INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+        `).run(...values);
+      }
     });
 
     transaction();
