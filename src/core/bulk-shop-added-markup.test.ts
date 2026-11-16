@@ -372,7 +372,7 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     expect(ledger.htmlFieldsOf(undo)).toEqual(['description', 'short_description']);
   });
 
-  // Row 1121: a NEW run whose before-image is the value a write of another run kept marked.
+  // A new run whose before-image is the value a write of another run kept marked.
   it('leaves a product out of a new run whose before-image is the marked value, reformatted too; plans the others', async () => {
     const { id } = await markedRun();
     const marked = `<p>Neu</p>${SCRIPT}`;
