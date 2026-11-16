@@ -7,7 +7,7 @@ import { BulkLedger } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
-import { hiddenAddsOf, targetHiddenAdds } from './bulk-hidden-adds.js';
+import { hiddenAddsOf, hiddenAddsToCopy, targetHiddenAdds } from './bulk-hidden-adds.js';
 import { htmlTextsOf, htmlTextsOfTree } from './bulk-html.js';
 import { readWithinBounds, withinReadingBounds } from './html-tree.js';
 import { IN_PLACE_CHARS, inPlaceReferences } from './hidden-chars.js';
@@ -99,6 +99,14 @@ describe('an HTML value past the reading bounds', () => {
     // CONTROL: within the bounds, the soft hyphen the field adds is named.
     expect(targetHiddenAdds({ description: '<p>Wasserfilter</p>' }, { description: '<p>Wasser\u00adfilter</p>' }, ['description']))
       .toEqual([{ field: 'description', codePoints: [SHY], html: true }]);
+  });
+
+  it('counts a before-image past them as empty for a value the owner copies by hand, so its character is marked', () => {
+    expect(hiddenAddsToCopy(deep('<p>Wasser\u00adfilter</p>'), '<p>Wasser\u00adfilter</p>')).toEqual([SHY]);
+    // CONTROL: a before-image within the bounds is read, and holds the character already.
+    expect(hiddenAddsToCopy('<p>Wasser\u00adfilter</p>', '<p>Wasser\u00adfilter</p>')).toEqual([]);
+    // A value to copy past the bounds itself marks nothing.
+    expect(hiddenAddsToCopy(null, deep('<p>Wasser\u00adfilter</p>'))).toEqual([]);
   });
 
   it('is named as an unread field with nothing to mark, so it is never left out', () => {

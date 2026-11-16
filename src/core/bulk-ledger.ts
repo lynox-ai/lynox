@@ -24,7 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
-import { hiddenAddsOf, targetHiddenAdds, type FieldHiddenAdds } from './bulk-hidden-adds.js';
+import { hiddenAddsToCopy, targetHiddenAdds, type FieldHiddenAdds } from './bulk-hidden-adds.js';
 import { checkMarkup, droppedTagsOf, endsClosed, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual, withinReadingBounds } from './html-tree.js';
@@ -1659,8 +1659,8 @@ export class BulkLedger {
           const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
           if (typeof value !== 'string' || value === was || !refusesShortcode(value, typeof was === 'string' ? was : null)) return [];
           // The owner pastes this value into the shop by hand: a hidden character it adds is marked
-          // there as in the list.
-          const codePoints = hiddenAddsOf(typeof was === 'string' ? was : null, value, true);
+          // there as in the list, and against an empty before where the before-image was not read.
+          const codePoints = hiddenAddsToCopy(typeof was === 'string' ? was : null, value);
           return [{ field: f, value, ...(codePoints.length > 0 ? { codePoints } : {}) }];
         })
         : [];

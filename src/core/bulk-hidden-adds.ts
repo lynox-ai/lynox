@@ -56,6 +56,13 @@ export function hiddenAddsOf(before: string | null, after: string, html = false)
   return hiddenAddsRead(before, after, html) ?? [];
 }
 
+/** {@link hiddenAddsOf} for a value the owner copies into the shop by hand, where no sentence can
+ *  say "not checked": a before-image past the reading bounds counts as empty, so every such
+ *  character the value holds is marked. `after` itself past the bounds marks nothing. */
+export function hiddenAddsToCopy(before: string | null, after: string): number[] {
+  return hiddenAddsRead(before, after, true) ?? hiddenAddsRead(null, after, true) ?? [];
+}
+
 /** {@link hiddenAddsOf}, or `null` when either side is an HTML value past the reading bounds and
  *  was not read: what it adds is then not known, in neither direction. */
 function hiddenAddsRead(before: string | null, after: string, html: boolean): number[] | null {
