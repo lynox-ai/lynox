@@ -137,23 +137,30 @@ function parseCounted(value: string, bounds: ReadingBounds): HtmlFragment {
 /** Whether a value stays within the bounds above: one counted parse and one pass over its tree.
  *  Ask it before any other parse or walk of a value a shop, a plan or a model wrote. A test may set smaller bounds to reach them quickly. */
 export function withinReadingBounds(value: string, bounds: Partial<ReadingBounds> = {}): boolean {
+  return readWithinBounds(value, bounds) !== null;
+}
+
+/** The tree of `value` from the one counted parse {@link withinReadingBounds} asks, or `null` past
+ *  the bounds: for a caller that reads the value right after, so it is not parsed twice. The tree
+ *  is the one {@link parseHtmlFragment} builds. */
+export function readWithinBounds(value: string, bounds: Partial<ReadingBounds> = {}): HtmlFragment | null {
   const limits: ReadingBounds = { ...READING_BOUNDS, ...bounds };
-  if (Buffer.byteLength(value, 'utf8') > MARKUP_MAX_BYTES) return false;
+  if (Buffer.byteLength(value, 'utf8') > MARKUP_MAX_BYTES) return null;
   let fragment: HtmlFragment;
   try {
     fragment = parseCounted(value, limits);
   } catch (err: unknown) {
-    if (err instanceof BoundExceeded) return false;
+    if (err instanceof BoundExceeded) return null;
     throw err;
   }
   const stack: [HtmlParent | HtmlChild, number, number][] = [[fragment, 0, 0]];
   while (stack.length > 0) {
     const [n, depth, above] = stack.pop()!;
     const carriers = above + ('tagName' in n && READ_AGAIN_CARRIERS.has(n.tagName) ? 1 : 0);
-    if (depth > limits.depth || carriers > MARKUP_MAX_CARRIER_NESTING) return false;
+    if (depth > limits.depth || carriers > MARKUP_MAX_CARRIER_NESTING) return null;
     if ('childNodes' in n) for (const c of childrenOf(n).nodes) stack.push([c, depth + 1, carriers]);
   }
-  return true;
+  return fragment;
 }
 
 /**

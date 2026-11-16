@@ -95,6 +95,8 @@ export interface BulkRunDetailData extends BulkRun {
 	/** Targets the owner has not taken out that add hidden characters the page marks; null where
 	 *  the run is neither approved nor confirmed from this page. */
 	hiddenAddsTargets?: number | null | undefined;
+	/** Targets with an HTML field too large or too complex to check for hidden characters. */
+	hiddenUncheckedTargets?: number | null | undefined;
 	writeFormNote: string | null;
 	writeFormConfirmation: string | null;
 	judgeModel: string | null;
@@ -583,6 +585,8 @@ export interface BulkTarget {
 	 *  than its before-image, where text may carry one and the page would not show it. Counted by
 	 *  the engine; the page marks every occurrence of each in that field ({@link bulkHiddenSegments}). */
 	hiddenAdds?: { field: string; codePoints: number[]; html?: true | undefined }[] | undefined;
+	/** HTML fields not checked for hidden characters: too large or too complex to read. */
+	hiddenUnchecked?: string[] | undefined;
 }
 
 /** One element or comment a new value adds or removes, as the engine's parser read it. */
@@ -1184,4 +1188,16 @@ export function bulkHiddenCountText(n: number | null | undefined, shopify: boole
 	if (n === null || n === undefined || n <= 0) return null;
 	// Products on Shopify, targets elsewhere, as every count beside it (U-218).
 	return i18n.tf(bulkOne(shopify ? 'bulk.hidden.count_products' : 'bulk.hidden.count', n), { n: String(n) });
+}
+
+/** The line beside it for targets with a field lynox could not check for hidden characters, or
+ *  null for none: a missing mark there says nothing (U-294). */
+export function bulkUncheckedCountText(n: number | null | undefined, shopify: boolean, i18n: BulkI18n): string | null {
+	if (n === null || n === undefined || n <= 0) return null;
+	return i18n.tf(bulkOne(shopify ? 'bulk.unchecked.count_products' : 'bulk.unchecked.count', n), { n: String(n) });
+}
+
+/** Whether the engine could not check this field of a target for hidden characters. */
+export function bulkHiddenUnchecked(target: Pick<BulkTarget, 'hiddenUnchecked'>, field: string): boolean {
+	return target.hiddenUnchecked?.includes(field) === true;
 }
