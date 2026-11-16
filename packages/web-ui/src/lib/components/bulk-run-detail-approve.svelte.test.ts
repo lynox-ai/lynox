@@ -763,6 +763,9 @@ describe('approving an undo, per target', () => {
 		targets = undoTargets();
 		await render();
 		expect(rows()).toHaveLength(2);
+		// A row stays a row to assistive tech where a narrow screen stacks it as a block.
+		expect(rows().map((r) => r.getAttribute('role'))).toEqual(['row', 'row']);
+		expect([...rows()[0]!.children].map((c) => c.getAttribute('role'))).toEqual(['cell', 'cell']);
 		const first = rows()[0]!;
 		expect(first.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
 		const link = first.querySelector('[data-testid="bulk-target-admin"]');
