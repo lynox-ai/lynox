@@ -687,7 +687,7 @@ describe('ImapSmtpProvider — search', () => {
       const err = await run().then(() => null, (e: unknown) => e);
       expect(err, name).toBeInstanceOf(MailError);
       expect((err as MailError).code).toBe('connection_dropped');
-      expect((err as MailError).message).toContain('the connection dropped before the search ran');
+      expect((err as MailError).message).toContain('the connection dropped before or while the search ran');
     }
   });
 

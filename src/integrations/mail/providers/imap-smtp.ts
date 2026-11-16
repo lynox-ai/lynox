@@ -387,8 +387,12 @@ function searchUidsOrThrow(result: number[] | false | undefined, folder: string,
   if (Array.isArray(result)) return result;
   // A server BYE before the search leaves `mailbox` set; imapflow's SEARCH then answers `false`
   // without sending anything, so `false` with the session out of the mailbox is the drop too.
-  if (result === undefined || mailboxLost(client)) {
+  if (result === undefined) {
     throw new MailError('connection_dropped', `IMAP search ${folder}: the connection dropped before the search ran.${DROPPED_NEXT_STEP}`);
+  }
+  // `false` cannot tell before from during: a BYE while SEARCH ran ends in the same place.
+  if (mailboxLost(client)) {
+    throw new MailError('connection_dropped', `IMAP search ${folder}: the connection dropped before or while the search ran.${DROPPED_NEXT_STEP}`);
   }
   throw new MailError('unknown', `IMAP search ${folder}: the search failed (the server refused it, or the connection dropped while it ran)`);
 }
