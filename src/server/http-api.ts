@@ -15338,12 +15338,14 @@ export class LynoxHTTPApi {
         const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace, plain: exportPlain } = exported;
         // A refusal from the destination is shown as its own text, which is written for the
         // person migrating; the raw response only when it carries none.
-        const refusal = async (r: Response, what: string): Promise<Error> => {
+        // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
+        // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
+        const refusal = async (r: Response, step: string, told: string): Promise<Error> => {
           const text = await r.text();
           let message: unknown;
           try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
-          // The target's own words, marked as its, at most 500 characters like the raw text.
-          return new Error(typeof message === 'string' && message !== '' ? `${what}; the target instance says: ${message.slice(0, 500)}` : `${what}: ${text.slice(0, 500)}`);
+          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${text.slice(0, 500)}`);
+          return new Error(`${told} It says: ${message.length > 500 ? `${message.slice(0, 500)}…` : message}`);
         };
 
         // 4. Send manifest
@@ -15353,7 +15355,7 @@ export class LynoxHTTPApi {
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
         });
-        if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected');
+        if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
 
         // 5. Send chunks
         for (let i = 0; i < chunks.length; i++) {
@@ -15369,7 +15371,7 @@ export class LynoxHTTPApi {
             headers: migrationHeaders,
             body: JSON.stringify(chunks[i]),
           });
-          if (!cRes.ok) throw await refusal(cRes, `Chunk ${String(i)} rejected`);
+          if (!cRes.ok) throw await refusal(cRes, `Chunk ${String(i)} rejected`, `The target instance refused part ${String(i + 1)} of the data.`);
         }
 
         // 6. Restore
@@ -15378,7 +15380,7 @@ export class LynoxHTTPApi {
           method: 'POST',
           headers: migrationHeaders,
         });
-        if (!rRes.ok) throw await refusal(rRes, 'Restore failed');
+        if (!rRes.ok) throw await refusal(rRes, 'Restore failed', 'The target instance could not restore the data.');
 
         const result = await rRes.json() as { success: boolean; verification: unknown };
         // Files the export could not carry (a link, a name that cannot travel) are named in the result,

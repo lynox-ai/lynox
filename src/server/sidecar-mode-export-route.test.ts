@@ -24,6 +24,10 @@ const target: {
   failCompletion?: boolean;
   /** Refuse the manifest with this `error`. */
   manifestError?: string;
+  /** Refuse the chunk at this index with this `error`. */
+  chunkError?: { at: number; error: string } | undefined;
+  /** Refuse the restore with this `error`. */
+  restoreError?: string | undefined;
 } = { importer: null, manifest: null, healthCalls: 0 };
 /** Every transfer key the route derives, to see whether it is zeroized. */
 const derivedKeys: Buffer[] = [];
@@ -50,6 +54,8 @@ vi.mock('../core/network-guard.js', async (original) => {
         }
         if (path === '/api/migration/manifest' && target.manifestError !== undefined) return json({ error: target.manifestError }, 422);
         if (path === '/api/migration/manifest') { target.manifest = body as MigrationManifest; imp.setManifest(target.manifest); return json({ accepted: true }); }
+        if (path === '/api/migration/chunk' && target.chunkError && (body as { seq: number }).seq === target.chunkError.at) return json({ error: target.chunkError.error }, 422);
+        if (path === '/api/migration/restore' && target.restoreError !== undefined) return json({ error: target.restoreError }, 500);
         if (path === '/api/migration/chunk') return json(imp.receiveChunk(body as Parameters<MigrationImporter['receiveChunk']>[0]));
         // The target's restore is not under test: answered without writing.
         if (path === '/api/migration/restore') return json({ success: true, verification: {} });
@@ -122,6 +128,8 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.claimsPlain = false;
     target.failCompletion = false;
     target.manifestError = undefined;
+    target.chunkError = undefined;
+    target.restoreError = undefined;
     derivedKeys.length = 0;
   });
 
@@ -213,14 +221,24 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.health = HEALTH;
     const events = await exportTo();
     expect((events.get('error') as { message: string }).message)
-      .toBe('Manifest rejected; the target instance says: The manifest carries a store as plaintext, which the target instance does not take yet; the source has to send it raw.');
+      .toBe('The target instance refused the migration. It says: The manifest carries a store as plaintext, which the target instance does not take yet; the source has to send it raw.');
   });
 
-  it('marks a destination\'s text as its own and shows at most 500 characters of it', async () => {
+  it('shows at most 500 characters of a destination\'s text, and marks the cut', async () => {
     setShellIsolationForTest(sidecar);
     target.manifestError = 'x'.repeat(499) + 'yz';
-    const events = await exportTo();
-    expect((events.get('error') as { message: string }).message).toBe(`Manifest rejected; the target instance says: ${'x'.repeat(499)}y`);
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: ${'x'.repeat(499)}y…`);
+    target.manifestError = 'x'.repeat(500);
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: ${'x'.repeat(500)}`);
+  });
+
+  it('says which part of the data the destination refused, counted from 1, and that it could not restore', async () => {
+    setShellIsolationForTest(sidecar);
+    target.chunkError = { at: 0, error: 'chunk refused' };
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of the data. It says: chunk refused');
+    target.chunkError = undefined;
+    target.restoreError = 'restore refused';
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: restore refused');
   });
 
   it('zeroizes the transfer key when the handshake completion fails', async () => {
