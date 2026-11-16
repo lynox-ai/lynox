@@ -10,6 +10,7 @@ import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { rawHtmlField } from './bulk-apply.js';
 import { judgeContext } from './bulk-judge.js';
+import { sameHtmlField } from './bulk-html.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { Parser } from 'parse5';
 
@@ -112,6 +113,12 @@ describe('a value beyond the reading bounds takes the strict side on every path'
     expect(sameValue({ d: unquoted(10) }, { d: quoted(10) }, ['d'])).toBe(true);
     expect(sameValue({ d: unquoted(DEEP) }, { d: quoted(DEEP) }, ['d'])).toBe(false);
     expect(sameValue({ d: quoted(DEEP) }, { d: quoted(DEEP) }, ['d'])).toBe(true);
+  });
+
+  it('sameHtmlField compares it byte for byte, the path every write back and mark reads', () => {
+    expect(sameHtmlField(unquoted(10), quoted(10))).toBe(true);
+    expect(sameHtmlField(unquoted(DEEP), quoted(DEEP))).toBe(false);
+    expect(sameHtmlField(quoted(DEEP), quoted(DEEP))).toBe(true);
   });
 
   it('rawHtmlField names it as not canonical', () => {
