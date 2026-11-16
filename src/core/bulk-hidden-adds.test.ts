@@ -79,6 +79,32 @@ describe('character references in an HTML field', () => {
   });
 });
 
+// A value a shop, a plan or a model wrote is parsed only within the reading bounds.
+describe('an HTML value past the reading bounds', () => {
+  const deep = (inner: string): string => `${'<div>'.repeat(600)}${inner}`;
+  const large = (inner: string): string => `<p>${'a'.repeat(1024 * 1024)}</p>${inner}`;
+
+  it('is not read for what it adds, nested too deep or too large', () => {
+    expect(hiddenAddsOf('<p>Wasserfilter</p>', deep('<p>Wasser\u00adfilter</p>'), true)).toEqual([]);
+    expect(hiddenAddsOf('<p>Wasserfilter</p>', large('<p>Wasser\u00adfilter</p>'), true)).toEqual([]);
+    // CONTROL: the same character within the bounds is found.
+    expect(hiddenAddsOf('<p>Wasserfilter</p>', '<p>Wasser\u00adfilter</p>', true)).toEqual([SHY]);
+  });
+
+  it('holds nothing as a before-image, so each such character the new value holds counts as added', () => {
+    expect(hiddenAddsOf(deep('<p>Wasser\u00adfilter</p>'), '<p>Wasser\u00adfilter</p>', true)).toEqual([SHY]);
+    // CONTROL: within the bounds, the before-image's soft hyphen is held.
+    expect(hiddenAddsOf('<p>Wasser\u00adfilter</p>', '<p>Wasser\u00adfilter</p>', true)).toEqual([]);
+  });
+
+  it('is named as a field that adds, unread and with nothing to mark, so the count leaves it in', () => {
+    expect(targetHiddenAdds({ description: '<p>a</p>' }, { description: deep('<p>a</p>') }, ['description']))
+      .toEqual([{ field: 'description', codePoints: [], html: true, unread: true }]);
+    // A plain field is no HTML and is read as it is, however deep its text looks.
+    expect(targetHiddenAdds({ name: 'a' }, { name: deep('a') }, [])).toEqual([]);
+  });
+});
+
 describe('targetHiddenAdds', () => {
   it('names each text field that adds one, and a target whose value is one text', () => {
     expect(targetHiddenAdds({ name: 'Mug', description: '<p>Alt</p>' }, { name: 'Mug', description: '<p>Wasser\u00adfilter</p>', stock: 3 }))
@@ -143,6 +169,14 @@ describe('the preview and the run\'s count', () => {
     expect(t!.hiddenAdds).toEqual([{ field: 'description', codePoints: [SHY], html: true }]);
     // The value itself is the one planned: a mark is the page's, never part of what is written.
     expect((t!.after as Record<string, unknown>)['description']).toBe('<p>Wasser\u00adfilter</p>');
+    expect(ledger.hiddenAddsTargets(id)).toBe(1);
+  });
+
+  it('names a description nested past the reading bounds as unread in the preview, and counts its target', () => {
+    const deep = `${'<div>'.repeat(600)}<p>Wasserfilter</p>`;
+    const id = previewed({ description: deep }, [{ description: '<p>Wasserfilter</p>' }]);
+    const [t] = ledger.getPreview(id);
+    expect(t!.hiddenAdds).toEqual([{ field: 'description', codePoints: [], html: true, unread: true }]);
     expect(ledger.hiddenAddsTargets(id)).toBe(1);
   });
 
