@@ -45,7 +45,7 @@ import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_SET_UP, storeClearanceHeld, storeSetupRefusal } from '../../core/shopify-host.js';
+import { clearanceRefusalCause, clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_SET_UP, storeClearanceHeld, storeSetupRefusal } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
 import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
@@ -2161,9 +2161,16 @@ export function shopifyExchangeSwitchOn(): boolean {
 }
 
 /**
+ * Why {@link storeExchangePassFor} minted no pass, for the connect callback's page: the switch is
+ * off, a self-hosted instance, a managed one that misses a part, the control plane did not answer
+ * or refused, or the callback, its token URL and the profile on the host are not one store.
+ */
+export type StoreExchangeRefusal = 'switched_off' | 'self_hosted' | 'not_set_up' | 'unconfirmed' | 'not_cleared' | 'not_this_store';
+
+/**
  * The token exchange's pass (PRD Appendix B4), for the connect callback alone, once the store's
- * signature on the callback held (`callback`). `undefined` when any condition fails; the
- * exchange is then refused as before. In this order:
+ * signature on the callback held (`callback`). When any condition fails, the cause instead
+ * ({@link StoreExchangeRefusal}), and the exchange is then refused as before. In this order:
  *  0. the switch `LYNOX_SHOPIFY_EXCHANGE` is on (`1` or `true`); off by default;
  *  1. a provisioned managed instance, with the clearance and the store binding;
  *  2. the shell-exec sidecar;
@@ -2181,18 +2188,19 @@ export async function storeExchangePassFor(
   tokenUrl: string,
   body: string,
   toolContext: ToolContext | undefined,
-): Promise<StorePass | undefined> {
-  if (!shopifyExchangeSwitchOn()) return undefined;
-  if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return undefined;
-  if (toolContext.shellIsolation.kind !== 'sidecar') return undefined;
+): Promise<StorePass | StoreExchangeRefusal> {
+  if (!shopifyExchangeSwitchOn()) return 'switched_off';
+  if (controlPlaneFromEnv() === null) return 'self_hosted';
+  if (!toolContext?.exactClearance || !toolContext.storeBindingDigest) return 'not_set_up';
+  if (toolContext.shellIsolation.kind !== 'sidecar') return 'not_set_up';
   let parsed: URL;
-  try { parsed = new URL(tokenUrl); } catch { return undefined; }
+  try { parsed = new URL(tokenUrl); } catch { return 'not_this_store'; }
   const origin = storeOriginOf(parsed);
-  if (origin === null || origin !== callback.origin || parsed.pathname !== STORE_EXCHANGE_PATH || parsed.href.includes('?')) return undefined;
+  if (origin === null || origin !== callback.origin || parsed.pathname !== STORE_EXCHANGE_PATH || parsed.href.includes('?')) return 'not_this_store';
   const profile = toolContext.apiStore?.getByHostname(parsed.hostname);
-  if (profile === undefined || profile.id !== callback.profileId || presetStoreHost(profile) !== normalizeHostForMatch(parsed.hostname)) return undefined;
+  if (profile === undefined || profile.id !== callback.profileId || presetStoreHost(profile) !== normalizeHostForMatch(parsed.hostname)) return 'not_this_store';
   const clearance = await toolContext.exactClearance.ensure();
-  if (!clearance.ok) return undefined;
+  if (!clearance.ok) return clearanceRefusalCause(clearance.reason, toolContext.exactClearance.heldRefusal());
   return mintStoreExchangePass(origin, body);
 }
 

@@ -176,7 +176,7 @@ describe('the exchange pass is minted in one place, for the connect callback alo
     expect(at).toBeGreaterThan(fn);
     expect(at).toBeLessThan(next);
     const body = http.slice(fn, at);
-    expect(body.indexOf('if (!shopifyExchangeSwitchOn()) return undefined;')).toBeGreaterThan(-1);
+    expect(body.indexOf("if (!shopifyExchangeSwitchOn()) return 'switched_off';")).toBeGreaterThan(-1);
     expect(body.indexOf('exactClearance.ensure()')).toBeGreaterThan(body.indexOf('shopifyExchangeSwitchOn()'));
   });
 
