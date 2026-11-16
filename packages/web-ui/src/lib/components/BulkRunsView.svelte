@@ -17,12 +17,15 @@
 	import BulkRunDetail from './BulkRunDetail.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
-	import { bulkHaltSuffixKey, bulkLabel, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
+	import { bulkHaltSuffixKey, bulkLoadErrorKey, bulkLabel, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
 	let merges = $state<BulkMerge[]>([]);
 	let loading = $state(true);
 	let error = $state('');
+	// Whether the last load read the run list. Only then does an empty list mean "no runs": a list
+	// that could not be read shows its error alone.
+	let runsRead = $state(false);
 	let mergeAnswer = $state<{ text: string; ok: boolean; goTo: string | null } | null>(null);
 	// The merge a refusal sent the owner to, marked in the list until the next action.
 	let markedMerge = $state<string | null>(null);
@@ -51,15 +54,20 @@
 				fetch(`${getApiBase()}/bulk/runs`),
 				fetch(`${getApiBase()}/merges`),
 			]);
-			// Bulk runs ship off; a 404 here means the feature is off, not a failure.
-			runs = runRes.ok ? ((await runRes.json()) as { runs: BulkRun[] }).runs : [];
+			// Bulk runs ship off; a 404 here means the feature is off, not a failure. Any other
+			// failure keeps the list as it was, as for the merges below.
+			if (runRes.ok) runs = ((await runRes.json()) as { runs: BulkRun[] }).runs;
+			else if (runRes.status === 404) runs = [];
+			runsRead = runRes.ok || runRes.status === 404;
 			// No subject store answers 404: no merges. Any other failure keeps the list as it was
 			// and says so, so an answer read against it is not read against an empty list.
 			if (mergeRes.ok) merges = ((await mergeRes.json()) as { merges: BulkMerge[] }).merges;
 			else if (mergeRes.status === 404) merges = [];
-			if ((!runRes.ok && runRes.status !== 404) || (!mergeRes.ok && mergeRes.status !== 404)) error = t('common.load_failed');
+			const failed = [runRes, mergeRes].filter((r) => !r.ok && r.status !== 404).map((r) => r.status);
+			if (failed.length > 0) error = t(bulkLoadErrorKey(failed));
 		} catch {
-			error = t('common.load_failed');
+			runsRead = false;
+			error = t(bulkLoadErrorKey([null]));
 		}
 		loading = false;
 	}
@@ -120,8 +128,10 @@
 
 			{#if loading}
 				<p class="text-text-subtle text-sm">{t('common.loading')}</p>
-			{:else if runs.length === 0}
+			{:else if runs.length === 0 && runsRead}
 				<p class="text-sm text-text-subtle py-6 text-center">{t('bulk.empty')}</p>
+			{:else if runs.length === 0}
+				<!-- The list could not be read: the error above stands alone. -->
 			{:else}
 				<div class="overflow-x-auto">
 					<table class="w-full text-sm">

@@ -776,6 +776,22 @@ export const BULK_FOLLOW_MS = 5000;
 export const BULK_FOLLOW_MAX_MS = 10 * 60 * 1000;
 export const BULK_FOLLOW_BACKOFF_MAX_MS = 60_000;
 
+/** The sentence for a load of the bulk pages that failed. The engine answers 429 when one
+ *  client sent too many requests within its window; that is not an engine that cannot be
+ *  reached, so it gets its own sentence. Only when every failed answer was a 429: a network
+ *  error (no status, `null`) or any other status keeps `common.load_failed`. */
+export function bulkLoadErrorKey(failed: readonly (number | null)[]): 'common.rate_limited' | 'common.load_failed' {
+	return failed.length > 0 && failed.every((s) => s === 429) ? 'common.rate_limited' : 'common.load_failed';
+}
+
+/** A load of a run's page that failed on an answer, with the answer's status. A thrown error
+ *  of another kind (no answer at all) carries none. */
+export class BulkLoadFailed extends Error {
+	constructor(readonly status: number | null) {
+		super('bulk load failed');
+	}
+}
+
 /** The next wait of a follow loop after an ask: back to the base after a good answer, longer
  *  after a refused one (`retryAfterS` from a 429's Retry-After, when it names seconds). */
 export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number | null): number {

@@ -2817,6 +2817,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'common.save': { de: 'Speichern', en: 'Save' },
 	'common.save_failed': { de: 'Speichern fehlgeschlagen. Bitte erneut versuchen.', en: 'Save failed. Please try again.' },
 	'common.load_failed': { de: 'Laden fehlgeschlagen. Ist die Engine erreichbar?', en: 'Failed to load. Is the engine reachable?' },
+	'common.rate_limited': { de: 'Zu viele Anfragen in kurzer Zeit. Warte einen Moment und lade die Seite dann neu.', en: 'Too many requests in a short time. Wait a moment, then reload the page.' },
 	'common.copied': { de: 'Kopiert', en: 'Copied' },
 	'common.copy_failed': { de: 'Kopieren hat nicht geklappt. Bitte von Hand markieren und kopieren.', en: 'Could not copy. Select the text and copy it by hand.' },
 	'session.expired_title': { de: 'Sitzung abgelaufen', en: 'Session expired' },
