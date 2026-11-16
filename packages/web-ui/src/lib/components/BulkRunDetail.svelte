@@ -904,12 +904,15 @@
 					<!-- With every target taken out the approval writes nothing; the sentence says why it is locked. -->
 					{#if bulkWriting(run) === 0}
 						<p class="text-sm" data-testid="bulk-undo-all-taken-out">{t('bulk.undo.all_taken_out')}</p>
+					{:else if run.changes.update + run.changes.create === 0}
+						<!-- Only the entries in the box below are left: the approval deletes them, and says so. -->
+						<p class="text-sm" data-testid="bulk-undo-only-deletes">{tf(bulkOne('bulk.undo.only_deletes', run.changes.delete), { n: String(run.changes.delete) })}</p>
 					{:else}
 						<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
 					{/if}
 					{#if run.changes.delete > 0}
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
+							<p>{tf(bulkOne('bulk.undo.creates', run.changes.delete), { k: String(run.changes.delete) })}</p>
 							<ul class="list-disc pl-5 mt-1">
 								{#each creates as c (c.seq)}<li>{@render targetName(c)}</li>{/each}
 							</ul>

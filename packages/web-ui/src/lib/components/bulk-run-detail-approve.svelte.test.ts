@@ -812,6 +812,34 @@ describe('approving an undo, per target', () => {
 		expect(approve()?.disabled).toBe(true);
 	});
 
+	it('says the undo only deletes the entry left once every target that gets a value back is taken out, and keeps the approval', async () => {
+		run = undoRun();
+		targets = undoTargets();
+		await render();
+		// One entry created by the source: the box names it in the singular.
+		expect(target.textContent).toContain(t('bulk.undo.creates_one'));
+		expect(target.textContent).not.toContain(tf('bulk.undo.creates', { k: '1' }));
+		takeOut()[0]!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')).toBeNull();
+		takeOut()[0]!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')?.textContent).toBe(t('bulk.undo.only_deletes_one'));
+		expect(target.textContent).not.toContain(tf('bulk.undo.approve_explain', { n: '0' }));
+		expect(target.querySelector('[data-testid="bulk-undo-all-taken-out"]')).toBeNull();
+		// The entry is still deleted: the approval stays.
+		expect(buttonByText(t('bulk.undo.approve'))?.disabled).toBe(false);
+	});
+
+	it('names several entries left to delete by their number, and the box in the plural', async () => {
+		run = undoRun({ total: 4, deselected: 2, changes: { update: 0, create: 0, delete: 2, unchanged: 0, invalid: 0 } });
+		targets = [...undoTargets().map((x) => (x.change === 'delete' ? x : { ...x, deselected: true })),
+			{ seq: 3, key: 'gid://shopify/Product/4', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false }];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')?.textContent).toBe(tf('bulk.undo.only_deletes', { n: '2' }));
+		expect(target.textContent).toContain(tf('bulk.undo.creates', { k: '2' }));
+	});
+
 	it('offers no target out of the undo of an atomic run, and says why once above the list', async () => {
 		run = undoRun({ atomic: true });
 		targets = undoTargets();
@@ -836,6 +864,19 @@ describe('approving an undo, per target', () => {
 		expect(t('bulk.undo.all_taken_out')).toBe('Du hast alle Ziele herausgenommen, darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
 		setLocale('en');
 		expect(t('bulk.undo.all_taken_out')).toBe('You took out every target, so this undo writes nothing. Put one back, or leave it with “Not now”.');
+	});
+
+	it('words what is left to delete, and one entry the source created, in both languages', () => {
+		const was = getLocale();
+		onTestFinished(() => setLocale(was));
+		setLocale('de');
+		expect(t('bulk.undo.only_deletes_one')).toBe('Du hast alle Ziele herausgenommen; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(tf('bulk.undo.only_deletes', { n: '3' })).toBe('Du hast alle Ziele herausgenommen; die Rücknahme löscht nur noch die 3 Einträge unten.');
+		expect(t('bulk.undo.creates_one')).toBe('Der ursprüngliche Lauf hat einen Eintrag neu angelegt. Die Rücknahme löscht ihn, ausser jemand hat ihn seither geändert:');
+		setLocale('en');
+		expect(t('bulk.undo.only_deletes_one')).toBe('You took out every target; the undo now only deletes the entry below.');
+		expect(tf('bulk.undo.only_deletes', { n: '3' })).toBe('You took out every target; the undo now only deletes the 3 entries below.');
+		expect(t('bulk.undo.creates_one')).toBe('The original run created one new entry. The undo deletes it unless someone has changed it since:');
 	});
 
 	it('heads the column "Jetzt → zurück auf" in German and "Now → back to" in English', () => {
