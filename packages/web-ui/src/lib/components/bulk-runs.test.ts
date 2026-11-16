@@ -1076,12 +1076,14 @@ describe('what the preview says about a target lynox leaves out', () => {
 	const reasons = [...union.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!);
 	// Reasons no Shopify run can record: a workspace file, a data store row, an effect field
 	// (WooCommerce and bexio only).
-	const NOT_SHOPIFY = new Set(['path_outside_workspace', 'unreadable', 'target_too_large', 'after_not_text', 'not_text',
-		'unknown_column', 'subject_column', 'bad_value', 'bad_key', 'effect_field',
+	const NOT_SHOPIFY = new Set([
 		// The HTML check's link and form refusals: a Shopify run writes no HTML field until
 		// descriptions are written (descriptionHtml is refused at planning), so these reach
 		// WooCommerce only, by code, until they are worded.
 		'new_link_domain', 'url_scheme', 'url_control_char', 'not_canonical']);
+	// Reasons a workspace, data-store or WooCommerce/bexio run records: worded on every run.
+	const LOCAL = ['path_outside_workspace', 'unreadable', 'target_too_large', 'after_not_text', 'not_text',
+		'unknown_column', 'subject_column', 'bad_value', 'bad_key'];
 	// What the HTML check refuses in elements, attributes, code and comments: any run with an
 	// HTML field, a Shopify description as a WooCommerce one, so each has its sentence on either.
 	const HTML_CHECK = ['element_not_allowed', 'attribute_not_allowed', 'content_changed', 'comment_added', 'new_img'];
@@ -1103,6 +1105,50 @@ describe('what the preview says about a target lynox leaves out', () => {
 			expect(key, reason).toMatch(/^bulk\.invalid\.[a-z_]+$/);
 			expect(key, reason).not.toBe('bulk.invalid.other');
 			expect(i18nSource, reason).toMatch(new RegExp(`'${key.replace(/\./g, '\\.')}': \\{ de: .+, en: .+ \\}`));
+		}
+	});
+	it('has a sentence for every workspace and data-store reason on any run, in both languages', () => {
+		for (const reason of LOCAL) {
+			expect(reasons, reason).toContain(reason);
+			for (const shopify of [false, true]) {
+				const key = bulkInvalidText(reason, shopify, true, i18n, { field: undefined, host: null, dataStore: true });
+				expect(key, reason).toBe(`bulk.invalid.${reason}`);
+			}
+			expect(i18nSource, reason).toMatch(new RegExp(`'bulk\\.invalid\\.${reason}': \\{ de: .+, en: .+ \\}`));
+		}
+	});
+	it('names the program an effect field belongs to, and says "the app" where the host is not known', () => {
+		const table: Record<string, string> = {
+			'bulk.invalid.effect_field': 'more {in_app}; do it {in_app}', 'bulk.invalid.in_app_bexio': 'in bexio',
+			'bulk.invalid.in_app_woocommerce': 'in WooCommerce', 'bulk.invalid.in_app_unknown': 'in the app',
+		};
+		const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => Object.entries(v).reduce((x, [n, w]) => x.replaceAll(`{${n}}`, w), table[k] ?? k) };
+		const at = (host: string | null): string => bulkInvalidText('effect_field', false, true, own, { field: undefined, host, dataStore: false });
+		expect(at('api.bexio.com')).toBe('more in bexio; do it in bexio');
+		expect(at('API.bexio.com')).toBe('more in bexio; do it in bexio');
+		expect(at('shop.example.com')).toBe('more in WooCommerce; do it in WooCommerce');
+		expect(at(null)).toBe('more in the app; do it in the app');
+		for (const key of ['effect_field', 'in_app_bexio', 'in_app_woocommerce', 'in_app_unknown']) {
+			expect(i18nSource, key).toMatch(new RegExp(`'bulk\\.invalid\\.${key}': \\{ de: .+, en: .+ \\}`));
+		}
+		// The program twice in each language: where it reacts, and where to make the change.
+		const line = i18nSource.split('\n').find((l) => l.trimStart().startsWith("'bulk.invalid.effect_field':"))!;
+		const [de, en] = line.split(", en: ");
+		expect(de!.split('{in_app}').length - 1).toBe(2);
+		expect(en!.split('{in_app}').length - 1).toBe(2);
+	});
+	it('reads the program from the host as core\'s effect fields are bound: bexio by its host, the rest WooCommerce paths', () => {
+		// A new provider added to the table turns this red, instead of being named WooCommerce.
+		const outbound = readFileSync(`${HERE}../../../../../src/core/outbound-write.ts`, 'utf8');
+		const table = outbound.slice(outbound.indexOf('export const OUTBOUND_EFFECT_FIELDS'));
+		const body = table.slice(0, table.indexOf('\n];'));
+		const entries = body.split('\n').filter((l) => /^\s*\{ /.test(l));
+		expect(entries.length).toBeGreaterThan(5);
+		// Every entry is one line here: one written over several would not be read, so it fails.
+		expect(entries.length, 'an entry over several lines').toBe(body.split('effect:').length - 1);
+		for (const e of entries) {
+			if (e.includes('host:')) expect(e, e).toContain("host: 'api.bexio.com'");
+			else expect(e, e).toMatch(/path: WOO\(/);
 		}
 	});
 	it('puts where the products are managed into the image sentence', () => {

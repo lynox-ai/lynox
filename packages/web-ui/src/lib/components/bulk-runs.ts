@@ -1003,6 +1003,21 @@ const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
 	element_not_allowed: 'element_not_allowed', attribute_not_allowed: 'attribute_not_allowed',
 	content_changed: 'content_changed', comment_added: 'comment_added', new_img: 'new_img',
 };
+/** Reasons a workspace or data-store run records (and `target_too_large`, an external one too):
+ *  a sentence of their own on every run, since no Shopify run records them (U-273). */
+const BULK_INVALID_LOCAL: Readonly<Record<string, string>> = {
+	path_outside_workspace: 'path_outside_workspace', unreadable: 'unreadable', not_text: 'not_text',
+	after_not_text: 'after_not_text', target_too_large: 'target_too_large',
+	unknown_column: 'unknown_column', subject_column: 'subject_column', bad_value: 'bad_value', bad_key: 'bad_key',
+};
+/** The program an effect field belongs to, as the sentence names it (core `OUTBOUND_EFFECT_FIELDS`):
+ *  bexio's entries are bound to its host, and every entry bound to no host is a WooCommerce path.
+ *  The page knows the host, not the path: a WooCommerce path on bexio's host, which bexio does not
+ *  serve, would read as bexio. */
+export function bulkEffectApp(host: string | null): 'bexio' | 'woocommerce' | null {
+	if (host === null || host === '') return null;
+	return host.toLowerCase() === 'api.bexio.com' ? 'bexio' : 'woocommerce';
+}
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
 export const BULK_DESELECT_REFUSALS: readonly string[] = ['atomic_undo', 'not_writing', 'not_taken_out'];
@@ -1030,6 +1045,12 @@ export function bulkInvalidText(
 		const key = shopify ? 'secret_in_context' : context?.dataStore === true ? 'secret_in_context_column' : 'secret_in_context_field';
 		return i18n.tf(`bulk.invalid.${key}`, { field });
 	}
+	if (reason === 'effect_field') {
+		const app = bulkEffectApp(context?.host ?? null);
+		return i18n.tf('bulk.invalid.effect_field', { in_app: i18n.t(app === null ? 'bulk.invalid.in_app_unknown' : `bulk.invalid.in_app_${app}`) });
+	}
+	const local = BULK_INVALID_LOCAL[reason];
+	if (local !== undefined) return i18n.t(`bulk.invalid.${local}`);
 	const anyForm = BULK_INVALID_ANY_FORM[reason];
 	if (anyForm !== undefined) {
 		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
