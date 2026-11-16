@@ -904,10 +904,10 @@
 					<!-- With every target taken out the approval writes nothing; the sentence says why it is locked. -->
 					{#if bulkWriting(run) === 0}
 						<p class="text-sm" data-testid="bulk-undo-all-taken-out">{t('bulk.undo.all_taken_out')}</p>
-					{:else if run.changes.update + run.changes.create === 0 && run.deselected > 0}
-						<!-- The owner took out every target that gets a value back; only the entries in the box below
-						     are left, and the approval deletes them. An undo whose source only created entries has
-						     taken nothing out, so it is not told it did. -->
+					{:else if run.changes.update + run.changes.create === 0 && listed.some((x) => x.deselected)}
+						<!-- The owner took out every target that gets a value back (the list holds only those); only
+						     the entries in the box below are left, and the approval deletes them. An undo whose source
+						     only created entries has none to take out, so it is not told it did. -->
 						<p class="text-sm" data-testid="bulk-undo-only-deletes">{tf(bulkOne('bulk.undo.only_deletes', run.changes.delete), { n: String(run.changes.delete) })}</p>
 					{:else if run.changes.update + run.changes.create === 0}
 						<!-- Its source only created entries: nothing gets a value back, the approval deletes them. -->
