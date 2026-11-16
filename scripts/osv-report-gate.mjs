@@ -85,11 +85,16 @@ export const ACCEPTED = [
   },
 ];
 
-/** The entry that accepts this finding today, or the expired one that would have, or null. */
+/**
+ * The entry that accepts this finding today, or the expired one that would have, or null. An
+ * `expires` that is not a zero-padded ISO date counts as expired: a string comparison against a
+ * missing or loose date would otherwise never run out.
+ */
 function acceptanceFor(id, name, version, accepted, today) {
-  const hit = accepted.find((a) => a.id === id && a.package === name && a.versions.includes(version));
+  const hit = accepted.find((a) => a.id === id && a.package === name && Array.isArray(a.versions) && a.versions.includes(version));
   if (!hit) return null;
-  return { entry: hit, expired: today > hit.expires };
+  const dated = typeof hit.expires === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(hit.expires);
+  return { entry: hit, expired: !dated || today > hit.expires };
 }
 const KNOWN_BANDS = new Set(['LOW', 'MODERATE', 'MEDIUM', 'HIGH', 'CRITICAL']);
 
@@ -306,7 +311,7 @@ export function main(argv) {
   }
   const ok = errors.length === 0 && blocking.length === 0;
   // Over all reports: an entry no finding matched is due for removal. It does not block.
-  const unused = ACCEPTED.filter((a) => !accepted.some((h) => h.id === a.id)).map((a) => `${a.package} ${a.id}`);
+  const unused = ACCEPTED.filter((a) => !accepted.some((h) => h.id === a.id && a.versions.some((v) => h.package === `${a.package}@${v}`))).map((a) => `${a.package} ${a.id}`);
 
   // The daily watch needs the same classification as the merge gate but files
   // an issue instead of failing, so it reads counts rather than an exit code.

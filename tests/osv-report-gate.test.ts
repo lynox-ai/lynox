@@ -421,6 +421,14 @@ describe('an accepted finding: one id, one package, exact versions, until a date
     expect(r.accepted).toEqual([]);
   });
 
+  it('treats a missing or loose expiry date as run out, so a malformed entry cannot accept forever', () => {
+    for (const expires of [undefined, '2099-1-1', 'never', '']) {
+      const r = evaluate({ doc: highOn('kit-like', '2.0.1'), rc: 1, accepted: [{ ...ENTRY, expires }], today: '2026-11-16' });
+      expect(r.ok, String(expires)).toBe(false);
+      expect(r.accepted, String(expires)).toEqual([]);
+    }
+  });
+
   it('blocks another version, another package and another id', () => {
     for (const doc of [highOn('kit-like', '2.0.2'), highOn('other', '2.0.1'), highOn('kit-like', '2.0.1', 'GHSA-oth-erid-0001')]) {
       const r = evaluate({ doc, rc: 1, accepted: [ENTRY], today: '2026-11-16' });
