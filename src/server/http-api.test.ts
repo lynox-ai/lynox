@@ -129,6 +129,7 @@ const mockHistorySearchRuns = vi.fn().mockReturnValue([]);
 const mockHistoryGetRun = vi.fn().mockReturnValue({ id: 'run-1', task_text: 'test' });
 const mockHistoryGetRunToolCalls = vi.fn().mockReturnValue([]);
 const mockDeleteWireSnapshotsForThread = vi.fn().mockReturnValue(0);
+const mockGetFailedToolUseIds = vi.fn().mockReturnValue(new Set<string>());
 const mockHistoryGetStats = vi.fn().mockReturnValue({ total_runs: 5 });
 const mockHistoryGetCostByDay = vi.fn().mockReturnValue([]);
 const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: 'calendar-month' | 'rolling' | 'stripe-billing'; label: string; startIso: string; endIso: string }) => ({
@@ -329,6 +330,7 @@ vi.mock('../core/engine.js', () => ({
       getRun: mockHistoryGetRun,
       getRunToolCalls: mockHistoryGetRunToolCalls,
       deleteWireSnapshotsForThread: mockDeleteWireSnapshotsForThread,
+      getFailedToolUseIds: mockGetFailedToolUseIds,
       getStats: mockHistoryGetStats,
       getCostByDay: mockHistoryGetCostByDay,
       getUsageSummary: mockHistoryGetUsageSummary,
@@ -8552,6 +8554,13 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('threads — graceful missing thread (issue #702)', () => {
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
     // Temporarily swap the engine's getThreadStore (null by default) for a
     // stub, restoring it after each case (mirrors withRegistry above).
     async function withThreadStore(store: unknown, test: () => Promise<void>): Promise<void> {
@@ -8589,6 +8598,41 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as { messages: unknown[]; threadMissing?: boolean };
         expect(body.threadMissing).toBeUndefined();
         expect(body.messages).toEqual([]);
+      });
+    });
+
+    it('GET /api/threads/:id/messages marks a call the ledger records as failed as unsuccessful', async () => {
+      // Drives the route: the stored result of a soft failure reads as a plain answer, so only the
+      // ledger knows. Dropping the ledger read from the handler must fail this test.
+      const records = [
+        { seq: 0, role: 'assistant', content_json: JSON.stringify([{ type: 'tool_use', id: 'tu_1', name: 'api_setup', input: {} }, { type: 'tool_use', id: 'tu_2', name: 'read_file', input: {} }]), created_at: '2026-11-16T10:00:00Z' },
+        { seq: 1, role: 'user', content_json: JSON.stringify([{ type: 'tool_result', tool_use_id: 'tu_1', content: 'Error: nothing was saved.' }, { type: 'tool_result', tool_use_id: 'tu_2', content: 'hello' }]), created_at: '2026-11-16T10:00:01Z' },
+      ];
+      mockGetFailedToolUseIds.mockClear();
+      mockGetFailedToolUseIds.mockReturnValueOnce(new Set(['tu_1']));
+      await withThreadStore({ getThread: () => ({ id: 't-soft' }), getMessages: () => records }, async () => {
+        const res = await jsonFetch('/api/threads/t-soft/messages');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { messages: Array<{ toolCalls?: Array<{ status: string; unsuccessful?: boolean }> }> };
+        const calls = body.messages[0]?.toolCalls ?? [];
+        expect(calls[0]).toEqual(expect.objectContaining({ status: 'done', unsuccessful: true }));
+        expect(calls[1]?.unsuccessful).toBeUndefined();
+        expect(mockGetFailedToolUseIds).toHaveBeenCalledWith('t-soft');
+      });
+    });
+
+    it('GET /api/threads/:id/messages still opens the chat when the ledger cannot be read', async () => {
+      const records = [
+        { seq: 0, role: 'assistant', content_json: JSON.stringify([{ type: 'tool_use', id: 'tu_1', name: 'api_setup', input: {} }]), created_at: '2026-11-16T10:00:00Z' },
+        { seq: 1, role: 'user', content_json: JSON.stringify([{ type: 'tool_result', tool_use_id: 'tu_1', content: 'Error: nothing was saved.' }]), created_at: '2026-11-16T10:00:01Z' },
+      ];
+      mockGetFailedToolUseIds.mockImplementationOnce(() => { throw new Error('database is locked'); });
+      await withThreadStore({ getThread: () => ({ id: 't-locked' }), getMessages: () => records }, async () => {
+        const res = await jsonFetch('/api/threads/t-locked/messages');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { messages: Array<{ toolCalls?: Array<{ status: string; unsuccessful?: boolean }> }> };
+        expect(body.messages[0]?.toolCalls?.[0]).toEqual(expect.objectContaining({ status: 'done' }));
+        expect(body.messages[0]?.toolCalls?.[0]?.unsuccessful).toBeUndefined();
       });
     });
 

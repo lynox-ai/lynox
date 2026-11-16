@@ -6510,8 +6510,16 @@ export class LynoxHTTPApi {
       const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
       // Apply render projection: merge tool-result carriers into preceding
       // tool-use blocks, strip safety wrappers for display, flatten into the
-      // UI-ready shape that mirrors the client's ChatMessage.
-      const messages = projectMessages(records);
+      // UI-ready shape that mirrors the client's ChatMessage. The ledger says which calls did not
+      // succeed although their stored result reads as a plain answer (a soft failure). A ledger
+      // that cannot be read marks nothing: the chat still opens, as it did before the marks.
+      let unsuccessfulToolUseIds: ReadonlySet<string> | undefined;
+      try {
+        unsuccessfulToolUseIds = engine.getRunHistory()?.getFailedToolUseIds(params['id']!);
+      } catch {
+        unsuccessfulToolUseIds = undefined;
+      }
+      const messages = projectMessages(records, { unsuccessfulToolUseIds });
       // Resumable re-attach (Tier 2, AC2/AC3): read this thread's live run
       // SYNCHRONOUSLY in the same tick as the transcript above. Two synchronous
       // reads can't be interleaved by an eager-persist checkpoint (which runs on
