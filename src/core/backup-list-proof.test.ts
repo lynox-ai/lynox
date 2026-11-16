@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ import { _resetWorkspaceAccess } from './workspace-access.js';
  * checked under, and checks afresh whatever changed, whatever the file says, unless this vault
  * key wrote the file.
  */
-type ProvenanceSeam = { provenanceOf: (manifest: unknown) => string };
+type ProvenanceSeam = { provenanceOf: (manifest: unknown) => string; readListProofFile: (key: string) => void };
 type ProofFile = { v: number; entries: Record<string, { digest: string; provenance: string }>; mac: string };
 
 const KEY = 'vault-key-list-proof';
@@ -232,6 +233,48 @@ describe('the backup list across a restart', () => {
     await m.createBackup();
     expect(m.listBackups().map(b => b.provenance)).toEqual(['no-key']);
     expect(readdirSync(backupDir)).not.toContain(BACKUP_LIST_PROOF_FILE);
+    // A file a keyed engine left there is not read either.
+    writeProof({});
+    const keyless = manager(null);
+    const read = vi.spyOn(keyless as unknown as ProvenanceSeam, 'readListProofFile');
+    expect(keyless.listBackups().map(b => b.provenance)).toEqual(['no-key']);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('checks afresh both backups whose entries were swapped in a file this key wrote', async () => {
+    const first = manager();
+    await first.createBackup();
+    await tick();
+    await first.createBackup();
+    first.listBackups();
+    const proof = readProof();
+    const [a, b] = Object.keys(proof.entries);
+    writeProof({ [a!]: proof.entries[b!]!, [b!]: proof.entries[a!]! });
+
+    const { m, checks } = fresh();
+    expect(m.listBackups().map(x => x.provenance)).toEqual(['verified', 'verified']);
+    expect(checks).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not wait on a FIFO in the file\'s place', async () => {
+    const first = manager();
+    await first.createBackup();
+    execFileSync('mkfifo', [proofPath()]);
+    const { m, checks } = fresh();
+    expect(m.listBackups()[0]?.provenance).toBe('verified');
+    expect(checks).toHaveBeenCalledTimes(1);
+  }, 5_000);
+
+  it('takes away a temporary file a crashed write left, on its next write', async () => {
+    const first = manager();
+    await first.createBackup();
+    first.listBackups();
+    const leftover = `${proofPath()}.4242.0123456789ab.tmp`;
+    writeFileSync(leftover, '{}');
+    await tick();
+    await first.createBackup();
+    first.listBackups();
+    expect(readdirSync(backupDir).filter(n => n.startsWith(`${BACKUP_LIST_PROOF_FILE}.`))).toEqual([]);
   });
 
   it('is removed by the erasure of a backup dir outside the data dir, with its temporary file', async () => {
@@ -240,8 +283,9 @@ describe('the backup list across a restart', () => {
     first.listBackups();
     writeFileSync(`${proofPath()}.123.abcdef012345.tmp`, '{}');
     writeFileSync(join(backupDir, 'not-ours.txt'), 'keep');
+    writeFileSync(`${proofPath()}.bak`, 'the user\'s own copy');
     const out = removeBackupsOutside(backupDir, data);
     expect(out.failures).toEqual([]);
-    expect(readdirSync(backupDir)).toEqual(['not-ours.txt']);
+    expect(readdirSync(backupDir).sort()).toEqual([`${BACKUP_LIST_PROOF_FILE}.bak`, 'not-ours.txt']);
   });
 });

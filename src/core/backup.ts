@@ -7,14 +7,14 @@
  * All operations are designed to be safe during concurrent lynox operation.
  */
 
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { snapshotSqlite } from './sqlite-snapshot.js';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
 import { canonicalMac, canonicalMacMatches, deriveBackupKey, deriveListProofKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
-import { BACKUP_LIST_PROOF_FILE, BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
+import { BACKUP_LIST_PROOF_FILE, BACKUP_LIST_PROOF_TMP, BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 import { OMITTED_SIDECAR, restoreRefusal } from './sidecar-refusals.js';
@@ -1168,14 +1168,23 @@ export class BackupManager {
   private readListProofFile(vaultKey: string): void {
     this._listProofRead = true;
     const path = join(this.backupDir, BACKUP_LIST_PROOF_FILE);
+    let fd: number | null = null;
     try {
-      const stat = lstatSync(path);
-      if (!stat.isFile() || stat.size > LIST_PROOF_MAX_BYTES) return;
-      const kept = readListProof(JSON.parse(readFileSync(path, 'utf-8')) as unknown, deriveListProofKey(vaultKey));
+      // One descriptor for the check and the read: a symlink is refused at open, a FIFO is not
+      // waited on, and the bound holds on the bytes read, also for a file that grows meanwhile.
+      fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      if (!fstatSync(fd).isFile()) return;
+      const buf = Buffer.alloc(LIST_PROOF_MAX_BYTES + 1);
+      let length = 0;
+      for (let n = 1; n > 0 && length < buf.length; length += n) n = readSync(fd, buf, length, buf.length - length, null);
+      if (length > LIST_PROOF_MAX_BYTES) return;
+      const kept = readListProof(JSON.parse(buf.subarray(0, length).toString('utf-8')) as unknown, deriveListProofKey(vaultKey));
       if (kept === null) return;
       for (const [name, entry] of kept) if (!this._listProvenance.has(name)) this._listProvenance.set(name, entry);
     } catch {
       // No file, or one that cannot be read: every manifest is checked afresh.
+    } finally {
+      if (fd !== null) closeSync(fd);
     }
   }
 
@@ -1191,6 +1200,11 @@ export class BackupManager {
     const text = JSON.stringify({ ...body, mac: canonicalMac(body, deriveListProofKey(vaultKey)) });
     if (Buffer.byteLength(text) > LIST_PROOF_MAX_BYTES) return;
     const path = join(this.backupDir, BACKUP_LIST_PROOF_FILE);
+    // A write cut off by a crash leaves its temporary file; the next write takes it away. One of
+    // another process mid-write goes too, and that process's rename then fails like any write here.
+    try {
+      for (const name of readdirSync(this.backupDir)) if (BACKUP_LIST_PROOF_TMP.test(name)) rmSync(join(this.backupDir, name), { force: true });
+    } catch { /* a leftover stays until the next write */ }
     const tmp = `${path}.${String(process.pid)}.${randomBytes(6).toString('hex')}.tmp`;
     try {
       writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });

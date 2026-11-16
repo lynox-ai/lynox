@@ -331,3 +331,5 @@ export const ERASE_KEPT = eraseBy('keep');
  * provenance shown. The erasure removes it with the backups (`data-dir-erase.ts`).
  */
 export const BACKUP_LIST_PROOF_FILE = '.list-provenance.json';
+/** The temporary file a write of `BACKUP_LIST_PROOF_FILE` leaves when the process dies before its rename: `<file>.<pid>.<12 hex>.tmp`. */
+export const BACKUP_LIST_PROOF_TMP = /^\.list-provenance\.json\.\d+\.[0-9a-f]{12}\.tmp$/;

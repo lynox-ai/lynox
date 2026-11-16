@@ -26,7 +26,7 @@
  */
 import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
-import { BACKUP_LIST_PROOF_FILE, DATA_DIR_INVENTORY, type DataDirEntry } from './data-dir-inventory.js';
+import { BACKUP_LIST_PROOF_FILE, BACKUP_LIST_PROOF_TMP, DATA_DIR_INVENTORY, type DataDirEntry } from './data-dir-inventory.js';
 import { unsafeRoot } from './workspace-root.js';
 import { mountIdAt } from './workspace-fd.js';
 
@@ -613,7 +613,7 @@ export function removeBackupsOutside(backupDir: string, dataDir: string): Remove
   }
   for (const name of names) {
     // The list's kept answers name every backup, and a write cut short leaves its temporary file.
-    const listProof = name === BACKUP_LIST_PROOF_FILE || name.startsWith(`${BACKUP_LIST_PROOF_FILE}.`);
+    const listProof = name === BACKUP_LIST_PROOF_FILE || BACKUP_LIST_PROOF_TMP.test(name);
     if (!BACKUP_NAME.test(name) && !listProof) continue;
     try {
       rmSync(join(dir, name), { recursive: true, force: true });
