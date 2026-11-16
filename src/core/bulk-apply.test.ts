@@ -1058,6 +1058,8 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     const runId = await planFiles(rows);
     approve(runId);
     await runBulkEffect(runId, 'bulk_apply', effectDeps(workspaceWriter()));
+    // A run that is done, not undone, names no undo.
+    expect(ledger.undoneBy(runId)).toBeNull();
 
     const undo = ledger.planUndo(runId);
     if (!undo.ok) throw new Error(undo.reason);
@@ -1077,8 +1079,33 @@ describe('undo — a second approval, its own run (§7 d)', () => {
     }
     expect(ledger.getStatus(runId)!.phase).toBe('undone');
     expect(ledger.getStatus(runId)!.undone).toBe(210);
+    // The owner's page names the undo and when its last target was taken back;
+    // the undo itself is not undone, so it names none.
+    const lastUndone = (engineDb.getDb().prepare('SELECT MAX(undone_at) AS at FROM bulk_targets WHERE run_id = ?').get(runId) as { at: string }).at;
+    expect(ledger.undoneBy(runId)).toEqual({ runId: undo.status.id, at: lastUndone });
+    expect(ledger.undoneBy(undo.status.id)).toBeNull();
     // Nothing left to take back.
     expect(ledger.planUndo(runId)).toEqual({ ok: false, reason: 'not_undoable' });
+  });
+
+  it('names the undo that finished, not a second one planned beside it, and when it took the last target back', async () => {
+    const runId = await planFiles(seedFiles());
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(workspaceWriter()));
+    const first = ledger.planUndo(runId);
+    if (!first.ok) throw new Error(first.reason);
+    // A previewed undo holds nothing, so a second one can be planned beside it; it never runs.
+    const second = ledger.planUndo(runId);
+    if (!second.ok) throw new Error(second.reason);
+    approve(first.status.id);
+    const t0 = new Date().toISOString();
+    expect((await runBulkEffect(first.status.id, 'bulk_undo', effectDeps(workspaceWriter()))).status).toBe('done');
+    const t1 = new Date().toISOString();
+    expect(ledger.getStatus(second.status.id)!.phase).toBe('previewed');
+    const by = ledger.undoneBy(runId)!;
+    expect(by.runId).toBe(first.status.id);
+    // The time lies inside the undo's own run.
+    expect(by.at >= t0 && by.at <= t1).toBe(true);
   });
 
   it('after a halt at 80 % takes back exactly the applied targets', async () => {
@@ -1312,6 +1339,18 @@ describe('conflicts — shown, not overwritten (§7 h)', () => {
     expect([s.conflicts, s.applied, s.failed]).toEqual([1, 209, 0]);
     // The source is not fully undone while one of its targets still stands.
     expect(ledger.getStatus(runId)!.phase).toBe('done');
+    // So its page does not say it was taken back, though a finished undo of it exists.
+    expect(ledger.undoneBy(runId)).toBeNull();
+    // Put back what the run wrote, and a second undo takes the rest. Its page names that one,
+    // though both undos finished and were planned within the same second (`created_at` has seconds).
+    writeFileSync(join(ws, 'pages/p003.md'), 'new 3\n');
+    const rest = ledger.planUndo(runId);
+    if (!rest.ok) throw new Error(rest.reason);
+    engineDb.getDb().prepare('UPDATE bulk_runs SET created_at = (SELECT created_at FROM bulk_runs WHERE id = ?) WHERE id = ?').run(undo.status.id, rest.status.id);
+    approve(rest.status.id);
+    expect((await runBulkEffect(rest.status.id, 'bulk_undo', effectDeps(workspaceWriter()))).status).toBe('done');
+    expect(ledger.getStatus(runId)!.phase).toBe('undone');
+    expect(ledger.undoneBy(runId)?.runId).toBe(rest.status.id);
   });
 
   it('a file changed between approval and apply is a conflict, not overwritten', async () => {
@@ -1356,12 +1395,90 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect([...state.values()]).toEqual(['v0', 'w1', 'v2', 'v3']);
   });
 
+  // A loop that marked a send and wrote, then died before recording it: the target holds the
+  // run's write but is not among the applied ones. The next pass fails before reaching it.
+  function sentUnrecorded(runId: string, seq: number): void {
+    ledger.markSent(runId, seq);
+    const row = engineDb.getDb().prepare('SELECT write_sent, applied_at FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq);
+    expect(row).toEqual({ write_sent: 1, applied_at: null });
+  }
+
+  it('a rollback takes back a target a dead loop sent to and never recorded', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    sentUnrecorded(runId, 3);
+    // k003 holds the dead loop's write; k002 fails and rolls the run back before k003 is read.
+    const { writer, state } = memory({ ...initial, k003: 'w3' }, new Set(['k002']));
+    const order: string[] = [];
+    const reads = new Map<string, number>();
+    const logged: TargetWriter = {
+      read: (k) => { reads.set(k, (reads.get(k) ?? 0) + 1); return writer.read(k); },
+      write: async (k, a) => { if (!a.absent && String(a.value).startsWith('v')) order.push(k); return writer.write(k, a); },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(logged))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
+    // Newest first, the unrecorded target in its place among the recorded ones.
+    expect(order).toEqual(['k003', 'k001', 'k000']);
+    // Each target read once by the pass that reached it and once by the rollback: a recorded one
+    // is not also read as an unrecorded one.
+    expect(Object.fromEntries(reads)).toEqual({ k000: 2, k001: 2, k002: 2, k003: 1 });
+    // Settled, so not one the owner's view marks; counted as neither applied nor undone.
+    expect(ledger.getPreview(runId).find((t) => t.key === 'k003')).toMatchObject({ written: false, undone: true });
+    expect(ledger.getStatus(runId)!.undone).toBe(2);
+    expect(ledger.getStatus(runId)!.applied).toBe(2);
+  });
+
+  it('a target a dead loop sent to whose write never landed needs no taking back', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    sentUnrecorded(runId, 3);
+    const { writer, state } = memory(initial, new Set(['k002']));
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
+  });
+
+  it('a rollback takes back a failed target whose write landed before it failed', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    const landsThenFails: TargetWriter = {
+      read: (k) => writer.read(k),
+      write: async (k, a) => {
+        const r = await writer.write(k, a);
+        // The run's own write only; the rollback's write back succeeds.
+        if (k === 'k002' && !a.absent && a.value === 'w2') throw new Error(`boom after landing ${MARK}`);
+        return r;
+      },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(landsThenFails))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
+  });
+
+  it('a target a dead loop sent to that someone changed since makes the rollback incomplete', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    sentUnrecorded(runId, 3);
+    const { writer, state } = memory({ ...initial, k003: 'someone else' }, new Set(['k002']));
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
+    expect(state.get('k003')).toBe('someone else');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRollbackIncomplete);
+    // The page has the one it left to mark: the incomplete rollback names a target to check.
+    const view = ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone]);
+    expect(view).toEqual([['k000', true, true], ['k001', true, true], ['k002', false, true], ['k003', true, false]]);
+  });
+
   it('a conflict also rolls an atomic run back', async () => {
     const { runId, initial } = recordMemoryRun(4, { atomic: true });
     approve(runId);
     const { writer, state } = memory({ ...initial, k002: 'someone else' });
     expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
     expect([...state.values()]).toEqual(['v0', 'v1', 'someone else', 'v3']);
+    // The conflicting target was never sent to: it is not the run's to take back, and the
+    // rollback of what the run wrote is complete.
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
   });
 
   it('a rollback that finds a target changed says so', async () => {
@@ -1380,9 +1497,10 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRollbackIncomplete);
     expect(state.get('k000')).toBe('touched');
     // The owner's view names the one target the rollback left: written by the run, not taken
-    // back. The ones it took back are undone, and the one that failed was never written.
+    // back. The ones it took back are undone, and the one that failed was never written: its
+    // send was read back as before the run, which settles it.
     const view = ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone]);
-    expect(view).toEqual([['k000', true, false], ['k001', true, true], ['k002', true, true], ['k003', false, false]]);
+    expect(view).toEqual([['k000', true, false], ['k001', true, true], ['k002', true, true], ['k003', false, true]]);
   });
 
   // The page marks what the rollback would still take back, no more: the same set. The row below
@@ -1398,7 +1516,8 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     ).run(runId, runId);
     expect(forced.changes).toBe(1);
     const marked = ledger.getPreview(runId).filter((t) => t.written && !t.undone).map((t) => t.key).sort();
-    expect(marked).toEqual(ledger.listAppliedDesc(runId).map((t) => t.key).sort());
+    const rollbackSet = [...ledger.listAppliedDesc(runId), ...ledger.listSentUnrecordedDesc(runId)];
+    expect(marked).toEqual(rollbackSet.map((t) => t.key).sort());
     expect(marked).toEqual([]);
   });
 
@@ -1407,7 +1526,8 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     approve(runId);
     const { writer } = memory({ ...initial, k000: 'w0' }, new Set(['k002']));
     await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
-    expect(ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone])).toEqual([['k000', false, false], ['k001', true, true], ['k002', false, false]]);
+    // k002 failed: sent, read back as before the run, settled by the rollback.
+    expect(ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone])).toEqual([['k000', false, false], ['k001', true, true], ['k002', false, true]]);
   });
 
   it('an atomic run cannot be approved with a cap below its size', () => {

@@ -258,6 +258,14 @@ describe('what stops a list read — each with a fixed reason, nothing of the pr
     expect(s.requests).toEqual([]);
   });
 
+  it('a list whose stored filters were changed past what a parse takes: stopped on its filter, nothing is sent', async () => {
+    const s = shop(3);
+    await stopsWith(s, BULK_HALT_REASONS.listFilterWithdrawn, (id) => {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(engineDb.enc(JSON.stringify({ ...source, filters: { category: ['12', '13'] } })), id);
+    });
+    expect(s.requests).toEqual([]);
+  });
+
   it('(016) a list whose path is no longer one a run may read, after it is read: no target is read', async () => {
     const s = shop(3);
     const restore = serve(s);

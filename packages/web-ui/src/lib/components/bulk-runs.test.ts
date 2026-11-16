@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+	bulkHiddenSegments, bulkHiddenCountText, bulkRawText,
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
-	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead, bulkOne,
+	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -201,19 +202,62 @@ describe('a Shopify run\'s field names and note', () => {
 	});
 
 	it('names a filtered list\'s group by its product type, vendor or both, with hidden characters shown', () => {
-		const t: BulkI18n = { t: (k) => k, tf: (k, vars) => `${k}${JSON.stringify(vars)}` };
-		expect(bulkListFilterText({ product_type: 'Tee' }, t)).toBe('bulk.list.filter_type{"type":"Tee"}');
-		expect(bulkListFilterText({ vendor: 'Acme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"Acme"}');
-		expect(bulkListFilterText({ product_type: 'Tee', vendor: 'Acme' }, t)).toBe('bulk.list.filter_both{"type":"Tee","vendor":"Acme"}');
-		expect(bulkListFilterText({ product_type: 'T\u200Bee', vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_both{"type":"T⟨U+200B⟩ee","vendor":"Ac⟨U+202E⟩me"}');
-		expect(bulkListFilterText({ product_type: 'T\u200Bee' }, t)).toBe('bulk.list.filter_type{"type":"T⟨U+200B⟩ee"}');
-		expect(bulkListFilterText({ vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"Ac⟨U+202E⟩me"}');
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		expect(bulkListFilterText({ product_type: 'Tee' }, t)).toBe('bulk.list.filter_type{"type":"[Tee]"}');
+		expect(bulkListFilterText({ vendor: 'Acme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"[Acme]"}');
+		expect(bulkListFilterText({ product_type: 'Tee', vendor: 'Acme' }, t)).toBe('bulk.list.filter_both{"type":"[Tee]","vendor":"[Acme]"}');
+		expect(bulkListFilterText({ product_type: 'T\u200Bee', vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_both{"type":"[T⟨U+200B⟩ee]","vendor":"[Ac⟨U+202E⟩me]"}');
+		expect(bulkListFilterText({ product_type: 'T\u200Bee' }, t)).toBe('bulk.list.filter_type{"type":"[T⟨U+200B⟩ee]"}');
+		expect(bulkListFilterText({ vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"[Ac⟨U+202E⟩me]"}');
 		expect(bulkListFilterText(null, t)).toBeNull();
 		expect(bulkListFilterText({}, t)).toBeNull();
+		expect(bulkListFilterText({ status: 'active' }, t)).toBeNull();
+	});
+
+	it('names the statuses a store\'s product list reads, on a line of its own: every one without a status filter, else the ones it names', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		expect(bulkListStatusText(null, t)).toBeNull();
+		expect(bulkListStatusText({}, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ product_type: 'Tee' }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ vendor: 'Acme' }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ status: 'active' }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>]"}');
+		expect(bulkListStatusText({ product_type: 'Tee', status: ['draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
+		// A status no store has stays as it came, its hidden characters shown.
+		expect(bulkListStatusText({ status: 'pub\u200Blished' }, t)).toBe('bulk.list.filter_status{"status":"[pub⟨U+200B⟩lished]"}');
+		expect(bulkListStatusText({ status: 'unlisted' }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.unlisted>]"}');
+	});
+
+	it('reads a status filter naming every status as none: no "only" beside the whole set', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		const every = ['active', 'draft', 'archived', 'unlisted'];
+		expect(bulkListStatusText({ status: every }, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ status: [...every].reverse() }, t)).toBe('<bulk.list.all_status>');
+		expect(bulkListStatusText({ product_type: 'Tee', status: every }, t)).toBe('<bulk.list.any_status>');
+		expect(bulkListStatusText({ vendor: 'Acme', status: every }, t)).toBe('<bulk.list.any_status>');
+		// A stored list the engine reads nothing for (another value, or one twice) is named as it came.
+		expect(bulkListStatusText({ status: [...every, 'published'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>], [<bulk.list.status.unlisted>] <bulk.list.or> [published]"}');
+		expect(bulkListStatusText({ status: ['active', ...every] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>] <bulk.list.or> [<bulk.list.status.unlisted>]"}');
+		// Four entries that are not the four: one unknown, or one twice.
+		expect(bulkListStatusText({ status: ['active', 'draft', 'archived', 'published'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>], [<bulk.list.status.archived>] <bulk.list.or> [published]"}');
+		expect(bulkListStatusText({ status: ['active', 'active', 'draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.active>], [<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
+		// Three of the four still narrow: the line names them.
+		expect(bulkListStatusText({ status: ['active', 'draft', 'archived'] }, t)).toBe('bulk.list.filter_status{"status":"[<bulk.list.status.active>], [<bulk.list.status.draft>] <bulk.list.or> [<bulk.list.status.archived>]"}');
+	});
+
+	it('names every value of a list, each in its own quotes and with its hidden characters shown, the last after "or"', () => {
+		const t: BulkI18n = { t: (k) => `<${k}>`, tf: (k, vars) => (k === 'bulk.list.value' ? `[${vars['value']!}]` : `${k}${JSON.stringify(vars)}`) };
+		expect(bulkListFilterText({ product_type: ['Tee', 'Kaffee'] }, t)).toBe('bulk.list.filter_type{"type":"[Tee] <bulk.list.or> [Kaffee]"}');
+		expect(bulkListFilterText({ product_type: ['A', 'B\u200B', 'C'] }, t)).toBe('bulk.list.filter_type{"type":"[A], [B⟨U+200B⟩] <bulk.list.or> [C]"}');
+		expect(bulkListFilterText({ product_type: ['A', 'B'], vendor: ['X', 'Y', 'Z'] }, t)).toBe('bulk.list.filter_both{"type":"[A] <bulk.list.or> [B]","vendor":"[X], [Y] <bulk.list.or> [Z]"}');
+		const fifty = Array.from({ length: 50 }, (_, i) => `G${String(i)}`);
+		const text = bulkListFilterText({ vendor: fifty }, t)!;
+		for (const v of fifty) expect(text).toContain(`[${v}]`);
 	});
 
 	it('knows a store host exactly, not by a suffix', () => {
 		expect(bulkIsShopifyHost('acme.myshopify.com')).toBe(true);
+		expect(bulkIsShopifyHost(`${'a'.repeat(63)}.myshopify.com`)).toBe(true);
+		expect(bulkIsShopifyHost(`${'a'.repeat(64)}.myshopify.com`)).toBe(false);
 		for (const host of ['myshopify.com', 'a.b.myshopify.com', 'acme.myshopify.com.evil.io', 'admin.shopify.com', null]) expect(bulkIsShopifyHost(host), String(host)).toBe(false);
 	});
 });
@@ -502,7 +546,15 @@ describe('going on from a run that halted', () => {
 			.toBe('You can continue. If the run halts again right away, shop.example.invalid or the AI model is not answering yet; try again later.');
 		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
-			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, verbraucht 0.0034 USD.');
+			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, angerechnet sind 0.0034 USD.');
+		// What counts toward the limit, not what was paid: a judge call without an answer counts at
+		// its worst case (ux U-174).
+		expect([de['bulk.halt.costCap'], en['bulk.halt.costCap'], de['bulk.halt.costCap_mandate'], en['bulk.halt.costCap_mandate']]).toEqual([
+			'Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: {cap} USD, angerechnet sind {spent} USD.',
+			'The run reached the AI cost limit you set at its start: {cap} USD, with {spent} USD counted toward it.',
+			'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap} USD, angerechnet sind {spent} USD.',
+			'The run reached the AI cost limit the owner set at its start: {cap} USD, with {spent} USD counted toward it.',
+		]);
 		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
 			cause: 'Deine Instanz darf shop.example.invalid nicht erreichen.',
 			before: 'Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
@@ -1036,8 +1088,8 @@ describe('what the preview says about a target lynox leaves out', () => {
 		'unknown_column', 'subject_column', 'bad_value', 'bad_key', 'effect_field',
 		// The HTML check's reasons: a Shopify run writes no HTML field until descriptions are
 		// written (descriptionHtml is refused at planning), so these reach WooCommerce only, by code.
-		'element_not_allowed', 'attribute_not_allowed', 'content_changed', 'comment_added', 'new_img', 'new_link_domain',
-		'url_scheme', 'url_control_char', 'not_canonical']);
+		// The link reasons have a sentence on every run, tested below.
+		'element_not_allowed', 'attribute_not_allowed', 'content_changed', 'comment_added', 'new_img', 'not_canonical']);
 	const i18nSource = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 
 	it('has a sentence of its own for every reason a Shopify run can record, in both languages', () => {
@@ -1084,6 +1136,33 @@ describe('what the preview says about a target lynox leaves out', () => {
 		// The way out ux released (U-103): the text below, to paste in the editor's HTML view.
 		expect(i18nSource).toContain('lynox schreibt diesen Text deshalb nicht. Den neuen Text siehst du unten. Kopier ihn und füge ihn {where} in der HTML- oder Text-Ansicht des Editors ein, nicht in der formatierten Ansicht, sonst wandelt der Editor die Zeichen selbst um. Oder bitte lynox im Chat, den Lauf ohne diese Beschreibung neu zu planen.');
 		expect(i18nSource).toContain("lynox does not write this text. You see the new text below. Copy it and paste it {where} in the editor\\'s HTML or text view, not the formatted view, or the editor converts the characters itself. Or ask lynox in the chat to plan the run again without this description.");
+	});
+	it('words a link the check refuses on every run, in one sentence for a run with or without a judge', () => {
+		const table: Record<string, string> = {
+			'bulk.invalid.new_link_domain': 'drop it, or by hand {where}',
+			'bulk.invalid.url_scheme': 'not a link, by hand {where}', 'bulk.invalid.url_control_char': 'odd characters',
+			'bulk.invalid.where_shopify': 'in Shopify', 'bulk.invalid.where_other': 'where you manage them', 'bulk.invalid.other': 'skip ({code})',
+		};
+		const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => (table[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => v[n] ?? '') };
+		const ctx = { field: undefined, host: null, dataStore: false };
+		expect(bulkInvalidText('new_link_domain', false, true, own, ctx)).toBe('drop it, or by hand where you manage them');
+		expect(bulkInvalidText('new_link_domain', true, true, own)).toBe('drop it, or by hand in Shopify');
+		expect(bulkInvalidText('url_scheme', false, true, own, ctx)).toBe('not a link, by hand where you manage them');
+		expect(bulkInvalidText('url_control_char', true, true, own, ctx)).toBe('odd characters');
+		// No sentence points to a field for allowed link domains, which no page mounts yet.
+		expect(i18nSource).not.toContain('new_link_domain_judged');
+	});
+	it('holds the released link sentences word for word, in both languages', () => {
+		const released: [string, string, string][] = [
+			["new_link_domain", "Der neue Text verweist auf eine Domain, auf die dieses Produkt bisher nicht verweist: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf ohne diesen Verweis neu zu planen. Gehört er so hinein, schreib den Text von Hand {where}.", "The new text points to a domain this product did not point to before: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. lynox does not write the text. Ask lynox in the chat to plan the run again without it. If it belongs there as it is, write the text by hand {where}."],
+			["url_scheme", "Der neue Text enthält eine Adresse, die kein gewöhnlicher Web- oder Mail-Link ist, etwa „javascript:“, oder in einem Shortcode einen Wert mit Doppelpunkt wie „a:b“. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf ohne diese Adresse neu zu planen. Gehört der Wert so in den Shortcode, schreib den Text von Hand {where}.", "The new text contains an address that is not a plain web or mail link, such as “javascript:”, or a value with a colon in a shortcode, such as “a:b”. lynox does not write it. Ask lynox in the chat to plan the run again without this address. If the value belongs in the shortcode as it is, write the text by hand {where}."],
+			["url_control_char", "Der neue Text enthält in einer Adresse oder einem Shortcode-Wert unsichtbare Steuerzeichen, das Ersatzzeichen � oder einen Backslash \\, oder eine Mail-Adresse mit Leerzeichen. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf neu zu planen, und sag dazu, dass Adressen und Shortcode-Werte keine solchen Zeichen und Mail-Adressen keine Leerzeichen enthalten sollen.", "The new text contains invisible control characters, the replacement character � or a backslash \\ in an address or a shortcode value, or a mail address with a space. lynox does not write it. Ask lynox in the chat to plan the run again and say that addresses and shortcode values must not contain such characters, and mail addresses no spaces."],
+		];
+		for (const [key, de, en] of released) {
+			// As the source writes it: a backslash and a quote escaped.
+			const esc = (x: string) => x.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+			expect(i18nSource, key).toContain(`'bulk.invalid.${key}': { de: '${esc(de)}', en: '${esc(en)}' }`);
+		}
 	});
 	it('adds the way to support on a managed instance only, and an unknown one reads as managed', () => {
 		expect(bulkInvalidText('read_failed', true, true, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');
@@ -1159,7 +1238,7 @@ describe('the context C the judge only reads (U-140)', () => {
 			"'bulk.invalid.secret_in_context_column': { de: 'Die Spalte {field} dieser Zeile enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt die Zeile deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es in der Tabelle, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Spalten neu zu planen.', en: 'The column {field} of this row contains something that looks like a password or key. lynox does not judge this row and sends nothing of it to the AI model. Remove it in the table, or ask lynox in the chat to plan the run again without {field} among the columns it reads.' }",
 			"'bulk.invalid.secret_in_context_field': { de: 'Das Feld {field} dieses Eintrags enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt den Eintrag deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es dort, wo du diesen Eintrag pflegst, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Feldern neu zu planen.', en: 'The field {field} of this entry contains something that looks like a password or key. lynox does not judge this entry and sends nothing of it to the AI model. Remove it where you keep this entry, or ask lynox in the chat to plan the run again without {field} among the fields it reads.' }",
 			// U-142: the way out holds in both directions, whichever spelling is the typo.
-			"'bulk.invalid.not_in_filter': { de: 'Die Shopify-Suche hat dieses Produkt mitgeliefert, aber sein Produkttyp oder Anbieter ist anders geschrieben als im Filter (etwa ü statt u). lynox ändert es nicht. Gehört es in die Gruppe, schreib den Wert in Shopify bei allen Produkten der Gruppe gleich und bitte lynox dann im Chat, den Lauf mit genau dieser Schreibweise neu zu planen.', en: 'Shopify\\'s search returned this product, but its product type or vendor is spelled differently from the filter (for example ü instead of u). lynox does not change it. If it belongs to the group, spell the value the same way on every product of the group in Shopify, then ask lynox in the chat to plan the run again with exactly that spelling.' }",
+			"'bulk.invalid.not_in_filter': { de: 'Die Shopify-Suche hat dieses Produkt mitgeliefert, aber sein Produkttyp oder Anbieter ist anders geschrieben als im Filter (etwa ü statt u), oder es hat einen anderen Status als im Filter. lynox ändert es nicht. Liegt es am Status, gehört es nicht in diesen Lauf. Gehört es in die Gruppe, schreib den Wert in Shopify bei allen Produkten der Gruppe gleich und bitte lynox dann im Chat, den Lauf mit genau dieser Schreibweise neu zu planen.', en: 'Shopify\\'s search returned this product, but its product type or vendor is spelled differently from the filter (for example ü instead of u), or its status is not the filter\\'s. lynox does not change it. If the status is the reason, it does not belong in this run. If it belongs to the group, spell the value the same way on every product of the group in Shopify, then ask lynox in the chat to plan the run again with exactly that spelling.' }",
 			// U-146: the mark and its line name only &, which is all the engine counts.
 			"'bulk.target.seo_entity': { de: '& neu in Titel oder SEO-Text', en: 'New & in title or SEO text' }",
 			"'bulk.preview.seo_entity': { de: 'Bei {n} Produkten kommt ein & neu in den Titel, den Browser-Tab und Suchergebnisse zeigen, oder in die Beschreibung im Suchergebnis. Manche Shop-Themes zeigen es dort als &amp;. Willst du das vermeiden, bitte lynox im Chat, den Lauf mit „und“ statt & neu zu planen, oder wähl bei diesen Produkten vor dem Freigeben „Nicht schreiben“. Sonst prüf nach dem Schreiben im Browser-Tab einer Produktseite, ob das & richtig erscheint.', en: 'In {n} products, an & is added to the title that the browser tab and search results show, or to the description in search results. Some store themes show it there as &amp;. To avoid this, ask lynox in a chat to plan the run again with \"and\" instead of &, or choose \"Don\\'t write\" on these products before you approve. Otherwise, after the write, check in the browser tab of a product page that the & shows correctly.' }",
@@ -1232,6 +1311,20 @@ describe('the markup list of a target (1010)', () => {
 		expect([en.head, en.lines.map((l) => [l.label, l.template]), en.note]).toEqual([
 			'Markup that changes in Description:', [['added:', '(inside a <template> block)'], ['removed:', null]],
 			'Plain formatting such as paragraphs, bold text or lists is not listed.',
+		]);
+	});
+
+	it('says a field it could not read was not listed, instead of calling the list complete', () => {
+		const de = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: false, unread: true }, false, 'Beschreibung', DE);
+		expect([de.head, de.lines, de.note]).toEqual([
+			'Geändertes Markup in Beschreibung:', [],
+			'Das Markup dieses Felds ist zu gross oder zu tief verschachtelt, um hier aufgelistet zu werden.',
+		]);
+		// On an undo the engine sets addsOutsideAllowlist with it, so the undo still says it may write back a script.
+		const en = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, unread: true }, true, 'Description', EN);
+		expect([en.head, en.restoresNote, en.note]).toEqual([
+			null, 'This markup was in your shop before the run. The undo writes it back, a script included.',
+			'The markup of this field is too large or nested too deeply to be listed here.',
 		]);
 	});
 
@@ -1332,4 +1425,66 @@ describe('the singular of a count of one', () => {
 			expect(bulkSkippedHead(run, shopify, EN)).toEqual({ text: enText, nothing: true });
 		});
 	}
+});
+
+// The value with a mark behind each hidden character the run adds in place.
+describe('bulkHiddenSegments', () => {
+	const i18n = { t: (k: string) => k, tf: (k: string, v: Record<string, string>) => `${k}:${Object.values(v).join('|')}` };
+	const textOf = (s: ReturnType<typeof bulkHiddenSegments>): string => s.map((p) => ('text' in p ? p.text : '')).join('');
+
+	it('marks every occurrence of a code point named, and none of one not named', () => {
+		const s = bulkHiddenSegments('Ke\u200ctab\u200cha und Wa\u00adsser', [0x200c], i18n);
+		expect(s.filter((p) => 'mark' in p)).toHaveLength(2);
+		expect(s.filter((p) => 'mark' in p).every((p) => 'label' in p && p.label === 'bulk.hidden.label:bulk.hidden.kind.zwnj (U+200C)')).toBe(true);
+	});
+
+	it('marks an emoji behind its whole grapheme, joiners and selector included, once', () => {
+		const family = '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}';
+		const s = bulkHiddenSegments(`Team ${family}!`, [0x200d], i18n);
+		expect(s).toEqual([{ text: `Team ${family}` }, { mark: 'bulk.hidden.mark', label: 'bulk.hidden.label:bulk.hidden.kind.zwj (U+200D)' }, { text: '!' }]);
+	});
+
+	it('gives no mark to a character the page shows as its code point already', () => {
+		// A soft hyphen at the end is not between letters: hidden, shown as its code point.
+		expect(bulkHiddenSegments('Wasser\u00ad', [0x00ad], i18n)).toEqual([{ text: 'Wasser⟨U+00AD⟩' }]);
+	});
+
+	it('marks a character reference in an HTML field behind it, and none in a plain one', () => {
+		const s = bulkHiddenSegments('<p>Wasser&shy;filter</p>', [0x00ad], i18n, true);
+		expect(s).toEqual([{ text: '<p>Wasser&shy;' }, { mark: 'bulk.hidden.mark', label: 'bulk.hidden.label:bulk.hidden.kind.soft_hyphen (U+00AD)' }, { text: 'filter</p>' }]);
+		expect(bulkHiddenSegments('Wasser&shy;filter', [0x00ad], i18n)).toEqual([{ text: 'Wasser&shy;filter' }]);
+		// Leading zeros in any number, as a browser reads them.
+		// Built, not written out: eleven zeros after `#` read like a colour to the hex guard.
+		const padded = `&#${'0'.repeat(11)}173;`;
+		expect(bulkHiddenSegments(`<p>Wa${padded}sser</p>`, [0x00ad], i18n, true).filter((p) => 'mark' in p)).toHaveLength(1);
+	});
+
+	it('marks a value that is not text in the JSON the page shows', () => {
+		const v = { note: 'Ke\u200ctab' };
+		const s = bulkHiddenSegments(bulkRawText(v), [0x200c], i18n);
+		expect(s.filter((p) => 'mark' in p)).toHaveLength(1);
+		expect(textOf(s)).toBe(bulkValueText(v));
+	});
+
+	// The mark is the page's: the segments' text is the value as the preview shows it, never more.
+	it('keeps the value\'s text whole beside the marks', () => {
+		for (const v of ['Wasser\u00adfilter', '<p title="a\u00adb">Wa\u00adsser</p>', 'x ❤\ufe0f \u200b', 'Ketab\u200cha\u200e.', '']) {
+			expect(textOf(bulkHiddenSegments(v, [0x00ad, 0x200c, 0x200e, 0xfe0f], i18n)), v).toBe(bulkValueText(v) === '' ? '' : bulkValueText(v));
+		}
+	});
+});
+
+describe('bulkHiddenCountText', () => {
+	const i18n = { t: (k: string) => k, tf: (k: string, v: Record<string, string>) => `${k}:${v['n'] ?? ''}` };
+	it('names several targets, one in the singular, and none at zero or unknown', () => {
+		expect(bulkHiddenCountText(4, false, i18n)).toBe('bulk.hidden.count:4');
+		expect(bulkHiddenCountText(1, false, i18n)).toBe('bulk.hidden.count_one:1');
+		expect(bulkHiddenCountText(0, false, i18n)).toBeNull();
+		expect(bulkHiddenCountText(null, false, i18n)).toBeNull();
+	});
+
+	it('names products on Shopify, as every count beside it does', () => {
+		expect(bulkHiddenCountText(4, true, i18n)).toBe('bulk.hidden.count_products:4');
+		expect(bulkHiddenCountText(1, true, i18n)).toBe('bulk.hidden.count_products_one:1');
+	});
 });

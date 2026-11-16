@@ -665,6 +665,22 @@ describe('applying an external run', () => {
     }
   });
 
+  // An API whose URL does not say it speaks GraphQL runs a `query` field as a document: the
+  // contract reads the body the run sends, not only its method and path.
+  it('sends no record whose body a GraphQL server would run as a mutation; CONTROL: a field that only names one is sent', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [url(0)], 'POST') });
+      expect(await c.write(url(0), 'POST', { query: 'mutation { deleteAll { id } }' })).toEqual({ kind: 'not_granted' });
+      expect(await c.write(url(0), 'POST', { documentId: 'stored-1' })).toEqual({ kind: 'not_granted' });
+      expect(s.requests.filter((r) => r.method === 'POST')).toEqual([]);
+      expect(await c.write(url(0), 'POST', { subscription: 'premium', note: 'Mutation (Variante) {neu}' })).not.toEqual({ kind: 'not_granted' });
+    } finally {
+      restore();
+    }
+  });
+
   it('waits out one 429 on a write, then writes', async () => {
     const s = shop();
     const restore = serve(s);
@@ -3022,8 +3038,10 @@ describe('a send without a clear answer is not sent again', () => {
         expect((await run(undo.status.id, c, 'bulk_undo')).status).toBe('done');
         expect(patches(s).includes('/products/0')).toBe(landed);
         expect(s.items.get('/products/0')!['price']).toBe('12.00');
-        // Taken back either way, so the run no longer counts it unclear.
+        // Taken back either way, so the run no longer counts it unclear, and counts it undone
+        // although it was never recorded as applied: an external undo sent to it.
         expect(ledger.getStatus(runId)!.sentUnknown).toBe(0);
+        expect(ledger.getStatus(runId)!.undone).toBe(5);
       } finally {
         restore();
       }

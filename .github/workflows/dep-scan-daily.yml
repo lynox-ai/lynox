@@ -103,9 +103,13 @@ jobs:
           jq -e 'has("blocking") and has("below") and ((.errors // ["no verdict"]) | length == 0)' /tmp/osv-verdict.json > /dev/null
 
           HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)
-          TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)
+          # An accepted HIGH/CRITICAL (ACCEPTED in the gate, time-limited) does not count as HIGH
+          # here, but it is still a finding: it is in the total and annotated on every run.
+          ACCEPTED=$(jq '(.accepted // []) | length' /tmp/osv-verdict.json)
+          TOTAL=$(jq '(.blocking | length) + (.below | length) + ((.accepted // []) | length)' /tmp/osv-verdict.json)
+          jq -r '(.accepted // [])[] | "::warning::osv watch: \(.package) \(.id) (\(.severity)) accepted until \(.until)"' /tmp/osv-verdict.json
           STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
-          echo "total=${TOTAL} high_or_critical=${HIGH}"
+          echo "total=${TOTAL} high_or_critical=${HIGH} accepted=${ACCEPTED}"
 
           # --- Ensure the dedup label exists (idempotent) ---
           gh label create dep-scan \

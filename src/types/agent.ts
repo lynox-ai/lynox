@@ -329,6 +329,14 @@ export interface IAgent {
    */
   chargeExternalCost(usd: number): void;
   /**
+   * Book the upper bounds of a spawned child's ended calls against this run's cost ceiling
+   * only — never into its cost snapshot or a debit, as an ended call is never billed.
+   *
+   * REQUIRED for the same reason as {@link IAgent.chargeExternalCost}: without it a delegating
+   * run's ceiling would count less than its children's ceilings did, silently.
+   */
+  chargeExternalCapOnlyCost(usd: number): void;
+  /**
    * Dollars left under this run's cost ceiling, or `null` when it has none.
    *
    * ⚠ `null` is NO CEILING — self-host or BYOK without a configured budget — and not

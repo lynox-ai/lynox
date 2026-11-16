@@ -161,7 +161,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
   const listed = (p: ApiProfile): StampEntry[] => [{ profile: p.id, grant: p.oauth_grant!.grant_id!, binding: bindingOf(p) }];
   const lead = 'setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login';
   // Spelled out: the model reads this sentence, and the probe that tests it reads this wording.
-  const FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.';
+  const FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“). Say so in your reply, and do not ask for permission.';
   // The same end without who decides: for these the owner's stamp is not the way.
   const FINAL_RUN = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Say so in your reply, and do not ask for permission.';
   // The member's own connection: a token exchange is not promised the same answer, another check stops it.

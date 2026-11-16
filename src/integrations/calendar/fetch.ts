@@ -10,6 +10,7 @@ import { OutwardReadUnrecorded } from '../../core/audit-log.js';
 import { currentCallSignal, joinCallSignal } from '../../core/call-connection.js';
 import { fetchWithValidatedRedirects, readBodyLimited } from '../../tools/builtin/http.js';
 import type { ToolContext } from '../../core/tool-context.js';
+import { readAddressWrites } from '../../core/outbound-write.js';
 
 /**
  * Wire-byte ceiling for a calendar feed.
@@ -55,6 +56,11 @@ export async function fetchIcsFeed(
   // when the truth is that the run was stopped and the read can simply be repeated.
   const call = currentCallSignal();
   const stopped = (): Error => new DOMException('the calendar read was stopped', 'AbortError');
+  // A feed is read, never written: an address a server may run as a write (`?_method=DELETE`, a
+  // GraphQL mutation) is not requested. The message names no part of it, the address is a credential.
+  if (readAddressWrites(url)) {
+    throw new Error('the calendar feed address carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write, so it was not requested. Use the feed address that the calendar shows for subscribing.');
+  }
   let response: Response;
   try {
     if (onRead) onRead(new URL(url).hostname);
