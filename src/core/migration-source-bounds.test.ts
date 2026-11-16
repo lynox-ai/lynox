@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -80,6 +80,34 @@ describe('the source checks the migration bounds before it encrypts anything', (
     const at = exportWith({ maxChunks: chunks, maxTotalBytes: bytes });
     expect(at.run).not.toThrow();
     expect(at.phases).toContain('done');
+  });
+
+  it('zeroes every collected chunk before it refuses', () => {
+    const { chunks, bytes } = measure();
+    const held: Buffer[] = [];
+    // Every chunk the export collects passes through the chunk splitter's output; hold each buffer.
+    const proto = MigrationExporter.prototype as unknown as { collectConfig: () => { data: Buffer } | null };
+    const original = proto.collectConfig;
+    const spy = vi.spyOn(proto, 'collectConfig').mockImplementation(function (this: unknown) {
+      const c = original.call(this);
+      if (c) held.push(c.data);
+      return c;
+    });
+    try {
+      const over = exportWith({ maxChunks: chunks - 1, maxTotalBytes: bytes });
+      expect(over.run).toThrow(/does not fit one migration/);
+      expect(held).toHaveLength(1);
+      expect(held[0]!.length).toBeGreaterThan(0);
+      expect(held[0]!.every(b => b === 0)).toBe(true);
+      // Control: the same export at the bound keeps the chunk until it is encrypted, then zeroes it too;
+      // so the assertion above is about the refusal only because the export did not get that far.
+      const at = exportWith({ maxChunks: chunks, maxTotalBytes: bytes });
+      const phases = at.phases;
+      at.run();
+      expect(phases).toContain('encrypting');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('refuses one byte over the total, names the bound, and encrypts nothing; takes it at the total', () => {

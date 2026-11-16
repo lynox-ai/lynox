@@ -368,9 +368,13 @@ export class MigrationExporter {
     }
   }
 
-  /** Insert chunks at the positions their collectors had, last position first. */
+  /**
+   * Insert chunks at the positions their collectors had. `placed` comes in collection order, so its
+   * positions never decrease; inserting from the last entry back keeps that order, also for
+   * several entries at one position (the databases all sit after the secrets).
+   */
   private insertAt(chunks: PlaintextChunk[], placed: Array<{ at: number; chunks: PlaintextChunk[] }>): void {
-    for (const p of [...placed].sort((a, b) => b.at - a.at)) chunks.splice(p.at, 0, ...p.chunks);
+    for (let i = placed.length - 1; i >= 0; i--) chunks.splice(placed[i]!.at, 0, ...placed[i]!.chunks);
   }
 
   /** Every database and the ledgers raw, as today. */

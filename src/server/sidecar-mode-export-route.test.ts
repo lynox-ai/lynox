@@ -14,7 +14,17 @@ import { _resetWorkspaceAccess } from '../core/workspace-access.js';
  * makes. The route reaches the network only through `network-guard.js` (imported lazily there),
  * so stubbing that module is the seam: the route, the exporter and the transfer run for real.
  */
-const target: { importer: MigrationImporter | null; manifest: MigrationManifest | null } = { importer: null, manifest: null };
+const target: {
+  importer: MigrationImporter | null; manifest: MigrationManifest | null;
+  /** The health body the target answers (absent: 404). */
+  health?: unknown; healthCalls: number;
+  /** Answer the handshake with `acceptsPlainStores: true` whatever the importer says. */
+  claimsPlain?: boolean;
+  /** Answer the handshake completion with 500. */
+  failCompletion?: boolean;
+} = { importer: null, manifest: null, healthCalls: 0 };
+/** Every transfer key the route derives, to see whether it is zeroized. */
+const derivedKeys: Buffer[] = [];
 const TOKEN = 'e'.repeat(64);
 const IS_ROOT = process.getuid?.() === 0;
 
@@ -30,8 +40,12 @@ vi.mock('../core/network-guard.js', async (original) => {
       const path = new URL(url).pathname;
       const body = typeof init.body === 'string' ? JSON.parse(init.body) as unknown : undefined;
       try {
-        if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET') return json(imp.startHandshake(TOKEN));
-        if (path === '/api/migration/handshake') { imp.completeHandshake((body as { clientPubKey: string }).clientPubKey); return json({ ready: true }); }
+        if (path === '/api/health') { target.healthCalls++; return target.health === undefined ? json({ error: 'none' }, 404) : json(target.health); }
+        if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET') return json({ ...imp.startHandshake(TOKEN), ...(target.claimsPlain ? { acceptsPlainStores: true } : {}) });
+        if (path === '/api/migration/handshake') {
+          if (target.failCompletion) return json({ error: 'completion refused' }, 500);
+          imp.completeHandshake((body as { clientPubKey: string }).clientPubKey); return json({ ready: true });
+        }
         if (path === '/api/migration/manifest') { target.manifest = body as MigrationManifest; imp.setManifest(target.manifest); return json({ accepted: true }); }
         if (path === '/api/migration/chunk') return json(imp.receiveChunk(body as Parameters<MigrationImporter['receiveChunk']>[0]));
         // The target's restore is not under test: answered without writing.
@@ -42,6 +56,11 @@ vi.mock('../core/network-guard.js', async (original) => {
       return json({ error: `unexpected ${path}` }, 404);
     }),
   };
+});
+
+vi.mock('../core/migration-crypto.js', async (original) => {
+  const real = await original<typeof import('../core/migration-crypto.js')>();
+  return { ...real, deriveTransferKey: vi.fn((...args: Parameters<typeof real.deriveTransferKey>) => { const k = real.deriveTransferKey(...args); derivedKeys.push(k); return k; }) };
 });
 
 const { LynoxHTTPApi } = await import('./http-api.js');
@@ -95,6 +114,11 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.importer?.cleanup();
     target.importer = null;
     target.manifest = null;
+    target.health = undefined;
+    target.healthCalls = 0;
+    target.claimsPlain = false;
+    target.failCompletion = false;
+    derivedKeys.length = 0;
   });
 
   afterAll(async () => {
@@ -113,8 +137,8 @@ describe('the migration export route in sidecar mode (real engine)', () => {
   });
 
   /** Runs the export and returns the SSE events by name. */
-  async function exportTo(): Promise<Map<string, unknown>> {
-    target.importer = new MigrationImporter({ lynoxDir: dst, vaultKey: 'a-dst-vault-key-for-the-route-test' });
+  async function exportTo(opts: { acceptPlainStores?: boolean } = {}): Promise<Map<string, unknown>> {
+    target.importer = new MigrationImporter({ lynoxDir: dst, vaultKey: 'a-dst-vault-key-for-the-route-test', acceptPlainStores: opts.acceptPlainStores === true });
     const res = await fetch(`${baseUrl}/api/migration/export`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' },
@@ -145,6 +169,56 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     const events = await exportTo();
     expect(events.get('done')).toBeUndefined();
     expect((events.get('error') as { message: string }).message).toMatch(/EACCES|permission/i);
+  });
+
+  const HEALTH = { migration: { import_limit_mb: 100_000, baseline_mb: 1, k: 1.5, rest_factor: 1 } };
+  const typeOf = (store: string): string | undefined => target.manifest?.chunks.find(c => c.name === store || c.name === `${store}:part0`)?.type;
+
+  it('sends the stores as plaintext to a destination that takes them and publishes its numbers', async () => {
+    setShellIsolationForTest(sidecar);
+    target.health = HEALTH;
+    const events = await exportTo({ acceptPlainStores: true });
+    expect(events.get('error')).toBeUndefined();
+    expect(typeOf('engine.db')).toBe('sqlite_db_plain');
+    expect((events.get('done') as { plain: { stores: Array<{ store: string; path: string }> } }).plain.stores.find(s => s.store === 'engine.db')?.path).toBe('plain');
+  });
+
+  it('sends the stores raw, as today, when the destination does not say it takes plaintext, without asking its health', async () => {
+    setShellIsolationForTest(sidecar);
+    target.health = HEALTH;
+    const events = await exportTo();
+    expect(events.get('error')).toBeUndefined();
+    expect(typeOf('engine.db')).toBe('sqlite_db');
+    expect(target.healthCalls).toBe(0);
+    expect((events.get('done') as { plain?: unknown }).plain).toBeUndefined();
+  });
+
+  it('sends the stores raw when the destination takes plaintext but its health body has no usable numbers', async () => {
+    setShellIsolationForTest(sidecar);
+    target.health = { migration: { ...HEALTH.migration, k: 0 } };
+    const events = await exportTo({ acceptPlainStores: true });
+    expect(events.get('error')).toBeUndefined();
+    expect(target.healthCalls).toBe(1);
+    expect(typeOf('engine.db')).toBe('sqlite_db');
+  });
+
+  it('shows a destination\'s refusal as its own text', async () => {
+    setShellIsolationForTest(sidecar);
+    // The handshake says yes, the importer does not take plaintext: it refuses the manifest.
+    target.claimsPlain = true;
+    target.health = HEALTH;
+    const events = await exportTo();
+    expect((events.get('error') as { message: string }).message)
+      .toBe('The manifest carries a store as plaintext, which the target instance does not take yet; the source has to send it raw.');
+  });
+
+  it('zeroizes the transfer key when the handshake completion fails', async () => {
+    setShellIsolationForTest(sidecar);
+    target.failCompletion = true;
+    const events = await exportTo();
+    expect((events.get('error') as { message: string }).message).toMatch(/Handshake completion failed/);
+    expect(derivedKeys).toHaveLength(1);
+    expect(derivedKeys[0]!.every(b => b === 0)).toBe(true);
   });
 
   it('zeroizes the transfer key when the export refuses', async () => {

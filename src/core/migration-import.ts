@@ -506,8 +506,8 @@ export class MigrationImporter {
         // ranking them is the difference between a diagnosis and a guess.
         throw new Error(
           `Unknown chunk type ${JSON.stringify(String(chunk.type).slice(0, 64))} in the `
-          + `manifest. Most likely this export was written by a newer lynox than this `
-          + `instance — upgrade this instance before restoring. Otherwise the manifest is `
+          + `manifest. Most likely this export was written by a newer lynox than the target `
+          + `instance — update the target instance before migrating. Otherwise the manifest is `
           + `corrupt. Either way, restoring now would silently leave out everything this `
           + `build cannot place.`,
         );
@@ -1331,6 +1331,9 @@ export class MigrationImporter {
     for (const [store, parts] of byStore) {
       if (!isPlainStore(store)) throw new Error(`Disallowed database name: "${store}"`);
       const first = parts.find(c => !c.meta.name.includes(':part') || c.meta.name.endsWith(':part0'))!;
+      // The same list `setManifest` checked before any chunk arrived (the meta is the manifest's),
+      // so this cannot refuse what it let through; the refusal's "None of the data was
+      // transferred" holds only there, before the chunks.
       const columns = checkPlainColumns(store, first.meta.columns);
       const payload = reassemble(parts);
       try {
