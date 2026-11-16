@@ -26,6 +26,7 @@
  */
 import type Database from 'better-sqlite3';
 import type { RequestPrincipal } from './request-principal.js';
+import { processErrorText } from './error-egress.js';
 
 export class MandateEnds {
   private readonly upsert: Database.Statement;
@@ -99,7 +100,7 @@ export class MandateEnds {
       try {
         listener(mandateId);
       } catch (err: unknown) {
-        process.stderr.write(`[lynox] a revoke listener failed for a mandate: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox] a revoke listener failed for a mandate: ${processErrorText(err)}\n`);
       }
     }
     return true;

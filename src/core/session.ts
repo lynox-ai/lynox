@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { runTaskTitle } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -219,6 +220,42 @@ export interface RunOptions {
   runGroupId?: string | undefined;
 }
 
+/**
+ * Whether a thread may hold turns of someone other than the owner, for the owner's taint (PRD
+ * customer-granted-operator-access B6): its row names a creator other than the owner. A mandate
+ * reaches only threads it created (`ownedBy`), so a thread a mandate's turns are in carries its
+ * tag — the live session and a resume read the same row. Fail-closed where the row cannot be
+ * read: a store that throws, or a tag this does not know, count as foreign. Only `null` (a row
+ * from before tags) and the owner's tag are the owner's.
+ *
+ * No store, and no row, are NOT foreign. A route admits a mandate only to a row that records it
+ * (`ownedBy`: a missing row belongs to no mandate), so a thread without a row, or an engine without
+ * a store (its history failed to open, `engine.ts`), can hold a helper's turns only from a run in
+ * this live session, which `Session._foreignRunHere` covers. Counting them foreign would send the
+ * owner's writes to review wherever the row write failed, and protect nothing more.
+ *
+ * Row and history go together, so "no row" also means "no helper's turns on disk": a restore brings
+ * back `threads` and `thread_messages` as one file (both in `history.db`, run-history.ts:718, :735);
+ * `ThreadStore.deleteThread` (thread-store.ts:323) removes the row and its messages with it
+ * (`ON DELETE CASCADE`, `foreign_keys = ON` at run-history.ts:1804); and a resume loads messages
+ * only for a thread that has a row (session-store.ts:126). A session opened before a delete keeps
+ * the history in memory: it read the row as it opened (the constructor) and keeps the mark.
+ */
+export function threadHoldsForeignTurns(
+  store: Pick<import('./thread-store.js').ThreadStore, 'getThread'> | null,
+  threadId: string,
+): boolean {
+  if (store === null) return false;
+  let row: { readonly created_by: string | null } | undefined;
+  try {
+    row = store.getThread(threadId);
+  } catch {
+    return true;
+  }
+  if (row === undefined) return false;
+  return !(row.created_by === null || row.created_by === principalTag(OWNER_PRINCIPAL));
+}
+
 export interface SessionOptions {
   sessionId?: string | undefined;
   model?: ModelTier | undefined;
@@ -384,6 +421,9 @@ export class Session {
    * library's default; the engine's own places name theirs (principal-sites.test.ts).
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
+  /** A run of someone other than the owner happened in this session, or its thread's row named
+   *  another creator when it opened (PRD B6, see `_run`). Never reset. */
+  private _foreignRunHere = false;
 
   /** Who ran here last — the run in flight, or the one before it (PRD
    *  customer-granted-operator-access §3.13 E7). Stopping, reviewing or compacting a session
@@ -681,6 +721,10 @@ export class Session {
           ...(opts?.principal ? { created_by: principalTag(opts.principal) } : {}),
         });
       } catch { /* best-effort */ }
+      // Who the thread is by, read once as the session opens with its history (PRD B6): a row
+      // deleted later (`ThreadStore.deleteThread`, thread-store.ts:323) takes its tag along while a
+      // session opened before keeps the helper's turns in memory, and `_run` would find no row.
+      if (threadHoldsForeignTurns(threadStore, this.sessionId)) this._foreignRunHere = true;
     }
 
     if (opts?.messages) {
@@ -815,6 +859,9 @@ export class Session {
     // Before anything that could rebuild the agent below, so every rebuild of this run is
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
     if (runOptions?.principal !== undefined) this._principal = runOptions.principal;
+    // Sticky for this session: someone other than the owner has run here (B6 below). Not left to
+    // the thread row alone, which depends on the route refusing a mandate on another's thread.
+    if (this._principal.kind !== 'owner') this._foreignRunHere = true;
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
     // Before anything that could rebuild the agent below, like the principal: every rebuild
     // of this run marks its agent by what this run's client said, never by an earlier run.
@@ -1268,6 +1315,16 @@ export class Session {
       }
     }
 
+    // PRD customer-granted-operator-access B6: the owner's turn in a thread a mandate's turns are
+    // in is tainted before the model hears it. The helper's messages are user turns there with no
+    // mark, so the history scan finds nothing; without this, a helper's text the model follows
+    // would be written as the owner's trusted memory. Here, after every rebuild of this run's
+    // prologue: later rebuilds and compactions carry the latch on (`restoreConversationTaint`).
+    // Only the owner's turn: a mandate's own turns are bounded by its tool lock, not by this.
+    if (this._principal.kind === 'owner' && (this._foreignRunHere || threadHoldsForeignTurns(threadStore, this.sessionId))) {
+      this.agent.restoreConversationTaint();
+    }
+
     // ⛔ CAPTURED BEFORE THE SEND, and the stop is read off THIS object rather than
     // off `this.agent` afterwards.
     //
@@ -1478,7 +1535,7 @@ export class Session {
             // never blocks the run, skipped in private mode, and never clobbers a
             // manual rename (the method re-checks the title before writing).
             if (llmUpgrade && taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
-              void this._generateLLMTitle(stripLoadedContext(taskText), title);
+              void this._generateLLMTitle(llmTitleSource(taskText), title);
             }
           }
           // Stamp this run's token/cost totals onto its final assistant
@@ -2418,12 +2475,11 @@ export class Session {
       // Gate this pool-key call through the managed credit lifecycle: on a
       // credit-exhausted (or fail-closed) managed tenant, skip the LLM title and
       // keep the heuristic placeholder — the title is best-effort enrichment, not
-      // worth spending against an empty balance. No-op on self-host/BYOK.
+      // worth spending against an empty balance. The gate also checks the
+      // instance's spending caps, which this run already passed at its start.
       const titleGate = await fireBeforeRunGate(this.engine, 'fast');
       if (titleGate.blockedReason !== null) return;
-      const prompt =
-        'Write a concise 3-6 word title in Title Case for a conversation that begins ' +
-        'with the message below. No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
+      const prompt = LLM_TITLE_PROMPT;
       const stream = titleClient.beta.messages.stream({
         model: fastSnap.modelId,
         max_tokens: 64,
@@ -3033,6 +3089,9 @@ export function firstThreadTitle(
  *  unit-testing the framing-strip (a context-chat's `[Loaded …]` preamble must
  *  not become the nav title). */
 export function generateThreadTitle(taskText: string): string {
+  // A scheduled run's opening turn is named by its task, never by the engine's lead above it.
+  const runTask = runTaskTitle(taskText);
+  if (runTask !== null) taskText = runTask;
   // Strip engine framing that isn't the user's words: the loaded-context preamble
   // (context-opened chats) and onboarding prompts. stripLoadedContext no-ops when
   // there is no preamble.
@@ -3056,6 +3115,26 @@ export function generateThreadTitle(taskText: string): string {
 
   return title || 'New Chat';
 }
+
+/**
+ * The text the fast model titles. A scheduled run's opening turn starts with the engine's English
+ * lead (`run-task-turn.ts`); the title follows the language of the message, so the model gets the
+ * task's own words, as the heuristic title does. Other chats lose only the loaded-context preamble.
+ */
+export function llmTitleSource(taskText: string): string {
+  return runTaskTitle(taskText) ?? stripLoadedContext(taskText);
+}
+
+/**
+ * What the fast model is asked for a thread's title. The title is in the language of the first
+ * message: a German conversation listed under an English title reads as someone else's. Title
+ * Case is an English rule, so it is asked only for an English title. Exported for the test that
+ * pins it.
+ */
+export const LLM_TITLE_PROMPT =
+  'Write a concise 3-6 word title for a conversation that begins with the message below. ' +
+  'Write it in the language of that message; use Title Case only for an English title. ' +
+  'No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
 
 /**
  * Clean a raw LLM title response into a usable thread title: take the first
