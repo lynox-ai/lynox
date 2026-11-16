@@ -95,6 +95,7 @@
 	import { looksLikeSecret } from '../utils/secret-shapes.js';
 	import { maskText } from '../utils/mask-text.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
+	import { scheduledTaskTurn } from '../utils/scheduled-task-turn.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
@@ -529,7 +530,7 @@
 	type GroupedBlock =
 		| { type: 'text'; text: string }
 		| { type: 'thinking'; text: string }
-		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status'] }
+		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status']; unsuccessful: boolean }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'spawn'; spawnId: string };
 
@@ -661,8 +662,10 @@
 				if (last && last.type === 'tools' && last.action === label.action) {
 					if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
 					last.status = worstStatus(last.status, tc.status);
+					// One member that did not succeed makes the row say so, as one error makes it ✗.
+					if (tc.unsuccessful === true) last.unsuccessful = true;
 				} else {
-					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status });
+					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status, unsuccessful: tc.unsuccessful === true });
 				}
 			}
 		}
@@ -2816,6 +2819,21 @@
 							{/if}
 						</div>
 					</div>
+				{:else if msg.role === 'user' && scheduledTaskTurn(stripLoadedContext(stripNowMarker(msg.content)))}
+					<!-- A scheduled run's opening turn: the engine wrote it, not the owner, so it is
+					     shown as the task it carries out, not as the owner's bubble (U-160). -->
+					{@const task = scheduledTaskTurn(stripLoadedContext(stripNowMarker(msg.content)))!}
+					<div class="rounded-[var(--radius-md)] border border-border bg-bg-muted px-4 py-2.5 text-sm" data-scheduled-task>
+						<div class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('chat.scheduled_task')}</div>
+						<div class="mt-1 font-medium text-text whitespace-pre-wrap break-words">{task.title}</div>
+						{#if task.description}
+							<div class="mt-1 text-text-muted whitespace-pre-wrap break-words">{task.description}</div>
+						{/if}
+						{#if task.question !== undefined}
+							<div class="mt-2 text-text-muted whitespace-pre-wrap break-words" data-scheduled-task-question><span class="text-text-subtle">{t('chat.scheduled_task_question')}</span> {task.question}</div>
+							<div class="mt-1 text-text-muted whitespace-pre-wrap break-words" data-scheduled-task-answer><span class="text-text-subtle">{t('chat.scheduled_task_answer')}</span> {task.answer}</div>
+						{/if}
+					</div>
 				{:else if msg.role === 'user'}
 					{@const userText = stripLoadedContext(stripNowMarker(msg.content))}
 					<div class="flex justify-end items-start gap-1.5">
@@ -2915,8 +2933,14 @@
 										</svg>
 									{/if}
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
-									{#if !isRunning}
-										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}">{isError ? '✗' : '✓'}</span>
+									{#if isError}
+										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] text-danger">✗</span><span class="sr-only">{t('chat.tool.status_error')}</span>
+									{:else if !isRunning && gBlock.unsuccessful}
+										<!-- A call that returned without doing what was asked: muted, in the row's own colour,
+										     not danger. The model reads the failure and usually deals with it in its answer. -->
+										<span class="ml-auto md:ml-1 text-[11px] md:text-[10px]">{t('chat.tool.unsuccessful')}</span>
+									{:else if !isRunning}
+										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] text-success">✓</span><span class="sr-only">{t('chat.tool.status_done')}</span>
 									{/if}
 								</div>
 							{:else if gBlock.type === 'spawn'}

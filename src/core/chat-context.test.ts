@@ -722,6 +722,12 @@ describe('resolveChatContext (kind: mail) — the follow-up a reply answers', ()
     expect(resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ autoReply: undefined }), own], other))!).toContain('mail_reply with uid: 41,');
   });
 
+  it('takes an unchecked message when it is the one that raised the item for a flagged message', () => {
+    const audit = [{ action: 'raised_on_sensitive_follow_up', payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: '<m-2@example.com>' }) }];
+    expect(resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ autoReply: undefined }), own], audit))!).toContain('mail_reply with uid: 42,');
+    expect(resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ autoReply: true }), own], audit))!).toContain('mail_reply with uid: 41,');
+  });
+
   it('says the inbox stored no text of a follow-up it kept none of, instead of "no message"', () => {
     const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ snippet: undefined, subject: 'Re: Project update' }), own]))!;
     expect(out).toContain('a follow-up to the mail the inbox took in — the inbox stored no text of it]');

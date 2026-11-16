@@ -20,6 +20,9 @@ export const RESERVED_TOOL_NAMES: Readonly<Record<string, string>> = Object.free
   tool_search_tool_regex: 'the provider\'s tool search, which the agent adds for deferred tools',
   google_gmail: 'an outbound tool in the output guard',
   ask_human: 'a question tool of a workflow step',
+  // A plugin tool under this name would make every workflow step refuse to start
+  // (`refuseFailStepCollision`); reserved, it is refused at the plugin boundary instead.
+  fail_step: 'a workflow step\'s own tool for reporting that it failed (runtime-adapter.ts)',
 });
 
 /**

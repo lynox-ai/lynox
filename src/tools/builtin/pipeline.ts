@@ -9,6 +9,7 @@ import { WORKFLOW_ENDED_MID_RUN, WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHEC
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
+import { reportedErrorStep, reportedFailureForCaller } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
@@ -28,11 +29,12 @@ import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
-import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes, noteMemberConnection, runCollectingMemberNotes } from '../../core/member-connection-notes.js';
+import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes, relayMemberNotes, runCollectingMemberNotes } from '../../core/member-connection-notes.js';
 import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '../../core/audit-log.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import type { WorkflowAuthorship } from '../../core/workflow-store.js';
 import { currentPlanRun, runAsPlanOf, runAsWorkflowRun } from '../../core/plan-run-context.js';
+import { currentWorkerRunStart } from '../../core/worker-run-start.js';
 import { isEngineRowId } from '../../core/instance-trail.js';
 
 const MAX_PLANS = 10;
@@ -317,7 +319,8 @@ function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null,
   };
 }
 
-function formatResult(state: RunState, name: string, resultLimit?: number): string {
+/** @internal exported for tests: the run's result as the calling model reads it. */
+export function formatResult(state: RunState, name: string, resultLimit?: number): string {
   // The name and the step ids are names, which take none of the places real text puts a character
   // that renders as nothing; each goes in as a placeholder and is escaped on its own below.
   const nonce = randomUUID();
@@ -337,12 +340,26 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
       costUsd: output.costUsd,
       skipped: output.skipped,
       skipReason: output.skipReason,
-      error: output.error,
+      // A reported failure's reason is the step agent's own text: the calling model reads lynox's
+      // fixed sentence instead, as one level up in a nested run (`spawnPipeline`), and where the
+      // reason is: diagnose_workflow_run shows it, quoted (U-192).
+      // The step id inside it is a name too: escaped like the `stepId` field (`asName`).
+      error: output.reportedFailure === true ? reportedFailureForCaller(asName(output.stepId)) : output.error,
     });
     totalDuration += output.durationMs;
     totalCost += output.costUsd;
   }
 
+  // A step's reported reason is model text and may copy a sentinel word for word: it never
+  // becomes lynox's own account of why the run ended.
+  const reportedBy = reportedErrorStep(state);
+  const reportedEnd = reportedBy !== undefined;
+  // Under `on_failure: stop` the runner ends on the reporting step without an entry in `outputs`,
+  // so the steps above never name it: the run says it once, in the same fixed sentence, and the
+  // run's error (the reason) stays out (U-192 1b). A step already named above is not named twice.
+  const runLevelNotice = reportedBy !== undefined
+    && ![...state.outputs.values()].some(o => o.stepId === reportedBy && o.reportedFailure === true)
+    ? reportedFailureForCaller(asName(reportedBy)) : undefined;
   const result: PipelineResult = {
     pipelineId: state.runId,
     name: asName(name),
@@ -353,8 +370,10 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
     // A fixed sentence, never stored text: the model is told why the run stopped, so it does not
     // retry it or report a step's failure (1100). The stored error is the short one; only here
     // does the model read what to tell the user (1184).
-    ...(state.error === WORKFLOW_ENDED_MID_RUN_ERROR ? { endedBecause: WORKFLOW_ENDED_MID_RUN }
+    ...(reportedEnd ? {}
+      : state.error === WORKFLOW_ENDED_MID_RUN_ERROR ? { endedBecause: WORKFLOW_ENDED_MID_RUN }
       : state.error === WORKFLOW_END_CHECK_FAILED_ERROR ? { endedBecause: WORKFLOW_END_CHECK_FAILED } : {}),
+    ...(runLevelNotice !== undefined ? { reportedFailure: runLevelNotice } : {}),
   };
 
   // The name and the step ids are stored text, saved perhaps before the save refused characters
@@ -362,8 +381,12 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
   // result the places real text puts one stay, so an emoji or a Persian word reads as it is; in a
   // name none does, so a ZWNJ an old step id carries between letters shows as well.
   let json = escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
+  // A placeholder is a whole JSON string (a field) or sits inside one (a step id in a sentence);
+  // inside, the escaped name goes in without its quotes.
   names.forEach((value, i) => {
-    json = json.replace(JSON.stringify(`__lynox_name_${i}_${nonce}__`), () => escapeHiddenInJson(JSON.stringify(value), { inPlace: false }));
+    const token = `__lynox_name_${i}_${nonce}__`;
+    const escaped = escapeHiddenInJson(JSON.stringify(value), { inPlace: false });
+    json = json.replace(JSON.stringify(token), () => escaped).replace(token, () => escaped.slice(1, -1));
   });
   return json;
 }
@@ -608,7 +631,11 @@ export interface RunSavedWorkflowResult {
    *  run was triggered — not just a terminal status. Empty when all steps
    *  succeeded; present for every step that recorded an error (incl. on_failure
    *  = 'continue'/'notify' runs that finished 'completed' with errored steps). */
-  stepErrors?: Array<{ stepId: string; error?: string | undefined; costUsd: number }> | undefined;
+  stepErrors?: Array<{ stepId: string; error?: string | undefined; costUsd: number; reported?: true | undefined }> | undefined;
+  /** The step whose reported failure (`fail_step`) is `error`: `error` is then the model's text,
+   *  and a sink that may not carry it (the escalation thread) names the step instead. A
+   *  `stepErrors` entry with `reported` is the same for that entry. */
+  errorReportedBy?: string | undefined;
   /** Why the run went ahead without the workflow's write grant, when it has one. */
   grantNote?: string | undefined;
   /** Writes a top-level step was refused, or that may have landed before a refused
@@ -987,9 +1014,11 @@ export async function runSavedWorkflow(
     // a failed step is reflected in `status`/`error`/`stepErrors`, not `ok`.
     const stepErrors = [...state.outputs.values()]
       .filter(o => o.error !== undefined && o.error !== '')
-      .map(o => ({ stepId: o.stepId, error: o.error, costUsd: o.costUsd }));
+      .map(o => ({ stepId: o.stepId, error: o.error, costUsd: o.costUsd, ...(o.reportedFailure === true ? { reported: true as const } : {}) }));
+    const errorReportedBy = reportedErrorStep(state);
     return {
       ok: true, runId: state.runId, status: state.status, costUsd, stepErrors, error: state.error,
+      ...(errorReportedBy !== undefined ? { errorReportedBy } : {}),
       // The decision's note, or the runner's when it had to drop the contract (an unrecorded run).
       ...(grant.note !== null ? { grantNote: grant.note } : state.grantNote !== undefined ? { grantNote: state.grantNote } : {}),
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
@@ -1015,6 +1044,33 @@ export interface WorkflowRunTrail {
 }
 
 /**
+ * Where the owner's start of a mandate's workflow came from: the library's Run, the owner's chat or
+ * session, or a run of the owner's own worker (`worker-run-start.ts`) — by "Run now", by its
+ * schedule, or in a way the record does not name (an event, a pickup after an answered question).
+ */
+export type OwnerStart = 'library' | 'owner-chat' | 'owner-run-now' | 'owner-schedule' | 'owner-unsaid';
+
+/** The `started=` word of each: the trail view knows `hand` and `schedule` (`startedBy`). An event
+ *  has no word there, and a pickup after an answer does not know how the run that asked was
+ *  started, so their rows name no start. */
+const OWNER_START_WORD: Readonly<Record<OwnerStart, 'hand' | 'schedule' | undefined>> = {
+  'library': 'hand',
+  'owner-chat': 'hand',
+  'owner-run-now': 'hand',
+  'owner-schedule': 'schedule',
+  'owner-unsaid': undefined,
+};
+
+/** The owner's start of a `run_workflow` call, read from the worker run it runs in, if any. */
+export function ownerStartOfCall(): OwnerStart {
+  const start = currentWorkerRunStart();
+  if (start === undefined) return 'owner-chat';
+  if (start === 'hand') return 'owner-run-now';
+  if (start === 'schedule') return 'owner-schedule';
+  return 'owner-unsaid';
+}
+
+/**
  * The trail of a stored workflow that someone other than the owner runs from a chat (660b): one
  * row before its first step, one after it, in that person's name. Its steps write their own rows
  * under its key. The run's bookkeeping is in its end row: whether the definition of a one-shot was
@@ -1025,7 +1081,7 @@ export interface WorkflowRunTrail {
 export function workflowRunTrail(
   principal: RequestPrincipal,
   auditLog: AuditLog | null,
-  run: { workflowId: string; oneShot: boolean; retry: boolean; startedBy?: 'library' | 'owner-chat' | undefined },
+  run: { workflowId: string; oneShot: boolean; retry: boolean; startedBy?: OwnerStart | undefined },
 ): WorkflowRunTrail | null {
   const p = principal;
   if (isOwnerPrincipal(p) || currentPlanRun(p) !== undefined) return null;
@@ -1036,8 +1092,9 @@ export function workflowRunTrail(
     ['retry', run.retry ? 'yes' : undefined],
     // The owner pressed Run in the library (1055): the run is the mandate's, the start the owner's,
     // in the words a plan's run started by hand uses, which the trail view shows (`started_hand`).
-    // The same words for the owner's chat or session running a mandate's workflow (1100).
-    ['started', run.startedBy !== undefined ? 'hand' : undefined],
+    // The same words for the owner's chat or session running a mandate's workflow. A run of the
+    // owner's own worker says how that run was started: its schedule is not a hand.
+    ['started', run.startedBy === undefined ? undefined : OWNER_START_WORD[run.startedBy]],
     ['by', run.startedBy !== undefined ? 'owner' : undefined],
   ];
   const write = (phase: AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
@@ -1113,7 +1170,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     const collected = runCollectingMemberNotes(asPlan);
     try { return await collected.done; } finally {
       memberRefused = collected.notes.size > 0;
-      for (const line of collected.notes) noteMemberConnection(line);
+      relayMemberNotes(collected);
     }
   };
 
@@ -1208,7 +1265,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }
     }
 
-    const retryTrail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true, ...(runFor.asPlan ? { startedBy: 'owner-chat' as const } : {}) });
+    const retryTrail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true, ...(runFor.asPlan ? { startedBy: ownerStartOfCall() } : {}) });
     if (retryTrail !== null) {
       try { retryTrail.begin(); } catch { return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1365,7 +1422,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     validateManifest(manifest);
     // Before the run is marked run, with no await since the executed-guard above: a one-shot whose
     // start cannot be recorded stays unrun, and a second call cannot slip in between (660b).
-    trail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false, ...(runFor.asPlan ? { startedBy: 'owner-chat' as const } : {}) });
+    trail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false, ...(runFor.asPlan ? { startedBy: ownerStartOfCall() } : {}) });
     if (trail !== null) {
       try { trail.begin(); } catch { trail = null; return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }

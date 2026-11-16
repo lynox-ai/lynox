@@ -2422,7 +2422,7 @@ describe('Agent', () => {
 
     // A reference in the path of a store request would be filled in after the path was read, so
     // a value such as `../../apps/x` would move the request out of `/admin/`. While store requests
-    // are refused, the request is refused before it is sent, every consent given. Once a
+    // need a store pass, the request is refused before it is sent, every consent given. Once a
     // pass carries them, the pass reads the finished URL (`store-pass.test.ts`, "refuses every
     // path outside /admin/, including one that resolves out of it").
     it('refuses a secret reference in the path of a store request before the value is filled in', async () => {
@@ -2438,7 +2438,7 @@ describe('Agent', () => {
       const result = (agent.getMessages()[2] as { content: Array<{ content: string; is_error: boolean }> }).content[0]!;
       expect(handler).not.toHaveBeenCalled();
       expect(result.is_error).toBe(true);
-      expect(result.content).toContain('Shopify is temporarily unavailable in lynox');
+      expect(result.content).toContain('only on an instance that lynox runs');
     });
 
     describe('a built-in provider\'s client secret', () => {
@@ -3463,6 +3463,11 @@ describe('Agent', () => {
         // memory_store, write_file and the like declare neither marker. Their result is what they
         // did; "may be incomplete" would invite a second, duplicate write.
         expect(await resultOf(makeTool('local_write', vi.fn(async () => 'Stored the note.')))).toBe('Stored the note.');
+      }, 3000);
+
+      it('an answer a reader (failureOf) calls a failure keeps the sentence: the model reads what it read before', async () => {
+        const read: ToolEntry = { ...reader(vi.fn(async () => 'Error: two of five pages, then the fetch failed.')), failureOf: (a: string) => (a.startsWith('Error:') ? a : null) };
+        expect(await resultOf(read)).toBe(`Error: two of five pages, then the fetch failed.\n\n${TOOL_STOPPED_RESULT_NOTE}`);
       }, 3000);
 
       it('a soft failure gets no sentence: a failure is no result that may be partial', async () => {

@@ -176,8 +176,8 @@ export interface ChatThreadMessage {
 /**
  * The message "Reply in chat" answers when it is not the item's own mail: the newest inbound
  * message of the thread that is not older than the item's own mail and is known not to be an
- * automatic reply — checked and not one, or the message that reopened the item (its audit names
- * it; reopening already ruled out a known automatic reply). An out-of-office note is stored in
+ * automatic reply — checked and not one, or the message that reopened or raised the item when
+ * the check could not tell (its audit names it; a known automatic reply is not taken either way). An out-of-office note is stored in
  * the thread too, and answering it would answer "I am away until …". Any other message never
  * checked (stored before the check existed) is not taken, so such an item answers its first
  * mail, as before.
@@ -188,7 +188,7 @@ export function followUpToAnswer(reader: ChatInboxReader, item: InboxItem): Chat
   const since = own?.mailDate?.getTime();
   const reopenedBy = new Set<string>();
   for (const a of reader.listAuditForItem(item.id, item.tenantId)) {
-    if (a.action !== 'reopened_on_reply') continue;
+    if (a.action !== 'reopened_on_reply' && a.action !== 'raised_on_sensitive_follow_up') continue;
     try {
       const id = (JSON.parse(a.payloadJson) as { message_id?: unknown }).message_id;
       if (typeof id === 'string') reopenedBy.add(id);

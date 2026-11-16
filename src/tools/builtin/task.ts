@@ -5,10 +5,12 @@ import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
-import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
+import { isOwnerPrincipal, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
+import { readAddressWrites } from '../../core/outbound-write.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -281,14 +283,34 @@ function detectEmbeddedParams(field: string, value: string | undefined): string 
  * (its consent sits on the workflow), and an edit that changes what a trigger
  * runs clears the stamp, so the update path needs it too.
  */
-function pendingConsent(task: object): string {
+function pendingConsent(task: object, byOwner: boolean): string {
   // Takes the union both creators return (a TODO has neither field) and reads
   // the two fields the gate reads. Narrowed here rather than cast per call site:
   // a caller that has to shape its argument is a caller that can shape it wrong.
-  const row = task as { effect?: unknown; confirmed_at?: unknown };
-  return row.effect === 'run_agent' && !row.confirmed_at
-    ? ' — it runs once you confirm it in Triggers.'
-    : '';
+  const row = task as { effect?: unknown; confirmed_at?: string | undefined; created_by?: string | undefined; edited_by?: string | undefined };
+  // Held back: an agent run nobody confirmed (`getDue`), or any row a mandate created or last
+  // changed that the owner has not stamped, whatever its effect (`mandateNeedsOwnerStamp`, the
+  // test the worker applies).
+  const held = (row.effect === 'run_agent' && !row.confirmed_at) || ('effect' in row && mandateNeedsOwnerStamp(row));
+  if (!held) return '';
+  // Only the owner confirms (`POST /api/tasks/:id/confirm`): a mandate's session is told who does,
+  // so it does not ask the person it works for to confirm what they cannot.
+  return byOwner
+    ? ' — it runs once you confirm it under Automation › Triggers.'
+    : ' — it runs only after the owner of this lynox confirms it under Automation › Triggers. The person in this chat has delegated access and cannot confirm it: tell them the owner has to.';
+}
+
+/**
+ * What a created row's report ends with: the consent it waits for, which names where it stands,
+ * or else where the web UI lists it. The place is read off the row the store returned, not off
+ * the branch that made it: a to-do assigned to lynox becomes a trigger (`createsTrigger`), and
+ * only a trigger carries `effect`. The Automation hub lists triggers under Triggers
+ * (`GET /api/triggers`) and to-dos under Tasks (`GET /api/tasks`).
+ */
+function createdNote(task: object, byOwner: boolean): string {
+  const consent = pendingConsent(task, byOwner);
+  if (consent !== '') return consent;
+  return `. It is listed under Automation › ${'effect' in task ? 'Triggers' : 'Tasks'}.`;
 }
 
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
@@ -413,6 +435,8 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         ...(isOwnerPrincipal(agent.principal) ? {} : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
         ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
       };
+      // Whose session reads the report: only the owner confirms a held-back row.
+      const byOwner = isOwnerPrincipal(agent.principal);
 
       if (input.workflow_id) {
         // The tool param is `workflow_id`; the TaskManager + DB column remain
@@ -506,7 +530,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
           const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
-          return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${pendingConsent(task)}`)}`;
+          return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${createdNote(task, byOwner)}`)}`;
         });
       }
 
@@ -519,11 +543,14 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           }), ifReturned);
           w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-          return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${pendingConsent(task)}`)}`;
+          return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${createdNote(task, byOwner)}`)}`;
         });
       }
 
       if (input.watch_url) {
+        // A watch only reads its page, unattended and again and again: an address a server may
+        // run as a write (`?_method=DELETE`, a GraphQL mutation) would send that write on every check.
+        if (readAddressWrites(input.watch_url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);
@@ -535,7 +562,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             watchIntervalMinutes: intervalMinutes,
           }), ifReturned);
           w.created('create', task.id);
-          return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`)}`;
+          return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${createdNote(task, byOwner)}`)}`;
         });
       }
 
@@ -546,7 +573,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         return withInstanceWrite(agent, { site: 'task_create#one-shot', kind: 'create', store: 'tasks', target: () => [['type', 'one-shot']], main: ['create'] }, (w) => {
           const task = w.run('create', () => managerRef.create({ ...baseParams, nextRunAt: input.run_at }), ifReturned);
           w.created('create', task.id);
-          return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
+          return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, createdNote(task, byOwner))}`;
         });
       }
 
@@ -555,7 +582,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       return withInstanceWrite(agent, { site: 'task_create#todo', kind: 'create', store: 'tasks', target: () => [['type', 'todo']], main: ['create'] }, (w) => {
         const task = w.run('create', () => managerRef.create(baseParams), ifReturned);
         w.created('create', task.id);
-        return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
+        return `Created: ${formatTaskLine(task, createdNote(task, byOwner))}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_create', e);
@@ -682,7 +709,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         // An edit can re-open consent: changing what a trigger RUNS clears the stamp
         // (`trigger-store.ts`), so the row just edited may be held back again — and
         // this report is the only place that says so.
-        return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task)}`)}`;
+        return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);

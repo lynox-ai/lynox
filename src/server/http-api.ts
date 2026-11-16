@@ -86,7 +86,7 @@ import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onb
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
-import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
+import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
@@ -114,6 +114,7 @@ import {
   type PersonErasureDeps, type PersonErasurePreview, type PersonErasureRefusal, type PersonErasureResult,
 } from '../core/person-erasure.js';
 import { durableMemoryState } from '../core/memory-tool-set.js';
+import { migrationCeiling } from '../core/migration-ceiling.js';
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
@@ -146,6 +147,7 @@ import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './we
 import { requestLogUrl } from './request-log-url.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
+import { EngineLessRefused } from '../core/engine-less-refusal.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -1351,6 +1353,10 @@ function authorshipOrNone(read: () => WorkflowAuthorship | undefined): WorkflowA
 /** The code beside `MANDATE_KEY_INPUT_REFUSAL`, read by the web UI. */
 export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
 
+/** Upload size caps on the run route, as base64 length: 5 MB for an image, 10 MB for any other file. */
+const CHAT_IMAGE_B64_MAX = 5 * 1024 * 1024;
+const CHAT_FILE_B64_MAX = 10 * 1024 * 1024;
+
 /**
  * Whether text a mandate's helper typed somewhere other than the chat reads as carrying a key — a
  * conversation's title, a task's fields, a compaction's focus — and was refused for it (422, the
@@ -2336,6 +2342,9 @@ export class LynoxHTTPApi {
         total_threads: threadCount,
         ...(engine !== null ? { durable_memory: durableMemoryState(engine.getLegacyMemoryReason()) } : {}),
       },
+      // What a migration into this instance may hold in memory; a source reads it before it
+      // exports (src/core/migration-ceiling.ts).
+      migration: migrationCeiling(),
     };
 
     this.healthCache = { data, expiresAt: now + 10_000 };
@@ -3060,6 +3069,8 @@ export class LynoxHTTPApi {
   private _answerTodoRefusal(res: ServerResponse, err: unknown): boolean {
     if (err instanceof ForeignTodoError) { errorResponse(res, 403, err.message); return true; }
     if (err instanceof TodoHasForeignSubtasksError) { errorResponse(res, 409, err.message); return true; }
+    // An engine without engine.db: the client's sentence, not the model's (`EngineLessRefused`).
+    if (err instanceof EngineLessRefused) { errorResponse(res, 409, err.client, 'engine_less'); return true; }
     return false;
   }
 
@@ -4684,6 +4695,44 @@ export class LynoxHTTPApi {
           return;
         }
       }
+      // An attached file is no way around it: every file is read here, before a takeover could end a
+      // parked run and before the file loop below writes any of them to the file area, so a refused
+      // upload changes nothing. The name gets the check a typed message gets; the content only the
+      // credential forms (`mandateDocumentCredential`), read both as text and, for a PDF or Word
+      // file, as what the extraction below gives. An image block is stored and sent as the `data`
+      // string came, so for a file declared as an image that string is read, and its bytes as text
+      // too (the type is the sender's word, and bytes after a valid header are still stored). The
+      // string must be plain base64: a decoder stops at a `=` inside it, and what follows would be
+      // stored unread. A real image's pixels are not read.
+      const attached = (body as Record<string, unknown> | null)?.['files'];
+      if (Array.isArray(attached) && !isOwnerPrincipal(this._principalOf(req))) {
+        for (const file of attached as { name?: unknown; type?: unknown; data?: unknown }[]) {
+          const rawName = typeof file.name === 'string' ? file.name : 'unknown';
+          if (mandateCredentialInput(rawName) !== null) {
+            errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
+          }
+          const rawType = typeof file.type === 'string' ? file.type : '';
+          // Past its size limit the loop below refuses this file (413) before it is stored.
+          if (typeof file.data !== 'string' || file.data.length > (rawType.startsWith('image/') ? CHAT_IMAGE_B64_MAX : CHAT_FILE_B64_MAX)) continue;
+          const buf = Buffer.from(file.data, 'base64');
+          const readings: string[] = [];
+          if (rawType.startsWith('image/')) {
+            if (!/^[A-Za-z0-9+/]*={0,2}$/.test(file.data)) {
+              errorResponse(res, 400, `Invalid file: ${sanitizeUploadFilename(rawName)}`); return;
+            }
+            readings.push(file.data, buf.toString('utf-8'));
+          } else {
+            readings.push(buf.toString('utf-8'));
+            try {
+              const extracted = await extractDocumentText(buf, sanitizeUploadFilename(rawName));
+              if (extracted) readings.push(extracted.text);
+            } catch { /* the loop below answers an unreadable document */ }
+          }
+          if (readings.some((t) => mandateDocumentCredential(t) !== null)) {
+            errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
+          }
+        }
+      }
       // Which erasure this request started under; see `erasureGeneration`.
       const erasureGenAtEntry = this.erasureGeneration;
       const erasedSinceEntry = (): boolean => this.erasureGeneration !== erasureGenAtEntry;
@@ -4922,8 +4971,8 @@ export class LynoxHTTPApi {
         // earlier with a typed error so the user sees a friendly message instead
         // of a raw provider 400. The frontend downscales to 1568px first, so a
         // real photo/screenshot lands far under this on any provider.
-        const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
-        const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
+        const MAX_IMAGE_B64_BYTES = CHAT_IMAGE_B64_MAX;
+        const MAX_FILE_B64_BYTES = CHAT_FILE_B64_MAX;
         const MAX_TEXT_FILE_DECODED_CHARS = 200_000;
         // Above this the upload becomes a real file in the tenant's file area
         // instead of message content.
@@ -6461,8 +6510,16 @@ export class LynoxHTTPApi {
       const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
       // Apply render projection: merge tool-result carriers into preceding
       // tool-use blocks, strip safety wrappers for display, flatten into the
-      // UI-ready shape that mirrors the client's ChatMessage.
-      const messages = projectMessages(records);
+      // UI-ready shape that mirrors the client's ChatMessage. The ledger says which calls did not
+      // succeed although their stored result reads as a plain answer (a soft failure). A ledger
+      // that cannot be read marks nothing: the chat still opens, as it did before the marks.
+      let unsuccessfulToolUseIds: ReadonlySet<string> | undefined;
+      try {
+        unsuccessfulToolUseIds = engine.getRunHistory()?.getFailedToolUseIds(params['id']!);
+      } catch {
+        unsuccessfulToolUseIds = undefined;
+      }
+      const messages = projectMessages(records, { unsuccessfulToolUseIds });
       // Resumable re-attach (Tier 2, AC2/AC3): read this thread's live run
       // SYNCHRONOUSLY in the same tick as the transcript above. Two synchronous
       // reads can't be interleaved by an eager-persist checkpoint (which runs on
@@ -6771,6 +6828,17 @@ export class LynoxHTTPApi {
     // ── Memory ──
     const VALID_MEMORY_NS = new Set(['knowledge', 'methods', 'status', 'learnings']);
     type MemoryNs = 'knowledge' | 'methods' | 'status' | 'learnings';
+    /**
+     * On an engine that started without engine.db a change to memory is refused with a plain
+     * reason (`Memory.refuseChangesWithoutStore`): 409 with the code `engine_less`, before anything in
+     * the body is looked at or written. Reading stays.
+     */
+    const refuseEngineLessMemory = (res: ServerResponse, memory: { engineLessRefusal?(reader: 'client'): string | null }): boolean => {
+      const refusal = memory.engineLessRefusal?.('client') ?? null;
+      if (refusal === null) return false;
+      errorResponse(res, 409, refusal, 'engine_less');
+      return true;
+    };
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/memory/:ns', async (_req, res, params) => {
       const memory = engine.getMemory();
@@ -6784,6 +6852,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
@@ -6796,6 +6865,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
@@ -6809,6 +6879,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/memory/:ns', async (req, res, params) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -6820,6 +6891,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       // Accept BOTH body contracts: the UI sends {old_content,new_content}; older/tool
@@ -9327,6 +9399,7 @@ export class LynoxHTTPApi {
           : taskManager.create({ ...baseParams, ...(runAt ? { nextRunAt: runAt } : {}) });
         jsonResponse(res, 201, task);
       } catch (e) {
+        if (e instanceof EngineLessRefused) { errorResponse(res, 409, e.client, 'engine_less'); return; }
         errorResponse(res, 400, e instanceof Error ? e.message : 'Failed to create task');
       }
     }, MARK);
@@ -9924,6 +9997,14 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         ...withBinding(status),
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
+        // The targets that add hidden characters the page marks but does not otherwise show: a
+        // line wherever the run is approved or its probe confirmed.
+        ...(() => {
+          // One pass for both counts; a target with a field past the reading bounds is counted
+          // on its own, as not checked, never as one that adds.
+          const hidden = actionable ? ledger.hiddenCounts(params['id']!) : null;
+          return { hiddenAddsTargets: hidden?.adds ?? null, hiddenUncheckedTargets: hidden?.unchecked ?? null };
+        })(),
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
         // the engine's own documents. It stands here so the owner sees where the read goes. A stored
         // source with no address to build (a form without a spec, a filter holding a list) shows its
@@ -15239,23 +15320,46 @@ export class LynoxHTTPApi {
           'X-Migration-Token': migrationToken,
         };
 
-        const completeRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
-          method: 'POST',
-          headers: migrationHeaders,
-          body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
-        });
-        if (!completeRes.ok) throw new Error('Handshake completion failed');
+        // The transfer key is zeroized once the chunks are encrypted, and also when the handshake
+        // completion or the export fails or refuses (a bundle over the destination's bounds).
+        let exported: ReturnType<typeof exporter.export>;
+        try {
+          const completeRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
+            method: 'POST',
+            headers: migrationHeaders,
+            body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
+          });
+          if (!completeRes.ok) throw new Error('Handshake completion failed');
 
-        sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
+          sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
 
-        // 3. Export + Encrypt
-        sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
-        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace } = exporter.export(transferKey, (p) => {
-          sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
-        });
+          // A destination that takes plaintext stores says so in its handshake; its numbers come
+          // from its health route. Anything short of both is the raw path, as for an older one.
+          const { plainOffer, readDestinationHealth } = await import('../core/migration-plain-source.js');
+          const ceiling = (handshake as { acceptsPlainStores?: unknown }).acceptsPlainStores === true
+            ? plainOffer(handshake, await readDestinationHealth(fetchPinned, targetUrl))
+            : null;
 
-        // Zeroize transfer key — no longer needed after encryption
-        crypto.zeroize(transferKey);
+          // 3. Export + Encrypt
+          sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
+          exported = exporter.export(transferKey, (p) => {
+            sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
+          }, ceiling ? { plain: { ceiling } } : undefined);
+        } finally {
+          crypto.zeroize(transferKey);
+        }
+        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace, plain: exportPlain } = exported;
+        // A refusal from the destination is shown as its own text, which is written for the
+        // person migrating; the raw response only when it carries none.
+        // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
+        // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
+        const refusal = async (r: Response, step: string, told: string): Promise<Error> => {
+          const text = await r.text();
+          let message: unknown;
+          try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
+          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${text.slice(0, 500)}`);
+          return new Error(`${told} It says: ${message.length > 500 ? `${message.slice(0, 500)}…` : message}`);
+        };
 
         // 4. Send manifest
         sendEvent('progress', { phase: 'transferring', message: 'Sending manifest...' });
@@ -15264,7 +15368,7 @@ export class LynoxHTTPApi {
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
         });
-        if (!mRes.ok) throw new Error(`Manifest rejected: ${await mRes.text()}`);
+        if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
 
         // 5. Send chunks
         for (let i = 0; i < chunks.length; i++) {
@@ -15280,7 +15384,7 @@ export class LynoxHTTPApi {
             headers: migrationHeaders,
             body: JSON.stringify(chunks[i]),
           });
-          if (!cRes.ok) throw new Error(`Chunk ${String(i)} rejected: ${await cRes.text()}`);
+          if (!cRes.ok) throw await refusal(cRes, `Chunk ${String(i)} rejected`, `The target instance refused part ${String(i + 1)} of the data.`);
         }
 
         // 6. Restore
@@ -15289,7 +15393,7 @@ export class LynoxHTTPApi {
           method: 'POST',
           headers: migrationHeaders,
         });
-        if (!rRes.ok) throw new Error(`Restore failed: ${await rRes.text()}`);
+        if (!rRes.ok) throw await refusal(rRes, 'Restore failed', 'The target instance could not restore the data.');
 
         const result = await rRes.json() as { success: boolean; verification: unknown };
         // Files the export could not carry (a link, a name that cannot travel) are named in the result,
@@ -15298,6 +15402,8 @@ export class LynoxHTTPApi {
           success: true, verification: result.verification,
           ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}),
           ...(exportWorkspace !== undefined ? { workspace: exportWorkspace } : {}),
+          // Per store the path it took and why a store took the raw path, for the report.
+          ...(exportPlain !== undefined ? { plain: exportPlain } : {}),
         });
       } catch (err: unknown) {
         sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });

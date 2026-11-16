@@ -129,6 +129,7 @@ const mockHistorySearchRuns = vi.fn().mockReturnValue([]);
 const mockHistoryGetRun = vi.fn().mockReturnValue({ id: 'run-1', task_text: 'test' });
 const mockHistoryGetRunToolCalls = vi.fn().mockReturnValue([]);
 const mockDeleteWireSnapshotsForThread = vi.fn().mockReturnValue(0);
+const mockGetFailedToolUseIds = vi.fn().mockReturnValue(new Set<string>());
 const mockHistoryGetStats = vi.fn().mockReturnValue({ total_runs: 5 });
 const mockHistoryGetCostByDay = vi.fn().mockReturnValue([]);
 const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: 'calendar-month' | 'rolling' | 'stripe-billing'; label: string; startIso: string; endIso: string }) => ({
@@ -329,6 +330,7 @@ vi.mock('../core/engine.js', () => ({
       getRun: mockHistoryGetRun,
       getRunToolCalls: mockHistoryGetRunToolCalls,
       deleteWireSnapshotsForThread: mockDeleteWireSnapshotsForThread,
+      getFailedToolUseIds: mockGetFailedToolUseIds,
       getStats: mockHistoryGetStats,
       getCostByDay: mockHistoryGetCostByDay,
       getUsageSummary: mockHistoryGetUsageSummary,
@@ -8552,6 +8554,13 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('threads — graceful missing thread (issue #702)', () => {
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
     // Temporarily swap the engine's getThreadStore (null by default) for a
     // stub, restoring it after each case (mirrors withRegistry above).
     async function withThreadStore(store: unknown, test: () => Promise<void>): Promise<void> {
@@ -8589,6 +8598,41 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as { messages: unknown[]; threadMissing?: boolean };
         expect(body.threadMissing).toBeUndefined();
         expect(body.messages).toEqual([]);
+      });
+    });
+
+    it('GET /api/threads/:id/messages marks a call the ledger records as failed as unsuccessful', async () => {
+      // Drives the route: the stored result of a soft failure reads as a plain answer, so only the
+      // ledger knows. Dropping the ledger read from the handler must fail this test.
+      const records = [
+        { seq: 0, role: 'assistant', content_json: JSON.stringify([{ type: 'tool_use', id: 'tu_1', name: 'api_setup', input: {} }, { type: 'tool_use', id: 'tu_2', name: 'read_file', input: {} }]), created_at: '2026-11-16T10:00:00Z' },
+        { seq: 1, role: 'user', content_json: JSON.stringify([{ type: 'tool_result', tool_use_id: 'tu_1', content: 'Error: nothing was saved.' }, { type: 'tool_result', tool_use_id: 'tu_2', content: 'hello' }]), created_at: '2026-11-16T10:00:01Z' },
+      ];
+      mockGetFailedToolUseIds.mockClear();
+      mockGetFailedToolUseIds.mockReturnValueOnce(new Set(['tu_1']));
+      await withThreadStore({ getThread: () => ({ id: 't-soft' }), getMessages: () => records }, async () => {
+        const res = await jsonFetch('/api/threads/t-soft/messages');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { messages: Array<{ toolCalls?: Array<{ status: string; unsuccessful?: boolean }> }> };
+        const calls = body.messages[0]?.toolCalls ?? [];
+        expect(calls[0]).toEqual(expect.objectContaining({ status: 'done', unsuccessful: true }));
+        expect(calls[1]?.unsuccessful).toBeUndefined();
+        expect(mockGetFailedToolUseIds).toHaveBeenCalledWith('t-soft');
+      });
+    });
+
+    it('GET /api/threads/:id/messages still opens the chat when the ledger cannot be read', async () => {
+      const records = [
+        { seq: 0, role: 'assistant', content_json: JSON.stringify([{ type: 'tool_use', id: 'tu_1', name: 'api_setup', input: {} }]), created_at: '2026-11-16T10:00:00Z' },
+        { seq: 1, role: 'user', content_json: JSON.stringify([{ type: 'tool_result', tool_use_id: 'tu_1', content: 'Error: nothing was saved.' }]), created_at: '2026-11-16T10:00:01Z' },
+      ];
+      mockGetFailedToolUseIds.mockImplementationOnce(() => { throw new Error('database is locked'); });
+      await withThreadStore({ getThread: () => ({ id: 't-locked' }), getMessages: () => records }, async () => {
+        const res = await jsonFetch('/api/threads/t-locked/messages');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { messages: Array<{ toolCalls?: Array<{ status: string; unsuccessful?: boolean }> }> };
+        expect(body.messages[0]?.toolCalls?.[0]).toEqual(expect.objectContaining({ status: 'done' }));
+        expect(body.messages[0]?.toolCalls?.[0]?.unsuccessful).toBeUndefined();
       });
     });
 
@@ -12610,7 +12654,8 @@ describe('LynoxHTTPApi', () => {
       const host = 'shop.example.com';
       const key = `https://${host}/products/1`;
       const planned = bulkLedger.recordExternalPlan({
-        createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]),
+        // The title gains a soft hyphen between letters: counted where the run is approved.
+        createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { price: '1', title: 'Wasser\u00adfilter' } }], contract: mintBulkContract(host, [key]),
       });
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
@@ -12625,7 +12670,7 @@ describe('LynoxHTTPApi', () => {
       // Not halted any more: nothing to resume.
       expect((await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' })).status).toBe(409);
 
-      bulkLedger.recordRead(id, 0, { before: { price: '2' } });
+      bulkLedger.recordRead(id, 0, { before: { price: '2', title: 'Wasserfilter' } });
       expect(bulkLedger.finishPreview(id)).toBe(true);
       // The fixture shop's `/products/<id>` is not a measured write form.
       const approve = (extra: Record<string, unknown> = { unmeasuredConfirmed: true }): Promise<Response> =>
@@ -12654,6 +12699,8 @@ describe('LynoxHTTPApi', () => {
         const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
         // One target to write: the note keeps its first two sentences.
         expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+        // Counted where the run is approved: its one target adds a soft hyphen.
+        expect(shown['hiddenAddsTargets']).toBe(1);
         for (const extra of [{}, { unmeasuredConfirmed: 'true' }, { unmeasuredConfirmed: 1 }]) {
           const unconfirmed = await approve(extra);
           expect(unconfirmed.status, JSON.stringify(extra)).toBe(409);
@@ -12729,6 +12776,8 @@ describe('LynoxHTTPApi', () => {
     it('shows the unmeasured-form note with an external apply run only — not with a local run, not with an undo', async () => {
       const local = await (await jsonFetch(`/api/bulk/runs/${planRun()}`)).json() as Record<string, unknown>;
       expect(local).toMatchObject({ writeForm: null, writeFormNote: null, writeFormConfirmation: null });
+      // A run awaiting approval whose targets add no hidden character: counted, as none.
+      expect(local['hiddenAddsTargets']).toBe(0);
 
       const host = 'shop.example.com';
       const key = `https://${host}/products/1`;
@@ -12737,6 +12786,8 @@ describe('LynoxHTTPApi', () => {
       const id = planned.status.id;
       const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
       expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE_ONE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+      // Planned, not read yet: neither approved nor confirmed here, so not counted.
+      expect(shown).toMatchObject({ phase: 'planned', hiddenAddsTargets: null });
       // The same run read as an undo: it restores under its source's confirmation, and does
       // not write one target first, so neither the note nor the statement applies.
       bulkDb.getDb().prepare(`UPDATE bulk_runs SET kind = 'undo' WHERE id = ?`).run(id);

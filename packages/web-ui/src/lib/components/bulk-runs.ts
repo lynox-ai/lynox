@@ -4,6 +4,7 @@
 // without the Svelte plugin.
 
 import { visibleText } from '../visible-text.js';
+import { hiddenCharIndexes, inPlaceReferences } from '../hidden-chars.js';
 
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface BulkI18n {
@@ -19,6 +20,7 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
 	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
 	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note',
+	'bulk.invalid.before_has_shop_markup', 'bulk.invalid.before_has_shop_markup_undated',
 ]);
 
 /** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form, a key's
@@ -90,6 +92,11 @@ export interface BulkRun {
 
 export interface BulkRunDetailData extends BulkRun {
 	checksum: string | null;
+	/** Targets the owner has not taken out that add hidden characters the page marks; null where
+	 *  the run is neither approved nor confirmed from this page. */
+	hiddenAddsTargets?: number | null | undefined;
+	/** Targets with an HTML field too large or too complex to check for hidden characters. */
+	hiddenUncheckedTargets?: number | null | undefined;
 	writeFormNote: string | null;
 	writeFormConfirmation: string | null;
 	judgeModel: string | null;
@@ -559,18 +566,27 @@ export interface BulkTarget {
 	shopAddedMarkup?: true | undefined;
 	/** Written, and the store kept the description otherwise than sent, without outside markup. */
 	hostRewrote?: true | undefined;
+	/** With `before_has_shop_markup`: when the earlier write that left this description marked was
+	 *  applied, or null where that run is no longer kept. */
+	shopMarkedAt?: string | null | undefined;
 	/** The fields behind a Shopify product page's SEO title and description whose text gains an `&`,
 	 *  which a theme may show as `&amp;`. A note; nothing is refused. */
 	seoEntityFields?: string[] | undefined;
 	/** Refused for `shortcode_changed`: each field the shortcode check refuses, with its whole
 	 *  planned value, for the owner to copy into the shop (1130). Set only where one holds. */
-	refusedValues?: { field: string; value: string }[] | undefined;
+	refusedValues?: { field: string; value: string; codePoints?: number[] | undefined }[] | undefined;
 	/** With `secret_in_context`: the field the judge only reads that held it, by its name. */
 	contextField?: string | undefined;
 	/** Per HTML field an `update` target changes: the elements and comments its new value adds and
 	 *  removes, each with its full value (PRD shopify-preset §20.2 item 5, sec-core M3). Computed by
 	 *  the engine from the parser's tree; the page only lists it, as text. */
 	markupChanges?: BulkFieldMarkupChange[] | undefined;
+	/** Per text field an `update` or `create` target writes: the hidden characters it holds more of
+	 *  than its before-image, where text may carry one and the page would not show it. Counted by
+	 *  the engine; the page marks every occurrence of each in that field ({@link bulkHiddenSegments}). */
+	hiddenAdds?: { field: string; codePoints: number[]; html?: true | undefined }[] | undefined;
+	/** HTML fields not checked for hidden characters: too large or too complex to read. */
+	hiddenUnchecked?: string[] | undefined;
 }
 
 /** One element or comment a new value adds or removes, as the engine's parser read it. */
@@ -592,6 +608,9 @@ export interface BulkFieldMarkupChange {
 	/** An added item lies outside what a write may add (the engine's allowlist): on an undo, markup
 	 *  from before the run that it writes back. Optional: an older engine sends none. */
 	addsOutsideAllowlist?: boolean | undefined;
+	/** The value or its before-image is larger or nested deeper than the engine reads: nothing is
+	 *  listed, and the note says so instead of calling the list complete. */
+	unread?: boolean | undefined;
 }
 
 /** An element or comment as code text, every attribute with its whole value (sec-core M3: a
@@ -635,7 +654,7 @@ export function bulkMarkupList(
 			...change.added.map(line(undo ? 'bulk.markup.restores' : 'bulk.markup.added')),
 			...change.removed.map(line(undo ? 'bulk.markup.removes' : 'bulk.markup.removed')),
 		],
-		note: i18n.t('bulk.markup.plain_note'),
+		note: i18n.t(change.unread === true ? 'bulk.markup.unread_note' : 'bulk.markup.plain_note'),
 	};
 }
 
@@ -1006,10 +1025,12 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
 };
 /** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
- *  of tags the page reads, whose way out differs from planning again (U-103). */
+ *  of tags the page reads, whose way out differs from planning again, and of links, in a
+ *  shortcode as much as in HTML. */
 const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
 	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
 	shortcode_changed: 'shortcode_changed',
+	new_link_domain: 'new_link_domain', url_scheme: 'url_scheme', url_control_char: 'url_control_char',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
@@ -1024,9 +1045,16 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
  *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
 export function bulkInvalidText(
 	reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n,
-	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's. */
-	context?: { field: string | undefined; host: string | null; dataStore: boolean },
+	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's.
+	 *  With `before_has_shop_markup`: the date of the earlier write, already formatted, or null. */
+	context?: { field: string | undefined; host: string | null; dataStore: boolean; markedDate?: string | null | undefined },
 ): string {
+	// The description an earlier run wrote and the store added markup to: named
+	// by that run's date, so the owner can find it; without the date where the run is gone.
+	if (reason === 'before_has_shop_markup') {
+		const date = context?.markedDate ?? null;
+		return date === null ? i18n.t('bulk.invalid.before_has_shop_markup_undated') : i18n.tf('bulk.invalid.before_has_shop_markup', { date });
+	}
 	// The field the judge only reads that held a credential, named so the owner knows which one to
 	// clean (U-140): on Shopify by its readable name, in the data store by the owner's column name,
 	// on any other list by the field's name as the list has it. The engine records the field with
@@ -1040,6 +1068,8 @@ export function bulkInvalidText(
 	}
 	const anyForm = BULK_INVALID_ANY_FORM[reason];
 	if (anyForm !== undefined) {
+		// One sentence for a judged run too: the field for allowed link domains is mounted on no page
+		// yet, so no run is told to add one there.
 		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
 	}
 	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
@@ -1076,4 +1106,111 @@ export function bulkSkippedHead(
 export function bulkValueText(v: unknown): string {
 	if (v === undefined || v === null || v === '') return '';
 	return bulkVisibleText(typeof v === 'string' ? v : JSON.stringify(v));
+}
+
+/** A piece of a value as the preview shows it: text, or the mark behind a character the run adds
+ *  and the text would not show ({@link bulkHiddenSegments}). */
+export type BulkValueSegment = { text: string } | { mark: string; label: string };
+
+/** The kind of a hidden character a run may add in place, by the key of its name. */
+const HIDDEN_KIND_KEYS: Readonly<Record<number, string>> = {
+	0x00ad: 'bulk.hidden.kind.soft_hyphen',
+	0x200c: 'bulk.hidden.kind.zwnj',
+	0x200e: 'bulk.hidden.kind.direction',
+	0x200f: 'bulk.hidden.kind.direction',
+	0x061c: 'bulk.hidden.kind.direction',
+	0x200d: 'bulk.hidden.kind.zwj',
+	0xfe0f: 'bulk.hidden.kind.vs16',
+};
+
+/** `text` cut into graphemes; where the browser has no `Intl.Segmenter`, into code points, so a
+ *  mark may then stand inside an emoji but is never left out. */
+function graphemes(text: string): string[] {
+	if (typeof Intl.Segmenter !== 'function') return Array.from(text);
+	return Array.from(new Intl.Segmenter('und', { granularity: 'grapheme' }).segment(text), (s) => s.segment);
+}
+
+function codePointName(cp: number): string {
+	return `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+}
+
+/**
+ * A value as the preview shows it, with a mark behind each character of `codePoints` the text
+ * would not show: hidden characters the engine counted more of in this field than its
+ * before-image holds (`hiddenAdds`). Every occurrence is marked, not
+ * only the new ones. A mark stands behind the whole grapheme, so an emoji is never cut, and names
+ * the kind and code point only in its label. A character the page already shows as its code point
+ * gets no mark. In an HTML field (`html`), a character reference that stands for one (`&shy;`) is
+ * marked behind it too: the source shows it as text, the store's page carries the character. The
+ * segments' text, joined, is the value as {@link bulkValueText} shows it: the mark is the page's,
+ * never part of the value.
+ */
+export function bulkHiddenSegments(text: string, codePoints: readonly number[], i18n: BulkI18n, html = false): BulkValueSegment[] {
+	const shown = new Set(hiddenCharIndexes(text));
+	const marked = new Set(codePoints);
+	// Where a marked reference ends, by its UTF-16 offset: its mark follows the grapheme it ends in.
+	const references = html ? inPlaceReferences(text).filter((r) => marked.has(r.cp)) : [];
+	const out: BulkValueSegment[] = [];
+	let pending = '';
+	let at = 0;
+	let offset = 0;
+	for (const segment of graphemes(text)) {
+		const kinds: number[] = [];
+		for (const c of segment) {
+			const cp = c.codePointAt(0)!;
+			if (shown.has(at)) pending += `⟨${codePointName(cp)}⟩`;
+			else {
+				pending += c;
+				if (marked.has(cp) && !kinds.includes(cp)) kinds.push(cp);
+			}
+			at++;
+		}
+		const end = offset + segment.length;
+		for (const r of references) if (r.end > offset && r.end <= end && !kinds.includes(r.cp)) kinds.push(r.cp);
+		offset = end;
+		if (kinds.length === 0) continue;
+		out.push({ text: pending });
+		pending = '';
+		const names = kinds.map((cp) => `${i18n.t(HIDDEN_KIND_KEYS[cp] ?? 'bulk.hidden.kind.other')} (${codePointName(cp)})`);
+		out.push({ mark: i18n.t('bulk.hidden.mark'), label: i18n.tf('bulk.hidden.label', { kind: names.join(', ') }) });
+	}
+	if (pending !== '' || out.length === 0) out.push({ text: pending });
+	return out;
+}
+
+/** A value as text before its hidden characters are shown: text as it is, anything else as JSON,
+ *  the text {@link bulkValueText} shows and {@link bulkHiddenSegments} marks. */
+export function bulkRawText(v: unknown): string {
+	if (v === undefined || v === null || v === '') return '';
+	return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+/** The code points a target's field adds that the preview marks; none for a field it does not name. */
+export function bulkHiddenAddsOf(target: Pick<BulkTarget, 'hiddenAdds'>, field: string): number[] {
+	return target.hiddenAdds?.find((h) => h.field === field)?.codePoints ?? [];
+}
+
+/** Whether the engine counted a target's field as HTML, whose character references are marked too. */
+export function bulkHiddenHtml(target: Pick<BulkTarget, 'hiddenAdds'>, field: string): boolean {
+	return target.hiddenAdds?.find((h) => h.field === field)?.html === true;
+}
+
+/** The line an approval and a probe's confirmation show when targets add hidden characters, or
+ *  null for none (a mark among hundreds of targets is not left to be found). */
+export function bulkHiddenCountText(n: number | null | undefined, shopify: boolean, i18n: BulkI18n): string | null {
+	if (n === null || n === undefined || n <= 0) return null;
+	// Products on Shopify, targets elsewhere, as every count beside it (U-218).
+	return i18n.tf(bulkOne(shopify ? 'bulk.hidden.count_products' : 'bulk.hidden.count', n), { n: String(n) });
+}
+
+/** The line beside it for targets with a field lynox could not check for hidden characters, or
+ *  null for none: a missing mark there says nothing (U-294). */
+export function bulkUncheckedCountText(n: number | null | undefined, shopify: boolean, i18n: BulkI18n): string | null {
+	if (n === null || n === undefined || n <= 0) return null;
+	return i18n.tf(bulkOne(shopify ? 'bulk.unchecked.count_products' : 'bulk.unchecked.count', n), { n: String(n) });
+}
+
+/** Whether the engine could not check this field of a target for hidden characters. */
+export function bulkHiddenUnchecked(target: Pick<BulkTarget, 'hiddenUnchecked'>, field: string): boolean {
+	return target.hiddenUnchecked?.includes(field) === true;
 }

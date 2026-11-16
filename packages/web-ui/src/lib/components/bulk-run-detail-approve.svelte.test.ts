@@ -210,6 +210,25 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('short_description:');
 	});
 
+	for (const judged of [true, false]) {
+		it(`words a new link domain under the product for a run ${judged ? 'with' : 'without'} a judge, naming no field for allowed domains`, async () => {
+			if (judged) run = makeRun({ judgeRuleHash: 'h1' });
+			targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'new_link_domain' } : x));
+			await render();
+			expect(target.textContent).toContain(t('bulk.invalid.new_link_domain').split('{where}')[0]!);
+			// No page mounts the field for allowed link domains yet, so no sentence names it.
+			expect(target.textContent).not.toContain(t('bulk.start_domains.label'));
+		});
+	}
+
+	it('shows a refused backslash as one backslash in the sentence the owner reads', async () => {
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'url_control_char' } : x));
+		await render();
+		const text = target.textContent ?? '';
+		expect(text).toMatch(/[Bb]ackslash \\[ ,]/);
+		expect(text).not.toContain('ackslash \\\\');
+	});
+
 	it('approves a run of one target whole, takes the product out against the checksum it showed, and then keeps only why nothing is left', async () => {
 		await render();
 		// One target to write: no probe first, the approval covers the whole run.
@@ -736,5 +755,200 @@ describe('the markup a target changes (1010)', () => {
 		expect(undo[0]!.textContent).toContain(t('bulk.markup.restores'));
 		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note'));
 		expect(target.querySelectorAll('script')).toHaveLength(0);
+	});
+});
+
+// A hidden character a target adds where text may carry one:
+// marked behind its grapheme, with the kind only in the label, a legend over the list, and a
+// count wherever the run is approved or its probe confirmed.
+describe('a hidden character a target adds in place', () => {
+	const marks = (): Element[] => [...target.querySelectorAll('[data-testid="bulk-hidden-mark"]')];
+	const count = (): string | null | undefined => target.querySelector('[data-testid="bulk-hidden-count"]')?.textContent;
+	const legend = (): Element | null => target.querySelector('[data-testid="bulk-hidden-legend"]');
+
+	it('marks a soft hyphen in a title and in an HTML description, counts the targets, and names the kind only in the label', async () => {
+		run = makeRun({ hiddenAddsTargets: 2, total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [
+			{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Wasserfilter', 'Wasser\u00adfilter'), error: null, deselected: false,
+				hiddenAdds: [{ field: 'title', codePoints: [0x00ad] }] },
+			{ seq: 2, key: 'gid://shopify/Product/2', change: 'update', error: null, deselected: false,
+				diff: { kind: 'fields', fields: [{ field: 'descriptionHtml', before: '<p>Wasserfilter</p>', after: '<p>Wasser\u00adfilter</p>' }] } as BulkTarget['diff'],
+				hiddenAdds: [{ field: 'descriptionHtml', codePoints: [0x00ad] }] },
+		];
+		await render();
+		expect(marks()).toHaveLength(2);
+		const label = tf('bulk.hidden.label', { kind: `${t('bulk.hidden.kind.soft_hyphen')} (U+00AD)` });
+		for (const m of marks()) {
+			expect(m.textContent).toBe(t('bulk.hidden.mark'));
+			expect(m.getAttribute('title')).toBe(label);
+			expect(m.getAttribute('aria-label')).toBe(label);
+		}
+		// The code point stands in the label, not in the text the owner reads.
+		expect(target.textContent).not.toContain('U+00AD');
+		// A Shopify run counts products, as every count beside it.
+		expect(count()).toBe(tf('bulk.hidden.count_products', { n: '2' }));
+		expect(legend()?.textContent).toBe(t('bulk.hidden.legend'));
+	});
+
+	// U-218: a value taken back no longer holds what will be written. Its mark stays, as a
+	// record of what was written, but turns grey with it and warns no more; it calls for no legend.
+	it('greys the mark of a value taken back, and shows the legend only for a value that still stands', async () => {
+		const marked = (seq: number, undone: boolean): BulkTarget => ({ seq, key: `gid://shopify/Product/${String(seq)}`, change: 'update', error: null, deselected: false,
+			written: true, undone, diff: fieldsDiff('Wasserfilter', 'Wasser\u00adfilter'), hiddenAdds: [{ field: 'title', codePoints: [0x00ad] }] } as BulkTarget);
+		run = makeRun({ phase: 'done', applied: 2, undone: 1, total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [marked(1, true), marked(2, false)];
+		await render();
+		const [back, stands] = marks();
+		expect(back!.className).toContain('text-text-subtle');
+		expect(back!.className).not.toContain('warning');
+		expect(stands!.className).toContain('text-warning');
+		expect(legend()?.textContent).toBe(t('bulk.hidden.legend'));
+	});
+
+	it('greys the mark of a text line taken back, too', async () => {
+		run = makeRun({ phase: 'done', applied: 1, undone: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'notes.txt', change: 'update', error: null, deselected: false, written: true, undone: true,
+			diff: { kind: 'text', from: 0, removed: ['Ketab'], added: ['Ke\u200ctab'] } as BulkTarget['diff'], hiddenAdds: [{ field: '', codePoints: [0x200c] }] } as BulkTarget];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.className).toContain('text-text-subtle');
+	});
+
+	it('shows no legend where every marked value is taken back', async () => {
+		run = makeRun({ phase: 'done', applied: 1, undone: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', error: null, deselected: false, written: true, undone: true,
+			diff: fieldsDiff('Wasserfilter', 'Wasser\u00adfilter'), hiddenAdds: [{ field: 'title', codePoints: [0x00ad] }] } as BulkTarget];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.className).toContain('text-text-subtle');
+		expect(legend()).toBeNull();
+	});
+
+	it('marks a new emoji behind the whole emoji, and a single target in the singular', async () => {
+		run = makeRun({ hiddenAddsTargets: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Wasserfilter', 'Wasserfilter ❤\ufe0f'), error: null, deselected: false,
+			hiddenAdds: [{ field: 'title', codePoints: [0xfe0f] }] }];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.closest('ins')?.textContent).toBe(`Wasserfilter \u2764\ufe0f${t('bulk.hidden.mark')}`);
+		expect(count()).toBe(t('bulk.hidden.count_products_one'));
+	});
+
+	// U-294: a field too large or too complex to check is said to be unchecked, under the field and
+	// in a count of its own; it is never counted or marked as one that adds.
+	const unchecked = (): Element[] => [...target.querySelectorAll('[data-testid="bulk-unchecked"]')];
+	const uncheckedCount = (): string | null | undefined => target.querySelector('[data-testid="bulk-unchecked-count"]')?.textContent;
+	it('says under an unchecked field that it was not checked, offers taking the target out, and counts it on its own', async () => {
+		run = makeRun({ hiddenAddsTargets: 0, hiddenUncheckedTargets: 2, total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [1, 2].map((seq) => ({ seq, key: `gid://shopify/Product/${String(seq)}`, change: 'update' as const, error: null, deselected: seq === 2,
+			diff: { kind: 'fields', fields: [{ field: 'descriptionHtml', before: '<p>a</p>', after: '<p>b</p>' }] } as BulkTarget['diff'],
+			hiddenUnchecked: ['descriptionHtml'] }));
+		await render();
+		expect(unchecked().map((e) => e.textContent)).toEqual([t('bulk.unchecked.field_take_out'), t('bulk.unchecked.field')]);
+		expect(uncheckedCount()).toBe(tf('bulk.unchecked.count_products', { n: '2' }));
+		// Nothing claims a mark or a character added.
+		expect(marks()).toHaveLength(0);
+		expect(legend()).toBeNull();
+		expect(count()).toBeUndefined();
+	});
+
+	it('says nothing of an unchecked field for a run without one', async () => {
+		run = makeRun({ hiddenAddsTargets: 0, hiddenUncheckedTargets: 0 });
+		await render();
+		expect(unchecked()).toHaveLength(0);
+		expect(uncheckedCount()).toBeUndefined();
+	});
+
+	it('holds the released unchecked sentences word for word, in both languages (U-294)', () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		const released: Record<string, [string, string]> = {
+			'bulk.unchecked.count': ['Bei {n} Zielen konnte lynox nicht prüfen, ob sie unsichtbare Zeichen hinzufügen: Ein Feld ist dafür zu gross oder zu komplex aufgebaut. Fehlt bei ihnen eine Markierung, heisst das nicht, dass sie keine hinzufügen.', 'For {n} targets, lynox could not check whether they add invisible characters: a field is too large or too complex for it. If they show no mark, that does not mean they add none.'],
+			'bulk.unchecked.count_one': ['Bei 1 Ziel konnte lynox nicht prüfen, ob es unsichtbare Zeichen hinzufügt: Ein Feld ist dafür zu gross oder zu komplex aufgebaut. Fehlt bei ihm eine Markierung, heisst das nicht, dass es keine hinzufügt.', 'For 1 target, lynox could not check whether it adds invisible characters: a field is too large or too complex for it. If it shows no mark, that does not mean it adds none.'],
+			'bulk.unchecked.count_products': ['Bei {n} Produkten konnte lynox nicht prüfen, ob sie unsichtbare Zeichen hinzufügen: Ein Feld ist dafür zu gross oder zu komplex aufgebaut. Fehlt bei ihnen eine Markierung, heisst das nicht, dass sie keine hinzufügen.', 'For {n} products, lynox could not check whether they add invisible characters: a field is too large or too complex for it. If they show no mark, that does not mean they add none.'],
+			'bulk.unchecked.count_products_one': ['Bei 1 Produkt konnte lynox nicht prüfen, ob es unsichtbare Zeichen hinzufügt: Ein Feld ist dafür zu gross oder zu komplex aufgebaut. Fehlt bei ihm eine Markierung, heisst das nicht, dass es keine hinzufügt.', 'For 1 product, lynox could not check whether it adds invisible characters: a field is too large or too complex for it. If it shows no mark, that does not mean it adds none.'],
+			'bulk.unchecked.field': ['lynox konnte nicht prüfen, ob hier unsichtbare Zeichen hinzukommen: Der bisherige oder der neue Inhalt ist dafür zu gross oder zu komplex aufgebaut.', 'lynox could not check whether invisible characters are added here: the current or the new content is too large or too complex for it.'],
+			'bulk.unchecked.field_take_out': ['lynox konnte nicht prüfen, ob hier unsichtbare Zeichen hinzukommen: Der bisherige oder der neue Inhalt ist dafür zu gross oder zu komplex aufgebaut. Willst du sichergehen, nimm dieses Ziel aus dem Lauf.', 'lynox could not check whether invisible characters are added here: the current or the new content is too large or too complex for it. To be sure, leave this target out of the run.'],
+		};
+		for (const [key, [de, en]] of Object.entries(released)) {
+			setLocale('de');
+			expect(t(key), key).toBe(de);
+			setLocale('en');
+			expect(t(key), key).toBe(en);
+		}
+	});
+
+	it('shows no mark, legend or count for a target that adds none', async () => {
+		run = makeRun({ hiddenAddsTargets: 0 });
+		await render();
+		expect(marks()).toHaveLength(0);
+		expect(legend()).toBeNull();
+		expect(count()).toBeUndefined();
+	});
+
+	// At a probe the page loads a first page only, unless a target adds such a character: then it
+	// loads all of them, so the count's "marked in the preview" holds for the eighth target too.
+	it('counts at a probe\'s confirmation too, and shows a marked target past the first page', async () => {
+		const n = 8;
+		run = makeRun({ targetSystem: 'http:api.example.com', phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1,
+			probe: { key: 'https://api.example.com/items/1', fields: ['title'] }, hiddenAddsTargets: 1, total: n,
+			changes: { update: n, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = Array.from({ length: n }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `https://api.example.com/items/${String(i + 1)}`, change: 'update', error: null, deselected: false,
+			diff: fieldsDiff('Ketab', i === n - 1 ? 'Ke\u200ctab' : 'Ketab!'), ...(i === n - 1 ? { hiddenAdds: [{ field: 'title', codePoints: [0x200c] }] } : {}),
+		}));
+		await render();
+		expect(count()).toBe(tf('bulk.hidden.count_one', { n: '1' }));
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.closest('tr')?.querySelector('code')?.textContent).toBe(`https://api.example.com/items/${String(n)}`);
+	});
+
+	it('marks the added lines of a value that is one text', async () => {
+		run = makeRun({ targetSystem: 'data_store', hiddenAddsTargets: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'row-1', change: 'update', error: null, deselected: false,
+			diff: { kind: 'text', from: 0, removed: ['Ketab'], added: ['Ke\u200ctab'] } as BulkTarget['diff'], hiddenAdds: [{ field: '', codePoints: [0x200c] }] }];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(count()).toBe(tf('bulk.hidden.count_one', { n: '1' }));
+	});
+
+	it('marks the value a target refused for its shortcode leaves to the owner to paste', async () => {
+		const value = '[gallery ids="1"]<p>Wa\u00adsser</p>';
+		run = makeRun({ total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'invalid', error: 'shortcode_changed', deselected: false, diff: { kind: 'none' } as BulkTarget['diff'],
+			refusedValues: [{ field: 'descriptionHtml', value, codePoints: [0x00ad] }] }];
+		await render();
+		const shown = target.querySelector('[data-testid="bulk-refused-value-text"]');
+		expect(shown?.querySelectorAll('[data-testid="bulk-hidden-mark"]')).toHaveLength(1);
+		expect(shown?.textContent).toBe(`[gallery ids="1"]<p>Wa\u00ad${t('bulk.hidden.mark')}sser</p>`);
+		// The phone has no title to show: the sentence under the field says what a mark means there.
+		expect(target.querySelector('[data-testid="bulk-refused-value-hidden"]')?.textContent).toBe(t('bulk.invalid.value_hidden'));
+	});
+
+	it('marks a soft hyphen an HTML description holds as its reference', async () => {
+		run = makeRun({ hiddenAddsTargets: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', error: null, deselected: false,
+			diff: { kind: 'fields', fields: [{ field: 'descriptionHtml', before: '<p>Wasserfilter</p>', after: '<p>Wasser&shy;filter</p>' }] } as BulkTarget['diff'],
+			hiddenAdds: [{ field: 'descriptionHtml', codePoints: [0x00ad], html: true }] }];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.closest('ins')?.textContent).toBe(`<p>Wasser&shy;${t('bulk.hidden.mark')}filter</p>`);
+	});
+
+	it('marks a reference in a value to copy, which is always HTML', async () => {
+		run = makeRun({ total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'invalid', error: 'shortcode_changed', deselected: false, diff: { kind: 'none' } as BulkTarget['diff'],
+			refusedValues: [{ field: 'descriptionHtml', value: '[gallery ids="1"]<p>Wa&shy;sser</p>', codePoints: [0x00ad] }] }];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-refused-value-text"]')?.querySelectorAll('[data-testid="bulk-hidden-mark"]')).toHaveLength(1);
+	});
+
+	it('says nothing under a value to copy that carries no mark', async () => {
+		run = makeRun({ total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'invalid', error: 'shortcode_changed', deselected: false, diff: { kind: 'none' } as BulkTarget['diff'],
+			refusedValues: [{ field: 'descriptionHtml', value: '[gallery ids="1"]<p>Wasser</p>' }] }];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-refused-value-text"]')).not.toBeNull();
+		expect(target.querySelector('[data-testid="bulk-refused-value-hidden"]')).toBeNull();
 	});
 });

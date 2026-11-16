@@ -11,7 +11,7 @@ Docker is the recommended way to run lynox in production.
 |-------|---------|
 | `ghcr.io/lynox-ai/lynox:latest` | Engine + Web UI on port 3000 (also tagged with the release version, e.g. `:2.9.1` — no `v` prefix) |
 
-The image is published as a multi-arch manifest (`linux/amd64` + `linux/arm64`), so Apple Silicon and ARM servers can pull natively. The bundled `docker-compose.yml` pins `platform: linux/amd64` as a conservative default — remove that line in the compose service if you want native arm64 on Apple Silicon.
+The image is published as a multi-arch manifest (`linux/amd64` + `linux/arm64`), so Apple Silicon and ARM servers pull the native image. Older copies of `docker-compose.yml` pinned `platform: linux/amd64`; if yours still has that line, remove it to run natively on ARM.
 
 ## Quick Start
 
@@ -113,7 +113,7 @@ Mount `~/.lynox` to keep your data across container restarts:
 
 The compose file mounts `${HOME}/.lynox`, and `${HOME}` is read anew by every `docker compose` command. Run them all as the same user in the same environment. A shell where `HOME` is set differently mounts that other folder, or fails to start if it does not exist. `sudo docker compose …` does the same, and on rootless Docker it also talks to a different daemon.
 
-The container has to be able to write the folder (see the Quick Start). If it restarts in a loop and the log says `cannot create /home/lynox/.lynox/.volume-check: Permission denied` or `/home/lynox/.lynox is not writable`, it is running as someone other than the folder's owner. Stop it and do one of the following:
+The container has to be able to write the folder (see the Quick Start). If it restarts in a loop and the log says `/home/lynox/.lynox belongs to uid … this container runs as uid …`, `ERROR: cannot read the access token file` or `/home/lynox/.lynox is not writable`, it is running as someone other than the folder's owner (older images said `cannot create /home/lynox/.lynox/.volume-check: Permission denied`). Stop it and do one of the following:
 
 - Run the second line of the Quick Start, as shown above.
 - For data that an older setup wrote as uid 1001, leave `LYNOX_UID` unset and keep running as 1001.

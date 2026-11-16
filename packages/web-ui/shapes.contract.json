@@ -97,7 +97,7 @@
       "source": "src/lib/components/ChatView.svelte",
       "evidence": {
         "classes": [
-          "ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}"
+          "ml-auto md:ml-1 text-[11px] md:text-[10px] text-success"
         ]
       },
       "preview": {

@@ -308,6 +308,11 @@ describe('DataStore source stamp', () => {
       const callers = walk(srcRoot).filter(f => /\.ensureSourceColumns\(/.test(readFileSync(f, 'utf8')));
       expect(callers.map(f => f.slice(srcRoot.length + 1))).toEqual(['core/engine.ts']);
     });
+
+    it('only the engine gives tables their ids: no other source file calls ensureCollectionIds', () => {
+      const callers = walk(srcRoot).filter(f => /\.ensureCollectionIds\(/.test(readFileSync(f, 'utf8')));
+      expect(callers.map(f => f.slice(srcRoot.length + 1))).toEqual(['core/engine.ts']);
+    });
   });
 
   describe('the writers stamp what the writing agent holds', () => {

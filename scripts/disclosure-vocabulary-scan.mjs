@@ -189,4 +189,4 @@ try {
   process.stderr.write(`disclosure-vocabulary-scan: could not resolve ${process.argv[1]}\n`);
   process.exitCode = 2;
 }
-if (invoked !== null && fileURLToPath(import.meta.url) === invoked) process.exit(main());
+if (invoked !== null && fileURLToPath(import.meta.url) === invoked) process.exitCode = main();
