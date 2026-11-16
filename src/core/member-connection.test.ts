@@ -346,6 +346,32 @@ describe('the run\'s member-connection notes', () => {
     expect(notes.size).toBe(1);
   });
 
+  it('a run inside a run hands its lines on only when it forwards them, and then with their German', async () => {
+    let held: ReadonlySet<string> = new Set();
+    let handed: ReadonlySet<string> = new Set();
+    let handedSaid: ReadonlyMap<string, string> = new Map();
+    const outerHeld = runCollectingMemberNotes(async () => {
+      const inner = runCollectingMemberNotes(async () => { refuseMemberConnection(crm(), OWNER_PRINCIPAL, ends(['M-1'])); });
+      await inner.done;
+      held = inner.notes;
+    });
+    await outerHeld.done;
+    // Without forwarding, the inner run keeps its lines to itself.
+    expect(held.size).toBe(1);
+    expect(outerHeld.notes.size).toBe(0);
+    const outerHanded = runCollectingMemberNotes(async () => {
+      const inner = runCollectingMemberNotes(async () => { refuseMemberConnection(crm(), OWNER_PRINCIPAL, ends(['M-1'])); }, undefined, { forward: true });
+      await inner.done;
+      handed = inner.notes;
+      handedSaid = inner.said;
+    });
+    await outerHanded.done;
+    expect([...outerHanded.notes]).toEqual([...handed]);
+    const line = [...handed][0]!;
+    expect(outerHanded.said.get(line)).toBe(handedSaid.get(line));
+    expect(handedSaid.get(line)).not.toBe(line);
+  });
+
   it('a request that may go on notes nothing', async () => {
     const { notes, done } = runCollectingMemberNotes(async () => refuseMemberConnection(crm(), B, ends(['M-1'])));
     expect(await done).toBeNull();
