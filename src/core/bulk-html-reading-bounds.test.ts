@@ -65,28 +65,28 @@ describe('the bounds the markup check reads within', () => {
     // A smaller bound reaches the same counting quickly; the parser builds two nodes of its own.
     const bound = 1000;
     const own = bound - 2;
-    expect(withinReadingBounds('<br>'.repeat(own), bound)).toBe(true);
-    expect(withinReadingBounds('<br>'.repeat(own + 1), bound)).toBe(false);
-    expect(withinReadingBounds('<!---->'.repeat(own), bound)).toBe(true);
-    expect(withinReadingBounds('<!---->'.repeat(own + 1), bound)).toBe(false);
-    expect(withinReadingBounds('x<br>'.repeat(own / 2), bound)).toBe(true);
-    expect(withinReadingBounds('x<br>'.repeat(own / 2) + 'x', bound)).toBe(false);
+    expect(withinReadingBounds('<br>'.repeat(own), { nodes: bound })).toBe(true);
+    expect(withinReadingBounds('<br>'.repeat(own + 1), { nodes: bound })).toBe(false);
+    expect(withinReadingBounds('<!---->'.repeat(own), { nodes: bound })).toBe(true);
+    expect(withinReadingBounds('<!---->'.repeat(own + 1), { nodes: bound })).toBe(false);
+    expect(withinReadingBounds('x<br>'.repeat(own / 2), { nodes: bound })).toBe(true);
+    expect(withinReadingBounds('x<br>'.repeat(own / 2) + 'x', { nodes: bound })).toBe(false);
     // Text the parser inserts rather than appends counts the same.
     const inserted = '<table>' + '<br>x'.repeat((own - 2) / 2) + '<br>';
-    expect(withinReadingBounds(inserted, bound)).toBe(true);
-    expect(withinReadingBounds(`${inserted}x`, bound)).toBe(false);
+    expect(withinReadingBounds(inserted, { nodes: bound })).toBe(true);
+    expect(withinReadingBounds(`${inserted}x`, { nodes: bound })).toBe(false);
   });
 
   it('end at the constant node bound by default', () => {
     // One parse of the bound's size; on a loaded machine it may take seconds.
-    expect(withinReadingBounds('<br>'.repeat(MARKUP_MAX_NODES - 2))).toBe(true);
-    expect(withinReadingBounds('<br>'.repeat(MARKUP_MAX_NODES - 1))).toBe(false);
+    expect(withinReadingBounds('<br>'.repeat(MARKUP_MAX_NODES - 2), { tags: MARKUP_MAX_NODES })).toBe(true);
+    expect(withinReadingBounds('<br>'.repeat(MARKUP_MAX_NODES - 1), { tags: MARKUP_MAX_NODES })).toBe(false);
   }, 60_000);
 
   it('count a run of words as the one text node it is', () => {
     // The tokenizer hands words and spaces over one by one; they build one node.
     expect(withinReadingBounds(`<p>${'word '.repeat(MARKUP_MAX_NODES)}</p>`)).toBe(true);
-    expect(withinReadingBounds('word '.repeat(2000), 1000)).toBe(true);
+    expect(withinReadingBounds('word '.repeat(2000), { nodes: 1000 })).toBe(true);
   });
 
   it('read prose just under the byte bound as within, and list it', () => {
