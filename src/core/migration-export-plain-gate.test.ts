@@ -7,7 +7,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { EngineDb } from './engine-db.js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { EngineDb, deriveEngineEncKey } from './engine-db.js';
+import { encryptStoredText } from './migration-rekey.js';
 import { RunHistory } from './run-history.js';
 import { generateEphemeralKeypair, deriveTransferKey, deserializePublicKey, serializePublicKey } from './migration-crypto.js';
 
@@ -60,15 +62,28 @@ describe('the export zeroes every plaintext buffer it made, whichever path a sto
     new EngineDb(join(dir, 'engine.db'), VAULT).close();
     new RunHistory(join(dir, 'history.db'), VAULT).close();
     if (opts.filler) {
+      // A merge ledger with one contact cell and a filler, written as the merge runner writes it.
+      const key = deriveEngineEncKey(VAULT);
+      mkdirSync(join(dir, 'sweeps'));
+      writeFileSync(join(dir, 'sweeps', 'merge-2026-11-16T00-00-00-000Z-abc123.json'), JSON.stringify({
+        version: 1, phase: 'merge', createdAt: '2026-11-16T00:00:00.000Z',
+        entry: {
+          dupId: 'd', canonicalId: 'c', kind: 'person', ownerUserId: 'u', dupArchivedAtWas: null, dupMergedIntoWas: null,
+          canonicalAliasesWas: '[]', canonicalParentWasDup: false, repoints: [], memorySubjects: { dupRows: [], canonicalMemoryIdsBefore: [] }, cooccurrences: [],
+          detail: { table: 'people', dupRow: { subject_id: 'd', email: encryptStoredText('d@example.org', key), phone: '' }, canonicalRow: { subject_id: 'c', email: '', phone: '' } },
+        },
+        dataStore: [], threadAnchors: [], applied: true, pad: 'f'.repeat(9 * 1024 * 1024),
+      }, null, 2));
+      key.fill(0);
       const d = new Database(join(dir, 'engine.db'));
       d.exec('CREATE TABLE filler (v TEXT)');
       d.prepare('INSERT INTO filler (v) VALUES (?)').run('f'.repeat(9 * 1024 * 1024));
       d.close();
     }
   }
-  const expectZeroed = (): void => {
-    expect(held.payloads.length).toBe(2);
-    expect(held.bodies.length).toBe(2);
+  const expectZeroed = (n = 2): void => {
+    expect(held.payloads.length).toBe(n);
+    expect(held.bodies.length).toBe(n);
     for (const b of [...held.payloads, ...held.bodies]) expect(zero(b)).toBe(true);
   };
 
@@ -82,7 +97,9 @@ describe('the export zeroes every plaintext buffer it made, whichever path a sto
     source({ filler: true });
     const { manifest } = new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT }).export(key(), undefined, { plain: { ceiling: ROOMY } });
     expect(manifest.chunks.filter(c => c.type === 'sqlite_db_plain' && c.name.startsWith('engine.db')).length).toBeGreaterThan(1);
-    expectZeroed();
+    expect(manifest.chunks.filter(c => c.type === 'sweeps' && c.name.startsWith('sweeps:part')).length).toBeGreaterThan(1);
+    expect(manifest.chunks.find(c => c.name === 'sweeps:part0')?.ledgerForm).toBe('plain');
+    expectZeroed(3);
   });
 
   it('on the raw path', () => {
