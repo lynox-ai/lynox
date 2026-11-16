@@ -60,6 +60,14 @@ describe('fetchIcsFeed', () => {
     expect(fetchWithValidatedRedirects.mock.calls[0]?.[2]).toEqual({ surface: 'discovery' });
   });
 
+  it('does not request a feed address a server may read as a write, and names no part of it', async () => {
+    for (const url of ['https://calendar.example.com/ical/private-9f3a7c21b4/basic.ics?_method=DELETE', 'https://calendar.example.com/graphql?query=mutation%7BdeleteAll%7D']) {
+      const err = await fetchIcsFeed(url).then(() => null, (e: unknown) => e as Error);
+      expect(err?.message).toBe('the calendar feed address carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write, so it was not requested. Use the feed address that the calendar shows for subscribing.');
+    }
+    expect(fetchWithValidatedRedirects).not.toHaveBeenCalled();
+  });
+
   it('reads at most MAX_ICS_BYTES', async () => {
     await fetchIcsFeed(SECRET_URL);
     expect(readBodyLimited.mock.calls[0]?.[1]).toBe(MAX_ICS_BYTES);

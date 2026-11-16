@@ -41,6 +41,7 @@ import {
   readdirSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   unlinkSync,
@@ -409,6 +410,20 @@ export function mountIdOfDir(path: string): number | null {
     return null;
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * The path an open fd refers to, read back from the kernel (`/proc/self/fd/<n>`), or `null` where
+ * that cannot be read: off Linux, or a fd whose link does not resolve. Only READS the link; it never
+ * opens through it. A caller that must know where a file it opened lives treats `null` as "refuse".
+ */
+export function fdRealPath(fd: number): string | null {
+  if (!IS_LINUX) return null;
+  try {
+    return realpathSync(`/proc/self/fd/${String(fd)}`);
+  } catch {
+    return null;
   }
 }
 

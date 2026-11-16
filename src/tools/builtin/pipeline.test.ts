@@ -652,9 +652,41 @@ describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
       template: false,
       confirmedAt: '2026-01-01T00:00:00.000Z',
     });
+    // The owner's stamp holds over these steps (`workflow-stamp.ts`): the run history says so.
+    const stamp = { value: 'holds' as string };
+    agent.toolContext.runHistory = { workflowStampState: () => stamp.value, workflowStampDigest: () => 'digest-1' } as unknown as NonNullable<IAgent['toolContext']['runHistory']>;
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
     expect(result).not.toContain('first-run confirmation');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    // The same workflow once its steps changed after the stamp: refused before any step, waiting for the owner.
+    stamp.value = 'awaits_owner_stamp';
+    const held = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(held).toMatch(/waits for its owner to review its steps/);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  // An unattended caller runs the workflow only as its owner stamped it: no changed steps for one run,
+  // and a retry only of a run whose steps were exactly the stamped ones.
+  it('refuses an autonomous run with changed steps, and an autonomous retry of a run that was not the stamped one', async () => {
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const pipelineId = 'stored-stamped';
+    storePipeline(pipelineId, {
+      id: pipelineId, name: 'p', goal: 'g', steps: [{ id: 's1', task: 'x' }], reasoning: 'r', estimatedCost: 0.01,
+      createdAt: new Date().toISOString(), executed: false, executionMode: 'tracked', template: true,
+      mode: 'autonomous', confirmedAt: '2026-01-01T00:00:00.000Z',
+    } as never);
+    const digest = { value: 'digest-1' };
+    agent.toolContext.runHistory = { workflowStampState: () => 'holds', workflowStampDigest: () => digest.value } as unknown as NonNullable<IAgent['toolContext']['runHistory']>;
+    const changed = await runWorkflowTool.handler({ workflow_id: pipelineId, modifications: [{ step_id: 's1', action: 'remove' }] }, agent);
+    expect(changed).toMatch(/only as its owner stamped it/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    expect(await runWorkflowTool.handler({ workflow_id: pipelineId }, agent)).not.toMatch(/^Error/);
+    // The stamp now holds over other steps than the run ran: its retry is refused.
+    digest.value = 'digest-2';
+    expect(await runWorkflowTool.handler({ workflow_id: pipelineId, retry: true }, agent)).toMatch(/waits for its owner to review its steps/);
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 
@@ -2747,7 +2779,12 @@ describe('the run row of a stored workflow run from a chat', () => {
     const marked = vi.fn(() => opts.removed !== false);
     const ctx = agent.toolContext as Record<string, unknown>;
     // The owner's workflow, which the helper runs as itself (1100).
-    ctx['runHistory'] = { getPlannedPipeline: () => undefined, insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(), markPipelineExecuted: marked, getWorkflowAuthorship: () => OWNER_AUTHORSHIP };
+    // The owner's stamp, as the run history reads it (`workflow-stamp.ts`): here it holds exactly
+    // when the definition carries one, so `confirmedAt` alone decides, as before the digest.
+    ctx['runHistory'] = {
+      getPlannedPipeline: () => undefined, insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(), markPipelineExecuted: marked, getWorkflowAuthorship: () => OWNER_AUTHORSHIP,
+      workflowStampState: (p: { confirmedAt?: string }) => (p.confirmedAt ? 'holds' : 'unconfirmed'), workflowStampDigest: () => 'digest-1',
+    };
     ctx['auditLog'] = opts.log === 'none' ? null : { record: (e: Rec) => { if (opts.log === 'throws') throw new Error('disk full'); recs.push(e); } };
     (agent as unknown as Record<string, unknown>)['principal'] = principal;
     return { agent, recs, marked };

@@ -171,6 +171,45 @@ describe('reassert', () => {
   });
 });
 
+// What a refused request names (`shopify-host.ts › clearanceRefusalText`) is the cause of the
+// refusal that holds, not how long ago it came: both kinds back off for the same 60 s.
+describe('heldRefusal', () => {
+  it('holds the control plane\'s refusal while its backoff runs, and nothing after', async () => {
+    const h = harness([async () => json(409, { ok: false, reason: 'below_floor' })]);
+    expect(h.c.heldRefusal()).toBeNull();
+    await h.c.ensure();
+    expect(h.c.heldRefusal()).toBe('below_floor');
+    expect(await h.c.ensure()).toEqual({ ok: false, reason: 'backoff' });
+    expect(h.c.heldRefusal()).toBe('below_floor');
+    h.advance(EXACT_ATTACH_BACKOFF_MS);
+    expect(h.c.heldRefusal()).toBeNull();
+  });
+
+  it('holds an unanswered ask as its own cause, for the same backoff', async () => {
+    const timeout = Object.assign(new Error('timed out'), { name: 'TimeoutError' });
+    const h = harness([async () => { throw timeout; }]);
+    await h.c.ensure();
+    expect(h.c.heldRefusal()).toBe('timeout');
+    h.advance(EXACT_ATTACH_BACKOFF_MS - 1);
+    expect(h.c.heldRefusal()).toBe('timeout');
+  });
+
+  it('holds a marker that could not be written, and a refused re-assert', async () => {
+    const h = harness([async () => json(200, { ok: true })], markerStub({ setThrows: true }));
+    await h.c.ensure();
+    expect(h.c.heldRefusal()).toBe('marker_unwritable');
+    const r = harness([async () => json(409, { ok: false, reason: 'not_tenant_host' })], markerStub({ set: true }));
+    await r.c.reassert(false);
+    expect(r.c.heldRefusal()).toBe('not_tenant_host');
+  });
+
+  it('holds nothing once the boot is cleared', async () => {
+    const h = harness([async () => json(200, { ok: true })]);
+    await h.c.ensure();
+    expect(h.c.heldRefusal()).toBeNull();
+  });
+});
+
 describe('controlPlaneFromEnv', () => {
   it('needs all three managed variables', () => {
     const full = { LYNOX_MANAGED_CONTROL_PLANE_URL: 'u', LYNOX_MANAGED_INSTANCE_ID: 'i', LYNOX_HTTP_SECRET: 's' };

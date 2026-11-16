@@ -29,7 +29,11 @@ interface InboxReadInput {
   limit?: number | undefined;
   offset?: number | undefined;
   id?: string | undefined;
+  rule_id?: string | undefined;
 }
+
+/** A rule id as the store makes them (`nextId('rul')`). */
+const RULE_ID = /^rul_[A-Za-z0-9_-]{1,64}$/;
 
 const BUCKETS: readonly InboxBucket[] = ['requires_user', 'draft_ready', 'auto_handled'];
 const USER_ACTIONS = new Set(['archived', 'replied', 'snoozed', 'unhandled']);
@@ -80,7 +84,8 @@ function sensitiveIn(...texts: ReadonlyArray<string | undefined>): string[] {
 function itemHeader(item: InboxItem): string {
   const action = item.userAction !== undefined && USER_ACTIONS.has(item.userAction) ? `/${item.userAction}` : '';
   const bucket = BUCKETS.includes(item.bucket) ? item.bucket : 'unknown';
-  return `id:${item.id} · bucket:${bucket}${action} · date:${isoSecond(item.mailDate ?? item.classifiedAt)}`;
+  const rule = item.matchedRuleId !== undefined && RULE_ID.test(item.matchedRuleId) ? ` · rule:${item.matchedRuleId}` : '';
+  return `id:${item.id} · bucket:${bucket}${action} · date:${isoSecond(item.mailDate ?? item.classifiedAt)}${rule}`;
 }
 
 /**
@@ -157,9 +162,12 @@ function renderList(reader: InboxReader, agent: IAgent, input: InboxReadInput): 
   }
   const limit = wholeNumber(input.limit, INBOX_READ_LIMITS.listDefault, 1, INBOX_READ_LIMITS.listMax);
   const offset = wholeNumber(input.offset, 0, 0, INBOX_READ_LIMITS.offsetMax);
-  const items = reader.listItems(input.bucket, limit, offset, leftOut(reader, agent));
-  if (items.length === 0) return `No open items in ${input.bucket}${offset > 0 ? ` after the first ${String(offset)}` : ''}.`;
-  const parts: string[] = [`Open items in ${input.bucket}, newest first (${String(offset + 1)}–${String(offset + items.length)}):`, ''];
+  const ruleId = typeof input.rule_id === 'string' && input.rule_id.trim().length > 0 ? input.rule_id.trim() : undefined;
+  if (ruleId !== undefined && !RULE_ID.test(ruleId)) return 'inbox_read: rule_id must be a rule id, as an item line shows it (rul_…).';
+  const items = reader.listItems(input.bucket, limit, offset, leftOut(reader, agent), ruleId);
+  const where = ruleId !== undefined ? `${input.bucket} filed by rule ${ruleId}` : input.bucket;
+  if (items.length === 0) return `No open items in ${where}${offset > 0 ? ` after the first ${String(offset)}` : ''}.`;
+  const parts: string[] = [`Open items in ${where}, newest first (${String(offset + 1)}–${String(offset + items.length)}):`, ''];
   for (const item of items) {
     // The stored body is checked though the list does not show it: it holds more of the mail
     // than the 200-character snippet, the part the intake check read.
@@ -210,6 +218,7 @@ export function createInboxReadTool(hooks?: MailHooks): ToolEntry<InboxReadInput
           limit: { type: 'number', description: `For "list": how many items. Default ${String(INBOX_READ_LIMITS.listDefault)}, at most ${String(INBOX_READ_LIMITS.listMax)}.` },
           offset: { type: 'number', description: 'For "list": skip this many items, to page on.' },
           id: { type: 'string', description: 'For "item": the item id, as a list shows it.' },
+          rule_id: { type: 'string', description: 'For "list": only the items this inbox rule filed (rule:… on an item line).' },
         },
         required: ['action'],
       },

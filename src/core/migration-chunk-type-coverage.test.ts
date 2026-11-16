@@ -135,7 +135,7 @@ describe('the declared list is the single source of the bucket table', () => {
     // drops it without a word (measured on v2.13.0 and v2.14.2). That addition owes a release
     // note, and a decision about whether it is the release that starts checking the version.
     expect([...MIGRATION_CHUNK_TYPES].sort()).toEqual([
-      'artifacts', 'config', 'memory', 'portable_dir', 'secrets', 'sqlite_db', 'sweeps',
+      'artifacts', 'config', 'memory', 'portable_dir', 'secrets', 'sqlite_db', 'sqlite_db_plain', 'sweeps',
     ]);
   });
 

@@ -126,16 +126,54 @@ describe('approving a preview', () => {
 		expect(line()!.textContent).toBe(full);
 		expect(buttonByText(tf('bulk.list.showAll', { n: '57' }))).toBeUndefined();
 		expect(document.activeElement).toBe(line());
+		// The statuses the list reads stand on a line of their own, after the group's: never between it and its button.
+		const lines = [...target.querySelectorAll('p')].map((p) => p.textContent);
+		expect(lines[lines.indexOf(full) + 1]).toBe(t('bulk.list.any_status'));
+	});
+
+	describe('the statuses a store\'s product list reads, where it is approved', () => {
+		const texts = (): (string | null)[] => [...target.querySelectorAll('p')].map((p) => p.textContent);
+		const german = (): void => {
+			const before = getLocale();
+			setLocale('de');
+			onTestFinished(() => setLocale(before));
+		};
+		it('names every status for a list without a filter', async () => {
+			german();
+			run = makeRun({ listFilters: {} });
+			await render();
+			expect(texts()).toContain('Gelesen wird jedes Produkt des Shops, in jedem Status, auch „Entwurf“ und „archiviert“, und auch Geschenkgutscheine.');
+		});
+		it('names the status a filter names, on its own line after the group\'s', async () => {
+			german();
+			run = makeRun({ listFilters: { product_type: 'Tee', status: 'active' } });
+			await render();
+			const all = texts();
+			expect(all[all.indexOf('Gelesen werden nur die Produkte vom Produkttyp „Tee“.') + 1]).toBe('Gelesen werden nur Produkte mit dem Status „aktiv“.');
+			expect(target.textContent).not.toContain(t('bulk.list.all_status'));
+		});
+		it('names the status where a listed run is started, before its list is read', async () => {
+			german();
+			run = makeRun({ phase: 'planned', haltKey: 'listed', haltReason: 'engine English', total: 1, listFirstPage: 'https://demo.myshopify.com/products.json', listStartChecksum: 'l1', listFilters: { status: 'active' }, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+			await render();
+			expect(texts()).toContain('Gelesen werden nur Produkte mit dem Status „aktiv“.');
+		});
+		it('names no status for a list that is not a store\'s products', async () => {
+			german();
+			run = makeRun({ listFilters: null });
+			await render();
+			expect(target.textContent).not.toContain('Status');
+		});
 	});
 
 	it('shows why lynox leaves a product out, and folds the unchanged one until asked', async () => {
 		await render();
 		expect(target.textContent).toContain(t('bulk.invalid.not_found'));
-		expect(target.textContent).toContain('Product/1');
-		expect(target.textContent).not.toContain('Product/2');
+		expect(target.innerHTML).toContain('admin/products/1"');
+		expect(target.innerHTML).not.toContain('admin/products/2"');
 		buttonByText(t('bulk.preview.show_unchanged_one'))!.click();
 		await settle();
-		expect(target.textContent).toContain('Product/2');
+		expect(target.innerHTML).toContain('admin/products/2"');
 	});
 
 	it('folds the one unchanged target of another host under a button in the singular', async () => {
@@ -290,7 +328,7 @@ describe('approving a preview', () => {
 		expect(gets.filter((u) => u.includes('/targets?'))).toEqual([
 			expect.stringMatching(/offset=0&limit=500$/), expect.stringMatching(/offset=500&limit=500$/),
 		]);
-		expect(target.textContent).toContain('Product/501');
+		expect(target.innerHTML).toContain('admin/products/501"');
 	});
 
 	it('offers no approval when the pages list fewer targets than the run counts (L1)', async () => {
@@ -299,7 +337,7 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain(t('common.load_failed'));
 		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
 		expect(buttonByText(t('bulk.approve.write_only'))).toBeUndefined();
-		expect(target.textContent).not.toContain('Product/1');
+		expect(target.innerHTML).not.toContain('admin/products/1"');
 	});
 
 	it('words a refused take-out by its code, not by the engine\'s English (U-040)', async () => {
@@ -404,7 +442,7 @@ describe('a run halted on markup its store added', () => {
 		}));
 		await render();
 		const marked = [...target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')]
-			.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+			.map((m) => m.closest('tr')?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')?.replace(/^https:\/\/[^/]+\/admin\/products\//, 'gid://shopify/Product/') ?? '');
 		expect(marked).toEqual(['gid://shopify/Product/8']);
 		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop'));
 		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop_before'));
@@ -440,7 +478,7 @@ describe('a run whose store kept descriptions otherwise than sent', () => {
 		}));
 	};
 	const markedKeys = (): string[] => [...target.querySelectorAll('[data-testid="bulk-host-rewrote"]')]
-		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+		.map((m) => m.closest('tr')?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')?.replace(/^https:\/\/[^/]+\/admin\/products\//, 'gid://shopify/Product/') ?? '');
 
 	it('names one product in the singular, and marks it past the first page', async () => {
 		rewritten([8]);
@@ -480,7 +518,7 @@ describe('an atomic run that rolled back', () => {
 		{ seq: 3, key: 'gid://shopify/Product/3', change: 'update', diff: fieldsDiff('E', 'F'), error: 'write failed', deselected: false, written: false, undone: false },
 	];
 	const marked = (): string[] => [...target.querySelectorAll('[data-testid="bulk-rollback-left"]')]
-		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+		.map((m) => m.closest('tr')?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')?.replace(/^https:\/\/[^/]+\/admin\/products\//, 'gid://shopify/Product/') ?? '');
 
 	it('marks exactly the target the rollback left, with its own sentence and no way on', async () => {
 		run = aborted('atomicRollbackIncomplete');
@@ -638,7 +676,7 @@ describe('a preview whose SEO text gains an &', () => {
 	};
 	const line = (): string | null | undefined => target.querySelector('[data-testid="bulk-seo-entity-count"]')?.textContent;
 	const markedKeys = (): string[] => [...target.querySelectorAll('[data-testid="bulk-seo-entity"]')]
-		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+		.map((m) => m.closest('tr')?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')?.replace(/^https:\/\/[^/]+\/admin\/products\//, 'gid://shopify/Product/') ?? '');
 
 	it('names two products with their number, marks each, and shows the entity as text', async () => {
 		gaining([1, 3]);
@@ -711,9 +749,162 @@ describe('the markup a target changes (1010)', () => {
 		await render();
 		const undo = target.querySelectorAll('[data-testid="bulk-undo-markup"]');
 		expect(undo).toHaveLength(1);
-		expect(codes(undo[0]!)).toEqual(['gid://shopify/Product/1', '<script>steal()</script>']);
+		// The product is named by its admin link; the markup it writes back is listed as text.
+		expect(undo[0]!.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
+		expect(codes(undo[0]!)).toEqual(['<script>steal()</script>']);
 		expect(undo[0]!.textContent).toContain(t('bulk.markup.restores'));
 		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note'));
 		expect(target.querySelectorAll('script')).toHaveLength(0);
+	});
+});
+
+// A hidden character a target adds where text may carry one:
+// marked behind its grapheme, with the kind only in the label, a legend over the list, and a
+// count wherever the run is approved or its probe confirmed.
+describe('a hidden character a target adds in place', () => {
+	const marks = (): Element[] => [...target.querySelectorAll('[data-testid="bulk-hidden-mark"]')];
+	const count = (): string | null | undefined => target.querySelector('[data-testid="bulk-hidden-count"]')?.textContent;
+	const legend = (): Element | null => target.querySelector('[data-testid="bulk-hidden-legend"]');
+
+	it('marks a soft hyphen in a title and in an HTML description, counts the targets, and names the kind only in the label', async () => {
+		run = makeRun({ hiddenAddsTargets: 2, total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [
+			{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Wasserfilter', 'Wasser\u00adfilter'), error: null, deselected: false,
+				hiddenAdds: [{ field: 'title', codePoints: [0x00ad] }] },
+			{ seq: 2, key: 'gid://shopify/Product/2', change: 'update', error: null, deselected: false,
+				diff: { kind: 'fields', fields: [{ field: 'descriptionHtml', before: '<p>Wasserfilter</p>', after: '<p>Wasser\u00adfilter</p>' }] } as BulkTarget['diff'],
+				hiddenAdds: [{ field: 'descriptionHtml', codePoints: [0x00ad] }] },
+		];
+		await render();
+		expect(marks()).toHaveLength(2);
+		const label = tf('bulk.hidden.label', { kind: `${t('bulk.hidden.kind.soft_hyphen')} (U+00AD)` });
+		for (const m of marks()) {
+			expect(m.textContent).toBe(t('bulk.hidden.mark'));
+			expect(m.getAttribute('title')).toBe(label);
+			expect(m.getAttribute('aria-label')).toBe(label);
+		}
+		// The code point stands in the label, not in the text the owner reads.
+		expect(target.textContent).not.toContain('U+00AD');
+		// A Shopify run counts products, as every count beside it.
+		expect(count()).toBe(tf('bulk.hidden.count_products', { n: '2' }));
+		expect(legend()?.textContent).toBe(t('bulk.hidden.legend'));
+	});
+
+	// U-218: a value taken back no longer holds what will be written. Its mark stays, as a
+	// record of what was written, but turns grey with it and warns no more; it calls for no legend.
+	it('greys the mark of a value taken back, and shows the legend only for a value that still stands', async () => {
+		const marked = (seq: number, undone: boolean): BulkTarget => ({ seq, key: `gid://shopify/Product/${String(seq)}`, change: 'update', error: null, deselected: false,
+			written: true, undone, diff: fieldsDiff('Wasserfilter', 'Wasser\u00adfilter'), hiddenAdds: [{ field: 'title', codePoints: [0x00ad] }] } as BulkTarget);
+		run = makeRun({ phase: 'done', applied: 2, undone: 1, total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [marked(1, true), marked(2, false)];
+		await render();
+		const [back, stands] = marks();
+		expect(back!.className).toContain('text-text-subtle');
+		expect(back!.className).not.toContain('warning');
+		expect(stands!.className).toContain('text-warning');
+		expect(legend()?.textContent).toBe(t('bulk.hidden.legend'));
+	});
+
+	it('greys the mark of a text line taken back, too', async () => {
+		run = makeRun({ phase: 'done', applied: 1, undone: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'notes.txt', change: 'update', error: null, deselected: false, written: true, undone: true,
+			diff: { kind: 'text', from: 0, removed: ['Ketab'], added: ['Ke\u200ctab'] } as BulkTarget['diff'], hiddenAdds: [{ field: '', codePoints: [0x200c] }] } as BulkTarget];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.className).toContain('text-text-subtle');
+	});
+
+	it('shows no legend where every marked value is taken back', async () => {
+		run = makeRun({ phase: 'done', applied: 1, undone: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', error: null, deselected: false, written: true, undone: true,
+			diff: fieldsDiff('Wasserfilter', 'Wasser\u00adfilter'), hiddenAdds: [{ field: 'title', codePoints: [0x00ad] }] } as BulkTarget];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.className).toContain('text-text-subtle');
+		expect(legend()).toBeNull();
+	});
+
+	it('marks a new emoji behind the whole emoji, and a single target in the singular', async () => {
+		run = makeRun({ hiddenAddsTargets: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Wasserfilter', 'Wasserfilter ❤\ufe0f'), error: null, deselected: false,
+			hiddenAdds: [{ field: 'title', codePoints: [0xfe0f] }] }];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.closest('ins')?.textContent).toBe(`Wasserfilter \u2764\ufe0f${t('bulk.hidden.mark')}`);
+		expect(count()).toBe(t('bulk.hidden.count_products_one'));
+	});
+
+	it('shows no mark, legend or count for a target that adds none', async () => {
+		run = makeRun({ hiddenAddsTargets: 0 });
+		await render();
+		expect(marks()).toHaveLength(0);
+		expect(legend()).toBeNull();
+		expect(count()).toBeUndefined();
+	});
+
+	// At a probe the page loads a first page only, unless a target adds such a character: then it
+	// loads all of them, so the count's "marked in the preview" holds for the eighth target too.
+	it('counts at a probe\'s confirmation too, and shows a marked target past the first page', async () => {
+		const n = 8;
+		run = makeRun({ targetSystem: 'http:api.example.com', phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1,
+			probe: { key: 'https://api.example.com/items/1', fields: ['title'] }, hiddenAddsTargets: 1, total: n,
+			changes: { update: n, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = Array.from({ length: n }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `https://api.example.com/items/${String(i + 1)}`, change: 'update', error: null, deselected: false,
+			diff: fieldsDiff('Ketab', i === n - 1 ? 'Ke\u200ctab' : 'Ketab!'), ...(i === n - 1 ? { hiddenAdds: [{ field: 'title', codePoints: [0x200c] }] } : {}),
+		}));
+		await render();
+		expect(count()).toBe(tf('bulk.hidden.count_one', { n: '1' }));
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.closest('tr')?.querySelector('code')?.textContent).toBe(`https://api.example.com/items/${String(n)}`);
+	});
+
+	it('marks the added lines of a value that is one text', async () => {
+		run = makeRun({ targetSystem: 'data_store', hiddenAddsTargets: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'row-1', change: 'update', error: null, deselected: false,
+			diff: { kind: 'text', from: 0, removed: ['Ketab'], added: ['Ke\u200ctab'] } as BulkTarget['diff'], hiddenAdds: [{ field: '', codePoints: [0x200c] }] }];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(count()).toBe(tf('bulk.hidden.count_one', { n: '1' }));
+	});
+
+	it('marks the value a target refused for its shortcode leaves to the owner to paste', async () => {
+		const value = '[gallery ids="1"]<p>Wa\u00adsser</p>';
+		run = makeRun({ total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'invalid', error: 'shortcode_changed', deselected: false, diff: { kind: 'none' } as BulkTarget['diff'],
+			refusedValues: [{ field: 'descriptionHtml', value, codePoints: [0x00ad] }] }];
+		await render();
+		const shown = target.querySelector('[data-testid="bulk-refused-value-text"]');
+		expect(shown?.querySelectorAll('[data-testid="bulk-hidden-mark"]')).toHaveLength(1);
+		expect(shown?.textContent).toBe(`[gallery ids="1"]<p>Wa\u00ad${t('bulk.hidden.mark')}sser</p>`);
+		// The phone has no title to show: the sentence under the field says what a mark means there.
+		expect(target.querySelector('[data-testid="bulk-refused-value-hidden"]')?.textContent).toBe(t('bulk.invalid.value_hidden'));
+	});
+
+	it('marks a soft hyphen an HTML description holds as its reference', async () => {
+		run = makeRun({ hiddenAddsTargets: 1, total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', error: null, deselected: false,
+			diff: { kind: 'fields', fields: [{ field: 'descriptionHtml', before: '<p>Wasserfilter</p>', after: '<p>Wasser&shy;filter</p>' }] } as BulkTarget['diff'],
+			hiddenAdds: [{ field: 'descriptionHtml', codePoints: [0x00ad], html: true }] }];
+		await render();
+		expect(marks()).toHaveLength(1);
+		expect(marks()[0]!.closest('ins')?.textContent).toBe(`<p>Wasser&shy;${t('bulk.hidden.mark')}filter</p>`);
+	});
+
+	it('marks a reference in a value to copy, which is always HTML', async () => {
+		run = makeRun({ total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'invalid', error: 'shortcode_changed', deselected: false, diff: { kind: 'none' } as BulkTarget['diff'],
+			refusedValues: [{ field: 'descriptionHtml', value: '[gallery ids="1"]<p>Wa&shy;sser</p>', codePoints: [0x00ad] }] }];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-refused-value-text"]')?.querySelectorAll('[data-testid="bulk-hidden-mark"]')).toHaveLength(1);
+	});
+
+	it('says nothing under a value to copy that carries no mark', async () => {
+		run = makeRun({ total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'invalid', error: 'shortcode_changed', deselected: false, diff: { kind: 'none' } as BulkTarget['diff'],
+			refusedValues: [{ field: 'descriptionHtml', value: '[gallery ids="1"]<p>Wasser</p>' }] }];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-refused-value-text"]')).not.toBeNull();
+		expect(target.querySelector('[data-testid="bulk-refused-value-hidden"]')).toBeNull();
 	});
 });
