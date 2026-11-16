@@ -18,6 +18,16 @@ import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-d
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 import { OMITTED_SIDECAR, restoreRefusal } from './sidecar-refusals.js';
+import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
+
+/**
+ * `: <reason>` for a log line about a failed backup or upload, or nothing while the process
+ * reduces error text (an exact connection is held). The reason can quote a workspace file name
+ * and, for an upload, Google's answer.
+ */
+export function backupFailureDetail(reason: string | undefined, fallback: string): string {
+  return isErrorTextReducedForProcess() ? '' : `: ${reason ?? fallback}`;
+}
 
 export { OMITTED_SIDECAR };
 import { closeAnchor, copyOut, FOLD_PROBE_NAME, isStageName, listDir, namesFoldAt, openAnchor, removeStaleStages, stageIn, statEntry, unlinkAt, WorkspaceAccessError, type StageEntry, type StagedWrite, type WorkspaceAnchor } from './workspace-fd.js';
@@ -783,14 +793,11 @@ export class BackupManager {
           try {
             const result = await this._gdriveUploader.upload(finalDir, manifest);
             if (!result.success) {
-              process.stderr.write(
-                `[lynox:backup] Google Drive upload failed — local backup is intact: ${result.error ?? 'unknown error'}\n`,
-              );
+              process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact${backupFailureDetail(result.error, 'unknown error')}\n`);
             }
           } catch (err: unknown) {
             // A throw is the unexpected path; the uploader reports refusals by return value.
-            const msg = err instanceof Error ? err.message : String(err);
-            process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${msg}\n`);
+            process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${processErrorText(err)}\n`);
           } finally {
             this._uploading--;
           }
