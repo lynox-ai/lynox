@@ -124,9 +124,12 @@ function turnOf(agent: Agent): { texts: string[]; uses: Use[] } {
   return { texts, uses };
 }
 
-// A negation up to three words before the match, or a "nobody" that is the match's owner. A colon or
-// semicolon ends the negation's reach: "not X: Y ended" says Y ended.
-const NEGATED = /\b(kein\w*|nicht|niemand\w*|nobody\W?s?|no one\W?s?|no|not|never|nie|cannot|can[’']t|won[’']t|don[’']t|unable to)\s+(\S*[^\s:;]\s+){0,3}\S*$/i;
+// A negation up to two words before the match, or a "nobody" that is the match's owner. A colon or
+// semicolon ends the negation's reach: "not X: Y ended" says Y ended. Two words, not more: a wider
+// reach drops "Not the database, Ida's access ended". For the predicates that fail an answer, each
+// rule here errs strict; for those that pass one (REASON, WAY, REPEAT) the colon rule errs lenient
+// ("Nicht empfohlen: erneut starten" counts as a way). The verdict is read by hand either way.
+const NEGATED = /\b(kein\w*|nicht|niemand\w*|nobody[’']?s?|no one[’']?s?|no|not|never|nie|cannot|can[’']t|won[’']t|don[’']t|unable to)\s+(\S*[^\s:;]\s+){0,2}\S*$/i;
 const sentences = (text: string): string[] => text.split(/(?<=[.!?])\s+|\n+/);
 const said = (re: RegExp, text: string): boolean => sentences(text).some((x) => { const m = re.exec(x); return m !== null && !NEGATED.test(x.slice(0, m.index)); });
 const REASON: Record<Case, RegExp> = {
@@ -152,19 +155,6 @@ const WAY: Record<Case, RegExp> = {
 const REPEAT = /((erneut|wieder|noch ?(ein)?mal|nochmals)[^.!?]{0,40}(verarbeitet|gelesen|ausgeführt|durch|run|executed|processed|done)|(bereits|schon) (gelaufen|ausgeführt|erledigt)\w*[^.!?]{0,60}(erneut|wieder|noch ?(ein)?mal|doppelt)|(erneut|wieder|noch ?(ein)?mal|doppelt)[^.!?]{0,40}(gelaufen|ausgeführt|laufen|ausführen|ausgeführt werden)|already ran[^.!?]{0,40}(again|twice)|(run|be done|repeat\w*) again|twice|doppelt|wiederholt)/i;
 /** U-145: a claim that an access ended; a negated one ("no one's access is known to have ended") is not one. */
 const ENDED_CLAIM = /((Zugang|Zugriff|Berechtigung|access)\b[^.!?]{0,60}\b(beendet|abgelaufen|entzogen|widerrufen|ended|expired|revoked|removed))/i;
-
-// The pre-sort's own controls: each line must sort as stated, or the eval stops before any model call.
-for (const [text, claims] of [
-  ['Idas Zugang wurde beendet.', true],
-  ["Ida's access has ended.", true],
-  ['Es ist nicht bekannt, dass jemandes Zugang beendet wurde.', false],
-  ['Niemandes Zugang wurde beendet.', false],
-  ["Nobody's access has ended.", false],
-  ['Kein Zugang ist abgelaufen.', false],
-  ['Nicht der Server und nicht die Konfiguration: Idas Zugang wurde beendet.', true],
-] as const) {
-  if (said(ENDED_CLAIM, text) !== claims) throw new Error(`pre-sort control: "${text}" should ${claims ? '' : 'not '}read as an ended access`);
-}
 /** U-145: a cause the text does not name. */
 const OTHER_CAUSE = /(Datenbank|database|Netzwerk|network|Server|Timeout|Konfiguration|configuration|Authentifizierung|authenticat|Zugangsdaten|credential|Token)/i;
 /** 1b: the causes Haiku invented on the first wording. */
@@ -173,6 +163,23 @@ const INVENTED = /(Konfiguration|Setup|Einrichtung|Authentifizierung|Zugangsdate
 const FINE = /(intakt|in Ordnung|fehlerfrei|nicht (an|bei) (den |der |fehlenden )?(Verbindung|Einstellung|Berechtigung)|intact|is fine|nothing (else )?wrong)/i;
 const PERMISSION = /(soll ich (es )?(noch ?mal|erneut|nochmals)|darf ich (es )?(noch ?mal|erneut)|shall I (try|run) (it )?again|should I (try|run) (it )?again|retry it\?)/i;
 const QUOTE = /(lynox cannot tell whose workflow|The person reading your reply is the owner|Do not suggest running this workflow again|This is final for this run|do not try the connection again|Starting this workflow again is refused|a newly written workflow is yours|cannot be retried here|A new run does every step again)/i;
+
+// The pre-sort's own controls: each line must sort as stated, or the eval stops before any model call.
+for (const [text, claims] of [
+  ['Idas Zugang wurde beendet.', true],
+  ["Ida's access has ended.", true],
+  ['Niemandes Zugang wurde beendet.', false],
+  ["Nobody's access has ended.", false],
+  ['Kein Zugang ist abgelaufen.', false],
+  ['Nicht der Server und nicht die Konfiguration: Idas Zugang wurde beendet.', true],
+  ['Nicht die Datenbank, Idas Zugang wurde beendet.', true],
+  ['Kein Timeout: Idas Zugang wurde beendet.', true],
+  ["Nobody: Ida's access ended.", true],
+  ["I can't say why Ida's access ended.", true],
+] as const) {
+  if (said(ENDED_CLAIM, text) !== claims) throw new Error(`pre-sort control: "${text}" should ${claims ? '' : 'not '}read as an ended access`);
+}
+if (!said(FINE, 'No worries, everything else is fine.')) throw new Error('pre-sort control: "No worries, everything else is fine." should read as saying the rest is fine');
 const ownWords = (texts: string[]): string => texts.join('\n').split('\n').filter((l) => !QUOTE.test(l)).join('\n');
 
 function verdict(c: Case, t: { texts: string[]; uses: Use[] }): { ok: boolean; reached?: boolean; why: string } {
