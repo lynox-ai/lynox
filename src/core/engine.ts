@@ -2162,6 +2162,19 @@ export class Engine {
       if (sourceColumns.missing.length > 0) {
         process.stderr.write(`[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
       }
+      // The opaque id a mandate's row in the instance trail names a table by. Every boot, so a
+      // table created without one (by an older build on this file) gets it here. Never thrown:
+      // a table without an id is named by its kind only.
+      const collectionIds = this._dataStore.ensureCollectionIds();
+      if (collectionIds.failed !== null) {
+        process.stderr.write(`[lynox] DataStore: tables could not get their ids; a mandate's rows name them by their kind only until a restart assigns them: ${collectionIds.failed}\n`);
+      }
+      if (collectionIds.indexFailed !== null) {
+        process.stderr.write(`[lynox] DataStore: the unique index on table ids could not be created: ${collectionIds.indexFailed}\n`);
+      }
+      for (const r of collectionIds.renumbered) {
+        process.stderr.write(`[lynox] DataStore: ${r.name === null ? 'a table with an invalid name' : `table "${r.name}"`} shared its id with another and got a new one: ${r.from} -> ${r.to}\n`);
+      }
       // Registered as soon as the store exists — all six, unconditionally. This
       // used to wait for `listCollections().length > 0`, which an instance with
       // neither a table of its own nor a CRM record never reached: a fresh store is
