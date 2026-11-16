@@ -147,6 +147,16 @@ describe('storePath', () => {
     expect(Math.floor(maxPlainStoreBytes(CONTAINER, 0, 0) / MIB)).toBe(189);
   });
 
+  it.each([
+    ['k 0', { ...CONTAINER, k: 0 }, 0],
+    ['k below 1', { ...CONTAINER, k: 0.5 }, 0],
+    ['a NaN limit', { ...CONTAINER, import_limit_mb: Number.NaN }, 0],
+    ['an infinite rest', CONTAINER, Number.POSITIVE_INFINITY],
+    ['a negative rest', CONTAINER, -1],
+  ])('maxPlainStoreBytes answers -1 for inputs storePath would not judge: %s', (_label, ceiling, rest) => {
+    expect(maxPlainStoreBytes(ceiling, rest, rest)).toBe(-1);
+  });
+
   it('takes plain at exactly the limit', () => {
     // baseline 0, no rest, k 2: the peak is B + S = 2 * S, so 5 MiB lands on a 10 MiB limit
     const c: MigrationCeiling = { import_limit_mb: 10, baseline_mb: 0, k: 2, rest_factor: 1 };

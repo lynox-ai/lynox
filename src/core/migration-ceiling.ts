@@ -46,10 +46,11 @@ export const MIGRATION_MEMORY = {
   restFactor: 1.944,
   /**
    * Peak over the baseline per byte of a store rewritten in memory. For the raw path the runs
-   * measured 3.48 / 2.83 / 2.31 at 25.8 / 82.5 / 206.3 MiB; the plaintext path does not exist
-   * yet, so this is the earlier in-memory rewrite spike's all-rows figure (7.1, one run,
-   * ciphertext to ciphertext), a reference and not a proven bound, until the build that adds
-   * the plaintext path measures it.
+   * measured 3.48 / 2.83 / 2.31 at 25.8 / 82.5 / 206.3 MiB. The plaintext path is not measured
+   * yet: its destination half re-encrypts in memory in steps (`migration-rekey.ts`), its source
+   * half is not built. Until the same driver measures both, this is the earlier in-memory rewrite
+   * spike's all-rows figure (7.1, one run, ciphertext to ciphertext), a reference and not a
+   * proven bound; no source sends a plaintext store before that measurement.
    */
   k: 7.1,
 } as const;
@@ -125,7 +126,12 @@ export function migrationCeiling(): MigrationCeiling {
 export interface MigrationSizes {
   /** The bundle's total original size in bytes, the store included. */
   bundleBytes: number;
-  /** The decoded non-database chunks in bytes. */
+  /**
+   * The non-database chunks in bytes, at their original size as they travel (the merge ledgers
+   * at their raw form's), not at their decoded size: the rest factor was measured that way (the
+   * R run's rest was the bundle). So the rest is part of the bundle, and a bundle smaller than
+   * the store and the rest is malformed, not merely large.
+   */
   restBytes: number;
   /** The store's payload in bytes. */
   storeBytes: number;
@@ -151,10 +157,12 @@ export function storePath(ceiling: MigrationCeiling, sizes: MigrationSizes): Sto
 /**
  * The largest store, in bytes, that takes the plaintext path next to `otherBytes` of other
  * chunks (the rest among them) and `restBytes` of decoded rest: the predicate solved for S,
- * with B = otherBytes + S. Negative when nothing fits.
+ * with B = otherBytes + S. Negative when nothing fits, and -1 for inputs `storePath` would
+ * not judge (a k below 1, a number that is not finite or is negative), never Infinity or NaN.
  */
 export function maxPlainStoreBytes(ceiling: MigrationCeiling, otherBytes: number, restBytes: number): number {
   const { import_limit_mb: limit, baseline_mb: baseline, k, rest_factor: restFactor } = ceiling;
+  if (![limit, baseline, k, restFactor, otherBytes, restBytes].every(usable) || k < 1) return -1;
   const headroomMb = limit - baseline - otherBytes / MIB - restFactor * (restBytes / MIB);
   return Math.floor((headroomMb * MIB) / k);
 }
