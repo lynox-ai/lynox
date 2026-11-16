@@ -572,6 +572,8 @@
 						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-seo-entity-count">{seoEntity === 1 ? t('bulk.preview.seo_entity_one') : tf('bulk.preview.seo_entity', { n: String(seoEntity) })}</p>
 					{/if}
 					<div class="overflow-x-auto">
+						<!-- The roles are not redundant here: a narrow screen shows rows as blocks, which drops them (U-266). -->
+						<!-- svelte-ignore a11y_no_redundant_roles -->
 						<table class="w-full text-sm" role="table">
 							<!-- On a narrow screen each target is one block: name and link first, its fields below (U-266). -->
 							<thead class="hidden sm:table-header-group">
@@ -582,6 +584,7 @@
 							</thead>
 							<tbody>
 								{#each shownTargets as target (target.seq)}
+									<!-- svelte-ignore a11y_no_redundant_roles -->
 									<tr role="row" class="block sm:table-row border-b border-border align-top {target.deselected ? 'opacity-60' : ''}" data-testid="bulk-target-row">
 										<td role="cell" class="block sm:table-cell pt-1.5 sm:pb-1.5 pr-3">
 											{@render targetName(target)}
@@ -898,7 +901,12 @@
 					<h2 class="text-sm font-medium">{t('bulk.undo.approve_title')}</h2>
 					<!-- The targets that get a value back are in the list above, each with the markup it
 					     writes back; the entries the source created are listed here. -->
-					<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
+					<!-- With every target taken out the approval writes nothing; the sentence says why it is locked. -->
+					{#if bulkWriting(run) === 0}
+						<p class="text-sm" data-testid="bulk-undo-all-taken-out">{t('bulk.undo.all_taken_out')}</p>
+					{:else}
+						<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
+					{/if}
 					{#if run.changes.delete > 0}
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>

@@ -803,9 +803,12 @@ describe('approving an undo, per target', () => {
 		await settle();
 		// One target left: the approval still writes it back.
 		expect(approve()?.disabled).toBe(false);
+		expect(target.querySelector('[data-testid="bulk-undo-all-taken-out"]')).toBeNull();
 		takeOut()[0]!.click();
 		await settle();
-		expect(target.textContent).toContain(tf('bulk.undo.approve_explain', { n: '0' }));
+		// The locked approval says why, and not that 0 targets get their value back.
+		expect(target.querySelector('[data-testid="bulk-undo-all-taken-out"]')?.textContent).toBe(t('bulk.undo.all_taken_out'));
+		expect(target.textContent).not.toContain(tf('bulk.undo.approve_explain', { n: '0' }));
 		expect(approve()?.disabled).toBe(true);
 	});
 
@@ -824,6 +827,15 @@ describe('approving an undo, per target', () => {
 		targets = undoTargets();
 		await render();
 		expect(target.querySelector('[data-testid="bulk-undo-atomic"]')).toBeNull();
+	});
+
+	it('says in both languages that an undo with every target taken out writes nothing', () => {
+		const was = getLocale();
+		onTestFinished(() => setLocale(was));
+		setLocale('de');
+		expect(t('bulk.undo.all_taken_out')).toBe('Du hast alle Ziele herausgenommen, darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
+		setLocale('en');
+		expect(t('bulk.undo.all_taken_out')).toBe('You took out every target, so this undo writes nothing. Put one back, or leave it with “Not now”.');
 	});
 
 	it('heads the column "Jetzt → zurück auf" in German and "Now → back to" in English', () => {
