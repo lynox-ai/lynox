@@ -817,7 +817,11 @@ export async function ensureSession(resumeThreadId?: string | null): Promise<str
 	const res = await fetch(`${getApiBase()}/sessions`, init);
 	if (res.status === 401) throw new SessionExpiredError();
 	if (res.status === 410) throw new ThreadDeletedError();
-	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
+	// Any other refusal (a rate limit, a server fault) opens no session: its answer carries no id,
+	// and a run must never be sent to a session it does not name.
+	if (!res.ok) throw new SessionStartRefusedError(res.status);
+	const data = (await res.json()) as { sessionId?: unknown; model?: string; contextWindow?: number };
+	if (typeof data.sessionId !== 'string' || data.sessionId === '') throw new SessionStartRefusedError(res.status);
 	sessionId = data.sessionId;
 	if (data.model) { sessionModel = data.model; sessionTier = data.model; }
 	if (data.contextWindow) contextWindow = data.contextWindow;
@@ -826,6 +830,12 @@ export async function ensureSession(resumeThreadId?: string | null): Promise<str
 
 class SessionExpiredError extends Error {
 	constructor() { super('session_expired'); this.name = 'SessionExpiredError'; }
+}
+
+/** The server answered the request for a session without one (a rate limit, a fault). No turn
+ *  started, so nothing ran; the message is kept, failed, for the user to send again. */
+class SessionStartRefusedError extends Error {
+	constructor(readonly status: number) { super(`session_refused_${status}`); this.name = 'SessionStartRefusedError'; }
 }
 
 /** The conversation was deleted (410). It is not opened again, so nothing retries it. */
@@ -1185,7 +1195,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			console.error('[chat] a run failed after its stream began', err);
 			return;
 		}
-		failTurnStart(turn, displayText ?? task, files, queueId, err instanceof ThreadDeletedError);
+		failTurnStart(turn, displayText ?? task, files, queueId, err instanceof ThreadDeletedError, err instanceof SessionStartRefusedError ? err.status : null);
 	}
 }
 
@@ -1195,7 +1205,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
  * the message is marked failed AND unconfirmed: it is never sent again without first asking
  * whether a turn is still running (`askBeforeResend`).
  */
-function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[] | undefined, queueId: string | undefined, threadDeleted = false): void {
+function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[] | undefined, queueId: string | undefined, threadDeleted = false, refusedStatus: number | null = null): void {
 	// Still the turn's thread: its own message is in the list (the list may have been rebuilt),
 	// or, for a turn that failed before adding one, the list is the one it started in.
 	let ownMsg = turn.userMsg && messages.includes(turn.userMsg) ? turn.userMsg : null;
@@ -1265,7 +1275,10 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 	// The thread was deleted meanwhile (another tab, another device): the server answered, and it
 	// will answer the same to every turn queued behind this one, so none of them is started. The
 	// message stays on screen, failed, to be copied into a new chat.
-	chatError = threadDeleted ? t('chat.error_thread_deleted') : t('chat.error_connection');
+	// A session the server refused is not a lost connection: say what the server said.
+	chatError = threadDeleted ? t('chat.error_thread_deleted')
+		: refusedStatus !== null ? mapApiError(refusedStatus, '')
+		: t('chat.error_connection');
 	chatErrorDetail = null;
 	if (threadDeleted) {
 		// The turns queued behind it are failed too, not left showing a send that never comes,
@@ -1404,8 +1417,18 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	if (!await askBeforeResend()) return;
 	msg.failed = false;
 	msg.sendUnconfirmed = false;
+	// The message on screen is the one sent again, not a copy added under it: it goes out as a
+	// queued turn, which the run finds by its id, as the automatic re-send does.
+	const shown = messages.includes(msg);
+	if (shown) {
+		msg.queued = true;
+		msg.queueId = newQueueId();
+	}
+	threadReadRefusal = null;
 	// A typed message sent again is still the user's own words.
-	await sendMessage(text, undefined, undefined, msg.typed === true ? { typed: true } : undefined);
+	const options = msg.typed === true ? { typed: true } : undefined;
+	if (shown) await _executeRun(text, undefined, undefined, options, msg.queueId);
+	else await sendMessage(text, undefined, undefined, options);
 }
 
 async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {
