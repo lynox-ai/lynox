@@ -66,6 +66,15 @@ function lastPathSegment(path: string): string {
   return parts[parts.length - 1] ?? '';
 }
 
+/** The profile an api_setup call is about: `id`, or the id of the profile it writes; else none. */
+function apiProfileId(input: Record<string, unknown> | undefined): string {
+  const id = strOrEmpty(input?.['id']).trim();
+  if (id.length > 0) return id;
+  const profile = input?.['profile'];
+  if (typeof profile !== 'object' || profile === null) return '';
+  return strOrEmpty((profile as Record<string, unknown>)['id']).trim();
+}
+
 /**
  * Map a tool call to its inline label. Returns `null` for hidden tools.
  *
@@ -99,6 +108,7 @@ export function toolCallLabel(
     case 'spawn_agent':       return { action: t('tool.delegated'),       subject: strOrEmpty(inp?.['task']).slice(0, 50) };
     case 'artifact_save':     return { action: t('tool.artifact_saved'),  subject: strOrEmpty(inp?.['title']) };
     case 'task_create':       return { action: t('tool.task_created'),    subject: strOrEmpty(inp?.['title']) };
+    case 'api_setup':         return { action: t('tool.api_profiles'),    subject: apiProfileId(inp).slice(0, 64) };
     default:                  return { action: toolName, subject: '' };
   }
 }
