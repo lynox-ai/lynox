@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, resolveSeverity, bandForScore } from '../scripts/osv-report-gate.mjs';
+import { evaluate, resolveSeverity, bandForScore, ACCEPTED } from '../scripts/osv-report-gate.mjs';
 
 const MALICIOUS_REPORT = JSON.parse(
   readFileSync(fileURLToPath(new URL('./fixtures/osv-report-malicious.json', import.meta.url)), 'utf8'),
@@ -382,5 +382,88 @@ describe('one scan per lockfile: several --report/--rc pairs', () => {
     const extra = spawnSync(process.execPath, [SCRIPT, '--report', a, '--rc', '0', '--rc', '0'], { encoding: 'utf8' });
     expect(extra.status).toBe(1);
     expect(extra.stderr).toContain('each report takes exactly one');
+  });
+});
+
+describe('an accepted finding: one id, one package, exact versions, until a date', () => {
+  const ENTRY = { id: 'GHSA-acc-ept-ed01', package: 'kit-like', versions: ['2.0.1'], expires: '2026-12-15', reason: 'path not reachable here' };
+
+  function highOn(name: string, version: string, id = ENTRY.id) {
+    return {
+      results: [{
+        source: { path: 'pnpm-lock.yaml' },
+        packages: [{
+          package: { name, version },
+          vulnerabilities: [{ id, database_specific: { severity: 'HIGH' } }],
+          groups: [{ ids: [id], max_severity: '7.5' }],
+        }],
+      }],
+    };
+  }
+
+  it('without an entry the finding blocks (control)', () => {
+    const r = evaluate({ doc: highOn('kit-like', '2.0.1'), rc: 1, accepted: [], today: '2026-11-16' });
+    expect(r.ok).toBe(false);
+    expect(r.blocking.map((b: { id: string }) => b.id)).toEqual([ENTRY.id]);
+  });
+
+  it('with a matching entry before its date it passes, and the finding is still listed', () => {
+    const r = evaluate({ doc: highOn('kit-like', '2.0.1'), rc: 1, accepted: [ENTRY], today: '2026-12-15' });
+    expect(r.ok).toBe(true);
+    expect(r.blocking).toEqual([]);
+    expect(r.accepted).toEqual([{ id: ENTRY.id, package: 'kit-like@2.0.1', source: 'pnpm-lock.yaml', severity: 'HIGH', until: '2026-12-15', reason: ENTRY.reason }]);
+  });
+
+  it('blocks again the day after its date, and says the acceptance ran out', () => {
+    const r = evaluate({ doc: highOn('kit-like', '2.0.1'), rc: 1, accepted: [ENTRY], today: '2026-12-16' });
+    expect(r.ok).toBe(false);
+    expect(r.blocking).toEqual([{ id: ENTRY.id, package: 'kit-like@2.0.1', source: 'pnpm-lock.yaml', severity: 'HIGH', expired: '2026-12-15' }]);
+    expect(r.accepted).toEqual([]);
+  });
+
+  it('blocks another version, another package and another id', () => {
+    for (const doc of [highOn('kit-like', '2.0.2'), highOn('other', '2.0.1'), highOn('kit-like', '2.0.1', 'GHSA-oth-erid-0001')]) {
+      const r = evaluate({ doc, rc: 1, accepted: [ENTRY], today: '2026-11-16' });
+      expect(r.ok).toBe(false);
+      expect(r.accepted).toEqual([]);
+    }
+  });
+
+  it('never accepts a finding whose severity cannot be resolved', () => {
+    const doc = highOn('kit-like', '2.0.1');
+    const vuln = doc.results[0]!.packages[0]!.vulnerabilities[0] as Record<string, unknown>;
+    delete vuln['database_specific'];
+    doc.results[0]!.packages[0]!.groups[0]!.max_severity = '';
+    const r = evaluate({ doc, rc: 1, accepted: [ENTRY], today: '2026-11-16' });
+    expect(r.ok).toBe(false);
+    expect(r.blocking[0].severity).toBe('UNRESOLVED');
+  });
+
+  it('every shipped entry names exact versions, an ISO date and a reason', () => {
+    expect(ACCEPTED.length).toBeGreaterThan(0);
+    for (const a of ACCEPTED) {
+      expect(a.versions.length).toBeGreaterThan(0);
+      for (const v of a.versions) expect(v).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(a.expires).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(a.reason.length).toBeGreaterThan(40);
+    }
+  });
+
+  it('through the CLI: an accepted finding exits 0, prints it as accepted and counts it', () => {
+    const SCRIPT = fileURLToPath(new URL('../scripts/osv-report-gate.mjs', import.meta.url));
+    const a = ACCEPTED[0]!;
+    const dir = mkdtempSync(join(tmpdir(), 'osv-gate-acc-'));
+    const file = join(dir, 'osv.json');
+    writeFileSync(file, JSON.stringify(highOn(a.package, a.versions[0]!, a.id)));
+    const r = spawnSync(process.execPath, [SCRIPT, '--report', file, '--rc', '1'], { encoding: 'utf8' });
+    // Valid only until the entry's date; past it this test would see the block, which is the point.
+    if (new Date().toISOString().slice(0, 10) <= a.expires) {
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`accepted until ${a.expires}`);
+      expect(r.stdout).toContain('1 finding(s), 0 blocking, 1 accepted');
+    } else {
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('acceptance expired');
+    }
   });
 });
