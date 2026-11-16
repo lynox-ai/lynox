@@ -17,6 +17,7 @@
 		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
+	import { BulkLoadFailed, bulkLoadErrorKey } from './bulk-runs.js';
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
 
@@ -62,10 +63,12 @@
 	}
 
 	/** A page of the run's targets. A failed fetch throws: an empty page would read as a run
-	 *  with fewer targets than the approval covers. */
+	 *  with fewer targets than the approval covers. A refused answer throws with its status, so
+	 *  the page can say why ({@link bulkLoadErrorKey}). */
 	async function loadTargets(offset: number, limit: number): Promise<BulkTarget[]> {
 		const r = await json<{ targets?: BulkTarget[] }>(`/bulk/runs/${encodeURIComponent(runId)}/targets?offset=${offset}&limit=${limit}`);
-		if (!r.ok || !Array.isArray(r.body.targets)) throw new Error('targets');
+		if (!r.ok) throw new BulkLoadFailed(r.status);
+		if (!Array.isArray(r.body.targets)) throw new Error('targets');
 		return r.body.targets;
 	}
 
@@ -141,7 +144,7 @@
 		try {
 			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
 			if (id !== runId) return false;
-			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
+			if (!r.ok) { if (!quiet) error = t(bulkLoadErrorKey([r.status])); loading = false; return false; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
@@ -171,9 +174,9 @@
 			unmeasuredOk = false;
 			probeOk = false;
 			supersedable = null;
-		} catch {
+		} catch (e) {
 			if (id !== runId) return false;
-			if (!quiet) error = t('common.load_failed');
+			if (!quiet) error = t(bulkLoadErrorKey([e instanceof BulkLoadFailed ? e.status : null]));
 			loading = false;
 			return false;
 		}
@@ -186,8 +189,8 @@
 		if (!run) return;
 		try {
 			targets = [...targets, ...(await loadFrom(targets.length, run.total))];
-		} catch {
-			actionError = t('common.load_failed');
+		} catch (e) {
+			actionError = t(bulkLoadErrorKey([e instanceof BulkLoadFailed ? e.status : null]));
 		}
 	}
 
