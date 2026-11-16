@@ -573,7 +573,8 @@
 					{/if}
 					<div class="overflow-x-auto">
 						<table class="w-full text-sm">
-							<thead>
+							<!-- On a narrow screen each target is one block: name and link first, its fields below (U-266). -->
+							<thead class="hidden sm:table-header-group">
 								<tr class="text-left text-xs text-text-subtle border-b border-border">
 									<th class="py-1.5 pr-3 font-medium">{t('bulk.head.target')}</th>
 									<th class="py-1.5 font-medium">{t(undoApproving ? 'bulk.undo.now_back' : 'bulk.preview.before_after')}</th>
@@ -581,8 +582,8 @@
 							</thead>
 							<tbody>
 								{#each shownTargets as target (target.seq)}
-									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}" data-testid="bulk-target-row">
-										<td class="py-1.5 pr-3">
+									<tr class="block sm:table-row border-b border-border align-top {target.deselected ? 'opacity-60' : ''}" data-testid="bulk-target-row">
+										<td class="block sm:table-cell pt-1.5 sm:pb-1.5 pr-3">
 											{@render targetName(target)}
 											{#if target.shopAddedMarkup}
 												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
@@ -597,7 +598,8 @@
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
 											{/if}
 										</td>
-										<td class="py-1.5">
+										<td class="block sm:table-cell pb-1.5 pt-1 sm:pt-1.5">
+											<div class="sm:hidden text-xs text-text-subtle">{t(undoApproving ? 'bulk.undo.now_back' : 'bulk.preview.before_after')}</div>
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}
 													<div>
