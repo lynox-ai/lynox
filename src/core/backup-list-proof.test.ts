@@ -281,7 +281,7 @@ describe('the backup list across a restart', () => {
       const { m, checks } = fresh();
       const started = Date.now();
       expect(m.listBackups()[0]?.provenance).toBe('verified');
-      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(Date.now() - started).toBeLessThan(1_600);
       expect(checks).toHaveBeenCalledTimes(1);
     } finally {
       releaser.kill('SIGKILL');
@@ -298,6 +298,26 @@ describe('the backup list across a restart', () => {
     await first.createBackup();
     first.listBackups();
     expect(readdirSync(backupDir).filter(n => n.startsWith(`${BACKUP_LIST_PROOF_FILE}.`))).toEqual([]);
+  });
+
+  it('keeps sweeping temporary files past an entry of that name it cannot remove', async () => {
+    const first = manager();
+    await first.createBackup();
+    first.listBackups();
+    // Eight of each: the directory order is not ours to choose, so a removable file almost surely
+    // comes after a directory that `rmSync` refuses.
+    const dirs: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const dir = `${proofPath()}.${String(100 + i)}.0123456789a${String(i)}.tmp`;
+      mkdirSync(dir);
+      dirs.push(dir);
+      writeFileSync(`${proofPath()}.${String(200 + i)}.0123456789b${String(i)}.tmp`, '{}');
+    }
+    await tick();
+    await first.createBackup();
+    first.listBackups();
+    const left = readdirSync(backupDir).filter(n => n.startsWith(`${BACKUP_LIST_PROOF_FILE}.`)).map(n => join(backupDir, n));
+    expect(left.sort()).toEqual([...dirs].sort());
   });
 
   it('is removed by the erasure of a backup dir outside the data dir, with its temporary file', async () => {

@@ -1184,7 +1184,7 @@ export class BackupManager {
     } catch {
       // No file, or one that cannot be read: every manifest is checked afresh.
     } finally {
-      if (fd !== null) closeSync(fd);
+      if (fd !== null) try { closeSync(fd); } catch { /* the answers are already taken or not */ }
     }
   }
 
@@ -1203,7 +1203,11 @@ export class BackupManager {
     // A write cut off by a crash leaves its temporary file; the next write takes it away. One of
     // another process mid-write goes too, and that process's rename then fails like any write here.
     try {
-      for (const name of readdirSync(this.backupDir)) if (BACKUP_LIST_PROOF_TMP.test(name)) rmSync(join(this.backupDir, name), { force: true });
+      for (const name of readdirSync(this.backupDir)) {
+        if (!BACKUP_LIST_PROOF_TMP.test(name)) continue;
+        // One entry that cannot go (a directory of that name, say) does not stop the rest.
+        try { rmSync(join(this.backupDir, name), { force: true }); } catch { /* it stays */ }
+      }
     } catch { /* a leftover stays until the next write */ }
     const tmp = `${path}.${String(process.pid)}.${randomBytes(6).toString('hex')}.tmp`;
     try {
