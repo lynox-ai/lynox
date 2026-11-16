@@ -432,8 +432,16 @@
 	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, view) : { text: null, nothing: false });
 	// Counted over the loaded targets: a preview the owner approves is loaded whole.
 	const seoEntity = $derived(approving ? bulkSeoEntityCount(targets) : 0);
-	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
-	const foldedUnchanged = $derived(targets.length - shownTargets.length);
+	// An undo the owner approves lists its targets as a write does (U-266): who takes a run back
+	// sees each product and the value it gets back. The entries it deletes are listed apart, under
+	// the approval, so its table leaves them out.
+	const undoApproving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'undo');
+	const listed = $derived(undoApproving ? targets.filter((x) => x.change !== 'delete') : targets);
+	// A target is taken out of a write, and out of an undo, except of the undo of an atomic run:
+	// that restores all of its targets or none (the ledger refuses it, `atomic_undo`).
+	const takesOut = $derived(approving || (undoApproving && run !== null && !run.atomic));
+	const shownTargets = $derived(showUnchanged ? listed : listed.filter((x) => x.change !== 'unchanged'));
+	const foldedUnchanged = $derived(listed.length - shownTargets.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
@@ -551,9 +559,12 @@
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{sentUnknownText}</p>
 			{/if}
 
-			{#if run.kind === 'apply' && targets.length > 0}
+			{#if (run.kind === 'apply' || undoApproving) && listed.length > 0}
 				<div>
-					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(targets.length), n: String(run.total) })}</h2>
+					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(listed.length), n: String(run.total - (targets.length - listed.length)) })}</h2>
+					{#if undoApproving && run.atomic && ownerActs}
+						<p class="text-sm mb-2" data-testid="bulk-undo-atomic">{t('bulk.deselect.refused.atomic_undo')}</p>
+					{/if}
 					{#if skipped.text && !skipped.nothing}
 						<p class="text-sm mb-2">{skipped.text}</p>
 					{/if}
@@ -561,17 +572,21 @@
 						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-seo-entity-count">{seoEntity === 1 ? t('bulk.preview.seo_entity_one') : tf('bulk.preview.seo_entity', { n: String(seoEntity) })}</p>
 					{/if}
 					<div class="overflow-x-auto">
-						<table class="w-full text-sm">
-							<thead>
+						<!-- The roles are not redundant here: a narrow screen shows rows as blocks, which drops them (U-266). -->
+						<!-- svelte-ignore a11y_no_redundant_roles -->
+						<table class="w-full text-sm" role="table">
+							<!-- On a narrow screen each target is one block: name and link first, its fields below (U-266). -->
+							<thead class="hidden sm:table-header-group">
 								<tr class="text-left text-xs text-text-subtle border-b border-border">
 									<th class="py-1.5 pr-3 font-medium">{t('bulk.head.target')}</th>
-									<th class="py-1.5 font-medium">{t('bulk.preview.before_after')}</th>
+									<th class="py-1.5 font-medium">{t(undoApproving ? 'bulk.undo.now_back' : 'bulk.preview.before_after')}</th>
 								</tr>
 							</thead>
 							<tbody>
 								{#each shownTargets as target (target.seq)}
-									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
-										<td class="py-1.5 pr-3">
+									<!-- svelte-ignore a11y_no_redundant_roles -->
+									<tr role="row" class="block sm:table-row border-b border-border align-top {target.deselected ? 'opacity-60' : ''}" data-testid="bulk-target-row">
+										<td role="cell" class="block sm:table-cell pt-1.5 sm:pb-1.5 pr-3">
 											{@render targetName(target)}
 											{#if target.shopAddedMarkup}
 												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
@@ -586,7 +601,8 @@
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
 											{/if}
 										</td>
-										<td class="py-1.5">
+										<td role="cell" class="block sm:table-cell pb-1.5 pt-1 sm:pt-1.5">
+											<div class="sm:hidden text-xs text-text-subtle">{t(undoApproving ? 'bulk.undo.now_back' : 'bulk.preview.before_after')}</div>
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}
 													<div>
@@ -602,7 +618,7 @@
 											{:else if target.error && target.change !== 'invalid'}
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
-											{@render markupList(target, false)}
+											{@render markupList(target, undoApproving)}
 											{#if target.change === 'invalid' && target.error}
 												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store' })}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
@@ -612,7 +628,7 @@
 													{/each}
 												{/if}
 											{/if}
-											{#if approving && (target.deselected || writes(target))}
+											{#if takesOut && (target.deselected || writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
 													{#if target.deselected}<span class="text-text-subtle">{view.t('bulk.deselect.taken_out')}</span>{/if}
 													{#if ownerActs}
@@ -632,7 +648,7 @@
 					{#if foldedUnchanged > 0}
 						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? bulkOne('bulk.preview.show_unchanged', foldedUnchanged) : bulkOne('bulk.preview.show_unchanged_targets', foldedUnchanged), { n: String(foldedUnchanged) })}</button>
 					{/if}
-					{#if targets.length < run.total}
+					{#if !undoApproving && targets.length < run.total}
 						<button type="button" class="{btnPlain} mt-2" onclick={showMore}>{tf('bulk.preview.show_all', { n: String(run.total) })}</button>
 					{/if}
 				</div>
@@ -883,24 +899,32 @@
 			{:else if run.kind === 'undo' && run.phase === 'previewed'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.undo.approve_title')}</h2>
-					<!-- The targets that get a value back; the entries the source created are listed apart. -->
-					<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
-					{#each targets.filter((x) => (x.markupChanges?.length ?? 0) > 0) as target (target.seq)}
-						<div class="text-sm" data-testid="bulk-undo-markup">
-							{@render targetName(target)}
-							{@render markupList(target, true)}
-						</div>
-					{/each}
+					<!-- The targets that get a value back are in the list above, each with the markup it
+					     writes back; the entries the source created are listed here. -->
+					<!-- With every target taken out the approval writes nothing; the sentence says why it is locked. -->
+					{#if bulkWriting(run) === 0}
+						<p class="text-sm" data-testid="bulk-undo-all-taken-out">{t('bulk.undo.all_taken_out')}</p>
+					{:else if run.changes.update + run.changes.create === 0 && listed.some((x) => x.deselected)}
+						<!-- The owner took out every target that gets a value back (the list holds only those); only
+						     the entries in the box below are left, and the approval deletes them. An undo whose source
+						     only created entries has none to take out, so it is not told it did. -->
+						<p class="text-sm" data-testid="bulk-undo-only-deletes">{tf(bulkOne('bulk.undo.only_deletes', run.changes.delete), { n: String(run.changes.delete) })}</p>
+					{:else if run.changes.update + run.changes.create === 0}
+						<!-- Its source only created entries: nothing gets a value back, the approval deletes them. -->
+						<p class="text-sm" data-testid="bulk-undo-deletes-only">{tf(bulkOne('bulk.undo.deletes_only', run.changes.delete), { n: String(run.changes.delete) })}</p>
+					{:else}
+						<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
+					{/if}
 					{#if run.changes.delete > 0}
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
+							<p>{tf(bulkOne('bulk.undo.creates', run.changes.delete), { k: String(run.changes.delete) })}</p>
 							<ul class="list-disc pl-5 mt-1">
 								{#each creates as c (c.seq)}<li>{@render targetName(c)}</li>{/each}
 							</ul>
 						</div>
 					{/if}
 					<div class="flex flex-wrap gap-2">
-						<button type="button" class={btnPrimary} disabled={busy || creates.length !== run.changes.delete} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
+						<button type="button" class={btnPrimary} disabled={busy || creates.length !== run.changes.delete || bulkWriting(run) === 0} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
 				</div>

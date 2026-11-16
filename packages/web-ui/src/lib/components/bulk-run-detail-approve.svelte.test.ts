@@ -728,13 +728,190 @@ describe('the markup a target changes (1010)', () => {
 		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false,
 			markupChanges: [{ field: 'descriptionHtml', added: [script], removed: [], addsOutsideAllowlist: true }] }];
 		await render();
-		const undo = target.querySelectorAll('[data-testid="bulk-undo-markup"]');
-		expect(undo).toHaveLength(1);
+		// The markup is listed in the target's own row of the list, once; no second block names it.
+		expect(target.querySelectorAll('[data-testid="bulk-undo-markup"]')).toHaveLength(0);
+		const rows = target.querySelectorAll('[data-testid="bulk-target-row"]');
+		expect(rows).toHaveLength(1);
+		const row = rows[0]!;
+		expect(target.querySelectorAll('[data-testid="bulk-markup"]')).toHaveLength(1);
 		// The product is named by its admin link; the markup it writes back is listed as text.
-		expect(undo[0]!.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
-		expect(codes(undo[0]!)).toEqual(['<script>steal()</script>']);
-		expect(undo[0]!.textContent).toContain(t('bulk.markup.restores'));
-		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note'));
+		expect(row.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
+		expect(codes(row)).toEqual(['<script>steal()</script>']);
+		expect(row.textContent).toContain(t('bulk.markup.restores'));
+		// Said in the row as text beside the field, not left to a tooltip (U-266).
+		expect(row.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note'));
 		expect(target.querySelectorAll('script')).toHaveLength(0);
+	});
+});
+
+// An undo the owner approves lists its targets as a write does (U-266): each product by its title
+// with its admin link, and the value it has now beside the one the undo writes back. Who takes a
+// run back sees what goes back where, not only a number.
+describe('approving an undo, per target', () => {
+	const undoTargets = (): BulkTarget[] => [
+		{ seq: 0, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu 1', 'Alt 1'), error: null, deselected: false, title: 'Snowboard Blau' },
+		{ seq: 1, key: 'gid://shopify/Product/2', change: 'update', diff: fieldsDiff('Neu 2', 'Alt 2'), error: null, deselected: false, title: 'Snowboard Rot' },
+		{ seq: 2, key: 'gid://shopify/Product/3', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false },
+	];
+	const undoRun = (o: Partial<BulkRunDetailData> = {}): BulkRunDetailData =>
+		makeRun({ kind: 'undo', sourceRunId: 'r0', total: 3, changes: { update: 2, create: 0, delete: 1, unchanged: 0, invalid: 0 }, ...o });
+	const rows = (): Element[] => [...target.querySelectorAll('[data-testid="bulk-target-row"]')];
+	const takeOut = (): HTMLButtonElement[] => [...target.querySelectorAll('button')].filter((b) => b.textContent?.trim() === t('bulk.deselect.off'));
+
+	it('lists each target it gives a value back, by title and admin link, with the value now and the one it writes back', async () => {
+		run = undoRun();
+		targets = undoTargets();
+		await render();
+		expect(rows()).toHaveLength(2);
+		// A row stays a row to assistive tech where a narrow screen stacks it as a block.
+		expect(rows().map((r) => r.getAttribute('role'))).toEqual(['row', 'row']);
+		expect([...rows()[0]!.children].map((c) => c.getAttribute('role'))).toEqual(['cell', 'cell']);
+		const first = rows()[0]!;
+		expect(first.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
+		const link = first.querySelector('[data-testid="bulk-target-admin"]');
+		expect(link?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
+		expect(link?.textContent).toBe(`${t('bulk.target.open_in_shop')}↗`);
+		expect(first.querySelector('del')?.textContent).toBe('Neu 1');
+		expect(first.querySelector('ins')?.textContent).toBe('Alt 1');
+		expect([...target.querySelectorAll('th')].map((h) => h.textContent)).toContain(t('bulk.undo.now_back'));
+		expect([...target.querySelectorAll('th')].map((h) => h.textContent)).not.toContain(t('bulk.preview.before_after'));
+		// The entry it deletes is listed apart, under the approval, not a second time in the list.
+		expect(rows().map((r) => r.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href'))).not.toContain('https://demo.myshopify.com/admin/products/3');
+		expect(target.textContent).toContain(tf('bulk.preview.title', { k: '2', n: '2' }));
+	});
+
+	it('takes one target out, and the number in the approval falls with it', async () => {
+		run = undoRun();
+		targets = undoTargets();
+		await render();
+		expect(target.textContent).toContain(tf('bulk.undo.approve_explain', { n: '2' }));
+		expect(takeOut()).toHaveLength(2);
+		takeOut()[1]!.click();
+		await settle();
+		expect(posts.filter((p) => p.url.endsWith('/bulk/runs/r1/targets/1/deselect'))).toHaveLength(1);
+		expect(target.textContent).toContain(tf('bulk.undo.approve_explain', { n: '1' }));
+		expect(rows()[1]!.textContent).toContain(t('bulk.deselect.taken_out'));
+		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
+	});
+
+	it('offers no approval once every target is taken out and nothing is left to write back', async () => {
+		run = undoRun({ total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change !== 'delete');
+		await render();
+		const approve = (): HTMLButtonElement | undefined => buttonByText(t('bulk.undo.approve'));
+		takeOut()[0]!.click();
+		await settle();
+		// One target left: the approval still writes it back.
+		expect(approve()?.disabled).toBe(false);
+		expect(target.querySelector('[data-testid="bulk-undo-all-taken-out"]')).toBeNull();
+		takeOut()[0]!.click();
+		await settle();
+		// The locked approval says why, and not that 0 targets get their value back.
+		expect(target.querySelector('[data-testid="bulk-undo-all-taken-out"]')?.textContent).toBe(t('bulk.undo.all_taken_out'));
+		expect(target.textContent).not.toContain(tf('bulk.undo.approve_explain', { n: '0' }));
+		expect(approve()?.disabled).toBe(true);
+	});
+
+	it('says the undo only deletes the entry left once every target that gets a value back is taken out, and keeps the approval', async () => {
+		run = undoRun();
+		targets = undoTargets();
+		await render();
+		// One entry created by the source: the box names it in the singular.
+		expect(target.textContent).toContain(t('bulk.undo.creates_one'));
+		expect(target.textContent).not.toContain(tf('bulk.undo.creates', { k: '1' }));
+		takeOut()[0]!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')).toBeNull();
+		takeOut()[0]!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')?.textContent).toBe(t('bulk.undo.only_deletes_one'));
+		expect(target.textContent).not.toContain(tf('bulk.undo.approve_explain', { n: '0' }));
+		expect(target.querySelector('[data-testid="bulk-undo-all-taken-out"]')).toBeNull();
+		// The entry is still deleted: the approval stays.
+		expect(buttonByText(t('bulk.undo.approve'))?.disabled).toBe(false);
+	});
+
+	it('does not say a target was taken out on the undo of a run that only created entries', async () => {
+		run = undoRun({ total: 1, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change === 'delete');
+		await render();
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')).toBeNull();
+		expect(target.querySelector('[data-testid="bulk-undo-all-taken-out"]')).toBeNull();
+		expect(target.textContent).toContain(t('bulk.undo.creates_one'));
+		// It says what the undo does instead: no value back, only the entry below.
+		expect(target.querySelector('[data-testid="bulk-undo-deletes-only"]')?.textContent).toBe(t('bulk.undo.deletes_only_one'));
+		expect(target.textContent).not.toContain(tf('bulk.undo.approve_explain', { n: '0' }));
+		expect(buttonByText(t('bulk.undo.approve'))?.disabled).toBe(false);
+	});
+
+	it('names several entries an undo only deletes by their number', async () => {
+		run = undoRun({ total: 2, changes: { update: 0, create: 0, delete: 2, unchanged: 0, invalid: 0 } });
+		targets = [...undoTargets().filter((x) => x.change === 'delete'),
+			{ seq: 3, key: 'gid://shopify/Product/4', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false }];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-undo-deletes-only"]')?.textContent).toBe(tf('bulk.undo.deletes_only', { n: '2' }));
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')).toBeNull();
+	});
+
+	it('names several entries left to delete by their number, and the box in the plural', async () => {
+		run = undoRun({ total: 4, deselected: 2, changes: { update: 0, create: 0, delete: 2, unchanged: 0, invalid: 0 } });
+		targets = [...undoTargets().map((x) => (x.change === 'delete' ? x : { ...x, deselected: true })),
+			{ seq: 3, key: 'gid://shopify/Product/4', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false }];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-undo-only-deletes"]')?.textContent).toBe(tf('bulk.undo.only_deletes', { n: '2' }));
+		expect(target.textContent).toContain(tf('bulk.undo.creates', { k: '2' }));
+		expect(buttonByText(t('bulk.undo.approve'))?.disabled).toBe(false);
+	});
+
+	it('offers no target out of the undo of an atomic run, and says why once above the list', async () => {
+		run = undoRun({ atomic: true });
+		targets = undoTargets();
+		await render();
+		expect(rows()).toHaveLength(2);
+		expect(takeOut()).toHaveLength(0);
+		expect(target.querySelectorAll('[data-testid="bulk-undo-atomic"]')).toHaveLength(1);
+		expect(target.querySelector('[data-testid="bulk-undo-atomic"]')?.textContent).toBe(t('bulk.deselect.refused.atomic_undo'));
+	});
+
+	it('says nothing about an atomic undo on the undo of a run that is not atomic', async () => {
+		run = undoRun();
+		targets = undoTargets();
+		await render();
+		expect(target.querySelector('[data-testid="bulk-undo-atomic"]')).toBeNull();
+	});
+
+	it('says in both languages that an undo with every target taken out writes nothing', () => {
+		const was = getLocale();
+		onTestFinished(() => setLocale(was));
+		setLocale('de');
+		expect(t('bulk.undo.all_taken_out')).toBe('Du hast alle Ziele herausgenommen, darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
+		setLocale('en');
+		expect(t('bulk.undo.all_taken_out')).toBe('You took out every target, so this undo writes nothing. Put one back, or leave it with “Not now”.');
+	});
+
+	it('words what is left to delete, and one entry the source created, in both languages', () => {
+		const was = getLocale();
+		onTestFinished(() => setLocale(was));
+		setLocale('de');
+		expect(t('bulk.undo.only_deletes_one')).toBe('Du hast alle Ziele herausgenommen; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(tf('bulk.undo.only_deletes', { n: '3' })).toBe('Du hast alle Ziele herausgenommen; die Rücknahme löscht nur noch die 3 Einträge unten.');
+		expect(t('bulk.undo.creates_one')).toBe('Der ursprüngliche Lauf hat einen Eintrag neu angelegt. Die Rücknahme löscht ihn, ausser jemand hat ihn seither geändert:');
+		expect(t('bulk.undo.deletes_only_one')).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur den Eintrag unten.');
+		expect(tf('bulk.undo.deletes_only', { n: '3' })).toBe('Diese Rücknahme schreibt keine Werte zurück; sie löscht nur die 3 Einträge unten.');
+		setLocale('en');
+		expect(t('bulk.undo.only_deletes_one')).toBe('You took out every target; the undo now only deletes the entry below.');
+		expect(tf('bulk.undo.only_deletes', { n: '3' })).toBe('You took out every target; the undo now only deletes the 3 entries below.');
+		expect(t('bulk.undo.creates_one')).toBe('The original run created one new entry. The undo deletes it unless someone has changed it since:');
+		expect(t('bulk.undo.deletes_only_one')).toBe('This undo writes no value back; it only deletes the entry below.');
+		expect(tf('bulk.undo.deletes_only', { n: '3' })).toBe('This undo writes no value back; it only deletes the 3 entries below.');
+	});
+
+	it('heads the column "Jetzt → zurück auf" in German and "Now → back to" in English', () => {
+		const was = getLocale();
+		onTestFinished(() => setLocale(was));
+		setLocale('de');
+		expect(t('bulk.undo.now_back')).toBe('Jetzt → zurück auf');
+		setLocale('en');
+		expect(t('bulk.undo.now_back')).toBe('Now → back to');
 	});
 });
