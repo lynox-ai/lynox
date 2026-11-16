@@ -561,7 +561,9 @@ describe('a value the engine sends ends closed', () => {
     '<p>a<', '<p>a</', '<plaintext>x',
   ];
 
-  it('closes every open input it can send, and holds no dropped stretch in it', () => {
+  it('leaves every open input it can send ending closed as the comparison reads it, with no dropped stretch', () => {
+    // `endsClosed` allows an element whose end tag the page may leave out (a paragraph, a list item)
+    // to stand open at the end; what it refuses is a value the next bytes would land inside.
     const unstable: string[] = [];
     for (const raw of OPEN) {
       const sent = canonicalHtml(raw);

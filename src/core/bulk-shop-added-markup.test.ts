@@ -432,6 +432,19 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     expect(byKey(next, `${LIST}/1`).change).toBe('update');
   });
 
+  it('refuses, and does not fail, where the marked run\'s list form does not decrypt either', async () => {
+    const { id } = await markedRun();
+    const db = engineDb.getDb();
+    const broken = (plain: string): string => { const sealed = engineDb.enc(plain); return `${sealed.slice(0, -6)}AAAAAA`; };
+    const source = (db.prepare('SELECT list_source FROM bulk_runs WHERE id = ?').get(id) as { list_source: string | null }).list_source;
+    expect(source).not.toBeNull();
+    db.prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(broken('{"form":"x"}'), id);
+    db.prepare('UPDATE bulk_targets SET target_key = ? WHERE run_id = ? AND shop_added_markup = 1').run(broken(`${LIST}/1`), id);
+    // Which fields it marked is not known, so every product a read meets counts as marked: nothing is
+    // left to write, and the run says so rather than throwing on the broken row.
+    expect(() => approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>Meins</p>' }, { description: `<p>Neu</p>${SCRIPT}` }])).toThrow('nothing_to_apply');
+  });
+
   it('mints no undo that restores a value another family left marked, read while that write was still unmarked', async () => {
     // r2 read the product before the refusal could see the mark: its before-image is the marked value.
     const { id } = await markedRun();

@@ -2747,7 +2747,11 @@ export class BulkLedger {
       if (kept === undefined || sent === undefined) return { appliedAt: r.applied_at };
       if (kept === null || typeof kept !== 'object') continue;
       const held = kept as Record<string, unknown>;
-      const marked = this.htmlFieldsOf(r.run_id).filter((f) => typeof sent[f] === 'string' && typeof held[f] === 'string'
+      // Which fields the marked run sent as HTML is read from its list form; one that does not decrypt
+      // or parse leaves them unknown, so the row counts as equal, like a value that cannot be read.
+      let fields: readonly string[];
+      try { fields = this.htmlFieldsOf(r.run_id); } catch { return { appliedAt: r.applied_at }; }
+      const marked = fields.filter((f) => typeof sent[f] === 'string' && typeof held[f] === 'string'
         && !sameHtmlField(sent[f] as string, held[f] as string));
       if (marked.some((f) => typeof now[f] === 'string' && htmlEqual(now[f] as string, held[f] as string))) {
         return { appliedAt: r.applied_at };
