@@ -940,6 +940,21 @@ describe('the image is the source\'s and is opened as untrusted', () => {
     expect(() => rekey(img)).toThrow(/has a generated or hidden column in other/);
   });
 
+  it('refuses a generated column on a table the schema text names with SQLite\'s prefix', () => {
+    const img = image("CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT); CREATE TABLE x (a INT, g INT GENERATED ALWAYS AS (a + 1) VIRTUAL); INSERT INTO memories VALUES ('m', 'x'); INSERT INTO x (a) VALUES (1);", (db) => {
+      db.unsafeMode(true);
+      db.pragma('writable_schema = ON');
+      db.prepare("UPDATE sqlite_master SET name = 'sqlite_x', tbl_name = 'sqlite_x', sql = 'CREATE TABLE sqlite_x (a INT, g INT GENERATED ALWAYS AS (a + abs(-9223372036854775808)) VIRTUAL)' WHERE name = 'x'").run();
+      db.pragma('writable_schema = OFF');
+    });
+    expect(() => rekey(img)).toThrow(/has a generated or hidden column in sqlite_x/);
+  });
+
+  it('takes SQLite\'s own tables', () => {
+    const img = image("CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT); INSERT INTO memories (text) VALUES ('x'); CREATE INDEX by_text ON memories (text); ANALYZE;");
+    expect(rekey(img).counts.reencrypted).toBe(1);
+  });
+
   it('removes a scratch directory an earlier import left behind', () => {
     const src = tmp(); const dst = tmp();
     seedStores(src, SRC);

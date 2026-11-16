@@ -258,7 +258,8 @@ function refuseUntrustedTables(db: Database.Database, refuse: (what: string) => 
   const odd = kinds.find((k) => k.type === 'virtual' || k.type === 'shadow');
   if (odd) throw refuse(`carries a virtual table (${odd.name.slice(0, 64)})`);
   for (const k of kinds) {
-    if (k.type !== 'table' || k.name.toLowerCase().startsWith('sqlite_')) continue;
+    // Every table, SQLite's own included: a source can give a table their prefix through the schema text.
+    if (k.type !== 'table') continue;
     if (tableColumns(db, k.name).some((c) => c.hidden !== 0)) throw refuse(`has a generated or hidden column in ${k.name.slice(0, 64)}`);
   }
 }
