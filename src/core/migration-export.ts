@@ -232,125 +232,133 @@ export class MigrationExporter {
     const databases: Array<{ name: string; at: number; raw: PlaintextChunk[]; plain: PlainSourceResult | null }> = [];
     let sweeps: { at: number; raw: PlaintextChunk[]; plain: PlainLedgers | null } | null = null;
 
-    onProgress?.({ phase: 'collecting', currentChunk: 0, totalChunks: 0, currentName: 'secrets' });
-
-    // 1. Secrets — decrypt from local vault
-    const secretsChunk = this.collectSecrets();
-    if (secretsChunk) plaintextChunks.push(secretsChunk);
-
-    // 2. SQLite databases — VACUUM INTO temp copies; on the plaintext path also decrypted in memory
-    for (const dbName of SQLITE_DBS) {
-      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dbName });
-      const snapshot = this.snapshotDatabase(dbName);
-      if (!snapshot) continue;
-      const plain = plan && isPlainStore(dbName) ? this.plainForm(snapshot, dbName) : null;
-      databases.push({ name: dbName, at: plaintextChunks.length, raw: splitIntoChunks(snapshot, 'sqlite_db', dbName), plain });
-    }
-
-    // A throw from here on leaves the stores' plaintext forms behind: they are zeroed on the way out.
+    // Every buffer collected below may hold plaintext (secrets, and the stores' plaintext forms);
+    // a throw anywhere before the return zeroes all of them on the way out.
     try {
-    // 3. Artifacts
-    onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'artifacts' });
-    const artifactChunk = this.collectArtifacts();
-    if (artifactChunk) plaintextChunks.push(artifactChunk);
+      onProgress?.({ phase: 'collecting', currentChunk: 0, totalChunks: 0, currentName: 'secrets' });
 
-    // 4. Memory — the flat-file store the memory_* tools actually read
-    onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'memory' });
-    plaintextChunks.push(...this.collectMemory());
+      // 1. Secrets — decrypt from local vault
+      const secretsChunk = this.collectSecrets();
+      if (secretsChunk) plaintextChunks.push(secretsChunk);
 
-    onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'sweeps' });
-    const ledgerFiles = this.readSweeps();
-    if (ledgerFiles) {
-      const raw = splitIntoChunks(Buffer.from(JSON.stringify({ files: ledgerFiles }), 'utf-8'), 'sweeps', 'sweeps');
-      const plain = plan && databases.some((d) => d.name === 'engine.db' && d.plain) ? this.plainLedgers(ledgerFiles) : null;
-      sweeps = { at: plaintextChunks.length, raw, plain };
-    }
+      // 2. SQLite databases — VACUUM INTO temp copies; on the plaintext path also decrypted in memory
+      for (const dbName of SQLITE_DBS) {
+        onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dbName });
+        const snapshot = this.snapshotDatabase(dbName);
+        if (!snapshot) continue;
+        const plain = plan && isPlainStore(dbName) ? this.plainForm(snapshot, dbName) : null;
+        databases.push({ name: dbName, at: plaintextChunks.length, raw: splitIntoChunks(snapshot, 'sqlite_db', dbName), plain });
+      }
 
-    for (const dirName of GENERIC_PORTABLE_DIRS) {
-      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dirName });
-      plaintextChunks.push(...this.collectPortableDir(dirName));
-    }
+      // 3. Artifacts
+      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'artifacts' });
+      const artifactChunk = this.collectArtifacts();
+      if (artifactChunk) plaintextChunks.push(artifactChunk);
 
-    // 5. Config (sanitized)
-    const configChunk = this.collectConfig();
-    if (configChunk) plaintextChunks.push(configChunk);
+      // 4. Memory — the flat-file store the memory_* tools actually read
+      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'memory' });
+      plaintextChunks.push(...this.collectMemory());
+
+      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'sweeps' });
+      const ledgerFiles = this.readSweeps();
+      if (ledgerFiles) {
+        const raw = splitIntoChunks(Buffer.from(JSON.stringify({ files: ledgerFiles }), 'utf-8'), 'sweeps', 'sweeps');
+        const plain = plan && databases.some((d) => d.name === 'engine.db' && d.plain) ? this.plainLedgers(ledgerFiles) : null;
+        sweeps = { at: plaintextChunks.length, raw, plain };
+      }
+
+      for (const dirName of GENERIC_PORTABLE_DIRS) {
+        onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dirName });
+        plaintextChunks.push(...this.collectPortableDir(dirName));
+      }
+
+      // 5. Config (sanitized)
+      const configChunk = this.collectConfig();
+      if (configChunk) plaintextChunks.push(configChunk);
+
+      // 6. The databases and the merge ledgers, each in the form its path takes. The path is chosen
+      //    only now, over every chunk: the destination judges the whole bundle.
+      const report = plan ? this.placeDatabases(plaintextChunks, databases, sweeps, plan.ceiling) : this.placeRaw(plaintextChunks, databases, sweeps);
+
+      // Assign sequence numbers
+      const chunkMetas: MigrationChunkMeta[] = plaintextChunks.map((c, i) => ({
+        ...c.meta,
+        seq: i,
+      }));
+
+      // The destination refuses a manifest over either bound only after it arrives; check here,
+      // before anything is encrypted or sent, and say which bound it is.
+      const totalBytes = chunkMetas.reduce((sum, c) => sum + c.originalSize, 0);
+      const over: string[] = [];
+      if (chunkMetas.length > this.bounds.maxChunks) {
+        over.push(`it needs ${String(chunkMetas.length)} chunks, and a migration carries at most ${String(this.bounds.maxChunks)} (each kind of data starts its own chunks of up to ${String(MAX_CHUNK_BYTES / (1024 * 1024))} MiB)`);
+      }
+      if (totalBytes > this.bounds.maxTotalBytes) {
+        over.push(`it is ${size(totalBytes, this.bounds.maxTotalBytes)}, and a migration carries at most ${size(this.bounds.maxTotalBytes, totalBytes)}`);
+      }
+      if (over.length > 0) {
+        for (const pc of plaintextChunks) pc.data.fill(0);
+        throw new Error(`This instance's data does not fit one migration: ${over.join('; ')}. None of your data was sent, and the data on this instance is unchanged. A migration cannot move only part of it; write to support@lynox.ai with this message and we will look at it with you.`);
+      }
+
+      // Build manifest (without hash first, then compute)
+      let lynoxVersion = 'unknown';
+      try {
+        const pkgPath = join(this.lynoxDir, '..', 'package.json');
+        if (existsSync(pkgPath)) {
+          const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: string };
+          if (pkg.version) lynoxVersion = pkg.version;
+        }
+      } catch { /* best effort */ }
+
+      const manifestBase = {
+        version: 1 as const,
+        exportedAt: new Date().toISOString(),
+        lynoxVersion,
+        totalChunks: chunkMetas.length,
+        chunks: chunkMetas,
+      };
+
+      const manifestHash = computeManifestHash(manifestBase);
+      const manifest: MigrationManifest = { ...manifestBase, manifestHash };
+
+      // Phase 2: Encrypt chunks and zeroize plaintext immediately after
+      const encryptedChunks: EncryptedChunk[] = [];
+      for (let i = 0; i < plaintextChunks.length; i++) {
+        const pc = plaintextChunks[i]!;
+        onProgress?.({
+          phase: 'encrypting',
+          currentChunk: i,
+          totalChunks: plaintextChunks.length,
+          currentName: pc.meta.name,
+        });
+
+        encryptedChunks.push(encryptChunk(pc.data, transferKey, i, manifestHash));
+
+        // Zeroize plaintext immediately after encryption — especially critical for secrets
+        pc.data.fill(0);
+      }
+
+      onProgress?.({ phase: 'done', currentChunk: plaintextChunks.length, totalChunks: plaintextChunks.length, currentName: '' });
+
+      return {
+        manifest, chunks: encryptedChunks,
+        ...(this.skipped.length > 0 ? { skipped: [...this.skipped] } : {}),
+        ...(this.workspaceOmitted ? { workspace: OMITTED_SIDECAR } : {}),
+        ...(report ? { plain: report } : {}),
+      };
     } catch (err: unknown) {
-      for (const d of databases) d.plain?.payload.fill(0);
-      sweeps?.plain?.payload.fill(0);
+      for (const pc of plaintextChunks) pc.data.fill(0);
+      for (const d of databases) {
+        for (const c of d.raw) c.data.fill(0);
+        d.plain?.payload.fill(0);
+      }
+      if (sweeps) {
+        for (const c of sweeps.raw) c.data.fill(0);
+        sweeps.plain?.payload.fill(0);
+      }
       throw err;
     }
-
-    // 6. The databases and the merge ledgers, each in the form its path takes. The path is chosen
-    //    only now, over every chunk: the destination judges the whole bundle.
-    const report = plan ? this.placeDatabases(plaintextChunks, databases, sweeps, plan.ceiling) : this.placeRaw(plaintextChunks, databases, sweeps);
-
-    // Assign sequence numbers
-    const chunkMetas: MigrationChunkMeta[] = plaintextChunks.map((c, i) => ({
-      ...c.meta,
-      seq: i,
-    }));
-
-    // The destination refuses a manifest over either bound only after it arrives; check here,
-    // before anything is encrypted or sent, and say which bound it is.
-    const totalBytes = chunkMetas.reduce((sum, c) => sum + c.originalSize, 0);
-    const over: string[] = [];
-    if (chunkMetas.length > this.bounds.maxChunks) {
-      over.push(`it needs ${String(chunkMetas.length)} chunks, and a migration carries at most ${String(this.bounds.maxChunks)} (each kind of data starts its own chunks of up to ${String(MAX_CHUNK_BYTES / (1024 * 1024))} MiB)`);
-    }
-    if (totalBytes > this.bounds.maxTotalBytes) {
-      over.push(`it is ${size(totalBytes, this.bounds.maxTotalBytes)}, and a migration carries at most ${size(this.bounds.maxTotalBytes, totalBytes)}`);
-    }
-    if (over.length > 0) {
-      for (const pc of plaintextChunks) pc.data.fill(0);
-      throw new Error(`This instance's data does not fit one migration: ${over.join('; ')}. None of your data was sent, and the data on this instance is unchanged. A migration cannot move only part of it; write to support@lynox.ai with this message and we will look at it with you.`);
-    }
-
-    // Build manifest (without hash first, then compute)
-    let lynoxVersion = 'unknown';
-    try {
-      const pkgPath = join(this.lynoxDir, '..', 'package.json');
-      if (existsSync(pkgPath)) {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: string };
-        if (pkg.version) lynoxVersion = pkg.version;
-      }
-    } catch { /* best effort */ }
-
-    const manifestBase = {
-      version: 1 as const,
-      exportedAt: new Date().toISOString(),
-      lynoxVersion,
-      totalChunks: chunkMetas.length,
-      chunks: chunkMetas,
-    };
-
-    const manifestHash = computeManifestHash(manifestBase);
-    const manifest: MigrationManifest = { ...manifestBase, manifestHash };
-
-    // Phase 2: Encrypt chunks and zeroize plaintext immediately after
-    const encryptedChunks: EncryptedChunk[] = [];
-    for (let i = 0; i < plaintextChunks.length; i++) {
-      const pc = plaintextChunks[i]!;
-      onProgress?.({
-        phase: 'encrypting',
-        currentChunk: i,
-        totalChunks: plaintextChunks.length,
-        currentName: pc.meta.name,
-      });
-
-      encryptedChunks.push(encryptChunk(pc.data, transferKey, i, manifestHash));
-
-      // Zeroize plaintext immediately after encryption — especially critical for secrets
-      pc.data.fill(0);
-    }
-
-    onProgress?.({ phase: 'done', currentChunk: plaintextChunks.length, totalChunks: plaintextChunks.length, currentName: '' });
-
-    return {
-      manifest, chunks: encryptedChunks,
-      ...(this.skipped.length > 0 ? { skipped: [...this.skipped] } : {}),
-      ...(this.workspaceOmitted ? { workspace: OMITTED_SIDECAR } : {}),
-      ...(report ? { plain: report } : {}),
-    };
   }
 
   /** A store's plaintext form, or null when its rewrite fails (it then travels raw). */

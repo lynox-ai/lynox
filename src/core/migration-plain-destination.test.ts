@@ -1287,6 +1287,24 @@ describe('the source\'s rewrite of a store image', () => {
     expect(rewriteStoreForPlain(changed(`UPDATE memories SET text = '', rowid = -5 WHERE rowid = ${firstMemory}`), 'engine.db', { key }).counts.decrypted).toBeGreaterThan(0);
   });
 
+  it('has no plaintext form for a table whose row key cannot name one row: a NULL key, a key or rowid beyond 2^53', () => {
+    const key = keyOf('engine.db', SRC);
+    expect(() => rewriteStoreForPlain(changed(`UPDATE memories SET id = NULL WHERE rowid = ${firstMemory}`), 'engine.db', { key })).toThrow(NoPlainForm);
+    expect(() => rewriteStoreForPlain(changed(`UPDATE memories SET rowid = 9007199254740993 WHERE rowid = ${firstMemory}`), 'engine.db', { key })).toThrow(NoPlainForm);
+    expect(() => rewriteStoreForPlain(changed(`UPDATE memories SET rowid = -9007199254740993 WHERE rowid = ${firstMemory}`), 'engine.db', { key })).toThrow(NoPlainForm);
+    // Control: at 2^53 - 1 the key still reads back as itself.
+    expect(rewriteStoreForPlain(changed(`UPDATE memories SET rowid = 9007199254740991 WHERE rowid = ${firstMemory}`), 'engine.db', { key }).counts.decrypted).toBeGreaterThan(0);
+    // A composite key's integer part beyond 2^53 (history.db wire_snapshots.turn_index).
+    const src = tmp();
+    seedStores(src, SRC);
+    const h = new Database(join(src, 'history.db'));
+    const rows = (h.prepare('SELECT count(*) AS n FROM wire_snapshots').get() as { n: number }).n;
+    expect(rows).toBeGreaterThan(0);
+    h.exec('UPDATE wire_snapshots SET turn_index = 9007199254740993 WHERE rowid = (SELECT min(rowid) FROM wire_snapshots)');
+    h.close();
+    expect(() => rewriteStoreForPlain(readFileSync(join(src, 'history.db')), 'history.db', { key: keyOf('history.db', SRC) })).toThrow(NoPlainForm);
+  });
+
   it('has no plaintext form when its header would be over the size the destination reads', () => {
     const key = keyOf('engine.db', SRC);
     const image = changed('SELECT 1');

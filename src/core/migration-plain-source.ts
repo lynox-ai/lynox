@@ -100,6 +100,19 @@ export function rewriteStoreForPlain(image: Buffer, store: PlainStore, options: 
       const has = new Set(info.map((c) => c.name.toLowerCase()));
       const pkCols = info.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
       const pkSelect = pkCols.length > 0 ? pkCols.map(quoted).join(', ') : 'rowid';
+      if (info.length > 0) {
+        // The two lists name a value by its row's key, and the destination finds it by that key. A
+        // PRIMARY KEY without NOT NULL takes NULL in any number of rows (its unique index lets NULLs
+        // repeat; apart from them it allows no two rows one key), and a key or rowid beyond 2^53
+        // reads back as another number: then a listing could name the wrong row. Such a table sends
+        // the store raw.
+        const SAFE = Number.MAX_SAFE_INTEGER;
+        const unsafe = (c: string): string => `(typeof(${c}) = 'integer' AND (${c} > ${String(SAFE)} OR ${c} < -${String(SAFE)}))`;
+        const t = quoted(table);
+        const nullKey = pkCols.length > 0 ? pkCols.map((c) => `${quoted(c)} IS NULL`).join(' OR ') : '0';
+        const bad = db.prepare(`SELECT 1 FROM ${t} WHERE ${nullKey} OR ${[unsafe('rowid'), ...pkCols.map((c) => unsafe(quoted(c)))].join(' OR ')} LIMIT 1`).get();
+        if (bad) throw new NoPlainForm(`${table} has a row key the lists cannot name one row by`);
+      }
       for (const column of cols) {
         if (!has.has(column)) {
           columns.push({ table, column, absent: true });

@@ -20,6 +20,11 @@ vi.mock('./migration-rekey.js', async (original) => {
   const real = await original<typeof import('./migration-rekey.js')>();
   return { ...real, encodePlainPayload: <T,>(h: Parameters<typeof real.encodePlainPayload<T>>[0], body: Buffer) => { held.bodies.push(body); return real.encodePlainPayload(h, body); } };
 });
+const failEncrypt = { on: false };
+vi.mock('./migration-crypto.js', async (original) => {
+  const real = await original<typeof import('./migration-crypto.js')>();
+  return { ...real, encryptChunk: (...a: Parameters<typeof real.encryptChunk>) => { if (failEncrypt.on) throw new Error('encrypt failed'); return real.encryptChunk(...a); } };
+});
 vi.mock('./migration-plain-source.js', async (original) => {
   const real = await original<typeof import('./migration-plain-source.js')>();
   return {
@@ -32,7 +37,7 @@ const { MigrationExporter } = await import('./migration-export.js');
 
 const VAULT = 'a-vault-key-for-the-plain-gate-test-2026';
 let dir = '';
-afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); calls.stores = 0; calls.ledgers = 0; held.payloads.length = 0; held.bodies.length = 0; vi.restoreAllMocks(); });
+afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); calls.stores = 0; calls.ledgers = 0; held.payloads.length = 0; held.bodies.length = 0; failEncrypt.on = false; vi.restoreAllMocks(); });
 
 function key(): Buffer {
   const a = generateEphemeralKeypair(); const b = generateEphemeralKeypair();
@@ -106,6 +111,28 @@ describe('the export zeroes every plaintext buffer it made, whichever path a sto
     source();
     const r = new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT }).export(key(), undefined, { plain: { ceiling: TIGHT } });
     expect(r.plain?.stores.map(s => s.path)).toEqual(['raw', 'raw']);
+    expectZeroed();
+  });
+
+  it('when a database after the two stores fails to snapshot', () => {
+    source();
+    const ds = new Database(join(dir, 'datastore.db'));
+    ds.exec('CREATE TABLE t (v)');
+    ds.close();
+    const proto = MigrationExporter.prototype as unknown as { snapshotDatabase: (n: string) => Buffer | null };
+    const original = proto.snapshotDatabase;
+    vi.spyOn(proto, 'snapshotDatabase').mockImplementation(function (this: unknown, n: string) {
+      if (n === 'datastore.db') throw new Error('snapshot failed');
+      return original.call(this, n);
+    });
+    expect(() => new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT }).export(key(), undefined, { plain: { ceiling: ROOMY } })).toThrow('snapshot failed');
+    expectZeroed();
+  });
+
+  it('when a chunk fails to encrypt', () => {
+    source();
+    failEncrypt.on = true;
+    expect(() => new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT }).export(key(), undefined, { plain: { ceiling: ROOMY } })).toThrow('encrypt failed');
     expectZeroed();
   });
 
