@@ -15315,12 +15315,17 @@ export class LynoxHTTPApi {
 
         // 3. Export + Encrypt
         sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
-        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace } = exporter.export(transferKey, (p) => {
-          sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
-        });
-
-        // Zeroize transfer key — no longer needed after encryption
-        crypto.zeroize(transferKey);
+        // The transfer key is zeroized once the chunks are encrypted, and also when the export
+        // refuses (a bundle over the destination's bounds) or fails.
+        let exported: ReturnType<typeof exporter.export>;
+        try {
+          exported = exporter.export(transferKey, (p) => {
+            sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
+          });
+        } finally {
+          crypto.zeroize(transferKey);
+        }
+        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace } = exported;
 
         // 4. Send manifest
         sendEvent('progress', { phase: 'transferring', message: 'Sending manifest...' });

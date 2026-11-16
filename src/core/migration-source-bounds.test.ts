@@ -129,12 +129,12 @@ describe('the destination enforces the same bounds', () => {
 
   it('refuses one chunk over the count and not at it', () => {
     expect(refusal(memory(MIGRATION_MAX_CHUNKS + 1, 1))).toMatch(/^Too many chunks/);
-    expect(refusal(memory(MIGRATION_MAX_CHUNKS, 1))).not.toMatch(/^Too many chunks/);
+    expect(refusal(memory(MIGRATION_MAX_CHUNKS, 1))).toBe('');
   });
 
   it('refuses one byte over the total and not at it', () => {
     const at = memory(2, MIGRATION_MAX_TOTAL_BYTES / 2);
-    expect(refusal(at)).not.toMatch(/^Total data size exceeds limit/);
+    expect(refusal(at)).toBe('');
     const over = memory(2, MIGRATION_MAX_TOTAL_BYTES / 2);
     over[1] = { ...over[1]!, originalSize: MIGRATION_MAX_TOTAL_BYTES / 2 + 1 };
     expect(refusal(over)).toMatch(/^Total data size exceeds limit/);
