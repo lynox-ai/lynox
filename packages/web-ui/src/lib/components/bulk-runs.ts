@@ -544,6 +544,9 @@ export type TargetDiff =
 export interface BulkTarget {
 	seq: number;
 	key: string;
+	/** A Shopify product's title as the store answered the preview's read. Optional: an older
+	 *  engine sends none, nor does an image target or a product without one. Text, never markup. */
+	title?: string | undefined;
 	sentUnchanged?: string[] | undefined;
 	change: BulkChange;
 	diff: TargetDiff;
