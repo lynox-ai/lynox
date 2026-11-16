@@ -9,7 +9,7 @@
  * and `RunHistory` under the source key, read back on the destination under its own.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -895,6 +895,58 @@ describe('the image is the source\'s and is opened as untrusted', () => {
     expect(out.includes('freespace-needle')).toBe(false);
     const back = new Database(out);
     try { expect(back.pragma('freelist_count', { simple: true })).toBe(0); } finally { back.close(); }
+  });
+
+  it('evaluates nothing of a table outside the set when it copies the image, and fires no trigger there', () => {
+    // An expression that throws when SQLite evaluates it, put in through the schema text as a
+    // source could: an expression index, a partial index, a CHECK and a DEFAULT on a table outside
+    // the set, and a trigger there. Neither `quick_check` (CHECK off) nor the `VACUUM INTO` copy
+    // evaluates them.
+    const BOOM = 'abs(-9223372036854775808)';
+    const img = image(`CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT);
+      CREATE TABLE other (a INT CHECK (a > 0), b INT DEFAULT 1);
+      CREATE INDEX by_expr ON other (a + 1); CREATE INDEX by_part ON other (a) WHERE a > 0;
+      CREATE TABLE fired (n INT);
+      CREATE TRIGGER on_other AFTER INSERT ON other BEGIN INSERT INTO fired VALUES (1); END;
+      INSERT INTO memories VALUES ('m', 'plain words'); INSERT INTO other (a) VALUES (1), (2); DELETE FROM fired;`, (db) => {
+      db.unsafeMode(true);
+      db.pragma('writable_schema = ON');
+      const set = db.prepare('UPDATE sqlite_master SET sql = ? WHERE name = ?');
+      set.run(`CREATE TABLE other (a INT CHECK (a > ${BOOM}), b INT DEFAULT (${BOOM}))`, 'other');
+      set.run(`CREATE INDEX by_expr ON other (a + ${BOOM})`, 'by_expr');
+      set.run(`CREATE INDEX by_part ON other (a) WHERE a > ${BOOM}`, 'by_part');
+      db.pragma('writable_schema = OFF');
+    });
+    const { image: out, counts } = rekey(img);
+    expect(counts.reencrypted).toBe(1);
+    const back = new Database(out);
+    try {
+      expect(back.prepare('SELECT count(*) AS n FROM fired').get()).toEqual({ n: 0 });
+      expect(back.prepare('SELECT count(*) AS n FROM other').get()).toEqual({ n: 2 });
+      // The control: the same schema evaluates its expressions on a write, and throws.
+      expect(() => back.prepare('INSERT INTO other (a) VALUES (5)').run()).toThrow(/integer overflow/);
+    } finally { back.close(); }
+  });
+
+  it.each(['STORED', 'VIRTUAL'])('refuses a %s generated column on a table outside the set, before anything reads it', (kind) => {
+    const BOOM = 'abs(-9223372036854775808)';
+    const img = image(`CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT); CREATE TABLE other (a INT, g INT GENERATED ALWAYS AS (a + 1) ${kind});
+      INSERT INTO memories VALUES ('m', 'x'); INSERT INTO other (a) VALUES (1);`, (db) => {
+      db.unsafeMode(true);
+      db.pragma('writable_schema = ON');
+      db.prepare('UPDATE sqlite_master SET sql = ? WHERE name = ?').run(`CREATE TABLE other (a INT, g INT GENERATED ALWAYS AS (a + ${BOOM}) ${kind})`, 'other');
+      db.pragma('writable_schema = OFF');
+    });
+    expect(() => rekey(img)).toThrow(/has a generated or hidden column in other/);
+  });
+
+  it('removes a scratch directory an earlier import left behind', () => {
+    const src = tmp(); const dst = tmp();
+    seedStores(src, SRC);
+    mkdirSync(join(dst, '.rekey-left'));
+    writeFileSync(join(dst, '.rekey-left', 'image.db'), 'enc:left over');
+    run(dst, [plainPart(src, 'engine.db')]);
+    expect(readdirSync(dst).filter((e) => e.startsWith('.rekey-'))).toEqual([]);
   });
 
   it('leaves no scratch file behind', () => {

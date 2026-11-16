@@ -241,6 +241,29 @@ function tableColumns(db: Database.Database, table: string): Array<{ name: strin
 const columnNames = (db: Database.Database, table: string): Set<string> => new Set(tableColumns(db, table).map((c) => c.name.toLowerCase()));
 
 /**
+ * What the image may not carry anywhere, checked before anything evaluates its schema: a virtual
+ * table (its writes and reads run its module's code on data the source chose) and a generated or
+ * hidden column (a read computes it, `quick_check` included: measured 2026-11-16). A store of this
+ * build has neither. What `quick_check` and the `VACUUM INTO` copy do not evaluate was measured
+ * the same day and is held by a test: an expression or partial index, a STORED generated column,
+ * a DEFAULT, and with `ignore_check_constraints` a CHECK, on a table outside the set.
+ */
+function refuseUntrustedTables(db: Database.Database, refuse: (what: string) => PlainRefusal): void {
+  let kinds: Array<{ name: string; type: string }>;
+  try {
+    kinds = db.prepare('PRAGMA table_list').all() as Array<{ name: string; type: string }>;
+  } catch {
+    throw refuse('has a table this instance cannot read');
+  }
+  const odd = kinds.find((k) => k.type === 'virtual' || k.type === 'shadow');
+  if (odd) throw refuse(`carries a virtual table (${odd.name.slice(0, 64)})`);
+  for (const k of kinds) {
+    if (k.type !== 'table' || k.name.toLowerCase().startsWith('sqlite_')) continue;
+    if (tableColumns(db, k.name).some((c) => c.hidden !== 0)) throw refuse(`has a generated or hidden column in ${k.name.slice(0, 64)}`);
+  }
+}
+
+/**
  * Re-encrypt a received image's columns of the set, in place, on an open in-memory connection.
  * Steps of `stepRows` rows by rowid, one transaction per step: a throw rolls back its step and
  * leaves the earlier ones, and the caller discards the image. Every value is decrypted again and
@@ -278,19 +301,9 @@ export function reencryptColumns(
   const setTables = [...PLAIN_COLUMNS[store].keys()];
   const trigger = db.prepare(`SELECT tbl_name AS t FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN (${setTables.map(() => '?').join(', ')}) LIMIT 1`).get(...setTables.map((t) => t.toLowerCase())) as { t: string } | undefined;
   if (trigger) throw refuse(`carries a trigger on ${trigger.t}`);
-  // A virtual table's writes run its module's code on data the source chose; a store of this build has none.
-  let kinds: Array<{ name: string; type: string }>;
-  try {
-    kinds = db.prepare('PRAGMA table_list').all() as Array<{ name: string; type: string }>;
-  } catch {
-    throw refuse('has a table this instance cannot read');
-  }
-  const odd = kinds.find((k) => k.type === 'virtual' || k.type === 'shadow');
-  if (odd) throw refuse(`carries a virtual table (${odd.name.slice(0, 64)})`);
-  // On a table of the set, a rewrite also computes its generated columns and expression indexes.
+  refuseUntrustedTables(db, refuse);
+  // On a table of the set, a rewrite also computes its expression indexes and the conditions of its partial ones.
   for (const table of setTables) {
-    const info = tableColumns(db, table);
-    if (info.some((c) => c.hidden !== 0)) throw refuse(`has a generated or hidden column in ${table}`);
     const indexes = db.prepare(`PRAGMA index_list(${quoted(table)})`).all() as Array<{ name: string; partial: number }>;
     for (const index of indexes) {
       const parts = db.prepare(`PRAGMA index_xinfo(${quoted(index.name)})`).all() as Array<{ cid: number }>;
@@ -416,8 +429,11 @@ export function reencryptImage(
   try {
     db.pragma('trusted_schema = OFF');
     db.pragma('foreign_keys = OFF');
+    // A CHECK runs on every row `quick_check` reads and on every rewrite; the source wrote them.
+    db.pragma('ignore_check_constraints = ON');
     db.pragma('temp_store = MEMORY');
     db.pragma('secure_delete = ON');
+    refuseUntrustedTables(db, (what) => new PlainRefusal(`Refusing to restore: ${store} in the bundle ${what} — import aborted before anything was replaced.`));
     let check: unknown[];
     try {
       check = db.pragma('quick_check', { simple: false }) as unknown[];

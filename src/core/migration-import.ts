@@ -15,7 +15,7 @@
  *  - Migration token is one-time use
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync, accessSync, constants as fsConstants } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync, rmSync, accessSync, constants as fsConstants } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -1314,6 +1314,11 @@ export class MigrationImporter {
    */
   private prepareStores(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): Array<{ meta: MigrationChunkMeta; data: Buffer }> {
     this.plainCounts = new Map();
+    // A process that ended between a re-encrypt's `VACUUM INTO` and its cleanup leaves the scratch
+    // directory behind (ciphertext only); the next import removes it.
+    for (const entry of existsSync(this.lynoxDir) ? readdirSync(this.lynoxDir) : []) {
+      if (entry.startsWith('.rekey-')) rmSync(join(this.lynoxDir, entry), { recursive: true, force: true });
+    }
     const byStore = new Map<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>>();
     for (const c of chunks) {
       const store = c.meta.name.split(':')[0]!;
