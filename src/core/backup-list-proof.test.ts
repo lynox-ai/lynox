@@ -51,8 +51,8 @@ const manager = (key: string | null = KEY): BackupManager => new BackupManager(d
 const proofPath = (): string => join(backupDir, BACKUP_LIST_PROOF_FILE);
 const readProof = (): ProofFile => JSON.parse(readFileSync(proofPath(), 'utf8')) as ProofFile;
 /** A file as this code writes it, MACed under `key` (the list's own key unless a test says otherwise). */
-function writeProof(entries: ProofFile['entries'], key: Buffer = deriveListProofKey(KEY)): void {
-  const body = { v: 1, entries };
+function writeProof(entries: ProofFile['entries'], key: Buffer = deriveListProofKey(KEY), v = 1): void {
+  const body = { v, entries };
   writeFileSync(proofPath(), JSON.stringify({ ...body, mac: canonicalMac(body, key) }));
 }
 const sha256 = (path: string): string => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -136,6 +136,17 @@ describe('the backup list across a restart', () => {
     expect(first.listBackups()[0]?.provenance).toBe('verified');
     const { m, checks } = fresh('another-vault-key');
     expect(m.listBackups()[0]?.provenance).toBe('mismatch');
+    expect(checks).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not take a file of another format version, though its MAC matches', async () => {
+    const first = manager();
+    await first.createBackup();
+    first.listBackups();
+    writeProof(readProof().entries, deriveListProofKey(KEY), 2);
+
+    const { m, checks } = fresh();
+    expect(m.listBackups()[0]?.provenance).toBe('verified');
     expect(checks).toHaveBeenCalledTimes(1);
   });
 

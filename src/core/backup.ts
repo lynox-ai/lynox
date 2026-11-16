@@ -148,7 +148,8 @@ function readListProof(value: unknown, key: Buffer): Map<string, KeptProvenance>
   const out = new Map<string, KeptProvenance>();
   for (const [name, entry] of Object.entries(entries as Record<string, unknown>)) {
     const { digest, provenance } = (typeof entry === 'object' && entry !== null ? entry : {}) as { digest?: unknown; provenance?: unknown };
-    if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) continue;
+    // A digest is only ever compared for equality with a sha256 the list just computed.
+    if (typeof digest !== 'string') continue;
     if (provenance !== 'verified' && provenance !== 'none' && provenance !== 'mismatch') continue;
     out.set(name, { digest, provenance });
   }
