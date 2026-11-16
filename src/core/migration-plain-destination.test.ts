@@ -1182,6 +1182,20 @@ describe('the source sends its stores as plaintext when the destination takes th
   });
 });
 
+describe('the source\'s rewrite of a store image', () => {
+  it('names a table or column of the set that the image lacks as absent, and rewrites the rest', () => {
+    const src = tmp();
+    seedStores(src, SRC);
+    const d = new Database(join(src, 'engine.db'));
+    d.exec('DROP TABLE entry_sources');
+    d.close();
+    const r = rewriteStoreForPlain(readFileSync(join(src, 'engine.db')), 'engine.db', { key: keyOf('engine.db', SRC) });
+    expect(r.columns).toContainEqual({ table: 'entry_sources', column: 'text', absent: true });
+    expect(r.columns).toContainEqual({ table: 'memories', column: 'text' });
+    expect(r.columns.filter(c => c.absent)).toHaveLength(1);
+  });
+});
+
 describe('the source chooses each store\'s path the way the destination judges it', () => {
   const at = (mb: number): number => mb * MIB;
   const base = (over: Partial<Parameters<typeof choosePlainPaths>[0]> = {}): Parameters<typeof choosePlainPaths>[0] => ({
@@ -1209,6 +1223,15 @@ describe('the source chooses each store\'s path the way the destination judges i
     expect(choosePlainPaths(base({ sweeps: { rawBytes: 10, plainBytes: null } })).get('engine.db')).toEqual({ path: 'raw', reason: 'ledgers' });
     expect(choosePlainPaths(base({ sweeps: { rawBytes: 10, plainBytes: 64 * MIB + 1 } })).get('engine.db')).toEqual({ path: 'raw', reason: 'ledgers' });
     expect(choosePlainPaths(base({ sweeps: { rawBytes: 10, plainBytes: 64 * MIB } })).get('engine.db')).toEqual({ path: 'plain' });
+  });
+
+  it('counts the ledgers at the larger of their two forms in the bundle, as the destination does', () => {
+    // Raw ledgers 10 MiB, their plaintext form 1 MiB. Bundle with the raw size: 10 + 10 + 10 = 30, rest 10;
+    // peak = 30 + 10 + (k - 1) * 10 = 50 at k 2. Counted at the travelling form it would read 41.
+    const sweeps = { rawBytes: at(10), plainBytes: at(1) };
+    const ceiling = (limit: number) => ({ import_limit_mb: limit, baseline_mb: 0, k: 2, rest_factor: 1 });
+    expect(choosePlainPaths(base({ ceiling: ceiling(50), sweeps })).get('engine.db')).toEqual({ path: 'plain' });
+    expect(choosePlainPaths(base({ ceiling: ceiling(49.9), sweeps })).get('engine.db')).toEqual({ path: 'raw', reason: 'memory' });
   });
 
   it('a store without a plaintext form takes the raw path', () => {
