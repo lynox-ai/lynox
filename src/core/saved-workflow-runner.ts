@@ -9,6 +9,7 @@ import { toolLockFor } from './mandate-tool-lock.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/pipeline.js';
 import { decideRunGrant, startedVia, type GrantDecision, type GrantRunOrigin } from './workflow-grant.js';
+import { workflowStampRefusal } from './workflow-stamp.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import type { SubAgentPromptHandles } from '../orchestrator/runtime-adapter.js';
 import type { ApprovalFilingContext } from './approval-filing.js';
@@ -199,7 +200,10 @@ export async function runGuardedSavedWorkflow(
     parentPrompt: opts?.parentPrompt,
     questionWait: opts?.questionWait,
     approvalFiling: opts?.approvalFiling,
-    checkWorkflow: opts?.checkWorkflow,
+    // The owner's stamp, asked of the copy the runner reads and runs, after every await of this
+    // path (the credit hook above): an edit while it waited cannot run on the stamp of the steps
+    // before it. Every caller's gate asked earlier; this one is the one that decides.
+    checkWorkflow: (planned: PlannedPipeline) => workflowStampRefusal(engine, planned) ?? opts?.checkWorkflow?.(planned) ?? null,
     // A webhook run's params are a third party's values: its step agents meet them only where a
     // task names them, fenced.
     paramsKeptFromSteps: opts?.origin?.kind === 'webhook',

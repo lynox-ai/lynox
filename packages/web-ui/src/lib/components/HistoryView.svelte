@@ -4,6 +4,7 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { unarchiveThread } from '../stores/threads.svelte.js';
+	import { runLabel } from '../utils/scheduled-task-turn.js';
 
 	interface RunRecord {
 		id: string;
@@ -160,7 +161,7 @@
 			const th = threadMap.get(threadId);
 			result.push({
 				threadId,
-				title: th?.title || (threadId === '_orphan' ? t('history.ungrouped') : threadRuns[0]?.task_text?.slice(0, 50) || threadId.slice(0, 8)),
+				title: th?.title || (threadId === '_orphan' ? t('history.ungrouped') : (threadRuns[0]?.task_text !== undefined ? runLabel(threadRuns[0].task_text) : undefined) || threadId.slice(0, 8)),
 				isArchived: (th?.is_archived ?? 0) === 1,
 				runs: threadRuns,
 				totalCost: threadRuns.reduce((s, r) => s + r.cost_usd, 0),

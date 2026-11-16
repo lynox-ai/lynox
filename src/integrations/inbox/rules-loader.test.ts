@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
 import { InboxRulesLoader, type RuleMatchInput } from './rules-loader.js';
+import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 import type { MailAccountConfig } from '../mail/provider.js';
 
 let mail: MailStateDb;
@@ -127,6 +128,17 @@ describe('InboxRulesLoader — ordering and isolation', () => {
   });
 });
 
+describe('InboxRulesLoader — only confirmed rules apply, a proposal waits for the owner', () => {
+  it('a rule the agent proposed matches nothing until the owner confirms it', () => {
+    const p = inbox.proposeRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'waits@x', name: 'W' }, 10);
+    const id = p.ok ? p.id : '';
+    expect(loader.match(input({ accountId: 'acct-1', from: 'waits@x' }))).toBeNull();
+    expect(inbox.confirmRule(id)).toBe(true);
+    loader.invalidateAll();
+    expect(loader.match(input({ accountId: 'acct-1', from: 'waits@x' }))?.id).toBe(id);
+  });
+});
+
 describe('InboxRulesLoader — cache', () => {
   it('reads rules from the DB on first match and serves later matches from cache', () => {
     inbox.insertRule({
@@ -137,7 +149,7 @@ describe('InboxRulesLoader — cache', () => {
       action: 'archive',
       source: 'on_demand',
     });
-    const spy = vi.spyOn(inbox, 'listRulesForAccount');
+    const spy = vi.spyOn(inbox, 'listConfirmedRulesForAccount');
     expect(loader.match(input({ from: 'a@x' }))).not.toBeNull();
     expect(loader.match(input({ from: 'a@x' }))).not.toBeNull();
     expect(loader.match(input({ from: 'a@x' }))).not.toBeNull();
@@ -163,7 +175,7 @@ describe('InboxRulesLoader — cache', () => {
     });
     loader.match(input({ accountId: 'acct-1', from: 'a@x' }));
     loader.match(input({ accountId: 'acct-2', from: 'b@x' }));
-    const spy = vi.spyOn(inbox, 'listRulesForAccount');
+    const spy = vi.spyOn(inbox, 'listConfirmedRulesForAccount');
     loader.invalidate('acct-1');
     loader.match(input({ accountId: 'acct-1', from: 'a@x' }));
     loader.match(input({ accountId: 'acct-2', from: 'b@x' }));
@@ -181,9 +193,40 @@ describe('InboxRulesLoader — cache', () => {
       source: 'on_demand',
     });
     loader.match(input({ from: 'a@x' }));
-    const spy = vi.spyOn(inbox, 'listRulesForAccount');
+    const spy = vi.spyOn(inbox, 'listConfirmedRulesForAccount');
     loader.invalidateAll();
     loader.match(input({ from: 'a@x' }));
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('InboxRulesLoader — description rules, read for the model check in the runner', () => {
+  it('match() never applies a description rule, even when its text is in the sender or subject', () => {
+    inbox.insertRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: 'Strategie', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    inbox.insertRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: 'mustermann@example.com', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    expect(loader.match(input())).toBeNull();
+    expect(loader.descriptionRules('acct-1')).toHaveLength(2);
+  });
+
+  it('descriptionRules() returns only confirmed description rules of the account, in confirmation order', () => {
+    const fixed = inbox.insertRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'a@x.example', bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    const a = inbox.proposeRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: 'Rechnungen von Lieferanten', name: 'A' }, 10, new Date(1_000));
+    const b = inbox.proposeRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: 'Terminanfragen', name: 'B' }, 10, new Date(2_000));
+    const waiting = inbox.proposeRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: 'Newsletter', name: 'C' }, 10, new Date(3_000));
+    inbox.insertRule({ accountId: 'acct-2', matcherKind: 'matches_description', matcherValue: 'fremdes Konto', bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    if (!a.ok || !b.ok || !waiting.ok) throw new Error('propose failed');
+    expect(inbox.confirmRule(b.id, undefined, new Date(5_000))).toBe(true);
+    expect(inbox.confirmRule(a.id, undefined, new Date(6_000))).toBe(true);
+    loader.invalidateAll();
+    const ids = loader.descriptionRules('acct-1').map((r) => r.id);
+    expect(ids).toEqual([b.id, a.id]);
+    expect(ids).not.toContain(fixed);
+    expect(ids).not.toContain(waiting.id);
+  });
+
+  it('descriptionRules() reads at most MAX_DESCRIPTION_RULES, the first confirmed, even when the database holds more', () => {
+    const ids = Array.from({ length: MAX_DESCRIPTION_RULES + 5 }, (_, i) =>
+      inbox.insertRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: `Beschreibung ${String(i)}`, bucket: 'requires_user', action: 'show', source: 'on_demand', createdAt: new Date(1_000 + i) }));
+    expect(loader.descriptionRules('acct-1').map((r) => r.id)).toEqual(ids.slice(0, MAX_DESCRIPTION_RULES));
   });
 });

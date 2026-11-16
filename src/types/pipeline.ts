@@ -102,6 +102,10 @@ export interface PipelineResult {
   /** Why the run ended before its next step, in lynox's own words, when it was not a step's
    *  failure: today only that an access the workflow depends on ended during the run (1100). */
   endedBecause?: string | undefined;
+  /** When a step's reported failure ended the run (`on_failure: stop`, where the step has no entry
+   *  in `steps`): lynox's fixed sentence naming that step and where its reason is shown. The reason
+   *  itself is the step agent's text and never goes here (U-192 1b). */
+  reportedFailure?: string | undefined;
 }
 
 /**

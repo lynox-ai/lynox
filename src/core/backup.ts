@@ -10,7 +10,7 @@
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import Database from 'better-sqlite3';
+import { snapshotSqlite } from './sqlite-snapshot.js';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
 import { deriveBackupKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
@@ -18,6 +18,16 @@ import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-d
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 import { OMITTED_SIDECAR, restoreRefusal } from './sidecar-refusals.js';
+import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
+
+/**
+ * `: <reason>` for a log line about a failed backup or upload, or nothing while the process
+ * reduces error text (an exact connection is held). The reason can quote a workspace file name
+ * and, for an upload, Google's answer.
+ */
+export function backupFailureDetail(reason: string | undefined, fallback: string): string {
+  return isErrorTextReducedForProcess() ? '' : `: ${reason ?? fallback}`;
+}
 
 export { OMITTED_SIDECAR };
 import { closeAnchor, copyOut, FOLD_PROBE_NAME, isStageName, listDir, namesFoldAt, openAnchor, removeStaleStages, stageIn, statEntry, unlinkAt, WorkspaceAccessError, type StageEntry, type StagedWrite, type WorkspaceAnchor } from './workspace-fd.js';
@@ -783,14 +793,11 @@ export class BackupManager {
           try {
             const result = await this._gdriveUploader.upload(finalDir, manifest);
             if (!result.success) {
-              process.stderr.write(
-                `[lynox:backup] Google Drive upload failed — local backup is intact: ${result.error ?? 'unknown error'}\n`,
-              );
+              process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact${backupFailureDetail(result.error, 'unknown error')}\n`);
             }
           } catch (err: unknown) {
             // A throw is the unexpected path; the uploader reports refusals by return value.
-            const msg = err instanceof Error ? err.message : String(err);
-            process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${msg}\n`);
+            process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${processErrorText(err)}\n`);
           } finally {
             this._uploading--;
           }
@@ -1259,16 +1266,7 @@ export class BackupManager {
    * Creates a consistent snapshot even during concurrent writes (WAL mode).
    */
   private vacuumInto(srcPath: string, destPath: string): void {
-    let db: InstanceType<typeof Database> | null = null;
-    try {
-      db = new Database(srcPath, { readonly: true });
-      // VACUUM INTO creates a complete, defragmented copy
-      // Escape single quotes in path to prevent SQL injection
-      const safePath = destPath.replace(/'/g, "''");
-      db.exec(`VACUUM INTO '${safePath}'`);
-    } finally {
-      try { db?.close(); } catch { /* ignore */ }
-    }
+    snapshotSqlite(srcPath, destPath);
   }
 
   /** Recursive directory copy preserving structure. */

@@ -67,16 +67,26 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// behaviour tests. A copy in the component would be a second rule with no
 		// test, and the source assertions here cannot see what a copy does.
 		expect(SCRIPT).toContain(
-			"import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
+			"import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
 		);
 		expect(SCRIPT).toContain("import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';");
-		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'showsInstruction', 'showsWatchTarget', 'watchOf', 'awaitsOwnerStamp', 'listedLine', 'listedNote', 'stampable', 'usesConnections']) {
+		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'showsInstruction', 'showsWatchAddress', 'showsWatchTarget', 'watchOf', 'awaitsOwnerStamp', 'listedLine', 'listedNote', 'stampable', 'usesConnections']) {
 			expect(SCRIPT, name).not.toMatch(new RegExp(`function\\s+${name}|${name}\\s*=`));
 		}
 		// Who waits is the two tested rules together, nothing besides: an agent run nobody confirmed,
 		// and anything a mandate set up or last changed (engine `mandateNeedsOwnerStamp`).
 		const held = SCRIPT.slice(SCRIPT.indexOf('function held('), SCRIPT.indexOf('\n\t}', SCRIPT.indexOf('function held(')));
 		expect(held.split('\n').map((l) => l.trim()).slice(1).join(' ')).toBe('return awaitsConfirmation(trigger) || awaitsOwnerStamp(trigger);');
+	});
+
+	it('a confirmed watch names its page on its row (PRD B6)', () => {
+		// The escalation of a watch someone the owner let in set up leaves the address out and points
+		// here, so the row must show it once the watch is confirmed.
+		const { cond, body } = ifBlockAround('data-trigger-watch');
+		// Not while it waits: the held block names the address there (`StampConfirm` or the consent box), never twice.
+		expect(cond).toBe('showsWatchAddress(trigger) && !held(trigger)');
+		expect(body).toContain("{watchOf(trigger)?.host ?? ''}");
+		expect(body).toContain("{watchOf(trigger)?.rest ?? ''}");
 	});
 
 	it('a waiting trigger carries its own badge, whole', () => {

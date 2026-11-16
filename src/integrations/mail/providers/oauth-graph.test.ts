@@ -307,6 +307,7 @@ describe('OAuthGraphProvider — fetch', () => {
     expect(msg.inReplyTo).toBe('<parent@example.com>');
     expect(msg.references).toBe('<root@example.com> <parent@example.com>');
     expect(msg.envelope.isAutoReply, 'the reply tool reads this, from the FETCHED envelope').toBe(true);
+    expect(msg.envelope.isAutoReplied).toBe(true);
     expect(msg.attachments).toEqual([
       { partId: 'att-1', filename: 'offer.pdf', contentType: 'application/pdf', sizeBytes: 1234, contentId: undefined, inline: false },
       { partId: 'att-2', filename: 'logo.png', contentType: 'image/png', sizeBytes: 99, contentId: undefined, inline: true },
@@ -323,6 +324,7 @@ describe('OAuthGraphProvider — fetch', () => {
     expect(msg.text).toBe('Plain <b>as is</b>');
     expect(msg.html).toBeUndefined();
     expect(msg.envelope.isAutoReply).toBe(false);
+    expect(msg.envelope.isAutoReplied).toBe(false);
   });
 });
 

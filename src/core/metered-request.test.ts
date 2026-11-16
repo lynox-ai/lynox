@@ -1,9 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 
 import type { Engine, LynoxHooks } from './engine.js';
 import type { SessionCounters } from '../types/index.js';
 import { fireBeforeRunGate, reportMeteredCost, debitInRunHelperCost } from './metered-request.js';
 import { openRunGroup } from './run-group.js';
+import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
 
 function makeCounters(): SessionCounters {
   return {
@@ -57,6 +58,50 @@ describe('fireBeforeRunGate — pre-run credit gate', () => {
     const onBeforeRun = vi.fn().mockRejectedValue('plain string boom');
     const result = await fireBeforeRunGate(makeEngine([{ onBeforeRun }]), 'fast');
     expect(result.blockedReason).toBe('plain string boom');
+  });
+});
+
+describe('fireBeforeRunGate — the instance\'s spending caps', () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const spentToday = (usd: number) => ({ getCostByDay: () => [{ day: today, cost_usd: usd, run_count: 1 }] });
+
+  afterEach(() => { resetPersistentBudget(); });
+
+  it('blocks at a reached daily cap before any hook runs, and says it was the cap', async () => {
+    configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const onBeforeRun = vi.fn();
+    const result = await fireBeforeRunGate(makeEngine([{ onBeforeRun }]), 'fast');
+    expect(result.blockedReason).toBe('Daily spending cap ($5) reached. Today: $5.00.');
+    expect(result.capReached).toBe('daily');
+    expect(onBeforeRun).not.toHaveBeenCalled();
+  });
+
+  it('blocks at a reached monthly cap', async () => {
+    configurePersistentBudget({ costProvider: spentToday(20), dailyCapUSD: 100, monthlyCapUSD: 20 });
+    const result = await fireBeforeRunGate(makeEngine([]), 'fast');
+    expect(result.blockedReason).toBe('Monthly spending cap ($20) reached. This month: $20.00.');
+    expect(result.capReached).toBe('monthly');
+  });
+
+  it('checks the caps without a host (self-host, BYOK), and passes under them', async () => {
+    configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const blocked = await fireBeforeRunGate(null, 'fast');
+    expect(blocked.blockedReason).toBe('Daily spending cap ($5) reached. Today: $5.00.');
+    expect(blocked.capReached).toBe('daily');
+
+    configurePersistentBudget({ costProvider: spentToday(4.99), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const passed = await fireBeforeRunGate(null, 'fast');
+    expect(passed.blockedReason).toBeNull();
+    expect(passed.capReached).toBeNull();
+  });
+
+  it('under the caps the hooks still decide, and a hook block is not the cap', async () => {
+    configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const onBeforeRun = vi.fn().mockRejectedValue(new Error('AI budget for this period reached.'));
+    const result = await fireBeforeRunGate(makeEngine([{ onBeforeRun }]), 'fast');
+    expect(onBeforeRun).toHaveBeenCalledOnce();
+    expect(result.blockedReason).toBe('AI budget for this period reached.');
+    expect(result.capReached).toBeNull();
   });
 });
 

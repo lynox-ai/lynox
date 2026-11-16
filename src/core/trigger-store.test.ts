@@ -258,6 +258,13 @@ describe('TriggerStore — what the creating session had taken in', () => {
     store.insert({ id: 'u', title: 'x again', source: 'cron', effect: 'run_workflow', nextRunAt: '2020-01-01T00:00:00.000Z' });
     expect(store.getDue('2030-01-01T00:00:00.000Z')[0]!.created_untrusted).toBe('external-tool');
   });
+
+  it('never clears a recorded cause when the row is written again with the clean cause', () => {
+    const store = make();
+    store.insert({ id: 'u', title: 'x', source: 'cron', effect: 'run_workflow', nextRunAt: '2020-01-01T00:00:00.000Z', createdUntrusted: 'external-tool' });
+    store.insert({ id: 'u', title: 'x again', source: 'cron', effect: 'run_workflow', nextRunAt: '2020-01-01T00:00:00.000Z', createdUntrusted: 'none' });
+    expect(store.getDue('2030-01-01T00:00:00.000Z')[0]!.created_untrusted).toBe('external-tool');
+  });
 });
 
 describe('TriggerStore — the model tier a trigger runs at', () => {

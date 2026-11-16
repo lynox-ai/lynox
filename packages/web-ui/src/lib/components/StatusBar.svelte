@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
+	import { bootStoreLineKeys, bootStoresOf } from '../boot-store-notice.js';
 	import { parseActiveRuns, countLiveRuns } from '../utils/active-runs.js';
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { t, getLocale } from '../i18n.svelte.js';
@@ -50,6 +51,8 @@
 	// No vault key over stores that already hold encrypted values. The engine puts this on the
 	// providers poll for the owner only; a mandate's response never carries it, so it sees nothing.
 	let vaultKey = $state<'missing_over_encrypted_data' | 'unknown' | null>(null);
+	// A boot store that did not open, the same way: owner only, from the providers poll.
+	let bootStoreKeys = $state<string[][]>([]);
 	// Tooltip text for the API-status pill — surfaces "Last run failed" (or
 	// equivalent provider description) so the user knows WHY the dot is red
 	// without having to open the status panel. Falls back to the provider
@@ -127,10 +130,11 @@
 			}
 
 			if (providersRes?.ok) {
-				const data = (await providersRes.json()) as { providers: ProviderEntry[]; vault_key?: unknown };
+				const data = (await providersRes.json()) as { providers: ProviderEntry[]; vault_key?: unknown; boot_stores_missing?: unknown; boot_stores_alerted?: unknown; boot_store_memory_old?: unknown };
 				if (stale()) return;
 				providers = Array.isArray(data.providers) ? data.providers : [];
 				vaultKey = data.vault_key === 'missing_over_encrypted_data' || data.vault_key === 'unknown' ? data.vault_key : null;
+				bootStoreKeys = bootStoreLineKeys(bootStoresOf(data.boot_stores_missing), data.boot_stores_alerted === true, data.boot_store_memory_old === true);
 				const primary = providers[0];
 				// Name ALL configured providers, not just the primary — in a hybrid
 				// tier setup (e.g. balanced=Mistral, deep=Anthropic) the footer must
@@ -383,6 +387,17 @@
 		</button>
 	{/if}
 {/snippet}
+
+{#if bootStoreKeys.length > 0}
+	<div role="alert" class="flex items-start gap-2 border-t border-warning/30 bg-warning/10 px-3 py-2 text-xs text-text">
+		<Icon name="warning" size="xs" class="mt-0.5 shrink-0 text-warning" />
+		<div class="space-y-1">
+			{#each bootStoreKeys as paragraph}
+				<p>{paragraph.map((k) => t(k)).join(' ')}</p>
+			{/each}
+		</div>
+	</div>
+{/if}
 
 {#if vaultKey !== null}
 	<div role="alert" class="flex items-start gap-2 border-t border-warning/30 bg-warning/10 px-3 py-2 text-xs text-text">
