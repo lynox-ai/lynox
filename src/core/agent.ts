@@ -5443,6 +5443,9 @@ export class Agent implements IAgent {
       // the tool used to return. Only `softFailureReason` diverges, and it
       // reaches nothing but `toolEnd`. See tool-soft-failure.ts.
       let softFailureReason: string | null = null;
+      // Only a thrown soft failure replaces the answer; one read by `failureOf` leaves it, and with
+      // it everything the model would have read, the stop note below included.
+      let thrownSoftFailure = false;
       let result: string;
       try {
         result = Agent.TOOL_TIMEOUT_EXEMPT.has(tc.name)
@@ -5465,6 +5468,18 @@ export class Agent implements IAgent {
         if (!isToolSoftFailure(err)) throw err;
         result = err.agentVisibleResult;
         softFailureReason = err.reason;
+        thrownSoftFailure = true;
+      }
+      // A tool that answers a call it did not carry out with a plain string says so through
+      // `failureOf`: the same soft failure as a thrown one, read from the answer it returned. The
+      // answer stays what the model reads. A reader that throws decides nothing: the call has
+      // already happened, and the worst it leaves is the ✓ it would have had without the reader.
+      if (softFailureReason === null && tool.failureOf !== undefined) {
+        try {
+          softFailureReason = tool.failureOf(result);
+        } catch {
+          softFailureReason = null;
+        }
       }
       // A write inside the instance was refused for want of its row: the handler may have turned
       // the throw into a result of its own, which must not read as if the entry were made.
@@ -5532,11 +5547,11 @@ export class Agent implements IAgent {
       // returns normally — and one that listens may return what it had when the stop came. A
       // call that reads from outside (`outwardRead`) and writes nothing outside says so. Only a
       // declared read counts: a tool that declares neither may write locally (a memory, a file),
-      // and a write's result is what it did. A soft failure is no result that may be partial, and
+      // and a write's result is what it did. A thrown soft failure is no result that may be partial, and
       // a result that already speaks of the stop (`ownStopSentence`) is left alone. After the
       // cap, so it is never cut off. The declarations are read only on a stopped run, and one
       // that throws on this input leaves the result as it is: the call already happened.
-      if (callSlot.stoppedByRun === true && softFailureReason === null && callSlot.ownStopSentence !== true && Agent._readsOutsideOnly(tool, tc.input)) {
+      if (callSlot.stoppedByRun === true && !thrownSoftFailure && callSlot.ownStopSentence !== true && Agent._readsOutsideOnly(tool, tc.input)) {
         sanitizedResult += `\n\n${TOOL_STOPPED_RESULT_NOTE}`;
       }
 
