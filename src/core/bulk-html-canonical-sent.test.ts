@@ -195,6 +195,23 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     expect(shown.refusedValues).toEqual([{ field: 'description', value: after.description }]);
   });
 
+  // The owner pastes the value by hand: a hidden character it holds where text may carry one is
+  // named with it, for the page to mark.
+  it('names with the value to copy the hidden characters it adds', () => {
+    const after = { description: '[button url="/a?x=1&y=2"]Wa\u00adsser[/button]' };
+    const { id, seq } = listed(after);
+    expect(ledger.recordRead(id, seq, { invalid: 'shortcode_changed' })).toBe(true);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'description', value: after.description, codePoints: [0x00ad] }]);
+  });
+
+  // …and one it holds as a character reference, which the store's page turns into the character.
+  it('names with the value to copy a hidden character it adds as a reference', () => {
+    const after = { description: '[button url="/a?x=1&y=2"]Wa&shy;sser[/button]' };
+    const { id, seq } = listed(after);
+    expect(ledger.recordRead(id, seq, { invalid: 'shortcode_changed' })).toBe(true);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'description', value: after.description, codePoints: [0x00ad] }]);
+  });
+
   it('CONTROL: a target refused for another reason carries no value to copy', () => {
     const { id, seq } = listed({ description: '[button url="/a?x=1&y=2"]Neu[/button]' });
     expect(ledger.recordRead(id, seq, { invalid: 'markup_dropped' })).toBe(true);
