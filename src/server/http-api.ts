@@ -15342,7 +15342,8 @@ export class LynoxHTTPApi {
           const text = await r.text();
           let message: unknown;
           try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
-          return new Error(typeof message === 'string' && message !== '' ? message : `${what}: ${text.slice(0, 500)}`);
+          // The target's own words, marked as its, at most 500 characters like the raw text.
+          return new Error(typeof message === 'string' && message !== '' ? `${what}; the target instance says: ${message.slice(0, 500)}` : `${what}: ${text.slice(0, 500)}`);
         };
 
         // 4. Send manifest

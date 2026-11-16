@@ -15,6 +15,7 @@ import Database from 'better-sqlite3';
 import { strictDecrypt, ENCRYPTED_PREFIX, type StrictDecryptResult } from './strict-decrypt.js';
 import {
   LEDGER_COLUMNS,
+  MAX_HEADER_BYTES,
   PLAIN_COLUMNS,
   encodePlainPayload,
   patchWalHeader,
@@ -49,9 +50,24 @@ export interface PlainSourceOptions {
   decrypt?: ((stored: string, key: Buffer) => StrictDecryptResult) | undefined;
   /** Rows per transaction (default 1,000). */
   stepRows?: number | undefined;
+  /** The largest header the destination parses (default its own bound); a test lowers it. */
+  maxHeaderBytes?: number | undefined;
 }
 
 const quoted = (name: string): string => `"${name.replace(/"/g, '""')}"`;
+
+/** Why a store has no plaintext form; the export then sends it raw, as today. */
+export class NoPlainForm extends Error {}
+
+/** The framed payload, or NoPlainForm when its header would be over the size the destination parses. */
+function frame<T>(header: PlainHeader<T>, body: Buffer, maxHeaderBytes: number): Buffer {
+  try {
+    if (Buffer.byteLength(JSON.stringify(header), 'utf-8') > maxHeaderBytes) throw new NoPlainForm('its list of values that did not decrypt is over the size the destination reads');
+    return encodePlainPayload(header, body);
+  } finally {
+    body.fill(0);
+  }
+}
 
 /**
  * Rewrite `image` (a `VACUUM INTO` snapshot of `store`, ciphertext) so that every column of the
@@ -90,6 +106,12 @@ export function rewriteStoreForPlain(image: Buffer, store: PlainStore, options: 
           continue;
         }
         columns.push({ table, column });
+        // What the destination's rewrite cannot take: a BLOB in a column of the set (its final check
+        // refuses one), and a row at a rowid at or below 0 that holds a value (its paging, like this
+        // one, starts above 0, so the value would arrive unlisted and unread). Either sends the store raw.
+        const c = quoted(column);
+        const odd = db.prepare(`SELECT 1 FROM ${quoted(table)} WHERE typeof(${c}) = 'blob' OR (rowid <= 0 AND typeof(${c}) = 'text' AND ${c} <> '') LIMIT 1`).get();
+        if (odd) throw new NoPlainForm(`${table}.${column} holds a value the plaintext path cannot carry`);
         const read = db.prepare(`SELECT rowid AS _r, ${pkSelect}, ${quoted(column)} AS _v FROM ${quoted(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`).raw();
         const write = db.prepare(`UPDATE ${quoted(table)} SET ${quoted(column)} = ? WHERE rowid = ?`);
         const runStep = db.transaction((after: number): number | null => {
@@ -112,15 +134,13 @@ export function rewriteStoreForPlain(image: Buffer, store: PlainStore, options: 
           }
           return rows.length < step ? null : last;
         });
-        // A rowid at or below 0 is outside the paging; such a row is left as it is (still ciphertext).
         let after: number | null = 0;
         while (after !== null) after = runStep(after);
       }
     }
 
-    const body = db.serialize();
     const plainHeader: PlainHeader<ListedValue> = header;
-    return { payload: encodePlainPayload(plainHeader, body), columns, counts };
+    return { payload: frame(plainHeader, db.serialize(), options.maxHeaderBytes ?? MAX_HEADER_BYTES), columns, counts };
   } finally {
     db.close();
   }
@@ -150,6 +170,7 @@ export function rewriteLedgersForPlain(
   files: Record<string, string>,
   key: Buffer,
   decrypt: (stored: string, key: Buffer) => StrictDecryptResult = strictDecrypt,
+  maxHeaderBytes: number = MAX_HEADER_BYTES,
 ): PlainLedgers | null {
   const rawBytes = Buffer.byteLength(JSON.stringify({ files }), 'utf-8');
   const header: { failed: ListedLedgerCell[]; looksEncrypted: ListedLedgerCell[] } = { failed: [], looksEncrypted: [] };
@@ -194,8 +215,12 @@ export function rewriteLedgersForPlain(
   } finally {
     probeKey.fill(0);
   }
-  const body = Buffer.from(JSON.stringify({ files: plain }), 'utf-8');
-  return { payload: encodePlainPayload(header, body), rawBytes, counts };
+  try {
+    return { payload: frame(header, Buffer.from(JSON.stringify({ files: plain }), 'utf-8'), maxHeaderBytes), rawBytes, counts };
+  } catch (err: unknown) {
+    if (err instanceof NoPlainForm) return null;
+    throw err;
+  }
 }
 
 /** One store's two forms, in bytes. */
@@ -220,7 +245,7 @@ export interface PathInput {
   sweepsCapBytes: number;
 }
 
-export type PathReason = 'no-plain-form' | 'memory' | 'ledgers';
+export type PathReason = 'no-plain-form' | 'memory' | 'ledgers' | 'bounds';
 
 /**
  * Which stores take the plaintext path, judged the way the destination judges the manifest at

@@ -22,6 +22,8 @@ const target: {
   claimsPlain?: boolean;
   /** Answer the handshake completion with 500. */
   failCompletion?: boolean;
+  /** Refuse the manifest with this `error`. */
+  manifestError?: string;
 } = { importer: null, manifest: null, healthCalls: 0 };
 /** Every transfer key the route derives, to see whether it is zeroized. */
 const derivedKeys: Buffer[] = [];
@@ -46,6 +48,7 @@ vi.mock('../core/network-guard.js', async (original) => {
           if (target.failCompletion) return json({ error: 'completion refused' }, 500);
           imp.completeHandshake((body as { clientPubKey: string }).clientPubKey); return json({ ready: true });
         }
+        if (path === '/api/migration/manifest' && target.manifestError !== undefined) return json({ error: target.manifestError }, 422);
         if (path === '/api/migration/manifest') { target.manifest = body as MigrationManifest; imp.setManifest(target.manifest); return json({ accepted: true }); }
         if (path === '/api/migration/chunk') return json(imp.receiveChunk(body as Parameters<MigrationImporter['receiveChunk']>[0]));
         // The target's restore is not under test: answered without writing.
@@ -118,6 +121,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.healthCalls = 0;
     target.claimsPlain = false;
     target.failCompletion = false;
+    target.manifestError = undefined;
     derivedKeys.length = 0;
   });
 
@@ -209,7 +213,14 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.health = HEALTH;
     const events = await exportTo();
     expect((events.get('error') as { message: string }).message)
-      .toBe('The manifest carries a store as plaintext, which the target instance does not take yet; the source has to send it raw.');
+      .toBe('Manifest rejected; the target instance says: The manifest carries a store as plaintext, which the target instance does not take yet; the source has to send it raw.');
+  });
+
+  it('marks a destination\'s text as its own and shows at most 500 characters of it', async () => {
+    setShellIsolationForTest(sidecar);
+    target.manifestError = 'x'.repeat(499) + 'yz';
+    const events = await exportTo();
+    expect((events.get('error') as { message: string }).message).toBe(`Manifest rejected; the target instance says: ${'x'.repeat(499)}y`);
   });
 
   it('zeroizes the transfer key when the handshake completion fails', async () => {

@@ -82,7 +82,7 @@ describe('the source checks the migration bounds before it encrypts anything', (
     expect(at.phases).toContain('done');
   });
 
-  it('zeroes every collected chunk before it refuses', () => {
+  it('zeroes the chunks it collected before it refuses, seen on the config chunk', () => {
     const { chunks, bytes } = measure();
     const held: Buffer[] = [];
     // Every chunk the export collects passes through the chunk splitter's output; hold each buffer.

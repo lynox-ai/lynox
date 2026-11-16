@@ -247,6 +247,8 @@ export class MigrationExporter {
       databases.push({ name: dbName, at: plaintextChunks.length, raw: splitIntoChunks(snapshot, 'sqlite_db', dbName), plain });
     }
 
+    // A throw from here on leaves the stores' plaintext forms behind: they are zeroed on the way out.
+    try {
     // 3. Artifacts
     onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'artifacts' });
     const artifactChunk = this.collectArtifacts();
@@ -272,6 +274,11 @@ export class MigrationExporter {
     // 5. Config (sanitized)
     const configChunk = this.collectConfig();
     if (configChunk) plaintextChunks.push(configChunk);
+    } catch (err: unknown) {
+      for (const d of databases) d.plain?.payload.fill(0);
+      sweeps?.plain?.payload.fill(0);
+      throw err;
+    }
 
     // 6. The databases and the merge ledgers, each in the form its path takes. The path is chosen
     //    only now, over every chunk: the destination judges the whole bundle.
@@ -398,8 +405,9 @@ export class MigrationExporter {
     ceiling: MigrationCeiling,
   ): PlainExportReport {
     const bytes = (cs: PlaintextChunk[]): number => cs.reduce((n, c) => n + c.data.length, 0);
+    const parts = (n: number): number => Math.max(1, Math.ceil(n / MAX_CHUNK_BYTES));
     const stores = databases.filter((d): d is typeof d & { name: PlainStore } => isPlainStore(d.name));
-    const paths = choosePlainPaths({
+    let paths = choosePlainPaths({
       ceiling,
       stores: stores.map((d) => ({ store: d.name, plainBytes: d.plain ? d.plain.payload.length : null, rawBytes: bytes(d.raw) })),
       otherBytes: bytes(chunks),
@@ -407,14 +415,43 @@ export class MigrationExporter {
       sweeps: sweeps ? { rawBytes: bytes(sweeps.raw), plainBytes: sweeps.plain ? sweeps.plain.payload.length : null } : null,
       sweepsCapBytes: SWEEPS_CAP_BYTES,
     });
+    const plainStore = (d: { name: string; plain: PlainSourceResult | null }): boolean => isPlainStore(d.name) && paths.get(d.name)?.path === 'plain' && d.plain !== null;
+    const plainLedgers = (): boolean => sweeps !== null && sweeps.plain !== null && paths.get('engine.db')?.path === 'plain';
+
+    // The source's own bounds (`this.bounds`) are judged over what travels. A plaintext form is a
+    // little larger than the raw one (the header) and can need one chunk more; where that alone
+    // would make the export refuse, every store goes raw instead, as today.
+    const size = (form: 'chosen' | 'raw'): { count: number; total: number } => {
+      let count = chunks.length;
+      let total = bytes(chunks);
+      for (const d of databases) {
+        const n = form === 'chosen' && plainStore(d) ? d.plain!.payload.length : bytes(d.raw);
+        count += form === 'chosen' && plainStore(d) ? parts(n) : d.raw.length;
+        total += n;
+      }
+      if (sweeps) {
+        const n = form === 'chosen' && plainLedgers() ? sweeps.plain!.payload.length : bytes(sweeps.raw);
+        count += form === 'chosen' && plainLedgers() ? parts(n) : sweeps.raw.length;
+        total += n;
+      }
+      return { count, total };
+    };
+    const over = (x: { count: number; total: number }): boolean => x.count > this.bounds.maxChunks || x.total > this.bounds.maxTotalBytes;
+    if (over(size('chosen')) && !over(size('raw'))) {
+      paths = new Map([...paths].map(([store, p]) => [store, p.path === 'plain' ? { path: 'raw' as const, reason: 'bounds' as const } : p]));
+    }
+
     const placed: Array<{ at: number; chunks: PlaintextChunk[] }> = [];
     const report: PlainExportReport = { stores: [] };
     for (const d of databases) {
       const choice = isPlainStore(d.name) ? paths.get(d.name) : undefined;
-      if (choice?.path === 'plain' && d.plain) {
-        const parts = splitIntoChunks(d.plain.payload, 'sqlite_db_plain', d.name);
-        parts[0]!.meta.columns = d.plain.columns;
-        placed.push({ at: d.at, chunks: parts });
+      if (plainStore(d)) {
+        const payload = d.plain!.payload;
+        const travel = splitIntoChunks(payload, 'sqlite_db_plain', d.name);
+        travel[0]!.meta.columns = d.plain!.columns;
+        // Split into copies: the whole payload does not travel and is zeroed now.
+        if (travel.length > 1) payload.fill(0);
+        placed.push({ at: d.at, chunks: travel });
         for (const c of d.raw) c.data.fill(0);
       } else {
         placed.push({ at: d.at, chunks: d.raw });
@@ -423,12 +460,13 @@ export class MigrationExporter {
       if (choice) report.stores.push({ store: d.name as PlainStore, path: choice.path, ...(choice.reason ? { reason: choice.reason } : {}), decrypted: d.plain?.counts.decrypted ?? 0, failed: d.plain?.counts.failed ?? 0 });
     }
     if (sweeps) {
-      const plain = paths.get('engine.db')?.path === 'plain' && sweeps.plain ? sweeps.plain : null;
+      const plain = plainLedgers() ? sweeps.plain : null;
       if (plain) {
-        const parts = splitIntoChunks(plain.payload, 'sweeps', 'sweeps');
-        parts[0]!.meta.ledgerForm = 'plain';
-        parts[0]!.meta.ledgerRawBytes = plain.rawBytes;
-        placed.push({ at: sweeps.at, chunks: parts });
+        const travel = splitIntoChunks(plain.payload, 'sweeps', 'sweeps');
+        travel[0]!.meta.ledgerForm = 'plain';
+        travel[0]!.meta.ledgerRawBytes = plain.rawBytes;
+        if (travel.length > 1) plain.payload.fill(0);
+        placed.push({ at: sweeps.at, chunks: travel });
         for (const c of sweeps.raw) c.data.fill(0);
       } else {
         placed.push({ at: sweeps.at, chunks: sweeps.raw });
