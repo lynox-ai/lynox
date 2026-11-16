@@ -49,6 +49,8 @@
 	async function load(): Promise<void> {
 		loading = true;
 		error = '';
+		// Read until the run list says otherwise: a load that fails before it is parsed has not read it.
+		runsRead = false;
 		try {
 			const [runRes, mergeRes] = await Promise.all([
 				fetch(`${getApiBase()}/bulk/runs`),
@@ -56,9 +58,13 @@
 			]);
 			// Bulk runs ship off; a 404 here means the feature is off, not a failure. Any other
 			// failure keeps the list as it was, as for the merges below.
-			if (runRes.ok) runs = ((await runRes.json()) as { runs: BulkRun[] }).runs;
-			else if (runRes.status === 404) runs = [];
-			runsRead = runRes.ok || runRes.status === 404;
+			if (runRes.ok) {
+				runs = ((await runRes.json()) as { runs: BulkRun[] }).runs;
+				runsRead = true;
+			} else if (runRes.status === 404) {
+				runs = [];
+				runsRead = true;
+			}
 			// No subject store answers 404: no merges. Any other failure keeps the list as it was
 			// and says so, so an answer read against it is not read against an empty list.
 			if (mergeRes.ok) merges = ((await mergeRes.json()) as { merges: BulkMerge[] }).merges;
@@ -66,7 +72,6 @@
 			const failed = [runRes, mergeRes].filter((r) => !r.ok && r.status !== 404).map((r) => r.status);
 			if (failed.length > 0) error = t(bulkLoadErrorKey(failed));
 		} catch {
-			runsRead = false;
 			error = t(bulkLoadErrorKey([null]));
 		}
 		loading = false;

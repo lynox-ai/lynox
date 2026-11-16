@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { readable } from 'svelte/store';
 import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 import { bulkLoadErrorKey, type BulkRun, type BulkRunDetailData, type BulkTarget } from './bulk-runs.js';
@@ -11,7 +10,14 @@ import { bulkLoadErrorKey, type BulkRun, type BulkRunDetailData, type BulkTarget
 // it, though the engine ran and held runs. A 429 now has its own sentence, a failure without an
 // answer keeps the old one, and the list says it is empty only after it read the list.
 
-vi.mock('$app/stores', () => ({ page: readable({ url: new URL('http://localhost/app/activity?tab=bulk') }) }));
+// A page store the tests can move: opening a run and coming back reloads the list in place.
+const LIST_URL = 'http://localhost/app/activity?tab=bulk';
+const pageStore = vi.hoisted(() => ({ store: null as null | { set: (v: { url: URL }) => void; subscribe: unknown } }));
+vi.mock('$app/stores', async () => {
+	const { writable: w } = await import('svelte/store');
+	pageStore.store = w({ url: new URL('http://localhost/app/activity?tab=bulk') });
+	return { page: pageStore.store };
+});
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -38,8 +44,9 @@ const TARGETS: BulkTarget[] = [
 	{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: { kind: 'fields', fields: [{ field: 'title', before: 'Alt', after: 'Neu' }] } as BulkTarget['diff'], error: null, deselected: false },
 ];
 
-// How each route answers: a status (with a JSON body on 200), or 'throw' for no answer at all.
-type Answer = number | 'throw';
+// How each route answers: a status (with a JSON body on 200), 'throw' for no answer at all, or
+// 'bad' for a 200 whose body is not JSON.
+type Answer = number | 'throw' | 'bad';
 let answers: { run: Answer; targets: Answer; runs: Answer; merges: Answer };
 let listed: BulkRun[];
 // Answers for the next asks for targets, one each, before `answers.targets` applies again.
@@ -58,6 +65,7 @@ beforeEach(() => {
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	resetSettingsViewer();
+	pageStore.store?.set({ url: new URL(LIST_URL) });
 	answers = { run: 200, targets: 200, runs: 200, merges: 200 };
 	listed = [];
 	targetQueue = [];
@@ -68,6 +76,7 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (a: Answer, body: unknown): Response => {
 			if (a === 'throw') throw new TypeError('Failed to fetch');
+			if (a === 'bad') return new Response('not json', { status: 200 });
 			return a === 200
 				? new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
 				: new Response(JSON.stringify({ error: 'Too many requests' }), { status: a, headers: { 'Content-Type': 'application/json', 'Retry-After': '4' } });
@@ -108,6 +117,14 @@ async function renderDetail(): Promise<void> {
 async function renderList(): Promise<void> {
 	const { default: BulkRunsView } = await import('./BulkRunsView.svelte');
 	component = mount(BulkRunsView, { target });
+	await settle();
+}
+
+/** Open a run and come back: the list loads again in place, keeping what it held. */
+async function reloadList(): Promise<void> {
+	pageStore.store!.set({ url: new URL(`${LIST_URL}&run=r1`) });
+	await settle();
+	pageStore.store!.set({ url: new URL(LIST_URL) });
 	await settle();
 }
 
@@ -233,6 +250,32 @@ describe('the run list that could not load', () => {
 		await renderList();
 		expect(target.textContent).toContain(t('common.load_failed'));
 		expect(target.textContent).not.toContain(RATE);
+	});
+
+	it('keeps the rows it showed and says too many requests when a reload gets a 429', async () => {
+		listed = [makeRun() as unknown as BulkRun];
+		await renderList();
+		expect(target.querySelectorAll('tbody tr').length).toBe(1);
+		answers.runs = 429;
+		await reloadList();
+		expect(target.textContent).toContain(RATE);
+		expect(target.querySelectorAll('tbody tr').length).toBe(1);
+	});
+
+	it('no longer says there are no runs when a reload after an empty list gets a 429', async () => {
+		await renderList();
+		expect(target.textContent).toContain(t('bulk.empty'));
+		answers.runs = 429;
+		await reloadList();
+		expect(target.textContent).toContain(RATE);
+		expect(target.textContent).not.toContain(t('bulk.empty'));
+	});
+
+	it('says there are no runs when the run list was read empty and the merges answer could not be read', async () => {
+		answers.merges = 'bad';
+		await renderList();
+		expect(target.textContent).toContain(t('common.load_failed'));
+		expect(target.textContent).toContain(t('bulk.empty'));
 	});
 
 	it('says there are no runs once it read an empty list', async () => {
