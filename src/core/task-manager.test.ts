@@ -273,6 +273,19 @@ describe('TaskManager', () => {
       expect(hook).not.toHaveBeenCalled();
     });
 
+    it('tells the model a webhook plan takes no run time or schedule, where it names what a plan can change', () => {
+      history.insertTrigger({ id: 'wh-fields', title: 'On delivery', source: 'webhook', effect: 'run_agent' });
+      const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      const refusalOf = (id: string): TriggerFieldsNotCarriedError => {
+        try { tm.update(id, { priority: 'high' }); } catch (err: unknown) { if (err instanceof TriggerFieldsNotCarriedError) return err; }
+        throw new Error('not refused');
+      };
+      expect(refusalOf('wh-fields').forModel).toContain('A scheduled plan can change title, description, status, assignee. ');
+      expect(refusalOf(reminder.id).forModel).toContain('A scheduled plan can change title, description, status, assignee, run_at, schedule. ');
+      // The API's sentence is the same for both.
+      expect(refusalOf('wh-fields').message).toBe(refusalOf(reminder.id).message);
+    });
+
     it('calls the hook while the stored row is still unchanged, and a hook that throws leaves it so', () => {
       const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
       // What the hook reads is the stored row at that moment, not the trigger it was handed.

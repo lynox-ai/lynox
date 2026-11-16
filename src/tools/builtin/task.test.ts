@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
-import { TaskManager } from '../../core/task-manager.js';
+import { PLAN_UPDATE_FIELDS, TaskManager } from '../../core/task-manager.js';
 import { taskCreateTool, taskUpdateTool, taskListTool, triggerDetailLine } from './task.js';
 import type { IAgent, MemoryScopeRef } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
@@ -798,9 +798,21 @@ describe('Task Tools', () => {
     it('task_update of only fields a plan does not carry tells the owner so, instead of "not found"', async () => {
       const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
       const report = await taskUpdateTool.handler({ task_id: t.id, due_date: '2026-12-01' }, makeAgent());
-      expect(report).toBe('Error: This is a scheduled plan, not a to-do: it has no due date. Nothing was changed.');
+      expect(report).toBe('Error: This is a scheduled plan, not a to-do: it has no due date. Nothing was changed. ' +
+        'A scheduled plan can change title, description, status, assignee, run_at, schedule. ' +
+        'Tell the user that due date belongs to to-dos rather than trying again.');
+      const two = await taskUpdateTool.handler({ task_id: t.id, priority: 'high', tags: ['x'] }, makeAgent());
+      expect(two).toContain('Tell the user that priority, tags belong to to-dos rather than trying again.');
       const none = await taskUpdateTool.handler({ task_id: t.id }, makeAgent());
-      expect(none).toBe('Error: This change names no field of a scheduled plan. Nothing was changed.');
+      expect(none).toBe('Error: This change names no field of a scheduled plan. Nothing was changed. ' +
+        'A scheduled plan can change title, description, status, assignee, run_at, schedule.');
+    });
+
+    it('the plan fields the refusal names are the task_update schema less the id and a to-do\'s fields', () => {
+      // Every property of the tool is either a plan field the refusal names, a to-do's field, or the id.
+      const TODO_ONLY = ['priority', 'due_date', 'tags'];
+      const props = Object.keys((taskUpdateTool.definition.input_schema as { properties: Record<string, unknown> }).properties);
+      expect([...PLAN_UPDATE_FIELDS].sort()).toEqual(props.filter((p) => p !== 'task_id' && !TODO_ONLY.includes(p)).sort());
     });
 
     it('task_update by a mandate on a schedule in another scope marks nothing', async () => {

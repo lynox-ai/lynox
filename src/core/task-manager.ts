@@ -96,16 +96,30 @@ function refuseBulkTrigger(trigger: TriggerRecord): void {
   if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
 }
 
+/** The `task_update` fields a scheduled plan can change, by the names the tool takes. A test
+ *  holds this to the tool's schema, so a field added there fails until it is named here or listed
+ *  as a to-do's. The refusal below names them, so the model is told what it can do instead. A
+ *  plan started by a webhook takes no run time or schedule (`WebhookTriggerScheduleError`). */
+export const PLAN_UPDATE_FIELDS: readonly string[] = ['title', 'description', 'status', 'assignee', 'run_at', 'schedule'];
+const WEBHOOK_PLAN_UPDATE_FIELDS: readonly string[] = PLAN_UPDATE_FIELDS.filter((f) => f !== 'run_at' && f !== 'schedule');
+
 /**
  * A change of a trigger that names only fields a trigger does not carry (a priority, a due date,
  * tags: those are a to-do's). Nothing would be written, so it is refused rather than answered
  * as a missing row.
  */
 export class TriggerFieldsNotCarriedError extends Error {
-  constructor(readonly fields: readonly string[]) {
+  /** What the model reads: the refusal plus what it can do instead, in the tool's field names
+   *  (U-284). An API client reads only `message`: its field names are not the tool's. */
+  readonly forModel: string;
+  constructor(readonly fields: readonly string[], webhook = false) {
     super(fields.length > 0
       ? `This is a scheduled plan, not a to-do: it has no ${fields.join(', ')}. Nothing was changed.`
       : 'This change names no field of a scheduled plan. Nothing was changed.');
+    const can = `A scheduled plan can change ${(webhook ? WEBHOOK_PLAN_UPDATE_FIELDS : PLAN_UPDATE_FIELDS).join(', ')}.`;
+    this.forModel = fields.length > 0
+      ? `${this.message} ${can} Tell the user that ${fields.join(', ')} ${fields.length === 1 ? 'belongs' : 'belong'} to to-dos rather than trying again.`
+      : `${this.message} ${can}`;
     this.name = 'TriggerFieldsNotCarriedError';
   }
 }
@@ -657,7 +671,7 @@ export class TaskManager {
       if ([title, description, status, assignee, nextRunAt, scheduleCron, modelTier].every((v) => v === undefined)) {
         const named = ([['priority', params.priority], ['due date', params.dueDate], ['tags', params.tags]] as const)
           .filter(([, v]) => v !== undefined).map(([name]) => name);
-        throw new TriggerFieldsNotCarriedError(named);
+        throw new TriggerFieldsNotCarriedError(named, trigger.source === 'webhook');
       }
 
       beforeTriggerWrite?.(trigger);

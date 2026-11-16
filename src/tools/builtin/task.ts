@@ -9,7 +9,7 @@ import { isOwnerPrincipal, mandateIdOf, mandateNeedsOwnerStamp, principalTag } f
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
-import { WATCH_OVERRIDE_REFUSAL, type BeforeTriggerWrite } from '../../core/task-manager.js';
+import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, type BeforeTriggerWrite } from '../../core/task-manager.js';
 import { readAddressWrites } from '../../core/outbound-write.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
@@ -713,6 +713,8 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);
+      // A plan's missing fields: the model also reads what it can change instead (U-284).
+      if (e instanceof TriggerFieldsNotCarriedError) return `Error: ${e.forModel}`;
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
     }
   },
