@@ -63,6 +63,14 @@ export interface HandshakeServerPayload {
   serverPubKey: string;   // base64
   signature: string;      // hex — HMAC-SHA256(serverPubKey, signingKey)
   challengeNonce: string; // hex — 32 random bytes, used as HKDF salt
+  /**
+   * The importer that answers this handshake takes `sqlite_db_plain` stores. Only `true` counts;
+   * absent on an older destination. Not covered by the signature: a forged `true` gets a store
+   * nothing it would not get anyway (the bundle goes only to the peer the signature names, and
+   * that peer already receives the vault's secrets in plaintext), and a destination that does not
+   * take plaintext refuses such a manifest at `setManifest`.
+   */
+  acceptsPlainStores?: boolean | undefined;
 }
 
 export interface HandshakeClientPayload {

@@ -429,6 +429,7 @@ export class MigrationImporter {
       serverPubKey,
       signature,
       challengeNonce: challengeNonce.toString('hex'),
+      acceptsPlainStores: this.acceptPlainStores,
     };
   }
 
