@@ -154,9 +154,28 @@ export interface WorkerNotices {
   /** The thread's seed (model context, English) and the push (the owner's, localized). */
   readonly helperWatchChanged: string;
   readonly helperWatchChangedPush: string;
+  /**
+   * The `user` turn that opens an escalation thread and a workflow's question thread. The model
+   * reads it as the owner's own words, so it names no title: a title may have been written by
+   * someone else, and goes into the assistant's turn, quoted.
+   */
+  readonly reportOpener: string;
+  readonly questionOpener: string;
+  /** The line above a scheduled workflow's question in its thread, the title quoted. */
+  questionFrom(title: string): string;
   readonly errorLabel: string;
   readonly failedStepsLabel: string;
   readonly writesLabel: string;
+  /**
+   * A step that reported it could not complete its task (`fail_step`), in lynox's own words: its
+   * reason is model text and stays out of the thread (U-192). `stepReported` is the run's error
+   * line, `stepReportedItem` its line under the failed steps, and `reportedReasonWhere` follows once
+   * when a step reported. The id goes in as the thread shows any id (`escalateToUser` strips what
+   * renders as nothing from the whole body).
+   */
+  stepReported(stepId: string): string;
+  stepReportedItem(stepId: string): string;
+  readonly reportedReasonWhere: string;
   /**
    * A run that stopped at its cost ceiling (`value` like `$0.50`) or turn limit (`value` the
    * count) with work still pending: the sentence the push leads with.
@@ -210,6 +229,15 @@ export interface WorkerNotices {
   watchChanged(url: string, analysis: string): string;
 }
 
+/**
+ * A title as it goes between quotes in a turn the model reads: without the characters that close
+ * a quote or start a line, so a title cannot end its quote and go on as the turn's own words.
+ * A title is set by the model or a delegated session and may carry text someone else wrote.
+ */
+export function inQuotes(title: string): string {
+  return title.replace(/["\u201C\u201D\u201E\u201F\u00AB\u00BB\u2033\uFF02]/g, "'").replace(/[\r\n\u2028\u2029]+/g, ' ');
+}
+
 /** The workflow statuses a notice names; any other, `unknown` included, is left out rather than quoted raw. */
 const NAMED_WORKFLOW_STATUS: ReadonlySet<string> = new Set(['failed', 'rejected']);
 const DE_WORKFLOW_STATUS: Readonly<Record<string, string>> = Object.freeze({
@@ -234,7 +262,7 @@ const EN: WorkerNotices = Object.freeze({
   containedQuestion: 'A question is waiting in the chat. This run may have read data from your connected shop, so this notification leaves out the question and its options. Open the chat to answer it.',
   containedQuestionInquiry: 'A question is waiting in the chat.',
   workflowIncomplete: (title: string, status: string | undefined) =>
-    `Your scheduled workflow "${title}" didn't complete${status !== undefined && NAMED_WORKFLOW_STATUS.has(status) ? ` (status: ${status})` : ''}.`,
+    `Your scheduled workflow "${inQuotes(title)}" didn't complete${status !== undefined && NAMED_WORKFLOW_STATUS.has(status) ? ` (status: ${status})` : ''}.`,
   helperPlanFailedTitle: (by: ShownMandate | undefined) => by === undefined
     ? '✗ A plan someone you let in set up did not complete'
     : by.changed ? `✗ A plan changed by ${by.address} did not complete` : `✗ A plan set up by ${by.address} did not complete`,
@@ -245,12 +273,18 @@ const EN: WorkerNotices = Object.freeze({
     : by.changed ? `🔍 A watch changed by ${by.address} reports a changed page` : `🔍 A page ${by.address} set a watch on has changed`,
   helperWatchChanged: 'A page that someone you let in set a watch on has changed. Its address and the summary are left out here, because that person chose the page. The watch is under Automation → Triggers.',
   helperWatchChangedPush: 'A page that someone you let in set a watch on has changed. Its address and the summary are left out here, because that person chose the page. The watch is under Automation → Triggers.',
+  reportOpener: 'What happened with my automation?',
+  questionOpener: 'My scheduled workflow has a question.',
+  questionFrom: (title: string) => `From your scheduled workflow "${inQuotes(title)}":`,
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
   budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
   errorLabel: 'Error:',
   failedStepsLabel: 'Failed steps:',
   writesLabel: 'Writes:',
+  stepReported: (stepId: string) => `Step "${stepId}" reported that it could not complete its task.`,
+  stepReportedItem: (stepId: string) => `• ${stepId}: reported that it could not complete its task.`,
+  reportedReasonWhere: 'You can ask here for the reason the step gave; it is kept in the run\'s record.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(run ${runId}${workflowId ? ` · workflow ${workflowId}` : ''})`
     : (workflowId ? `(workflow ${workflowId})` : ''),
@@ -343,7 +377,7 @@ const DE: WorkerNotices = Object.freeze({
   containedQuestionInquiry: 'Im Chat wartet eine Frage.',
   workflowIncomplete: (title: string, status: string | undefined) => {
     const named = status !== undefined ? DE_WORKFLOW_STATUS[status] : undefined;
-    return `Dein geplanter Workflow „${title}“ ist nicht fertig geworden${named !== undefined ? ` (Status: ${named})` : ''}.`;
+    return `Dein geplanter Workflow „${inQuotes(title)}“ ist nicht fertig geworden${named !== undefined ? ` (Status: ${named})` : ''}.`;
   },
   helperPlanFailedTitle: (by: ShownMandate | undefined) => by === undefined
     ? '✗ Ein Plan von jemandem, dem du Zugang gegeben hast, ist nicht fertig geworden'
@@ -357,12 +391,18 @@ const DE: WorkerNotices = Object.freeze({
     : by.changed ? `🔍 Eine Beobachtung, die ${by.address} geändert hat, meldet eine Änderung` : `🔍 Eine Seite, die ${by.address} beobachten lässt, hat sich geändert`,
   helperWatchChanged: 'Eine Seite, die jemand beobachten lässt, dem du Zugang gegeben hast, hat sich geändert. Adresse und Zusammenfassung stehen hier nicht, weil diese Person die Seite gewählt hat. Die Beobachtung findest du unter Automation → Trigger.',
   helperWatchChangedPush: 'Eine Seite, die jemand beobachten lässt, dem du Zugang gegeben hast, hat sich geändert. Adresse und Zusammenfassung stehen hier nicht, weil diese Person die Seite gewählt hat. Die Beobachtung findest du unter Automation → Trigger.',
+  reportOpener: 'Was ist mit meiner Automation passiert?',
+  questionOpener: 'Mein geplanter Workflow hat eine Frage.',
+  questionFrom: (title: string) => `Aus deinem geplanten Workflow „${inQuotes(title)}“:`,
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `${kind === 'cost' ? `Gestoppt an der Kostengrenze (${value})` : `Gestoppt am Rundenlimit (${value})`}, obwohl noch Arbeit offen war.`,
   budgetCutWayOut: 'Ein Neustart kann wieder an derselben Stelle stoppen. Bitte lynox im Chat, die Aufgabe in kleinere Pläne aufzuteilen.',
   errorLabel: 'Fehler:',
   failedStepsLabel: 'Fehlgeschlagene Schritte:',
   writesLabel: 'Schreibvorgänge:',
+  stepReported: (stepId: string) => `Schritt „${stepId}“ hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  stepReportedItem: (stepId: string) => `• ${stepId}: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  reportedReasonWhere: 'Den Grund, den der Schritt angegeben hat, kannst du hier erfragen; er steht im Protokoll des Laufs.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(Lauf ${runId}${workflowId ? ` · Workflow ${workflowId}` : ''})`
     : (workflowId ? `(Workflow ${workflowId})` : ''),

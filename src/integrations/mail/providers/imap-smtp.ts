@@ -774,7 +774,15 @@ export class ImapSmtpProvider implements MailProvider {
         { uid: true },
       ));
 
-      if (!msg) throw new MailError('not_found', `Message uid=${String(opts.uid)} not found in ${folder}`);
+      // `fetchOne` answers `undefined` when no mailbox is selected any more, and `false` when the
+      // FETCH found nothing or was sent after the mailbox had been deselected. With no mailbox
+      // selected the read never happened: that is not an absent message.
+      if (!msg) {
+        if (msg === undefined || client.mailbox === false) {
+          throw new MailError('unknown', `IMAP fetch ${folder}: the connection dropped before message uid=${String(opts.uid)} was read`);
+        }
+        throw new MailError('not_found', `Message uid=${String(opts.uid)} not found in ${folder}`);
+      }
 
       const envelope = this.buildEnvelope(folder, msg);
 
@@ -835,11 +843,13 @@ export class ImapSmtpProvider implements MailProvider {
     // body with a trailing marker so they know truncation happened.
     const key = partId.toLowerCase();
     return this.readCommand(client, async () => {
+      let fetched = 0;
       for await (const msg of client.fetch(
         String(uid),
         { uid: true, bodyParts: [{ key, maxLength: MAX_BODY_BYTES }] },
         { uid: true },
       )) {
+        fetched++;
         const buf = msg.bodyParts?.get(key);
         if (buf && buf.length > 0) {
           // Decode the Content-Transfer-Encoding (base64 / quoted-printable)
@@ -851,6 +861,12 @@ export class ImapSmtpProvider implements MailProvider {
           }
           return text;
         }
+      }
+      // The generator ends without yielding when no mailbox is selected any more (as in
+      // `assertFetchRan`): the connection dropped, and the part was never read. A message that
+      // came back with an empty part is empty.
+      if (fetched === 0 && client.mailbox === false) {
+        throw new MailError('unknown', `IMAP fetch uid=${String(uid)}: the connection dropped before part ${partId} was read`);
       }
       return '';
     });
@@ -1035,11 +1051,17 @@ export class ImapSmtpProvider implements MailProvider {
       sentPath = this.sentFolderPath = sent.path;
     }
     if (sentPath === null) return;
+    let appended: Awaited<ReturnType<ImapFlow['append']>>;
     try {
-      await client.append(sentPath, raw, ['\\Seen'], new Date());
+      appended = await client.append(sentPath, raw, ['\\Seen'], new Date());
     } catch (err) {
       this.sentFolderPath = undefined; // folder may be gone — re-resolve next time
       throw err;
+    }
+    // imapflow resolves `append` to `false` instead of rejecting when the session is no longer
+    // signed in: the copy was not stored. The folder is not in doubt, so it stays resolved.
+    if (!appended) {
+      throw new MailError('unknown', `IMAP append ${sentPath}: the session was no longer signed in, the Sent copy was not stored`);
     }
   }
 

@@ -2085,6 +2085,10 @@ export class Engine {
     // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
     // silent downgrade over the alternative — the alternative was silence with nothing working.
     this._legacyMemory = legacyMemoryReason(this.userConfig.durable_memory_enabled, this._knowledgeStore);
+    // The old tools here stand in for the durable ones, whose next boot with engine.db does not read
+    // what these write: a change is refused with a plain reason instead. With durable memory off the
+    // files are the memory, and they are written as before.
+    if (this._legacyMemory === 'store_missing' && this.engineDb === null) this.memory?.refuseChangesWithoutStore();
     if (this._legacyMemory === null) {
       this.registry
         .register(rememberTool)
@@ -2108,6 +2112,9 @@ export class Engine {
       const { TaskManager, setPipelineModeLookup } = await import('./task-manager.js');
       this._taskManager = new TaskManager(this.runHistory);
       this._toolContext.taskManager = this._taskManager;
+      // Without engine.db a to-do lands in history.db only, which the next boot with engine.db may
+      // not read: refused with a plain reason instead (`refuseTaskChangesWithoutStore`).
+      if (this.engineDb === null) this._taskManager.refuseTaskChangesWithoutStore();
       // Wire the pipeline-mode lookup so TaskManager can refuse to schedule
       // pipelines it may not run. Lazy-imported to avoid a tools→core cycle.
       // Fail-closed: if the import or wiring fails, install a lookup that
@@ -2643,7 +2650,8 @@ export class Engine {
           if (result.success) {
             process.stderr.write(`[lynox] Pre-update backup created: ${result.path}\n`);
           } else {
-            process.stderr.write(`[lynox] Pre-update backup failed: ${result.error ?? 'unknown'}\n`);
+            const { backupFailureDetail } = await import('./backup.js');
+            process.stderr.write(`[lynox] Pre-update backup failed${backupFailureDetail(result.error, 'unknown')}\n`);
           }
         }
 

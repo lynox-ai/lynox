@@ -30,6 +30,7 @@ const { AuditLog } = await import('./audit-log.js');
 import type { Engine } from './engine.js';
 import type { ChannelOutcome } from './notification-router.js';
 import type { EscalateOpts } from './escalation.js';
+import { WORKER_NOTICES } from './worker-notices.js';
 
 const T0 = Date.parse('2026-01-01T09:00:30.000Z');
 const DUE = '2026-01-01T09:00:00.000Z';
@@ -127,6 +128,14 @@ async function failOnce(channels: Channel[], awaitAnswer = true, createdBy?: str
 }
 
 describe('a failed scheduled workflow records whether its escalation reached anyone', () => {
+  it('opens its thread with the engine\'s opener; the title is the thread\'s and the report\'s, quoted', async () => {
+    const { seen } = await failOnce(['delivered']);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.opener).toBe('What happened with my automation?');
+    expect(seen[0]!.title).toBe('✗ Nightly export');
+    expect(seen[0]!.body.startsWith(WORKER_NOTICES.en.workflowIncomplete('Nightly export', undefined).slice(0, -1))).toBe(true);
+  });
+
   it('gemeldet: a channel delivered the wakeup', async () => {
     const { escalation } = await failOnce(['delivered']);
     expect(escalation().outcome).toBe('delivered');

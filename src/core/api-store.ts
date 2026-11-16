@@ -29,6 +29,7 @@ import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
 import { credentialBearing, credentialHosts, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
 import { processErrorText, reducedErrorText } from './error-egress.js';
+import { engineLessSentence, type EngineLessReader } from './engine-less-refusal.js';
 
 // ── Errors ──
 
@@ -1257,24 +1258,17 @@ const ENGINE_LESS_HEADS = {
   connect: "This engine is running without engine.db, which it could not open when it was started, so lynox does not connect API accounts now: the connection would be lost once the engine opens engine.db again. Nothing was sent to the provider, and nothing is connected later on its own; once someone has restarted the engine, the account has to be connected again.",
   renew: "This engine is running without engine.db, which it could not open when it was started, so lynox does not renew an API connection's access now: the renewed access would be lost once the engine opens engine.db again. Nothing was sent to the provider.",
 } as const;
-/** True for every reader: it lasts until a restart, and the log says why. */
-const ENGINE_LESS_LASTS = "This does not end on its own: it lasts until someone restarts the engine and the engine can open all its files again; the log the engine writes at start says why it could not.";
-/**
- * For the model only: without it, models measured on these refusals offered to do it after the
- * restart, which nothing in lynox would carry out. An HTTP answer is read by a person or a
- * program, not by the model, so it gets no such advice; the JSON error body is also capped at 600
- * characters, which the sentences with it would exceed.
- */
-const ENGINE_LESS_TO_MODEL = "Do not retry and do not offer to do it later on your own: nothing will remind you after the restart. Tell the user it did not happen; after the restart they can ask again. Do not ask whether to try again later either; if they want that, they ask after the restart.";
 
 export type EngineLessKind = keyof typeof ENGINE_LESS_HEADS;
 /** `model`: a tool result the model reads. `client`: an HTTP answer (a JSON error or an OAuth page). */
-export type EngineLessReader = 'model' | 'client';
+export type { EngineLessReader };
 
-/** The refusal of `kind` for `reader`; both readers' sentences are built from the same parts. */
+/**
+ * The refusal of `kind` for `reader`; both readers' sentences are built from the same parts, which
+ * memory and tasks share (`engine-less-refusal.ts`).
+ */
 export function engineLessText(kind: EngineLessKind, reader: EngineLessReader): string {
-  const told = `${ENGINE_LESS_HEADS[kind]} ${ENGINE_LESS_LASTS}`;
-  return reader === 'model' ? `${told} ${ENGINE_LESS_TO_MODEL}` : told;
+  return engineLessSentence(ENGINE_LESS_HEADS[kind], reader);
 }
 
 /** A save the store refused, with the reason it gives the caller. */
