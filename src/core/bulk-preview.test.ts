@@ -923,7 +923,10 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
         await w.tick();
         expect(w.recordTaskRun.mock.calls[0]![2], JSON.stringify(opts)).toBe('failed');
         expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.credential);
-        expect(JSON.stringify(w.notify.mock.calls)).toContain(BULK_HALT_REASONS.credential);
+        // The owner is told in a sentence, not the stored reason (U-324).
+        expect(JSON.stringify(w.notify.mock.calls)).toContain('lynox finds no stored access to the target system.');
+        // A halt the pass returned, not a throw: titled as halted, marked and recorded as failed.
+        expect((w.notify.mock.calls[0] as unknown as [{ title: string }])[0].title, JSON.stringify(opts)).toBe(`\u2717 Preview halted · ${HOST}`);
         expect(w.triggers.getDue()).toEqual([]);
       }
       expect(s.requests).toEqual([]);
@@ -1001,10 +1004,67 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
         expect(w.recordTaskRun.mock.calls[0]![1]).toBe(`${done} ${counts} ${costs}`);
         await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
         expect((w.notify.mock.calls[0] as unknown as [{ body: string }])[0].body).toBe(`${done} ${counts} ${costs}`);
+        // The title names the stage, the end and the host, in the same language; never the run's
+        // id, which the trigger's own title carries for the model (U-324).
+        const title = (w.notify.mock.calls[0] as unknown as [{ title: string }])[0].title;
+        expect(title).toBe(`✓ ${language === 'de' ? 'Vorschau fertig' : 'Preview done'} · ${HOST}`);
+        expect(title).not.toContain(runId);
         expect(ledger.getStatus(runId)!.phase).toBe('previewed');
       } finally {
         restore();
       }
+    }
+  });
+
+  it('titles a pass that found its run moved on as failed, not halted: nothing is held to go on', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+      // The run moved on before this tick, without a halt: the pass stops on it and halts nothing.
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'previewed' WHERE id = ?`).run(runId);
+      const w = workerFor();
+      await w.tick();
+      await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
+      expect(ledger.getStatus(runId)!.haltReason).toBeNull();
+      expect((w.notify.mock.calls[0] as unknown as [{ title: string }])[0].title).toBe(`\u2717 Preview failed · ${HOST}`);
+    } finally {
+      restore();
+    }
+  });
+
+  it('pushes a run whose host cannot be read with the stage alone, and still pushes it', async () => {
+    const s = shop();
+    const restore = serve(s);
+    const read = vi.spyOn(ledger, 'getRunForApply').mockImplementation(() => { throw new Error('SQLITE_CORRUPT'); });
+    try {
+      planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+      const w = workerFor({ costUsd: 0.01 });
+      await w.tick();
+      await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
+      expect((w.notify.mock.calls[0] as unknown as [{ title: string }])[0].title).toBe('✓ Preview done');
+    } finally {
+      read.mockRestore();
+      restore();
+    }
+  });
+
+  it('names a bulk run by stage and host also when its handler throws past its own catch, never by its id', async () => {
+    const s = shop();
+    const restore = serve(s);
+    const thrown = vi.spyOn(WorkerLoop.prototype as unknown as { executeBulkPreview: () => Promise<void> }, 'executeBulkPreview')
+      .mockImplementation(async () => { throw new Error('boom'); });
+    try {
+      const runId = planRun([{ target: url(0), after: { price: '1' } }]);
+      const w = workerFor();
+      await w.tick();
+      await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
+      const title = (w.notify.mock.calls[0] as unknown as [{ title: string }])[0].title;
+      expect(title).toBe(`✗ Preview failed · ${HOST}`);
+      expect(title).not.toContain(runId);
+    } finally {
+      thrown.mockRestore();
+      restore();
     }
   });
 
@@ -1015,7 +1075,11 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       const runId = planRun([{ target: url(0), after: { price: '1' } }]);
       const w = workerFor({ rateLimit: () => { throw new Error('boom'); } });
       await w.tick();
+      // Recorded and marked as failed; its title says it halted, which the body no longer says
+      // (U-324).
       expect(w.recordTaskRun.mock.calls[0]![2]).toBe('failed');
+      await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
+      expect((w.notify.mock.calls[0] as unknown as [{ title: string; priority: string }])[0]).toMatchObject({ title: `\u2717 Preview halted · ${HOST}`, priority: 'high' });
       const st = ledger.getStatus(runId)!;
       expect([st.phase, st.haltReason]).toEqual(['planned', BULK_HALT_REASONS.unavailable]);
       // Halted, it no longer holds the slot, and the owner can resume it.
@@ -1035,7 +1099,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       await w.tick();
       // The handler's own sentence: the throw reached its catch, which halted the run. Read
       // past `getStatus`, which would also halt a run left with no trigger.
-      expect(w.recordTaskRun.mock.calls[0]![1]).toBe(`Bulk preview halted: ${BULK_HALT_REASONS.unavailable}.`);
+      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, the target system is not reachable yet.');
       expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId))
         .toEqual({ halt_reason: BULK_HALT_REASONS.unavailable });
     } finally {
@@ -1052,7 +1116,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       const runId = planRun([{ target: url(0), after: { price: '1' } }]);
       const w = workerFor({ language: 'de' });
       await w.tick();
-      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Vorschau angehalten: Zielsystem nicht erreichbar oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.');
+      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Zielsystem nicht erreichbar oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.');
       expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId))
         .toEqual({ halt_reason: BULK_HALT_REASONS.unavailable });
     } finally {
