@@ -27,6 +27,7 @@ import { EngineDb } from '../core/engine-db.js';
 import { ApprovalStore, type ApprovalFiling } from '../core/approval-store.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { secretsForProfile } from '../core/profile-secret-view.js';
+import { eraseRefusal } from '../core/sidecar-refusals.js';
 import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import type { MailConnectPromptData } from '../types/agent.js';
@@ -1275,6 +1276,36 @@ describe('LynoxHTTPApi', () => {
       };
       expect(await viewerOf(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token)).toBe('mandate');
       expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
+    });
+
+    it('GET /api/config hands the Web UI the switch the engine refusals name their way out by', async () => {
+      const keys = ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const;
+      const saved = keys.map(k => process.env[k]);
+      onTestFinished(() => { keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; }); });
+      for (const k of keys) delete process.env[k];
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      const config = async (): Promise<{ managed: unknown; billing_tier_set: unknown }> => {
+        repayRateWindow();
+        const res = await fetch(`${baseUrl}/api/config`, { headers: { cookie: `lynox_session=${owner}` } });
+        expect(res.status).toBe(200);
+        return (await res.json()) as { managed: unknown; billing_tier_set: unknown };
+      };
+      // A value that does not normalize comes back raw in `managed`, where the Web UI's `isManaged()` does not
+      // count it; the engine counts it, and so does the switch.
+      for (const [value, managed, set] of [[undefined, undefined, false], ['managed', 'managed', true], ['gold', 'gold', true]] as const) {
+        if (value === undefined) delete process.env['LYNOX_BILLING_TIER'];
+        else process.env['LYNOX_BILLING_TIER'] = value;
+        const body = await config();
+        expect([body.managed, body.billing_tier_set]).toEqual([managed, set]);
+        expect(eraseRefusal().includes('support@lynox.ai')).toBe(set);
+      }
+      // The legacy alias alone counts the same, also behind an empty canonical name.
+      process.env['LYNOX_BILLING_TIER'] = '';
+      process.env['LYNOX_MANAGED_MODE'] = 'eu';
+      expect((await config()).billing_tier_set).toBe(true);
+      expect(eraseRefusal()).toContain('support@lynox.ai');
+      delete process.env['LYNOX_MANAGED_MODE'];
+      delete process.env['LYNOX_BILLING_TIER'];
     });
 
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
@@ -5629,6 +5660,61 @@ describe('LynoxHTTPApi', () => {
       } finally {
         restoreTransport();
         for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+      }
+    });
+
+    it('POST /api/secrets/validate-key on an instance connected to a Shopify store checks no key and sends nothing', async () => {
+      // This file shares ONE per-IP rate window: the requests below are paid back after.
+      const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+      const { setPinnedTransportForTests } = await import('../core/network-guard.js');
+      const { PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+      // Both ways out of the route: Anthropic's and Mistral's probes use the global fetch, a typed
+      // base URL the pinned transport. Each answers 401, so a probe that went out reads `invalid`
+      // with its own reason, never the refusal.
+      const pinnedHosts: string[] = [];
+      const restoreTransport = setPinnedTransportForTests(async (input) => {
+        pinnedHosts.push(input.hostname);
+        return new Response('{}', { status: 401 });
+      });
+      const realFetch = globalThis.fetch;
+      const PROVIDER_HOSTS = ['https://api.anthropic.com', 'https://api.eu.mistral.ai'];
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) =>
+        PROVIDER_HOSTS.some((h) => String(u).startsWith(h)) ? Promise.resolve(new Response('{}', { status: 401 })) : realFetch(u, init));
+      const toProviders = (): number => fetchSpy.mock.calls.filter(([u]) => PROVIDER_HOSTS.some((h) => String(u).startsWith(h))).length + pinnedHosts.length;
+      const probes = [
+        { provider: 'anthropic', key: ['sk', 'ant', 'typed'].join('-') },
+        { provider: 'mistral', key: 'typed-mistral-key' },
+        { provider: 'openai', key: 'typed-key', api_base_url: 'https://api.mistral.ai/v1' },
+        { provider: 'custom', key: 'typed-key', api_base_url: 'https://api.mistral.ai/v1' },
+      ];
+      // Set by hand, not vi.stubEnv: unstubAllEnvs would also drop the file's other env settings.
+      const prev = process.env['LYNOX_SHOPIFY_EXCHANGE'];
+      try {
+        process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+        for (const body of probes) {
+          const res = await jsonFetch('/api/secrets/validate-key', { method: 'POST', body: JSON.stringify(body) });
+          expect(res.status, body.provider).toBe(200);
+          // The page picks its sentence by this exact code (web UI `utils/setup-key-check.ts`).
+          expect(await res.json(), body.provider).toEqual({ state: 'invalid', error: PROVIDER_NOT_ON_LIST_REFUSAL, code: 'provider_list_own_key' });
+        }
+        expect(toProviders()).toBe(0);
+        // Control: without the switch a probe goes out to its provider and is not refused. Only the
+        // two with a fixed endpoint: a typed base URL is first resolved for real, which a test
+        // without network would fail for a reason that is not this one.
+        delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+        for (const body of probes.filter((p) => p.api_base_url === undefined)) {
+          const before = toProviders();
+          const res = await jsonFetch('/api/secrets/validate-key', { method: 'POST', body: JSON.stringify(body) });
+          const json = await res.json() as { state?: string; error?: string };
+          expect(json.error, body.provider).not.toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+          expect(toProviders(), body.provider).toBe(before + 1);
+        }
+      } finally {
+        fetchSpy.mockRestore();
+        restoreTransport();
+        for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+        if (prev === undefined) delete process.env['LYNOX_SHOPIFY_EXCHANGE']; else process.env['LYNOX_SHOPIFY_EXCHANGE'] = prev;
       }
     });
 

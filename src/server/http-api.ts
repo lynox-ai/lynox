@@ -61,7 +61,7 @@ import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '.
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js';
-import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
+import { billingTierSet, eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
@@ -1352,6 +1352,9 @@ function authorshipOrNone(read: () => WorkflowAuthorship | undefined): WorkflowA
 
 /** The code beside `MANDATE_KEY_INPUT_REFUSAL`, read by the web UI. */
 export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
+
+/** The code beside the key check's refusal while the provider list applies, read by the web UI. */
+export const PROVIDER_LIST_KEY_CODE = 'provider_list_own_key';
 
 /** Upload size caps on the run route, as base64 length: 5 MB for an image, 10 MB for any other file. */
 const CHAT_IMAGE_B64_MAX = 5 * 1024 * 1024;
@@ -7535,6 +7538,17 @@ export class LynoxHTTPApi {
       // Mistral's global endpoint is checked where a model request would go: the EU one.
       const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? toMistralEuBase(b['api_base_url']) : '';
       if (!provider || !key) { errorResponse(res, 400, 'Missing provider or key'); return; }
+      // On an instance connected to a Shopify store a request goes only where a model request may
+      // go (`contained-providers.ts`). The key checked here is always one the user typed, so the
+      // check is refused for any provider named, before anything is sent. `invalid` keeps the page from saving it, and
+      // the code lets the page say why in its own words (`setup-key-check.ts`).
+      {
+        const { providerListApplies, PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+        if (providerListApplies()) {
+          jsonResponse(res, 200, { state: 'invalid', error: PROVIDER_NOT_ON_LIST_REFUSAL, code: PROVIDER_LIST_KEY_CODE });
+          return;
+        }
+      }
       const { validateAnthropicKey, validateMistralKey, validateOpenAICompatKey } = await import('../cli/docker-installer.js');
       try {
         if (provider === 'anthropic') {
@@ -7662,6 +7676,10 @@ export class LynoxHTTPApi {
         // re-synced. cpSuppliesLLMKey above already normalizes internally.
         redacted['managed'] = normalizeBillingTier(tier) ?? tier;
       }
+      // Any tier value at all, canonical or not: the switch the engine's refusals name their way
+      // out by (`sidecar-refusals.ts`). The Web UI's notices take theirs from this, not from
+      // `managed`, so both name the same one.
+      redacted['billing_tier_set'] = billingTierSet();
       // Capability probe: what this instance *can* do, independent of tier.
       // Drives capability-based gating in the Web UI so working features stop
       // being hidden by tier checks (see PRD-SETTINGS-REFACTOR Principle 6).

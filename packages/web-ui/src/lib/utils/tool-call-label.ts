@@ -108,6 +108,9 @@ export function toolCallLabel(
     case 'spawn_agent':       return { action: t('tool.delegated'),       subject: strOrEmpty(inp?.['task']).slice(0, 50) };
     case 'artifact_save':     return { action: t('tool.artifact_saved'),  subject: strOrEmpty(inp?.['title']) };
     case 'task_create':       return { action: t('tool.task_created'),    subject: strOrEmpty(inp?.['title']) };
+    case 'ask_user':          return { action: t('tool.question'),        subject: '' };
+    case 'plan_task':         return { action: t('tool.plan_created'),    subject: '' };
+    case 'google_calendar':   return { action: t('tool.calendar'),        subject: '' };
     case 'api_setup':         return { action: t('tool.api_profiles'),    subject: apiProfileId(inp).slice(0, 64) };
     default:                  return { action: toolName, subject: '' };
   }

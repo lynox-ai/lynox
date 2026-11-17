@@ -163,6 +163,13 @@ export interface WorkerNotices {
   readonly questionOpener: string;
   /** The line above a scheduled workflow's question in its thread, the title quoted. */
   questionFrom(title: string): string;
+  /**
+   * A question from a plan someone the owner let in set up or changed (PRD B6): the thread's and
+   * the push's title, and the line above the question, in lynox's words. The plan's title stays
+   * out, as on the failure path: it is that person's text, and here it would be called the owner's.
+   */
+  helperQuestionTitle(by: ShownMandate | undefined): string;
+  readonly helperQuestionFrom: string;
   readonly errorLabel: string;
   readonly failedStepsLabel: string;
   readonly writesLabel: string;
@@ -232,10 +239,12 @@ export interface WorkerNotices {
 /**
  * A title as it goes between quotes in a turn the model reads: without the characters that close
  * a quote or start a line, so a title cannot end its quote and go on as the turn's own words.
+ * A line is started by every character Unicode counts as a line break: CR, LF, VT, FF, NEL,
+ * U+2028 and U+2029.
  * A title is set by the model or a delegated session and may carry text someone else wrote.
  */
 export function inQuotes(title: string): string {
-  return title.replace(/["\u201C\u201D\u201E\u201F\u00AB\u00BB\u2033\uFF02]/g, "'").replace(/[\r\n\u2028\u2029]+/g, ' ');
+  return title.replace(/["\u201C\u201D\u201E\u201F\u00AB\u00BB\u2033\uFF02]/g, "'").replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, ' ');
 }
 
 /** The workflow statuses a notice names; any other, `unknown` included, is left out rather than quoted raw. */
@@ -276,6 +285,10 @@ const EN: WorkerNotices = Object.freeze({
   reportOpener: 'What happened with my automation?',
   questionOpener: 'My scheduled workflow has a question.',
   questionFrom: (title: string) => `From your scheduled workflow "${inQuotes(title)}":`,
+  helperQuestionTitle: (by: ShownMandate | undefined) => by === undefined
+    ? 'A plan someone you let in set up has a question'
+    : by.changed ? `A plan changed by ${by.address} has a question` : `A plan set up by ${by.address} has a question`,
+  helperQuestionFrom: 'From a scheduled workflow that someone you let in set up or changed. Its name is left out here, because it can contain text from that person:',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
   budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
@@ -394,6 +407,10 @@ const DE: WorkerNotices = Object.freeze({
   reportOpener: 'Was ist mit meiner Automation passiert?',
   questionOpener: 'Mein geplanter Workflow hat eine Frage.',
   questionFrom: (title: string) => `Aus deinem geplanten Workflow „${inQuotes(title)}“:`,
+  helperQuestionTitle: (by: ShownMandate | undefined) => by === undefined
+    ? 'Ein Plan von jemandem, dem du Zugang gegeben hast, hat eine Frage'
+    : by.changed ? `Ein Plan, den ${by.address} geändert hat, hat eine Frage` : `Ein Plan von ${by.address} hat eine Frage`,
+  helperQuestionFrom: 'Aus einem geplanten Workflow, den jemand, dem du Zugang gegeben hast, eingerichtet oder geändert hat. Der Name des Workflows steht hier nicht, weil er Text dieser Person enthalten kann:',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `${kind === 'cost' ? `Gestoppt an der Kostengrenze (${value})` : `Gestoppt am Rundenlimit (${value})`}, obwohl noch Arbeit offen war.`,
   budgetCutWayOut: 'Ein Neustart kann wieder an derselben Stelle stoppen. Bitte lynox im Chat, die Aufgabe in kleinere Pläne aufzuteilen.',

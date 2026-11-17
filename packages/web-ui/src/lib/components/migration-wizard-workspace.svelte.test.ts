@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { t } from '../i18n.svelte.js';
 import { reset, setTarget, startMigration, getStep } from '../stores/migration.svelte.js';
 import { getToasts, dismissToast } from '../stores/toast.svelte.js';
+import { _resetManagedStatus } from '../stores/integrations/managed.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -32,7 +33,8 @@ beforeEach(() => {
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	done = { success: true, verification: VERIFICATION };
-	config = {};
+	config = { billing_tier_set: false };
+	_resetManagedStatus();
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		if (u.endsWith('/migration/export')) {
@@ -93,7 +95,7 @@ describe('the migration done step', () => {
 	});
 
 	it('names support on a managed instance', async () => {
-		config = { managed: 'managed' };
+		config = { managed: 'managed', billing_tier_set: true };
 		done = { ...done, workspace: 'omitted-sidecar' };
 		await migrate();
 		expect(omittedLine()).toBe(t('migration.workspace_omitted_managed'));

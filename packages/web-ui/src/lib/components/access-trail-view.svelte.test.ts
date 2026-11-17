@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { setLocale, getLocale } from '../i18n.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -131,6 +132,49 @@ describe('each kind of entry', () => {
 		expect(text(li)).toContain('3 Fenster');
 		expect(text(li?.querySelector('[data-targets]'))).toBe('mindestens 40 geschrieben, mindestens 0 fehlgeschlagen');
 		expect(text(li?.querySelector('[data-note]'))).toBe('Angehalten wie geplant, wartet auf dich');
+	});
+
+	it('counts a bulk run\'s windows with a singular in EN, and DE as it was', async () => {
+		const bulk = (windows: number): unknown => ({
+			kind: 'bulk', runId: `r${String(windows)}`, action: 'bulk:apply', host: 'shop.example.invalid', at: NOW, person: IDA, status: 'done',
+			planned: false, windows, targets: { written: 1, failed: 0, atLeast: false },
+		});
+		const before = getLocale();
+		try {
+			setLocale('en');
+			await render([bulk(1), bulk(2)]);
+			const [one, two] = items();
+			expect(text(one)).toMatch(/(^|\s)1 window(\s|$)/);
+			expect(text(two)).toMatch(/(^|\s)2 windows(\s|$)/);
+			unmount(component!);
+			setLocale('de');
+			await render([bulk(1), bulk(2)]);
+			const [oneDe, twoDe] = items();
+			expect(text(oneDe)).toMatch(/(^|\s)1 Fenster(\s|$)/);
+			expect(text(twoDe)).toMatch(/(^|\s)2 Fenster(\s|$)/);
+		} finally {
+			setLocale(before);
+		}
+	});
+
+	it('counts a plan run\'s write steps with a singular, in DE and EN', async () => {
+		const plan = (writeSteps: number): unknown => ({
+			kind: 'plan', run: 'plan', key: `k${String(writeSteps)}`, trigger: null, startedBy: null, at: NOW, person: IDA, status: 'done', writeSteps, entries: [],
+		});
+		const before = getLocale();
+		try {
+			setLocale('de');
+			await render([plan(1), plan(2)]);
+			expect(items().map((li) => text(li.querySelector('[data-targets]')))).toEqual(['1 Schreibschritt', '2 Schreibschritte']);
+			unmount(component!);
+			setLocale('en');
+			await render([plan(1), plan(2)]);
+			const [one, two] = items();
+			expect(text(one?.querySelector('[data-targets]'))).toBe('1 write step');
+			expect(text(two?.querySelector('[data-targets]'))).toBe('2 write steps');
+		} finally {
+			setLocale(before);
+		}
 	});
 
 	it('a bulk run that did not halt as planned says nothing of a plan', async () => {

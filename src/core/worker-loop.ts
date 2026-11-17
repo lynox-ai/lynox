@@ -3725,10 +3725,7 @@ export class WorkerLoop {
     // thread, where they would read as lynox's own words (PRD B6). The ids stay for the diagnosis.
     // The plan is the trigger and, for `run_workflow`, its workflow: an owner's schedule of a
     // workflow a mandate wrote runs that mandate's steps, read at dispatch (`planOf`).
-    const othersTrigger = setUpByOther(task);
-    // (A mandate's test run by hand has no `planOf`, but covers only its own proposal: `othersTrigger`.)
-    const planOf = this.#runSlotOf(task.id)?.planOf;
-    const othersPlan = othersTrigger || (planOf !== undefined && !isOwnerPrincipal(planOf));
+    const { othersTrigger, othersPlan } = this.#othersPlan(task);
     this.engine.escalateToUser({
       key: task.id,
       title: othersPlan ? notices.helperPlanFailedTitle(othersTrigger ? shownMandate(task) : undefined) : `✗ ${task.title}`,
@@ -3747,6 +3744,18 @@ export class WorkerLoop {
   }
 
   /**
+   * Whether a run's plan is someone else's than the owner's: its trigger set up or changed by
+   * someone the owner let in (`othersTrigger`), or its workflow, read at dispatch (`planOf`).
+   * Both the failure path and the question channel leave such a plan's title out (PRD B6).
+   */
+  #othersPlan(task: TriggerRecord): { othersTrigger: boolean; othersPlan: boolean } {
+    const othersTrigger = setUpByOther(task);
+    // (A mandate's test run by hand has no `planOf`, but covers only its own proposal: `othersTrigger`.)
+    const planOf = this.#runSlotOf(task.id)?.planOf;
+    return { othersTrigger, othersPlan: othersTrigger || (planOf !== undefined && !isOwnerPrincipal(planOf)) };
+  }
+
+  /**
    * The question channel of a scheduled workflow run that may ask its owner (PRD 3b-2 §4.1): the
    * run's steps reach the owner through it, with the run's id as the address. What differs from
    * the task path (`executeStandard`) is the teardown: nothing is parked, and the wait listens to
@@ -3762,12 +3771,15 @@ export class WorkerLoop {
     const runId = randomUUID();
     const teardown = active?.controller.signal ?? new AbortController().signal;
     const notices = this.#notices();
+    // A plan someone the owner let in set up or changed: its title stays out of the thread, the
+    // push and the line above the question, where it would be called the owner's (PRD B6).
+    const { othersTrigger, othersPlan } = this.#othersPlan(task);
     const channel = new WorkflowQuestions({
       runId,
       scheduleId: task.id,
-      title: task.title,
+      title: othersPlan ? notices.helperQuestionTitle(othersTrigger ? shownMandate(task) : undefined) : task.title,
       opener: notices.questionOpener,
-      titleLine: notices.questionFrom(task.title),
+      titleLine: othersPlan ? notices.helperQuestionFrom : notices.questionFrom(task.title),
       principal: runAs,
       handRun: active?.handRun === true,
       promptStore: () => this.engine.getPromptStore(),
@@ -4095,6 +4107,19 @@ export class WorkerLoop {
 }
 
 /**
+ * A run's planner as the trail names it. The run row keeps the planner's tag and grant only, not
+ * the name the session was shown under, so the name comes from the grant's latest row that carries
+ * one (`AuditLog.displayNameOf`), as on every other row of the same person. With no such row, or
+ * when it cannot be read, the address stands alone, as before.
+ */
+function plannerAsShown(planner: RequestPrincipal, auditLog: import('./audit-log.js').AuditLog | null): RequestPrincipal {
+  if (planner.kind !== 'mandate' || planner.display !== undefined || planner.mandateId === undefined || auditLog === null) return planner;
+  let display: string | null = null;
+  try { display = auditLog.displayNameOf(planner.mandateId); } catch { /* the address stands in */ }
+  return display === null ? planner : { ...planner, display };
+}
+
+/**
  * The trail recorder of a bulk run's reads: for a run a delegated session planned, each GET
  * the engine sends for it is first a `read` row under that session's principal, with the run's
  * id (PRD customer-granted-operator-access §3.9). The owner started or approved the run, but
@@ -4114,7 +4139,7 @@ export function bulkReadRecorder(
   targetOf: typeof import('./audit-log.js').httpTarget,
 ): ((url: string, detail?: string) => boolean) | null {
   if (run.delegatedPlanner === null) return null;
-  const record = recorderOf({ principal: run.delegatedPlanner, currentRunId: run.id, toolContext: { auditLog } }, 'bulk:read');
+  const record = recorderOf({ principal: plannerAsShown(run.delegatedPlanner, auditLog), currentRunId: run.id, toolContext: { auditLog } }, 'bulk:read');
   // A planner that is the owner after all records nothing, and reads as before.
   if (record === null) return null;
   return (url, detail) => {
@@ -4147,9 +4172,9 @@ export function bulkRunTrail(
     externalHostOf: typeof import('./bulk-ledger.js').externalHostOf;
   },
 ): import('./bulk-apply.js').BulkRunTrail | null {
-  const planner = run.delegatedPlanner;
   const host = tools.externalHostOf(run.targetSystem);
-  if (planner === null || isOwnerPrincipal(planner)) return null;
+  if (run.delegatedPlanner === null || isOwnerPrincipal(run.delegatedPlanner)) return null;
+  const planner = plannerAsShown(run.delegatedPlanner, auditLog);
   // Not a writer the engine knows: no writer is built for it, so the run halts before this is
   // asked (`bulkWriterFor`); were it asked, the row is written all the same.
   const where: readonly [string, string] = host !== null ? ['host', host] : ['store', run.targetSystem === 'workspace' ? 'files' : run.targetSystem === 'data_store' ? 'data_store' : 'other'];

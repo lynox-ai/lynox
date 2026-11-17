@@ -2181,7 +2181,14 @@ export class BulkLedger {
     if (probe === 'not_found') return { ok: false, reason: 'not_found' };
     if (probe === null) return { ok: false, reason: 'not_a_probe' };
     const { host, method } = probe;
-    const kind = probeRowKind(probe, runId);
+    // A target key that is not a URL has no path to file the probe under: not a probe, as
+    // `probeToConfirm` already reads it, rather than a throw the route answers with 500.
+    let kind: string;
+    try {
+      kind = probeRowKind(probe, runId);
+    } catch {
+      return { ok: false, reason: 'not_a_probe' };
+    }
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,

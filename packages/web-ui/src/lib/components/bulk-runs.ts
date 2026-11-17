@@ -5,6 +5,7 @@
 
 import { visibleText } from '../visible-text.js';
 import { hiddenCharIndexes, inPlaceReferences } from '../hidden-chars.js';
+import { startDomainOf } from './bulk-start-domains.js';
 
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface BulkI18n {
@@ -126,6 +127,19 @@ export interface BulkRunDetailData extends BulkRun {
 	judgeServedBy: { provider: string; label: string } | null;
 	/** An instance with its own model key: the engine refuses every start of a judged run there. */
 	judgeOwnKey: boolean;
+	/** The run's list as the engine counts it; null for a run without one. Absent from an engine
+	 *  older than the field, which reads as no list. */
+	list?: { state: string } | null;
+	/** The link domains the owner allowed at the start of a judged list run, besides the store's
+	 *  own (PRD shopify-preset §20.2 item 5); null or absent where none were given. */
+	startDomains?: string[] | null;
+}
+
+/** Whether a run takes allowed link domains: a judged run over a list on an external store, the
+ *  only start the engine accepts them at. Its start offers the field; its restart and its
+ *  approval show the list, which is fixed from the judge's first start on. */
+export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'list' | 'targetSystem'>): boolean {
+	return run.judge !== null && (run.list ?? null) !== null && bulkHostOf(run.targetSystem) !== null;
 }
 
 /** The word over a halted run's cause. An owner's stop is a stop, not a halt: „angehalten“ is
@@ -578,6 +592,8 @@ export interface BulkTarget {
 	refusedValues?: { field: string; value: string; codePoints?: number[] | undefined }[] | undefined;
 	/** With `secret_in_context`: the field the judge only reads that held it, by its name. */
 	contextField?: string | undefined;
+	/** With `new_link_domain`: the domain the refused link points to, as the engine recorded it. */
+	linkDomain?: string | undefined;
 	/** Per HTML field an `update` target changes: the elements and comments its new value adds and
 	 *  removes, each with its full value (PRD shopify-preset §20.2 item 5, sec-core M3). Computed by
 	 *  the engine from the parser's tree; the page only lists it, as text. */
@@ -1091,8 +1107,10 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
 export function bulkInvalidText(
 	reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n,
 	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's.
-	 *  With `before_has_shop_markup`: the date of the earlier write, already formatted, or null. */
-	context?: { field: string | undefined; host: string | null; dataStore: boolean; markedDate?: string | null | undefined },
+	 *  With `before_has_shop_markup`: the date of the earlier write, already formatted, or null.
+	 *  `startDomains`: the run takes allowed link domains at the start of judging ({@link bulkTakesStartDomains});
+	 *  `linkDomain`: with `new_link_domain`, the domain the refused link points to. */
+	context?: { field: string | undefined; host: string | null; dataStore: boolean; markedDate?: string | null | undefined; startDomains?: boolean; linkDomain?: string | undefined },
 ): string {
 	// The description an earlier run wrote and the store added markup to: named
 	// by that run's date, so the owner can find it; without the date where the run is gone.
@@ -1113,9 +1131,13 @@ export function bulkInvalidText(
 	}
 	const anyForm = BULK_INVALID_ANY_FORM[reason];
 	if (anyForm !== undefined) {
-		// One sentence for a judged run too: the field for allowed link domains is mounted on no page
-		// yet, so no run is told to add one there.
-		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
+		// A run that takes allowed link domains at the start of judging names that field as a way out,
+		// for a domain the field takes (not an address, not a name without a dot); the list is fixed
+		// from the first start, so the way is to plan the run again. Every other run, and a domain the
+		// page was not told, reads the sentence without it.
+		const addable = context?.linkDomain !== undefined && startDomainOf(context.linkDomain) !== null;
+		const key = anyForm === 'new_link_domain' && context?.startDomains === true && addable ? 'new_link_domain_judged' : anyForm;
+		return i18n.tf(`bulk.invalid.${key}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
 	}
 	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
 	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });
