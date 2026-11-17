@@ -39,17 +39,19 @@ const COVERAGE_OMITTED: Record<WayOut, string> = {
 	loading: 'backups.coverage_omitted_fact',
 	failed: 'backups.coverage_omitted_unknown',
 };
-const WORKSPACE_OMITTED: Record<WayOut, string> = {
-	managed: 'migration.workspace_omitted_managed',
-	self: 'migration.workspace_omitted_self',
-	loading: 'migration.workspace_omitted_fact',
-	failed: 'migration.workspace_omitted_unknown',
-};
 
-/** The next step for files the migration could not carry, or `null` while the way out loads. */
-export function skippedNextKey(count: number, wayOut: WayOut): string | null {
-	if (wayOut === 'loading') return null;
-	return `migration.skipped_next_${wayOut === 'failed' ? 'unknown' : wayOut}_${count === 1 ? 'one' : 'many'}`;
+/**
+ * The migration's done step names one way out, lynox support, whatever the source runs as: a done
+ * step follows only a migration the target accepted, and a target accepts one only with a tier set
+ * (its import routes answer 404 otherwise, the same check the engine's refusals switch on), as on every
+ * instance lynox provisions. So the target's own refusals name support too, and its support can copy
+ * what the migration left behind (U-304).
+ */
+const WORKSPACE_OMITTED = 'migration.workspace_omitted_managed';
+
+/** The next step for files the migration could not carry (the same way out, U-304). */
+export function skippedNextKey(count: number): string {
+	return `migration.skipped_next_managed_${count === 1 ? 'one' : 'many'}`;
 }
 
 /** The record the engine writes when it left the workspace out (`OMITTED_SIDECAR`). */
@@ -96,11 +98,11 @@ export function visibleSkippedPath(path: string): string {
 }
 
 /** What the migration's done step says, from its `done` event. `null` when the workspace went along. */
-export function migrationWorkspaceNotice(done: { workspace?: unknown }, wayOut: WayOut): { description: string; line: string; toast: string } | null {
+export function migrationWorkspaceNotice(done: { workspace?: unknown }): { description: string; line: string; toast: string } | null {
 	if (done.workspace !== OMITTED_SIDECAR) return null;
 	return {
 		description: 'migration.success_desc_without_workspace',
-		line: WORKSPACE_OMITTED[wayOut],
+		line: WORKSPACE_OMITTED,
 		toast: 'migration.success_without_workspace',
 	};
 }
