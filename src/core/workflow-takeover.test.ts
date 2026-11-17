@@ -191,19 +191,30 @@ describe('a workflow whose mandate ended is taken over: covered, stamped and rec
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });
     ended(b, 'h@x.ch');
+    renewed(b, 'c@x.ch');
+    // A plan of the ended mandate's own, paused: it stays paused.
+    plan(b, 'p', 'w', 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    // A plan of C with a list of allowed connections the new stamp ends; its members change.
+    plan(b, 'q', 'w', 'c@x.ch');
+    const entry = { profile: 'pr', grant: 'g-c@x.ch', binding: 'b' };
+    b.db.prepare('UPDATE triggers SET stamp_connections = ? WHERE id = ?').run(encodeStamp('2026-01-01T00:00:00.000Z', null, [entry]), 'q');
+    b.profiles.push(profile('mine', 'shop.example.invalid', 'h@x.ch', 'g-h@x.ch', 'Main store'));
     const r = wfRow(b, 'w') as { definition_json: string };
     const sha = (v: string): string => createHash('sha256').update(v).digest('hex');
-    const parts = (prefix: string): string => sha(JSON.stringify([
-      prefix, 'w', sha(r.definition_json),
+    const expected = sha(JSON.stringify([
+      'lynox:workflow-takeover:v1', 'w', sha(r.definition_json),
       marksOf(wfRow(b, 'w')), [false, false],
       true, 'owner',
-      [], [], [], [],
+      [{ id: 'q', title: 'Plan q', before: tag('c@x.ch'), after: tag('c@x.ch'), runsNoMore: false }], [],
+      [['p', 'Plan p']],
+      [['q', 'Plan q', [entry]]],
       [['workflow-created', 'h@x.ch', true, false]],
-      [], [],
+      [['mine', 'g-h@x.ch', 'Main store']],
+      [['s2', 'mine']],
     ]));
     expect(WORKFLOW_TAKEOVER_DIGEST_PREFIX).toBe('lynox:workflow-takeover:v1');
-    expect(expectOf(b, 'w')).toBe(parts(WORKFLOW_TAKEOVER_DIGEST_PREFIX));
-    expect(parts('lynox:plan-takeover:v1')).not.toBe(parts(WORKFLOW_TAKEOVER_DIGEST_PREFIX));
+    expect(expectOf(b, 'w')).toBe(expected);
   });
 
   it('a mark an earlier takeover covered is neither shown nor recorded again: only the new editor’s is', () => {
@@ -375,7 +386,7 @@ describe('the connections a run as the owner no longer uses', () => {
     expect(pv.kind === 'preview' && pv.preview.connections).toEqual([{ profileId: 'mine', account: 'Main store', by: 'h@x.ch' }]);
     // s2 calls the shop, which another mandate connected: marked though its person is not one shown.
     // s3 names the same host through another tool, which sends no connection: not marked.
-    expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual(['s2']);
+    expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual([{ step: 's2', profileId: 'shop' }]);
   });
 
   it('a step on the owner’s own connection is not marked', () => {
@@ -438,6 +449,28 @@ describe('the digest: anything shown that moved between preview and takeover is 
     pause(b, 'p', 'h@x.ch');
     const p = workflowTakeoverPreview(deps(b), 'w');
     expect(p.kind === 'preview' && [p.preview.stillPaused, p.preview.alsoReleased]).toEqual([[{ id: 'p', title: 'Plan p' }], []]);
+    refusedChanged(b, shown);
+  });
+
+  it('the title of a plan that stays paused', () => {
+    const b = ready();
+    plan(b, 'p', 'w', 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const shown = expectOf(b, 'w');
+    b.db.prepare("UPDATE triggers SET title = 'Renamed' WHERE id = 'p'").run();
+    refusedChanged(b, shown);
+  });
+
+  it('the title of a plan whose list of allowed connections lapses', () => {
+    const b = ready();
+    // The mandate's own plan: its members do not change, so only the lapsing list names it.
+    plan(b, 'q', 'w', 'h@x.ch');
+    b.db.prepare('UPDATE triggers SET stamp_connections = ? WHERE id = ?')
+      .run(encodeStamp('2026-01-01T00:00:00.000Z', null, [{ profile: 'pr', grant: 'g-h@x.ch', binding: 'b' }]), 'q');
+    const p = workflowTakeoverPreview(deps(b), 'w');
+    expect(p.kind === 'preview' && [p.preview.lapsing, p.preview.memberChanges, p.preview.stillPaused]).toEqual([[{ id: 'q', title: 'Plan q' }], [], []]);
+    const shown = expectOf(b, 'w');
+    b.db.prepare("UPDATE triggers SET title = 'Renamed' WHERE id = 'q'").run();
     refusedChanged(b, shown);
   });
 

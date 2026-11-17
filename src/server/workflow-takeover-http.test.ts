@@ -214,12 +214,22 @@ describe('the workflow takeover routes (real engine)', () => {
     expect(stamp.json['mode']).toBe('autonomous');
   });
 
+  it('a definition without mode or failure strategy: the preview shows the values derived for it, as the stamp preview does', async () => {
+    const id = workflow('n@example.invalid');
+    end('n@example.invalid');
+    db().prepare("UPDATE workflows SET definition_json = json_remove(definition_json, '$.mode', '$.on_failure') WHERE id = ?").run(id);
+    const stamp = await ask('GET', `/api/workflows/${id}/stamp-preview`, ownerCookie);
+    const p = await ask('GET', `/api/workflows/${id}/takeover-preview`, ownerCookie);
+    expect([p.json['mode'], p.json['onFailure']]).toEqual([stamp.json['mode'], stamp.json['onFailure']]);
+    expect(stamp.json['mode']).toBe('autonomous');
+  });
+
   it('the preview shows the steps as the stamp preview does, each with its connection flag, and the marks', async () => {
     const id = workflow('g@example.invalid');
     end('g@example.invalid');
     const stamp = await ask('GET', `/api/workflows/${id}/stamp-preview`, ownerCookie);
     const p = await ask('GET', `/api/workflows/${id}/takeover-preview`, ownerCookie);
-    expect(p.json['steps']).toEqual((stamp.json['steps'] as Array<Record<string, unknown>>).map((s) => ({ ...s, foreignConnection: false })));
+    expect(p.json['steps']).toEqual((stamp.json['steps'] as Array<Record<string, unknown>>).map((s) => ({ ...s, foreignConnection: false, connectionProfile: null })));
     expect(p.json['marks']).toEqual([{ name: 'g@example.invalid', role: 'workflow-created', ended: true }]);
     expect(p.json['planned']).toBeUndefined();
   });
@@ -239,8 +249,9 @@ describe('the workflow takeover routes (real engine)', () => {
     inner.getApiStore = () => ({ knownProfiles: () => [shop], getByHostname: (h: string) => (h === 'shop.example.invalid' ? shop : undefined) });
     try {
       const p = await ask('GET', `/api/workflows/${id}/takeover-preview`, ownerCookie);
-      expect((p.json['steps'] as Array<{ id: string; foreignConnection: boolean }>).map((s) => [s.id, s.foreignConnection])).toEqual([['s1', false], ['s2', true]]);
-      expect(p.json['connections']).toEqual([{ profileId: 'shop', account: 'Main store', by: 'k@example.invalid' }]);
+      expect((p.json['steps'] as Array<{ id: string; foreignConnection: boolean; connectionProfile: string | null }>).map((s) => [s.id, s.foreignConnection, s.connectionProfile]))
+        .toEqual([['s1', false, null], ['s2', true, 'shop']]);
+      expect(p.json['connections']).toEqual([{ profileId: 'shop', account: 'Main store', by: 'k@example.invalid', provider: 'shop.example.invalid' }]);
     } finally {
       inner.getApiStore = orig;
     }

@@ -85,8 +85,8 @@ export interface WorkflowTakeoverPreview {
   /** Plans whose list of allowed connections lapses with the new stamp. */
   readonly lapsing: ReadonlyArray<{ readonly id: string; readonly title: string }>;
   readonly connections: readonly WorkflowTakeoverConnection[];
-  /** Captured steps whose call goes to a profile some mandate connected (whoever it was). */
-  readonly foreignConnectionSteps: readonly string[];
+  /** Captured steps whose call goes to a profile some mandate connected (whoever it was), with that profile. */
+  readonly foreignConnectionSteps: ReadonlyArray<{ readonly step: string; readonly profileId: string }>;
 }
 
 export type WorkflowTakeoverPreviewResult =
@@ -113,7 +113,7 @@ export interface WorkflowTakeoverState {
   readonly stillPaused: readonly TriggerRecord[];
   readonly lapsing: ReadonlyArray<{ readonly trigger: TriggerRecord; readonly entries: readonly StampEntry[] }>;
   readonly connections: readonly (WorkflowTakeoverConnection & { readonly grant: string })[];
-  readonly foreignConnectionSteps: readonly string[];
+  readonly foreignConnectionSteps: ReadonlyArray<{ readonly step: string; readonly profileId: string }>;
   /** The digest of the steps as they are, the stamp is held to. */
   readonly stampDigest: string;
   /** The grant ids of the mandate marks the takeover covers that were not covered yet, for the audit row. */
@@ -215,7 +215,7 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
   // The connections of the mandates whose marks are covered, by grant id: a run as the owner does
   // not reach them. A consent without a grant id cannot be told to be theirs, and gets no line.
   const connections: Array<WorkflowTakeoverConnection & { grant: string }> = [];
-  const foreignConnectionSteps: string[] = [];
+  const foreignConnectionSteps: Array<{ step: string; profileId: string }> = [];
   if (deps.profiles !== null) {
     for (const p of deps.profiles.knownProfiles()) {
       const grant = p.oauth_grant?.connected_mandate_id;
@@ -229,7 +229,7 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
     for (const st of steps) {
       const p = stepProfile(deps.profiles, st);
       const id = (st as { id?: unknown }).id;
-      if (p !== undefined && isMandateConnection(p) && typeof id === 'string') foreignConnectionSteps.push(id);
+      if (p !== undefined && isMandateConnection(p) && typeof id === 'string') foreignConnectionSteps.push({ step: id, profileId: p.id });
     }
   }
 
@@ -244,7 +244,7 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
     lapsing.map((l) => [l.trigger.id, l.trigger.title, l.entries]),
     marks.map((m) => [m.role, m.name, m.ended, m.undetermined === true]),
     connections.map((c) => [c.profileId, c.grant, c.account]),
-    foreignConnectionSteps,
+    foreignConnectionSteps.map((f) => [f.step, f.profileId]),
   ])).digest('hex');
 
   return {

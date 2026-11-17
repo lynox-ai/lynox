@@ -9214,12 +9214,19 @@ export class LynoxHTTPApi {
       const out = workflowTakeoverPreview(deps, params['id']!);
       if (out.kind === 'not_found') { errorResponse(res, 404, 'Workflow not found'); return; }
       if (out.kind === 'refused') { jsonResponse(res, 200, { refusal: out.refusal, message: WORKFLOW_TAKEOVER_REFUSALS[out.refusal].message }); return; }
-      const { planned, foreignConnectionSteps, ...preview } = out.preview;
-      const marked = new Set(foreignConnectionSteps);
-      // A step whose literal call goes to a profile some mandate connected is marked, whoever it was.
-      const steps = (await stepsShown(planned)).map((st) => ({ ...st, foreignConnection: marked.has(st.id) }));
+      const { planned, foreignConnectionSteps, connections: owned, ...preview } = out.preview;
+      const marked = new Map(foreignConnectionSteps.map((f) => [f.step, f.profileId] as const));
+      // A step whose literal call goes to a profile some mandate connected is marked, whoever it was,
+      // with the profile, so the view can name the person where a connection below is that profile.
+      const steps = (await stepsShown(planned)).map((st) => ({ ...st, foreignConnection: marked.has(st.id), connectionProfile: marked.get(st.id) ?? null }));
+      // Each connection with its provider, as the plan takeover's preview names it.
+      const apiStore = engine.getApiStore();
+      const connections = owned.map((c) => {
+        const p = apiStore?.knownProfiles().find((k) => k.id === c.profileId);
+        return { ...c, provider: p === undefined ? c.profileId : connectionShown(p).provider };
+      });
       // Everything the stamp binds beside the steps, as the stamp preview shows it: the takeover stamps it too.
-      jsonResponse(res, 200, { ...preview, ...stampShown(planned), steps, refusal: null });
+      jsonResponse(res, 200, { ...preview, connections, ...stampShown(planned), steps, refusal: null });
     }, ownerOnly('see what taking over a workflow would do')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/takeover', async (_req, res, params, body) => {
