@@ -1143,12 +1143,6 @@ describe('the headers of a write, read together under one budget', () => {
     expect('unshowable' in past && past.unshowable).toEqual({ reason: 'unreadable' });
   });
 
-  it('keeps every header in the key of a write whose headers are unreadable', () => {
-    const past = headersForQuestion(many(1), (t) => t, () => 'show');
-    expect(past.keyed?.length).toBe(2000);
-    expect(past.keyed?.[0]).toEqual(['x-hdr-0000', 'v'.repeat(163)]);
-  });
-
   // A refusal of one header comes before the budget runs out, and is kept as it is.
   it('names a header that holds a secret in an encoded form, though the budget would run out after it', () => {
     const headers = { 'x-a': '%73ecret', ...many(1) };

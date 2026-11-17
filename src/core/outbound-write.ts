@@ -1295,14 +1295,15 @@ export type HeaderShowing = 'show' | 'key' | 'omit';
  * sorted: two secrets that mask alike are still two writes.
  *
  * Every header is read under one budget, shared by all of them (`withinReadingBudget`): each
- * is bounded on its own, their number is not. Past it the headers count as unreadable, like any
- * other part past it; the key still holds them, so the owner can be asked with a note.
+ * is bounded on its own, their number is not. Past it the headers count as unreadable and the
+ * write is refused for everyone, the owner included: a header the question cannot show was
+ * always refused, and enough headers before it must not turn that into a question.
  */
 export function headersForQuestion(
   headers: Readonly<Record<string, unknown>>,
   mask: (text: string) => string,
   showing: (name: string, value: string) => HeaderShowing,
-): { lines: string[]; names: string[]; keyed: Array<[string, string]> } | { unshowable: UnshowableHeader; keyed?: Array<[string, string]> } {
+): { lines: string[]; names: string[]; keyed: Array<[string, string]> } | { unshowable: UnshowableHeader } {
   const seen = new Set<string>();
   for (const k of Object.keys(headers)) {
     const name = k.trim().toLowerCase();
@@ -1333,7 +1334,7 @@ export function headersForQuestion(
     }
     return { lines };
   }, () => ({ unshowable: { reason: 'unreadable' } }));
-  if ('unshowable' in read) return read.unshowable.reason === 'unreadable' ? { unshowable: read.unshowable, keyed } : read;
+  if ('unshowable' in read) return read;
   return { lines: read.lines, names: shown.map(({ k }) => spelled(k)), keyed };
 }
 
