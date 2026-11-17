@@ -1,6 +1,7 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
 import { isStepIdShape, stepIdRefusal } from './step-id.js';
+import { fieldReferencing } from './template-refs.js';
 
 /**
  * A single step-level edit to a workflow's step list. The vocabulary is shared
@@ -189,6 +190,16 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
 
     if (mod.action === 'remove') {
       const removedId = steps[idx]!.id;
+      // A `{{<id>.…}}` reference to the removed step would stay as raw text in the step that reads
+      // it, and its `input_from` entry is dropped below: refused, naming the step that reads it.
+      for (const [i, s] of steps.entries()) {
+        if (i === idx) continue;
+        const field = fieldReferencing(s, removedId);
+        if (field) {
+          return `Error: remove: step #${String(i + 1)} reads the output of step #${String(idx + 1)} in its ${field}. `
+            + `Change that reference first (update_task), or remove step #${String(i + 1)} too.`;
+        }
+      }
       steps.splice(idx, 1);
       // Drop the removed step from every other step's data dependencies so the
       // edited list never references a step that no longer exists.
