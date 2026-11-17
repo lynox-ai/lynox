@@ -3231,7 +3231,8 @@ describe('WorkerLoop', () => {
     expect(WORKER_NOTICES.de.workflowRefUnresolved(2)).toBe('Schritt 2 dieses Workflows nutzt das Ergebnis eines Schritts, den er nicht liest. Darum lief der Workflow nicht. Bitte lynox im Chat, diesen Schritt zu reparieren.');
     expect(WORKER_NOTICES.en.workflowRefUnresolved(2)).toBe('Step 2 of this workflow uses the result of a step it does not read, so the workflow did not run. Ask lynox in a chat to fix that step.');
 
-    // A webhook run's event ends with the same words, not the full refusal, and is told by the drain only.
+    // A webhook run's event ends with the same words, not the full refusal, and it is not pushed here
+    // (the drain tells an event's end).
     const event: { outcome?: { state: string; reason?: string } } = {};
     (loop as unknown as { activeTasks: Map<string, unknown> }).activeTasks.set('pipe-task-ref', { event, pauseDeadline: () => undefined, resumeDeadline: () => undefined });
     (router.notify as ReturnType<typeof vi.fn>).mockClear();

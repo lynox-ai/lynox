@@ -112,7 +112,12 @@ describe('removing a step another step\'s reference reads is refused', () => {
       .toContain('Error: remove: the step this edit adds ("late") reads the output of a step this edit removes');
     // A step this edit renames is named by the id it has in that list.
     expect(applyModifications(steps(), [{ action: 'rename_step', step_id: 'sum', value: 'total' }, { action: 'remove', step_id: 'fetch' }]))
-      .toBe('Error: remove: step "sum" reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step "sum" too. This edit renames that step: put that action before the rename.');
+      .toBe('Error: remove: step "sum" reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step "sum" too. This edit renames that step: put the update_task before the rename, or remove it by its new id.');
+    // The repair the text names works: the update_task before the rename.
+    const repaired = steps();
+    expect(applyModifications(repaired, [{ action: 'update_task', step_id: 'sum', value: 'Sum what you have' }, { action: 'rename_step', step_id: 'sum', value: 'total' }, { action: 'remove', step_id: 'fetch' }])).toBeNull();
+    expect(applyModifications(steps(), [{ action: 'rename_step', step_id: 'mail', value: 'send' }, { action: 'remove', step_id: 'sum' }]))
+      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input_template.body. Remove step "mail" too: its input template cannot be edited. This edit renames that step: remove it by its new id, or leave the rename out.');
   });
 
   it('one edit that removes a step and what reads it, in either order, is taken', () => {
@@ -140,6 +145,11 @@ describe('removing a step another step\'s reference reads is refused', () => {
     const out = applyModifications(s, [{ action: 'remove', step_id: '#1' }]) ?? '';
     expect(out).toContain('step #2 (its position before this edit) reads the output of a step this edit removes');
     expect(out).not.toContain('Old');
+    // Renamed in the same edit, it is still found by that position: no word about the rename.
+    const renamed: InlinePipelineStep[] = [{ id: 'Old Fetch', task: 'Fetch' }, { id: 'Old Sum', task: 'Sum {{Old Fetch.result}}', input_from: ['Old Fetch'] }];
+    const out2 = applyModifications(renamed, [{ action: 'rename_step', step_id: '#2', value: 'total' }, { action: 'remove', step_id: '#1' }]) ?? '';
+    expect(out2).toContain('step #2 (its position before this edit) reads the output of a step this edit removes');
+    expect(out2).not.toContain('renames');
   });
 
   it('a step only listed in input_from, with no reference to it, is still removed', () => {
