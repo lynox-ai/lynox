@@ -23671,6 +23671,26 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     });
   });
 
+  it('refuses a second handshake while a migration session runs, with a code the source tells apart', async () => {
+    const token = randomBytes(32).toString('hex');
+    const holder = api as unknown as { _migrationImporter: { cleanup(): void } | null };
+    try {
+    await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token, LYNOX_VAULT_KEY: 'a-vault-key-for-the-session-code-test' }, async () => {
+      const first = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+      expect(first.status).toBe(200);
+      const second = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+      expect(second.status).toBe(400);
+      const body = (await second.json()) as { error: string; code?: string };
+      expect(body.code).toBe('migration_session_active');
+      expect(body.error.startsWith('Migration session already active')).toBe(true);
+    });
+    } finally {
+      // Leave no session behind for the tests after this one, also when an assertion fails.
+      holder._migrationImporter?.cleanup();
+      holder._migrationImporter = null;
+    }
+  });
+
   it('with no secret at all, a local request is admin, on a managed instance too', async () => {
     await withEnv({ LYNOX_HTTP_SECRET: undefined, LYNOX_HTTP_ADMIN_SECRET: undefined, LYNOX_BILLING_TIER: 'managed' }, async () => {
       const open = new LynoxHTTPApi();
