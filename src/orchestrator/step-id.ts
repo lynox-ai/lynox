@@ -80,3 +80,64 @@ export function storedStepOrder(row: { manifest_json: string } | undefined): str
     return undefined;
   }
 }
+
+/**
+ * A run's copy of a stored plan's steps, where every id outside the allowed shape is replaced by
+ * `step-<n>`, its position counted from 1 (`step-<n>-<k>` if that is taken). A plan stored before
+ * ids had a shape still runs, and what a run writes on the way (a timeout, a refused replay, a graph
+ * or manifest error) names its steps by id; with this, none of it carries the stored text.
+ *
+ * Each reference moves with its step: an `input_from` entry and a `{{<id>…}}` placeholder in a task
+ * or an input template. An `input_from` entry outside the shape that names no step becomes
+ * `unknown-step-<j>`, so the graph check refuses it without quoting it. Steps already in the shape,
+ * and plans with none outside it, come back unchanged.
+ */
+export function runStepIds<T extends { id: string; task: string; input_from?: string[] | undefined; input_template?: Record<string, unknown> | undefined }>(steps: readonly T[]): T[] {
+  const taken = new Set(steps.map(s => s.id).filter(isStepIdShape));
+  const renamed = new Map<string, string>();
+  steps.forEach((s, i) => {
+    if (isStepIdShape(s.id) || renamed.has(s.id)) return;
+    let name = `step-${String(i + 1)}`;
+    for (let k = 2; taken.has(name); k++) name = `step-${String(i + 1)}-${String(k)}`;
+    taken.add(name);
+    renamed.set(s.id, name);
+  });
+  const dangling = steps.some(s => (s.input_from ?? []).some(r => !isStepIdShape(r) && !renamed.has(r)));
+  if (renamed.size === 0 && !dangling) return [...steps];
+
+  // Longest first, so an id that begins with another one is matched whole.
+  const olds = [...renamed.keys()].sort((a, b) => b.length - a.length);
+  const inText = (text: string): string => text.replace(/\{\{([^}]+)\}\}/g, (match: string, raw: string) => {
+    const path = raw.trim();
+    const old = olds.find(o => path === o || path.startsWith(`${o}.`));
+    return old === undefined ? match : `{{${renamed.get(old)!}${path.slice(old.length)}}}`;
+  });
+  const inValue = (value: unknown): unknown => {
+    if (typeof value === 'string') return inText(value);
+    if (Array.isArray(value)) return value.map(inValue);
+    if (value !== null && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, inValue(v)]));
+    }
+    return value;
+  };
+  let unknown = 0;
+  const unknownName = new Map<string, string>();
+  const ref = (r: string): string => {
+    if (isStepIdShape(r)) return r;
+    const now = renamed.get(r);
+    if (now !== undefined) return now;
+    let name = unknownName.get(r);
+    if (name === undefined) {
+      do name = `unknown-step-${String(++unknown)}`; while (taken.has(name));
+      unknownName.set(r, name);
+    }
+    return name;
+  };
+  return steps.map(s => ({
+    ...s,
+    id: renamed.get(s.id) ?? s.id,
+    task: inText(s.task),
+    ...(s.input_from !== undefined ? { input_from: s.input_from.map(ref) } : {}),
+    ...(s.input_template !== undefined ? { input_template: inValue(s.input_template) as Record<string, unknown> } : {}),
+  }));
+}

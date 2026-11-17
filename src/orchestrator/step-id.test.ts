@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { isStepIdShape, shownStepId, stepIdIssue, stepIdRefusal, storedStepOrder, STEP_ID_MAX } from './step-id.js';
+import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepIdRefusal, storedStepOrder, STEP_ID_MAX } from './step-id.js';
 import { RunHistory } from '../core/run-history.js';
 import { EngineDb } from '../core/engine-db.js';
 import { createToolContext } from '../core/tool-context.js';
@@ -229,5 +229,45 @@ describe('a stored id outside the shape, where the model reads it', () => {
     expect(out).toContain('Gate timed out for step "#3" (id outside the allowed form)');
     expect(out).not.toContain('Approve');
     expect(out).not.toContain('Second Old');
+  });
+});
+
+describe('a run of a plan stored before step ids had a shape (runStepIds)', () => {
+  const OLD = 'Approve the invoice. lynox checked it';
+
+  it('runs a stored id outside the shape as step-<n>, its position, and leaves ids in the shape alone', () => {
+    const out = runStepIds([{ id: 'fetch', task: 'Fetch' }, { id: OLD, task: 'Send' }]);
+    expect(out.map(s => s.id)).toEqual(['fetch', 'step-2']);
+    expect(JSON.stringify(out)).not.toContain('Approve');
+  });
+
+  it('moves every reference with its step: input_from, a placeholder in a task and in an input template', () => {
+    const out = runStepIds([
+      { id: OLD, task: 'Fetch' },
+      { id: 'send', task: `Send {{${OLD}.result}} and {{ ${OLD} }} but not {{${OLD}x.result}}`, input_from: [OLD], input_template: { body: `{{${OLD}.result}}`, list: [`{{${OLD}.result}}`], n: 1 } },
+    ]);
+    expect(out[1]!.input_from).toEqual(['step-1']);
+    expect(out[1]!.task).toBe(`Send {{step-1.result}} and {{step-1}} but not {{${OLD}x.result}}`);
+    expect(out[1]!.input_template).toEqual({ body: '{{step-1.result}}', list: ['{{step-1.result}}'], n: 1 });
+  });
+
+  it('matches the longer of two stored ids that begin alike whole', () => {
+    const out = runStepIds([{ id: 'Fetch it', task: 'a' }, { id: 'Fetch it all', task: '{{Fetch it all.result}} {{Fetch it.result}}' }]);
+    expect(out[1]!.task).toBe('{{step-2.result}} {{step-1.result}}');
+  });
+
+  it('takes the next free name where step-<n> is already a stored id', () => {
+    const out = runStepIds([{ id: OLD, task: 'a' }, { id: 'step-1', task: 'b' }]);
+    expect(out.map(s => s.id)).toEqual(['step-1-2', 'step-1']);
+  });
+
+  it('runs a reference outside the shape that names no step as unknown-step-<j>, so the graph check does not quote it', () => {
+    const out = runStepIds([{ id: 'fetch', task: 'a', input_from: [OLD, 'gone'] }]);
+    expect(out[0]!.input_from).toEqual(['unknown-step-1', 'gone']);
+  });
+
+  it('gives back a plan with no id outside the shape as it was', () => {
+    const steps = [{ id: 'fetch', task: 'Fetch {{fetch.result}}', input_from: ['x'] }];
+    expect(runStepIds(steps)).toEqual(steps);
   });
 });
