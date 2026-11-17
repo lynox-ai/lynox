@@ -3451,7 +3451,7 @@ export class RunHistory {
       parameters: (planned as { parameters?: unknown }).parameters,
     }) ?? planned.steps.reduce<ReturnType<typeof findHiddenInName>>(
       (hit, s, i) => hit ?? (typeof s.id === 'string' ? findHiddenInName(s.id, `steps[${i}].id`) : null), null);
-    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
+    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden, { steps: true }));
     // A step's id has a limited shape (`step-id.ts`): it reaches the model next to lynox's own words.
     // Every producer saves here, so no new plan carries a free-form id; one stored before the limit
     // is shown by its position, and `update_workflow_steps` names the rename it needs first.
