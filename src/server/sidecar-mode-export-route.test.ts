@@ -450,7 +450,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
   it('passes the network guard\'s refusal of the restore request on with the retry sentence, and asks to check the target for anything else', async () => {
     setShellIsolationForTest(sidecar);
     target.guardBlocksRestore = true;
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Blocked: the redirect points to a private address. You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('lynox did not send the request to restore the data: the redirect points to a private address. The target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
     // One without any words of its own.
     target.guardText = '';
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The request to restore the data ended unexpectedly. Check on the target instance whether your data arrived before you migrate again.');
@@ -476,6 +476,15 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('lynox could not set up the connection to the target instance: its answer is not in the expected format. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
   });
 
+  it('says nothing was transferred for a stop without words before the handshake', async () => {
+    setShellIsolationForTest(sidecar);
+    const proto = (await import('../core/migration-export.js')).MigrationExporter.prototype as unknown as { preview: () => unknown };
+    const spy = vi.spyOn(proto, 'preview').mockImplementation(() => { throw new Error(''); });
+    try {
+      expect(((await exportTo()).get('error') as { message: string }).message).toBe('The migration stopped for a reason lynox could not read. Nothing was transferred.');
+    } finally { spy.mockRestore(); }
+  });
+
   it('adds no retry sentence where the same attempt would fail again', async () => {
     setShellIsolationForTest(sidecar);
     // The source's own bound: the bundle does not fit one migration.
@@ -496,6 +505,9 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     const spy = vi.spyOn(proto, 'collectConfig').mockImplementation(() => { throw new Error('config unreadable'); });
     try {
       expect(((await exportTo()).get('error') as { message: string }).message).toBe('config unreadable. You can start the migration again in 30 minutes at the latest.');
+      // A stop without any words of its own still says what the user can do.
+      spy.mockImplementation(() => { throw new Error(''); });
+      expect(((await exportTo()).get('error') as { message: string }).message).toBe('The migration stopped for a reason lynox could not read. You can start the migration again in 30 minutes at the latest.');
       // Any text reaching the user is cleaned, also one that did not come from the target.
       spy.mockImplementation(() => { throw new Error('config\u202e unreadable\n'); });
       expect(((await exportTo()).get('error') as { message: string }).message).toBe('config unreadable. You can start the migration again in 30 minutes at the latest.');

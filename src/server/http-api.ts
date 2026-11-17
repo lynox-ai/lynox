@@ -15477,8 +15477,11 @@ export class LynoxHTTPApi {
           // The network guard refusing the address (it follows no redirects): nothing was sent, so a
           // new attempt can get past it. Anything else: the user checks the target first.
           const text = relayedText(err instanceof Error ? err.message : String(err)).trim();
-          const next = text.startsWith('Blocked:') ? AGAIN : 'Check on the target instance whether your data arrived before you migrate again.';
-          throw new Error(`${text === '' ? 'The request to restore the data ended unexpectedly' : text}${/[.!?…]$/.test(text) ? '' : '.'} ${next}`);
+          if (text.startsWith('Blocked:')) {
+            const reason = text.slice('Blocked:'.length).trim().replace(/[.!?…]+$/, '');
+            throw new Error(`lynox did not send the request to restore the data${reason === '' ? '' : `: ${reason}`}. The target instance has not restored anything. ${AGAIN}`);
+          }
+          throw new Error(`${text === '' ? 'The request to restore the data ended unexpectedly' : text}${/[.!?…]$/.test(text) ? '' : '.'} Check on the target instance whether your data arrived before you migrate again.`);
         }
         // A 4xx is the target turning the restore down before it started (a missing chunk, sidecar
         // mode); a 5xx is the restore failing on the way, which can leave part of it applied.
@@ -15498,7 +15501,8 @@ export class LynoxHTTPApi {
       } catch (err: unknown) {
         // Every text to the user goes through the same cleaning, the guard's and the exporter's too.
         const { relayedText: clean } = await import('../core/migration-target-reply.js');
-        const message = clean(err instanceof Error ? err.message : 'Migration failed', 2000).trim() || 'Migration failed';
+        const message = clean(err instanceof Error ? err.message : '', 2000).trim()
+          || `The migration stopped for a reason lynox could not read.${sessionMayBeHeld ? '' : ' Nothing was transferred.'}`;
         // A stop after the handshake that names no next step (a read failing on this instance) gets
         // the retry sentence. A stop that names one (check the target, write to support) does not:
         // there the same attempt fails again, and the sentence would send the user round in a loop.
