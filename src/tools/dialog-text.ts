@@ -224,7 +224,7 @@ export const RULE_LABELS_DE: Readonly<Record<string, string>> = {
   'write file via bash (use write_file instead)': 'Datei per bash schreiben (nutze stattdessen write_file)',
   'write into the lynox data dir': 'in den Datenordner von lynox schreiben',
   'write to device': 'auf ein Gerät schreiben',
-  'HTTP request with an option the guard cannot read (shell expansion)': 'HTTP-Anfrage mit einer Option, die lynox nicht lesen kann (Shell-Erweiterung)',
+  'HTTP request with an option the guard cannot read (shell expansion)': 'HTTP-Anfrage mit einer Option, die lynox nicht prüfen kann (Shell-Erweiterung)',
 };
 
 /** A rule's label in `language`; English as written. */

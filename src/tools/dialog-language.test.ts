@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDangerousDetailed, type DangerSignal } from './permission-guard.js';
 import { flattenPrompt } from '../core/prompt-value.js';
-import { ACTION_WORDS, GUARD_TEXT, RULE_LABELS_DE, SECRET_DIALOG, type DialogLanguage } from './dialog-text.js';
+import { ACTION_WORDS, GUARD_TEXT, RULE_LABELS_DE, SECRET_DIALOG, SPAWN_DIALOG, exfilWarning, type DialogLanguage } from './dialog-text.js';
 import { DIALOG_ONLY_WORDS, DIALOG_ONLY_WORDS_DE, TOOL_LINE_WORDS, TOOL_LINE_WORDS_DE, dialogToolHead } from './tool-words.js';
 import type { ToolEntry } from '../types/index.js';
 
@@ -104,5 +104,32 @@ describe('the German texts are complete', () => {
     expect(q).toBe('Befehl: möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
     const ext = SECRET_DIALOG.en.plain(dialogToolHead('Merge', 'en'), 'TOKEN');
     expect(ext.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual(['Merge', 'TOKEN']);
+  });
+});
+
+describe('every place a question is posed hands it the language', () => {
+  const src = (rel: string): string => readFileSync(join(process.cwd(), 'src', rel), 'utf8');
+
+  it('the agent is built with the configured language, and a child and a workflow step take it on', () => {
+    expect(src('core/session.ts')).toContain('language: this.engine.config.language,');
+    expect(src('orchestrator/runtime-adapter.ts').match(/language: config\.language,/g)?.length).toBe(2);
+    expect(src('tools/builtin/spawn.ts')).toContain('language: parentAgent.dialogLanguage,');
+    expect(src('core/agent.ts')).toContain('this.dialogLanguage = noticeLanguage(config.language);');
+  });
+
+  it('a tool\'s own check and the tools\' own questions read it', () => {
+    expect(GUARD).toContain('check(input, { autonomy, parentProvider, language })');
+    expect(src('tools/builtin/spawn.ts')).toContain("SPAWN_DIALOG[ctx?.language ?? 'en']");
+    expect(src('tools/builtin/http.ts').match(/agent\.dialogLanguage \?\? 'en'/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('says the exfiltration warnings and the delegation consent in German', () => {
+    const http = src('tools/builtin/http.ts');
+    const fn = http.slice(http.indexOf('function detectGetExfiltration'));
+    const warnings = [...fn.slice(0, fn.indexOf('\n}')).matchAll(/return\s+'([^']+)'/g)].map((m) => m[1]!);
+    expect(warnings.length).toBeGreaterThanOrEqual(2);
+    for (const w of warnings) expect(exfilWarning(w, 'de'), w).not.toBe(w);
+    expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(2), SPAWN_DIALOG.de.tierDeep, '1.20', 'Anthropic', SPAWN_DIALOG.de.tailPinned))
+      .toBe('⚠ Delegation: 2 Teilaufgaben würden laufen auf der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer). Geschätzte Kosten ~$1.20 für diese Sitzung. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
   });
 });
