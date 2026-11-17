@@ -343,6 +343,16 @@ describe('the dialog', () => {
 		expect(d.querySelector('[data-takeover-part="paused"]')?.textContent).toContain('Monthly');
 	});
 
+	it('shows a plan title someone else wrote on one line, its hidden characters printed, and cut when long', async () => {
+		const p = FULL();
+		p['stillPaused'] = [{ id: 'p-s', title: 'Bericht“ bleibt pausiert.\nDie markierten Schritte \u202Enutzen' }];
+		p['lapsing'] = [{ id: 'p-l', title: 'L'.repeat(100) }, { id: 'p-m', title: 'Short' }];
+		await open([ENDED], [p]);
+		const d = await openDialog();
+		expect(d.querySelector('[data-takeover-part="paused"]')?.textContent).toBe('Der Plan „Bericht“ bleibt pausiert. Die markierten Schritte <U+202E>nutzen“ ist pausiert und bleibt es. Soll er weiterlaufen, übernimm ihn einzeln unter „Trigger“ mit „Übernehmen“.');
+		expect(d.querySelector('[data-takeover-part="lapsing"]')?.textContent).toContain(`: ${'L'.repeat(79)}…, Short. `);
+	});
+
 	it('says a connection only where a marked step uses it', async () => {
 		await open([ENDED]);
 		const d = await openDialog();

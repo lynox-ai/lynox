@@ -1,5 +1,5 @@
 import { t, tf } from '../i18n.svelte.js';
-import { memberChangeLines, planList, type TakeoverMemberChange } from './plan-takeover.js';
+import { memberChangeLines, planList, shownValue, type TakeoverMemberChange } from './plan-takeover.js';
 import { parseStampPreview, type StampPreview, type StampStep } from './workflow-stamp.js';
 
 /**
@@ -109,7 +109,7 @@ export function parseWorkflowTakeoverPreview(body: unknown): WorkflowTakeoverPre
 /** The line of one mark in the dialog's head: who, in which role, and whether their access ended. */
 export function markLine(m: WorkflowTakeoverMark): string {
 	if (m.undetermined) return t(m.role === 'workflow-created' ? 'workflow_library.takeover.undetermined.created' : 'workflow_library.takeover.undetermined.edited');
-	const who = tf(m.role === 'workflow-created' ? 'takeover.role.created' : 'takeover.role.edited', { name: m.name });
+	const who = tf(m.role === 'workflow-created' ? 'takeover.role.created' : 'takeover.role.edited', { name: shownValue(m.name) });
 	return `${who} · ${m.ended ? t('workflow_library.access_ended_unnamed') : t('workflow_library.takeover.still_access')}`;
 }
 
@@ -117,7 +117,7 @@ export function markLine(m: WorkflowTakeoverMark): string {
 export function stepConnectionNote(p: Pick<WorkflowTakeoverPreview, 'connections'>, step: WorkflowTakeoverStep): string | null {
 	if (!step.foreignConnection) return null;
 	const by = step.connectionProfile === null ? undefined : p.connections.find((c) => c.profileId === step.connectionProfile)?.by;
-	return by === undefined ? t('workflow_library.takeover.step_connection_unnamed') : tf('workflow_library.takeover.step_connection', { name: by });
+	return by === undefined ? t('workflow_library.takeover.step_connection_unnamed') : tf('workflow_library.takeover.step_connection', { name: shownValue(by) });
 }
 
 /** One sentence below the steps; `kind` names the part of the dialog it is. */
@@ -142,21 +142,21 @@ export function workflowTakeoverLines(p: WorkflowTakeoverPreview): WorkflowTakeo
 		lines.push({
 			kind: 'connection',
 			text: tf('workflow_library.takeover.connection', {
-				name: c.by,
-				provider: c.provider,
+				name: shownValue(c.by),
+				provider: shownValue(c.provider),
 				// The account in brackets, unless it is the person's own address, already named.
-				account: c.account !== null && c.account !== '' && c.account.toLowerCase() !== c.by.toLowerCase() ? ` (${c.account})` : '',
+				account: c.account !== null && c.account !== '' && c.account.toLowerCase() !== c.by.toLowerCase() ? ` (${shownValue(c.account)})` : '',
 			}),
 		});
 	}
 	const paused = new Set(p.stillPaused.map((s) => s.id));
 	for (const line of memberChangeLines(p.memberChanges.filter((c) => !paused.has(c.id)))) lines.push({ kind: 'member_change', text: line.text });
-	if (p.lapsing.length === 1) lines.push({ kind: 'lapsing', text: tf('workflow_library.takeover.lapsing_one', { plan: p.lapsing[0]!.title }) });
+	if (p.lapsing.length === 1) lines.push({ kind: 'lapsing', text: tf('workflow_library.takeover.lapsing_one', { plan: shownValue(p.lapsing[0]!.title) }) });
 	else if (p.lapsing.length > 1) lines.push({ kind: 'lapsing', text: tf('workflow_library.takeover.lapsing_many', { plans: planList(p.lapsing.map((l) => l.title)) }) });
-	if (p.alsoReleased.length === 1) lines.push({ kind: 'released', text: tf('takeover.f2.released_one', { plan: p.alsoReleased[0]!.title }) });
+	if (p.alsoReleased.length === 1) lines.push({ kind: 'released', text: tf('takeover.f2.released_one', { plan: shownValue(p.alsoReleased[0]!.title) }) });
 	else if (p.alsoReleased.length > 1) lines.push({ kind: 'released', text: tf('takeover.f2.released', { plans: planList(p.alsoReleased.map((r) => r.title)) }) });
 	const where = { tab: t('hub.automation.triggers'), button: t('takeover.button') };
-	if (p.stillPaused.length === 1) lines.push({ kind: 'paused', text: tf('workflow_library.takeover.paused_one', { plan: p.stillPaused[0]!.title, ...where }) });
+	if (p.stillPaused.length === 1) lines.push({ kind: 'paused', text: tf('workflow_library.takeover.paused_one', { plan: shownValue(p.stillPaused[0]!.title), ...where }) });
 	else if (p.stillPaused.length > 1) lines.push({ kind: 'paused', text: tf('workflow_library.takeover.paused_many', { plans: planList(p.stillPaused.map((s) => s.title)), ...where }) });
 	lines.push({ kind: 'afterwards', text: t('workflow_library.takeover.afterwards') });
 	return lines;

@@ -1,4 +1,19 @@
 import { t, tf } from '../i18n.svelte.js';
+import { visible } from './workflow-stamp.js';
+
+/** How many characters of a value someone else wrote a sentence shows, the cut one included. */
+export const SHOWN_VALUE_MAX = 80;
+
+/**
+ * A value someone else wrote (a plan's title, a name, an account) as a sentence of lynox's shows
+ * it: on one line, cut to {@link SHOWN_VALUE_MAX} characters, and with the characters that change
+ * how text reads without being seen printed as their code point (`visible`). A title that reads as
+ * the end of the sentence and the start of another can then neither run long nor hide a turn.
+ */
+export function shownValue(text: string): string {
+	const chars = Array.from(text.replace(/\s+/g, ' ').trim());
+	return visible(chars.length > SHOWN_VALUE_MAX ? `${chars.slice(0, SHOWN_VALUE_MAX - 1).join('')}…` : chars.join(''));
+}
 
 /**
  * The owner's takeover of a paused plan, as the Triggers view shows it: the lines of the
@@ -65,8 +80,9 @@ export function nameOfTag(tag: string): string {
 
 /** At most five plans by name, the rest as "and {n} more" (U-037 Nachtrag 2). */
 export function planList(titles: readonly string[]): string {
-	if (titles.length <= 5) return titles.join(', ');
-	return tf('takeover.plans_more', { plans: titles.slice(0, 5).join(', '), n: String(titles.length - 5) });
+	const shown = titles.map(shownValue);
+	if (shown.length <= 5) return shown.join(', ');
+	return tf('takeover.plans_more', { plans: shown.slice(0, 5).join(', '), n: String(shown.length - 5) });
 }
 
 /**
@@ -118,10 +134,11 @@ export function memberChangeLines(changes: readonly TakeoverMemberChange[]): Tak
 	}
 	return [...groups.values()].map((g) => {
 		const one = g.titles.length === 1;
-		const before = nameOfTag(g.before);
+		const before = shownValue(nameOfTag(g.before));
+		const plan = shownValue(g.titles[0]!);
 		const text = g.after === null
-			? (one ? tf('takeover.change.owner_one', { plan: g.titles[0]!, before }) : tf('takeover.change.owner_many', { plans: planList(g.titles), before }))
-			: (one ? tf('takeover.change.member_one', { plan: g.titles[0]!, before, after: nameOfTag(g.after) }) : tf('takeover.change.member_many', { plans: planList(g.titles), before, after: nameOfTag(g.after) }));
+			? (one ? tf('takeover.change.owner_one', { plan, before }) : tf('takeover.change.owner_many', { plans: planList(g.titles), before }))
+			: (one ? tf('takeover.change.member_one', { plan, before, after: shownValue(nameOfTag(g.after)) }) : tf('takeover.change.member_many', { plans: planList(g.titles), before, after: shownValue(nameOfTag(g.after)) }));
 		return { kind: 'member_change' as const, text };
 	});
 }

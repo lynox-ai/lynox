@@ -2644,12 +2644,13 @@ export class LynoxHTTPApi {
   /**
    * What the workflow takeover reads and writes (`workflow-takeover.ts`): the plan takeover's, the
    * workflow store on the same engine.db, whose hash the stamp is taken with, and the connections.
-   * Null with a 503 when engine.db is not there.
+   * Null with a 503 when engine.db is not there, or the store of access ends: without it every
+   * person would read as ended, and a workflow a live person shaped could be taken over.
    */
   #workflowTakeoverDeps(res: ServerResponse): WorkflowTakeoverDeps | null {
     const deps = this.#takeoverDepsIfReady();
     const engineDb = this.engine?.getEngineDb() ?? null;
-    if (deps === null || engineDb === null) {
+    if (deps === null || engineDb === null || (this.engine?.getMandateEnds() ?? null) === null) {
       errorResponse(res, 503, 'Taking over a workflow is not available on this instance right now.');
       return null;
     }

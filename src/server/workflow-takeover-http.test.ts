@@ -170,6 +170,23 @@ describe('the workflow takeover routes (real engine)', () => {
     expect(db().prepare('SELECT * FROM workflows WHERE id = ?').get(id)).toEqual(before);
   });
 
+  it('without the store of access ends, neither shows the preview nor takes over, and nothing is written', async () => {
+    const id = workflow('store@example.invalid');
+    live('store@example.invalid');
+    const before = db().prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+    const shown = await ask('GET', `/api/workflows/${id}/takeover-preview`, ownerCookie);
+    expect([shown.status, shown.json['refusal']]).toEqual([200, 'mandate_live']);
+    const saved = engine.getMandateEnds.bind(engine);
+    Object.assign(engine, { getMandateEnds: () => undefined });
+    try {
+      expect((await ask('GET', `/api/workflows/${id}/takeover-preview`, ownerCookie)).status).toBe(503);
+      expect((await ask('POST', `/api/workflows/${id}/takeover`, ownerCookie, { expect: 'x' })).status).toBe(503);
+    } finally {
+      Object.assign(engine, { getMandateEnds: saved });
+    }
+    expect(db().prepare('SELECT * FROM workflows WHERE id = ?').get(id)).toEqual(before);
+  });
+
   it('is not held to the plan pause: with the pause off the takeover still works', async () => {
     restore();
     restore = setPlanPauseForTests(false);
