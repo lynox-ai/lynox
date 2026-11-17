@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DIALOG_ONLY_WORDS, TOOL_LINE_WORDS, dialogToolWord } from './tool-words.js';
+import { BUILTIN_TOOL_NAMES } from '../core/builtin-tool-names.js';
 
 const SRC = join(process.cwd(), 'src');
 const read = (rel: string): string => readFileSync(join(SRC, rel), 'utf8');
@@ -86,10 +87,23 @@ describe('the word a confirmation dialog names a tool by', () => {
     expect(dialogToolWord('batch_files')).toBe('Bulk file change');
     expect(dialogToolWord('bash')).toBe('Command');
     expect(dialogToolWord('http_request')).toBe('API request');
-    expect(dialogToolWord('some_new_tool')).toBe('Tool "some_new_tool"');
+    expect(dialogToolWord('some_new_tool')).toBe('External tool "some_new_tool"');
     // An inherited property is not a word.
-    expect(dialogToolWord('constructor')).toBe('Tool "constructor"');
-    expect(dialogToolWord('toString')).toBe('Tool "toString"');
+    expect(dialogToolWord('constructor')).toBe('External tool "constructor"');
+    expect(dialogToolWord('toString')).toBe('External tool "toString"');
+  });
+
+  it('shows a foreign name as a foreign value: one line, no control or bidi characters, cut, escaped', () => {
+    expect(dialogToolWord('a\u202Eb\u200Bc')).toBe('External tool "abc"');
+    expect(dialogToolWord('line\nbreak\ttab')).toBe('External tool "line break tab"');
+    expect(dialogToolWord('x'.repeat(64))).toBe(`External tool "${'x'.repeat(64)}"`);
+    expect(dialogToolWord('x'.repeat(65))).toBe(`External tool "${'x'.repeat(63)}…"`);
+    expect(dialogToolWord('say "Merge" now')).toBe('External tool "say \\"Merge\\" now"');
+    expect(dialogToolWord('back\\slash')).toBe('External tool "back\\\\slash"');
+  });
+
+  it('belongs to built-in tools only: no plugin can take a key of the table', () => {
+    for (const tool of [...Object.keys(TOOL_LINE_WORDS), ...Object.keys(DIALOG_ONLY_WORDS)]) expect(BUILTIN_TOOL_NAMES.has(tool), tool).toBe(true);
   });
 
   it('cannot be imitated by a tool named like one of the words', () => {
@@ -110,7 +124,7 @@ describe('the word a confirmation dialog names a tool by', () => {
       expect(text.includes('⚠ ${system(toolName)}'), path).toBe(false);
       for (const tool of reach) expect(text.includes(`⚠ ${tool}`), `${path} opens a dialog with ${tool}`).toBe(false);
     }
-    expect(read('tools/permission-guard.ts').match(/⚠ \$\{system\(dialogToolWord\(toolName\)\)\}/g)?.length).toBe(24);
+    expect(read('tools/permission-guard.ts').match(/⚠ \$\{system\(dialogToolWord\(toolName\)\)\}/g)?.length).toBe(27);
     expect(read('tools/builtin/api-setup.ts').match(/pv`⚠ \$\{toolWordFrame\('api_setup'\)\}: /g)?.length).toBe(5);
     expect(read('tools/builtin/http.ts').match(/pv`⚠ \$\{toolWordFrame\('http_request'\)\}: /g)?.length).toBe(2);
     expect(read('tools/builtin/spawn.ts').match(/`⚠ \$\{dialogToolWord\('spawn_agent'\)\}: /g)?.length).toBe(1);

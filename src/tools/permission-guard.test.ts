@@ -3340,7 +3340,7 @@ describe('isDangerous — capability-contract grant', () => {
   });
 });
 
-// A `destructive.check` may return a WarningPayload (spawn-agent deep-tier
+// A built-in tool's `destructive.check` may return a WarningPayload (spawn-agent deep-tier
 // consent) instead of a plain action-label string. The guard must render the
 // payload's `message` verbatim — NOT wrap it in the generic "modifies external
 // data" label, which is the wrong framing for a cost-consent gate — and must
@@ -3348,38 +3348,38 @@ describe('isDangerous — capability-contract grant', () => {
 describe('isDangerous — WarningPayload check (spawn-style consent)', () => {
   it('renders the payload message verbatim, not the generic external-data label', () => {
     const entry: ToolEntry = {
-      definition: { name: 'consent_tool', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
+      definition: { name: 'spawn_agent', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
       handler: async () => '',
       destructive: {
         mode: 'external',
-        check: () => ({ message: '⚠ consent_tool: custom consent text naming tier + cost' }) satisfies WarningPayload,
+        check: () => ({ message: '⚠ Delegation: custom consent text naming tier + cost' }) satisfies WarningPayload,
       },
     };
-    const result = isDangerous('consent_tool', {}, undefined, entry);
+    const result = isDangerous('spawn_agent', {}, undefined, entry);
     // Mutate the guard back to wrapping `detail` as a suffix and this reads
-    // `⚠ consent_tool: [object Object] — modifies external data` instead.
-    expect(result).toBe('⚠ consent_tool: custom consent text naming tier + cost');
+    // `⚠ Delegation: [object Object] — modifies external data` instead.
+    expect(result).toBe('⚠ Delegation: custom consent text naming tier + cost');
     expect(result).not.toContain('modifies external data');
   });
 
   it('passes the autonomy ctx to the check so it can opt out in autonomous mode', () => {
     const seen: Array<{ autonomy?: AutonomyLevel } | undefined> = [];
     const entry: ToolEntry = {
-      definition: { name: 'consent_tool', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
+      definition: { name: 'spawn_agent', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
       handler: async () => '',
       destructive: {
         mode: 'external',
         check: (_input, ctx) => {
           seen.push(ctx);
-          return ctx?.autonomy === 'autonomous' ? null : ({ message: '⚠ consent_tool: needs your OK' } satisfies WarningPayload);
+          return ctx?.autonomy === 'autonomous' ? null : ({ message: '⚠ Delegation: needs your OK' } satisfies WarningPayload);
         },
       },
     };
     // Autonomous → check opts out → not flagged. Mutate the ctx pass-away and the
     // check sees ctx=undefined, returns the payload, and the spawn is refused
     // headlessly instead of clamped — the D2 regression at the guard layer.
-    expect(isDangerous('consent_tool', {}, 'autonomous', entry)).toBeNull();
-    expect(isDangerous('consent_tool', {}, 'guided', entry)).toBe('⚠ consent_tool: needs your OK');
+    expect(isDangerous('spawn_agent', {}, 'autonomous', entry)).toBeNull();
+    expect(isDangerous('spawn_agent', {}, 'guided', entry)).toBe('⚠ Delegation: needs your OK');
     expect(seen).toContainEqual({ autonomy: 'autonomous' });
     expect(seen).toContainEqual({ autonomy: 'guided' });
   });
@@ -3393,7 +3393,7 @@ describe('isDangerous — WarningPayload check (spawn-style consent)', () => {
         return typeof a === 'string' && a === 'upload' ? a : null;
       } },
     };
-    expect(isDangerous('gd', { action: 'upload' }, undefined, entry)).toBe('⚠ Tool "gd": upload — modifies external data');
+    expect(isDangerous('gd', { action: 'upload' }, undefined, entry)).toBe('⚠ External tool "gd": "upload" — modifies external data');
     expect(isDangerous('gd', { action: 'search' }, undefined, entry)).toBeNull();
   });
 });

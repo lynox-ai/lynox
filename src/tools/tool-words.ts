@@ -10,10 +10,13 @@
  *
  * Only tools that can reach a dialog are listed; the test fails for every built-in tool
  * that can reach a dialog without a word. Any other tool (a plugin's, an MCP server's) is
- * named `Tool "<name>"`: a tool name holds no space or quote, so it can never read as one
- * of these words, whatever it is called.
+ * named `External tool "<name>"`, so it can never read as one of these words, whatever it
+ * is called. Nothing guarantees which characters such a name holds, so it is handled as any
+ * foreign value is (see `externalToolName`). Every key here is a built-in tool's name, which
+ * no plugin can take.
  */
 
+import { singleLine } from '../core/prompt-value.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 
 /** Tools whose dialog word is the chat's tool-line word, word for word. */
@@ -51,13 +54,27 @@ export const DIALOG_ONLY_WORDS = {
 /** A tool this table has a word for. */
 export type DialogTool = keyof typeof TOOL_LINE_WORDS | keyof typeof DIALOG_ONLY_WORDS;
 
-/** The dialog's word for `toolName`; a tool without one is named, marked as a name. */
+/** The longest a foreign tool's name is shown in a dialog, "…" included. */
+const EXTERNAL_NAME_MAX = 64;
+
+/**
+ * A foreign tool's name as a dialog shows it: on one line, without control or bidi
+ * characters, at most 64 characters with "…", and with `\` and `"` escaped, so the quotes
+ * around it are the dialog's own.
+ */
+function externalToolName(toolName: string): string {
+  const chars = Array.from(singleLine(toolName).trim());
+  const shown = chars.length > EXTERNAL_NAME_MAX ? `${chars.slice(0, EXTERNAL_NAME_MAX - 1).join('')}…` : chars.join('');
+  return shown.replace(/[\\"]/g, (c) => `\\${c}`);
+}
+
+/** The dialog's word for `toolName`; a tool without one is named as an external tool. */
 export function dialogToolWord(toolName: string): string {
   const dialogOnly: Readonly<Record<string, string>> = DIALOG_ONLY_WORDS;
   const lineWords: Readonly<Record<string, string>> = TOOL_LINE_WORDS;
   if (Object.hasOwn(dialogOnly, toolName)) return dialogOnly[toolName]!;
   if (Object.hasOwn(lineWords, toolName)) return lineWords[toolName]!;
-  return `Tool "${toolName}"`;
+  return `External tool "${externalToolName(toolName)}"`;
 }
 
 /**

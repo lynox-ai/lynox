@@ -18,6 +18,7 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 import { promptSegments, promptValue, pv, singleLine } from '../core/prompt-value.js';
 import { dialogToolWord } from './tool-words.js';
+import { BUILTIN_TOOL_NAMES } from '../core/builtin-tool-names.js';
 
 // lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
 // still read the entries that are not marked secret, `apis/` among them. Prefix is fuzzy
@@ -2116,8 +2117,19 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       // returned in autonomous mode is also rendered verbatim; in practice the
       // spawn check returns null in autonomous (the handler clamps instead), so
       // this branch is reached only interactively.
+      // A tool from outside the engine (a plugin's) wrote its check itself: what it returns is
+      // shown as its value after its marked name, never as the dialog's own text, so it cannot
+      // word a dialog to read as a built-in tool's.
+      const external = !BUILTIN_TOOL_NAMES.has(toolName);
       if (typeof detail !== 'string') {
+        if (external) return framed`⚠ ${system(dialogToolWord(toolName))}: "${agentText(detail.message)}"`;
         return framed`${system(detail.message)}`;
+      }
+      if (external && detail) {
+        if (autonomy === 'autonomous') {
+          return askable(framed`⚠ ${system(dialogToolWord(toolName))}: "${agentText(detail)}" [BLOCKED — I need your OK before doing this]`);
+        }
+        return framed`⚠ ${system(dialogToolWord(toolName))}: "${agentText(detail)}" — ${system(mode === 'data' ? 'destroys stored data' : 'modifies external data')}`;
       }
       const suffix = detail ? `: ${detail}` : '';
       if (autonomy === 'autonomous') {

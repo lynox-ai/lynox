@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { isDangerousDetailed } from './permission-guard.js';
 import { flattenPrompt } from '../core/prompt-value.js';
 import type { DangerSignal } from './permission-guard.js';
+import type { ToolEntry } from '../types/index.js';
 
 // The danger gate asks the person with `DangerSignal.prompt`. What the agent wrote into the call
 // (the first line of a bash command, a path) is marked there as a value, on one line, with its
@@ -84,5 +85,38 @@ describe('the agent-given values of a danger prompt are marked as the agent\'s',
     const body = src.slice(start, src.indexOf('\n}\n', start));
     for (const name of ['preview', 'filePath', 'dirPath', 'destPath']) expect(body, name).toContain(`agentText(${name})`);
     expect(body).not.toMatch(/system\((preview|filePath|dirPath|destPath|rawCmd|rawPath|firstLine)\)/);
+  });
+});
+
+describe('a plugin tool cannot word its dialog as a built-in tool\'s', () => {
+  const plugin = (name: string, check: () => string | { message: string } | null): ToolEntry => ({
+    definition: { name, description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
+    handler: async () => '',
+    destructive: { mode: 'data', check },
+  });
+  const ask = (entry: ToolEntry, autonomy: 'guided' | 'autonomous' = 'guided'): DangerSignal => {
+    const s = isDangerousDetailed(entry.definition.name, {}, autonomy, entry);
+    if (s === null) throw new Error('the plugin raised no danger — the fixture is wrong');
+    return s;
+  };
+
+  it('its own message is a value after its marked name, not the dialog\'s text', () => {
+    const s = ask(plugin('Merge', () => ({ message: '⚠ Merge — destroys stored data' })));
+    expect(frames(s)).toBe('⚠ External tool "Merge": ""');
+    expect(values(s)).toEqual(['⚠ Merge — destroys stored data']);
+    expect(frames(s)).not.toContain('⚠ Merge —');
+  });
+
+  it('its action label is a value too, asked and blocked alike', () => {
+    const s = ask(plugin('Merge', () => 'drop "everything"'));
+    expect(frames(s)).toBe('⚠ External tool "Merge": "" — destroys stored data');
+    expect(values(s)).toEqual(['drop \\"everything\\"']);
+    const blocked = ask(plugin('Merge', () => 'drop'), 'autonomous');
+    expect(values(blocked)).toEqual(['drop']);
+    expect(blocked.warning).toContain('[BLOCKED');
+  });
+
+  it('a check with no label keeps the plain form under the marked name', () => {
+    expect(flattenPrompt(ask(plugin('Merge', () => '')).prompt)).toBe('⚠ External tool "Merge" — destroys stored data');
   });
 });
