@@ -2714,7 +2714,12 @@ export class LynoxHTTPApi {
     const phase = requestOutcomePhase(status);
     const note = this._requestTrailNotes.get(req);
     const closing: AuditEntry = { ...entry, phase, action: note === undefined ? entry.action : `${entry.action} ${note}` };
-    try { this.engine?.getAuditLog()?.record(closing); } catch { /* the attempt row stands alone */ }
+    try {
+      this.engine?.getAuditLog()?.record(closing);
+    } catch (err) {
+      // The attempt row stands alone; say so, so a missing outcome is not silent.
+      process.stderr.write(`[lynox] the outcome of a mandate's change could not be recorded: ${processErrorText(err)}\n`);
+    }
   }
 
   /**

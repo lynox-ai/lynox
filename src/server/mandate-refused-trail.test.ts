@@ -177,6 +177,27 @@ describe('a mandate\'s refused attempts and its revoke in the actor trail (real 
     expect(newRows()).toEqual([]);
   });
 
+  it('a change whose outcome row cannot be written: the attempt row stands, and the failure is logged', async () => {
+    const ctx = inner().engine._toolContext;
+    const kept = ctx.auditLog;
+    if (kept === null) throw new Error('fixture: no trail');
+    // Writes the attempt, refuses every outcome.
+    ctx.auditLog = new Proxy(kept, {
+      get: (target, prop) => prop === 'record'
+        ? (entry: { phase: string }) => { if (entry.phase !== 'attempt') throw new Error('disk full'); return target.record(entry as Parameters<AuditLog['record']>[0]); }
+        : Reflect.get(target, prop, target),
+    });
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await ask('POST', '/api/tasks', mandateCookie);
+      expect(err.mock.calls.some(([m]) => String(m).includes('outcome of a mandate\'s change could not be recorded'))).toBe(true);
+    } finally {
+      err.mockRestore();
+      ctx.auditLog = kept;
+    }
+    expect(newRows().map((r) => [r.action, r.phase])).toEqual([['POST /api/tasks', 'attempt']]);
+  });
+
   it('an admin route asked from another site: refused, and no row the person never made', async () => {
     inner().rateCounts.clear();
     const res = await fetch(`${base}/api/security/events/aggregate`, { headers: { cookie: `lynox_session=${mandateCookie}`, 'sec-fetch-site': 'cross-site' } });
