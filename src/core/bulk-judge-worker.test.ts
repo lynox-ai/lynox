@@ -223,6 +223,20 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     await vi.waitFor(() => { if (captured.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
     expect(captured.map((e) => e.message)).toContain('bulk_judge call failed: Error');
   });
+
+  // The halt in the catch is one UPDATE and can throw itself: the owner still hears the handler's
+  // fixed sentence, recorded and pushed, never the raw error the dispatch would report.
+  it('a halt that throws in the catch still records and pushes the handler\'s fixed sentence', async () => {
+    model.create = async () => ({});
+    const id = startedRun();
+    vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
+    vi.spyOn(ledger, 'haltPreview').mockImplementation(() => { throw new Error('SQLITE_BUSY'); });
+    const { records, notes } = await tick(id);
+    expect(records).toEqual(['Bulk judge stopped.']);
+    await vi.waitFor(() => { if (notes.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
+    expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual(['Bulk judge stopped.']);
+    for (const text of [...records, ...notes]) expect(text).not.toContain('SQLITE_BUSY');
+  });
 });
 
 describe('bulk_judge through the worker: run group', () => {
