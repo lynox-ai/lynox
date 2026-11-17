@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { BULK_HALT_REASONS, BulkPreviewCapError, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
-import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
-import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listReadContract, parseListSource } from '../../core/bulk-list.js';
+import { BULK_WRITE_METHODS, canonicalHost, isPlainObject, mintBulkContract, planExternal } from '../../core/bulk-external.js';
+import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isEmptyShopifyDescription, listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { shopifyBulkReadEnabled, shopifyMediaAccess, type ShopifyMediaAccess } from '../../core/bulk-shopify.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { loadConfig } from '../../core/config.js';
@@ -12,7 +12,8 @@ import {
   bulkFileKey, parseSourceText, planDataStore, planWorkspace, readBulkKey, rowsToSource,
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
-import { contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { htmlFieldsOfFormName } from '../../core/bulk-html.js';
+import { JUDGE_MAX_HTML, contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
 import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_STATUS_VALUES, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
@@ -180,7 +181,7 @@ function isPlannerShopifyForm(form: unknown): form is typeof SHOPIFY_LIST_FORM |
  *  the first fault, and the schema does not describe the form, so a model would learn the rules
  *  one refusal at a time. */
 const SHOPIFY_FORM_RULES: Record<string, string> = {
-  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com), all of them or those of some product types and/or vendors and/or statuses: no path, id_field or write_method. All of them means every product in every status, gift cards included. To leave out drafts and archived products, name status active — it leaves out unlisted products too, an active product is not always published, and a gift card can be active, so a status does not leave gift cards out. source_list.filters may name product_type, vendor, status or several; status is one of ${SHOPIFY_LIST_STATUS_VALUES.join(', ')} as written, or a list of 2 or more of them; a status narrows a group, it never replaces it: for the products of one type or vendor, name that too, with the status beside it; product_type and vendor each take one value as text or several (2 to ${String(SHOPIFY_LIST_FILTER_MAX_VALUES)}) as a list, of which a product matches any one — one run for several groups, not a run per group; each value as the store shows it (letter case of A-Z aside, nothing else), which may hold ${SHOPIFY_FILTER_VALUE_RULE} (a value that does not fit is refused, never changed); source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string".`,
+  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com), all of them or those of some product types and/or vendors and/or statuses: no path, id_field or write_method. All of them means every product in every status, gift cards included. To leave out drafts and archived products, name status active — it leaves out unlisted products too, an active product is not always published, and a gift card can be active, so a status does not leave gift cards out. source_list.filters may name product_type, vendor, status or several; status is one of ${SHOPIFY_LIST_STATUS_VALUES.join(', ')} as written, or a list of 2 or more of them; a status narrows a group, it never replaces it: for the products of one type or vendor, name that too, with the status beside it; product_type and vendor each take one value as text or several (2 to ${String(SHOPIFY_LIST_FILTER_MAX_VALUES)}) as a list, of which a product matches any one — one run for several groups, not a run per group; each value as the store shows it (letter case of A-Z aside, nothing else), which may hold ${SHOPIFY_FILTER_VALUE_RULE} (a value that does not fit is refused, never changed); source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null, descriptionHtml only as text that is not empty; a judge (then without after) sets only the same fields, each of type "string".`,
   shopify_media: `Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only ${SHOPIFY_MEDIA_WRITABLE_FIELDS.join(', ')}, as text of at most ${String(SHOPIFY_ALT_MAX_CHARS)} characters or null. For product fields, use form shopify.`,
 };
 
@@ -343,13 +344,19 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     }
     if (judgeInput !== undefined && form !== 'shopify') throw new BulkSourceError(`source_list.form ${form} does not take judge yet: give the fields to set in source_list.after.`);
     if (input.write_method !== undefined) throw new BulkSourceError(`source_list.form ${form} does not take write_method: the engine writes a store with its own form.`);
+    // The planner's own after-state only: a judge's template plans every field as null until its
+    // verdict, which the step that settles it holds to the same rule (`emptiesDescription`).
+    const after = judgeInput === undefined && form === SHOPIFY_LIST_FORM ? (listInput as Record<string, unknown>)['after'] : undefined;
+    if (isPlainObject(after) && Object.hasOwn(after, 'descriptionHtml') && isEmptyShopifyDescription(SHOPIFY_LIST_FORM, 'descriptionHtml', after['descriptionHtml'])) {
+      throw new BulkSourceError('source_list.after.descriptionHtml must be the new description as text: the store ignores null, and a text that shows nothing leaves the page empty.');
+    }
   }
   let judge: JudgeRule | undefined;
   if (judgeInput !== undefined) {
     const raw = typeof listInput === 'object' && listInput !== null ? listInput as Record<string, unknown> : {};
     if (raw['after'] !== undefined) throw new BulkSourceError('With judge, source_list takes no "after": the model decides each target\'s values.');
     const idField = typeof raw['id_field'] === 'string' ? raw['id_field'] : 'id';
-    judge = normalizeJudgeRule(judgeInput, { idField, contextFields: contextFieldsOfListForm(raw['form']) });
+    judge = normalizeJudgeRule(judgeInput, { idField, contextFields: contextFieldsOfListForm(raw['form']), htmlFields: htmlFieldsOfFormName(raw['form']) });
     // A store takes its product fields as text: a verdict of another type would be judged and paid
     // for, then refused by the write document for the whole run. A field the store cannot be
     // written is left to the Shopify parse below, which names the fields that can.
@@ -452,7 +459,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           description: 'A rule a model applies to each target instead of a given "after".',
           properties: {
             rule: { type: 'string', description: 'What to decide for each target, in plain words (up to 4000 characters).' },
-            schema: { type: 'object', description: 'The fields the model sets, field name → {type: "string", maxLength} or {type: "string", enum: [...]} or {type: "number"|"integer"} or {type: "boolean"}. No pattern, no lists or nested objects; at most 20 fields.' },
+            schema: { type: 'object', description: `The fields the model sets, field name → {type: "string", maxLength} or {type: "string", enum: [...]} or {type: "number"|"integer"} or {type: "boolean"}. No pattern, no lists or nested objects; at most 20 fields. Set each text field's maxLength near the longest text the run writes in it: the list form's HTML fields (shopify: descriptionHtml; woocommerce: description, short_description) may take up to ${String(JUDGE_MAX_HTML)} together, and in a list run a larger maxLength makes the run hold fewer targets.` },
             tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Which tier places the call (its provider, its limit). The model that judges is set per provider, not by the tier. Default fast.' },
             context: { type: 'array', items: { type: 'string' }, description: 'Optional: other fields of each target the model reads to decide, but never sets — not a field of schema, not the id field; at most 20. The user sees them before starting the run, and they go to the model too.' },
           },

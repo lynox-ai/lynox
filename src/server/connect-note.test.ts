@@ -82,6 +82,6 @@ describe('the note page', () => {
   it('control: the customer text alone keeps its page, without a note', () => {
     const html = consentPageHtml({ lang: 'de', writeScopes: ['a_edit'], paragraphs: ['P.'] }, ['a_edit']);
     expect(html).not.toContain('data-connect-note');
-    expect(html).toContain('action="?shown_scopes=a_edit"');
+    expect(html).toMatch(/action="\?shown_scopes=a_edit&amp;shown_consent=[0-9a-f]{16}"/);
   });
 });

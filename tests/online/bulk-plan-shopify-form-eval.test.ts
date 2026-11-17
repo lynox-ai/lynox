@@ -8,7 +8,10 @@
  * plans again. This eval measures what that costs, on real models, on both providers:
  * (s1) "set the SEO description of every product to one text" → form shopify, after.seo_description;
  * (s2) "set the alt text of every product image to one text" → form shopify_media, after.alt;
- * (s3) "write each product an SEO title from its name" → form shopify with a judge that sets seo_title.
+ * (s3) "write each product an SEO title from its name" → form shopify with a judge that sets seo_title;
+ * (s5) "rewrite each product description" → form shopify with a judge that sets descriptionHtml. The
+ * store's longest description is LONGEST_DESCRIPTION characters; the table reports the maxLength the
+ * plan gives descriptionHtml and how many handled calls the engine refused over descriptionHtml.
  * A run passes when the plan it records is in that form and sets that field, however many calls
  * it took. How many it took is the price, counted apart: `handled` is the calls that reached
  * `bulk_plan`'s handler, and `first` that the first of them was recorded right. Both are a lower
@@ -44,12 +47,17 @@ const IMAGE_WRITING_STORE = {
   getByHostname: (h: string) => h === STORE ? { base_url: `https://${STORE}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: STORE.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'], asked_scope: ['read_products', 'write_products', 'write_files'], store_binding: 'bound' } } : undefined,
 };
 
+// One description longer than a plain text field may be (2,000), as real stores have them (s5).
+const LONG_BODY = `<p>${Array.from({ length: 30 }, (_, i) => `Absatz ${String(i + 1)}: Unser Alpkäse reift sechs Monate im Felsenkeller auf 1800 Metern und wird von Hand gepflegt.`).join('</p><p>')}</p>`;
+const LONGEST_DESCRIPTION = LONG_BODY.length;
+
 // The fields a store's product list carries (Admin REST), so a model that reads before it plans
 // finds the description and the vendor (s4) where a real store has them.
 const PRODUCTS = JSON.stringify({
   products: [
     { id: 1, title: 'Bergtee', body_html: '<p>Kräutertee aus dem Engadin, von Hand gepflückt.</p>', vendor: 'Hof Sur', product_type: 'Tee', tags: 'bio, tee', images: [{ id: 11, alt: '' }] },
     { id: 2, title: 'Honig', body_html: '<p>Blütenhonig vom eigenen Hof, kalt geschleudert.</p>', vendor: 'Hof Sur', product_type: 'Honig', tags: 'bio', images: [{ id: 21, alt: 'Honig' }] },
+    { id: 3, title: 'Alpkäse', body_html: LONG_BODY, vendor: 'Alp Sur', product_type: 'Käse', tags: 'bio', images: [{ id: 31, alt: '' }] },
   ],
 });
 
@@ -70,6 +78,13 @@ interface Case {
 const listOf = (input: Record<string, unknown>): Record<string, unknown> =>
   typeof input['source_list'] === 'object' && input['source_list'] !== null ? input['source_list'] as Record<string, unknown> : {};
 const keysOf = (v: unknown): string[] => (typeof v === 'object' && v !== null ? Object.keys(v) : []);
+/** A judge's fields, whether the schema lists them itself or under `properties` (both are taken). */
+const schemaOf = (judge: unknown): Record<string, unknown> => {
+  const s = typeof judge === 'object' && judge !== null ? (judge as Record<string, unknown>)['schema'] : undefined;
+  if (typeof s !== 'object' || s === null) return {};
+  const inner = (s as Record<string, unknown>)['properties'];
+  return (typeof inner === 'object' && inner !== null ? inner : s) as Record<string, unknown>;
+};
 
 const CASES: Case[] = [
   {
@@ -101,7 +116,22 @@ const CASES: Case[] = [
         && !keysOf(judge['schema']).includes('descriptionHtml') && context.includes('descriptionHtml');
     },
   },
+  {
+    label: '(s5) a new description per product, decided from the old one',
+    message: `Schreib für jedes Produkt in meinem Shop ${STORE} die Produktbeschreibung neu: gleicher Inhalt, besser lesbar, mit kurzen Absätzen. Plan das als Massenlauf, ich gebe ihn dann frei.`,
+    right: (input) => {
+      const judge = typeof input['judge'] === 'object' && input['judge'] !== null ? input['judge'] as Record<string, unknown> : {};
+      return listOf(input)['form'] === 'shopify' && keysOf(schemaOf(judge)).includes('descriptionHtml');
+    },
+  },
 ];
+
+/** The maxLength a plan's judge gives descriptionHtml, or '-' where it gives none. */
+function descriptionMax(input: Record<string, unknown> | undefined): string {
+  const field = schemaOf(input?.['judge'])['descriptionHtml'];
+  const max = typeof field === 'object' && field !== null ? (field as Record<string, unknown>)['maxLength'] : undefined;
+  return typeof max === 'number' ? String(max) : '-';
+}
 
 /** `bulk_plan` itself, on a ledger of its own per run; every call and answer is kept. */
 function realBulkPlan(ledger: BulkLedger, plans: Plan[]): ToolEntry {
@@ -166,9 +196,18 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   if (recorded === undefined) why = plans.length === 0 ? 'no bulk_plan call reached the handler' : `no plan recorded in ${String(plans.length)} handled calls`;
   else if (!c.right(recorded.input)) why = `recorded, but not the asked form and field: ${JSON.stringify(recorded.input['source_list'])}`;
   else { ok = true; why = handled === 1 ? 'right on the first handled call' : `right on handled call ${String(handled)}`; }
+  // Refusals that name descriptionHtml, among the calls up to the recorded one; and the maxLength of
+  // the plan recorded (or, without one, of the last call), measured on the call itself.
+  // A refusal carries the form's rules after its own sentence, and the rules name descriptionHtml; so
+  // do two refusals that list the fields allowed. Only a sentence about the field itself counts.
+  const about = (answer: string): boolean => answer.split(' Form shopify plans')[0]!
+    .replace(/may only set: [^.]*\./g, '').replace(/It reads: [^.]*\./g, '').includes('descriptionHtml');
+  const descRefusals = plans.slice(0, handled).filter((p) => !RECORDED.test(p.answer) && about(p.answer)).length;
+  const max = descriptionMax((recorded ?? plans.at(-1))?.input);
+  const below = max !== '-' && Number(max) < LONGEST_DESCRIPTION;
   const dump = process.env['FORM_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, handled, first: ok && handled === 1, plans, reply: reply.slice(0, 4000) })}\n`);
-  table.push(`${provider}\t${c.label}\t#${String(i)}\t${ok ? 'PASS' : 'FAIL'}\t${why}`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, handled, first: ok && handled === 1, maxLength: max, below, descRefusals, longest: LONGEST_DESCRIPTION, plans, reply: reply.slice(0, 4000) })}\n`);
+  table.push(`${provider}\t${c.label}\t#${String(i)}\t${ok ? 'PASS' : 'FAIL'}\t${why}\tmaxLength=${max}${below ? ' (below the longest)' : ''}\tdescRefusals=${String(descRefusals)}`);
   expect(ok, why).toBe(true);
 }
 

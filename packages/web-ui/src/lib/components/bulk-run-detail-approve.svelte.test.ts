@@ -238,6 +238,16 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('short_description:');
 	});
 
+	it('names each refused field of a Shopify product by its label, as the row above does', async () => {
+		const a = '[box a="1&2"]x[/box]';
+		const b = '[pbutton]Los[/pbutton]';
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'shortcode_changed', refusedValues: [{ field: 'descriptionHtml', value: a }, { field: 'seo_title', value: b }] } : x));
+		await render();
+		const names = [...target.querySelectorAll('[data-testid="bulk-refused-field"]')].map((e) => e.textContent?.trim());
+		expect(names).toEqual([`${t('bulk.field.shopify.descriptionHtml')}:`, `${t('bulk.field.shopify.seo_title')}:`]);
+		expect(target.textContent).not.toContain('descriptionHtml:');
+	});
+
 	// The sentence names the field for allowed link domains only where it is a way out: a judged
 	// list run on a shop, read by the owner, who alone starts judging (U-157).
 	const listed: Partial<BulkRunDetailData> = { judge: { tier: 'standard', unjudged: 0 }, judgeRuleHash: 'h1', list: { state: 'done' }, startDomains: null };
@@ -256,13 +266,15 @@ describe('approving a preview', () => {
 			targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'new_link_domain', linkDomain: c.domain ?? 'video.example' } : x));
 			await render();
 			const where = t('bulk.invalid.where_shopify');
+			const domain = c.domain ?? 'video.example';
 			const text = target.textContent ?? '';
+			// The domain is named in either sentence (U-311).
 			if (c.judged) {
-				expect(text).toContain(t('bulk.invalid.new_link_domain_judged').replace('{where}', where));
-				expect(text).not.toContain(t('bulk.invalid.new_link_domain').replace('{where}', where));
+				expect(text).toContain(tf('bulk.invalid.new_link_domain_judged_named', { domain, where }));
+				expect(text).not.toContain(tf('bulk.invalid.new_link_domain_named', { domain, where }));
 			} else {
-				expect(text).toContain(t('bulk.invalid.new_link_domain').replace('{where}', where));
-				expect(text).not.toContain(t('bulk.invalid.new_link_domain_judged').split('{where}')[0]!.slice(0, 120));
+				expect(text).toContain(tf('bulk.invalid.new_link_domain_named', { domain, where }));
+				expect(text).not.toContain(tf('bulk.invalid.new_link_domain_judged_named', { domain, where }).slice(0, 200));
 			}
 			resetSettingsViewer();
 		});
@@ -800,8 +812,50 @@ describe('the markup a target changes (1010)', () => {
 		expect(undo[0]!.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
 		expect(codes(undo[0]!)).toEqual(['<script>steal()</script>']);
 		expect(undo[0]!.textContent).toContain(t('bulk.markup.restores'));
-		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note'));
+		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note_active'));
+		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.className).toBe('text-warning');
 		expect(target.querySelectorAll('script')).toHaveLength(0);
+	});
+
+	it('says of an undo that restores the owner\'s own table only that it was there before', async () => {
+		const table = { kind: 'element' as const, namespace: 'html', element: 'table', attributes: [['width', '100%']] as [string, string][], text: null, inTemplate: false };
+		run = makeRun({ kind: 'undo', sourceRunId: 'r0', total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false,
+			markupChanges: [{ field: 'descriptionHtml', added: [table], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: true }] }];
+		await render();
+		const note = target.querySelector('[data-testid="bulk-undo-markup"] [data-testid="bulk-markup-restores-note"]');
+		expect(note?.textContent).toBe(t('bulk.markup.restores_note'));
+		// Neutral, as the head and the footnote: not a warning about the owner's own table.
+		expect(note?.className).toBe('text-text-subtle');
+	});
+});
+
+describe('the reason under a value lynox leaves out, as the run\'s page words it', () => {
+	const invalid = (error: string, o: Partial<BulkTarget> = {}): BulkTarget[] => [
+		TARGETS[0]!, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error, deselected: false, ...o },
+	];
+
+	it('names the refused domain as text, never as a link (U-311)', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = invalid('new_link_domain', { linkDomain: '<a href="https://evil.example">evil.example</a>' } as Partial<BulkTarget>);
+		await render();
+		expect(target.textContent).toContain('„<a href="https://evil.example">evil.example</a>“');
+		expect(target.querySelector('a[href="https://evil.example"]')).toBeNull();
+	});
+
+	it('words a cut-off answer of a judge that decides an HTML field as a description to keep by hand', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 }, judge: {} as BulkRunDetailData['judge'], judgesHtml: true } as Partial<BulkRunDetailData>);
+		targets = invalid('cut_off');
+		await render();
+		expect(target.textContent).toContain(tf('bulk.invalid.cut_off_html', { where: t('bulk.invalid.where_shopify') }));
+	});
+
+	it('control: the same cut-off answer of a judge that decides no HTML field keeps the plain sentence', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 }, judge: {} as BulkRunDetailData['judge'], judgesHtml: false } as Partial<BulkRunDetailData>);
+		targets = invalid('cut_off');
+		await render();
+		expect(target.textContent).toContain(t('bulk.invalid.cut_off'));
+		expect(target.textContent).not.toContain(tf('bulk.invalid.cut_off_html', { where: t('bulk.invalid.where_shopify') }));
 	});
 });
 
@@ -1462,5 +1516,47 @@ describe('the allowed link domains of a judged list run', () => {
 		run = makeRun({ judge: { tier: 'standard', unjudged: 0 }, list: null });
 		await render();
 		expect(target.querySelector('[data-testid="bulk-start-domains"]')).toBeNull();
+	});
+});
+
+// The halt for an outdated connection consent names the next step once: on the owner's page the box
+// below says to plan again, so the halt ends at the reconnect; a mandate's page has no such box, so
+// its halt says it.
+describe('the next step of a halt for an outdated connection consent', () => {
+	// Nothing written yet, or some of the run already written: the two halt sentences.
+	const halted = (applied: number): BulkRunDetailData => makeRun({
+		targetSystem: 'http:demo.myshopify.com', phase: 'approved', applied, sentUnknown: 0,
+		haltReason: 'engine English', haltKey: 'consentOutdated', consentFields: ['descriptionHtml'],
+	});
+	// Pinned, not read from the keys under test: a halt that drops the step must fail here.
+	const planAgain = (): RegExp => (getLocale() === 'de' ? /neu (zu )?planen/ : /plan the run again/);
+	// The halt line of the head, not the page: target rows say to plan again for their own reasons.
+	const haltLine = (): string => [...target.querySelectorAll('dt')].find((d) => d.textContent === t('bulk.head.halted'))!.nextElementSibling!.textContent!;
+	const cases = (['de', 'en'] as const).flatMap((lang) => [0, 1].map((applied) => [lang, applied] as const));
+	const inLocale = (lang: 'de' | 'en'): void => {
+		const before = getLocale();
+		setLocale(lang);
+		onTestFinished(() => setLocale(before));
+	};
+
+	it.each(cases)('says to plan again in the box below on the owner\'s page, and not in the halt (%s, %i written)', async (lang, applied) => {
+		inLocale(lang);
+		run = halted(applied);
+		await render();
+		expect(t('bulk.resume.none')).toMatch(planAgain());
+		expect(target.textContent).toContain(t('bulk.resume.none'));
+		expect(haltLine()).toContain(t('bulk.consent.field.descriptionHtml'));
+		expect(haltLine()).not.toMatch(planAgain());
+	});
+
+	// The box is looked for by its words; the owner's case above shows those words are the box's.
+	it.each(cases)('says to plan again in the halt on a mandate\'s page, which has no box (%s, %i written)', async (lang, applied) => {
+		inLocale(lang);
+		viewerOf = 'mandate';
+		run = halted(applied);
+		await render();
+		expect(target.textContent).not.toContain(t('bulk.resume.none'));
+		expect(haltLine()).toContain(t('bulk.consent.field.descriptionHtml'));
+		expect(haltLine()).toMatch(planAgain());
 	});
 });

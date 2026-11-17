@@ -430,6 +430,10 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-list.ts | if (source.form === SHOPIFY_FILTERED_LIST_FORM) return sourc',
     'core/bulk-list.ts | if (source.form === SHOPIFY_LIST_FORM) return source.path ==',
     'core/bulk-list.ts | return form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTER',
+    // A list too large is worded with the step a Shopify list allows, filtered or not (U-186).
+    'web-ui/lib/components/bulk-runs.ts | : key === \'listTooLarge\' && (run.listForm === \'shopify\' || r',
+    // A description emptied by a verdict is refused on both product forms (M6b (iii)).
+    'core/bulk-list.ts | return (form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTE',
     'core/bulk-list.ts | return isListForm(source.form) && BULK_LIST_FORMS[source.for',
     'core/bulk-list.ts | return isListForm(source.form) && Object.values(source.filte',
     'core/bulk-list.ts | return isShopifyListForm(source.form);',
@@ -475,7 +479,10 @@ describe('where the stored Shopify list form is read', () => {
     'tools/builtin/bulk.ts | if (access.kind !== \'writable\' && (form === \'shopify_media\' ',
     'tools/builtin/bulk.ts | throw new ShopifyAccessRefusal(SHOPIFY_MEDIA_NO_SCOPE[access',
     'tools/builtin/bulk.ts | const images = form !== \'shopify\' ? \'\' : access.kind === \'wr',
-    'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listRea',
+    'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isEmpty',
+    // The planner's own after-state names `shopify`, filtered or not: an empty description is refused.
+    'tools/builtin/bulk.ts | const after = judgeInput === undefined && form === SHOPIFY_L',
+    'tools/builtin/bulk.ts | if (isPlainObject(after) && Object.hasOwn(after, \'descriptio',
     // parseShopifyMediaListSource: the planner's image form and the form it is stored under.
     'core/bulk-list.ts | if (form === SHOPIFY_MEDIA_LIST_FORM) return parseShopifyMed',
     'core/bulk-list.ts | return { form: SHOPIFY_MEDIA_LIST_FORM, path: \'\', filters: {',
