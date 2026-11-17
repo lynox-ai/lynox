@@ -26,7 +26,7 @@ import {
   type PlainHeader,
   type PlainStore,
 } from './migration-rekey.js';
-import { storePath, type MigrationCeiling } from './migration-ceiling.js';
+import { storePath, maxPlainStoreBytes, type MigrationCeiling } from './migration-ceiling.js';
 
 export interface PlainSourceCounts {
   /** Values that decrypted and travel as plaintext. */
@@ -239,8 +239,10 @@ export function rewriteLedgersForPlain(
 /** One store's two forms, in bytes. */
 export interface StoreForms {
   store: PlainStore;
-  /** Its `sqlite_db_plain` payload, or null when it has none (the rewrite failed). */
+  /** Its `sqlite_db_plain` payload, or null when it has none (the rewrite failed or was not tried). */
   plainBytes: number | null;
+  /** Why it has none, when that was decided before the rewrite (`plainFormRefusal`); else `no-plain-form`. */
+  refused?: 'bounds' | 'memory' | 'source-memory' | undefined;
   /** Its raw `VACUUM INTO` snapshot. */
   rawBytes: number;
 }
@@ -258,7 +260,7 @@ export interface PathInput {
   sweepsCapBytes: number;
 }
 
-export type PathReason = 'no-plain-form' | 'memory' | 'ledgers' | 'bounds';
+export type PathReason = 'no-plain-form' | 'memory' | 'ledgers' | 'bounds' | 'source-memory';
 
 /**
  * Which stores take the plaintext path, judged the way the destination judges the manifest at
@@ -273,7 +275,7 @@ export type PathReason = 'no-plain-form' | 'memory' | 'ledgers' | 'bounds';
  */
 export function choosePlainPaths(input: PathInput): Map<PlainStore, { path: 'plain' | 'raw'; reason?: PathReason }> {
   const out = new Map<PlainStore, { path: 'plain' | 'raw'; reason?: PathReason }>();
-  for (const s of input.stores) out.set(s.store, s.plainBytes === null ? { path: 'raw', reason: 'no-plain-form' } : { path: 'plain' });
+  for (const s of input.stores) out.set(s.store, s.plainBytes === null ? { path: 'raw', reason: s.refused ?? 'no-plain-form' } : { path: 'plain' });
   const engine = out.get('engine.db');
   if (engine?.path === 'plain' && input.sweeps) {
     const plainLedgers = input.sweeps.plainBytes;
@@ -292,6 +294,49 @@ export function choosePlainPaths(input: PathInput): Map<PlainStore, { path: 'pla
     if (!failing) return out;
     out.set(failing.store, { path: 'raw', reason: 'memory' });
   }
+}
+
+/**
+ * Why a store cannot take the plaintext path, judged from its raw snapshot BEFORE its plaintext
+ * form is built, or null when it may. Building that form holds several copies of the store in
+ * memory, so a store that could never travel in it is not rewritten at all.
+ *
+ * The judgment uses the raw size as a lower bound of the plaintext form's: the rewrite updates the
+ * snapshot's rows in place, serializes the same pages and puts a header in front, so the form is
+ * not smaller. The other databases are counted at their raw size for the same reason. That makes
+ * the first two checks necessary conditions of the later choice, never stricter than it:
+ * - `bounds`: the bundle would be over the source's own size bound with the store at that size;
+ * - `memory`: the store is over the largest one the destination's numbers allow next to the rest
+ *   (`maxPlainStoreBytes`), which also covers numbers it cannot judge.
+ * The third is new and may be stricter than the choice, on purpose: the choice judges the
+ * destination's memory, this one the source's own.
+ * - `source-memory`: building the form would take this instance over its own memory limit: its
+ *   resident memory now plus `kSource` times the store (the measured upper bound of the source's
+ *   peak per byte, which counts the snapshot it already holds once more).
+ * The destination's numbers are untrusted. A destination that announces a vast limit still meets
+ * `bounds` and `source-memory`, which are the source's own; `bounds` caps the bundle's size,
+ * `source-memory` what the rewrite may hold.
+ */
+export function plainFormRefusal(input: {
+  ceiling: MigrationCeiling;
+  /** The store's raw snapshot, in bytes. */
+  rawBytes: number;
+  /** Everything else in the bundle at its smallest: other chunks, the ledgers raw, the other databases raw. */
+  othersBytes: number;
+  /** The rest as `choosePlainPaths` counts it: the non-database chunks and the ledgers raw. */
+  restBytes: number;
+  /** The source's bound on a bundle's total size. */
+  maxTotalBytes: number;
+  /** This instance's memory: its limit and its resident memory now, in MiB, and the source's k. */
+  source: { limitMb: number; rssMb: number; k: number };
+}): 'bounds' | 'memory' | 'source-memory' | null {
+  if (input.rawBytes > input.maxTotalBytes - input.othersBytes) return 'bounds';
+  if (input.rawBytes > maxPlainStoreBytes(input.ceiling, input.othersBytes, input.restBytes)) return 'memory';
+  const { limitMb, rssMb, k } = input.source;
+  // Anything it cannot judge refuses, as `storePath` does.
+  if (![limitMb, rssMb, k].every((n) => Number.isFinite(n) && n >= 0) || k < 1) return 'source-memory';
+  if (rssMb + (k * input.rawBytes) / (1024 * 1024) > limitMb) return 'source-memory';
+  return null;
 }
 
 /** Bytes of the destination's `/api/health` body the source reads at most; a real one is about 1 kB. */
