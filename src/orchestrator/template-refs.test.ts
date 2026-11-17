@@ -99,14 +99,14 @@ describe('removing a step another step\'s reference reads is refused', () => {
     { id: 'mail', task: 'Mail', input_template: { body: '{{sum.result}}' }, input_from: ['sum'] },
   ];
 
-  it('names the step that reads it by its position in the list the edit starts from, and the field', () => {
+  it('names the step that reads it by its id, and the field', () => {
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'fetch' }]))
-      .toBe('Error: remove: step #2 reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step #2 too.');
+      .toBe('Error: remove: step "sum" reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step "sum" too.');
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'sum' }]))
-      .toBe('Error: remove: step #3 reads the output of a step this edit removes, in its input_template.body. Remove step #3 too: its input template cannot be edited.');
-    // A step added in the same edit has no stored position: it is named by its id.
+      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input_template.body. Remove step "mail" too: its input template cannot be edited.');
+    // A step added in the same edit has an id in the shape too.
     expect(applyModifications([{ id: 'fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum it' }], [{ action: 'add_step', step_id: 'late', value: 'Use {{fetch.result}}', input_from: ['fetch'] }, { action: 'remove', step_id: 'fetch' }]))
-      .toContain('Error: remove: the step this edit adds, "late" reads the output of a step this edit removes');
+      .toContain('Error: remove: step "late" reads the output of a step this edit removes');
   });
 
   it('one edit that removes a step and what reads it, in either order, is taken', () => {
@@ -130,10 +130,10 @@ describe('removing a step another step\'s reference reads is refused', () => {
   });
 
   it('names a step whose id is a stored text by position only', () => {
-    const s: InlinePipelineStep[] = [{ id: 'Old Fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum {{Old Fetch.result}}', input_from: ['Old Fetch'] }];
+    const s: InlinePipelineStep[] = [{ id: 'Old Fetch', task: 'Fetch' }, { id: 'Old Sum', task: 'Sum {{Old Fetch.result}}', input_from: ['Old Fetch'] }];
     const out = applyModifications(s, [{ action: 'remove', step_id: '#1' }]) ?? '';
-    expect(out).toContain('step #2 reads the output of a step this edit removes');
-    expect(out).not.toContain('Old Fetch');
+    expect(out).toContain('step #2 (its position before this edit) reads the output of a step this edit removes');
+    expect(out).not.toContain('Old');
   });
 
   it('a step only listed in input_from, with no reference to it, is still removed', () => {
@@ -161,7 +161,7 @@ describe('set_input_from: the way to make a stored reference resolve', () => {
   it('a cycle it makes is refused at the check of the whole list', () => {
     const s = broken();
     expect(applyModifications(s, [{ action: 'set_input_from', step_id: 'sum', input_from: ['fetch', 'other'] }, { action: 'set_input_from', step_id: 'fetch', input_from: ['sum'] }])).toBeNull();
-    expect(() => validateManifest(manifest(s.map(x => ({ ...x, task: x.task }))))).toThrow();
+    expect(() => validateManifest(manifest(s.map(x => ({ ...x, task: x.task }))))).toThrow('Dependency cycle detected: ');
   });
 
   it('an empty list clears it', () => {

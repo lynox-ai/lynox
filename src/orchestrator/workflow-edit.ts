@@ -129,8 +129,8 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
   // refused below, so an edit that removes a step and changes what read it is one edit.
   const removed = new Set<string>();
   // Each step's position in the list the edit starts from, the list the caller sees: a refusal after
-  // the edit names a step by it (steps keep their object through update_task, rename_step and
-  // set_input_from; a step this edit adds has none).
+  // the edit names a step whose id is outside the shape by it (steps keep their object through
+  // update_task, rename_step and set_input_from).
   const storedAt = new Map(steps.map((s, i) => [s, i + 1] as const));
   for (const mod of modifications) {
     if (mod.action === 'add_step') {
@@ -245,9 +245,9 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
     for (const s of steps) {
       const field = fieldReferencing(s, removedId);
       if (!field) continue;
-      const at = storedAt.get(s);
-      // A step this edit adds has an id in the shape (`newIdProblem`), so it is named by that id.
-      const which = at !== undefined ? `step #${String(at)}` : `the step this edit adds, "${s.id}"`;
+      // By its id when that has the shape (a step this edit adds always does, `newIdProblem`): a `#n`
+      // in the next edit counts in the list as that edit has changed it so far, an id does not.
+      const which = isStepIdShape(s.id) ? `step "${s.id}"` : `step #${String(storedAt.get(s) ?? 0)} (its position before this edit)`;
       const fix = field === 'task'
         ? `Change that reference in the same edit (update_task), or remove ${which} too.`
         : `Remove ${which} too: its input template cannot be edited.`;
