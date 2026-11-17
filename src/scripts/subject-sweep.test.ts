@@ -1,9 +1,11 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../core/engine-db.js';
 import { setDataDir } from '../core/config.js';
+import { MANAGED_VAULT_KEY_REFUSAL } from '../core/engine-init.js';
+import { _resetVaultKeySource } from '../core/vault-key-source.js';
 import { SubjectStore } from '../core/subject-store.js';
 import { DataStore } from '../core/data-store.js';
 import { MemoryGraphStore } from '../core/memory-graph-store.js';
@@ -819,5 +821,33 @@ describe('subject-sweep — --orphans refuses without both live stores', () => {
     process.argv = ['node', 'subject-sweep', '--orphans', '--apply', `--data-dir=${dir}`];
     try { main(); } finally { process.argv = argv; }
     expect(process.exitCode, 'a not-yet-built apply must not exit 0').toBe(2);
+  });
+});
+
+// On an instance the platform hosts, the sweep opens engine.db only under the delivered vault key,
+// as the engine does: without it, it stops before it opens a store.
+describe('subject-sweep — main() and the vault key on a hosted instance', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+    vi.unstubAllEnvs();
+    _resetVaultKeySource();
+    setDataDir(null);
+  });
+
+  it('stops without the delivered key, before engine.db is opened', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-sweep-hosted-')); dirs.push(dir);
+    vi.stubEnv('HOME', dir);
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    vi.stubEnv('LYNOX_VAULT_KEY', '');
+    vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', undefined);
+    _resetVaultKeySource();
+    const argv = process.argv;
+    process.argv = ['node', 'subject-sweep', `--data-dir=${dir}`];
+    try {
+      expect(() => main()).toThrow(MANAGED_VAULT_KEY_REFUSAL);
+    } finally { process.argv = argv; }
+    expect(existsSync(join(dir, 'engine.db'))).toBe(false);
   });
 });
