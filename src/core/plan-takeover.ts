@@ -22,25 +22,25 @@
  * since. Only paused plans are taken over; a plan that is not paused has nothing to take over.
  */
 import { createHash } from 'node:crypto';
-import type Database from 'better-sqlite3';
 import { newCorrelationId } from './audit-log.js';
 import {
-  PAUSE_PLAN_COLS, pausedForOf, planPauseOn, rowPlanMembers, workflowAuthorOf, type PausePlanRow, type PauseRole, type WorkflowAuthorRow,
+  PAUSE_PLAN_COLS, pausedForOf, planPauseOn, rowPlanMembers, type PausePlanRow, type PauseRole,
 } from './plan-pause.js';
 import type { StampEntry } from './plan-run-context.js';
 import { stampExpect, stampFromRow } from './plan-stamp.js';
 import {
-  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, editorCovered, isMandateTag, planAuthorshipOf, planMandate, principalHasEnded, principalTag,
+  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, planAuthorshipOf, principalHasEnded, principalTag,
   type RequestPrincipal,
 } from './request-principal.js';
 import {
-  COVER_FROM_MARKS, TakeoverUnrecorded, commitTakeover, coverEffects, leaseRunning, pausedDbAtOf, pausedForIds, release, scheduleOf,
-  workflowCover, type TakeoverCoreDeps, type TakeoverMemberChange, type TakeoverSchedule,
+  COVER_FROM_MARKS, TakeoverUnrecorded, commitTakeover, coverAuditTarget, coverEffects, leaseRunning, marksOf, pausedDbAtOf, pausedForIds,
+  release, releasedForDigest, scheduleOf, workflowConfirmedAt, workflowCover, workflowOfPreview, workflowRowOf,
+  type TakeoverCoreDeps, type TakeoverMemberChange, type TakeoverSchedule, type TakeoverWorkflowView, type WorkflowRow,
 } from './takeover-core.js';
 import type { TriggerStore } from './trigger-store.js';
 import type { TriggerRecord } from '../types/index.js';
 
-export type { TakeoverMemberChange, TakeoverPrompts, TakeoverSchedule } from './takeover-core.js';
+export type { TakeoverMemberChange, TakeoverPrompts, TakeoverSchedule, TakeoverWorkflowView } from './takeover-core.js';
 
 const isWorkflowRole = (r: PauseRole): boolean => r === 'workflow-created' || r === 'workflow-edited';
 
@@ -68,10 +68,7 @@ export interface TakeoverPreview {
   /** `owner`, or the tag of the workflow's member, which stays. */
   readonly runsAs: string;
   /** `from`: whose mark on the workflow the takeover reads (`planMandate`), by address, and as which role: F2 names that member. */
-  readonly workflow: {
-    readonly id: string; readonly name: string; readonly takenOver: boolean;
-    readonly from: { readonly name: string; readonly role: 'workflow-edited' | 'workflow-created' } | null;
-  } | null;
+  readonly workflow: TakeoverWorkflowView | null;
   readonly memberChanges: readonly TakeoverMemberChange[];
   readonly alsoReleased: ReadonlyArray<{ readonly id: string; readonly title: string }>;
   readonly connections: readonly StampEntry[];
@@ -92,13 +89,6 @@ export type TakeoverResult =
   | { readonly kind: 'refused'; readonly refusal: TakeoverRefusal | 'changed' | 'prompts' | 'unrecorded' }
   | { readonly kind: 'not_found' };
 
-/** A workflow row by its exact id, with what the owner is shown of it. */
-interface WorkflowRow extends WorkflowAuthorRow {
-  readonly id: string;
-  readonly name: string;
-  readonly definition_json: string;
-}
-
 /** Everything the takeover decides, from one synchronous read. */
 interface TakeoverPlan {
   readonly trigger: TriggerRecord;
@@ -115,26 +105,6 @@ interface TakeoverPlan {
   readonly dueAt: string | null;
   readonly coveredMandates: readonly string[];
   readonly expect: string;
-}
-
-function workflowRowOf(db: Database.Database, id: string): WorkflowRow | undefined {
-  const a = workflowAuthorOf(db, id);
-  if (a === undefined) return undefined;
-  const d = db.prepare('SELECT id, name, definition_json FROM workflows WHERE id = ?').get(id) as
-    { id: string; name: string; definition_json: string } | undefined;
-  return d === undefined ? undefined : { ...a, ...d };
-}
-
-/** `definition_json.$.confirmedAt`, the workflow's own stamp; null when it has none or cannot be read. */
-function workflowConfirmedAt(wf: WorkflowRow | undefined): string | null {
-  if (wf === undefined) return null;
-  try {
-    const parsed: unknown = JSON.parse(wf.definition_json);
-    const at = parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>)['confirmedAt'] : undefined;
-    return typeof at === 'string' ? at : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -239,16 +209,14 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   const schedule = scheduleOf(trigger, now);
   const dueAt = schedule === 'run_now_only_missed' || schedule === 'run_now_only_partial'
     ? trigger.paused_due_at ?? trigger.next_run_at ?? null : null;
-  const marks = (a: { created_by?: string | null | undefined; created_mandate_id?: string | null | undefined; created_at?: string | null | undefined; mandate_editor?: string | null | undefined; mandate_editor_id?: string | null | undefined; mandate_edited_at?: string | null | undefined }): unknown[] =>
-    [a.created_by ?? null, a.created_mandate_id ?? null, a.created_at ?? null, a.mandate_editor ?? null, a.mandate_editor_id ?? null, a.mandate_edited_at ?? null];
   const expect = createHash('sha256').update(JSON.stringify([
     TAKEOVER_DIGEST_PREFIX,
     stampExpect(trigger, workflowConfirmedAt(wf), connections),
     trigger.status, trigger.next_run_at ?? null, trigger.paused_at ?? null, trigger.paused_for ?? null,
-    marks(trigger),
-    wf === undefined ? null : [wf.id, wf.name, createHash('sha256').update(wf.definition_json).digest('hex'), marks(wf)],
+    marksOf(trigger),
+    wf === undefined ? null : [wf.id, wf.name, createHash('sha256').update(wf.definition_json).digest('hex'), marksOf(wf)],
     coverWorkflow, principalTag(runsAs),
-    memberChanges, released.map((r) => [r.id, r.title, r.status, r.next_run_at ?? null, r.paused_for ?? null]),
+    memberChanges, releasedForDigest(released),
     schedule, dueAt,
   ])).digest('hex');
 
@@ -275,18 +243,6 @@ export function workflowsCoveredByTakeover(deps: TakeoverDeps): Map<string, numb
     if (typeof plan === 'object' && plan.coverWorkflow && plan.wf !== undefined) covered.set(plan.wf.id, (covered.get(plan.wf.id) ?? 0) + 1);
   }
   return covered;
-}
-
-/** The preview's workflow: null without one, or when no mandate's mark on it is left to take over. */
-function workflowOfPreview(wf: WorkflowRow | undefined, coverWorkflow: boolean): TakeoverPreview['workflow'] {
-  if (wf === undefined) return null;
-  const a = planAuthorshipOf(wf);
-  const mark = planMandate(a);
-  if (mark === undefined) return null;
-  // `planMandate` reads the editor's mark first, when it is not covered; else the creator's.
-  const role = isMandateTag(a.mandate_editor) && !editorCovered(a) ? 'workflow-edited' : 'workflow-created';
-  const from = mark.principal.kind === 'mandate' ? { name: mark.principal.email, role } as const : null;
-  return { id: wf.id, name: wf.name, takenOver: coverWorkflow, from };
 }
 
 /** What the owner is shown before taking the plan over: one read, no await. */
@@ -324,9 +280,7 @@ export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreview
  *    mandate's list of connections is not inherited — and the audit row. A row that cannot be
  *    written rolls all of it back.
  *
- * The next run: a cron plan's next occurrence from now, no missed run is made up; a watch, a
- * webhook or an inbox plan keeps its own; a one-shot due later keeps its time, and one whose time
- * passed (or that stopped part-way) runs only on "Run now", never by itself.
+ * The next run of the plan and of every plan it releases: `scheduleOf` in `takeover-core.ts`.
  */
 export function takeOver(deps: TakeoverDeps, id: string, expect: string): TakeoverResult {
   if (!planPauseOn()) return { kind: 'refused', refusal: 'not_available' };
@@ -340,7 +294,7 @@ export function takeOver(deps: TakeoverDeps, id: string, expect: string): Takeov
       deps.triggers.setConfirmedAt(id, now.toISOString(), principalTag(OWNER_PRINCIPAL));
       record({
         principal: OWNER_PRINCIPAL, action: 'plan.takeover', phase: 'done', correlationId: newCorrelationId(),
-        target: `trigger=${id}${plan.coveredMandates.length > 0 ? ` mandates=${plan.coveredMandates.join(',')}` : ''}${plan.released.length > 0 ? ` released=${plan.released.map((r) => r.id).join(',')}` : ''}`,
+        target: coverAuditTarget(`trigger=${id}`, plan.coveredMandates, plan.released),
       });
       const after = deps.triggers.getById(id);
       if (after === undefined) throw new TakeoverUnrecorded('the plan is gone');

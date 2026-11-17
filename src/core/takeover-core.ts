@@ -10,9 +10,9 @@
 import type Database from 'better-sqlite3';
 import type { AuditLog } from './audit-log.js';
 import { nextOccurrence } from './cron-parser.js';
-import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, pausedForOf } from './plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, pausedForOf, workflowAuthorOf, type WorkflowAuthorRow } from './plan-pause.js';
 import {
-  OWNER_PRINCIPAL, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag,
+  OWNER_PRINCIPAL, editorCovered, isMandateTag, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag,
   type PlanAuthorship, type PlanMandate, type RequestPrincipal,
 } from './request-principal.js';
 import type { TriggerStore } from './trigger-store.js';
@@ -131,8 +131,8 @@ export function coverEffects(
   const db = deps.db;
   const memberChanges: TakeoverMemberChange[] = [];
   const released: TriggerRecord[] = [];
-  const others = db.prepare("SELECT id FROM triggers WHERE target_workflow_id = ? AND id != ? AND status != 'completed' ORDER BY id")
-    .all(wfId, exceptId ?? '') as Array<{ id: string }>;
+  const others = db.prepare("SELECT id FROM triggers WHERE target_workflow_id = ? AND (? IS NULL OR id != ?) AND status != 'completed' ORDER BY id")
+    .all(wfId, exceptId, exceptId) as Array<{ id: string }>;
   for (const { id: otherId } of others) {
     const other = deps.triggers.getById(otherId);
     if (other === undefined || other.id !== otherId) continue;
@@ -161,7 +161,11 @@ export function coverEffects(
   return { memberChanges, released };
 }
 
-/** What the takeover does to the next run (see the docblock of `takeOver` in `plan-takeover.ts`). */
+/**
+ * What a release does to the plan's next run: a cron plan's next occurrence from now, no missed
+ * run is made up; a watch, a webhook or an inbox plan keeps its own; a one-shot due later keeps its
+ * time, and one whose time passed (or that stopped part-way) runs only on "Run now", never by itself.
+ */
 export function scheduleOf(t: TriggerRecord, now: Date): TakeoverSchedule {
   if (t.schedule_cron) return 'next_cron';
   if (t.source === 'watch' || t.source === 'webhook' || t.source === 'inbox_event') return 'kept';
@@ -208,6 +212,69 @@ export function release(deps: Pick<TakeoverCoreDeps, 'db' | 'triggers'>, t: Trig
     case 'kept':
       break;
   }
+}
+
+/** A workflow row by its exact id, with what the owner is shown of it. */
+export interface WorkflowRow extends WorkflowAuthorRow {
+  readonly id: string;
+  readonly name: string;
+  readonly definition_json: string;
+}
+
+export function workflowRowOf(db: Database.Database, id: string): WorkflowRow | undefined {
+  const a = workflowAuthorOf(db, id);
+  if (a === undefined) return undefined;
+  const d = db.prepare('SELECT id, name, definition_json FROM workflows WHERE id = ?').get(id) as
+    { id: string; name: string; definition_json: string } | undefined;
+  return d === undefined ? undefined : { ...a, ...d };
+}
+
+/** `definition_json.$.confirmedAt`, the workflow's own stamp; null when it has none or cannot be read. */
+export function workflowConfirmedAt(wf: WorkflowRow | undefined): string | null {
+  if (wf === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(wf.definition_json);
+    const at = parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>)['confirmedAt'] : undefined;
+    return typeof at === 'string' ? at : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The workflow as a takeover's preview shows it. `from`: whose mark the takeover reads (`planMandate`), by address, and as which role. */
+export interface TakeoverWorkflowView {
+  readonly id: string; readonly name: string; readonly takenOver: boolean;
+  readonly from: { readonly name: string; readonly role: 'workflow-edited' | 'workflow-created' } | null;
+}
+
+/** The preview's workflow: null without one, or when no mandate's mark on it is left to take over. */
+export function workflowOfPreview(wf: WorkflowRow | undefined, coverWorkflow: boolean): TakeoverWorkflowView | null {
+  if (wf === undefined) return null;
+  const a = planAuthorshipOf(wf);
+  const mark = planMandate(a);
+  if (mark === undefined) return null;
+  // `planMandate` reads the editor's mark first, when it is not covered; else the creator's.
+  const role = isMandateTag(a.mandate_editor) && !editorCovered(a) ? 'workflow-edited' : 'workflow-created';
+  const from = mark.principal.kind === 'mandate' ? { name: mark.principal.email, role } as const : null;
+  return { id: wf.id, name: wf.name, takenOver: coverWorkflow, from };
+}
+
+/** A row's six marks as a digest binds them: who created it and who changed it last, with grant and time. */
+export function marksOf(a: {
+  created_by?: string | null | undefined; created_mandate_id?: string | null | undefined; created_at?: string | null | undefined;
+  mandate_editor?: string | null | undefined; mandate_editor_id?: string | null | undefined; mandate_edited_at?: string | null | undefined;
+}): unknown[] {
+  return [a.created_by ?? null, a.created_mandate_id ?? null, a.created_at ?? null, a.mandate_editor ?? null, a.mandate_editor_id ?? null, a.mandate_edited_at ?? null];
+}
+
+/** The released plans as a digest binds them: what the preview shows of each, and what a release reads. */
+export function releasedForDigest(released: readonly TriggerRecord[]): unknown[] {
+  return released.map((r) => [r.id, r.title, r.status, r.next_run_at ?? null, r.paused_for ?? null]);
+}
+
+/** The audit row's target: `head`, the grant ids of every mark covered (no address), and the plans released. */
+export function coverAuditTarget(head: string, coveredMandates: readonly string[], released: readonly TriggerRecord[]): string {
+  return `${head}${coveredMandates.length > 0 ? ` mandates=${coveredMandates.join(',')}` : ''}${released.length > 0 ? ` released=${released.map((r) => r.id).join(',')}` : ''}`;
 }
 
 /** The audit row or a read-back failed inside the transaction: everything is rolled back. */
