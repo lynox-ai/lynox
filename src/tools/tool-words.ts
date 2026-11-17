@@ -68,13 +68,37 @@ function externalToolName(toolName: string): string {
   return shown.replace(/[\\"]/g, (c) => `\\${c}`);
 }
 
-/** The dialog's word for `toolName`; a tool without one is named as an external tool. */
+/**
+ * The dialog's word for `toolName` as plain text (the warning, the audit); a tool without one
+ * is named as an external tool. A dialog shows it through {@link dialogToolHead}.
+ */
 export function dialogToolWord(toolName: string): string {
   const dialogOnly: Readonly<Record<string, string>> = DIALOG_ONLY_WORDS;
   const lineWords: Readonly<Record<string, string>> = TOOL_LINE_WORDS;
   if (Object.hasOwn(dialogOnly, toolName)) return dialogOnly[toolName]!;
   if (Object.hasOwn(lineWords, toolName)) return lineWords[toolName]!;
   return `External tool "${externalToolName(toolName)}"`;
+}
+
+/**
+ * The dialog's word for `toolName` as a prompt: a word of the table is the engine's own text
+ * (frame); an external tool's name is a VALUE between the frame's quotes, so nothing in it can
+ * shape the dialog, whatever characters it holds.
+ */
+export function dialogToolHead(toolName: string): PromptText {
+  const dialogOnly: Readonly<Record<string, string>> = DIALOG_ONLY_WORDS;
+  const lineWords: Readonly<Record<string, string>> = TOOL_LINE_WORDS;
+  if (Object.hasOwn(dialogOnly, toolName) || Object.hasOwn(lineWords, toolName)) {
+    return { [PROMPT_TEXT_BRAND]: true, segments: [{ kind: 'frame', text: dialogToolWord(toolName) }] };
+  }
+  return {
+    [PROMPT_TEXT_BRAND]: true,
+    segments: [
+      { kind: 'frame', text: 'External tool "' },
+      { kind: 'value', text: externalToolName(toolName) },
+      { kind: 'frame', text: '"' },
+    ],
+  };
 }
 
 /**

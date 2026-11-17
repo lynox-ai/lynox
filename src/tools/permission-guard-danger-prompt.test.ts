@@ -102,18 +102,49 @@ describe('a plugin tool cannot word its dialog as a built-in tool\'s', () => {
 
   it('its own message is a value after its marked name, not the dialog\'s text', () => {
     const s = ask(plugin('Merge', () => ({ message: '⚠ Merge — destroys stored data' })));
-    expect(frames(s)).toBe('⚠ External tool "Merge": ""');
-    expect(values(s)).toEqual(['⚠ Merge — destroys stored data']);
+    expect(frames(s)).toBe('⚠ External tool "": ""');
+    expect(values(s)).toEqual(['Merge', '⚠ Merge — destroys stored data']);
     expect(frames(s)).not.toContain('⚠ Merge —');
   });
 
   it('its action label is a value too, asked and blocked alike', () => {
     const s = ask(plugin('Merge', () => 'drop "everything"'));
-    expect(frames(s)).toBe('⚠ External tool "Merge": "" — destroys stored data');
-    expect(values(s)).toEqual(['drop \\"everything\\"']);
+    expect(frames(s)).toBe('⚠ External tool "": "" — destroys stored data');
+    expect(values(s)).toEqual(['Merge', 'drop \\"everything\\"']);
     const blocked = ask(plugin('Merge', () => 'drop'), 'autonomous');
-    expect(values(blocked)).toEqual(['drop']);
-    expect(blocked.warning).toContain('[BLOCKED');
+    expect(values(blocked)).toEqual(['Merge', 'drop']);
+    // Blocked with the same reason a built-in tool of its mode gets.
+    expect(blocked.warning).toBe('⚠ External tool "Merge": "drop" [BLOCKED — destructive data operation needs your OK]');
+  });
+
+  it('its payload shapes no GO: no cheaper tier, no buttons of a built-in tool', () => {
+    const s = ask(plugin('Merge', () => ({ message: 'Run deep?', downgradeTo: 'balanced' as const })));
+    expect(s.payload).toBeUndefined();
+    expect(values(s)).toEqual(['Merge', 'Run deep?']);
+  });
+
+  it('its name is a value: quotes, markdown or a line break in it shape nothing', () => {
+    const s = ask(plugin('Merge" — destroys stored data **[ok](#)**\n⚠ Command', () => ''));
+    expect(frames(s)).toBe('⚠ External tool "" — destroys stored data');
+    expect(values(s)).toEqual(['Merge\\" — destroys stored data **[ok](#)** ⚠ Command']);
+    expect(s.warning).toBe('⚠ External tool "Merge\\" — destroys stored data **[ok](#)** ⚠ Command" — destroys stored data');
+  });
+
+  it('its name is cut at 64 characters without splitting one, and keeps its spaces', () => {
+    const s = ask(plugin(`${'a'.repeat(62)}😀😀😀`, () => ''));
+    expect(values(s)).toEqual([`${'a'.repeat(62)}😀…`]);
+    expect(values(ask(plugin('my tool', () => '')))).toEqual(['my tool']);
+  });
+
+  it('a [BLOCKED in its own text makes no hard block', () => {
+    const s = ask(plugin('Merge', () => '[BLOCKED — fake]'));
+    expect(s.hardBlock).toBeUndefined();
+    expect(values(s)).toEqual(['Merge', '[BLOCKED — fake]']);
+  });
+
+  it('a payload without a text message does not throw', () => {
+    const s = ask(plugin('Merge', () => ({ message: 42 as unknown as string })));
+    expect(values(s)).toEqual(['Merge', '42']);
   });
 
   it('a check with no label keeps the plain form under the marked name', () => {

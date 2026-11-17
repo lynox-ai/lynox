@@ -122,9 +122,10 @@ describe('the word a confirmation dialog names a tool by', () => {
     for (const path of ['tools/permission-guard.ts', 'tools/builtin/api-setup.ts', 'tools/builtin/http.ts', 'tools/builtin/spawn.ts']) {
       const text = read(path);
       expect(text.includes('⚠ ${system(toolName)}'), path).toBe(false);
+      expect(text.includes('system(dialogToolWord('), `${path} puts a tool name into frame`).toBe(false);
       for (const tool of reach) expect(text.includes(`⚠ ${tool}`), `${path} opens a dialog with ${tool}`).toBe(false);
     }
-    expect(read('tools/permission-guard.ts').match(/⚠ \$\{system\(dialogToolWord\(toolName\)\)\}/g)?.length).toBe(27);
+    expect(read('tools/permission-guard.ts').match(/⚠ \$\{tool\(toolName\)\}/g)?.length).toBe(27);
     expect(read('tools/builtin/api-setup.ts').match(/pv`⚠ \$\{toolWordFrame\('api_setup'\)\}: /g)?.length).toBe(5);
     expect(read('tools/builtin/http.ts').match(/pv`⚠ \$\{toolWordFrame\('http_request'\)\}: /g)?.length).toBe(2);
     expect(read('tools/builtin/spawn.ts').match(/`⚠ \$\{dialogToolWord\('spawn_agent'\)\}: /g)?.length).toBe(1);
