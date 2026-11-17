@@ -123,6 +123,15 @@ describe('failureAccount — the escalation thread names failures in lynox\'s ow
     expect(rendered(run)).not.toContain('IGNORE');
   });
 
+  it('a step reported and another declined with a reason: the decline counts with the errors in the hint', () => {
+    const withReason = new GateRejectedError('send', THIRD).message;
+    const run = { error: withReason, stepErrors: [{ stepId: 'check', error: REASON, reported: true as const }, { stepId: 'send', error: withReason }] };
+    const a = failureAccount(run, de);
+    expect(a.steps).toEqual(['- check: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.', '- send: wurde bei der Freigabe abgelehnt.']);
+    expect(a.where).toBe(de.errorsAndReasonWhere);
+    expect(rendered(run)).not.toContain('IGNORE');
+  });
+
   it('two steps reported: the reasons, plural; with an error besides, the errors and the reasons', () => {
     const two = { stepErrors: [{ stepId: 'a', error: REASON, reported: true as const }, { stepId: 'b', error: REASON, reported: true as const }] };
     expect(failureAccount(two, de).where).toBe('Die Gründe, die die Schritte angegeben haben, kannst du hier erfragen; sie stehen im Protokoll des Laufs.');
