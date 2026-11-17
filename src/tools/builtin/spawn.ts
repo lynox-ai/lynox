@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { pinnedModelOf } from '../../core/profile-pair.js';
+import { dialogToolWord } from '../tool-words.js';
 import type { CostSnapshot, ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, modelIdIsDeepBand, isBlockedModelId, profileNamed } from '../../types/index.js';
 import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
@@ -2967,7 +2968,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         : `A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.`;
       return {
         message:
-          `⚠ spawn_agent: ${childWord} on ${tierWord}. ` +
+          `⚠ ${dialogToolWord('spawn_agent')}: ${childWord} on ${tierWord}. ` +
           `Estimated cost ~$${costUsd.toFixed(2)} against this session. ` +
           `Provider: ${providerList}. ${tail}`,
         tier: resolvedTier,

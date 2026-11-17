@@ -2924,7 +2924,7 @@ describe('WorkerLoop', () => {
     vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
     const store = new PromptStore(history.getDb());
     try {
-      const asked = pv`⚠ http_request: POST to h.example /v1/x (fields "name") — Allow outbound data?${onBoxBlock('{\n  "name": "CANARY-VALUE"\n}')}`;
+      const asked = pv`⚠ API request: POST to h.example /v1/x (fields "name") — Allow outbound data?${onBoxBlock('{\n  "name": "CANARY-VALUE"\n}')}`;
       const session = {
         sessionId: 'thread-worker-onbox',
         _recreateAgent: vi.fn(),
@@ -2940,7 +2940,7 @@ describe('WorkerLoop', () => {
         await new Promise((r) => setTimeout(r, 5));
       }
       const sent = vi.mocked(router.notify).mock.calls.map(([m]) => m).find((m) => m.inquiry !== undefined);
-      expect(sent?.inquiry?.question).toBe('⚠ http_request: POST to h.example /v1/x (fields "name") — Allow outbound data?');
+      expect(sent?.inquiry?.question).toBe('⚠ API request: POST to h.example /v1/x (fields "name") — Allow outbound data?');
       expect(sent?.body).not.toContain('CANARY-VALUE');
       expect(loop.getTaskPendingInput(task.id)!.question).toContain('"name": "CANARY-VALUE"');
       // The stored row carries the SEGMENTS, so the owner's UI renders the value as a value
@@ -2971,9 +2971,9 @@ describe('WorkerLoop', () => {
         _recreateAgent: vi.fn(),
         promptUser: undefined as ((q: unknown, o?: string[], m?: PromptMeta) => Promise<string>) | undefined,
         run: vi.fn(async () => {
-          answers.push(await session.promptUser!('⚠ bash: rm -rf / [BLOCKED]', ['Allow', 'Deny'], { blocked: true }));
+          answers.push(await session.promptUser!('⚠ Command: rm -rf / [BLOCKED]', ['Allow', 'Deny'], { blocked: true }));
           // Same run, same source: a question that asks for an OK goes out as before.
-          answers.push(await session.promptUser!('⚠ mail_send [BLOCKED — connecting/sending mail needs your OK]', ['Allow', 'Deny']));
+          answers.push(await session.promptUser!('⚠ New email [BLOCKED — connecting/sending mail needs your OK]', ['Allow', 'Deny']));
           return 'Done.';
         }),
       };
@@ -2987,8 +2987,8 @@ describe('WorkerLoop', () => {
       }
       expect(answers).toEqual([UNATTENDED_BLOCK_ANSWER]);
       const asked = vi.mocked(router.notify).mock.calls.map(([m]) => m.inquiry?.question).filter((q) => q !== undefined);
-      expect(asked).toEqual(['⚠ mail_send [BLOCKED — connecting/sending mail needs your OK]']);
-      expect(store.getPending('thread-worker-hardblock')?.question).toBe('⚠ mail_send [BLOCKED — connecting/sending mail needs your OK]');
+      expect(asked).toEqual(['⚠ New email [BLOCKED — connecting/sending mail needs your OK]']);
+      expect(store.getPending('thread-worker-hardblock')?.question).toBe('⚠ New email [BLOCKED — connecting/sending mail needs your OK]');
       loop.stop();
     } finally {
       history.close();
