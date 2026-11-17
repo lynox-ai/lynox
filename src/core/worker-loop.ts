@@ -3884,7 +3884,7 @@ export class WorkerLoop {
       const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
       // A plain row read: `getStatus` frees dead reads as it reads, and a title must not write.
       const st = ledger?.getRunForApply(task.bulk_run_id);
-      return st != null && typeof st.haltReason === 'string' && st.phase !== 'aborted' && st.phase !== 'done' && st.phase !== 'undone';
+      return st !== null && st !== undefined && typeof st.haltReason === 'string' && st.phase !== 'aborted' && st.phase !== 'done' && st.phase !== 'undone';
     } catch {
       return false;
     }
