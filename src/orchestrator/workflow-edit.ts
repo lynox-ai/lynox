@@ -252,16 +252,20 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       const was = stored.get(s);
       const which = was === undefined ? `the step this edit adds ("${s.id}")`
         : isStepIdShape(was.id) ? `step "${was.id}"` : `step #${String(was.at)} (its position before this edit)`;
-      const fix = field === 'task'
-        ? `Change that reference in the same edit (update_task), or remove ${which} too.`
-        : `Remove ${which} too: its input template cannot be edited.`;
+      // An input template cannot be edited, so keeping the step it reads is the way that loses nothing;
+      // removing the reader too is named last, and only with the user's word.
+      if (field !== 'task') {
+        const renamedToo = was !== undefined && was.id !== s.id && isStepIdShape(was.id)
+          ? ` This edit also renames ${which}: if you remove it, name it by its new id.` : '';
+        return `Error: remove: ${which} reads the output of a step this edit removes, in its ${field}, and its input template cannot be edited. `
+          + `Keep the step it reads, or remove ${which} too only if the user wants it gone.${renamedToo}`;
+      }
+      const fix = `Change that reference in the same edit (update_task), or remove ${which} too.`;
       // A step this edit renames is named by its old id, which no longer finds it after the rename: an
       // update_task goes before the rename, a removal names the new id (or the rename is dropped). A
       // step named by its position is found by it before and after a rename.
       const renamed = was === undefined || was.id === s.id || !isStepIdShape(was.id) ? ''
-        : field === 'task'
-          ? ' This edit renames that step: put the update_task before the rename, or remove it by its new id.'
-          : ' This edit renames that step: remove it by its new id, or leave the rename out.';
+        : ' This edit renames that step: put the update_task before the rename, or remove it by its new id.';
       return `Error: remove: ${which} reads the output of a step this edit removes, in its ${field}. ${fix}${renamed}`;
     }
   }

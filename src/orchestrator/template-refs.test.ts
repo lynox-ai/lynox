@@ -106,7 +106,7 @@ describe('removing a step another step\'s reference reads is refused', () => {
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'fetch' }]))
       .toBe('Error: remove: step "sum" reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step "sum" too.');
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'sum' }]))
-      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input_template.body. Remove step "mail" too: its input template cannot be edited.');
+      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input_template.body, and its input template cannot be edited. Keep the step it reads, or remove step "mail" too only if the user wants it gone.');
     // A step added in the same edit is not in the list the next edit starts from.
     expect(applyModifications([{ id: 'fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum it' }], [{ action: 'add_step', step_id: 'late', value: 'Use {{fetch.result}}', input_from: ['fetch'] }, { action: 'remove', step_id: 'fetch' }]))
       .toContain('Error: remove: the step this edit adds ("late") reads the output of a step this edit removes');
@@ -117,7 +117,7 @@ describe('removing a step another step\'s reference reads is refused', () => {
     const repaired = steps();
     expect(applyModifications(repaired, [{ action: 'update_task', step_id: 'sum', value: 'Sum what you have' }, { action: 'rename_step', step_id: 'sum', value: 'total' }, { action: 'remove', step_id: 'fetch' }])).toBeNull();
     expect(applyModifications(steps(), [{ action: 'rename_step', step_id: 'mail', value: 'send' }, { action: 'remove', step_id: 'sum' }]))
-      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input_template.body. Remove step "mail" too: its input template cannot be edited. This edit renames that step: remove it by its new id, or leave the rename out.');
+      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input_template.body, and its input template cannot be edited. Keep the step it reads, or remove step "mail" too only if the user wants it gone. This edit also renames step "mail": if you remove it, name it by its new id.');
   });
 
   it('one edit that removes a step and what reads it, in either order, is taken', () => {
