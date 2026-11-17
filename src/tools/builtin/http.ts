@@ -2081,7 +2081,10 @@ function storePassPrecheck(url: string, headers: Record<string, string>, toolCon
     if (QUERY_CREDENTIAL.test(name)) return 'a request to a Shopify store may not carry a credential in its address. Remove it; the engine attaches the store connection itself.';
   }
   for (const name of Object.keys(headers)) {
-    if (STORE_CREDENTIAL_HEADERS.has(name.toLowerCase())) return `a request to a Shopify store may not carry a credential header of its own (${shapedForLog(name, DERIVED_NAME_SHAPE, 60)}). Remove it; the engine attaches the store connection itself.`;
+    // The name printed is the entry of the fixed set it matched, never the model's own spelling:
+    // a header name the set does not hold never reaches this text.
+    const known = name.toLowerCase();
+    if (STORE_CREDENTIAL_HEADERS.has(known)) return `a request to a Shopify store may not carry a credential header of its own (${known}). Remove it; the engine attaches the store connection itself.`;
   }
   return storeClearanceHeld(toolContext!);
 }
