@@ -38,7 +38,8 @@ import {
   MIN_USEFUL_EXTRACT_CHARS,
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
-import { onBoxBlock, pv } from '../../core/prompt-value.js';
+import { onBoxBlock, promptFrame, pv } from '../../core/prompt-value.js';
+import { dialogToolWord } from '../tool-words.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
 import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
@@ -3490,7 +3491,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           blockedVerbatim(`Blocked: ${exfilWarning}`);
         }
         const answer = await agent.promptUser(
-          pv`⚠ http_request: ${exfilWarning} — Allow?`,
+          pv`⚠ ${promptFrame(dialogToolWord('http_request'))}: ${exfilWarning} — Allow?`,
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
@@ -3905,7 +3906,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             const sentNote = alsoNamed.length === 0 ? pv``
               : pv` It is sent as a ${sentMethod} that also names ${alsoNamed.join(', ')}; a server may run any of these.`;
             const answer = await promptUser(
-              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`,
+              pv`⚠ ${promptFrame(dialogToolWord('http_request'))}: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`,
               ['Allow', 'Deny', '\x00'],
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());

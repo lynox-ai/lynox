@@ -17,6 +17,7 @@ import { detectInjectionAttempt } from '../core/data-boundary.js';
 import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 import { promptSegments, promptValue, pv, singleLine } from '../core/prompt-value.js';
+import { dialogToolWord } from './tool-words.js';
 
 // lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
 // still read the entries that are not marked secret, `apis/` among them. Prefix is fuzzy
@@ -1982,11 +1983,11 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     if (autonomy === 'autonomous') {
       const hit = _scanBashDanger(rawCmd, CRITICAL_BASH, surfaces);
       if (hit) {
-        return hardBlock(framed`⚠ ${system(toolName)}: ${system(hit.label)} — "${agentText(preview)}" [BLOCKED — this action needs to be run manually for safety]`);
+        return hardBlock(framed`⚠ ${system(dialogToolWord(toolName))}: ${system(hit.label)} — "${agentText(preview)}" [BLOCKED — this action needs to be run manually for safety]`);
       }
       const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH, surfaces) ?? _scanBashDanger(rawCmd, UNATTENDED_ASK_BASH, surfaces) ?? curlOptionFromWords(rawCmd);
       if (ask) {
-        return framed`⚠ ${system(toolName)}: ${system(ask.label)} — "${agentText(preview)}"`;
+        return framed`⚠ ${system(dialogToolWord(toolName))}: ${system(ask.label)} — "${agentText(preview)}"`;
       }
       return null;
     }
@@ -1997,7 +1998,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // stricter rule on a later one.
     const hit = _scanBashDanger(rawCmd, CRITICAL_BASH, surfaces) ?? _scanBashDanger(rawCmd, DANGEROUS_AFTER_CRITICAL_BASH, surfaces) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH, surfaces) ?? curlOptionFromWords(rawCmd);
     if (hit) {
-      return framed`⚠ ${system(toolName)}: ${system(hit.label)} — "${agentText(preview)}"`;
+      return framed`⚠ ${system(dialogToolWord(toolName))}: ${system(hit.label)} — "${agentText(preview)}"`;
     }
   }
 
@@ -2007,9 +2008,9 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // Check both raw (pre-symlink) and resolved path — /etc/ → /private/etc/ on macOS
     if (isSensitivePath(rawPath) || isSensitivePath(filePath)) {
       if (autonomy === 'autonomous') {
-        return hardBlock(framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
+        return hardBlock(framed`⚠ ${system(dialogToolWord(toolName))}: read sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
       }
-      return framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
+      return framed`⚠ ${system(dialogToolWord(toolName))}: read sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
     }
   }
 
@@ -2027,24 +2028,24 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     for (const judged of target !== null && target !== filePath ? [filePath, target] : [filePath]) {
       if (isSensitivePath(judged)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(judged)}" [BLOCKED — this path contains system or security files]`);
+          return hardBlock(framed`⚠ ${system(dialogToolWord(toolName))}: write to sensitive path — "${agentText(judged)}" [BLOCKED — this path contains system or security files]`);
         }
-        return framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(judged)}" — this path contains system or security files`;
+        return framed`⚠ ${system(dialogToolWord(toolName))}: write to sensitive path — "${agentText(judged)}" — this path contains system or security files`;
       }
     }
     // Overwriting an existing file with empty content destroys it (rm bypass)
     const content = (input as { content?: unknown }).content;
     if (toolName === 'write_file' && typeof content === 'string' && content.trim() === '') {
       if (autonomy === 'autonomous') {
-        return hardBlock(framed`⚠ ${system(toolName)}: overwrite with empty content — "${agentText(filePath)}" [BLOCKED]`);
+        return hardBlock(framed`⚠ ${system(dialogToolWord(toolName))}: overwrite with empty content — "${agentText(filePath)}" [BLOCKED]`);
       }
-      return framed`⚠ ${system(toolName)}: overwrite file with empty content — "${agentText(filePath)}"`;
+      return framed`⚠ ${system(dialogToolWord(toolName))}: overwrite file with empty content — "${agentText(filePath)}"`;
     }
     // In autonomous mode without workspace, restrict writes to project directory
     if (autonomy === 'autonomous' && !isWorkspaceActive()) {
       const cwd = resolveRealPath(process.cwd());
       if (toolName === 'write_file' && !isPathWithin(filePath, cwd)) {
-        return hardBlock(framed`⚠ ${system(toolName)}: write outside project directory — "${agentText(filePath)}" [BLOCKED — I can only write files within the current project]`);
+        return hardBlock(framed`⚠ ${system(dialogToolWord(toolName))}: write outside project directory — "${agentText(filePath)}" [BLOCKED — I can only write files within the current project]`);
       }
     }
   }
@@ -2057,9 +2058,9 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     if (dirPath) {
       if (isSensitivePath(dirRaw) || isSensitivePath(dirPath) || LYNOX_DIR.test(dirRaw) || LYNOX_DIR.test(dirPath)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}" [BLOCKED]`);
+          return hardBlock(framed`⚠ ${system(dialogToolWord(toolName))}: operate in sensitive directory — "${agentText(dirPath)}" [BLOCKED]`);
         }
-        return framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}"`;
+        return framed`⚠ ${system(dialogToolWord(toolName))}: operate in sensitive directory — "${agentText(dirPath)}"`;
       }
     }
 
@@ -2068,17 +2069,17 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       const destPath = resolveRealPath(destRaw);
       if (isSensitivePath(destRaw) || isSensitivePath(destPath) || LYNOX_DIR.test(destRaw) || LYNOX_DIR.test(destPath)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${system(toolName)}: move into sensitive path — "${agentText(destPath)}" [BLOCKED]`);
+          return hardBlock(framed`⚠ ${system(dialogToolWord(toolName))}: move into sensitive path — "${agentText(destPath)}" [BLOCKED]`);
         }
-        return framed`⚠ ${system(toolName)}: move files into sensitive path — "${agentText(destPath)}"`;
+        return framed`⚠ ${system(dialogToolWord(toolName))}: move files into sensitive path — "${agentText(destPath)}"`;
       }
 
       const cwd = resolveRealPath(process.cwd());
       if (!isPathWithin(destPath, cwd)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${system(toolName)}: move destination outside project — "${agentText(destPath)}" [BLOCKED]`);
+          return hardBlock(framed`⚠ ${system(dialogToolWord(toolName))}: move destination outside project — "${agentText(destPath)}" [BLOCKED]`);
         }
-        return framed`⚠ ${system(toolName)}: move destination outside project — "${agentText(destPath)}"`;
+        return framed`⚠ ${system(dialogToolWord(toolName))}: move destination outside project — "${agentText(destPath)}"`;
       }
     }
   }
@@ -2089,9 +2090,9 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   const MAIL_WRITE_TOOLS = new Set(['mail_send', 'mail_reply', 'mail_connect']);
   if (MAIL_WRITE_TOOLS.has(toolName)) {
     if (autonomy === 'autonomous') {
-      return askable(framed`⚠ ${system(toolName)} [BLOCKED — connecting/sending mail needs your OK]`);
+      return askable(framed`⚠ ${system(dialogToolWord(toolName))} [BLOCKED — connecting/sending mail needs your OK]`);
     }
-    return toolName === 'mail_connect' ? framed`⚠ ${system(toolName)} — connects a mailbox` : framed`⚠ ${system(toolName)} — sends external mail`;
+    return toolName === 'mail_connect' ? framed`⚠ ${system(dialogToolWord(toolName))} — connects a mailbox` : framed`⚠ ${system(dialogToolWord(toolName))} — sends external mail`;
   }
 
   // Declarative destructive-tool gate. Each tool registers
@@ -2123,10 +2124,10 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
         const blockReason = mode === 'data'
           ? '[BLOCKED — destructive data operation needs your OK]'
           : '[BLOCKED — I need your OK before doing this]';
-        return askable(framed`⚠ ${system(toolName)}${system(suffix)} ${system(blockReason)}`);
+        return askable(framed`⚠ ${system(dialogToolWord(toolName))}${system(suffix)} ${system(blockReason)}`);
       }
       const label = mode === 'data' ? 'destroys stored data' : 'modifies external data';
-      return framed`⚠ ${system(toolName)}${system(suffix)} — ${system(label)}`;
+      return framed`⚠ ${system(dialogToolWord(toolName))}${system(suffix)} — ${system(label)}`;
     }
   }
 
@@ -2143,7 +2144,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const method = effectiveWriteMethod(String(req.method ?? 'GET'), headers, String(req.url ?? ''), typeof req.body === 'string' ? req.body : undefined) ?? 'OVERRIDE';
     if (method === 'DELETE') {
       if (autonomy === 'autonomous') {
-        return askable(framed`⚠ ${system(toolName)}: HTTP DELETE [BLOCKED — destructive operation]`);
+        return askable(framed`⚠ ${system(dialogToolWord(toolName))}: HTTP DELETE [BLOCKED — destructive operation]`);
       }
     }
     // Block write methods in autonomous mode — can send emails, create invoices, modify records.
@@ -2155,7 +2156,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // make that unreachable. DELETE never arrives here in autonomous mode — the branch
     // above returns for it.
     if (!isReadMethod(method) && autonomy === 'autonomous') {
-      return framed`⚠ ${system(toolName)}: HTTP ${system(method)} — write operation, needs your OK`;
+      return framed`⚠ ${system(dialogToolWord(toolName))}: HTTP ${system(method)} — write operation, needs your OK`;
     }
   }
 
@@ -2166,7 +2167,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       const combined = [spec.task, spec.context].filter(Boolean).join('\n');
       const injection = detectInjectionAttempt(combined);
       if (injection.detected) {
-        return framed`⚠ ${system(toolName)}: spawn task contains suspicious patterns (${system(injection.patterns.join(', '))}). Review needed.`;
+        return framed`⚠ ${system(dialogToolWord(toolName))}: spawn task contains suspicious patterns (${system(injection.patterns.join(', '))}). Review needed.`;
       }
     }
   }

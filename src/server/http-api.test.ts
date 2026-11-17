@@ -9088,7 +9088,7 @@ describe('LynoxHTTPApi', () => {
         // The reload path is where this silently regressed before: the live SSE
         // event carried the origin, the resumed prompt did not, and a long
         // workflow is precisely the case where a page gets refreshed mid-prompt.
-        ps.insertAskUser('sess-wf', '⚠ bash: remote shell access', ['Allow', 'Deny'], false, undefined, {
+        ps.insertAskUser('sess-wf', '⚠ Command: remote shell access', ['Allow', 'Deny'], false, undefined, {
           workflowName: 'bexio Triage Phase 1-3',
           stepId: 'load_contacts',
           stepTask: 'Paginate GET /2.0/contact',
@@ -9120,7 +9120,7 @@ describe('LynoxHTTPApi', () => {
         label: 'prompt',
         raise: (session: typeof mockSessionInstance) =>
           (session.promptUser as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>))(
-            '⚠ bash: remote shell access', ['Allow', 'Deny'], ORIGIN_META),
+            '⚠ Command: remote shell access', ['Allow', 'Deny'], ORIGIN_META),
       },
       {
         label: 'prompt_tabs',

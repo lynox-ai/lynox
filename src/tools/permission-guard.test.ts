@@ -1443,7 +1443,7 @@ describe('isDangerous', () => {
 
     it('BLOCKS http_request POST in autonomous mode (write operation)', () => {
       const result = isDangerous('http_request', { method: 'POST', url: 'https://api.example.com/data' }, 'autonomous');
-      expect(result).toBe('⚠ http_request: HTTP POST — write operation, needs your OK');
+      expect(result).toBe('⚠ API request: HTTP POST — write operation, needs your OK');
     });
 
     it('BLOCKS http_request PUT in autonomous mode (write operation)', () => {
@@ -2544,8 +2544,8 @@ describe('isDangerous', () => {
     ];
 
     it.each(MODES)('names each form as the written one is named (%s)', (mode) => {
-      expect(check('cat ~/.lynox/workspace/../engine.db', mode), 'positive control: the written form').toContain(`bash: ${TRAVERSAL}`);
-      for (const command of LEAVES) expect(check(command, mode), command).toContain(`bash: ${TRAVERSAL}`);
+      expect(check('cat ~/.lynox/workspace/../engine.db', mode), 'positive control: the written form').toContain(`Command: ${TRAVERSAL}`);
+      for (const command of LEAVES) expect(check(command, mode), command).toContain(`Command: ${TRAVERSAL}`);
     });
 
     it('reads no dot-dot into a word that forms none', () => {
@@ -3814,11 +3814,11 @@ describe('edit_file is guarded as write_file is', () => {
   it.each(['config/.env', 'home/.ssh/id_rsa', 'deploy.key', 'credentials.json'])('blocks an unattended edit of %s, as write_file is blocked', (path) => {
     const write = isDangerous('write_file', { path, content: 'b' }, 'autonomous');
     expect(write).toContain('write to sensitive path');
-    expect(isDangerous('edit_file', edit(path), 'autonomous')).toBe(write!.replace('write_file', 'edit_file'));
+    expect(isDangerous('edit_file', edit(path), 'autonomous')).toBe(write!.replace('File write', 'File edit'));
   });
   it('asks about an edit of a sensitive path in a chat', () => {
     const result = isDangerous('edit_file', edit('config/.env'));
-    expect(result).toContain('edit_file: write to sensitive path');
+    expect(result).toContain('File edit: write to sensitive path');
     expect(result).not.toContain('[BLOCKED');
   });
   // edit_file confines its own path (to the workspace or the artifacts root), so the guard does not
