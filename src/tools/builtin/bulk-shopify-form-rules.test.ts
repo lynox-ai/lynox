@@ -396,6 +396,16 @@ describe('an image plan on a store connection that may not write image alt texts
       expect(forMandate.endsWith(`(product fields). ${note} ${NOTE_OWNER_ONLY}`), forMandate).toBe(true);
     });
 
+    // A mandate may connect again a profile it set up itself, so it is offered the link as the
+    // owner is; a profile another mandate set up names the owner only.
+    it('offers the new link to the mandate that set the connection up, and names the owner to another', async () => {
+      const own = connection({ ...preset({ ...full, state: 'revoked' }, fullScope), created_by: `mandate:${MANDATE.email}` });
+      expect(await planOn(own, { source_list: { form: 'shopify', after: { seo_title: 'x' } } }, MANDATE)).toBe(`Error: The bulk run cannot change this store's products: ${REVOKED} Tell the user this in one sentence. ${OFFER}`);
+      const other = connection({ ...preset({ ...full, state: 'revoked' }, fullScope), created_by: 'mandate:jan@kanzlei.example' });
+      expect(await planOn(other, { source_list: { form: 'shopify', after: { seo_title: 'x' } } }, MANDATE)).toBe(`Error: The bulk run cannot change this store's products: ${REVOKED} ${OWNER_ONLY}`);
+      expect(runs()).toEqual({ n: 0 });
+    });
+
     // The control: the same connection, bound and not revoked, plans both forms.
     it('plans both forms over the same connection while it is bound and not revoked', async () => {
       const store = connection(preset({ ...full, state: 'connected' }, fullScope));

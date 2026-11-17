@@ -3,7 +3,7 @@ import { BULK_HALT_REASONS, BulkPreviewCapError, bulkFoundAsPlannedNote, type Bu
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
 import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { shopifyBulkReadEnabled, shopifyMediaAccess, type ShopifyMediaAccess } from '../../core/bulk-shopify.js';
-import { isOwnerPrincipal } from '../../core/request-principal.js';
+import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { loadConfig } from '../../core/config.js';
 import { noticeLanguage } from '../../core/notice-language.js';
 import { detectSecretInContent } from './http.js';
@@ -216,8 +216,8 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
  *  - `revoked`: Shopify ended the connection's authorization; `unbound`: its token is not bound to
  *    the store (`shopifyMediaAccess`). Either way nothing can be written to the store until it is
  *    connected again, whatever the scope and whatever the form, so a product plan is refused for
- *    them too. The owner is offered the new link; in a mandate's chat (`…_owner_only`) only the
- *    owner is named, as for the scope. */
+ *    them too. The owner, and a mandate that set the profile up itself, is offered the new link;
+ *    in any other mandate's chat (`…_owner_only`) only the owner is named. */
 type MediaCase = 'writable' | 'not_granted' | 'no_connection' | 'owner_may_add' | 'owner_only' | DeadCase | `${DeadCase}_owner_only`;
 type DeadCase = 'revoked' | 'unbound';
 const isDeadCase = (kind: MediaCase): boolean => kind === 'revoked' || kind === 'unbound' || kind === 'revoked_owner_only' || kind === 'unbound_owner_only';
@@ -225,9 +225,15 @@ const isDeadCase = (kind: MediaCase): boolean => kind === 'revoked' || kind === 
 function mediaCaseFor(input: BulkPlanInput, agent: IAgent): { kind: MediaCase; host: string } {
   const host = typeof input.target_host === 'string' ? canonicalHost(input.target_host) : null;
   if (host === null) return { kind: 'no_connection', host: 'this store' };
-  const access: ShopifyMediaAccess = shopifyMediaAccess(agent.toolContext?.apiStore?.getByHostname(host), host);
+  const profile = agent.toolContext?.apiStore?.getByHostname(host);
+  const access: ShopifyMediaAccess = shopifyMediaAccess(profile, host);
   const owner = isOwnerPrincipal(agent.principal);
-  if (access === 'revoked' || access === 'unbound') return { kind: owner ? access : `${access}_owner_only`, host };
+  // A dead connection is mended by connecting it again, which a mandate may do for a profile it
+  // set up itself (`api_setup` connect): that mandate is offered the link as the owner is.
+  if (access === 'revoked' || access === 'unbound') {
+    const mayConnect = owner || (profile?.created_by !== undefined && profile.created_by === principalTag(agent.principal));
+    return { kind: mayConnect ? access : `${access}_owner_only`, host };
+  }
   if (access !== 'not_asked') return { kind: access, host };
   return { kind: owner ? 'owner_may_add' : 'owner_only', host };
 }
