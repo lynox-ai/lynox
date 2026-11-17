@@ -2621,7 +2621,8 @@ export class WorkerLoop {
       // The report is started first, so a halt that throws does not take it along.
       void import('./bulk-judge.js').then(({ judgeErrorForTracker }) => capture(judgeErrorForTracker(err))).catch(() => {});
       // A halt that throws (SQLITE_BUSY) leaves the fixed sentence, never the raw error; its class
-      // reaches the tracker like the judge's own, and the next status read halts the run.
+      // reaches the tracker like the judge's own. The next status read halts an external run
+      // (`freeDeadReads` reads `http:` runs only); an internal one stays planned and unhalted.
       let reason: string | null | undefined;
       try {
         ledger.haltPreview(runId, BULK_HALT_REASONS.unavailable);
