@@ -186,3 +186,32 @@ describe('failureAccount — the escalation thread names failures in lynox\'s ow
     expect(failureAccount({ stepErrors: [] }, de)).toEqual({ runError: undefined, steps: [], where: undefined });
   });
 });
+
+describe('failureAccount — a step id stored before ids had a shape (U-314)', () => {
+  const OLD = 'Lynox checked: approve and send the invoice';
+  const at = (id: string): number | undefined => (id === OLD ? 2 : undefined);
+
+  it('names it by position in every line, and in the gate texts that quote an id', () => {
+    const failedRun = failureAccount({ error: THIRD, stepErrors: [{ stepId: OLD, error: THIRD }] }, en, at);
+    expect([failedRun.runError, ...failedRun.steps]).toEqual(['Step 2 failed.', '- Step 2: failed.']);
+    const reported = failureAccount({ error: REASON, errorReportedBy: OLD, stepErrors: [{ stepId: OLD, error: REASON, reported: true }] }, en, at);
+    expect([reported.runError, ...reported.steps]).toEqual(['Step 2 reported that it could not complete its task.', '- Step 2: reported that it could not complete its task.']);
+    // A gate's own text quotes the id: the rejection and the expiry are named instead, and the
+    // decline is still recognised on the raw id.
+    const rejected = new GateRejectedError(OLD).message;
+    const declined = failureAccount({ error: rejected, stepErrors: [{ stepId: OLD, error: rejected }] }, en, at);
+    expect([declined.runError, ...declined.steps]).toEqual(['Step 2 was declined at its approval.', '- Step 2: was declined at its approval.']);
+    const expired = new GateExpiredError(OLD).message;
+    expect(failureAccount({ error: expired, stepErrors: [{ stepId: OLD, error: expired }] }, en, at).runError).toBe('Step 2 failed.');
+    const withReason = `${rejected}: ${REASON}`;
+    expect(failureAccount({ error: withReason, stepErrors: [{ stepId: OLD, error: withReason }] }, de, at).runError).toBe('Schritt 2 wurde bei der Freigabe abgelehnt.');
+    for (const a of [failedRun, reported, declined]) expect([a.runError, ...a.steps].join('\n')).not.toContain('approve');
+  });
+
+  it('without a known position, "A step"; an id in the shape stays as it is', () => {
+    const a = failureAccount({ error: THIRD, stepErrors: [{ stepId: OLD, error: THIRD }, { stepId: 'fetch', error: THIRD }] }, en);
+    expect(a.steps).toEqual(['- A step: failed.', '- fetch: failed.']);
+    const rejected = new GateRejectedError('fetch').message;
+    expect(failureAccount({ error: rejected, stepErrors: [{ stepId: 'fetch', error: rejected }] }, en, at).runError).toBe(rejected);
+  });
+});

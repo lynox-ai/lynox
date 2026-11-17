@@ -338,8 +338,8 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
       writeScopes: ['contact_edit', 'note_edit', 'task_edit', 'kb_offer_edit', 'kb_invoice_edit'],
       paragraphs: [
         'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
-        'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
+        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+        'Für Buchhaltung, Bank und Lohn fragt lynox bei bexio keine Rechte an. Welche Rechte der Zugang am Ende erhält, legt bexio fest. Gewährt bexio mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
       ],
       // The page around the text, approved 2026-10-21 (reviewed first), its line under the list
       // 2026-11-03, under the same
@@ -348,8 +348,8 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
       // that leaves out, so the line under the list says what it covers.
       frame: {
         title: 'Schreibrechte für bexio bestätigen',
-        scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
+        scopesIntro: 'lynox fragt bei bexio diese Schreibrechte an:',
+        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
         button: 'Zustimmen und weiter zu bexio',
         afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
       },
@@ -381,39 +381,43 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     // case; the boundary does not.
     params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]{0,62}$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
     requiredScopes: [],
-    // `read_all_orders` stays out: Shopify grants it only on request. `write_products` is the one
-    // write scope: a bulk run writes a product only through the engine's own write document
-    // (`shopify-graphql.ts`), and Shopify grants a write only to the token, so the scope sits on
-    // the connection. It is asked for only when the profile names it. No other write scope.
-    allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products'],
-    // Customer text, approved 2026-11-03. A change to a word needs a new approval; the test that
-    // holds this text byte for byte is the reminder. Shown before every link that asks for
-    // write_products, a new connection's or a reconnect's. The fields in the second paragraph
-    // are those of the engine's product write form, a test holds the two together. Image alt
-    // texts are not among them: the engine's image form writes through `fileUpdate`, which
-    // needs `write_files` or `write_themes`, and this preset refuses both. `write_products`
-    // itself can change an alt text (the deprecated `productUpdateMedia`), which a chat request
-    // may send after a yes; paragraph 1 and the line under the scope list cover that.
+    // `read_all_orders` stays out: Shopify grants it only on request. Two write scopes:
+    // `write_products`, and `write_files` for the bulk image form (`fileUpdate`, alt texts only,
+    // `shopify-graphql.ts`). A bulk run writes only through the engine's own write documents, and
+    // Shopify grants a write only to the token, so the scope sits on the connection. Each is
+    // asked for only when the profile names it. `write_themes` stays out: it reaches theme code
+    // (Liquid and scripts in the storefront), a different class of access.
+    allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products', 'write_files'],
+    // Customer text. A change to a word needs a new approval; the test that holds this text byte
+    // for byte is the reminder. Shown before every link that asks for a write scope, a new
+    // connection's or a reconnect's. The second paragraph names no fields: a bulk run changes
+    // what its approved list holds, in any of its forms. The third says that the app, not the
+    // request, decides what the token holds (Shopify grants the app's configured scopes).
+    // The breadth of `write_files` under the list from shopify.dev, read 2026-11-10: the `File`
+    // interface and the objects that implement it (`GenericFile`, `MediaImage`, `Video`,
+    // `Model3d`), the `files` query and the file mutations (access-scopes); `fileUpdate` can
+    // replace a file's content while keeping its URL (mutations/fileUpdate).
     consentNotice: {
       lang: 'de',
-      writeScopes: ['write_products'],
+      writeScopes: ['write_products', 'write_files'],
       paragraphs: [
         'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an Shopify schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in Shopify, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er.',
-        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Zuerst schreibt lynox eine einzige Änderung, die der Inhaber bestätigen muss, bevor der Rest folgt. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel und SEO-Beschreibung. Anlegen, löschen oder Preise ändern kann er nicht.',
-        'Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.',
+        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+        'Für Bestellungen, Kunden, Lagerbestand und Versand fragt lynox bei Shopify keine Schreibrechte an. Welche Rechte der Zugang am Ende erhält, legt die App in deinem Shopify fest. Gewährt sie mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
       ],
       // The breadth under the list from shopify.dev, read 2026-10-28: write_products covers
       // Product, ProductVariant and Collection (access-scopes); productCreate, productDelete,
       // collectionCreate and productVariantsBulkUpdate, whose input carries the price, require it.
       frame: {
         title: 'Schreibrechte für Shopify bestätigen',
-        scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in Shopify:',
-        scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
+        scopesIntro: 'lynox fragt bei Shopify diese Schreibrechte an:',
+        scopesNote: 'Ein Schreibzugriff auf Produkte gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Ein Schreibzugriff auf Dateien gilt für alle Dateien des Stores, also Bilder, Videos, 3D-Modelle und andere Dateien, etwa hochladen, ersetzen, umbenennen, Alt-Texte ändern und löschen. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
         button: 'Zustimmen und weiter zu Shopify',
         afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
       },
       scopeNames: {
         write_products: 'Produkte: Schreibzugriff',
+        write_files: 'Dateien: Schreibzugriff',
       },
     },
     scopeSeparator: ',',

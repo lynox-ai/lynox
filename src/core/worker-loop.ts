@@ -61,6 +61,7 @@ import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
+import { storedStepOrder } from '../orchestrator/step-id.js';
 import { failedRunBody } from './escalation-failure.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
@@ -3682,6 +3683,19 @@ export class WorkerLoop {
     // the body names the failed steps in lynox's own words, and the errors stay in the run's record,
     // readable through diagnose_workflow_run (U-192, U-201).
     const notices = this.#notices();
+    // A step id stored before ids had a shape (`step-id.ts`) is not shown: this body reads as the
+    // assistant's own words. It is named by its position in the stored workflow, as the model sees it
+    // (`#2`); the run and workflow ids below still lead to it (diagnose_workflow_run). The position is
+    // read from the workflow as stored now: an edit between the run and this thread can shift it, and
+    // an id no longer there is named without one. A lookup that fails costs the position, never the
+    // thread: the owner hears of the failure either way.
+    let order: string[] | undefined;
+    try {
+      order = task.pipeline_id ? storedStepOrder(this.engine.getRunHistory()?.getPlannedPipeline(task.pipeline_id)) : undefined;
+    } catch {
+      order = undefined;
+    }
+    const positionOf = (id: string): number | undefined => { const at = order?.indexOf(id) ?? -1; return at === -1 ? undefined : at + 1; };
     // The run + workflow ids ride in the seeded body so the agent, when the user
     // replies, can diagnose the run (diagnose_workflow_run), edit the workflow
     // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
@@ -3697,7 +3711,7 @@ export class WorkerLoop {
       opener: notices.reportOpener,
       body: othersPlan
         ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
-        : failedRunBody(notices, { title: task.title, status: result.status, run: result, grantLines, ref }),
+        : failedRunBody(notices, { title: task.title, status: result.status, run: result, grantLines, ref, positionOf }),
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
       onReported: this.#recordEscalation(task.id),
     });

@@ -25,6 +25,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { isStepIdShape, shownStepId, stepIdIssue } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
@@ -320,19 +321,26 @@ function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null,
 }
 
 /** @internal exported for tests: the run's result as the calling model reads it. */
-export function formatResult(state: RunState, name: string, resultLimit?: number): string {
+export function formatResult(state: RunState, name: string, resultLimit?: number, stepOrder?: readonly string[]): string {
   // The name and the step ids are names, which take none of the places real text puts a character
   // that renders as nothing; each goes in as a placeholder and is escaped on its own below.
   const nonce = randomUUID();
   const names: string[] = [];
   const asName = (value: string): string => `__lynox_name_${names.push(value) - 1}_${nonce}__`;
+  // A step id stored before ids had a shape (`step-id.ts`) goes in by its position in the workflow
+  // (`stepOrder`, the stored order), never as its text.
+  const asStepId = (id: string): string => {
+    if (isStepIdShape(id)) return asName(id);
+    const at = stepOrder?.indexOf(id) ?? -1;
+    return shownStepId(id, at === -1 ? undefined : at);
+  };
   const steps: PipelineStepResult[] = [];
   let totalDuration = 0;
   let totalCost = 0;
 
   for (const [, output] of state.outputs) {
     steps.push({
-      stepId: asName(output.stepId),
+      stepId: asStepId(output.stepId),
       result: truncateResult(output.result, resultLimit),
       durationMs: output.durationMs,
       tokensIn: output.tokensIn,
@@ -344,7 +352,7 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
       // fixed sentence instead, as one level up in a nested run (`spawnPipeline`), and where the
       // reason is: diagnose_workflow_run shows it, quoted (U-192).
       // The step id inside it is a name too: escaped like the `stepId` field (`asName`).
-      error: output.reportedFailure === true ? reportedFailureForCaller(asName(output.stepId)) : output.error,
+      error: output.reportedFailure === true ? reportedFailureForCaller(asStepId(output.stepId)) : output.error,
     });
     totalDuration += output.durationMs;
     totalCost += output.costUsd;
@@ -359,7 +367,7 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
   // run's error (the reason) stays out (U-192 1b). A step already named above is not named twice.
   const runLevelNotice = reportedBy !== undefined
     && ![...state.outputs.values()].some(o => o.stepId === reportedBy && o.reportedFailure === true)
-    ? reportedFailureForCaller(asName(reportedBy)) : undefined;
+    ? reportedFailureForCaller(asStepId(reportedBy)) : undefined;
   const result: PipelineResult = {
     pipelineId: state.runId,
     name: asName(name),
@@ -462,6 +470,11 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   if (steps.length > maxSteps) {
     return `Error: Workflow exceeds maximum of ${maxSteps} steps (got ${steps.length}).`;
   }
+
+  // A step id has a limited shape (`step-id.ts`): a run's result and its diagnosis show it to the
+  // model. Checked before the duplicate check, so no refusal quotes an id outside it back.
+  const shapeIssue = stepIdIssue(steps);
+  if (shapeIssue) return `Error: ${shapeIssue}`;
 
   // Validate unique IDs
   const ids = new Set<string>();
@@ -1343,7 +1356,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // the next retry from a third chat skip the check while this chat is contained.
       recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs), ranDigest: prev.ranDigest });
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents, prev.state.outputs);
-      const text = formatResult(state, planned.name, resultLimit);
+      const text = formatResult(state, planned.name, resultLimit, planned.steps.map(s => s.id));
       // Set last: a throw above returns an error, and the end row must not say success then.
       retryOutcome = state.status === 'completed' && !memberRefused ? 'success' : 'failed';
       return text;
@@ -1477,7 +1490,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }
 
     debitInSessionWorkflowCost(deps, state, manifest.agents, null);
-    const text = formatResult(state, planned.name, resultLimit);
+    const text = formatResult(state, planned.name, resultLimit, planned.steps.map(s => s.id));
     // Set last: a throw above returns an error, and the end row must not say success then.
     outcome = state.status === 'completed' && !memberRefused ? 'success' : 'failed';
     return text;

@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { MEASURED_WRITE_FORMS } from './bulk-write-forms.js';
 import {
   OAUTH_PRESETS,
   askedScopes,
@@ -456,7 +455,7 @@ describe('the bexio customer text covers every write scope the preset allows', (
   // scope on that side, reading included, may not come back into the list without a new text.
   it('allows no accounting, bank or payroll scope, reading included', () => {
     const bexio = OAUTH_PRESETS.get('bexio')!;
-    expect(bexio.consentNotice?.paragraphs.join(' ')).toContain('Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.');
+    expect(bexio.consentNotice?.paragraphs.join(' ')).toContain('Für Buchhaltung, Bank und Lohn fragt lynox bei bexio keine Rechte an.');
     const promised = /^(bank_|kb_bill|kb_expense|transaction|payroll|accounting|salary|archive_)/;
     expect([...bexio.allowedScopes, ...bexio.requiredScopes].filter((s) => promised.test(s))).toEqual([]);
   });
@@ -604,7 +603,7 @@ describe('the scopes a grant holds and the scopes a connection asks for', () => 
   });
 
   it('has nothing to compare for a scope the provider refuses, a provider that adds scopes of its own, or a profile of no provider', () => {
-    expect(askedScopes({ preset_id: 'shopify', scope: 'write_files' })).toBeUndefined();
+    expect(askedScopes({ preset_id: 'shopify', scope: 'write_themes' })).toBeUndefined();
     expect(askedScopes({ preset_id: 'shopify', scope: 'read_products write_products' })).toEqual(['read_products', 'write_products']);
     expect(askedScopes({ preset_id: 'bexio', scope: 'contact_show' })).toBeUndefined();
     expect(askedScopes({})).toBeUndefined();
@@ -617,14 +616,12 @@ describe('the scopes a grant holds and the scopes a connection asks for', () => 
   });
 });
 
-// bexio's consent text says a bulk run changes only what was tested at bexio, "today only existing
-// contacts". On a connected account a run writes only in a measured form (`bulk-external.ts`), so
-// the text holds while bexio's measured forms are exactly the contact update. A form added there
-// fails here, and the text needs a new approval.
-describe('the bexio customer text and the forms a bulk run may write there', () => {
-  it('names existing contacts while the contact update is bexio\'s only measured write form', () => {
-    const bexio = MEASURED_WRITE_FORMS.filter((f) => f.host === 'api.bexio.com');
-    expect(bexio.map((f) => [f.path.source, [...f.methods]])).toEqual([['^\\/2\\.0\\/contact\\/[0-9]+$', ['POST']]]);
-    expect(OAUTH_PRESETS.get('bexio')?.consentNotice?.paragraphs[1]).toContain('Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte.');
+// The bulk-run paragraph names no form and no field: a run changes what its approved list holds,
+// in whichever form it writes. Shopify and bexio carry the same paragraph, so a form added on
+// either side needs no new text, and a sentence that names one comes back here.
+describe('the bulk-run paragraph of the customer texts', () => {
+  const GENERAL = 'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.';
+  it.each([['bexio'], ['shopify']])('is the same general paragraph for %s', (id) => {
+    expect(OAUTH_PRESETS.get(id)?.consentNotice?.paragraphs[1]).toBe(GENERAL);
   });
 });

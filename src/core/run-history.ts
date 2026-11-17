@@ -26,6 +26,7 @@ import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
+import { stepIdIssue } from '../orchestrator/step-id.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -3458,6 +3459,11 @@ export class RunHistory {
     }) ?? planned.steps.reduce<ReturnType<typeof findHiddenInName>>(
       (hit, s, i) => hit ?? (typeof s.id === 'string' ? findHiddenInName(s.id, `steps[${i}].id`) : null), null);
     if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
+    // A step's id has a limited shape (`step-id.ts`): it reaches the model next to lynox's own words.
+    // Every producer saves here, so no new plan carries a free-form id; one stored before the limit
+    // is shown by its position, and `update_workflow_steps` names the rename it needs first.
+    const shapeIssue = stepIdIssue(planned.steps);
+    if (shapeIssue) throw new Error(shapeIssue);
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The
