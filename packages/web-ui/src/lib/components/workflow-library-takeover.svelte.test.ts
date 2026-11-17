@@ -411,6 +411,30 @@ describe('the dialog', () => {
 		}
 	});
 
+	it('sets apart the plan and the person in the sentences of plans released to the owner, and the plan whose connections lapse after them', async () => {
+		const owner = (id: string, title: string): Record<string, unknown> => ({ id, title, before: 'mandate:FX-ownerperson', after: null, runsNoMore: false });
+		const boxes = (d: HTMLElement, kind: string): string[][] => [...d.querySelectorAll(`[data-takeover-part="${kind}"]`)].map((e) => [...e.querySelectorAll('bdi[data-foreign-value]')].map((b) => b.textContent ?? ''));
+		// One plan to the owner; two others run again, one of which lapses: the sentence after names it.
+		const one = FULL();
+		one['alsoReleased'] = [{ id: 'p-o', title: 'FX-ownone' }, { id: 'p-x', title: 'FX-relx' }, { id: 'p-y', title: 'FX-rely' }];
+		one['memberChanges'] = [owner('p-o', 'FX-ownone')];
+		one['lapsing'] = [{ id: 'p-x', title: 'FX-relx' }];
+		await open([ENDED], [one]);
+		let d = await openDialog();
+		expect(boxes(d, 'released')).toEqual([['FX-ownone', 'FX-ownerperson'], ['FX-relx', 'FX-rely']]);
+		expect(boxes(d, 'lapsing')).toEqual([['FX-relx']]);
+		expect(foreignPlaces(d).filter(([, apart]) => !apart)).toEqual([]);
+		// Two plans to the owner, under the same person: one sentence names both and the person.
+		reset();
+		const many = FULL();
+		many['alsoReleased'] = [{ id: 'p-o', title: 'FX-ownone' }, { id: 'p-p', title: 'FX-owntwo' }];
+		many['memberChanges'] = [owner('p-o', 'FX-ownone'), owner('p-p', 'FX-owntwo')];
+		await open([ENDED], [many]);
+		d = await openDialog();
+		expect(boxes(d, 'released')).toEqual([['FX-ownerperson', 'FX-ownone', 'FX-owntwo']]);
+		expect(foreignPlaces(d).filter(([, apart]) => !apart)).toEqual([]);
+	});
+
 	it('the dialog\'s name, read from its heading, carries no mark', async () => {
 		await open([ENDED]);
 		const d = await openDialog();
