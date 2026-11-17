@@ -1425,6 +1425,16 @@ describe('applying a Shopify run', () => {
     expect(granted.reads).toEqual([gid(10), gid(20), gid(30)]);
   });
 
+  it.each([
+    ['an embedded frame', '<p>x</p><iframe src="https://evil.example/"></iframe>'],
+    ['an event handler', '<p>x</p><img src="x" onerror="steal()">'],
+  ])('mints no write for a description with %s', async (_what, value) => {
+    fill(2);
+    const id = await previewed();
+    plant(id, gid(10), { descriptionHtml: value });
+    expect(ledger.shopifyApplyOf(id)!.writes.map((w) => w.gid)).toEqual([gid(20)]);
+  });
+
   it('mints no write for a description that is not the bytes the check read: a tag the parser drops, a non-canonical form', async () => {
     fill(2);
     const id = await previewed();
@@ -1551,6 +1561,63 @@ describe('applying a Shopify run', () => {
       ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, unmeasuredConfirmed: true, maxTargets: 1 });
       await applyUnder(undo.status.id, undefined, 'bulk_undo');
       expect(ledger.getStatus(undo.status.id)!.haltReason).not.toBe(BULK_HALT_REASONS.consentOutdated);
+      expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
+    });
+
+    /** The run applied under the current text, undone, and the undo of that undo planned and approved. */
+    const redoOf = async (): Promise<string> => {
+      const id = await describing();
+      await applyUnder(id, CURRENT);
+      const undo = ledger.planUndo(id);
+      if (!undo.ok) throw new Error(undo.reason);
+      await runBulkPreview(undo.status.id, deps());
+      ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+      await applyUnder(undo.status.id, CURRENT, 'bulk_undo');
+      expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
+      const redo = ledger.planUndo(undo.status.id);
+      if (!redo.ok) throw new Error(redo.reason);
+      expect(ledger.getRunForApply(redo.status.id)).toMatchObject({ kind: 'undo', sourceRunId: undo.status.id });
+      await runBulkPreview(redo.status.id, deps());
+      ledger.approve(redo.status.id, { checksum: ledger.computeChecksum(redo.status.id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+      s.requests.length = 0;
+      return redo.status.id;
+    };
+
+    // An undo of an undo writes the new description again: it is held like the run that first wrote it.
+    it('holds an undo of an undo once the connection no longer carries the current text', async () => {
+      const redo = await redoOf();
+      const out = await applyUnder(redo, undefined, 'bulk_undo');
+      expect(out.status).toBe('refused');
+      expect(ledger.getStatus(redo)!.haltReason).toBe(BULK_HALT_REASONS.consentOutdated);
+      expect(s.requests).toEqual([]);
+      expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
+    });
+
+    it('lets an undo of an undo write under the current text', async () => {
+      const redo = await redoOf();
+      await applyUnder(redo, CURRENT, 'bulk_undo');
+      expect(ledger.getStatus(redo)!.haltReason).toBeNull();
+      expect(s.products.get(10)!['descriptionHtml']).toBe('<p>Neu</p>');
+    });
+
+    // A run on a store host whose rows do not make it a Shopify run is read by neither the consent
+    // nor the markup check before sending: it halts before its writer is built.
+    it('halts a run on a store host that is not a Shopify run by its rows, under any connection', async () => {
+      fill(1);
+      vi.stubEnv(FLAG, '1');
+      const id = startedList(source({ seo_title: 'New title', descriptionHtml: '<p>Neu</p>' }));
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      engineDb.getDb().prepare(`UPDATE bulk_targets SET target_key = ? WHERE run_id = ?`)
+        .run(engineDb.enc(`https://${HOST}/admin/api/2025-01/products/10.json`), id);
+      expect(ledger.shopifyApplyOf(id)).toBeNull();
+      expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+      s.requests.length = 0;
+      const out = await applyUnder(id, CURRENT);
+      expect(out.status).toBe('refused');
+      expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.contract);
+      expect(s.requests).toEqual([]);
       expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
     });
   });

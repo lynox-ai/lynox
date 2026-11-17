@@ -30,6 +30,7 @@ import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { shopifyConsentBlock } from './bulk-shopify.js';
+import { isShopifyStoreHostName } from './shopify-graphql.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
 
@@ -278,12 +279,21 @@ async function applyRunEffect(
     ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff);
     return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.shopifyWriteOff), say) };
   }
+  // A run on a store host that is not a Shopify run by its rows (`shopifyApplyOf` null) writes
+  // nothing: neither the consent below nor the markup check before sending would read it.
+  const host = externalHostOf(run.targetSystem);
+  const apply = ledger.shopifyApplyOf(runId);
+  if (apply === null && host !== null && isShopifyStoreHostName(host)) {
+    ledger.halt(runId, BULK_HALT_REASONS.contract);
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.contract), say) };
+  }
   // A Shopify run that writes a field its connection was not confirmed for writes nothing: halted
-  // before its writer is built, on the first call and on every resume. An undo restores what such a
-  // run wrote and is not held back.
-  if (run.kind !== 'undo') {
-    const apply = ledger.shopifyApplyOf(runId);
-    const host = externalHostOf(run.targetSystem);
+  // before its writer is built, on the first call and on every resume. An undo of a run that was not
+  // itself an undo restores what that run found and is not held back; an undo of an undo writes the
+  // new values again and is held like the run that first wrote them.
+  const source = run.kind === 'undo' && run.sourceRunId !== null ? ledger.getRunForApply(run.sourceRunId) : null;
+  const restoresOnly = source !== null && source.kind !== 'undo';
+  if (!restoresOnly) {
     const blocked = apply === null ? [] : shopifyConsentBlock(apply, host === null ? undefined : deps.shopifyGrantOf?.(host));
     if (blocked.length > 0) {
       ledger.halt(runId, BULK_HALT_REASONS.consentOutdated);
