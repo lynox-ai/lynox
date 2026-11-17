@@ -201,7 +201,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     storePipeline('wf-1', makePlanned({ steps: [{ id: `a${ZWSP}`, task: 'One' }, { id: `a${ZWNJ}`, task: 'Two' }, { id: 'b', task: 'Three' }] }));
     const rename = (step_id: string, value: string): Promise<string> => updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id, value }] }, makeAgent(history)) as Promise<string>;
-    expect(await rename('a', 'x')).toBe('Error: Steps #1, #2 all read as "a" (their ids differ only in characters that do not show), so renaming cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#2".');
+    expect(await rename('a', 'x')).toBe('Error: Steps #1 and #2 all read as "a" (their ids differ only in characters that do not show), so this rename cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#2".');
     expect(await rename(`a${ZWSP}`, `x${ZWSP}`)).toBe('Error: rename_step: the new id contains a character that renders as nothing (U+200B). Type the id again.');
     // Outside the shape (`step-id.ts`): a dot, a leading "#", a line break; the id is not quoted back.
     expect(await rename(`a${ZWSP}`, 'x.y')).toBe('Error: rename_step: the new id: a step id is 1 to 40 characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. Choose an id in that form.');
@@ -224,7 +224,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     ] }));
     const edit = (modifications: unknown[]): Promise<string> =>
       updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications } as never, makeAgent(history)) as Promise<string>;
-    expect(await edit([{ action: 'rename_step', step_id: 'ab', value: 'x' }])).toMatch(/^Error: Steps #1, #2 all read as "ab"/);
+    expect(await edit([{ action: 'rename_step', step_id: 'ab', value: 'x' }])).toMatch(/^Error: Steps #1 and #2 all read as "ab"/);
     expect(await edit([{ action: 'update_task', step_id: 'c', value: 'Three!' }])).toMatch(/rename_step for step #2 \(id outside the allowed form\): step_id "#2"/);
     expect(await edit([{ action: 'update_task', step_id: 'c', value: 'Three!' }, { action: 'rename_step', step_id: '#2', value: 'two' }])).toContain('✓ Updated workflow');
     _resetPipelineStore();
@@ -291,7 +291,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   it('points twins at a position another step\'s stored id takes only after that step is renamed', async () => {
     storePipeline('wf-1', makePlanned({ steps: [{ id: 'a\u200B', task: 'One' }, { id: 'a\u200C', task: 'Two' }, { id: '#2', task: 'Three' }] }));
     const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id: 'a', value: 'x' }] }, makeAgent(history));
-    expect(out).toBe('Error: Steps #1, #2 all read as "a" (their ids differ only in characters that do not show), so renaming cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#2", after a rename_step with step_id "#2" that gives step #3, stored with the id "#2", a new id.');
+    expect(out).toBe('Error: Steps #1 and #2 all read as "a" (their ids differ only in characters that do not show), so this rename cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#2", after a rename_step with step_id "#2" that gives step #3, stored with the id "#2", a new id.');
   });
 
   it('says which step "#1" reached when a step stored with that id sits elsewhere', async () => {

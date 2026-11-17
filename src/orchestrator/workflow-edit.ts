@@ -91,21 +91,25 @@ export function byPosition(steps: readonly InlinePipelineStep[], i: number): str
     : `step_id "${ref}", after a rename_step with step_id "${ref}" that gives step #${other + 1}, stored with the id "${ref}", a new id`;
 }
 
+/** Positions as a reader lists them: "#1 and #3", "#1, #3 and #5". */
+function listedPositions(indexes: readonly number[]): string {
+  const positions = indexes.map(i => `#${i + 1}`);
+  return positions.length > 1 ? `${positions.slice(0, -1).join(', ')} and ${positions[positions.length - 1]}` : positions.join('');
+}
+
 /** The refusal for an id that names two steps, which `what` cannot choose between. */
 function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: string, runNames?: ReadonlyMap<string, string>): string {
+  const change = what === 'task update' ? 'this update' : what === 'removal' ? 'this removal' : what === 'renaming' ? 'this rename' : what;
   const alike = alikeIndexes(steps, id);
   if (alike.length === 0) {
     // A run name two steps share: they were stored with the same id, outside the shape.
     const storedId = runNames?.get(id);
     const shared = steps.flatMap((s, i) => (s.id === storedId ? [i] : []));
     const at = shared[shared.length - 1] ?? 0;
-    const positions = shared.map(i => `#${i + 1}`);
-    const listed = positions.length > 1 ? `${positions.slice(0, -1).join(', ')} and ${positions[positions.length - 1]}` : positions.join('');
-    const change = what === 'task update' ? 'this update' : what === 'removal' ? 'this removal' : what === 'renaming' ? 'this rename' : what;
-    return `Error: Steps ${listed} were stored with the same id, which runs as ${quotedId(id)}, so ${change} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, at)}. To end the clash, give one of them its own id (rename_step with step_id "#${at + 1}").`;
+    return `Error: Steps ${listedPositions(shared)} were stored with the same id, which runs as ${quotedId(id)}, so ${change} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, at)}. To end the clash, give one of them its own id (rename_step with ${byPosition(steps, at)}).`;
   }
   const last = alike[alike.length - 1]!;
-  return `Error: Steps ${alike.map(i => `#${i + 1}`).join(', ')} all read as ${quotedId(id)} (their ids differ only in characters that do not show), so ${what} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, last)}.`;
+  return `Error: Steps ${listedPositions(alike)} all read as ${quotedId(id)} (their ids differ only in characters that do not show), so ${change} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, last)}.`;
 }
 
 /** `text` with every `{{<from>…}}` reference to a step's output pointed at `to`. */
