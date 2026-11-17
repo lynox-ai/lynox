@@ -199,9 +199,9 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect((await save(store, 'create', keyProfile(), 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
     const denied = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), 'Deny');
     expect(denied.asked).toHaveLength(1);
-    expect(denied.asked[0]).toContain('This save changes:\n- secret read for vault_keys[0]: KP_KEY_A → KP_KEY_B');
+    expect(denied.asked[0]).toContain('This save changes:\n- secret read: KP_KEY_A → KP_KEY_B');
     const nobody = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), undefined);
-    expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
+    expect(nobody.result).toBe('Blocked: profile "kp" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user\'s acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, and that they can save it again by asking lynox in a chat where they can answer. Do not try to save it in another way.');
     expect(stored(store, 'kp')?.auth?.vault_keys).toEqual(['KP_KEY_A']);
   });
 
@@ -254,7 +254,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
   });
 
   it.each([
-    ['another order of vault_keys', { auth: { type: 'bearer', vault_keys: ['KP_KEY_B', 'KP_KEY_A'] } }, '- secret read for vault_keys[0]: KP_KEY_A → KP_KEY_B'],
+    ['another order of vault_keys', { auth: { type: 'bearer', vault_keys: ['KP_KEY_B', 'KP_KEY_A'] } }, '- secret read (1st): KP_KEY_A → KP_KEY_B\n- secret read (2nd): KP_KEY_B → KP_KEY_A'],
     ['a name moved into another place', { auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], username_key: 'KP_KEY_B' } }, '- secret read for username_key: (none) → KP_KEY_B'],
     ['the key put in the query string', { auth: { type: 'query', query_param: 'key', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] } }, '- how the secret is attached (auth.type): bearer → query'],
   ] as const)('a key profile: %s sends a credential differently with the same names, and is asked about and refused with nobody to ask', async (_n, over, line) => {
@@ -311,6 +311,24 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     const denied = await save(store, 'update', ownGrant({ scope: 'read write' }), 'Deny');
     expect(denied.asked[0]).toContain('- scopes added: read write');
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read,write');
+  });
+
+  it('the question lists where the secret goes and which one is read before what it may do', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant(), 'Allow');
+    const next = ownGrant({ scope: 'read write', audience: 'https://other.example' });
+    next.base_url = 'https://api.mistral.ai/v1';
+    next.auth!.oauth!.client_secret_key = 'SVC_OTHER';
+    next.auth!.vault_keys = ['SVC_CID', 'SVC_OTHER'];
+    const { asked } = await save(store, 'update', next, 'Deny');
+    const lines = asked[0]!.split('\n').filter((l) => l.startsWith('- ')).map((l) => l.split(':')[0]);
+    expect(lines).toEqual([
+      '- address (base_url)',
+      '- secret read (2nd)',
+      '- secret read for oauth.client_secret_key',
+      '- audience',
+      '- scopes added',
+    ]);
   });
 
   it('a save that only takes a scope away narrows the profile: it saves with nobody to ask', async () => {
