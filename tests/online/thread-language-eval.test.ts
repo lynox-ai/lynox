@@ -137,8 +137,10 @@ async function runTurn(model: string, client: Client, want: MessageLanguage, run
 
 /**
  * The title judge: Fireworks deepseek-v4p1-flash (reasoning off, as the adapter sends small calls).
- * It was Claude Haiku until the Anthropic dev key ran out; the judge was checked against Haiku's
- * verdicts on the same titles before the switch, and numbers from the two judges are reported apart.
+ * It was Claude Haiku until the Anthropic dev key ran out. Before the switch this judge read the 48
+ * titles of an old-arm run as Haiku had, all 48, the six wrong-language ones among them; numbers
+ * from the two judges are reported apart. It grades its own model's titles too: the controls and
+ * that comparison are what that rests on.
  */
 const JUDGE_MODEL = 'accounts/fireworks/models/deepseek-v4p1-flash-1017';
 let judge: Client | null = null;

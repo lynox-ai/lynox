@@ -38,8 +38,39 @@ const EN = new Set([
   'tomorrow', 'always', 'never', 'just', 'about', 'into', 'then', 'than',
 ]);
 
+/**
+ * Common words of the other languages the product offers (French, Italian, Spanish, Dutch,
+ * Portuguese, Swedish). Several of them would otherwise count as English (`a`, `no`, `me`, `is`,
+ * `on`) and turn a Spanish or Dutch message English. Two of them in a message and it is not
+ * decided. Left out: words that are also German or English (`du`, `des`, `je`, `um`, `da`, `van`,
+ * `non`, `per`, `do`, `den`, `os`).
+ */
+const OTHER = new Set([
+  'le', 'la', 'les', 'et', 'est', 'une', 'un', 'que', 'qui', 'pour', 'pas', 'vous', 'nous', 'il',
+  'avec', 'toi', 'moi', 'sont', 'mais', 'très', 'el', 'los', 'las', 'de', 'del', 'y', 'muy', 'por',
+  'para', 'con', 'una', 'mi', 'pero', 'se', 'lo', 'gusta', 'che', 'della', 'sono', 'sia', 'troppo',
+  'e', 'questo', 'het', 'een', 'ik', 'niet', 'voor', 'ons', 'dit', 'zijn', 'wij', 'eu', 'não', 'é',
+  'uma', 'och', 'jag', 'har', 'är', 'inte', 'att', 'det', 'som', 'på', 'bor', 'en',
+]);
+const OTHER_WORDS = 2;
+
 /** Each side's count must reach this, and beat the other side by more than double. */
 const MIN_WORDS = 2;
+
+interface Count { de: number; en: number; other: number }
+
+function count(text: string): Count {
+  const c: Count = { de: 0, en: 0, other: 0 };
+  for (const raw of text.split(/[^\p{L}']+/u)) {
+    if (raw.length === 0) continue;
+    const word = raw.toLowerCase();
+    if (OTHER.has(word)) c.other += 1;
+    else if (DE.has(word)) c.de += 1;
+    else if (EN.has(word)) c.en += 1;
+    else if (/^[a-zäöüß]+$/.test(raw) && /[äöüß]/.test(raw)) c.de += 1;
+  }
+  return c;
+}
 
 export function messageLanguage(text: string): MessageLanguage | null {
   const plain = text
@@ -47,16 +78,16 @@ export function messageLanguage(text: string): MessageLanguage | null {
     .replace(/`[^`\n]*`/g, ' ')
     .replace(/\bhttps?:\/\/\S+/g, ' ')
     .replace(/[„“"«»][^„“"«»\n]*[“"«»]/g, ' ');
-  let de = 0;
-  let en = 0;
-  for (const raw of plain.split(/[^\p{L}']+/u)) {
-    if (raw.length === 0) continue;
-    const word = raw.toLowerCase();
-    if (DE.has(word)) de += 1;
-    else if (EN.has(word)) en += 1;
-    else if (/^[a-zäöüß]+$/.test(raw) && /[äöüß]/.test(raw)) de += 1;
-  }
-  if (de >= MIN_WORDS && de > 2 * en) return 'de';
-  if (en >= MIN_WORDS && en > 2 * de) return 'en';
-  return null;
+  const all = count(plain);
+  if (all.other >= OTHER_WORDS) return null;
+  const language: MessageLanguage | null = all.de >= MIN_WORDS && all.de > 2 * all.en ? 'de'
+    : all.en >= MIN_WORDS && all.en > 2 * all.de ? 'en'
+    : null;
+  if (language === null) return null;
+  // The opening words are the user's own instruction; what follows may be pasted text in another
+  // language ("Fass das zusammen: The quarterly report …"). If the opening leans the other way,
+  // the message is not decided.
+  const head = count(plain.trimStart().split(/[:\n.?!]/u, 1)[0] ?? '');
+  const other = language === 'de' ? head.en > head.de : head.de > head.en;
+  return other ? null : language;
 }

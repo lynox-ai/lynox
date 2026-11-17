@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { runTaskTitle } from './run-task-turn.js';
+import { runTaskTitle, RUN_TASK_LEAD } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -1283,13 +1283,7 @@ export class Session {
     // cache. Computed once so the durable persist below and the agent buffer
     // carry byte-identical user content (keeps the count-based eager-persist
     // delta aligned — no duplicate row).
-    // The marker also names the language the user wrote in, where the words settle it: the
-    // user's own words, without a loaded-context preamble or a scheduled run's engine lead.
-    const ownWords = Array.isArray(task)
-      ? task.flatMap(b => (typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'text'
-        && typeof (b as { text?: unknown }).text === 'string' ? [(b as { text: string }).text] : [])).join('\n')
-      : task;
-    const userContent = withCurrentTimePrefix(task, this._userTimezone ?? undefined, messageLanguage(llmTitleSource(ownWords)));
+    const userContent = withCurrentTimePrefix(task, this._userTimezone ?? undefined, this._writtenIn(task, runOptions));
 
     // Seq floor for this run's footprint — captured BEFORE the durable persist
     // so the failed-turn catch flips exactly the rows this run created.
@@ -2468,6 +2462,25 @@ export class Session {
    * caller. `fast` resolves against the active provider, so under hybrid it
    * follows the configured fast-tier model.
    */
+  /**
+   * The language the marker names for this turn ({@link withCurrentTimePrefix}), or `null` for none.
+   * Read from the user's own words: without a loaded-context preamble, and for a scheduled run the
+   * task's title and description without the engine's lead. None for an internal run (a compaction
+   * or a summary writes in the thread's language, which its own prompt asks for; its English lead
+   * would read as English) and none where the instance has a language set (`config.language`): that
+   * explicit preference is in the system prompt and must not be contradicted turn by turn.
+   */
+  private _writtenIn(task: string | unknown[], runOptions: RunOptions | undefined): MessageLanguage | null {
+    if (runOptions?.internal === true) return null;
+    if (languageOverrideSuffix(this.engine.config.language) !== '') return null;
+    const words = Array.isArray(task)
+      ? task.flatMap(b => (typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'text'
+        && typeof (b as { text?: unknown }).text === 'string' ? [(b as { text: string }).text] : [])).join('\n')
+      : task;
+    const own = runTaskTitle(words) !== null ? words.replace(RUN_TASK_LEAD, '') : stripLoadedContext(words);
+    return messageLanguage(own);
+  }
+
   private async _generateLLMTitle(firstMessage: string, placeholder: string): Promise<void> {
     try {
       const provider = getActiveProvider();

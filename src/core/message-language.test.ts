@@ -28,6 +28,25 @@ describe('messageLanguage', () => {
     expect(messageLanguage('')).toBeNull();
   });
 
+  it('leaves every other offered language undecided, not English', () => {
+    for (const message of [
+      'On a besoin de toi, il me faut une réponse avant vendredi.',
+      'Non mi piace, a me sembra che il prezzo sia troppo alto e no.',
+      'No me gusta, a mi me parece que el precio es muy alto.',
+      'Dit is een test en het is belangrijk voor ons bedrijf.',
+      'Eu não sei se a reunião do projeto é amanhã, me diga.',
+      'Jag bor i Stockholm och jag har en bil i garaget.',
+    ]) expect(messageLanguage(message), message).toBeNull();
+  });
+
+  it('leaves undecided a message whose opening instruction is in the other language than the pasted text', () => {
+    expect(messageLanguage('Bitte beantworte diese Mail kurz:\n\nHi, could you send us the updated price list for the spring season? We would like to place an order by Friday and need the new numbers for that.')).toBeNull();
+    expect(messageLanguage('Fass das zusammen: The quarterly report shows that revenue grew by 4 % and that the costs of the new warehouse were higher than planned.')).toBeNull();
+    expect(messageLanguage('Summarize this for me: Der Quartalsbericht zeigt, dass der Umsatz um 4 % gewachsen ist und die Kosten für das neue Lager höher waren als geplant.')).toBeNull();
+    // Control: an opening in the same language decides as before.
+    expect(messageLanguage('Please make exactly these three tool calls, one after the other, without asking: 1) api_setup with action list.')).toBe('en');
+  });
+
   it('counts words spelled alike in both languages for neither side', () => {
     // "in", "an", "will", "am", "also", "so", "was", "die", "es", "da": none of them may decide.
     expect(messageLanguage('in an will am also so was die es da')).toBeNull();
