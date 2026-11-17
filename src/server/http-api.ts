@@ -2736,8 +2736,12 @@ export class LynoxHTTPApi {
     if (!writesMandateTrail(principal)) return true;
     // Asked again here, not only at sign-in: a revoke can land while the body is still arriving,
     // and a change that has not begun by the revoke must not begin. One already begun is not
-    // stopped here; its attempt row stands before the revoke row.
-    if (principalHasEnded(principal, (id) => this._mandateLive(id))) {
+    // stopped here; its attempt row stands before the revoke row. Asked as sign-in asked: of the
+    // same store (without one, sign-in has refused every mandate), for the grant the cookie names
+    // (a session cookie always names one).
+    const endedId = mandateIdOf(principal);
+    const ends = this.engine?.getMandateEnds() ?? null;
+    if (endedId !== undefined && ends !== null && !ends.isLive(endedId)) {
       errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
       return false;
     }

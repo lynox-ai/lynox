@@ -23786,7 +23786,7 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
         const origEnds = engine['getMandateEnds'];
         engine['getAuditLog'] = () => null;
         // A store that takes the empty list, so the route answers 200 when it runs at all.
-        engine['getMandateEnds'] = () => ({ revoke: () => false });
+        engine['getMandateEnds'] = () => ({ revoke: () => false, isLive: () => true });
         const revoke = (): Promise<Response> => as(ADMIN, '/api/admin/mandates/revoke', { method: 'POST', body: JSON.stringify({ revoked_mandate_ids: [] }) }, freshBase);
         try {
           await withEnv(MANAGED, async () => {
