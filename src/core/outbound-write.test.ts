@@ -1128,6 +1128,34 @@ describe('a header name longer than the question shows', () => {
   });
 });
 
+// Each header is bounded on its own, their number is not: all of them are read under one budget
+// (READING_BUDGET_CHARS, 600 000). A plain ASCII text has one reading, which costs its length and
+// 64 more; a header is read twice, its name and its masked value. 2000 headers with a name of 10
+// and a value of 162 characters cost 2000 × (10 + 64 + 162 + 64) = 600 000: exactly the budget.
+describe('the headers of a write, read together under one budget', () => {
+  const many = (extra: number): Record<string, string> => Object.fromEntries(
+    Array.from({ length: 2000 }, (_, i) => [`x-hdr-${String(i).padStart(4, '0')}`, 'v'.repeat(162 + (i === 0 ? extra : 0))]));
+
+  it('reads them at the budget, and counts them unreadable one character past it', () => {
+    const at = headersForQuestion(many(0), (t) => t, () => 'show');
+    expect('lines' in at && at.lines.length).toBe(2000);
+    const past = headersForQuestion(many(1), (t) => t, () => 'show');
+    expect('unshowable' in past && past.unshowable).toEqual({ reason: 'unreadable' });
+  });
+
+  it('keeps every header in the key of a write whose headers are unreadable', () => {
+    const past = headersForQuestion(many(1), (t) => t, () => 'show');
+    expect(past.keyed?.length).toBe(2000);
+    expect(past.keyed?.[0]).toEqual(['x-hdr-0000', 'v'.repeat(163)]);
+  });
+
+  // A refusal of one header comes before the budget runs out, and is kept as it is.
+  it('names a header that holds a secret in an encoded form, though the budget would run out after it', () => {
+    const headers = { 'x-a': '%73ecret', ...many(1) };
+    expect(headersForQuestion(headers, (t) => t.replaceAll('secret', '***'), () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'x-a' } });
+  });
+});
+
 // The gate reads one call's body about ten times; the reading is kept by a digest of body and headers.
 describe('the body read once per body and headers', () => {
   it('reads the same body under other headers anew', () => {

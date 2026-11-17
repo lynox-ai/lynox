@@ -351,6 +351,10 @@ function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: st
     case 'escaped-secret':
       return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Write the value plainly.`);
+    case 'unreadable':
+      // Not refused here: an unreadable part is refused under a mandate or at a connected account
+      // with the other parts, and asked about with a note otherwise.
+      return `Blocked: the headers of this ${write} to ${service} have too many percent-encoded characters for the approval question to check them for a stored secret. Nothing was sent.`;
     case 'secret-name':
       return `Blocked: this ${write} to ${service} sets a header whose name holds a stored secret. A header name is shown in the approval question as it is. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Put the secret in the value, as secret:NAME.`);
@@ -3750,7 +3754,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (asksForWrite) {
       const counters = agent.sessionCounters;
       const mandate = !isOwnerPrincipal(agent.principal);
-      if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, service(), mandate));
+      // Headers too costly to read are an unreadable part like the body: refused below under a
+      // mandate or at a connected account, asked with a note to the owner.
+      const headersUnreadable = 'unshowable' in askedHeaders && askedHeaders.unshowable.reason === 'unreadable';
+      if ('unshowable' in askedHeaders && !headersUnreadable) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, service(), mandate));
       const batch = agent.approvalBatch?.();
       // How many calls of this batch are this same call; an Allow sends that many (`approvedInBatch`).
       // Outside a batch an answer covers this call alone, so the question names one.
@@ -3834,11 +3841,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           // secret no one can see: refused like one, with its own way out.
           const unreadablePart = shown !== undefined && 'unshowable' in shown && shown.unshowable === 'unreadable' ? 'body'
             : query?.unreadable === true ? 'query'
+              : headersUnreadable ? 'headers'
               // The URL as the question reads it: the path with the query's keys (`pathForQuestion`).
               : !pathReadable(input.url, mask) ? 'path'
                 : undefined;
           const refusal = unreadablePart !== undefined
-            ? `Blocked: the ${unreadablePart} of this ${refusedAs} to ${service()} has too many percent-encoded characters for the approval question to check it for a stored secret. Nothing was sent. Send the values as plain text where the service accepts that, or fewer of them per request. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in ${service()}.`
+            ? `Blocked: the ${unreadablePart} of this ${refusedAs} to ${service()} ${unreadablePart === 'headers' ? 'have' : 'has'} too many percent-encoded characters for the approval question to check ${unreadablePart === 'headers' ? 'them' : 'it'} for a stored secret. Nothing was sent. Send the values as plain text where the service accepts that, or fewer of them per request. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in ${service()}.`
             : bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
               ? `Blocked: the body of this ${refusedAs} to ${service()} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
@@ -3875,7 +3883,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // The headers' names leave the box with the question; their values stay on it, like the body's.
         const headersBlock = 'lines' in askedHeaders && askedHeaders.lines.length > 0
           ? pv` It sets the headers ${askedHeaders.names.join(', ')}.${onBoxBlock(askedHeaders.lines.join('\n'))}`
-          : pv``;
+          : headersUnreadable
+            ? pv` The headers have too many percent-encoded characters to check for a stored secret, so they are not shown here. If you do not know what this write sends, decline it.`
+            : pv``;
         const bodyBlock = shown !== undefined && 'text' in shown
           ? onBoxBlock(shown.text)
           : !bodyGoesOut ? pv``
