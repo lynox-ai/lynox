@@ -134,6 +134,16 @@ describe('artifact_save refuses the eviction placeholder as content', () => {
     expect(store.list().length).toBe(before);
   });
 
+  it('the refusal names the placeholder and does not claim a saved document', async () => {
+  // The refusal says what the content is, never that a document was saved: for the old in-field
+  // form, the file may hold no document at all.
+    const { forms } = await placeholdersFor(DOCUMENT);
+    const err = await artifactSaveTool.handler({ title: 'Pitch v3', content: forms[0]![1] }, makeAgent(store)).then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toContain("artifact_save refused: `content` contains the engine's placeholder (");
+    expect(err?.message).toContain('in place of text it took out of an earlier call — it is not a document, and it does not show that a document was saved.');
+    expect(err?.message).not.toMatch(/already saved|a saved document/);
+  });
+
   it('either form under a heading is refused too', async () => {
     const { forms } = await placeholdersFor(DOCUMENT);
     for (const [form, placeholder] of forms) {

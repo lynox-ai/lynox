@@ -131,10 +131,10 @@ export function isInArtifactsRoot(realPath: string): boolean {
 export function refuseEvictionPlaceholder(written: string, realPath: string): void {
   if (!isInArtifactsRoot(realPath) || !containsEvictionMarker(written)) return;
   throw new Error(
-    'refused: the text contains the engine\'s placeholder for a saved artifact ("[evicted after ' +
+    'refused: the text contains the engine\'s placeholder ("[evicted after ' +
     'successful save …]", "[The body of this document was removed …]" or "[The content of this ' +
     'call was the engine\'s placeholder …]"). The engine puts it in ' +
-    'your context where an artifact it already saved used to be — it is not content. ' +
+    'your context in place of text it took out of an earlier call — it is not content. ' +
     'Nothing was written. Write the actual text instead; artifact_history lists earlier versions ' +
     'of an artifact.',
   );

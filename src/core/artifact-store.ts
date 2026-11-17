@@ -43,8 +43,8 @@ export interface ArtifactMeta {
   /** Bumped on every save AND on every external edit (file tools / bash)
    *  detected by reconcile(). Legacy entries without it normalize to 1. */
   version: number;
-  /** Set when the content file is the engine's placeholder for a saved body
-   *  rather than a document: a save that stored the placeholder lost the
+  /** Set when the content file is the engine's placeholder rather than a
+   *  document: a save that stored the placeholder lost the
    *  document. `artifact_save` and the file tools refuse such content now;
    *  this marks files written before they did, or by a path without that
    *  check. Computed on read, never written to the index; absent when the file
@@ -88,11 +88,11 @@ function isLostOnSave(bytes: number, content: string): boolean {
   return bytes <= LOST_ON_SAVE_MAX_BYTES && containsEvictionMarker(content);
 }
 
-/** Thrown by {@link ArtifactStore.save} for content that holds only the engine's placeholder for
- *  an already saved document ({@link isLostOnSave}). Each caller words it for whoever reads it. */
+/** Thrown by {@link ArtifactStore.save} for content that holds only the engine's placeholder, not
+ *  a document ({@link isLostOnSave}). Each caller words it for whoever reads it. */
 export class ArtifactPlaceholderError extends Error {
   constructor() {
-    super('The content holds only the engine\'s placeholder for a saved document, not a document. Nothing was saved.');
+    super('The content holds only the engine\'s placeholder, not a document. Nothing was saved.');
     this.name = 'ArtifactPlaceholderError';
   }
 }
