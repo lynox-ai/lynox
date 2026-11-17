@@ -2123,17 +2123,18 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const { mode, check } = entry.destructive;
     const detail = check ? check(input, { autonomy, parentProvider }) : '';
     if (detail !== null) {
-      // A WarningPayload carries its OWN fully-formed GO message (spawn-agent
+      // A built-in tool's WarningPayload carries its OWN fully-formed GO message (spawn-agent
       // deep-tier consent: tier + cost + provider). Render it verbatim — the
       // generic "modifies external data" label is the wrong framing for a
       // cost-consent gate. Plain-string checks (the action-label suffix used by
-      // google_drive etc.) keep their existing wrapped form below. A payload
+      // google_drive etc.) keep their existing wrapped form below. A built-in's payload
       // returned in autonomous mode is also rendered verbatim; in practice the
       // spawn check returns null in autonomous (the handler clamps instead), so
       // this branch is reached only interactively.
-      // A tool from outside the engine (a plugin's) wrote its check itself: what it returns is
-      // shown as its value after its marked name, never as the dialog's own text, so it cannot
-      // word a dialog to read as a built-in tool's.
+      // A tool from outside the engine (a plugin's) wrote its check itself: whatever it returns
+      // (a label, a payload) is shown as its value after its marked name, never as the dialog's
+      // own text, so it cannot word a dialog to read as a built-in tool's; unattended it is
+      // blocked with the reason of its mode, so a self-confirming tool still meets the gate.
       const external = !BUILTIN_TOOL_NAMES.has(toolName);
       const blockReason = mode === 'data'
         ? '[BLOCKED — destructive data operation needs your OK]'
