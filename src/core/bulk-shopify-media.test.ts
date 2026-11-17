@@ -406,7 +406,8 @@ describe('reading a store\'s images', () => {
 describe('applying a media run', () => {
   const CURRENT_GRANT = { consent_version: SHOPIFY_CONSENT_VERSION };
   const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply', grant: unknown = CURRENT_GRANT): Promise<{ status: string }> => runBulkEffect(id, effect, {
-    // A connection confirmed under the current consent text: the alt text is beyond what an older one covers.
+    // By default a connection confirmed under the current consent text: the alt text is beyond what an
+    // older one covers. The test of the hold passes another grant.
     ledger, trailFor: () => null, shopifyGrantOf: () => grant,
     // The worker's own writer: the form it reads and writes with comes from the run's rows.
     writerFor: (run) => bulkWriterFor(run, null, (r) => externalRunWriter(r, ledger, (rr, _q, _r, shopifyApply) => {
