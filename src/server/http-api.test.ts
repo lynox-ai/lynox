@@ -12479,9 +12479,26 @@ describe('LynoxHTTPApi', () => {
       expect(bulkLedger.finishPreview(id)).toBe(true);
       const approve = (): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true, maxTargets: 1 }) });
 
+      // The store's own cause, as the run page says it, not a missing credential: this process has
+      // no control plane, so it is a self-hosted one.
+      const { ApiStore } = await import('../core/api-store.js');
+      mockGetApiStore.mockReturnValue(new ApiStore());
       const refused = await approve();
-      expect(((await refused.json()) as { error: string }).error).toMatch(/stored credential for this run's host cannot be attached/);
+      expect(((await refused.json()) as { error: string }).error).toBe('lynox reaches Shopify stores only on an instance run by lynox. You run this instance yourself.');
       expect(refused.status).toBe(409);
+      // With a control plane but without the parts a store pass needs, it is one lynox has to set up.
+      // (Set and removed by hand: `vi.unstubAllEnvs` would also drop this file's own stubs.)
+      process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.example.invalid';
+      process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+      try {
+        const notSetUp = await approve();
+        expect(((await notSetUp.json()) as { error: string }).error).toBe('Shopify is not set up on your instance. lynox has to fix this, not you; resuming helps only after that.');
+        expect(notSetUp.status).toBe(409);
+      } finally {
+        delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+        delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+        mockGetApiStore.mockReturnValue(null);
+      }
 
       // Not the network policy: a GID read as an address would be refused there. The store's
       // credential needs a store pass, which the S5 measurement exercises (PRD shopify-preset §16.10).

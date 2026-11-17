@@ -27,6 +27,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, resourceKindOf, type BulkRunForApply } from './bulk-ledger.js';
+import type { StoreAttachRefusal } from './shopify-host.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import {
   BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, writeMethodOf,
@@ -120,13 +121,14 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null } = {}): ExternalClient {
+function client(opts: { attach?: boolean; refuse?: StoreAttachRefusal; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
-    attach: async (u, headers, method) => {
+    attach: async (u, headers, method, out) => {
       opts.methods?.push(method);
+      if (opts.refuse !== undefined) { if (out) out.refusal = opts.refuse; return null; }
       if (opts.attach === false) return null;
       headers['authorization'] = `Bearer ${TOKEN}`;
       return opts.connection ? opts.connection(u, method) : { id: 'fixture', grantId: 'grant-1' };
@@ -641,6 +643,25 @@ describe('applying an external run', () => {
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(noCred) })).status).toBe('halted');
       expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.credential);
       expect(s.requests.length).toBe(before);
+    } finally {
+      restore();
+    }
+  });
+
+  it('halts on the store\'s own cause, not on a missing credential, leaving the targets unwritten and pending', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      for (const cause of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable'] as const) {
+        engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+        const c = client({ refuse: cause });
+        const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), client());
+        const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(out.status, cause).toBe('halted');
+        expect(ledger.getStatus(runId), cause).toMatchObject({ haltReason: BULK_HALT_REASONS[cause], applied: 0, failed: 0 });
+        expect(ledger.listPending(runId), cause).toEqual([0, 1]);
+      }
+      expect(s.requests.filter((r) => r.method === 'PATCH')).toEqual([]);
     } finally {
       restore();
     }

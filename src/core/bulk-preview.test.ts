@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_MAX_PREVIEWED_RUNS, canonicalJson, delegatedPlannerOf, type PlannedTarget } from './bulk-ledger.js';
+import { SHOPIFY_PAGES, type StoreAttachRefusal } from './shopify-host.js';
 import { BULK_NOTICES } from './bulk-notices.js';
 import {
   BULK_RETRY_AFTER_CAP_MS, BulkHostBudget, beforeOverFields, canonicalHost, externalClient, externalTargetKey,
@@ -83,14 +84,15 @@ function contractFor(keys: string[]): ReturnType<typeof mintBulkContract> {
 }
 
 /** A client wired like the worker's, with an attach that fills the header. */
-function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all'; recordRead?: (url: string) => boolean; connection?: () => AttachedConnection | null } = {}): ExternalClient {
+function client(opts: { attach?: boolean; refuse?: StoreAttachRefusal; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all'; recordRead?: (url: string) => boolean; connection?: () => AttachedConnection | null } = {}): ExternalClient {
   const ctx = createToolContext({});
   if (opts.policy) applyNetworkPolicy(ctx, opts.policy, undefined);
   return externalClient({
     contract: contractFor(opts.keys ?? [0, 1, 2, 3, 4, 5, 9, 'x'].map(url)),
     hostPolicy: ctx,
     ackHosts: undefined,
-    attach: async (_u, headers) => {
+    attach: async (_u, headers, _m, out) => {
+      if (opts.refuse !== undefined) { if (out) out.refusal = opts.refuse; return null; }
       if (opts.attach === false) return null;
       headers['authorization'] = `Bearer ${TOKEN}`;
       return opts.connection?.() ?? { id: 'fixture', grantId: 'grant-1' };
@@ -382,6 +384,42 @@ describe('the preview effect', () => {
       expect(s.requests).toEqual([]);
     } finally {
       restore();
+    }
+  });
+
+  it('a store\'s own refusal reads as its cause, and the preview halts on it, not on credential', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      expect(await client({ refuse: 'shopifyNotCleared' }).get(url(0))).toEqual({ kind: 'store_refused', reason: 'shopifyNotCleared' });
+      for (const cause of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable'] as const) {
+        engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+        const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+        expect((await runBulkPreview(runId, previewDeps(client({ refuse: cause })))).status, cause).toBe('halted');
+        expect(ledger.getStatus(runId)!.haltReason, cause).toBe(BULK_HALT_REASONS[cause]);
+      }
+      expect(s.requests).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a store\'s refusal at the send stays blocked: the request, not the store\'s set-up, is refused', async () => {
+    // The send-time refusals of a store request depend on the request (its path, body, headers),
+    // so they name no cause of the store's and offer no resume as one.
+    for (const [thrown, kind] of [
+      ['Blocked: request to a Shopify store refused: a store pass reaches only its own store. Do not retry it with changed headers or a changed address.', { kind: 'blocked' }],
+      [`Blocked: ${SHOPIFY_PAGES}`, { kind: 'blocked' }],
+      ['Blocked: hostname "shop.example" not in network allow-list', { kind: 'blocked' }],
+      ['socket hang up', { kind: 'failed' }],
+    ] as const) {
+      const restore = setPinnedTransportForTests(async () => { throw new Error(thrown); });
+      try {
+        vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+        expect(await client().get(url(0)), thrown).toEqual(kind);
+      } finally {
+        restore();
+      }
     }
   });
 

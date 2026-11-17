@@ -136,6 +136,7 @@ function invalidFor(read: ExternalRead): BulkInvalidReason | null {
 function haltFor(read: ExternalRead): BulkHaltReason | null {
   switch (read.kind) {
     case 'no_credential': return BULK_HALT_REASONS.credential;
+    case 'store_refused': return BULK_HALT_REASONS[read.reason];
     case 'unauthorized': return BULK_HALT_REASONS.unauthorized;
     case 'blocked': return BULK_HALT_REASONS.blocked;
     case 'not_granted': return BULK_HALT_REASONS.contract;
@@ -193,7 +194,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // was on sends nothing once it is off.
   if (shopify && !(deps.shopifyEnabled ?? shopifyBulkReadEnabled)()) return halt(BULK_HALT_REASONS.shopifyReadOff);
   const endpoint = shopify ? shopifyGraphqlEndpoint(host) : null;
-  if (shopify && endpoint === null) return halt(BULK_HALT_REASONS.unavailable);
+  // The preset pins no API version: a setting of lynox's, which resuming does not change.
+  if (shopify && endpoint === null) return halt(BULK_HALT_REASONS.shopifyNoApiVersion);
   if (shopify && list.state === 'pending') return await readShopifyList(list);
   client = shopify
     ? deps.clientFor(run, undefined, { phase: 'read', targets: ledger.externalTargetKeys(runId) })

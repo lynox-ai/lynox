@@ -172,9 +172,20 @@ export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' |
 const BULK_RESTART_AS_IS = new Set([
 	'unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized',
 	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap', 'unrecorded', 'listReadFailed', 'shopInactive',
+	// A store's own cause: going on helps once it is gone (lynox fixed it, or a few minutes passed).
+	'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable',
 ]);
 /** Halts a restart would meet again on the same targets: the run has to be planned again. */
-const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff']);
+const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff', 'shopifySelfHosted', 'shopifyNoApiVersion']);
+
+/** The note beside a run no restart moves on: plan it again, as a rule. Not for a self-hosted
+ *  instance, which no plan reaches a store from, and none for a missing setting of lynox's, whose
+ *  own sentence already says that going on does not help (U-232). */
+export function bulkRestartNoneNote(haltKey: string | null): 'bulk.restart.none' | 'bulk.restart.none_self_hosted' | null {
+	if (haltKey === 'shopifySelfHosted') return 'bulk.restart.none_self_hosted';
+	if (haltKey === 'shopifyNoApiVersion') return null;
+	return 'bulk.restart.none';
+}
 
 /** How a planned run that halted on a failure goes on: read on, read its list on, judge on, judge
  *  on under a higher spend limit — or not at all (`none`, `no_judge`, `judge_own_key`). Null for a
@@ -243,6 +254,7 @@ export function bulkHaltText(
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
 	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff', 'markupAddedByShop',
+	'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */

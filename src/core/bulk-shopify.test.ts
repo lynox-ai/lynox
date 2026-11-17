@@ -10,6 +10,13 @@ vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn().mockResolvedValue([{ address: '23.227.38.65', family: 4 }]) },
 }));
 
+// A preset without its pinned API version, for one test: the run then has no endpoint at all.
+const noApiVersion = vi.hoisted(() => ({ on: false }));
+vi.mock('./shopify-graphql.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./shopify-graphql.js')>();
+  return { ...actual, shopifyGraphqlEndpoint: (host: string) => (noApiVersion.on ? null : actual.shopifyGraphqlEndpoint(host)) };
+});
+
 import dns from 'node:dns/promises';
 import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -845,9 +852,11 @@ describe('the worker\'s client for a Shopify run', () => {
     const run = { id, targetSystem: `http:${HOST}`, contractJson: ledger.getListRun(id)!.contractJson, delegatedPlanner: null };
     const page0 = { form: 'shopify_products_list', afterId: 0, filters: {} } as const;
     const read10 = { form: 'shopify_product_read', gid: gid(10) } as const;
-    // Past the grant: what stops it is the missing stored credential, nothing is sent.
-    expect(await factory(run, undefined, { phase: 'list', afterId: 0, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'no_credential' });
-    expect(await factory(run, undefined, { phase: 'read', targets: [gid(10)] })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'no_credential' });
+    // Past the grant: what stops it is the store's own refusal, named through the worker's attach
+    // (this process has no control plane, so it is a self-hosted one), and nothing is sent.
+    const selfHosted = { kind: 'store_refused', reason: 'shopifySelfHosted' };
+    expect(await factory(run, undefined, { phase: 'list', afterId: 0, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual(selfHosted);
+    expect(await factory(run, undefined, { phase: 'read', targets: [gid(10)] })!.graphqlRead(ENDPOINT, read10)).toEqual(selfHosted);
     // The stored contract alone grants no read; a grant holds its own body and no other.
     expect(await factory(run)!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
     expect(await factory(run, undefined, { phase: 'list', afterId: 5, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
@@ -877,6 +886,20 @@ describe('the switch', () => {
     s.requests.length = 0;
     expect((await runBulkPreview(id2, deps({ shopifyEnabled: () => false }))).status).toBe('halted');
     expect(ledger.getStatus(id2)!.haltReason).toBe(BULK_HALT_REASONS.shopifyReadOff);
+    expect(minted).toEqual([]);
+    expect(s.requests).toEqual([]);
+  });
+
+  it('halts as a missing setting of lynox\'s, not as an unreachable store, when the preset pins no API version', async () => {
+    fill(3);
+    const id = startedList();
+    noApiVersion.on = true;
+    try {
+      expect((await runBulkPreview(id, deps())).status).toBe('halted');
+    } finally {
+      noApiVersion.on = false;
+    }
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.shopifyNoApiVersion);
     expect(minted).toEqual([]);
     expect(s.requests).toEqual([]);
   });

@@ -44,6 +44,14 @@ export function isShopifyAdminUrl(url: string): boolean {
  * "temporarily" unavailable, since no refusal here has an end the engine knows of.
  */
 
+/**
+ * Why a bulk run's request to a store got no pass, by the halt it ends in (`BULK_HALT_REASONS`):
+ * self-hosted, a part missing, the control plane did not answer or refused, or the run could not
+ * be recorded as one that reads the store. A missing connection is not among them: that halt is
+ * `credential`, as for any host.
+ */
+export type StoreAttachRefusal = 'shopifySelfHosted' | 'shopifyNotSetUp' | 'shopifyUnconfirmed' | 'shopifyNotCleared' | 'containmentUnwritable';
+
 /** A request to a store carried a `secret:` reference, while a store pass would be possible. */
 export const SHOPIFY_CREDENTIAL_REFERENCE =
   'a request to a Shopify store may not carry a credential reference (secret:…). Remove it and send the request again; the engine attaches the store connection itself.';
