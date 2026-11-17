@@ -3,6 +3,11 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { setLocale, getLocale, t } from '../i18n.svelte.js';
 
+// A margin or a padding class of any side or axis, also behind variants (`sm:`, `hover:`) and `!`:
+// `m`/`p` with one of `lrxytbse`, `bs` or `be`, or none. Not `max-w-`, `min-w-`, `place-`, `pointer-`.
+const MARGIN_CLASS = /^(?:[^:\s]+:)*!?-?m(?:[lrxytbse]|bs|be)?-/;
+const PADDING_CLASS = /^(?:[^:\s]+:)*!?-?p(?:[lrxytbse]|bs|be)?-/;
+
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -433,6 +438,16 @@ describe('the dialog', () => {
 		d = await openDialog();
 		expect(boxes(d, 'released')).toEqual([['FX-ownerperson', 'FX-ownone', 'FX-owntwo']]);
 		expect(foreignPlaces(d).filter(([, apart]) => !apart)).toEqual([]);
+		// Two plans run again and both lapse: the sentence after names both.
+		reset();
+		const both = FULL();
+		both['alsoReleased'] = [{ id: 'p-x', title: 'FX-relx' }, { id: 'p-y', title: 'FX-rely' }];
+		both['memberChanges'] = [];
+		both['lapsing'] = [{ id: 'p-x', title: 'FX-relx' }, { id: 'p-y', title: 'FX-rely' }];
+		await open([ENDED], [both]);
+		d = await openDialog();
+		expect(boxes(d, 'lapsing')).toEqual([['FX-relx', 'FX-rely']]);
+		expect(foreignPlaces(d).filter(([, apart]) => !apart)).toEqual([]);
 	});
 
 	it('the dialog\'s name, read from its heading, carries no mark', async () => {
@@ -784,8 +799,8 @@ describe('the library\'s own sentences', () => {
 		expect(inSentence?.textContent).toBe('Daily');
 		for (const b of [card!.querySelector('bdi[data-foreign-value]')!, inSentence!]) {
 			const classes = [...b.classList];
-			expect(classes.filter((c) => /^-?m[lrxytbse]?-/.test(c))).toEqual([]);
-			expect(classes.filter((c) => /^-?p[xylrtbse]?-/.test(c))).toEqual(['px-1']);
+			expect(classes.filter((c) => MARGIN_CLASS.test(c))).toEqual([]);
+			expect(classes.filter((c) => PADDING_CLASS.test(c))).toEqual(['px-1']);
 			expect(classes).toContain('box-decoration-clone');
 			// The 1 px edge that draws the box on every ground, in a title and in a sentence.
 			expect(classes.filter((c) => c.startsWith('border'))).toEqual(['border', 'border-text-subtle']);
@@ -828,5 +843,16 @@ describe('the library\'s own sentences', () => {
 		const places = foreignPlaces(banner!);
 		expect(places.map(([v]) => v).sort()).toEqual(['FX-person', 'FX-wfname']);
 		expect(places.filter(([, apart]) => !apart)).toEqual([]);
+	});
+});
+
+describe('the spacing class patterns of these tests', () => {
+	it('catch every margin and padding form, and no other class', () => {
+		for (const c of ['mx-1', 'mbs-1', 'mbe-2', 'sm:mx-1', '!mx-1', 'hover:sm:-mt-1', 'ms-0.5', 'm-0']) expect(MARGIN_CLASS.test(c), c).toBe(true);
+		for (const c of ['px-1', 'pbs-1', 'pbe-2', 'sm:px-1', '!px-1', 'ps-0.5', 'p-0']) expect(PADDING_CLASS.test(c), c).toBe(true);
+		for (const c of ['max-w-1', 'min-w-0', 'mask-x', 'place-items-center', 'pointer-events-none', 'font-mono', 'bg-bg-muted', 'box-decoration-clone']) {
+			expect(MARGIN_CLASS.test(c), c).toBe(false);
+			expect(PADDING_CLASS.test(c), c).toBe(false);
+		}
 	});
 });

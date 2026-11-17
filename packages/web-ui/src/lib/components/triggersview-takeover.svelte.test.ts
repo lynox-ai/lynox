@@ -4,6 +4,11 @@ import { dirname, join } from 'node:path';
 import { setLocale, getLocale } from '../i18n.svelte.js';
 import { startPausedPlansNav } from '../stores/paused-plans.svelte.js';
 
+// A margin or a padding class of any side or axis, also behind variants (`sm:`, `hover:`) and `!`:
+// `m`/`p` with one of `lrxytbse`, `bs` or `be`, or none. Not `max-w-`, `min-w-`, `place-`, `pointer-`.
+const MARGIN_CLASS = /^(?:[^:\s]+:)*!?-?m(?:[lrxytbse]|bs|be)?-/;
+const PADDING_CLASS = /^(?:[^:\s]+:)*!?-?p(?:[lrxytbse]|bs|be)?-/;
+
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -263,7 +268,7 @@ describe('the confirmation', () => {
 			expect(box!.classList.contains('bg-bg-muted'), line).toBe(true);
 			expect(box!.classList.contains('font-mono'), line).toBe(false);
 			// No space of its own outside; 4 px inside, on each line of a wrapped title.
-			expect([...box!.classList].filter((c) => /^-?m[lrxytbse]?-/.test(c)), line).toEqual([]);
+			expect([...box!.classList].filter((c) => MARGIN_CLASS.test(c)), line).toEqual([]);
 			expect(box!.classList.contains('px-1'), line).toBe(true);
 			expect(box!.classList.contains('box-decoration-clone'), line).toBe(true);
 			// Its 1 px edge, the part of the box that shows on every ground.
@@ -525,5 +530,16 @@ describe('the confirmation', () => {
 		expect(listLoads).toBe(before + 1);
 		expect(document.querySelector('[data-takeover-confirm]')).toBeNull();
 		expect(document.querySelector('[data-takeover-note]')?.textContent).toBe('Dieser Plan muss nicht mehr übernommen werden. Die Liste ist aktualisiert.');
+	});
+});
+
+describe('the spacing class patterns of these tests', () => {
+	it('catch every margin and padding form, and no other class', () => {
+		for (const c of ['mx-1', 'mbs-1', 'mbe-2', 'sm:mx-1', '!mx-1', 'hover:sm:-mt-1', 'ms-0.5', 'm-0']) expect(MARGIN_CLASS.test(c), c).toBe(true);
+		for (const c of ['px-1', 'pbs-1', 'pbe-2', 'sm:px-1', '!px-1', 'ps-0.5', 'p-0']) expect(PADDING_CLASS.test(c), c).toBe(true);
+		for (const c of ['max-w-1', 'min-w-0', 'mask-x', 'place-items-center', 'pointer-events-none', 'font-mono', 'bg-bg-muted', 'box-decoration-clone']) {
+			expect(MARGIN_CLASS.test(c), c).toBe(false);
+			expect(PADDING_CLASS.test(c), c).toBe(false);
+		}
 	});
 });
