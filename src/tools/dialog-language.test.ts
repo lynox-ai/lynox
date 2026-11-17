@@ -67,6 +67,7 @@ describe('a confirmation question in the instance\'s language', () => {
   });
 
   it('reads as German: the tool\'s German word and the German sentence', () => {
+    expect(flattenPrompt(ask(CASES[1]!, 'de').prompt)).toBe('⚠ Befehl: git push (nur auf ausdrücklichen Wunsch) — "git push origin main"');
     expect(flattenPrompt(ask(CASES[3]!, 'de').prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive} — "/etc/shadow" — ${GUARD_TEXT.de.systemFiles}`);
     expect(flattenPrompt(ask(CASES[11]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen — ändert Daten ausserhalb von lynox');
     expect(flattenPrompt(ask(CASES[12]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen [BLOCKED — dafür brauche ich dein OK]');
@@ -115,6 +116,18 @@ describe('every place a question is posed hands it the language', () => {
     expect(src('orchestrator/runtime-adapter.ts').match(/language: config\.language,/g)?.length).toBe(2);
     expect(src('tools/builtin/spawn.ts')).toContain('language: parentAgent.dialogLanguage,');
     expect(src('core/agent.ts')).toContain('this.dialogLanguage = noticeLanguage(config.language);');
+  });
+
+  it('every dialog table is indexed by the language handed in, never by a fixed one', () => {
+    const allowed = new Set(["agent.dialogLanguage ?? 'en'", 'language', 'this.dialogLanguage', "ctx?.language ?? 'en'", 'l']);
+    let seen = 0;
+    for (const rel of ['tools/builtin/http.ts', 'tools/builtin/api-setup.ts', 'tools/builtin/spawn.ts', 'core/agent.ts']) {
+      for (const m of src(rel).matchAll(/[A-Z][A-Z_]*_(?:DIALOG|NOTE)\[([^\]]+)\]/g)) {
+        seen += 1;
+        expect(allowed.has(m[1]!), `${rel}: ${m[0]}`).toBe(true);
+      }
+    }
+    expect(seen).toBeGreaterThanOrEqual(12);
   });
 
   it('a tool\'s own check and the tools\' own questions read it', () => {
