@@ -122,24 +122,6 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     if (steps.length > MAX_STEPS) {
       return `Error: The edit exceeds the maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
     }
-    const seen = new Set<string>();
-    for (const s of steps) {
-      // An id the edit kept may be stored text from before the save refused hidden characters.
-      if (seen.has(s.id)) return `Error: Duplicate step id ${quotedId(s.id)} after the edit.`;
-      seen.add(s.id);
-    }
-
-    // Graph parity with every RUN path: validate the edited steps as a manifest
-    // (zod shape + dependency-graph check — no dangling input_from, no cycle)
-    // BEFORE persisting, so a structurally broken edit is rejected here at save
-    // rather than deferred to a failed cron run. The run-volatile path validates
-    // the same way (executePipelineById → buildManifest → validateManifest).
-    try {
-      validateManifest(buildManifest(planned.name, steps, planned.on_failure ?? 'stop'));
-    } catch (err: unknown) {
-      return `Error: The edit produces an invalid workflow: ${getErrorMessage(err)}`;
-    }
-
     // Re-infer the interaction mode: adding an ask_user step flips an autonomous
     // (cron-eligible) workflow to interactive, which can no longer run headless.
     // Text stored before the save refused characters that render as nothing: the save below would
@@ -185,6 +167,25 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
         ...(outsideShape ? [`a step id saved before step ids were limited to 1 to ${String(STEP_ID_MAX)} characters (lowercase a-z, digits 0-9, _ or -)`] : []),
       ].join(', and ');
       return `Error: This workflow holds ${why}, which a save now refuses. Nothing was saved. Call again with this call's modifications and, after them:\n${fixes.map(f => `- ${f}`).join('\n')}`;
+    }
+
+    const seen = new Set<string>();
+    for (const s of steps) {
+      // An id the edit kept may be stored text from before the save refused hidden characters.
+      if (seen.has(s.id)) return `Error: Duplicate step id ${quotedId(s.id)} after the edit.`;
+      seen.add(s.id);
+    }
+
+    // After the stored text above: these refusals quote ids, so every id here is in the shape.
+    // Graph parity with every RUN path: validate the edited steps as a manifest
+    // (zod shape + dependency-graph check — no dangling input_from, no cycle)
+    // BEFORE persisting, so a structurally broken edit is rejected here at save
+    // rather than deferred to a failed cron run. The run-volatile path validates
+    // the same way (executePipelineById → buildManifest → validateManifest).
+    try {
+      validateManifest(buildManifest(planned.name, steps, planned.on_failure ?? 'stop'));
+    } catch (err: unknown) {
+      return `Error: The edit produces an invalid workflow: ${getErrorMessage(err)}`;
     }
 
     const newMode = inferPipelineMode(steps);
