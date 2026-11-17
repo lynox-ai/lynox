@@ -86,6 +86,14 @@ export interface ToolEntry<TInput = unknown> {
    */
   redactInputForAudit?: ((input: TInput) => unknown) | undefined;
   /**
+   * For a tool that answers a call it did not carry out with an ordinary string (a refusal, a
+   * failed check): the reason, read from that answer, or null when the call was done. A reason
+   * makes the returned answer a soft failure, exactly as a thrown `ToolSoftFailure` with that
+   * answer would: the model reads the same text, the ledger records the reason, and the call is
+   * not shown as done. The tool reads only its own answer's form, never content it passed on.
+   */
+  failureOf?: ((answer: string) => string | null) | undefined;
+  /**
    * For a tool that writes a file named by its `path` field: the file it would write for that
    * path, resolved as its handler resolves it (the workspace, a link in it, the artifacts
    * directory), or `null` when the handler would refuse the path. The Permission Guard reads its

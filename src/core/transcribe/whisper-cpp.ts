@@ -17,8 +17,8 @@ import { execFile as nodeExecFile, spawn } from 'node:child_process';
 import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { getErrorMessage } from '../utils.js';
 import { INPUT_GUARD_ARGS } from '../ffmpeg-input.js';
+import { processErrorText } from '../error-egress.js';
 import type { SegmentCallback, TranscribeOpts, TranscribeProvider } from './types.js';
 
 const WHISPER_PATHS = [
@@ -122,7 +122,7 @@ export async function transcribeWhisperCpp(
     return text || null;
   } catch (err: unknown) {
     cleanup();
-    process.stderr.write(`[whisper] transcription failed: ${getErrorMessage(err)}\n`);
+    process.stderr.write(`[whisper] transcription failed: ${processErrorText(err)}\n`);
     return null;
   }
 }
@@ -188,7 +188,7 @@ export async function transcribeWhisperCppStream(
     return fullText || null;
   } catch (err: unknown) {
     cleanup();
-    process.stderr.write(`[whisper] streaming transcription failed: ${getErrorMessage(err)}\n`);
+    process.stderr.write(`[whisper] streaming transcription failed: ${processErrorText(err)}\n`);
     return null;
   }
 }

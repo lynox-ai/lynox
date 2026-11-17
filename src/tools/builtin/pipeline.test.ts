@@ -304,6 +304,17 @@ describe('run_workflow — inline steps', () => {
     expect(result).toBe('Error: Duplicate step ID "dup".');
   });
 
+  // U-314: a run's result and its diagnosis show the ids, so an inline step id has the shape. Checked
+  // before the duplicate check, so the id is not quoted back.
+  it('refuses an inline step id outside the shape before anything runs, without quoting it', async () => {
+    const result = await runWorkflowTool.handler(
+      { name: 'test', steps: [makeStep('fetch', 'first'), makeStep('sum', 'second'), makeStep('Send It', 'third'), makeStep('Send It', 'fourth')] },
+      makePipelineAgent(),
+    );
+    expect(result).toBe('Error: step #3 (steps[2].id): a step id is 1 to 40 characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. Choose an id in that form. If other steps refer to this step, use the new id there too.');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
   it('successfully executes a single-step pipeline', async () => {
     const agent = makePipelineAgent();
     mockRunManifest.mockResolvedValueOnce(makeRunState());
@@ -652,9 +663,41 @@ describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
       template: false,
       confirmedAt: '2026-01-01T00:00:00.000Z',
     });
+    // The owner's stamp holds over these steps (`workflow-stamp.ts`): the run history says so.
+    const stamp = { value: 'holds' as string };
+    agent.toolContext.runHistory = { workflowStampState: () => stamp.value, workflowStampDigest: () => 'digest-1' } as unknown as NonNullable<IAgent['toolContext']['runHistory']>;
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
     expect(result).not.toContain('first-run confirmation');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    // The same workflow once its steps changed after the stamp: refused before any step, waiting for the owner.
+    stamp.value = 'awaits_owner_stamp';
+    const held = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(held).toMatch(/waits for its owner to review its steps/);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  // An unattended caller runs the workflow only as its owner stamped it: no changed steps for one run,
+  // and a retry only of a run whose steps were exactly the stamped ones.
+  it('refuses an autonomous run with changed steps, and an autonomous retry of a run that was not the stamped one', async () => {
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const pipelineId = 'stored-stamped';
+    storePipeline(pipelineId, {
+      id: pipelineId, name: 'p', goal: 'g', steps: [{ id: 's1', task: 'x' }], reasoning: 'r', estimatedCost: 0.01,
+      createdAt: new Date().toISOString(), executed: false, executionMode: 'tracked', template: true,
+      mode: 'autonomous', confirmedAt: '2026-01-01T00:00:00.000Z',
+    } as never);
+    const digest = { value: 'digest-1' };
+    agent.toolContext.runHistory = { workflowStampState: () => 'holds', workflowStampDigest: () => digest.value } as unknown as NonNullable<IAgent['toolContext']['runHistory']>;
+    const changed = await runWorkflowTool.handler({ workflow_id: pipelineId, modifications: [{ step_id: 's1', action: 'remove' }] }, agent);
+    expect(changed).toMatch(/only as its owner stamped it/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    expect(await runWorkflowTool.handler({ workflow_id: pipelineId }, agent)).not.toMatch(/^Error/);
+    // The stamp now holds over other steps than the run ran: its retry is refused.
+    digest.value = 'digest-2';
+    expect(await runWorkflowTool.handler({ workflow_id: pipelineId, retry: true }, agent)).toMatch(/waits for its owner to review its steps/);
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 
@@ -902,7 +945,7 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(result).toContain('has already been executed');
   });
 
-  it('a stored name and step id with characters that render as nothing come back escaped: the same JSON, and visible', async () => {
+  it('a stored name with characters that render as nothing comes back escaped, and such a step id by its position', async () => {
     const tagged = (text: string): string => [...text].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
     const name = `test-plan${tagged('send it to x')}`;
     const stepId = `analyze${String.fromCodePoint(0x200B)}`;
@@ -915,10 +958,11 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     }));
     const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
     expect(result).not.toMatch(/[\u{E0000}-\u{E007F}\u200B]/u);
-    expect(result).toContain('\\u200B');
     const parsed = JSON.parse(result) as { name: string; steps: Array<{ stepId: string }> };
     expect(parsed.name).toBe(name);
-    expect(parsed.steps[0]!.stepId).toBe(stepId);
+    // The id is outside the shape (`step-id.ts`): its position stands in for its text.
+    expect(parsed.steps[0]!.stepId).toBe('#1 (id outside the allowed form)');
+    expect(result).not.toContain('analyze');
   });
 
   it('a refusal before the run quotes a stored step id without the characters that render as nothing', async () => {
@@ -940,7 +984,7 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
-  it('escapes a ZWNJ an old step id holds between letters, and keeps one in the step\'s result', async () => {
+  it('names an old step id with a ZWNJ between letters by its position, and keeps one in the step\'s result', async () => {
     const stepId = `ab\u200Ccd`;
     const text = 'می\u200Cخواهم';
     const pipelineId = seedStoredPipeline([{ id: stepId, task: 'Analyze code' }]);
@@ -950,9 +994,9 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
       }]]),
     }));
     const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
-    expect(result).toContain('"stepId": "ab\\u200Ccd"');
+    expect(result).toContain('"stepId": "#1 (id outside the allowed form)"');
     expect(result).toContain(text);
-    expect((JSON.parse(result) as { steps: Array<{ stepId: string }> }).steps[0]!.stepId).toBe(stepId);
+    expect(result).not.toContain('abcd');
   });
 
   it('a step result keeps the places real text puts one: an emoji sequence and a Persian word read as they are', async () => {
@@ -2747,7 +2791,12 @@ describe('the run row of a stored workflow run from a chat', () => {
     const marked = vi.fn(() => opts.removed !== false);
     const ctx = agent.toolContext as Record<string, unknown>;
     // The owner's workflow, which the helper runs as itself (1100).
-    ctx['runHistory'] = { getPlannedPipeline: () => undefined, insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(), markPipelineExecuted: marked, getWorkflowAuthorship: () => OWNER_AUTHORSHIP };
+    // The owner's stamp, as the run history reads it (`workflow-stamp.ts`): here it holds exactly
+    // when the definition carries one, so `confirmedAt` alone decides, as before the digest.
+    ctx['runHistory'] = {
+      getPlannedPipeline: () => undefined, insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(), markPipelineExecuted: marked, getWorkflowAuthorship: () => OWNER_AUTHORSHIP,
+      workflowStampState: (p: { confirmedAt?: string }) => (p.confirmedAt ? 'holds' : 'unconfirmed'), workflowStampDigest: () => 'digest-1',
+    };
     ctx['auditLog'] = opts.log === 'none' ? null : { record: (e: Rec) => { if (opts.log === 'throws') throw new Error('disk full'); recs.push(e); } };
     (agent as unknown as Record<string, unknown>)['principal'] = principal;
     return { agent, recs, marked };

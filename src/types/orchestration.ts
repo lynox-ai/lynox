@@ -74,6 +74,8 @@ export interface AgentOutput {
   skipped: boolean;
   skipReason?: string | undefined;
   error?: string | undefined;
+  /** `error` is the reason the step's own agent reported (`StepReportedFailureError`): model text. */
+  reportedFailure?: true | undefined;
 }
 
 export interface RunState {
@@ -85,6 +87,11 @@ export interface RunState {
   globalContext: Record<string, unknown>;
   outputs: Map<string, AgentOutput>;
   error?: string | undefined;
+  /** Set when a step's reported failure (`StepReportedFailureError`) became `error`: then `error`
+   *  is model text, and a sink that may not carry it names the step instead
+   *  (`reportedFailureNotice`). Holds the reason too, so a later write of `error` (an owner's stop)
+   *  is not mistaken for it — read it through {@link reportedErrorStep}. */
+  errorReportedBy?: { stepId: string; reason: string } | undefined;
   /** Why the run went on without the contract it was handed (a run under a grant it could not record). */
   grantNote?: string | undefined;
 }
@@ -127,6 +134,42 @@ export class GateRejectedError extends Error {
     super(`Gate rejected step "${stepId}"${reason ? `: ${reason}` : ''}`);
     this.name = 'GateRejectedError';
   }
+}
+
+/**
+ * A step whose agent called its `fail_step` tool: it reported that it could not complete its task.
+ * Thrown by the runner AFTER the step's cost is stamped, so it runs through the ordinary failure
+ * path (`on_failure`). The message is the model's reason, already sanitised and capped
+ * (`sanitizeFailStepReason`) — model text, so it is kept out of the escalation thread's body
+ * (`reportedFailureNotice`) and never reaches a later step.
+ */
+export class StepReportedFailureError extends Error {
+  constructor(public readonly stepId: string, public readonly reason: string) {
+    super(reason);
+    this.name = 'StepReportedFailureError';
+  }
+}
+
+/**
+ * The fixed sentence that stands for a reported failure wherever its model-written reason must not
+ * go (a later step's input). Written by lynox alone. The escalation thread says it in the owner's
+ * language (`WorkerNotices.stepReported`); the calling chat model reads
+ * {@link reportedFailureForCaller}, which also says where the reason is (U-192).
+ */
+export function reportedFailureNotice(stepId: string): string {
+  return `Step "${stepId}" reported that it could not complete its task.`;
+}
+
+/** What the chat model that ran the workflow reads for a reported failure: the fixed sentence and
+ *  the tool that shows the reason, quoted (U-192 1b). */
+export function reportedFailureForCaller(stepId: string): string {
+  return `${reportedFailureNotice(stepId)} Its reason is not shown here; diagnose_workflow_run with this run's id shows it, quoted.`;
+}
+
+/** The step whose reported failure is the run's `error` right now, or undefined. */
+export function reportedErrorStep(state: Pick<RunState, 'error' | 'errorReportedBy'>): string | undefined {
+  const by = state.errorReportedBy;
+  return by !== undefined && state.error === by.reason ? by.stepId : undefined;
 }
 
 export class GateExpiredError extends Error {

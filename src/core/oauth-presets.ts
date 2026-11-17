@@ -802,3 +802,17 @@ export function scopesBeyondAsked(granted: readonly string[], asked: readonly st
   const known = new Set(asked);
   return [...new Set(granted.filter((s) => !known.has(s)))];
 }
+
+/**
+ * How a text sends the model to a built-in provider's sign-in: the connect call, and what that call
+ * returns. "Give the user the link it returns" assumed a link; connect may answer without one,
+ * and a model told to pass a link on then looks for one or writes one (U-191, U-195). One
+ * text for every place that sends the model there, so a fix reaches all of them. `id` is a stored
+ * profile's id, which every path into the store checks; without one the text names "that profile".
+ */
+export function connectCallText(id?: string): string {
+  const call = id === undefined
+    ? 'call api_setup with action "connect" for that profile'
+    : `call api_setup with action "connect" and id "${id}"`;
+  return `${call}; that call returns the sign-in link for the user, or says why there is none.`;
+}

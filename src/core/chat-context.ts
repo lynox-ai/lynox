@@ -7,6 +7,7 @@ import { stripUntrustedSeparators } from './sanitize.js';
 import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
 import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
 import { stripHidden, stripHiddenInName } from './hidden-text.js';
+import { isStepIdShape, shownStepId, storedStepOrder } from '../orchestrator/step-id.js';
 import { detectSensitiveContent } from '../integrations/inbox/sensitive-content.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
@@ -176,8 +177,8 @@ export interface ChatThreadMessage {
 /**
  * The message "Reply in chat" answers when it is not the item's own mail: the newest inbound
  * message of the thread that is not older than the item's own mail and is known not to be an
- * automatic reply — checked and not one, or the message that reopened the item (its audit names
- * it; reopening already ruled out a known automatic reply). An out-of-office note is stored in
+ * automatic reply — checked and not one, or the message that reopened or raised the item when
+ * the check could not tell (its audit names it; a known automatic reply is not taken either way). An out-of-office note is stored in
  * the thread too, and answering it would answer "I am away until …". Any other message never
  * checked (stored before the check existed) is not taken, so such an item answers its first
  * mail, as before.
@@ -188,7 +189,7 @@ export function followUpToAnswer(reader: ChatInboxReader, item: InboxItem): Chat
   const since = own?.mailDate?.getTime();
   const reopenedBy = new Set<string>();
   for (const a of reader.listAuditForItem(item.id, item.tenantId)) {
-    if (a.action !== 'reopened_on_reply') continue;
+    if (a.action !== 'reopened_on_reply' && a.action !== 'raised_on_sensitive_follow_up') continue;
     try {
       const id = (JSON.parse(a.payloadJson) as { message_id?: unknown }).message_id;
       if (typeof id === 'string') reopenedBy.add(id);
@@ -337,6 +338,12 @@ function storedLine(s: string, max: number): string {
  *  carry such a character: a ZWNJ an old step id holds between letters goes too. */
 function storedName(s: string, max: number): string {
   return oneLine(stripHiddenInName(s), max);
+}
+
+/** A stored step id in the preamble: itself in the allowed shape, otherwise its position in the
+ *  workflow (`step-id.ts`), or the note alone where no position is known (`index` absent or -1). */
+function storedStepId(id: string, index: number | undefined): string {
+  return isStepIdShape(id) ? storedName(id, MAX_STEP_ID_CHARS) : shownStepId(id, index === -1 ? undefined : index);
 }
 
 /**
@@ -623,7 +630,7 @@ export function resolveChatContext(
     }
     if (wf.template !== true) return null; // only saved workflows are editable
     const steps = (wf.steps ?? [])
-      .map((s, i) => `  ${i + 1}. [${storedName(s.id, MAX_STEP_ID_CHARS)}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
+      .map((s, i) => `  ${i + 1}. [${storedStepId(s.id, i)}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
       .join('\n');
     return (
       `[Loaded saved workflow for editing — id: ${wf.id}]\n` +
@@ -651,8 +658,9 @@ export function resolveChatContext(
     }
   }
   const stepResults = runHistory.getPipelineStepResults(run.id);
+  const order = storedStepOrder(run.workflow_id ? runHistory.getPlannedPipeline(run.workflow_id) : undefined);
   const trace = stepResults
-    .map(s => `  [${s.status}] ${storedName(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
+    .map(s => `  [${s.status}] ${storedStepId(s.step_id, order?.indexOf(s.step_id))}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
     .join('\n');
   const hasFailure = run.status === 'failed' || stepResults.some(s => s.status === 'failed' || s.error);
   // Only point at the editable workflow if it still exists — a run can outlive a

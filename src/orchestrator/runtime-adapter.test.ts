@@ -14,7 +14,14 @@ vi.mock('../core/agent.js', () => ({
     abort: ReturnType<typeof vi.fn>;
     noteUntrustedData: ReturnType<typeof vi.fn>;
     restoreConversationTaint: ReturnType<typeof vi.fn>;
-  }) {
+  }, config?: { tools?: ToolEntry[]; stepFailTool?: ToolEntry }) {
+    // Every non-replay step agent also gets its own fail_step (pinned in fail-step.test.ts).
+    // The tests here pin the step's GRANT, so the recorded config lists it without that one entry —
+    // removed by identity, so a fail_step that arrived any other way still shows.
+    if (config?.tools !== undefined && config.stepFailTool !== undefined) {
+      const own = config.stepFailTool;
+      config.tools = config.tools.filter(t => t !== own);
+    }
     this.send = mockSend;
     this.abort = vi.fn();
     // Cross-step taint seed: the spawner calls these on the constructed step

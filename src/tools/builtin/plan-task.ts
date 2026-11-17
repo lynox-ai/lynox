@@ -13,6 +13,7 @@ import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 import { currentCallSignal } from '../../core/call-connection.js';
+import { STEP_ID_MAX } from '../../orchestrator/step-id.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -71,11 +72,15 @@ export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[]
   const ids: string[] = [];
 
   for (const phase of phases) {
-    let id = slugify(phase.name);
+    // A step id has a limited shape (`step-id.ts`); the slug has its characters, and it is cut at a
+    // word boundary to the length, the suffix that keeps it unique included.
+    const base = slugify(phase.name);
+    let id = truncateSlug(base, STEP_ID_MAX);
     if (usedIds.has(id)) {
       let counter = 2;
-      while (usedIds.has(`${id}-${counter}`)) counter++;
-      id = `${id}-${counter}`;
+      const suffixed = (n: number): string => `${truncateSlug(base, STEP_ID_MAX - `-${n}`.length)}-${n}`;
+      while (usedIds.has(suffixed(counter))) counter++;
+      id = suffixed(counter);
     }
     usedIds.add(id);
     ids.push(id);

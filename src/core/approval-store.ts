@@ -65,6 +65,11 @@ export interface ApprovalOrigin {
   /** Whether the run had read content it did not write (a web page, a mail) before it filed:
    *  the card says so (§4.5). Known only at filing, so it is stored then. */
   afterUntrusted?: boolean | undefined;
+  /** Which side of `afterUntrusted` held, stored with it since U-209: the instruction the run carried
+   *  out was written after outside content was read (its trigger's `created_untrusted`), and/or the
+   *  run itself had read some. Absent on a record from before: it reads as the run's own. */
+  instructionUntrusted?: boolean | undefined;
+  runUntrusted?: boolean | undefined;
 }
 
 export interface StoredAddress {
@@ -335,7 +340,9 @@ function readOrigin(json: string): ApprovalOrigin | null {
   const o = v as Record<string, unknown>;
   if (!isString(o['source']) || !isString(o['triggerId']) || !isString(o['runId']) || !isString(o['rootRunId'])) return null;
   if (!isOptionalString(o['eventId']) || !isOptionalString(o['threadId'])) return null;
-  if (o['afterUntrusted'] !== undefined && typeof o['afterUntrusted'] !== 'boolean') return null;
+  for (const k of ['afterUntrusted', 'instructionUntrusted', 'runUntrusted']) {
+    if (o[k] !== undefined && typeof o[k] !== 'boolean') return null;
+  }
   const origin = o as unknown as ApprovalOrigin;
   return originIsComplete(origin) ? origin : null;
 }
