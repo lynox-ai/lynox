@@ -34,6 +34,7 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv, singleLine } from '../../core/prompt-value.js';
+import type { PromptText } from '../../types/agent.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
@@ -1854,6 +1855,71 @@ function consentOf(agent: IAgent, profile: ApiProfile): Pick<OAuthGrantRecord, '
   return p.mandateId === undefined ? { connected_by: principalTag(p) } : { connected_by: principalTag(p), connected_mandate_id: p.mandateId };
 }
 
+const scopeTokens = (scope: string | undefined): string[] =>
+  (scope ?? '').split(/[\s,]+/).filter((s) => s !== '');
+
+const secretNamesOf = (p: ApiProfile | undefined): string[] => {
+  const a = p?.auth;
+  const o = a?.oauth;
+  return [...new Set([
+    ...(a?.vault_keys ?? []), a?.username_key, a?.password_key,
+    o?.client_id_key, o?.client_secret_key, o?.refresh_token_key,
+  ].filter((n): n is string => typeof n === 'string' && n !== ''))];
+};
+
+/**
+ * What a save changes against the stored profile, in the fields that decide where a credential
+ * goes and what it may do: the scopes, the provider's parameters (such as the store), the
+ * addresses, the secrets it reads, and the grant of an OAuth sign-in of its own. One line each,
+ * with the values as values. Empty for a new profile or a save that changes none of these.
+ */
+export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile): PromptText[] {
+  if (prior === undefined) return [];
+  const out: PromptText[] = [];
+  const was = new Set(scopeTokens(prior.auth?.oauth?.scope));
+  const now = new Set(scopeTokens(next.auth?.oauth?.scope));
+  const added = [...now].filter((s) => !was.has(s));
+  const removed = [...was].filter((s) => !now.has(s));
+  if (added.length > 0) out.push(pv`scopes added: ${added.join(' ')}`);
+  if (removed.length > 0) out.push(pv`scopes removed: ${removed.join(' ')}`);
+  const pp = (p: ApiProfile): Record<string, unknown> =>
+    isPlainRecord(p.auth?.oauth?.preset_params) ? p.auth!.oauth!.preset_params as Record<string, unknown> : {};
+  const [ppWas, ppNow] = [pp(prior), pp(next)];
+  for (const key of [...new Set([...Object.keys(ppWas), ...Object.keys(ppNow)])].sort()) {
+    const [a, b] = [ppWas[key], ppNow[key]];
+    if (JSON.stringify(a) !== JSON.stringify(b)) {
+      out.push(pv`provider parameter ${key}: ${a === undefined ? '(none)' : String(a)} → ${b === undefined ? '(none)' : String(b)}`);
+    }
+  }
+  const field = (label: string, a: string | undefined, b: string | undefined): void => {
+    if ((a ?? '') !== (b ?? '')) out.push(pv`${label}: ${a ?? '(none)'} → ${b ?? '(none)'}`);
+  };
+  field('address (base_url)', prior.base_url, next.base_url);
+  field('token address (token_url)', prior.auth?.oauth?.token_url, next.auth?.oauth?.token_url);
+  field('grant type', prior.auth?.oauth?.grant_type, next.auth?.oauth?.grant_type);
+  field('audience', prior.auth?.oauth?.audience, next.auth?.oauth?.audience);
+  const [sWas, sNow] = [secretNamesOf(prior), secretNamesOf(next)];
+  const sAdded = sNow.filter((n) => !sWas.includes(n));
+  const sRemoved = sWas.filter((n) => !sNow.includes(n));
+  if (sAdded.length > 0) out.push(pv`secrets it reads, added: ${sAdded.join(', ')}`);
+  if (sRemoved.length > 0) out.push(pv`secrets it reads, removed: ${sRemoved.join(', ')}`);
+  return out;
+}
+
+/**
+ * An OAuth sign-in of the profile's own (no built-in provider) whose token the agent fetches by
+ * itself (`client_credentials`, `fetch_token`): a change of its scope, audience or grant type
+ * takes effect with no person and no consent page, so the save asks the owner first.
+ */
+export function ownGrantChanges(prior: ApiProfile | undefined, next: ApiProfile): boolean {
+  if (prior === undefined || next.auth?.type !== 'oauth2' || builtInPresetOf(next) !== undefined) return false;
+  const [a, b] = [prior.auth?.oauth, next.auth.oauth];
+  if (a?.grant_type !== 'client_credentials' && b?.grant_type !== 'client_credentials') return false;
+  return scopeTokens(a?.scope).sort().join(' ') !== scopeTokens(b?.scope).sort().join(' ')
+    || (a?.audience ?? '') !== (b?.audience ?? '')
+    || (a?.grant_type ?? '') !== (b?.grant_type ?? '');
+}
+
 /**
  * A mandate's turn changes only a profile the mandate wrote (PRD customer-granted-operator-
  * access §3.13, H2). Every rule that reads a profile — the preset write refusal, the vetted
@@ -2357,6 +2423,12 @@ ${draftJson}
       // prompted") that could never be followed — the prompt was unreachable and the
       // else-branch below deleted any ack that did exist.
       const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
+      // What this save changes in the fields that decide where a credential goes and what it may
+      // do, named in the question: a consent to "save this profile" is not a consent to the scope
+      // a text in a tool result asked the model to add. And a change to an own sign-in's grant,
+      // which the agent's next `fetch_token` would use with nobody asked, is asked about on its own.
+      const changes = securityChanges(prior, profile);
+      const grantChange = ownGrantChanges(prior, profile);
       // Two questions, one prompt, and the redirect half is asked even when the
       // host IS vetted. That is not thoroughness: it is what keeps the refusal
       // at connect time followable. If this only ran for non-vetted hosts, a
@@ -2364,7 +2436,7 @@ ${draftJson}
       // would refuse for want of an acceptance, and its advice — save again and
       // accept — would point at a prompt that never appears. That dead end is
       // the one this file already carries a scar from.
-      if (nonVetted.length > 0 || redirectUrls.length > 0) {
+      if (nonVetted.length > 0 || redirectUrls.length > 0 || grantChange) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -2416,9 +2488,16 @@ ${draftJson}
           if (nonVetted.length > 0) {
             return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
           }
+          // Its next token would carry the new scope or audience with nobody asked: refused.
+          if (grantChange) {
+            return `Blocked: profile "${profile.id}" not saved. The save changes the scope, audience or grant type of its own OAuth sign-in, which the next fetch_token would use, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved.`;
+          }
         } else {
+          const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
+          const changeBlock = changeList === undefined ? pv`` : pv`This save changes:${changeList}\n\n`;
+          const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
           const answer = await agent.promptUser(
-            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this profile?`,
             ['Allow', 'Deny', '\x00'],
           );
           if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
