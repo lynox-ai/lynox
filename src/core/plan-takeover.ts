@@ -23,21 +23,24 @@
  */
 import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import type { AuditLog } from './audit-log.js';
 import { newCorrelationId } from './audit-log.js';
-import { nextOccurrence } from './cron-parser.js';
 import {
-  ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PAUSE_PLAN_COLS, PLAN_ENDED_RESULT, pausedForOf, planPauseOn,
-  rowPlanMembers, workflowAuthorOf, type PausePlanRow, type PauseRole, type WorkflowAuthorRow,
+  PAUSE_PLAN_COLS, pausedForOf, planPauseOn, rowPlanMembers, workflowAuthorOf, type PausePlanRow, type PauseRole, type WorkflowAuthorRow,
 } from './plan-pause.js';
 import type { StampEntry } from './plan-run-context.js';
 import { stampExpect, stampFromRow } from './plan-stamp.js';
 import {
-  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, editorCovered, isMandateTag, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag,
-  type PlanMandate, type RequestPrincipal,
+  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, editorCovered, isMandateTag, planAuthorshipOf, planMandate, principalHasEnded, principalTag,
+  type RequestPrincipal,
 } from './request-principal.js';
+import {
+  COVER_FROM_MARKS, TakeoverUnrecorded, commitTakeover, coverEffects, leaseRunning, pausedDbAtOf, pausedForIds, release, scheduleOf,
+  workflowCover, type TakeoverCoreDeps, type TakeoverMemberChange, type TakeoverSchedule,
+} from './takeover-core.js';
 import type { TriggerStore } from './trigger-store.js';
 import type { TriggerRecord } from '../types/index.js';
+
+export type { TakeoverMemberChange, TakeoverPrompts, TakeoverSchedule } from './takeover-core.js';
 
 const isWorkflowRole = (r: PauseRole): boolean => r === 'workflow-created' || r === 'workflow-edited';
 
@@ -47,25 +50,8 @@ export const TAKEOVER_DIGEST_PREFIX = 'lynox:plan-takeover:v1';
 /** Why a plan cannot be taken over, before anything is written. */
 export type TakeoverRefusal = 'not_available' | 'bulk' | 'nothing_to_take_over' | 'unreadable' | 'running';
 
-/** What happens to the plan's next run once it is taken over. */
-export type TakeoverSchedule = 'kept' | 'next_cron' | 'run_now_only_missed' | 'run_now_only_partial';
-
-/** The prompts of a plan, in history.db: settled and detached before the takeover writes. */
-export interface TakeoverPrompts {
-  expirePendingForTrigger(triggerId: string, reason: 'plan_taken_over'): number;
-  getAnsweredForTrigger(triggerId: string): { readonly id: string } | undefined;
-  releaseTrigger(promptId: string): boolean;
-}
-
-export interface TakeoverDeps {
-  /** engine.db: triggers, workflows and the audit log are in this one file. */
-  readonly db: Database.Database;
+export interface TakeoverDeps extends TakeoverCoreDeps {
   readonly triggers: Pick<TriggerStore, 'getById' | 'endWait' | 'setConfirmedAt' | 'getStampConnections'>;
-  /** `MandateEnds.isLive`. */
-  readonly isLive: (mandateId: string) => boolean;
-  readonly audit: AuditLog | null;
-  readonly prompts: TakeoverPrompts | null;
-  readonly now?: (() => Date) | undefined;
 }
 
 /** A member of the plan as the owner is shown it. */
@@ -74,17 +60,6 @@ export interface TakeoverMember {
   readonly roles: readonly PauseRole[];
   readonly ended: boolean;
   readonly reason: 'expired' | 'revoked' | null;
-}
-
-/** Another plan on the workflow whose members the takeover changes. */
-export interface TakeoverMemberChange {
-  readonly id: string;
-  readonly title: string;
-  /** The tag of the member the plan acts for, before and after; null for the owner. */
-  readonly before: string | null;
-  readonly after: string | null;
-  /** A plan that is not paused and will not run again by itself (a stopped or failed one-shot). */
-  readonly runsNoMore: boolean;
 }
 
 export interface TakeoverPreview {
@@ -142,9 +117,6 @@ interface TakeoverPlan {
   readonly expect: string;
 }
 
-/** The audit row or the read-back failed inside the transaction: everything is rolled back. */
-class Unrecorded extends Error {}
-
 function workflowRowOf(db: Database.Database, id: string): WorkflowRow | undefined {
   const a = workflowAuthorOf(db, id);
   if (a === undefined) return undefined;
@@ -163,56 +135,6 @@ function workflowConfirmedAt(wf: WorkflowRow | undefined): string | null {
   } catch {
     return null;
   }
-}
-
-function memberKey(p: RequestPrincipal): string {
-  return p.kind === 'mandate' ? `${p.email}\u0000${p.mandateId ?? ''}` : p.kind;
-}
-
-/**
- * Whether a member still holds a plan in the sense of the pause: its end is proven or it cannot
- * be told live (`principalHasEnded`), or it is one of the grants the plan was paused for and its
- * mark is older than the pause. The rule that decides the workflow's cover and the one that
- * decides a release are this one function.
- *
- * The mark's age matters only for a member that is live: a grant renewed after the pause. Its
- * mark from before the pause is what the pause was about; a mark it made after the pause is a
- * change the owner was not shown, so it is not covered, and the plan runs as that member (and
- * pauses again when it ends). Both times are the database's clock: the mark's `datetime('now')`
- * and the pause's `paused_db_at`. A mark in the same second as the pause counts as after it, the
- * side where the plan stays with the mandate. A member whose end is proven is covered whatever
- * its mark's age: left uncovered, the plan would run as an ended mandate and pause again, and the
- * owner could never take it over.
- */
-function holds(mark: PlanMandate, pausedFor: ReadonlySet<string>, pausedDbAt: number | null, isLive: (id: string) => boolean): boolean {
-  const member = mark.principal;
-  if (principalHasEnded(member, isLive)) return true;
-  if (member.mandateId === undefined || !pausedFor.has(member.mandateId)) return false;
-  return pausedDbAt !== null && Math.floor(mark.at / 1000) < pausedDbAt;
-}
-
-/** `paused_db_at`, the pause in the database's clock; null when the row has none. */
-function pausedDbAtOf(db: Database.Database, id: string): number | null {
-  const r = db.prepare('SELECT paused_db_at FROM triggers WHERE id = ?').get(id) as { paused_db_at: number | null } | undefined;
-  return r?.paused_db_at ?? null;
-}
-
-function pausedForIds(raw: string | undefined): Set<string> {
-  return new Set(pausedForOf(raw).entries.map((e) => e.mandateId));
-}
-
-/** What the takeover does to the next run (see the docblock of {@link takeOver}). */
-function scheduleOf(t: TriggerRecord, now: Date): TakeoverSchedule {
-  if (t.schedule_cron) return 'next_cron';
-  if (t.source === 'watch' || t.source === 'webhook' || t.source === 'inbox_event') return 'kept';
-  if (t.next_run_at !== undefined && Date.parse(t.next_run_at) > now.getTime()) return 'kept';
-  const partial = t.last_run_status === 'stopped'
-    && (t.last_run_result === ACCESS_ENDED_PAUSED_RESULT || t.last_run_result === ACCESS_ENDED_RESULT);
-  return partial ? 'run_now_only_partial' : 'run_now_only_missed';
-}
-
-function stopResults(result: string | undefined): boolean {
-  return result === ACCESS_ENDED_PAUSED_RESULT || result === ACCESS_ENDED_RESULT || result === PLAN_ENDED_RESULT;
 }
 
 /**
@@ -236,15 +158,12 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   } catch {
     return 'unreadable';
   }
-  const lease = db.prepare('SELECT lease_until FROM triggers WHERE id = ?').get(id) as { lease_until: string | null } | undefined;
   const now = deps.now?.() ?? new Date();
-  if (lease !== undefined && lease.lease_until !== null && lease.lease_until > now.toISOString()) return 'running';
+  if (leaseRunning(db, id, now)) return 'running';
 
   const isLive = deps.isLive;
   const own = pausedForIds(trigger.paused_for);
-  const wfMark: PlanMandate | undefined = wf === undefined ? undefined : planMandate(planAuthorshipOf(wf));
-  const coverWorkflow = wfMark !== undefined && holds(wfMark, own, pausedDbAtOf(db, id), isLive);
-  const runsAs: RequestPrincipal = wfMark === undefined || coverWorkflow ? OWNER_PRINCIPAL : wfMark.principal;
+  const { wfMark, coverWorkflow, runsAs } = workflowCover(wf === undefined ? undefined : planAuthorshipOf(wf), own, pausedDbAtOf(db, id), isLive);
 
   // Everyone the owner is shown: who the plan was paused for, as they are now (a renewed grant is
   // live again), every other mandate whose mark the takeover covers, and the member that stays.
@@ -301,39 +220,12 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   const coveredMandates = new Set<string>();
   for (const m of coveredMarks) if (isMandateTag(m.tag) && m.id) coveredMandates.add(m.id);
 
-  const memberChanges: TakeoverMemberChange[] = [];
-  const released: TriggerRecord[] = [];
+  let memberChanges: readonly TakeoverMemberChange[] = [];
+  let released: readonly TriggerRecord[] = [];
   if (coverWorkflow && wf !== undefined) {
-    const others = db.prepare("SELECT id FROM triggers WHERE target_workflow_id = ? AND id != ? AND status != 'completed' ORDER BY id")
-      .all(wf.id, id) as Array<{ id: string }>;
-    for (const { id: otherId } of others) {
-      const other = deps.triggers.getById(otherId);
-      if (other === undefined || other.id !== otherId) continue;
-      const mark = planMandate(planAuthorshipOf(other));
-      const before = planMembers(mark, wfMark);
-      const after = planMembers(mark, undefined);
-      const keysBefore = new Set(before.members.map(memberKey));
-      const keysAfter = new Set(after.members.map(memberKey));
-      const same = keysBefore.size === keysAfter.size && [...keysBefore].every((k) => keysAfter.has(k));
-      if (same) continue;
-      const paused = other.paused_at !== undefined;
-      memberChanges.push({
-        id: other.id,
-        title: other.title,
-        before: before.of === undefined ? null : principalTag(before.of),
-        after: after.of === undefined ? null : principalTag(after.of),
-        runsNoMore: !paused && other.next_run_at === undefined && (other.status === 'stopped' || other.status === 'failed'),
-      });
-      // Released when no member is left that holds it: after the cover its only member is the
-      // mandate of its own schedule, if any.
-      if (paused && !(mark !== undefined && holds(mark, pausedForIds(other.paused_for), pausedDbAtOf(db, other.id), isLive))) {
-        // Released with the same steps as the plan taken over, its lease among them: a run of it
-        // still under way would end as stopped over the release.
-        const lease = db.prepare('SELECT lease_until FROM triggers WHERE id = ?').get(other.id) as { lease_until: string | null } | undefined;
-        if (lease !== undefined && lease.lease_until !== null && lease.lease_until > now.toISOString()) return 'running';
-        released.push(other);
-      }
-    }
+    const effects = coverEffects(deps, wf.id, id, wfMark, now);
+    if (effects === 'running') return 'running';
+    ({ memberChanges, released } = effects);
   }
 
   const stamp = deps.triggers.getStampConnections(id);
@@ -420,44 +312,6 @@ export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreview
   };
 }
 
-/** Settles a plan's open question and detaches an answered one, so no answer from the mandate's time reaches the owner's first run. */
-function clearPrompts(prompts: TakeoverPrompts, id: string): void {
-  prompts.expirePendingForTrigger(id, 'plan_taken_over');
-  // Bounded: every release detaches one row, and a row that does not detach ends the loop.
-  for (let i = 0; i < 100; i++) {
-    const answered = prompts.getAnsweredForTrigger(id);
-    if (answered === undefined || !prompts.releaseTrigger(answered.id)) return;
-  }
-}
-
-/** The writes that make a paused plan run again: lease, pause, status, schedule. Inside the caller's transaction. */
-function release(deps: TakeoverDeps, t: TriggerRecord, now: Date): void {
-  const db = deps.db;
-  // A lapsed lease of a run that died before the pause would make the next claim read
-  // `interrupted`; it is cleared, and with it that run's interruption, which nobody will record.
-  db.prepare('UPDATE triggers SET lease_holder = NULL, lease_until = NULL, lease_since = NULL WHERE id = ? AND (lease_until IS NULL OR lease_until <= ?)')
-    .run(t.id, now.toISOString());
-  db.prepare('UPDATE triggers SET paused_at = NULL, paused_db_at = NULL, paused_for = NULL WHERE id = ?').run(t.id);
-  if (t.status === 'waiting') deps.triggers.endWait(t.id, 'open');
-  else if (t.status === 'stopped' && stopResults(t.last_run_result)) {
-    db.prepare("UPDATE triggers SET status = 'open', updated_at = datetime('now') WHERE id = ? AND status = 'stopped'").run(t.id);
-  }
-  switch (scheduleOf(t, now)) {
-    case 'next_cron':
-      db.prepare('UPDATE triggers SET next_run_at = ? WHERE id = ?').run(nextOccurrence(t.schedule_cron!, now).toISOString(), t.id);
-      break;
-    case 'run_now_only_missed':
-    case 'run_now_only_partial':
-      db.prepare('UPDATE triggers SET next_run_at = NULL WHERE id = ?').run(t.id);
-      break;
-    case 'kept':
-      break;
-  }
-}
-
-const COVER_FROM_MARKS = `covered_created_by = created_by, covered_created_id = created_mandate_id, covered_created_at = created_at,
-  covered_edited_by = mandate_editor, covered_edited_id = mandate_editor_id, covered_edited_at = mandate_edited_at, covered_at = ?`;
-
 /**
  * Takes a paused plan over, against the digest the owner was shown (`expect`).
  *
@@ -476,44 +330,27 @@ const COVER_FROM_MARKS = `covered_created_by = created_by, covered_created_id = 
  */
 export function takeOver(deps: TakeoverDeps, id: string, expect: string): TakeoverResult {
   if (!planPauseOn()) return { kind: 'refused', refusal: 'not_available' };
-  const first = planOf(deps, id);
-  if (first === 'not_found') return { kind: 'not_found' };
-  if (typeof first === 'string') return { kind: 'refused', refusal: first };
-  if (first.expect !== expect) return { kind: 'refused', refusal: 'changed' };
-  if (deps.audit === null) return { kind: 'refused', refusal: 'unrecorded' };
-  if (deps.prompts === null) return { kind: 'refused', refusal: 'prompts' };
-  try {
-    for (const t of [first.trigger, ...first.released]) clearPrompts(deps.prompts, t.id);
-  } catch {
-    return { kind: 'refused', refusal: 'prompts' };
-  }
-  const audit = deps.audit;
-  try {
-    return deps.db.transaction((): TakeoverResult => {
-      const plan = planOf(deps, id);
-      if (plan === 'not_found') return { kind: 'not_found' };
-      if (typeof plan === 'string') return { kind: 'refused', refusal: plan };
-      if (plan.expect !== expect) return { kind: 'refused', refusal: 'changed' };
-      const now = deps.now?.() ?? new Date();
+  return commitTakeover(deps, expect, () => decided(planOf(deps, id)),
+    (plan) => [plan.trigger.id, ...plan.released.map((r) => r.id)],
+    (plan, now, record): TakeoverResult => {
       const nowS = Math.floor(now.getTime() / 1000);
       deps.db.prepare(`UPDATE triggers SET ${COVER_FROM_MARKS} WHERE id = ?`).run(nowS, id);
       if (plan.coverWorkflow && plan.wf !== undefined) deps.db.prepare(`UPDATE workflows SET ${COVER_FROM_MARKS} WHERE id = ?`).run(nowS, plan.wf.id);
       for (const t of [plan.trigger, ...plan.released]) release(deps, t, now);
       deps.triggers.setConfirmedAt(id, now.toISOString(), principalTag(OWNER_PRINCIPAL));
-      try {
-        audit.record({
-          principal: OWNER_PRINCIPAL, action: 'plan.takeover', phase: 'done', correlationId: newCorrelationId(),
-          target: `trigger=${id}${plan.coveredMandates.length > 0 ? ` mandates=${plan.coveredMandates.join(',')}` : ''}${plan.released.length > 0 ? ` released=${plan.released.map((r) => r.id).join(',')}` : ''}`,
-        });
-      } catch (err: unknown) {
-        throw new Unrecorded(err instanceof Error ? err.message : String(err));
-      }
+      record({
+        principal: OWNER_PRINCIPAL, action: 'plan.takeover', phase: 'done', correlationId: newCorrelationId(),
+        target: `trigger=${id}${plan.coveredMandates.length > 0 ? ` mandates=${plan.coveredMandates.join(',')}` : ''}${plan.released.length > 0 ? ` released=${plan.released.map((r) => r.id).join(',')}` : ''}`,
+      });
       const after = deps.triggers.getById(id);
-      if (after === undefined) throw new Unrecorded('the plan is gone');
+      if (after === undefined) throw new TakeoverUnrecorded('the plan is gone');
       return { kind: 'taken_over', trigger: after, runsAs: principalTag(plan.runsAs) };
-    }).immediate();
-  } catch (err: unknown) {
-    if (err instanceof Unrecorded) return { kind: 'refused', refusal: 'unrecorded' };
-    throw err;
-  }
+    });
+}
+
+/** `planOf` as the commit reads it: the plan to write from, or the answer instead. */
+function decided(plan: TakeoverPlan | TakeoverRefusal | 'not_found'): { readonly ok: TakeoverPlan } | { readonly stop: TakeoverResult } {
+  if (plan === 'not_found') return { stop: { kind: 'not_found' } };
+  if (typeof plan === 'string') return { stop: { kind: 'refused', refusal: plan } };
+  return { ok: plan };
 }
