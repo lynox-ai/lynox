@@ -1,3 +1,4 @@
+import { stripHiddenInName } from '../core/hidden-text.js';
 /**
  * The shape of a workflow step's id. An id reaches the model wherever a run, a diagnosis or an edit
  * names its step, and the owner needs it to repair a plan, so it cannot be left out. Its shape is
@@ -93,7 +94,13 @@ export function storedSteps(row: { manifest_json: string } | undefined): Runnabl
   if (!row) return undefined;
   try {
     const steps = (JSON.parse(row.manifest_json) as { steps?: unknown }).steps;
-    return Array.isArray(steps) ? steps.filter((s): s is RunnableStep => typeof (s as RunnableStep | null)?.id === 'string' && typeof (s as RunnableStep).task === 'string') : undefined;
+    // Every step keeps its place, so the positions stay those of the stored plan.
+    return Array.isArray(steps)
+      ? steps.map((s: unknown) => {
+        const step = (s ?? {}) as Partial<RunnableStep>;
+        return { ...step, id: typeof step.id === 'string' ? step.id : '', task: typeof step.task === 'string' ? step.task : '' };
+      })
+      : undefined;
   } catch {
     return undefined;
   }
@@ -135,12 +142,16 @@ function templateStrings(value: unknown): string[] {
  * from one run's changed copy, so the same step has the same name in every run.
  */
 export function stepRunNames(steps: readonly RunnableStep[]): Map<string, string> {
+  // Each read as it reads without the characters that render as nothing: an id stored as `step-2`
+  // plus one of them reads as `step-2` (and an edit finds it by that), so it holds that name too, and a
+  // run that strips a task first sees the same heads as one that does not.
   const taken = new Set<string>(['params']);
+  const take = (name: string): void => { const shown = stripHiddenInName(name); if (isStepIdShape(shown)) taken.add(shown); };
   for (const s of steps) {
-    if (isStepIdShape(s.id)) taken.add(s.id);
-    for (const r of s.input_from ?? []) if (isStepIdShape(r)) taken.add(r);
+    take(s.id);
+    for (const r of s.input_from ?? []) take(r);
     for (const text of [s.task, ...templateStrings(s.input_template)]) {
-      for (const head of placeholderHeads(text)) if (isStepIdShape(head)) taken.add(head);
+      for (const head of placeholderHeads(text)) take(head);
     }
   }
   const names = new Map<string, string>();

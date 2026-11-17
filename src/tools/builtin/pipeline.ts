@@ -949,7 +949,8 @@ export async function runSavedWorkflow(
   // but a workflow saved before that still carries them, and a hidden clause would run as part
   // of the step's instruction. Stripped, not refused, so it keeps running on what can be seen.
   // A step id stored before ids had a shape runs as `step-<n>`, so nothing the run writes quotes it.
-  const steps: InlinePipelineStep[] = runStepIds(planned.steps.map(s => ({ ...s, task: stripHidden(s.task) })));
+  // The names come from the stored plan as stored, as every other reader computes them.
+  const steps: InlinePipelineStep[] = runStepIds(planned.steps.map(s => ({ ...s, task: stripHidden(s.task) })), stepRunNames(planned.steps));
   if (steps.length === 0) {
     return { ok: false, error: 'Workflow has no steps to execute.' };
   }

@@ -285,6 +285,19 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
     expect(out[0]!.input_from).toEqual(['step-2']);
   });
 
+  it('counts a stored id that reads as a name without its hidden characters as holding that name', () => {
+    // An edit finds `step-2` plus a ZWSP by `step-2`, so the step outside the shape must not run as `step-2`.
+    const names = stepRunNames([{ id: 'fetch', task: 'a' }, { id: OLD, task: 'b' }, { id: 'step-2\u200B', task: 'c' }]);
+    expect(names.get(OLD)).toBe('step-2a');
+  });
+
+  it('names alike whether or not a run stripped the hidden characters from the tasks first', () => {
+    const stored = [{ id: 'fetch', task: 'use {{step-2\u200B.result}}' }, { id: OLD, task: 'b' }];
+    const stripped = stored.map(st => ({ ...st, task: st.task.replace('\u200B', '') }));
+    expect([...stepRunNames(stored)]).toEqual([...stepRunNames(stripped)]);
+    expect(stepRunNames(stored).get(OLD)).toBe('step-2a');
+  });
+
   it('never touches a {{params.…}} placeholder, also where a stored id starts with params.', () => {
     const out = runStepIds([{ id: 'params.month x', task: 'a' }, { id: 'send', task: 'for {{params.month x}} and {{params.month}}' }]);
     expect(out[0]!.id).toBe('step-1');
