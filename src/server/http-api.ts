@@ -147,6 +147,7 @@ import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './we
 import { requestLogUrl } from './request-log-url.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
+import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
@@ -315,6 +316,50 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
   changed: { status: 409, message: 'The plan changed while you were looking at it. Look at it again, then take it over. The plan stays paused.' },
   prompts: { status: 503, message: "lynox cannot close the plan's open questions right now, so it did not take the plan over. It stays paused. Try again in a few minutes." },
   unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so lynox did not take the plan over; it stays paused. Try again in a few minutes.' },
+};
+
+/**
+ * Each step of a workflow as it runs, as the stamp and the takeover previews show it: a captured
+ * step's literal call beside its task, and the tools it gets, worked out the way the runtime does
+ * (a step that names none gets the pool). `secret:` references stay names; no value is resolved
+ * here. A role can widen the tools and change the model at run time: it is shown by name, with
+ * what it grants (a role is built in, `roles.ts`, not stored).
+ */
+async function stepsShown(planned: PlannedPipeline) {
+  const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
+  const { getRole } = await import('../core/roles.js');
+  const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
+    const r = name === undefined ? undefined : getRole(name);
+    return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
+  };
+  return (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
+    id: st.id,
+    task: st.task,
+    tool: st.tool ?? null,
+    inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
+    tools: [...inlineStepToolNames(st)],
+    model: st.model ?? null,
+    role: st.role ?? null,
+    roleGrant: roleGrantOf(st.role),
+    effort: st.effort ?? null,
+    thinking: st.thinking ?? null,
+    timeoutMs: st.timeout_ms ?? null,
+    inputFrom: st.input_from ?? null,
+  }));
+}
+
+/**
+ * How the workflow takeover's refusals are answered. Plain placeholders: the texts the library
+ * shows are its own, by code.
+ */
+export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'changed' | 'prompts' | 'unrecorded', { readonly status: number; readonly message: string }> = {
+  unreadable: { status: 409, message: 'The workflow cannot be read, so it cannot be taken over.' },
+  nothing_to_take_over: { status: 409, message: 'This workflow does not need to be taken over.' },
+  mandate_live: { status: 409, message: 'Someone who set up or changed this workflow still has access, so it cannot be taken over.' },
+  running: { status: 409, message: 'A run of a plan on this workflow has not finished yet. Try again in a few minutes.' },
+  changed: { status: 409, message: 'The workflow changed while you were looking at it. Look at it again, then take it over.' },
+  prompts: { status: 503, message: 'The open questions of its plans cannot be closed right now, so the workflow was not taken over. Try again in a few minutes.' },
+  unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so the workflow was not taken over. Try again in a few minutes.' },
 };
 
 /**
@@ -2564,6 +2609,21 @@ export class LynoxHTTPApi {
       audit: engine.getAuditLog(),
       prompts: engine.getPromptStore(),
     };
+  }
+
+  /**
+   * What the workflow takeover reads and writes (`workflow-takeover.ts`): the plan takeover's, the
+   * workflow store on the same engine.db, whose hash the stamp is taken with, and the connections.
+   * Null with a 503 when engine.db is not there.
+   */
+  #workflowTakeoverDeps(res: ServerResponse): WorkflowTakeoverDeps | null {
+    const deps = this.#takeoverDepsIfReady();
+    const engineDb = this.engine?.getEngineDb() ?? null;
+    if (deps === null || engineDb === null) {
+      errorResponse(res, 503, 'Taking over a workflow is not available on this instance right now.');
+      return null;
+    }
+    return { ...deps, workflows: new WorkflowStore(engineDb), hasher: engineDb, profiles: this.engine?.getApiStore() ?? null };
   }
 
   /** The plan's exact id from a path that may carry a prefix; null with the answer sent when it names none or more than one. */
@@ -9085,12 +9145,6 @@ export class LynoxHTTPApi {
       const planned = history.getWorkflowExact(params['id']!);
       const expect = planned === undefined ? null : history.workflowStampDigest(planned);
       if (planned === undefined || expect === null) { errorResponse(res, 404, 'Workflow not found'); return; }
-      const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
-      const { getRole } = await import('../core/roles.js');
-      const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
-        const r = name === undefined ? undefined : getRole(name);
-        return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
-      };
       const state = history.workflowStampState(planned);
       const shaped = history.workflowMandateShaped(planned.id);
       const contract = planned.capabilityContract;
@@ -9105,25 +9159,7 @@ export class LynoxHTTPApi {
         // What the contract lets the run write, as the grant's preview words it.
         contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
         parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
-        // Each step as it runs: a captured step's literal call beside its task, and the tools it
-        // gets, worked out the way the runtime does (a step that names none gets the pool).
-        // `secret:` references stay names; no value is resolved here.
-        // A role can widen the tools and change the model at run time: it is shown by name.
-        steps: (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
-          id: st.id,
-          task: st.task,
-          tool: st.tool ?? null,
-          inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
-          tools: [...inlineStepToolNames(st)],
-          model: st.model ?? null,
-          role: st.role ?? null,
-          // A role is built in (`roles.ts`), not stored: what it grants is shown beside its name.
-          roleGrant: roleGrantOf(st.role),
-          effort: st.effort ?? null,
-          thinking: st.thinking ?? null,
-          timeoutMs: st.timeout_ms ?? null,
-          inputFrom: st.input_from ?? null,
-        })),
+        steps: await stepsShown(planned),
       });
     }, ownerOnly('see what stamping a workflow would confirm')));
 
@@ -9151,6 +9187,48 @@ export class LynoxHTTPApi {
         .filter((t) => t.pipeline_id === id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(id))).length;
       jsonResponse(res, 200, { stampedAt: now?.confirmedAt ?? null, awaitsStamp: false, stillOff });
     }, ownerOnly('stamp a workflow')));
+
+    // The owner's takeover of a workflow a mandate set up or changed, once that mandate's access
+    // ended (`workflow-takeover.ts`): the preview shows the steps as the stamp preview does, whose
+    // marks are covered, what moves on the other plans, and the connections a run as the owner no
+    // longer uses, with the digest the takeover is held to. Its own routes: the stamp's `expect`
+    // never covers a mark. Not held to the plan pause: a workflow is taken over without a plan.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/takeover-preview', async (_req, res, params) => {
+      const deps = this.#workflowTakeoverDeps(res);
+      if (deps === null) return;
+      const out = workflowTakeoverPreview(deps, params['id']!);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Workflow not found'); return; }
+      if (out.kind === 'refused') { jsonResponse(res, 200, { refusal: out.refusal, message: WORKFLOW_TAKEOVER_REFUSALS[out.refusal].message }); return; }
+      const { planned, foreignConnectionSteps, ...preview } = out.preview;
+      const marked = new Set(foreignConnectionSteps);
+      // A step whose literal call goes to a profile some mandate connected is marked, whoever it was.
+      const steps = (await stepsShown(planned)).map((st) => ({ ...st, foreignConnection: marked.has(st.id) }));
+      jsonResponse(res, 200, { ...preview, steps, refusal: null });
+    }, ownerOnly('see what taking over a workflow would do')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/takeover', async (_req, res, params, body) => {
+      // The digest from the preview is required: the takeover is the owner's consent to what the
+      // preview showed, and nothing else.
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: take the workflow over from its preview.', 'expect_required'); return; }
+      const deps = this.#workflowTakeoverDeps(res);
+      if (deps === null) return;
+      const out = takeOverWorkflow(deps, params['id']!, expected);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Workflow not found'); return; }
+      if (out.kind === 'refused') {
+        const r = WORKFLOW_TAKEOVER_REFUSALS[out.refusal];
+        errorResponse(res, r.status, r.message, out.refusal);
+        return;
+      }
+      // The cached definition carries the old stamp: a run after this must read the new one.
+      const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
+      forgetPipeline(out.id);
+      // As after the stamp: schedules the wait switched off stay off, counted for the page.
+      const stillOff = (engine.getTaskManager()?.listTriggers?.() ?? [])
+        .filter((t) => t.pipeline_id === out.id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(out.id))).length;
+      jsonResponse(res, 200, { takenOver: true, runsAs: out.runsAs, stillOff });
+    }, ownerOnly('take over a workflow')));
 
     // ── Tasks ──
     this.addStatic('user', 'GET /api/tasks', async (req, res) => {
