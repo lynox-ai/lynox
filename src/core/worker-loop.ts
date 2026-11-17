@@ -4107,6 +4107,19 @@ export class WorkerLoop {
 }
 
 /**
+ * A run's planner as the trail names it. The run row keeps the planner's tag and grant only, not
+ * the name the session was shown under, so the name comes from the grant's latest row that carries
+ * one (`AuditLog.displayNameOf`), as on every other row of the same person. With no such row, or
+ * when it cannot be read, the address stands alone, as before.
+ */
+function plannerAsShown(planner: RequestPrincipal, auditLog: import('./audit-log.js').AuditLog | null): RequestPrincipal {
+  if (planner.kind !== 'mandate' || planner.display !== undefined || planner.mandateId === undefined || auditLog === null) return planner;
+  let display: string | null = null;
+  try { display = auditLog.displayNameOf(planner.mandateId); } catch { /* the address stands in */ }
+  return display === null ? planner : { ...planner, display };
+}
+
+/**
  * The trail recorder of a bulk run's reads: for a run a delegated session planned, each GET
  * the engine sends for it is first a `read` row under that session's principal, with the run's
  * id (PRD customer-granted-operator-access §3.9). The owner started or approved the run, but
@@ -4126,7 +4139,7 @@ export function bulkReadRecorder(
   targetOf: typeof import('./audit-log.js').httpTarget,
 ): ((url: string, detail?: string) => boolean) | null {
   if (run.delegatedPlanner === null) return null;
-  const record = recorderOf({ principal: run.delegatedPlanner, currentRunId: run.id, toolContext: { auditLog } }, 'bulk:read');
+  const record = recorderOf({ principal: plannerAsShown(run.delegatedPlanner, auditLog), currentRunId: run.id, toolContext: { auditLog } }, 'bulk:read');
   // A planner that is the owner after all records nothing, and reads as before.
   if (record === null) return null;
   return (url, detail) => {
@@ -4159,9 +4172,9 @@ export function bulkRunTrail(
     externalHostOf: typeof import('./bulk-ledger.js').externalHostOf;
   },
 ): import('./bulk-apply.js').BulkRunTrail | null {
-  const planner = run.delegatedPlanner;
   const host = tools.externalHostOf(run.targetSystem);
-  if (planner === null || isOwnerPrincipal(planner)) return null;
+  if (run.delegatedPlanner === null || isOwnerPrincipal(run.delegatedPlanner)) return null;
+  const planner = plannerAsShown(run.delegatedPlanner, auditLog);
   // Not a writer the engine knows: no writer is built for it, so the run halts before this is
   // asked (`bulkWriterFor`); were it asked, the row is written all the same.
   const where: readonly [string, string] = host !== null ? ['host', host] : ['store', run.targetSystem === 'workspace' ? 'files' : run.targetSystem === 'data_store' ? 'data_store' : 'other'];
