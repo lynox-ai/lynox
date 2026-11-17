@@ -33,11 +33,21 @@ import { copyOut } from './workspace-fd.js';
 import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 import { OMITTED_SIDECAR } from './sidecar-refusals.js';
 import type { SecretScope } from '../types/index.js';
+import { deriveEngineEncKey } from './engine-db.js';
+import { deriveHistoryEncKey } from './run-history.js';
+import { isPlainStore, type PlainStore } from './migration-rekey.js';
+import type { MigrationCeiling } from './migration-ceiling.js';
+import {
+  choosePlainPaths, rewriteLedgersForPlain, rewriteStoreForPlain,
+  type PathReason, type PlainLedgers, type PlainSourceResult,
+} from './migration-plain-source.js';
 import {
   encryptChunk,
   computeManifestHash,
   sha256,
   MAX_CHUNK_BYTES,
+  MIGRATION_MAX_CHUNKS,
+  MIGRATION_MAX_TOTAL_BYTES,
   type MigrationManifest,
   type MigrationChunkMeta,
   type EncryptedChunk,
@@ -76,7 +86,32 @@ export interface ExportResult {
    * walker 2): its files are not in this export, and the rest is.
    */
   workspace?: typeof OMITTED_SIDECAR | undefined;
+  /**
+   * Set when the export was asked for the plaintext path: per store (engine.db, history.db) the
+   * path it took, why a store took the raw path, and the values that decrypted or did not
+   * (failed ones travel as they were and are named in the payload).
+   */
+  plain?: PlainExportReport | undefined;
 }
+
+export interface PlainExportReport {
+  stores: Array<{ store: PlainStore; path: 'plain' | 'raw'; reason?: PathReason | undefined; decrypted: number; failed: number }>;
+  /** The merge ledgers, when there are any: their path follows engine.db's. */
+  ledgers?: { path: 'plain' | 'raw'; decrypted: number; failed: number } | undefined;
+}
+
+export interface ExportOptions {
+  /**
+   * The destination takes plaintext stores and published these numbers: the stores and the merge
+   * ledgers are decrypted in memory, and each store takes the plaintext path where the numbers
+   * say the destination can re-encrypt it (`choosePlainPaths`), else the raw path as today.
+   * Absent: every store travels raw.
+   */
+  plain?: { ceiling: MigrationCeiling } | undefined;
+}
+
+/** The merge ledgers' cap at the destination (`MAX_MEMORY_BUNDLE_BYTES` in the importer). */
+const SWEEPS_CAP_BYTES = 64 * 1024 * 1024;
 
 interface PlaintextChunk {
   meta: MigrationChunkMeta;
@@ -88,6 +123,12 @@ interface PlaintextChunk {
 // DERIVED from `data-dir-inventory.ts` — see the note there. Safe to list a DB before it
 // has data: the export loop skips any that doesn't exist (existsSync guard below).
 const SQLITE_DBS = MIGRATE_SQLITE_DBS;
+
+/** Bytes as MiB with one decimal for a refusal a person reads, or as bytes where that would read equal to `other`. */
+function size(bytes: number, other: number): string {
+  const mib = (n: number) => (n / (1024 * 1024)).toFixed(1);
+  return mib(bytes) === mib(other) ? `${String(bytes)} bytes` : `${mib(bytes)} MiB`;
+}
 
 /**
  * Split a payload into `MAX_CHUNK_BYTES`-bounded chunks. `encryptChunk` throws
@@ -151,6 +192,8 @@ export class MigrationExporter {
    * exactly how a cap ends up shipping untested.
    */
   private readonly portableDirLimits: { maxEntries: number; maxBytes: number } | undefined;
+  /** Overrides for the migration's bounds, for the same reason: a test cannot build 500 MiB. */
+  private readonly bounds: { maxChunks: number; maxTotalBytes: number };
   /** Workspace entries the current export left out; reset per `export()`. */
   private skipped: string[] = [];
   /** Set by `collectWorkspace` when it left the workspace out; reset per `export()`. */
@@ -160,8 +203,10 @@ export class MigrationExporter {
     lynoxDir?: string | undefined;
     vaultKey?: string | undefined;
     portableDirLimits?: { maxEntries: number; maxBytes: number } | undefined;
+    bounds?: { maxChunks: number; maxTotalBytes: number } | undefined;
   } | undefined) {
     this.portableDirLimits = options?.portableDirLimits;
+    this.bounds = options?.bounds ?? { maxChunks: MIGRATION_MAX_CHUNKS, maxTotalBytes: MIGRATION_MAX_TOTAL_BYTES };
     this.lynoxDir = options?.lynoxDir ?? getLynoxDir();
     const key = options?.vaultKey ?? process.env['LYNOX_VAULT_KEY'];
     if (!key) {
@@ -177,97 +222,268 @@ export class MigrationExporter {
    * @param onProgress   - Optional progress callback for UI updates
    * @returns Manifest + encrypted chunks ready for upload
    */
-  export(transferKey: Buffer, onProgress?: ProgressCallback | undefined): ExportResult {
+  export(transferKey: Buffer, onProgress?: ProgressCallback | undefined, options?: ExportOptions | undefined): ExportResult {
     // Phase 1: Collect plaintext chunks
     const plaintextChunks: PlaintextChunk[] = [];
     this.skipped = [];
     this.workspaceOmitted = false;
+    const plan = options?.plain;
+    /** Where each database's chunks go in `plaintextChunks`, and both forms of a plaintext-path store. */
+    const databases: Array<{ name: string; at: number; raw: PlaintextChunk[]; plain: PlainSourceResult | null }> = [];
+    let sweeps: { at: number; raw: PlaintextChunk[]; plain: PlainLedgers | null } | null = null;
 
-    onProgress?.({ phase: 'collecting', currentChunk: 0, totalChunks: 0, currentName: 'secrets' });
-
-    // 1. Secrets — decrypt from local vault
-    const secretsChunk = this.collectSecrets();
-    if (secretsChunk) plaintextChunks.push(secretsChunk);
-
-    // 2. SQLite databases — VACUUM INTO temp copies
-    for (const dbName of SQLITE_DBS) {
-      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dbName });
-      const dbChunks = this.collectDatabase(dbName);
-      plaintextChunks.push(...dbChunks);
-    }
-
-    // 3. Artifacts
-    onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'artifacts' });
-    const artifactChunk = this.collectArtifacts();
-    if (artifactChunk) plaintextChunks.push(artifactChunk);
-
-    // 4. Memory — the flat-file store the memory_* tools actually read
-    onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'memory' });
-    plaintextChunks.push(...this.collectMemory());
-
-    onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'sweeps' });
-    plaintextChunks.push(...this.collectSweeps());
-
-    for (const dirName of GENERIC_PORTABLE_DIRS) {
-      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dirName });
-      plaintextChunks.push(...this.collectPortableDir(dirName));
-    }
-
-    // 5. Config (sanitized)
-    const configChunk = this.collectConfig();
-    if (configChunk) plaintextChunks.push(configChunk);
-
-    // Assign sequence numbers
-    const chunkMetas: MigrationChunkMeta[] = plaintextChunks.map((c, i) => ({
-      ...c.meta,
-      seq: i,
-    }));
-
-    // Build manifest (without hash first, then compute)
-    let lynoxVersion = 'unknown';
+    // Every buffer collected below may hold plaintext (secrets, and the stores' plaintext forms);
+    // a throw anywhere before the return zeroes all of them on the way out.
     try {
-      const pkgPath = join(this.lynoxDir, '..', 'package.json');
-      if (existsSync(pkgPath)) {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: string };
-        if (pkg.version) lynoxVersion = pkg.version;
+      onProgress?.({ phase: 'collecting', currentChunk: 0, totalChunks: 0, currentName: 'secrets' });
+
+      // 1. Secrets — decrypt from local vault
+      const secretsChunk = this.collectSecrets();
+      if (secretsChunk) plaintextChunks.push(secretsChunk);
+
+      // 2. SQLite databases — VACUUM INTO temp copies; on the plaintext path also decrypted in memory
+      for (const dbName of SQLITE_DBS) {
+        onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dbName });
+        const snapshot = this.snapshotDatabase(dbName);
+        if (!snapshot) continue;
+        const plain = plan && isPlainStore(dbName) ? this.plainForm(snapshot, dbName) : null;
+        databases.push({ name: dbName, at: plaintextChunks.length, raw: splitIntoChunks(snapshot, 'sqlite_db', dbName), plain });
       }
-    } catch { /* best effort */ }
 
-    const manifestBase = {
-      version: 1 as const,
-      exportedAt: new Date().toISOString(),
-      lynoxVersion,
-      totalChunks: chunkMetas.length,
-      chunks: chunkMetas,
+      // 3. Artifacts
+      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'artifacts' });
+      const artifactChunk = this.collectArtifacts();
+      if (artifactChunk) plaintextChunks.push(artifactChunk);
+
+      // 4. Memory — the flat-file store the memory_* tools actually read
+      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'memory' });
+      plaintextChunks.push(...this.collectMemory());
+
+      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'sweeps' });
+      const ledgerFiles = this.readSweeps();
+      if (ledgerFiles) {
+        const raw = splitIntoChunks(Buffer.from(JSON.stringify({ files: ledgerFiles }), 'utf-8'), 'sweeps', 'sweeps');
+        const plain = plan && databases.some((d) => d.name === 'engine.db' && d.plain) ? this.plainLedgers(ledgerFiles) : null;
+        sweeps = { at: plaintextChunks.length, raw, plain };
+      }
+
+      for (const dirName of GENERIC_PORTABLE_DIRS) {
+        onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dirName });
+        plaintextChunks.push(...this.collectPortableDir(dirName));
+      }
+
+      // 5. Config (sanitized)
+      const configChunk = this.collectConfig();
+      if (configChunk) plaintextChunks.push(configChunk);
+
+      // 6. The databases and the merge ledgers, each in the form its path takes. The path is chosen
+      //    only now, over every chunk: the destination judges the whole bundle.
+      const report = plan ? this.placeDatabases(plaintextChunks, databases, sweeps, plan.ceiling) : this.placeRaw(plaintextChunks, databases, sweeps);
+
+      // Assign sequence numbers
+      const chunkMetas: MigrationChunkMeta[] = plaintextChunks.map((c, i) => ({
+        ...c.meta,
+        seq: i,
+      }));
+
+      // The destination refuses a manifest over either bound only after it arrives; check here,
+      // before anything is encrypted or sent, and say which bound it is.
+      const totalBytes = chunkMetas.reduce((sum, c) => sum + c.originalSize, 0);
+      const over: string[] = [];
+      if (chunkMetas.length > this.bounds.maxChunks) {
+        over.push(`it needs ${String(chunkMetas.length)} chunks, and a migration carries at most ${String(this.bounds.maxChunks)} (each kind of data starts its own chunks of up to ${String(MAX_CHUNK_BYTES / (1024 * 1024))} MiB)`);
+      }
+      if (totalBytes > this.bounds.maxTotalBytes) {
+        over.push(`it is ${size(totalBytes, this.bounds.maxTotalBytes)}, and a migration carries at most ${size(this.bounds.maxTotalBytes, totalBytes)}`);
+      }
+      if (over.length > 0) {
+        for (const pc of plaintextChunks) pc.data.fill(0);
+        throw new Error(`This instance's data does not fit one migration: ${over.join('; ')}. None of your data was sent, and the data on this instance is unchanged. A migration cannot move only part of it; write to support@lynox.ai with this message and we will look at it with you.`);
+      }
+
+      // Build manifest (without hash first, then compute)
+      let lynoxVersion = 'unknown';
+      try {
+        const pkgPath = join(this.lynoxDir, '..', 'package.json');
+        if (existsSync(pkgPath)) {
+          const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: string };
+          if (pkg.version) lynoxVersion = pkg.version;
+        }
+      } catch { /* best effort */ }
+
+      const manifestBase = {
+        version: 1 as const,
+        exportedAt: new Date().toISOString(),
+        lynoxVersion,
+        totalChunks: chunkMetas.length,
+        chunks: chunkMetas,
+      };
+
+      const manifestHash = computeManifestHash(manifestBase);
+      const manifest: MigrationManifest = { ...manifestBase, manifestHash };
+
+      // Phase 2: Encrypt chunks and zeroize plaintext immediately after
+      const encryptedChunks: EncryptedChunk[] = [];
+      for (let i = 0; i < plaintextChunks.length; i++) {
+        const pc = plaintextChunks[i]!;
+        onProgress?.({
+          phase: 'encrypting',
+          currentChunk: i,
+          totalChunks: plaintextChunks.length,
+          currentName: pc.meta.name,
+        });
+
+        encryptedChunks.push(encryptChunk(pc.data, transferKey, i, manifestHash));
+
+        // Zeroize plaintext immediately after encryption — especially critical for secrets
+        pc.data.fill(0);
+      }
+
+      onProgress?.({ phase: 'done', currentChunk: plaintextChunks.length, totalChunks: plaintextChunks.length, currentName: '' });
+
+      return {
+        manifest, chunks: encryptedChunks,
+        ...(this.skipped.length > 0 ? { skipped: [...this.skipped] } : {}),
+        ...(this.workspaceOmitted ? { workspace: OMITTED_SIDECAR } : {}),
+        ...(report ? { plain: report } : {}),
+      };
+    } catch (err: unknown) {
+      for (const pc of plaintextChunks) pc.data.fill(0);
+      for (const d of databases) {
+        for (const c of d.raw) c.data.fill(0);
+        d.plain?.payload.fill(0);
+      }
+      if (sweeps) {
+        for (const c of sweeps.raw) c.data.fill(0);
+        sweeps.plain?.payload.fill(0);
+      }
+      throw err;
+    }
+  }
+
+  /** A store's plaintext form, or null when its rewrite fails (it then travels raw). */
+  private plainForm(snapshot: Buffer, store: PlainStore): PlainSourceResult | null {
+    const key = store === 'engine.db' ? deriveEngineEncKey(this.vaultKey) : deriveHistoryEncKey(this.vaultKey);
+    try {
+      return rewriteStoreForPlain(snapshot, store, { key });
+    } catch {
+      return null;
+    } finally {
+      key.fill(0);
+    }
+  }
+
+  /** The merge ledgers' plaintext form, or null when they have to travel raw. */
+  private plainLedgers(files: Record<string, string>): PlainLedgers | null {
+    const key = deriveEngineEncKey(this.vaultKey);
+    try {
+      return rewriteLedgersForPlain(structuredClone(files), key);
+    } finally {
+      key.fill(0);
+    }
+  }
+
+  /**
+   * Insert chunks at the positions their collectors had. `placed` comes in collection order, so its
+   * positions never decrease; inserting from the last entry back keeps that order, also for
+   * several entries at one position (the databases all sit after the secrets).
+   */
+  private insertAt(chunks: PlaintextChunk[], placed: Array<{ at: number; chunks: PlaintextChunk[] }>): void {
+    for (let i = placed.length - 1; i >= 0; i--) chunks.splice(placed[i]!.at, 0, ...placed[i]!.chunks);
+  }
+
+  /** Every database and the ledgers raw, as today. */
+  private placeRaw(
+    chunks: PlaintextChunk[],
+    databases: Array<{ at: number; raw: PlaintextChunk[] }>,
+    sweeps: { at: number; raw: PlaintextChunk[] } | null,
+  ): undefined {
+    this.insertAt(chunks, [...databases.map((d) => ({ at: d.at, chunks: d.raw })), ...(sweeps ? [{ at: sweeps.at, chunks: sweeps.raw }] : [])]);
+    return undefined;
+  }
+
+  /**
+   * The plaintext path: choose per store over the whole bundle, then place each store and the
+   * ledgers in the chosen form and zero the form that does not travel.
+   */
+  private placeDatabases(
+    chunks: PlaintextChunk[],
+    databases: Array<{ name: string; at: number; raw: PlaintextChunk[]; plain: PlainSourceResult | null }>,
+    sweeps: { at: number; raw: PlaintextChunk[]; plain: PlainLedgers | null } | null,
+    ceiling: MigrationCeiling,
+  ): PlainExportReport {
+    const bytes = (cs: PlaintextChunk[]): number => cs.reduce((n, c) => n + c.data.length, 0);
+    const parts = (n: number): number => Math.max(1, Math.ceil(n / MAX_CHUNK_BYTES));
+    const stores = databases.filter((d): d is typeof d & { name: PlainStore } => isPlainStore(d.name));
+    let paths = choosePlainPaths({
+      ceiling,
+      stores: stores.map((d) => ({ store: d.name, plainBytes: d.plain ? d.plain.payload.length : null, rawBytes: bytes(d.raw) })),
+      otherBytes: bytes(chunks),
+      otherDatabaseBytes: databases.filter((d) => !isPlainStore(d.name)).reduce((n, d) => n + bytes(d.raw), 0),
+      sweeps: sweeps ? { rawBytes: bytes(sweeps.raw), plainBytes: sweeps.plain ? sweeps.plain.payload.length : null } : null,
+      sweepsCapBytes: SWEEPS_CAP_BYTES,
+    });
+    const plainStore = (d: { name: string; plain: PlainSourceResult | null }): boolean => isPlainStore(d.name) && paths.get(d.name)?.path === 'plain' && d.plain !== null;
+    const plainLedgers = (): boolean => sweeps !== null && sweeps.plain !== null && paths.get('engine.db')?.path === 'plain';
+
+    // The source's own bounds (`this.bounds`) are judged over what travels. A plaintext form is a
+    // little larger than the raw one (the header) and can need one chunk more; where that alone
+    // would make the export refuse, every store goes raw instead, as today.
+    const size = (form: 'chosen' | 'raw'): { count: number; total: number } => {
+      let count = chunks.length;
+      let total = bytes(chunks);
+      for (const d of databases) {
+        const n = form === 'chosen' && plainStore(d) ? d.plain!.payload.length : bytes(d.raw);
+        count += form === 'chosen' && plainStore(d) ? parts(n) : d.raw.length;
+        total += n;
+      }
+      if (sweeps) {
+        const n = form === 'chosen' && plainLedgers() ? sweeps.plain!.payload.length : bytes(sweeps.raw);
+        count += form === 'chosen' && plainLedgers() ? parts(n) : sweeps.raw.length;
+        total += n;
+      }
+      return { count, total };
     };
-
-    const manifestHash = computeManifestHash(manifestBase);
-    const manifest: MigrationManifest = { ...manifestBase, manifestHash };
-
-    // Phase 2: Encrypt chunks and zeroize plaintext immediately after
-    const encryptedChunks: EncryptedChunk[] = [];
-    for (let i = 0; i < plaintextChunks.length; i++) {
-      const pc = plaintextChunks[i]!;
-      onProgress?.({
-        phase: 'encrypting',
-        currentChunk: i,
-        totalChunks: plaintextChunks.length,
-        currentName: pc.meta.name,
-      });
-
-      encryptedChunks.push(encryptChunk(pc.data, transferKey, i, manifestHash));
-
-      // Zeroize plaintext immediately after encryption — especially critical for secrets
-      pc.data.fill(0);
+    const over = (x: { count: number; total: number }): boolean => x.count > this.bounds.maxChunks || x.total > this.bounds.maxTotalBytes;
+    if (over(size('chosen')) && !over(size('raw'))) {
+      paths = new Map([...paths].map(([store, p]) => [store, p.path === 'plain' ? { path: 'raw' as const, reason: 'bounds' as const } : p]));
     }
 
-    onProgress?.({ phase: 'done', currentChunk: plaintextChunks.length, totalChunks: plaintextChunks.length, currentName: '' });
-
-    return {
-      manifest, chunks: encryptedChunks,
-      ...(this.skipped.length > 0 ? { skipped: [...this.skipped] } : {}),
-      ...(this.workspaceOmitted ? { workspace: OMITTED_SIDECAR } : {}),
-    };
+    const placed: Array<{ at: number; chunks: PlaintextChunk[] }> = [];
+    const report: PlainExportReport = { stores: [] };
+    for (const d of databases) {
+      const choice = isPlainStore(d.name) ? paths.get(d.name) : undefined;
+      if (plainStore(d)) {
+        const payload = d.plain!.payload;
+        const travel = splitIntoChunks(payload, 'sqlite_db_plain', d.name);
+        travel[0]!.meta.columns = d.plain!.columns;
+        // Split into copies: the whole payload does not travel and is zeroed now.
+        if (travel.length > 1) payload.fill(0);
+        placed.push({ at: d.at, chunks: travel });
+        for (const c of d.raw) c.data.fill(0);
+      } else {
+        placed.push({ at: d.at, chunks: d.raw });
+        d.plain?.payload.fill(0);
+      }
+      if (choice) report.stores.push({ store: d.name as PlainStore, path: choice.path, ...(choice.reason ? { reason: choice.reason } : {}), decrypted: d.plain?.counts.decrypted ?? 0, failed: d.plain?.counts.failed ?? 0 });
+    }
+    if (sweeps) {
+      const plain = plainLedgers() ? sweeps.plain : null;
+      if (plain) {
+        const travel = splitIntoChunks(plain.payload, 'sweeps', 'sweeps');
+        travel[0]!.meta.ledgerForm = 'plain';
+        travel[0]!.meta.ledgerRawBytes = plain.rawBytes;
+        if (travel.length > 1) plain.payload.fill(0);
+        placed.push({ at: sweeps.at, chunks: travel });
+        for (const c of sweeps.raw) c.data.fill(0);
+      } else {
+        placed.push({ at: sweeps.at, chunks: sweeps.raw });
+        sweeps.plain?.payload.fill(0);
+      }
+      report.ledgers = { path: plain ? 'plain' : 'raw', decrypted: sweeps.plain?.counts.decrypted ?? 0, failed: sweeps.plain?.counts.failed ?? 0 };
+    }
+    this.insertAt(chunks, placed);
+    return report;
   }
 
   /**
@@ -360,16 +576,22 @@ export class MigrationExporter {
     }
   }
 
-  private collectDatabase(dbName: string): PlaintextChunk[] {
+  /**
+   * A `VACUUM INTO` snapshot of the database (a consistent, defragmented copy), read into a Buffer;
+   * the file is removed. It holds what the store holds: ciphertext in the encrypted columns. A
+   * file left at the snapshot's path by an export that was killed is removed first: `VACUUM INTO`
+   * refuses an existing file, which would block every later export.
+   */
+  private snapshotDatabase(dbName: string): Buffer | null {
     const srcPath = join(this.lynoxDir, dbName);
-    if (!existsSync(srcPath)) return [];
+    if (!existsSync(srcPath)) return null;
 
-    // VACUUM INTO creates a consistent, defragmented copy
     const tmpPath = join(this.lynoxDir, `${dbName}.migration-tmp`);
+    try { unlinkSync(tmpPath); } catch { /* none left */ }
     snapshotSqlite(srcPath, tmpPath);
 
     try {
-      return splitIntoChunks(readFileSync(tmpPath), 'sqlite_db', dbName);
+      return readFileSync(tmpPath);
     } finally {
       try { unlinkSync(tmpPath); } catch { /* ok */ }
     }
@@ -471,9 +693,10 @@ export class MigrationExporter {
    * are deliberately NOT carried: they describe an archive phase against subject ids on
    * the source instance and are not a reversal record for a merge.
    */
-  private collectSweeps(): PlaintextChunk[] {
+  /** The merge ledgers by file name, as stored; null when there are none. */
+  private readSweeps(): Record<string, string> | null {
     const sweepsDir = join(this.lynoxDir, 'sweeps');
-    if (!existsSync(sweepsDir)) return [];
+    if (!existsSync(sweepsDir)) return null;
 
     const files: Record<string, string> = {};
     for (const fileName of readdirSync(sweepsDir)) {
@@ -490,8 +713,8 @@ export class MigrationExporter {
       } catch { continue; } // vanished between readdir and read
     }
 
-    if (Object.keys(files).length === 0) return [];
-    return splitIntoChunks(Buffer.from(JSON.stringify({ files }), 'utf-8'), 'sweeps', 'sweeps');
+    if (Object.keys(files).length === 0) return null;
+    return files;
   }
 
   /**
@@ -501,7 +724,7 @@ export class MigrationExporter {
    * base64, not utf-8: decoding a .docx as text and re-encoding it destroys the file while
    * every test that only round-trips ASCII stays green.
    *
-   * Symlinks are skipped rather than followed — the same reason as `collectSweeps`: a link
+   * Symlinks are skipped rather than followed — the same reason as `readSweeps`: a link
    * planted here would otherwise carry whatever it points at out inside the bundle.
    */
   private collectPortableDir(dirName: string): PlaintextChunk[] {

@@ -27,7 +27,7 @@ import {
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
-import { canonicalHtml } from './html-tree.js';
+import { canonicalHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
@@ -161,7 +161,8 @@ export function rawHtmlField(t: Pick<ApplyTarget, 'after' | 'expected'>, fields:
   const was = !t.expected.absent && typeof t.expected.value === 'object' && t.expected.value !== null ? t.expected.value as Record<string, unknown> : {};
   for (const f of fields) {
     const v = (after as Record<string, unknown>)[f];
-    if (typeof v === 'string' && v !== was[f] && canonicalHtml(v) !== v) return f;
+    // A value beyond the reading bounds is not parsed: it counts as not canonical.
+    if (typeof v === 'string' && v !== was[f] && (!withinReadingBounds(v) || canonicalHtml(v) !== v)) return f;
   }
   return null;
 }
@@ -449,14 +450,10 @@ async function applyRunEffect(
         // (the target is marked sent), or someone else set the value, and the run sends
         // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
         // also what an undo must expect.
-        // Found only under the HTML comparison: the store holds the planned description in its own
-        // form — counted like a read-back stored otherwise than sent. A title or SEO title the store
-        // saved in its measured form is no description and not counted; neither is HTML, so that
-        // comparison runs without the HTML fields.
-        const rewritten = htmlFields.length > 0 && !sameImage(cur, t.after) && !(savedForm && sameInSavedForm(cur, t.after));
+        // Found only under the HTML comparison is not counted as a rewrite: the comparison explains
+        // the store's form of the planned description, as for a read-back.
         return {
           kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null,
-          ...(rewritten ? { hostRewrote: true as const } : {}),
         };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected, htmlFields)) return { kind: 'conflict' };
