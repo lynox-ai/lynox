@@ -133,8 +133,7 @@ it('reports from a timer a request started before reporting was turned off and o
     // read before the flush below, which calls the live client too.
     expect(liveFlush).toHaveBeenCalledWith(2000);
     await Sentry.flush(2000);
-    // The handler exits once its flush settles: two SDK steps of up to 2 s each, here at once,
-    // since the transport answers immediately.
+    // The handler exits once its flush settles, here at once: the transport answers immediately.
     await vi.waitFor(() => expect(exit).toHaveBeenCalled(), { timeout: 3000 });
   } finally {
     // On a failure above, the handler's exit may still be pending; it must meet the stub, not the
