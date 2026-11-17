@@ -17,9 +17,10 @@
   `fs.protected_hardlinks=1`; the refusal says how to set it. (#2164)
 - On first start `engine.db` moves from schema **53** to **68**, `history.db`
   from **69** to **72** and `mail-state.db` from **18** to **20**. The steps add
-  tables, columns and indexes and fill two new columns for existing rows: a bulk
-  target whose write was sent but never confirmed is marked as unclear, so it is
-  not sent again. There is no down path. (#2137, #2139, #2183, #2100,
+  tables, columns and indexes, and fill two new columns for existing rows: each
+  API connection gets an opaque id, and a bulk target whose write to an external
+  API was sent but never confirmed is marked as unclear, so a resumed run does
+  not send it again. There is no down path. (#2137, #2139, #2183, #2100,
   #2130, #2154, #2167, #2254, #2337, #2389)
 - On Anthropic and Vertex the bulk-run judge is now Sonnet 4.6 instead of Haiku 4.5.
   A judge call costs about three times as much, so the owner's cost limit covers
@@ -33,11 +34,12 @@
   that hold an address, or a contact's name in a CRM route. Lines written before
   2.18.0, for example in `docker logs`, may hold them; clear them, or rotate a
   key that was passed in a URL. (#2369)
-- With `LYNOX_SHOPIFY_EXCHANGE` on, lynox sends model, speech and transcription
-  requests only to Anthropic's API or Fireworks' endpoint with the key the
+- With `LYNOX_SHOPIFY_EXCHANGE` set to `1` or `true`, chats, runs, workers, the
+  bulk-run judge, the mail classifier and the connection test send model
+  requests only to Anthropic's API or Fireworks' endpoint, with the key the
   control plane supplies. Mistral, Vertex, another base URL and a key the owner
-  brings get a client that sends nothing and says why, so a self-hosted or
-  own-key instance with the switch on makes no model calls. The batch API and
+  brings are refused before anything is sent, so on a self-hosted or own-key
+  instance with the switch on these make no model calls. The batch API and
   speech output are off, and transcription uses only the local whisper.cpp.
   (#2239)
 - `StreamProcessor.process` now throws `StreamIncompleteError` when a stream ends
