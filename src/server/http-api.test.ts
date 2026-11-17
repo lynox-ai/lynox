@@ -22702,7 +22702,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview', 'GET /api/workflows/stance-probe/takeover-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });

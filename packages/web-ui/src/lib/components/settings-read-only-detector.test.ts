@@ -38,6 +38,7 @@ const EXEMPT: Record<string, string> = {
 	'PersonErasurePanel.svelte': 'Mounted only by SubjectsView, behind a button shown in the owner\'s session only; a mandate is told where an erasure request goes.',
 	'StampConfirm.svelte': 'Mounted only by TriggersView, at a schedule a known owner stamps (`ownerStamps`) or checks (`offersCheck`); anyone else reads, in its place, that the owner confirms the plan.',
 	'TriggersView.svelte': 'Its one owner-only button (confirming a plan) shows only to a known owner (isOwnerSession); anyone else reads, in its place, that the owner confirms the plan.',
+	'WorkflowTakeoverDialog.svelte': 'Mounted only by WorkflowLibraryView, behind its takeover button, which shows only where the person\'s access ended and only to a known owner (`ownerActs`); the library route gives a mandate no `runs_as` to show it at.',
 };
 /**
  * Pages outside the settings that write through an owner-only route: the actions on them (approve,
@@ -258,7 +259,7 @@ describe('every page that writes through an owner-only route has a read-only vie
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'StampConfirm.svelte', 'TriggersView.svelte']);
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'StampConfirm.svelte', 'TriggersView.svelte', 'WorkflowTakeoverDialog.svelte']);
 		for (const name of OUTSIDE_SETTINGS) expect(pages.map((p) => basename(p))).toContain(name);
 		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte', 'SecretsView.svelte', 'KeysView.svelte', 'CalendarSettings.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {
