@@ -147,7 +147,7 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
     const s = ledger.getStatus(id)!;
     expect(s.phase).toBe('planned');
     expect(s.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
-    expect(s.judge).toEqual({ tier: 'fast', unjudged: 2 });
+    expect(s.judge).toEqual({ tier: 'fast', unjudged: 2, judged: 0 });
     // A target without its verdict shows no after-state and no changed fields.
     const p = ledger.getPreview(id);
     expect(p.map((t) => [t.after, t.changedFields])).toEqual([[null, null], [null, null]]);
@@ -317,6 +317,27 @@ describe('runBulkJudge over data-store rows', () => {
     await runBulkJudge(id, h.deps);
     expect(h.calls).toHaveLength(1);
     expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
+  });
+
+  it('counts each verdict as it lands, a refused target included, out of the targets the judge reads', async () => {
+    const id = await plan(['A', 'B']);
+    expect(ledger.getStatus(id)!.judge).toMatchObject({ judged: 0, unjudged: 2 });
+    expect(start(id).ok).toBe(true);
+    // The first target read as absent: the judge refuses it without a call (seam as below).
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = (SELECT MIN(seq) FROM bulk_targets WHERE run_id = ?)')
+      .run(engineDb.enc(JSON.stringify({ absent: true })), id, id);
+    const seen: { judged: number; unjudged: number }[] = [];
+    const h = harness((user) => {
+      const j = ledger.getStatus(id)!.judge!;
+      seen.push({ judged: j.judged, unjudged: j.unjudged });
+      return { data: change({ title: title(user) }), costUsd: 0.01 };
+    });
+    await runBulkJudge(id, h.deps);
+    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
+    // While the second target is judged, the refused first one already counts.
+    expect(seen).toEqual([{ judged: 1, unjudged: 1 }]);
+    expect(ledger.getStatus(id)!.judge).toMatchObject({ judged: 2, unjudged: 0 });
   });
 
   it('a target read as absent (an external read that found nothing) is invalid not_found, without a call', async () => {

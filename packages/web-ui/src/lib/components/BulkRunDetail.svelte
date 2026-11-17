@@ -15,7 +15,7 @@
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkWorkingStep, bulkWorkingLine, bulkCountsPending, bulkHeadCounts,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -97,6 +97,8 @@
 	// The run a follow loop (below) belongs to: a new load for another run, or the page going
 	// away, ends the loop of the one before.
 	let following = 0;
+	// The follow loop gave up after `BULK_FOLLOW_MAX_MS` while the run still worked: the page says so.
+	let followStopped = $state(false);
 	// What the engine's last 429 said to wait (Retry-After, seconds), for a follow loop's next wait.
 	let lastRetryAfter: number | null = null;
 
@@ -109,6 +111,7 @@
 	 *  succeeded, after `BULK_FOLLOW_MAX_MS`, or when the page shows another run. */
 	async function follow(): Promise<void> {
 		const mine = ++following;
+		followStopped = false;
 		const until = Date.now() + BULK_FOLLOW_MAX_MS;
 		let delay = BULK_FOLLOW_MS;
 		while (mine === following && run !== null && bulkEngineWorking(run) && Date.now() < until) {
@@ -125,6 +128,26 @@
 			const body = res?.ok ? ((await res.json().catch(() => null)) as BulkRunDetailData | null) : null;
 			let retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
 			let ok = body !== null;
+			// A newer follow loop (another run, the page gone, a restarted follow) owns the page: this
+			// answer is older than what it shows.
+			if (mine !== following) return;
+			const current = run;
+			if (body !== null && bulkEngineWorking(body) && body.id === runId && current !== null) {
+				if (body.phase !== current.phase || bulkWorkingStep(body) !== bulkWorkingStep(current)) {
+					// Another step: the run is loaded anew, its targets and counts with it.
+					lastRetryAfter = null;
+					ok = await load({ quiet: true });
+					if (!ok) retryAfter = lastRetryAfter;
+				} else {
+					// The same step: the page takes the run's progress from the ask, so the working line,
+					// the head's counts, the cost and a pause move with the run. Every other count stays
+					// as loaded, with the targets and their marks it speaks of; no input is offered then.
+					run = {
+						...current, applied: body.applied, conflicts: body.conflicts, failed: body.failed, judge: body.judge,
+						costUsd: body.costUsd, resumesAt: body.resumesAt,
+					};
+				}
+			}
 			if (body !== null && !bulkEngineWorking(body)) {
 				lastRetryAfter = null;
 				ok = await load({ quiet: true });
@@ -132,6 +155,8 @@
 			}
 			delay = bulkFollowDelay(delay, ok, retryAfter);
 		}
+		// Given up, not ended: the run still works and the page no longer asks.
+		if (mine === following && run !== null && bulkEngineWorking(run) && Date.now() >= until) followStopped = true;
 	}
 
 	// Each load counts up; an answer is the page's only while no later load has begun. The run's id
@@ -429,7 +454,7 @@
 		return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric' });
 	}
 
-	$effect(() => { void runId; following++; void load(); });
+	$effect(() => { void runId; following++; followStopped = false; void load(); });
 	// The page going away ends a follow loop.
 	$effect(() => () => { following++; });
 	$effect(() => {
@@ -450,6 +475,12 @@
 	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
 	const undoneText = $derived(run ? bulkUndoneText(run, getLocale(), i18n) : null);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
+	// What the engine works on while it moves the run on by itself; the page keeps its counts until then.
+	// The step cannot change while the page waits: a list read ends in its own halt (`listed`), the
+	// judge is fixed at planning, and approved and writing are both the write. An interrupted run
+	// that resumes later says so in its own line and gets no working line.
+	const workingStep = $derived(run && !run.resumesAt ? bulkWorkingStep(run) : null);
+	const workingLine = $derived(run && workingStep !== null ? bulkWorkingLine(workingStep, run) : null);
 	// The probe's target by its title where the loaded targets hold its before-image.
 	const probeLabel = $derived(run?.probe ? bulkTargetLabel(run.targetSystem, { key: run.probe.key }, i18n) : '');
 	// The probe's admin link: its target is often not among the targets the page shows.
@@ -575,7 +606,7 @@
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">{error || t('common.load_failed')}</div>
 	{:else}
 		<section class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-4">
-			<h1 class="text-lg font-medium">{bulkLabel(run, i18n)}</h1>
+			<h1 class="text-lg font-medium" data-testid="bulk-title">{bulkLabel(run, i18n, bulkCountsPending(workingStep))}</h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
 				{#each steps as s (s)}
@@ -595,7 +626,7 @@
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
 				<dd>{provider}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
 				<dt class="text-text-subtle">{t('bulk.head.targets')}</dt>
-				<dd>{tf('bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) })}</dd>
+				<dd data-testid="bulk-counts">{bulkHeadCounts(workingStep, run, i18n)}</dd>
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
 					<dt class="text-text-subtle">{t('bulk.head.cost')}</dt>
 					<dd class="font-mono">{formatCost(run.costUsd)}{run.costCapUsd !== null ? ` / ${formatCost(run.costCapUsd)}` : ''}</dd>
@@ -608,6 +639,11 @@
 
 			{#if run.resumesAt}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{tf('bulk.resumes_at', { time: when(run.resumesAt) })}</p>
+			{/if}
+			{#if workingStep !== null && followStopped}
+				<p class="text-sm text-text-muted" data-testid="bulk-follow-stopped">{t('bulk.follow.stopped')}</p>
+			{:else if workingLine !== null}
+				<p class="text-sm text-text-muted" data-testid="bulk-working">{tf(workingLine.key, { provider, ...workingLine.params })}</p>
 			{/if}
 			{#if bulkWaitsForStart(run)}
 				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
