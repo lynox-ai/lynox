@@ -27,7 +27,7 @@ import { EngineDb } from '../core/engine-db.js';
 import { ApprovalStore, type ApprovalFiling } from '../core/approval-store.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { secretsForProfile } from '../core/profile-secret-view.js';
-import { eraseRefusal } from '../core/sidecar-refusals.js';
+import { billingTierSet, eraseRefusal } from '../core/sidecar-refusals.js';
 import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import type { MailConnectPromptData } from '../types/agent.js';
@@ -23424,6 +23424,44 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
       expect((await as(TEST_SECRET, USER_ROUTE)).status).toBe(200);
       expect((await as(TEST_SECRET, ADMIN_ROUTE)).status).toBe(403);
     });
+  });
+
+  // The Web UI's migration done step names the target's support whatever the source runs as. That holds
+  // because a target takes a migration only with a tier set: every import route turns it down otherwise,
+  // on the same switch the refusals name their way out by. A route that took one without would leave the
+  // done step naming the wrong way out.
+  it('takes a migration in only where the refusals name support as the way out', async () => {
+    const routes = [
+      ['GET', '/api/migration/handshake'], ['POST', '/api/migration/handshake'], ['POST', '/api/migration/manifest'],
+      ['POST', '/api/migration/chunk'], ['POST', '/api/migration/restore'],
+    ] as const;
+    // As a source sends it: the target's migration token, nothing else.
+    const TOKEN = 'a'.repeat(64);
+    const refused = async (method: string, path: string): Promise<boolean> => {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method, headers: { 'x-migration-token': TOKEN, 'Content-Type': 'application/json' }, ...(method === 'POST' ? { body: '{}' } : {}),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+      // Past the token check in every case, so the route itself decides.
+      expect(body.error, `${method} ${path}`).not.toMatch(/migration token/i);
+      return res.status === 404 && body.error === 'Migration import only available on managed instances';
+    };
+    const cases = [
+      ['no tier', {}],
+      ['a canonical tier', { LYNOX_BILLING_TIER: 'managed' }],
+      ['a tier that does not normalize', { LYNOX_BILLING_TIER: 'gold' }],
+      ['the legacy alias behind an empty canonical name', { LYNOX_BILLING_TIER: '', LYNOX_MANAGED_MODE: 'eu' }],
+    ] as const;
+    for (const [label, env] of cases) {
+      await withEnv({ ...SELF_HOSTED, LYNOX_MIGRATION_TOKEN: TOKEN, LYNOX_VAULT_KEY: undefined, ...env }, async () => {
+        const supportNamed = billingTierSet();
+        // Control: both sides of the switch occur in the table.
+        expect(supportNamed, label).toBe(label !== 'no tier');
+        for (const [method, path] of routes) {
+          expect(await refused(method, path), `${label}: ${method} ${path}`).toBe(!supportNamed);
+        }
+      });
+    }
   });
 
   it('on a self-hosted instance with two secrets, the admin bearer keeps the user routes', async () => {

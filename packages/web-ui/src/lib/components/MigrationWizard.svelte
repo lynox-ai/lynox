@@ -19,7 +19,6 @@
 	} from '../stores/migration.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import { migrationWorkspaceNotice, skippedNextKey, visibleSkippedPath } from '../backup-coverage.js';
-	import { managedWayOut, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 
 	const step = $derived(getStep());
 	const preview = $derived(getPreview());
@@ -27,15 +26,12 @@
 	const error = $derived(getError());
 	const progress = $derived(getProgress());
 	const verification = $derived(getVerification());
-	const workspaceNotice = $derived(migrationWorkspaceNotice({ workspace: getDoneWorkspace() }, managedWayOut()));
+	const workspaceNotice = $derived(migrationWorkspaceNotice({ workspace: getDoneWorkspace() }));
 	// Files the export could not carry (row 1033, ux U-056): the count, the paths on request, and
 	// the same next step as for a workspace left out. At most this many paths are listed.
 	const SKIPPED_SHOWN = 50;
 	const skipped = $derived(getDoneSkipped());
-	const skippedNext = $derived(skippedNextKey(skipped.length, managedWayOut()));
-	// The engine's tier switch picks the way out the notices name (U-302): none while it loads,
-	// a reload hint after a failed read.
-	$effect(() => { void loadManagedStatus(); });
+	const skippedNext = $derived(skippedNextKey(skipped.length));
 	const targetUrl = $derived(getTargetUrl());
 
 	let manualUrl = $state('');
@@ -276,7 +272,7 @@
 						{/if}
 					</details>
 					{#if !workspaceNotice}
-						{#if skippedNext !== null}<p data-testid="migration-skipped-next" class="mt-1 text-xs text-warning">{t(skippedNext)}</p>{/if}
+						<p data-testid="migration-skipped-next" class="mt-1 text-xs text-warning">{t(skippedNext)}</p>
 					{/if}
 				{/if}
 			</div>
