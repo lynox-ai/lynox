@@ -90,10 +90,10 @@ export const DISPLAY_NAME_SQL =
   'SELECT actor_display FROM audit_log WHERE mandate_id = ? AND actor_display IS NOT NULL ORDER BY id DESC LIMIT 1';
 
 /** The reads behind {@link AuditLog.mandatePrincipalOf}: a row with a name first, on the partial
- *  index above; only a grant none of whose rows carries a name walks the trail. */
+ *  index above; else any row of the grant, on `idx_audit_log_mandate` (engine.db v70). */
 const MANDATE_PERSON_NAMED_SQL =
   'SELECT actor_email, actor_display FROM audit_log WHERE mandate_id = ? AND actor_display IS NOT NULL ORDER BY id DESC LIMIT 1';
-const MANDATE_PERSON_ANY_SQL =
+export const MANDATE_PERSON_ANY_SQL =
   'SELECT actor_email, actor_display FROM audit_log WHERE mandate_id = ? AND actor_email IS NOT NULL ORDER BY id DESC LIMIT 1';
 
 /** The action of the row a revoked grant leaves in its person's trail. */
@@ -166,7 +166,8 @@ export class AuditLog {
  * The row a revoke leaves in the revoked person's trail, so the owner sees when the access ended
  * there and which reads came before it. Written when the instance learns of the revoke, which is
  * after the owner's click by however long the control plane takes to tell it; reads in between
- * stand before this row, and none after it (a revoked session is refused before its read row).
+ * stand before this row, and none after it (a revoked session is refused before its read row, and a
+ * change is asked again before its attempt row, so one whose body was still arriving does not run).
  * False when the grant never acted here: there is no person in the trail to put it under.
  * Throws when the row cannot be written.
  */

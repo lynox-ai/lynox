@@ -2734,6 +2734,12 @@ export class LynoxHTTPApi {
     if (method === 'GET' || method === 'HEAD') return true;
     const principal = this._principalOf(req);
     if (!writesMandateTrail(principal)) return true;
+    // Asked again here, not only at sign-in: a revoke can land while the body is still arriving,
+    // and a change after the revoke row must not run, nor stand after it in the trail.
+    if (principalHasEnded(principal, (id) => this._mandateLive(id))) {
+      errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
+      return false;
+    }
     if (this._openTrail(req, principal, `${method} ${routePath}`, requestPathTarget(pathname))) return true;
     errorResponse(res, 503, 'This change cannot be recorded in the instance log right now, so it was not made.');
     return false;

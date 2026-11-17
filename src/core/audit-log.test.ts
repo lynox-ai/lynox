@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
-import { AuditLog, DISPLAY_NAME_SQL, MANDATE_REVOKED_ACTION, recordMandateRevoked, OutwardReadUnrecorded, delegatedRedirects, httpTarget, namedTarget, outwardReadRecorder, requestOutcomePhase, requestPathTarget } from './audit-log.js';
+import { AuditLog, DISPLAY_NAME_SQL, MANDATE_PERSON_ANY_SQL, MANDATE_REVOKED_ACTION, recordMandateRevoked, OutwardReadUnrecorded, delegatedRedirects, httpTarget, namedTarget, outwardReadRecorder, requestOutcomePhase, requestPathTarget } from './audit-log.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { createMailReadTool } from '../integrations/mail/tools/mail-read.js';
 import { createMailSearchTool } from '../integrations/mail/tools/mail-search.js';
@@ -76,9 +76,16 @@ describe('audit_log in engine.db (v22)', () => {
     expect(got[0]).toMatchObject({ actor_kind: 'mandate', actor_email: 'recipient@example.invalid', actor_display: 'TEST-DISPLAY', mandate_id: 'TEST-MANDATE-1', action: MANDATE_REVOKED_ACTION, target: null, phase: 'done' });
   });
 
-  it('reads a grant\'s display name through the partial index, not a walk over the trail (v55)', () => {
+  it('looks a grant\'s person up through an index also when no row carries a name, not a walk over the trail (v70)', () => {
+    const plan = (db.getDb().prepare(`EXPLAIN QUERY PLAN ${MANDATE_PERSON_ANY_SQL}`).all('TEST-MANDATE-1') as { detail: string }[]).map((r) => r.detail);
+    expect(plan).toEqual(['SEARCH audit_log USING INDEX idx_audit_log_mandate (mandate_id=?)']);
+  });
+
+  it('reads a grant\'s display name through an index on the grant, not a walk over the trail (v55, v70)', () => {
     const plan = (db.getDb().prepare(`EXPLAIN QUERY PLAN ${DISPLAY_NAME_SQL}`).all('TEST-MANDATE-1') as { detail: string }[]).map((r) => r.detail);
-    expect(plan).toEqual(['SEARCH audit_log USING INDEX idx_audit_log_mandate_display (mandate_id=?)']);
+    // Either index on the grant serves it; since v70 the planner may take the full one.
+    expect(plan).toHaveLength(1);
+    expect(plan[0]).toMatch(/^SEARCH audit_log USING INDEX idx_audit_log_mandate(_display)? \(mandate_id=\?\)$/);
     // The index holds only the rows that carry a name.
     const idx = db.getDb().prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_audit_log_mandate_display'").get() as { sql: string } | undefined;
     expect(idx?.sql).toMatch(/WHERE actor_display IS NOT NULL$/);

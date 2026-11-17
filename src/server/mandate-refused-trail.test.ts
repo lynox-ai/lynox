@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Server } from 'node:http';
+import { request as httpRequest, type Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { MANDATE_REVOKED_ACTION, type AuditLog } from '../core/audit-log.js';
@@ -232,6 +232,44 @@ describe('a mandate\'s refused attempts and its revoke in the actor trail (real 
     inner()._dispatchRoute.set(alone, route);
     inner()._recordMandateRefusal(alone, mandate);
     expect(refusedRows()).toEqual([expect.objectContaining({ action: 'POST /api/tasks', mandate_id: MANDATE_ID })]);
+  });
+
+  it('a revoke that lands while a change\'s body is still arriving: the change is refused, and no row after the revoke', async () => {
+    const SLOW = 'TEST-MANDATE-SLOW-BODY';
+    const { loginSession } = await import('../../packages/web-ui/src/lib/server/auth.js');
+    const cookie = loginSession(SECRET, {
+      kind: 'mandate', email: 'eva@example.invalid', display: 'EVA', mandate_id: SLOW,
+      mandate_expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    })?.token;
+    if (cookie === undefined) throw new Error('fixture: no cookie');
+    // One read, so the grant has a person in the trail for its revoke row.
+    expect((await ask('GET', '/api/threads', cookie)).status).toBe(200);
+    inner().rateCounts.clear();
+    const body = JSON.stringify({ title: 'after the end' });
+    const answer = new Promise<{ status: number; text: string }>((resolve, reject) => {
+      const req = httpRequest(`${base}/api/tasks`, {
+        method: 'POST',
+        headers: { cookie: `lynox_session=${cookie}`, 'content-type': 'application/json', origin: base, 'content-length': String(Buffer.byteLength(body)) },
+      }, (res) => {
+        let text = '';
+        res.on('data', (c: Buffer) => { text += c.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, text }));
+      });
+      req.on('error', reject);
+      // Signed in with the first half; the revoke lands before the rest arrives.
+      req.write(body.slice(0, 5));
+      setTimeout(() => {
+        const ends = inner().engine.getMandateEnds();
+        if (ends === null) { reject(new Error('fixture: no mandate ends')); return; }
+        ends.revoke(SLOW);
+        req.end(body.slice(5));
+      }, 200);
+    });
+    const got = await answer;
+    expect(got.status).toBe(403);
+    expect(got.text).toContain('mandate_revoked');
+    const mine = newRows().filter((r) => r.mandate_id === SLOW);
+    expect(mine.map((r) => [r.action, r.phase])).toEqual([['GET /api/threads', 'read'], [MANDATE_REVOKED_ACTION, 'done']]);
   });
 
   it('a revoke: one row in the person\'s trail after its reads, and none for what it asks afterwards', async () => {
