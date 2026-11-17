@@ -4,7 +4,8 @@
  * `devDependencies`) through every snapshot's own dependencies. Returns one path per place the
  * package is reached, or none. A dependency whose snapshot the walk cannot find is returned too,
  * as `missing snapshot: <key>`: a key form the walk does not understand (an alias, a tarball, a
- * new lockfile format) must not read as a clean leaf.
+ * new lockfile format) must not read as a clean leaf. A listed importer that the lockfile does not
+ * have is returned as `missing importer: <name>`, for the same reason.
  */
 interface LockDep { readonly version: string }
 interface LockImporter {
@@ -32,7 +33,11 @@ export function runtimeReach(lock: LockDoc, target: string, importers: readonly 
   const stack: Array<{ key: string; path: string[] }> = [];
   for (const imp of importers) {
     const entry = lock.importers?.[imp];
-    const deps = { ...(entry?.dependencies ?? {}), ...(entry?.optionalDependencies ?? {}) };
+    if (entry === undefined) {
+      found.push(`missing importer: ${imp}`);
+      continue;
+    }
+    const deps = { ...(entry.dependencies ?? {}), ...(entry.optionalDependencies ?? {}) };
     for (const [name, dep] of Object.entries(deps)) {
       // A workspace link is another importer, walked on its own when it is listed.
       if (dep.version.startsWith('link:')) continue;

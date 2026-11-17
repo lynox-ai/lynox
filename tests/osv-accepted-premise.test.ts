@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
 import { ACCEPTED } from '../scripts/osv-report-gate.mjs';
 import { parse as parseYaml } from 'yaml';
-import { runtimeReach, type LockDoc } from './osv-runtime-reach.js';
+import { runtimeReach, type LockDoc } from './helpers/osv-runtime-reach.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.svelte-kit', 'coverage']);
@@ -117,6 +117,9 @@ const PREMISES: Record<string, () => string[]> = {
   // Advisory scope: an attacker-chosen glob pattern. picomatch must not be a runtime dependency of
   // what ships, the docs that also carry it must stay out of what ships, and shipped source may not
   // load a glob package or the code (rollup, the Sentry CLI) that inlines its own copy.
+  // Known limit: the web UI's server build bundles any devDependency its server code imports. The
+  // glob packages are caught by name in the source; a devDependency that only carries picomatch
+  // transitively (a glob library built on it, say) would not be.
   'GHSA-fc5q-39xc-vjpf': picomatchCheck,
 };
 
@@ -143,8 +146,14 @@ describe('the premise of each accepted OSV finding holds in this tree', () => {
     // (rollup, through the error reporter's bundler plugins), so the snapshot lookups really walk.
     expect(runtimeReach(lock('pnpm-lock.yaml'), 'better-sqlite3', SHIPPED).length).toBeGreaterThan(0);
     expect(runtimeReach(lock('pnpm-lock.yaml'), 'rollup', SHIPPED).some((p) => p.split(' > ').length > 3)).toBe(true);
+    // The web UI importer is walked too: one of its own runtime dependencies is found through it.
+    expect(runtimeReach(lock('pnpm-lock.yaml'), 'dompurify', SHIPPED).some((p) => p.startsWith('packages/web-ui > '))).toBe(true);
+    // An importer's optional dependencies are walked, and a listed importer the lockfile lacks is reported.
+    const optional: LockDoc = { importers: { '.': { optionalDependencies: { picomatch: { version: '4.0.7' } } }, 'packages/web-ui': {} }, snapshots: { 'picomatch@4.0.7': {} } };
+    expect(runtimeReach(optional, 'picomatch', SHIPPED)).toEqual(['. > picomatch']);
+    expect(runtimeReach({ importers: { '.': {} }, snapshots: {} }, 'picomatch', SHIPPED)).toEqual(['missing importer: packages/web-ui']);
     // A dependency whose snapshot is missing is reported, never treated as a clean leaf.
-    const unknownKey: LockDoc = { importers: { '.': { dependencies: { alias: { version: 'picomatch@4.0.7' } } } }, snapshots: {} };
+    const unknownKey: LockDoc = { importers: { '.': { dependencies: { alias: { version: 'picomatch@4.0.7' } } }, 'packages/web-ui': {} }, snapshots: {} };
     expect(runtimeReach(unknownKey, 'picomatch', SHIPPED)).toEqual(['missing snapshot: alias@picomatch@4.0.7 (. > alias)']);
     // A planted transitive path is found; the same package as a dev dependency only is not.
     const planted: LockDoc = {
@@ -152,7 +161,7 @@ describe('the premise of each accepted OSV finding holds in this tree', () => {
       snapshots: { 'a@1.0.0(p@2)': { dependencies: { '@s/b': '2.0.0' } }, '@s/b@2.0.0': { optionalDependencies: { picomatch: '4.0.7' } }, 'picomatch@4.0.7': {} },
     };
     expect(runtimeReach(planted, 'picomatch', SHIPPED)).toEqual(['. > a > @s/b > picomatch']);
-    const devOnly = { importers: { '.': { devDependencies: { picomatch: { version: '4.0.7' } } } }, snapshots: {} } as unknown as LockDoc;
+    const devOnly = { importers: { '.': { devDependencies: { picomatch: { version: '4.0.7' } } }, 'packages/web-ui': {} }, snapshots: {} } as unknown as LockDoc;
     expect(runtimeReach(devOnly, 'picomatch', SHIPPED)).toEqual([]);
   });
 
