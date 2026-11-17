@@ -123,11 +123,14 @@
 			const body = res?.ok ? ((await res.json().catch(() => null)) as BulkRunDetailData | null) : null;
 			let retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
 			let ok = body !== null;
-			// While the engine works, the page takes the run's counts from each ask: the working line
-			// and the head move with the run. Its targets stay as loaded; no input is offered then.
+			// While the engine works, the page takes the run's progress from each ask: the working line
+			// and the head's counts move with the run. Every other count stays as loaded, with the
+			// targets and their marks it speaks of; no input is offered then.
 			// A load since this ask was sent owns the page: its run is newer than this answer.
 			if (mine !== following) return;
-			if (body !== null && bulkEngineWorking(body) && body.id === runId) run = body;
+			if (body !== null && bulkEngineWorking(body) && body.id === runId && run !== null) {
+				run = { ...run, phase: body.phase, applied: body.applied, conflicts: body.conflicts, failed: body.failed, judge: body.judge };
+			}
 			if (body !== null && !bulkEngineWorking(body)) {
 				lastRetryAfter = null;
 				ok = await load({ quiet: true });
