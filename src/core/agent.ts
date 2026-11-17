@@ -108,7 +108,7 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
-import { collectVaultKeys, grantTokenNames, isMandateConnection, tokenSlotNames } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateConnection, tokenSlotNames } from './api-store.js';
 import { MEMBER_CONNECTION_PREFIX, noteMemberConnection } from './member-connection-notes.js';
 import { boundCtx, memberRefusalCase, memberRefusalOwnerNote, memberRefusalText, slotMayReach, type BindingCtx, type MemberRefusal, type OwnerNote } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
@@ -4423,15 +4423,20 @@ export class Agent implements IAgent {
    * meant as that credential. A guessed token name otherwise reads as one to collect. Conditional,
    * because a name the profile does not attach (an extra key) still has to be collected.
    */
-  private _attachedProfileNote(tc: { name: string; input: unknown }): string {
+  private _attachedProfileNote(tc: { name: string; input: unknown }, absentNames: readonly string[]): string {
     if (tc.name !== 'http_request') return '';
     try {
       const host = new URL(String((tc.input as { url?: unknown } | null)?.url ?? '')).hostname;
       const profile = this.toolContext.apiStore?.getByHostname(host);
       const type = profile?.auth?.type;
       if (profile === undefined || (type !== 'bearer' && type !== 'header' && type !== 'oauth2')) return '';
-      const renews = type === 'oauth2' ? ' and renews it itself, so no token request is needed either' : '';
-      return ` ${host} belongs to api_profile "${String(profile.id)}" (${type}), whose credential the engine attaches when the profile is accepted for that host${renews}. If a missing name was meant as that credential, do not collect it: send the request without it and without an auth header of your own. Only a name the profile does not attach is collected.`;
+      // A missing name that IS the profile's own credential is missing for the attach too: then
+      // collecting it (or minting it) is the way out, and this note would say the opposite.
+      // `collectVaultKeys` holds every name the attach reads, an oauth2 profile's derived pair included.
+      const own = new Set(collectVaultKeys(profile));
+      if (absentNames.some((n) => own.has(n))) return '';
+      const renews = type === 'oauth2' ? ' and renews it when it can, so no token request is needed either' : '';
+      return ` ${host} belongs to api_profile "${String(profile.id)}" (${type}), whose credential the engine attaches when the profile is accepted for that host and the vault holds it${renews}. If a missing name was meant as that credential, do not collect it: send the request without it and without an auth header of your own. Only a name the profile does not attach is collected.`;
     } catch { return ''; }
   }
 
@@ -4536,14 +4541,18 @@ export class Agent implements IAgent {
       }
       const offGrant = offGrantOf(secretNames);
       if (offGrant.length > 0) {
-        // Named only when one profile holds every refused name: the way out is that profile's own request.
+        // Named only when one profile holds every refused name AND its own request would get its token:
+        // a held-back holder, or one whose token may not reach its own base, is no way out but a loop.
         let holder: string | undefined;
         try {
           const holders = apiStore!.knownProfiles().filter((p) => offGrant.every((n) => tokenSlotNames(p).has(n)));
-          holder = holders.length === 1 ? String(holders[0]!.id) : undefined;
+          const only = holders.length === 1 ? holders[0]! : undefined;
+          // `slotMayReach` is false for a held-back owner too (`profile-secret-view.ts`).
+          holder = only !== undefined && slotMayReach(apiStore!, accessTokenKey(only.id), 'request', only.base_url, undefined, bindCtx)
+            ? String(only.id) : undefined;
         } catch { holder = undefined; }
         const wayOut = holder !== undefined
-          ? `Send the request to profile "${holder}"'s base_url again without that reference and without an Authorization header of your own: the engine attaches the profile's token and renews it itself, so no token request is needed either.`
+          ? `Send the request to profile "${holder}"'s base_url again without that reference and without an Authorization header of your own: the engine attaches the profile's token and renews it when it can, so no token request is needed either.`
           : 'Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.';
         return refused(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. ${wayOut}`, offGrant);
       }
@@ -5332,7 +5341,7 @@ export class Agent implements IAgent {
           return {
             type: 'tool_result',
             tool_use_id: tc.id,
-            content: `Tool "${tc.name}" referenced secret(s) the vault doesn't have: ${absentNames.map((n) => `"${n}"`).join(', ')}.${hint}${scopeNote}${this._attachedProfileNote(tc)} The literal \`secret:NAME\` string would have been sent to the external service — that's the failure mode this guard exists to prevent. Recover: call \`ask_secret\` with each missing name to store its value (or use the suggested existing name), then retry the original tool call. Do NOT proceed under the assumption that the tool "doesn't resolve secrets in bodies" — it does, when the vault has them.`,
+            content: `Tool "${tc.name}" referenced secret(s) the vault doesn't have: ${absentNames.map((n) => `"${n}"`).join(', ')}.${hint}${scopeNote}${this._attachedProfileNote(tc, absentNames)} The literal \`secret:NAME\` string would have been sent to the external service — that's the failure mode this guard exists to prevent. Recover: call \`ask_secret\` with each missing name to store its value (or use the suggested existing name), then retry the original tool call. Do NOT proceed under the assumption that the tool "doesn't resolve secrets in bodies" — it does, when the vault has them.`,
             is_error: true,
           };
         }

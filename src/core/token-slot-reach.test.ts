@@ -656,7 +656,7 @@ describe('the way out a refused or missing token name points to', () => {
     const result = await agentCall(store(), OWNER_VAULT, call('https://api.shop.example/v1/orders', 'SHOP_API_GUESSED_TOKEN'));
     expect(result).toContain("referenced secret(s) the vault doesn't have");
     expect(result).toContain('api.shop.example belongs to api_profile \\"shop-api\\" (oauth2)');
-    expect(result).toContain('and renews it itself, so no token request is needed either');
+    expect(result).toContain('and renews it when it can, so no token request is needed either');
     expect(result).toContain('If a missing name was meant as that credential, do not collect it');
     expect(sent).toHaveLength(0);
   });
@@ -664,7 +664,34 @@ describe('the way out a refused or missing token name points to', () => {
   it('a missing name to a host whose bearer profile the engine attaches: points to it, without the renewal', async () => {
     const result = await agentCall(store(), OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTER_GUESSED'));
     expect(result).toContain('reports.example belongs to api_profile \\"reporter\\" (bearer)');
-    expect(result).not.toContain('renews it itself');
+    expect(result).not.toContain('renews it when it can');
+  });
+
+  it('a missing name that is the profile\'s own credential keeps the way to collect it', async () => {
+    const { REPORTER_KEY: _gone, ...vault } = OWNER_VAULT;
+    const result = await agentCall(store(), vault, call('https://reports.example/v1/x', 'REPORTER_KEY'));
+    expect(result).toContain("referenced secret(s) the vault doesn't have");
+    expect(result).toContain('Recover: call `ask_secret`');
+    expect(result).not.toContain('belongs to api_profile');
+  });
+
+  it('a missing access token of an oauth2 profile keeps the way to collect or mint it', async () => {
+    const { SHOP_API_ACCESS_TOKEN: _gone, ...vault } = OWNER_VAULT;
+    const result = await agentCall(store(), vault, call('https://api.shop.example/v1/orders', 'SHOP_API_ACCESS_TOKEN'));
+    expect(result).toContain("referenced secret(s) the vault doesn't have");
+    expect(result).not.toContain('belongs to api_profile');
+  });
+
+  it('does not name a sole holder whose own request would not get its token either (held back)', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const held: ApiProfile = { ...oauth('zzz-evil', { client_secret_key: 'ZZZ_EVIL_ACCESS_TOKEN' }), oauth_grant: { written: [{ name: 'SHOPIFY_REFRESH_TOKEN', fp: 'f' }] } };
+    const s = fromDirectory([oauth('foo')]);
+    expect(registerLegacy(s, held)).toBe(false);
+    expect(s.knownProfiles().map((p) => p.id)).toContain('zzz-evil');
+    const result = await agentCall(s, { ZZZ_EVIL_ACCESS_TOKEN: value('held', 'access') }, call('https://collector.example/c', 'ZZZ_EVIL_ACCESS_TOKEN'));
+    expect(result).toContain('would send ZZZ_EVIL_ACCESS_TOKEN to collector.example');
+    expect(result).not.toContain('Send the request to profile');
+    expect(result).toContain('Call the API through the profile that holds the connection');
   });
 
   it('control: a missing name to a host without a profile keeps the plain way to collect it', async () => {
