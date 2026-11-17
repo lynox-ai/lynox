@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { getLynoxDir } from '../../core/config.js';
 import { ensureDirSync } from '../../core/atomic-write.js';
 import { scrubFreedPages, zeroDeletedContent } from '../../core/sqlite-constants.js';
+import { normalizeMailTarget } from '../../core/send-target.js';
 import type { MailAccountConfig, MailAccountType, MailAuthType, MailAddress, MailEnvelope, MailPresetSlug } from './provider.js';
 import { isValidAccountType, isValidAuthType } from './provider.js';
 import type { DeltaCursor, DeltaCursorStore } from './providers/oauth-graph.js';
@@ -615,6 +616,15 @@ const MIGRATIONS: string[] = [
    ALTER TABLE inbox_items ADD COLUMN matched_rule_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_inbox_items_matched_rule ON inbox_items(tenant_id, matched_rule_id);
    COMMIT;`,
+
+  // v22: whether every recipient of a sent mail was one the owner had named before it went out
+  // (`SentMailLogInput.originOwnerKnown`). Only such a send makes its recipients count as known
+  // later (`isOwnerKnownRecipient`). Every older row is 0: nothing recorded it before, and a
+  // send approved on a card is 0 too, since an approval is not the owner naming the address.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (22);
+   ALTER TABLE mail_sent_log ADD COLUMN origin_owner_known INTEGER NOT NULL DEFAULT 0;
+   COMMIT;`,
 ];
 
 export interface MailStateDbOptions {
@@ -781,6 +791,8 @@ export interface SentMailLogInput {
   bodyChars: number;
   sentAt?: Date | undefined;
   followupId?: string | undefined;
+  /** Every recipient was one the owner had named before the send (v22). Absent: false. */
+  originOwnerKnown?: boolean | undefined;
 }
 
 export interface SentMailLogEntry {
@@ -1403,13 +1415,13 @@ export class MailStateDb {
       .prepare<[
         string, string, string, string, string | null,
         string, string | null, string | null,
-        string, number, number, string | null,
+        string, number, number, string | null, number,
       ], unknown>(
         `INSERT INTO mail_sent_log (
            id, tenant_id, account_id, message_id, in_reply_to,
            to_json, cc_json, bcc_json,
-           subject, body_chars, sent_at, followup_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           subject, body_chars, sent_at, followup_id, origin_owner_known
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1424,8 +1436,40 @@ export class MailStateDb {
         input.bodyChars,
         (input.sentAt ?? new Date()).getTime(),
         input.followupId ?? null,
+        input.originOwnerKnown === true ? 1 : 0,
       );
     return id;
+  }
+
+  /**
+   * Whether `address` was a recipient — to, cc or bcc — of a send whose every recipient the
+   * owner had named (`origin_owner_known = 1`). Addresses are compared as whole normalized
+   * tokens (`normalizeMailTarget`: lower case, the domain in ASCII form), never as substrings,
+   * so `x@firma.ch` does not match a send to `max@firma.ch`. An address that does not
+   * normalize is never known.
+   */
+  isOwnerKnownRecipient(address: string, opts: { tenantId?: string | undefined } = {}): boolean {
+    const wanted = normalizeMailTarget(address)?.value;
+    if (wanted === undefined) return false;
+    const rows = this.db
+      .prepare<[string], { to_json: string; cc_json: string | null; bcc_json: string | null }>(
+        `SELECT to_json, cc_json, bcc_json FROM mail_sent_log
+         WHERE tenant_id = ? AND origin_owner_known = 1`,
+      )
+      .iterate(opts.tenantId ?? 'default');
+    for (const row of rows) {
+      for (const json of [row.to_json, row.cc_json, row.bcc_json]) {
+        if (json === null) continue;
+        let list: unknown;
+        try { list = JSON.parse(json); } catch { continue; }
+        if (!Array.isArray(list)) continue;
+        for (const entry of list) {
+          const addr = (entry as { address?: unknown } | null)?.address;
+          if (typeof addr === 'string' && normalizeMailTarget(addr)?.value === wanted) return true;
+        }
+      }
+    }
+    return false;
   }
 
   /**

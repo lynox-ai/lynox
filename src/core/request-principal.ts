@@ -74,6 +74,28 @@ export function principalTag(p: RequestPrincipal): string {
   }
 }
 
+/** The prefix of the tag a trigger's run writes with (`runAuthorTag`). */
+export const TRIGGER_AUTHOR_PREFIX = 'trigger:';
+/** The prefix of the tag a workflow step writes with (`workflowAuthorTag`). */
+export const WORKFLOW_AUTHOR_PREFIX = 'workflow:';
+
+/**
+ * The tag a run's own writes carry: the message it persists as its typed turn, and every row
+ * it writes into the data store. A run a trigger started carries `trigger:<id>` whoever the
+ * trigger runs for, the owner included: nobody typed that turn, and a later check must not
+ * read it as something the owner wrote. Every other run carries its principal's tag. A trigger
+ * named by its origin alone still gets the trigger tag, with `unknown` for the id.
+ */
+export function runAuthorTag(principal: RequestPrincipal, run?: { triggerId?: string | undefined; triggerOrigin?: string | undefined } | undefined): string {
+  if (run?.triggerId !== undefined || run?.triggerOrigin !== undefined) return `${TRIGGER_AUTHOR_PREFIX}${run.triggerId ?? 'unknown'}`;
+  return principalTag(principal);
+}
+
+/** The tag a workflow step's writes carry: never `owner`, whoever started the workflow. */
+export function workflowAuthorTag(runId: string | undefined): string {
+  return `${WORKFLOW_AUTHOR_PREFIX}${runId ?? 'unknown'}`;
+}
+
 /**
  * Whether a trigger waits for the owner's stamp because a mandate created or last changed
  * it (PRD customer-granted-operator-access §3.12, §3.13). Pure and exported so the rule is
