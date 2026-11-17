@@ -18,6 +18,7 @@ import {
 import type { MailContext } from '../context.js';
 import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
+import { mailTargets } from '../../../core/send-target.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry, accountForRow } from './registry.js';
@@ -54,6 +55,12 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
     outwardWrite: () => 'reply',
     // A reply reads the mail it answers before it writes: that read is a row of its own.
     outwardRead: (input) => namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)], ['uid', input.uid]]),
+    // Only the recipients the call names: the `to` and `cc` overrides, parsed with this tool's
+    // own parser. The default recipients (the original sender, and everyone on reply_all) come
+    // from the mail being answered, which the input does not hold.
+    sendTargets: (input) => mailTargets(
+      [input.to, input.cc].flatMap((field) => parseAddressList(field).map((a) => a.address)),
+    ),
     definition: {
       name: 'mail_reply',
       description:

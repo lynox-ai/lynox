@@ -640,6 +640,21 @@ describe('sendMail — recordSentMail integration', () => {
     expect(args.inReplyTo).toBe('<orig@x>');
   });
 
+  it('records whether the owner had named every recipient: false unless the caller says so', async () => {
+    const provider = fakeProvider();
+    const registry = fakeRegistry(provider);
+    const recordSentMail = vi.fn();
+    const ctx = {
+      stateDb: { recordSentMail },
+      getAccountConfig: () => SENDING_ACCOUNT,
+    } as unknown as import('./context.js').MailContext;
+    const input: SendCoreInput = { to: [RECIPIENT], subject: 'logged', body: 'body' };
+    expect((await sendMail(registry, input, {}, ctx)).ok).toBe(true);
+    expect((await sendMail(registry, { ...input, subject: 'two' }, { originOwnerKnown: true }, ctx)).ok).toBe(true);
+    expect((await sendMail(registry, { ...input, subject: 'three' }, { originOwnerKnown: false }, ctx)).ok).toBe(true);
+    expect(recordSentMail.mock.calls.map((c) => (c[0] as Record<string, unknown>)['originOwnerKnown'])).toEqual([false, true, false]);
+  });
+
   it('does not call recordSentMail when ctx is undefined (CLI/headless callers)', async () => {
     const provider = fakeProvider();
     const registry = fakeRegistry(provider);

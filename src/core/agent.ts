@@ -615,6 +615,8 @@ export class Agent implements IAgent {
   recordToolCall?: ToolCallRecorder | undefined;
   /** See `AgentConfig.conversationGrants`. Undefined: nothing records what this agent read. */
   conversationGrants?: ConversationGrants | undefined;
+  /** See `IAgent.writeAuthor`. Set per run by the session; null is unknown. */
+  writeAuthor: string | null = null;
   /** See `AgentConfig.conversationRoot`. */
   readonly conversationRoot: boolean;
   /** See `AgentConfig.turnEndUsageCounted`. */
@@ -1626,6 +1628,7 @@ export class Agent implements IAgent {
     this._stepFailTool = config.stepFailTool;
     this.recordToolCall = config.recordToolCall;
     this.conversationGrants = config.conversationGrants;
+    this.writeAuthor = config.writeAuthor ?? null;
     this.conversationRoot = config.conversationRoot === true;
     this.turnEndUsageCounted = config.turnEndUsageCounted === true;
     this.spawnDepth = config.spawnDepth ?? 0;
