@@ -29,8 +29,9 @@ vi.mock('@sentry/node', async () => {
 
 const Sentry = await import('@sentry/node');
 const {
-  initErrorReporting, captureError, shutdownErrorReporting, isErrorReportingEnabled, _resetForTesting,
+  initErrorReporting, captureError, captureLynoxError, captureUserFeedback, shutdownErrorReporting, isErrorReportingEnabled, _resetForTesting,
 } = await import('./error-reporting.js');
+const { LynoxError } = await import('./errors.js');
 
 const DSN = 'https://key@bugs.example.invalid/1';
 // Matched as the exception's value: the SDK attaches source lines as context, so another
@@ -72,6 +73,50 @@ it('reports from outside the request after reporting is turned on again inside o
   await Sentry.flush(2000);
   expect(reached('inside-the-request')).toBe(true);  // control: the client sends
   expect(reached('outside-the-request')).toBe(true);
+});
+
+// A request that started before reporting was turned off and on again (a long chat stream) and a
+// timer a request started keep the scope forked then, and that scope names the client of its time,
+// now closed. What they capture after the new init must reach the new client.
+it('reports from a timer a request started before reporting was turned off and on again', async () => {
+  expect(await initErrorReporting(DSN)).toBe(true);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let fired!: () => void;
+  const done = new Promise<void>((resolve) => { fired = resolve; });
+  const server = http.createServer((_req, res) => {
+    // Started inside the request, so it runs in the request's scope; it captures only once released.
+    setTimeout(() => {
+      void gate.then(async () => {
+        captureError(new Error('from-an-old-timer'));
+        captureLynoxError(new LynoxError('lynox-from-an-old-timer', 'TEST_CODE'));
+        await captureUserFeedback({ name: 'n', comments: 'feedback-from-an-old-timer' });
+        fired();
+      });
+    }, 0);
+    res.writeHead(200);
+    res.end();
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve, reject) => {
+    const rq = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/' }, (r) => { r.resume(); r.on('end', resolve); });
+    rq.on('error', reject);
+    rq.end();
+  });
+
+  // Off, then on again from outside the request: the timer's scope still names the closed client.
+  await shutdownErrorReporting();
+  expect(await initErrorReporting(DSN)).toBe(true);
+  release();
+  await done;
+  await Sentry.flush(2000);
+  expect(reached('from-an-old-timer')).toBe(true);
+  expect(reached('lynox-from-an-old-timer')).toBe(true);
+  // Matched as the feedback's message field: the comment's bare text also rides along as source
+  // context in the error events above.
+  expect(sent.some((e) => e.includes('"message":"feedback-from-an-old-timer"'))).toBe(true);
 });
 
 it('turns reporting on when the toggle arrives while a shutdown is still running', async () => {

@@ -166,6 +166,21 @@ let _sentryModule: typeof import('@sentry/node') | null = null;
  */
 let _defaultScope: ReturnType<typeof import('@sentry/node').getCurrentScope> | null = null;
 /**
+ * The client the last init built (null if it built none); read only while reporting is on. A scope forked
+ * before that init (a request still streaming, a timer a request started) still names an older,
+ * closed client, so this module's captures set this one on the scope they fork instead of trusting
+ * the scope's own.
+ */
+let _currentClient: NonNullable<ReturnType<typeof import('@sentry/node').init>> | null = null;
+
+/** Runs `capture` in a scope forked from the current one, with the current client set on it. */
+function withCurrentClient(Sentry: typeof import('@sentry/node'), capture: (scope: ReturnType<typeof Sentry.getCurrentScope>) => void): void {
+  Sentry.withScope((scope) => {
+    if (_currentClient !== null) scope.setClient(_currentClient);
+    capture(scope);
+  });
+}
+/**
  * Every init and shutdown runs after the one called before it, so the state at the end is the
  * one the last call asked for. Without that, a shutdown that ran while an init was still loading
  * the SDK missed the client the init then built: the switch read off while the client sent.
@@ -338,6 +353,7 @@ async function startErrorReporting(dsn: string | undefined): Promise<boolean> {
         return event;
       },
     });
+    _currentClient = built ?? null;
     if (built) {
       _builtClients.add(built);
       _defaultScope.setClient(built);
@@ -381,7 +397,7 @@ export function addLLMBreadcrumb(model: string, inputTokens: number, outputToken
 export function captureLynoxError(error: LynoxError): void {
   if (!_enabled || !_sentry) return;
   const Sentry = _sentry;
-  Sentry.withScope((scope) => {
+  withCurrentClient(Sentry, (scope) => {
     scope.setTag('error.code', error.code);
     scope.setTag('error.type', error.name);
     if (error.context) {
@@ -398,7 +414,8 @@ export function captureLynoxError(error: LynoxError): void {
 /** Capture any generic error. */
 export function captureError(error: unknown): void {
   if (!_enabled || !_sentry) return;
-  _sentry.captureException(error);
+  const Sentry = _sentry;
+  withCurrentClient(Sentry, () => Sentry.captureException(error));
 }
 
 // ── User Feedback (for /bug command) ──
@@ -410,14 +427,17 @@ export async function captureUserFeedback(opts: {
   if (!_enabled || !_sentry) return null;
   try {
     const Sentry = _sentry;
-    const eventId = Sentry.captureMessage('User bug report', 'info');
-    // Feedback travels as its own envelope item and does not pass `beforeSend`, so
-    // the comment, free text the person typed or pasted, is masked here before it
-    // reaches the SDK.
-    Sentry.captureFeedback({
-      name: opts.name,
-      message: maskSecretText(opts.comments),
-      associatedEventId: eventId,
+    let eventId: string | null = null;
+    withCurrentClient(Sentry, () => {
+      eventId = Sentry.captureMessage('User bug report', 'info');
+      // Feedback travels as its own envelope item and does not pass `beforeSend`, so
+      // the comment, free text the person typed or pasted, is masked here before it
+      // reaches the SDK.
+      Sentry.captureFeedback({
+        name: opts.name,
+        message: maskSecretText(opts.comments),
+        associatedEventId: eventId,
+      });
     });
     return eventId;
   } catch {
@@ -577,4 +597,5 @@ export function _resetForTesting(): void {
   _initialized = false;
   _enabled = false;
   _sentry = null;
+  _currentClient = null;
 }
