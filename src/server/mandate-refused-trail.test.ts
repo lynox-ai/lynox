@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -30,8 +30,11 @@ describe('a mandate\'s refused attempts and its revoke in the actor trail (real 
   type Row = { id: number; actor_kind: string; actor_email: string | null; actor_display: string | null; mandate_id: string | null; action: string; target: string | null; phase: string; correlation_id: string };
   type Inner = {
     engine: { _toolContext: { auditLog: AuditLog | null }; engineDb: { getDb: () => import('better-sqlite3').Database }; getMandateEnds: () => MandateEnds | null };
-    rateCounts: Map<string, unknown>;
+    rateCounts: Map<string, { count: number; resetAt: number }>;
     server: Server | null;
+    _openTrails: WeakMap<object, unknown>;
+    _dispatchRoute: WeakMap<object, { method: string; routePath: string; pathname: string }>;
+    _recordMandateRefusal: (req: object, principal: unknown) => void;
   };
   const inner = (): Inner => api as unknown as Inner;
   const rows = (): Row[] => inner().engine.engineDb.getDb()
@@ -159,12 +162,52 @@ describe('a mandate\'s refused attempts and its revoke in the actor trail (real 
     expect(newRows()).toEqual([]);
   });
 
-  it('a refused row that cannot be written: the refusal stands, still 403', async () => {
-    await withBrokenTrail(async () => {
-      const res = await ask('GET', '/api/secrets', mandateCookie);
-      expect(res.status).toBe(403);
-    });
+  it('a refused row that cannot be written: the refusal stands, still 403, and the failure is logged', async () => {
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await withBrokenTrail(async () => {
+        const res = await ask('GET', '/api/secrets', mandateCookie);
+        expect(res.status).toBe(403);
+      });
+      expect(err.mock.calls.some(([m]) => String(m).includes('refused attempt could not be recorded'))).toBe(true);
+    } finally {
+      err.mockRestore();
+    }
     expect(newRows()).toEqual([]);
+  });
+
+  it('an admin route asked from another site: refused, and no row the person never made', async () => {
+    inner().rateCounts.clear();
+    const res = await fetch(`${base}/api/security/events/aggregate`, { headers: { cookie: `lynox_session=${mandateCookie}`, 'sec-fetch-site': 'cross-site' } });
+    await res.arrayBuffer();
+    expect(res.status).toBe(403);
+    expect(newRows()).toEqual([]);
+  });
+
+  it('an admin route asked past the rate limit: 429 before any row', async () => {
+    await ask('GET', '/api/threads', mandateCookie);
+    before = rows().length;
+    for (const entry of inner().rateCounts.values()) entry.count = 1_000_000;
+    const res = await fetch(`${base}/api/security/events/aggregate`, { headers: { cookie: `lynox_session=${mandateCookie}` } });
+    await res.arrayBuffer();
+    expect(res.status).toBe(429);
+    expect(newRows()).toEqual([]);
+    inner().rateCounts.clear();
+  });
+
+  it('a refusal inside a write\'s handler: no second row, as the write\'s own pair closes as refused', () => {
+    const mandate = { kind: 'mandate', email: 'ida@example.invalid', display: 'IDA', mandateId: MANDATE_ID };
+    const route = { method: 'POST', routePath: '/api/tasks', pathname: '/api/tasks' };
+    const inWrite = {};
+    inner()._dispatchRoute.set(inWrite, route);
+    inner()._openTrails.set(inWrite, {});
+    inner()._recordMandateRefusal(inWrite, mandate);
+    expect(newRows()).toEqual([]);
+    // Control: the same refusal without an open pair is a row.
+    const alone = {};
+    inner()._dispatchRoute.set(alone, route);
+    inner()._recordMandateRefusal(alone, mandate);
+    expect(refusedRows()).toEqual([expect.objectContaining({ action: 'POST /api/tasks', mandate_id: MANDATE_ID })]);
   });
 
   it('a revoke: one row in the person\'s trail after its reads, and none for what it asks afterwards', async () => {

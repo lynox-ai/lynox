@@ -2849,12 +2849,13 @@ export class LynoxHTTPApi {
 
   /**
    * A `refused` row for an act only the owner may perform, so the owner sees the attempt: the
-   * route as registered, the path as sent (or `target`). Its own correlation id: no attempt row
-   * stands before it, the refusal is the whole act. The refusal stands whether or not the row is
-   * written, as it grants nothing; a row that cannot be written is logged.
+   * route as registered, the path as sent (or `target`). Its own correlation id: the refusal is
+   * the whole act. A write refused inside its handler already has its attempt row, and the
+   * dispatcher closes that pair as refused, so it gets no second row here. The refusal stands
+   * whether or not the row is written, as it grants nothing; a row that cannot be written is logged.
    */
   private _recordMandateRefusal(req: IncomingMessage, principal: RequestPrincipal, target?: string): void {
-    if (!writesMandateTrail(principal)) return;
+    if (!writesMandateTrail(principal) || this._openTrails.has(req)) return;
     const route = this._dispatchRoute.get(req);
     if (route === undefined) return;
     try {
@@ -2864,6 +2865,11 @@ export class LynoxHTTPApi {
     } catch (err: unknown) {
       process.stderr.write(`[lynox] a mandate's refused attempt could not be recorded: ${err instanceof Error ? err.message : String(err)}\n`);
     }
+  }
+
+  /** What the browser attached on its own, for `_refusedAsAmbientCrossSite`. */
+  private _ambientOf(req: IncomingMessage, secret: string | undefined): 'none' | 'no-secret' | 'cookie' {
+    return !secret ? 'no-secret' : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
   }
 
   /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
@@ -4185,9 +4191,14 @@ export class LynoxHTTPApi {
           return;
         }
       } else if (routeScope === 'admin' && authScope !== 'admin') {
-        // A mandate is `user`, so an owner's admin route refuses it here (D6): its attempt too.
+        // A mandate is `user`, so an owner's admin route refuses it here (D6): its attempt too,
+        // with the two checks the dispatch puts before every row of a mandate's: charged first, so
+        // a session that keeps asking is stopped before it writes rows, and refused when another
+        // site sent it, so no site can write an attempt into the trail the person never made.
         const routePath = this._routeTemplateOf(method, pathname);
-        if (routePath !== null) {
+        if (routePath !== null && writesMandateTrail(this._principalOf(req))) {
+          if (this._rateLimit(req, res, clientIp)) return;
+          if (this._refusedAsAmbientCrossSite(req, res, method, undefined, this._ambientOf(req, secret), trustProxy)) return;
           this._dispatchRoute.set(req, { method, routePath, pathname });
           this._recordMandateRefusal(req, this._principalOf(req));
         }
@@ -4243,10 +4254,7 @@ export class LynoxHTTPApi {
       }
     }
 
-    // What the browser attached on its own, for `_refusedAsAmbientCrossSite`.
-    const ambient: 'none' | 'no-secret' | 'cookie' = !secret
-      ? 'no-secret'
-      : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
+    const ambient = this._ambientOf(req, secret);
 
     if (!this._beginCpTrail(req, res, method, pathname, authScope, body)) return;
 
