@@ -96,9 +96,17 @@ export function templateRefIssue(
         }
         if (ids.has(name)) {
           if ((step.input_from ?? []).includes(name)) continue;
+          const named = isStepIdShape(name) ? `"${name}"` : `step #${String(steps.findIndex(s => s.id === name) + 1)}`;
           return `${where}: it refers to the output of ${shownStep(name)}, which is not in this step's input_from, so the reference would stay unresolved. `
-            + `Add ${isStepIdShape(name) ? `"${name}"` : `step #${String(steps.findIndex(s => s.id === name) + 1)}`} to this step's input_from (in a saved workflow: set_input_from)`
-            + (inTemplate ? '.' : ', or leave the reference out.');
+            + `Add ${named} to this step's input_from (in a saved workflow: set_input_from)`
+            // In a tool's argument it may be text for the system the tool writes to: renaming the step
+            // it matches leaves that text as written (`rename_step` rewrites only the steps that read it).
+            // The placeholder is quoted only when every part of it has the step id shape (`step-id.ts`).
+            + (inTemplate
+              ? `. If ${ref.split('.').every(isStepIdShape) ? `"{{${ref}}}"` : 'the placeholder'} is text for the system the tool writes to (for example a mail-merge field), `
+                + `not this workflow's step, rename ${isStepIdShape(name) ? `step "${name}"` : named} (rename_step) so its id no longer matches; `
+                + 'the text then stays as written. If you cannot tell which is meant, ask the user.'
+              : ', or leave the reference out.');
         }
         if (second === 'result' && !inTemplate) {
           return `${where}: it refers to the result of ${isStepIdShape(name) ? `step "${name}"` : 'a step id outside the allowed form'}, and this workflow has no such step. `

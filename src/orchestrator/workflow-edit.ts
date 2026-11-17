@@ -209,7 +209,12 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       if (to !== from && steps.some(s => s.id === to)) return `Error: Step ${quotedId(to)} already exists — cannot rename step #${idx + 1} to it.`;
       steps[idx]!.id = to;
       for (const s of steps) {
+        // A `{{<from>.…}}` is a reference only in a step that lists `from` in its input_from: the
+        // run builds a step's context from those steps alone (`context.ts`). Anywhere else it is
+        // text, such as a placeholder a tool hands on to the system it writes to, and stays as written.
+        const reads = s.input_from?.includes(from) === true;
         if (s.input_from) s.input_from = s.input_from.map(dep => (dep === from ? to : dep));
+        if (!reads) continue;
         s.task = renamedRefs(s.task, from, to);
         if (s.input_template) s.input_template = renamedInTemplate(s.input_template, from, to) as Record<string, unknown>;
       }

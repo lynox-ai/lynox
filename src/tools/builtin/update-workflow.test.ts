@@ -396,6 +396,23 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(reread.steps[0]!.task).toBe('Fetch it all');
   });
 
+  it('a mail-merge placeholder that matches a step id: the edit is refused with the way out, the rename saves, and the placeholder stays as written', async () => {
+    storePipeline('wf-1', makePlanned({ steps: [
+      { id: 'order', task: 'Fetch the order' },
+      { id: 'mail', task: 'Mail it', tool: 'mail_send', input_template: { body: 'Your {{order.result}}' } },
+    ] }));
+    const agent = makeAgent(history);
+    const refused = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'mail', value: 'Mail the customer' }] }, agent);
+    expect(refused).toContain('If "{{order.result}}" is text for the system the tool writes to (for example a mail-merge field), not this workflow\'s step, rename step "order" (rename_step) so its id no longer matches; the text then stays as written. If you cannot tell which is meant, ask the user.');
+    const saved = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id: 'order', value: 'fetch_order' }] }, agent);
+    expect(saved).not.toMatch(/^Error/);
+    const reread = getPipeline('wf-1', history)!;
+    expect(reread.steps.map(x => x.id)).toEqual(['fetch_order', 'mail']);
+    expect(reread.steps[1]!.input_template).toEqual({ body: 'Your {{order.result}}' });
+  });
+
   it('removes a step and drops it from dependents input_from', async () => {
     history.insertPlannedPipeline(makePlanned(), null);
     const agent = makeAgent(history);

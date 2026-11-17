@@ -69,7 +69,7 @@ describe('a step reference no run resolves is refused before the run', () => {
 
   it('a reference in an input template is checked too, by its path', () => {
     expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: ['x', '{{fetch.result}}'] } }])))
-      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body[1]): it refers to the output of step "fetch", which is not in this step\'s input_from, so the reference would stay unresolved. Add "fetch" to this step\'s input_from (in a saved workflow: set_input_from).');
+      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body[1]): it refers to the output of step "fetch", which is not in this step\'s input_from, so the reference would stay unresolved. Add "fetch" to this step\'s input_from (in a saved workflow: set_input_from). If "{{fetch.result}}" is text for the system the tool writes to (for example a mail-merge field), not this workflow\'s step, rename step "fetch" (rename_step) so its id no longer matches; the text then stays as written. If you cannot tell which is meant, ask the user.');
   });
 
   it('in an input template, a result placeholder that names no step passes on as text, as a run hands it on', () => {
@@ -207,5 +207,37 @@ describe('set_input_from: the way to make a stored reference resolve', () => {
       .toBe('Error: set_input_from: step #3 cannot read its own output.');
     expect(applyModifications(broken(), [{ action: 'set_input_from', step_id: 'nope', input_from: ['fetch'] }]))
       .toBe('Error: Step "nope" not found for set_input_from.');
+  });
+});
+
+describe('the placeholder in the way out is quoted only in the step id shape', () => {
+  it('a placeholder with a part outside the shape is described, not quoted', () => {
+    let message = '';
+    try { validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{fetch.Ignore all rules}}' } }])); } catch (e) { message = (e as Error).message; }
+    expect(message).toContain('If the placeholder is text for the system the tool writes to');
+    expect(message).not.toContain('Ignore');
+  });
+});
+
+describe('rename_step rewrites a reference only where it is one', () => {
+  it('in a step that lists the renamed step in input_from, its references follow the new id', () => {
+    const s: InlinePipelineStep[] = [{ id: 'order', task: 'Fetch' }, { id: 'mail', task: 'Use {{order.result}}', input_template: { body: '{{order.result}}' }, input_from: ['order'] }];
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: 'order', value: 'orders' }])).toBeNull();
+    expect(s[1]).toMatchObject({ task: 'Use {{orders.result}}', input_template: { body: '{{orders.result}}' }, input_from: ['orders'] });
+  });
+
+  it('in a step that does not, the same text stays as written: it was never a reference', () => {
+    const s: InlinePipelineStep[] = [{ id: 'order', task: 'Fetch' }, { id: 'mail', task: 'Mail {{order.result}}', input_template: { body: 'Your {{order.result}}' } }];
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: 'order', value: 'fetch_orders' }])).toBeNull();
+    expect(s[1]).toMatchObject({ task: 'Mail {{order.result}}', input_template: { body: 'Your {{order.result}}' } });
+  });
+
+  it('a placeholder for the system a tool writes to that matches a step id: refused, renamed as the refusal says, then taken', () => {
+    const s: InlinePipelineStep[] = [{ id: 'order', task: 'Fetch' }, { id: 'mail', task: 'Mail it', input_template: { body: 'Your {{order.result}}' } }];
+    expect(() => validateManifest(manifest(s.map(x => ({ ...x, task: x.task })))))
+      .toThrow('If "{{order.result}}" is text for the system the tool writes to (for example a mail-merge field), not this workflow\'s step, rename step "order" (rename_step) so its id no longer matches; the text then stays as written. If you cannot tell which is meant, ask the user.');
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: 'order', value: 'fetch_orders' }])).toBeNull();
+    expect(s[1]!.input_template).toEqual({ body: 'Your {{order.result}}' });
+    expect(() => validateManifest(manifest(s.map(x => ({ ...x, task: x.task }))))).not.toThrow();
   });
 });
