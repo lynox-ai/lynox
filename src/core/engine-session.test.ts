@@ -499,6 +499,7 @@ import { setTenantWorkspace } from './workspace.js';
 import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace } from 'node:fs';
 import { tmpdir as tmpdirForWorkspace } from 'node:os';
 import { join as joinForWorkspace } from 'node:path';
+import { _resetVaultKeySource } from './vault-key-source.js';
 // === Helper ===
 
 async function createEngineAndSession(config: Record<string, unknown> = {}): Promise<{ engine: Engine; session: Session }> {
@@ -719,7 +720,11 @@ describe('Engine + Session (Orchestrator)', () => {
     // that hook runs after plugins load — so the plugin step must already refuse.
     it('builds no plugin manager on a half-provisioned instance that then fails to start', async () => {
       const before = process.env['LYNOX_BILLING_TIER'];
+      const beforeKey = process.env['LYNOX_VAULT_KEY'];
       process.env['LYNOX_BILLING_TIER'] = 'hosted';
+      // The delivered vault key, so the start gets past the key to the managed hook.
+      process.env['LYNOX_VAULT_KEY'] = 'A'.repeat(64);
+      _resetVaultKeySource();
       try {
         const engine = new Engine({} as import('../types/index.js').LynoxConfig);
         await expect(engine.init()).rejects.toThrow(/Managed hook/);
@@ -727,6 +732,9 @@ describe('Engine + Session (Orchestrator)', () => {
       } finally {
         if (before === undefined) delete process.env['LYNOX_BILLING_TIER'];
         else process.env['LYNOX_BILLING_TIER'] = before;
+        if (beforeKey === undefined) delete process.env['LYNOX_VAULT_KEY'];
+        else process.env['LYNOX_VAULT_KEY'] = beforeKey;
+        _resetVaultKeySource();
       }
     });
 
