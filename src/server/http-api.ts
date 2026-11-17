@@ -15342,7 +15342,7 @@ export class LynoxHTTPApi {
           }
           // The target's own words, cleaned and cut; a refusal here starts no session on it.
           const said = typeof refused?.error === 'string' ? refused.error : errText;
-          const words = relayedText(said);
+          const words = relayedText(said).trim();
           throw new Error(words === ''
             ? 'The target instance did not accept the migration. Nothing was transferred.'
             : `The target instance did not accept the migration. It says: ${words}${/[.!?…]$/.test(words) ? '' : '.'} Nothing was transferred.`);
@@ -15476,8 +15476,8 @@ export class LynoxHTTPApi {
           if (isConnectionFailure(err)) throw new Error(restoreUnknown('broken'));
           // Anything else, such as the network guard refusing a redirect: the request may have reached
           // the target before that, so the user checks it first. The text names a host the target chose.
-          const text = relayedText(err instanceof Error ? err.message : String(err));
-          throw new Error(`${text}${/[.!?…]$/.test(text) ? '' : '.'} Check on the target instance whether your data arrived before you migrate again.`);
+          const text = relayedText(err instanceof Error ? err.message : String(err)).trim();
+          throw new Error(`${text === '' ? 'The request to restore the data ended unexpectedly' : text}${/[.!?…]$/.test(text) ? '' : '.'} Check on the target instance whether your data arrived before you migrate again.`);
         }
         // A 4xx is the target turning the restore down before it started (a missing chunk, sidecar
         // mode); a 5xx is the restore failing on the way, which can leave part of it applied.

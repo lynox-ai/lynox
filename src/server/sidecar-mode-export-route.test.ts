@@ -50,6 +50,8 @@ const target: {
   otherCurve?: boolean;
   /** Fail the restore request with the network guard's own refusal. */
   guardBlocksRestore?: boolean;
+  /** The text of that refusal, when not the default one. */
+  guardText?: string | undefined;
   /** Answer this step with a body of `bytes` bytes: the handshake, its refusal, or the restore's report. */
   large?: { at: 'handshake' | 'handshake-refusal' | 'restore'; bytes: number } | undefined;
   /** Answer the handshake with this raw body and 200. */
@@ -104,7 +106,7 @@ vi.mock('../core/network-guard.js', async (original) => {
         const foreign = generateKeyPairSync('ec', { namedCurve: 'secp256k1' }).publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
         return json({ ...p, serverPubKey: foreign, signature: signHandshake(foreign, deriveSigningKey(TOKEN)) });
       }
-      if (target.guardBlocksRestore && step === 'restore') throw new Error('Blocked: the redirect points to a private address');
+      if (target.guardBlocksRestore && step === 'restore') throw new Error(target.guardText ?? 'Blocked: the redirect points to a private address');
       if (target.badSignature && step === 'handshake') {
         const p = target.importer!.startHandshake(TOKEN);
         return json({ ...p, signature: '00'.repeat(32) });
@@ -234,6 +236,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.badSignature = false;
     target.otherCurve = false;
     target.guardBlocksRestore = false;
+    target.guardText = undefined;
     derivedKeys.length = 0;
   });
 
@@ -401,8 +404,10 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.handshakeRefusal = { error: 'Invalid migration token' };
     expect(await message()).toBe('The target instance did not accept the migration. It says: Invalid migration token. Nothing was transferred.');
     // A refusal without any words of its own.
-    target.handshakeRefusal = { error: '' };
-    expect(await message()).toBe('The target instance did not accept the migration. Nothing was transferred.');
+    for (const error of ['', '\n\t ', '\u202e']) {
+      target.handshakeRefusal = { error };
+      expect(await message()).toBe('The target instance did not accept the migration. Nothing was transferred.');
+    }
   });
 
   it('gives up on a target that does not start answering, per step, with what the user can know', async () => {
@@ -446,6 +451,9 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     setShellIsolationForTest(sidecar);
     target.guardBlocksRestore = true;
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('Blocked: the redirect points to a private address. Check on the target instance whether your data arrived before you migrate again.');
+    // One without any words of its own.
+    target.guardText = '';
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The request to restore the data ended unexpectedly. Check on the target instance whether your data arrived before you migrate again.');
   });
 
   it('words a connection that cannot be made per step, never with the transport\'s own text', async () => {
