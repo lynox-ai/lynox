@@ -319,6 +319,26 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
 };
 
 /**
+ * What a workflow's stamp binds beside its steps (`workflowStampDigest`), as the stamp and the
+ * takeover previews show it: its mode, failure strategy, limits, contract and parameters with
+ * their defaults. `planned` is read with its defaults filled (`withWorkflowDefaults`).
+ */
+function stampShown(planned: PlannedPipeline): {
+  mode: PlannedPipeline['mode']; onFailure: NonNullable<PlannedPipeline['on_failure']>; limits: PlannedPipeline['limits'] | null;
+  contract: string[] | null; parameters: Array<{ name: string; required: boolean; default: unknown }>;
+} {
+  const contract = planned.capabilityContract;
+  return {
+    mode: planned.mode,
+    onFailure: planned.on_failure ?? 'stop',
+    limits: planned.limits ?? null,
+    // What the contract lets the run write, as the grant's preview words it.
+    contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
+    parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
+  };
+}
+
+/**
  * Each step of a workflow as it runs, as the stamp and the takeover previews show it: a captured
  * step's literal call beside its task, and the tools it gets, worked out the way the runtime does
  * (a step that names none gets the pool). `secret:` references stay names; no value is resolved
@@ -352,7 +372,7 @@ async function stepsShown(planned: PlannedPipeline) {
  * How the workflow takeover's refusals are answered. Plain placeholders: the texts the library
  * shows are its own, by code.
  */
-export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'changed' | 'prompts' | 'unrecorded', { readonly status: number; readonly message: string }> = {
+export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'changed' | 'prompts' | 'unrecorded' | 'stamp_refused', { readonly status: number; readonly message: string }> = {
   unreadable: { status: 409, message: 'The workflow cannot be read, so it cannot be taken over.' },
   nothing_to_take_over: { status: 409, message: 'This workflow does not need to be taken over.' },
   mandate_live: { status: 409, message: 'Someone who set up or changed this workflow still has access, so it cannot be taken over.' },
@@ -360,6 +380,7 @@ export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'chang
   changed: { status: 409, message: 'The workflow changed while you were looking at it. Look at it again, then take it over.' },
   prompts: { status: 503, message: 'The open questions of its plans cannot be closed right now, so the workflow was not taken over. Try again in a few minutes.' },
   unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so the workflow was not taken over. Try again in a few minutes.' },
+  stamp_refused: { status: 409, message: 'The steps of this workflow could not be stamped as shown, so it was not taken over. Look at it again, then take it over.' },
 };
 
 /**
@@ -9147,18 +9168,12 @@ export class LynoxHTTPApi {
       if (planned === undefined || expect === null) { errorResponse(res, 404, 'Workflow not found'); return; }
       const state = history.workflowStampState(planned);
       const shaped = history.workflowMandateShaped(planned.id);
-      const contract = planned.capabilityContract;
       jsonResponse(res, 200, {
         expect,
         stampedAt: state === 'holds' ? planned.confirmedAt ?? null : null,
         changedBy: shaped ? 'mandate' : 'owner',
         awaitsStamp: state === 'awaits_owner_stamp',
-        mode: planned.mode,
-        onFailure: planned.on_failure ?? 'stop',
-        limits: planned.limits ?? null,
-        // What the contract lets the run write, as the grant's preview words it.
-        contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
-        parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
+        ...stampShown(planned),
         steps: await stepsShown(planned),
       });
     }, ownerOnly('see what stamping a workflow would confirm')));
@@ -9203,7 +9218,8 @@ export class LynoxHTTPApi {
       const marked = new Set(foreignConnectionSteps);
       // A step whose literal call goes to a profile some mandate connected is marked, whoever it was.
       const steps = (await stepsShown(planned)).map((st) => ({ ...st, foreignConnection: marked.has(st.id) }));
-      jsonResponse(res, 200, { ...preview, steps, refusal: null });
+      // Everything the stamp binds beside the steps, as the stamp preview shows it: the takeover stamps it too.
+      jsonResponse(res, 200, { ...preview, ...stampShown(planned), steps, refusal: null });
     }, ownerOnly('see what taking over a workflow would do')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/takeover', async (_req, res, params, body) => {

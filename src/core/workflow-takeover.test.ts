@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -12,10 +13,10 @@ import type { ApiProfile } from './api-store.js';
 import { setPlanPauseForTests, writePause, type PausedFor } from './plan-pause.js';
 import { encodeStamp } from './plan-stamp.js';
 import { creatorCovered, editorCovered, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers } from './request-principal.js';
-import type { TakeoverPrompts } from './takeover-core.js';
+import { COVER_FROM_MARKS, marksOf, type TakeoverPrompts } from './takeover-core.js';
 import { workflowStampHolds, withOwnerStamp } from './workflow-stamp.js';
 import {
-  WORKFLOW_TAKEOVER_DIGEST_PREFIX, takeOverWorkflow, workflowTakeoverOf, workflowTakeoverPreview, type WorkflowTakeoverDeps,
+  WORKFLOW_TAKEOVER_DIGEST_PREFIX, takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps,
 } from './workflow-takeover.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 
@@ -96,6 +97,8 @@ function renewed(b: Box, email: string, grant = `g-${email}`): void {
 const STEPS = [
   { id: 's1', task: 'Read the orders' },
   { id: 's2', task: 'Call the shop', tool: 'http_request', input_template: { url: 'https://shop.example.invalid/orders', method: 'GET' } },
+  // Another tool with a url: not a request the runtime sends with a profile's connection.
+  { id: 's3', task: 'Read the shop page', tool: 'web_research', input_template: { url: 'https://shop.example.invalid/' } },
 ];
 
 /** A workflow created by `by` (a mandate), with two steps; stamped by the owner when `stamped`. */
@@ -172,7 +175,7 @@ describe('a workflow whose mandate ended is taken over: covered, stamped and rec
     expect(auditRows(b)).toEqual([{ actor_kind: 'owner', target: 'workflow=w mandates=g-h@x.ch' }]);
   });
 
-  it('the preview names each mark with its role and end, and its digest has its own prefix', () => {
+  it('the preview names each mark with its role and end', () => {
     const b = box();
     workflow(b, 'w', { email: 'c@x.ch' });
     editor(b, 'workflows', 'w', 'e@x.ch', null);
@@ -182,8 +185,39 @@ describe('a workflow whose mandate ended is taken over: covered, stamped and rec
       { name: 'c@x.ch', role: 'workflow-created', ended: true },
       { name: 'e@x.ch', role: 'workflow-edited', ended: true, undetermined: true },
     ]);
+  });
+
+  it('its digest is the hash of its own prefix and of what the preview shows, in this order', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    ended(b, 'h@x.ch');
+    const r = wfRow(b, 'w') as { definition_json: string };
+    const sha = (v: string): string => createHash('sha256').update(v).digest('hex');
+    const parts = (prefix: string): string => sha(JSON.stringify([
+      prefix, 'w', sha(r.definition_json),
+      marksOf(wfRow(b, 'w')), [false, false],
+      true, 'owner',
+      [], [], [], [],
+      [['workflow-created', 'h@x.ch', true, false]],
+      [], [],
+    ]));
     expect(WORKFLOW_TAKEOVER_DIGEST_PREFIX).toBe('lynox:workflow-takeover:v1');
-    expect(p.kind === 'preview' && p.preview.expect).toMatch(/^[0-9a-f]{64}$/);
+    expect(expectOf(b, 'w')).toBe(parts(WORKFLOW_TAKEOVER_DIGEST_PREFIX));
+    expect(parts('lynox:plan-takeover:v1')).not.toBe(parts(WORKFLOW_TAKEOVER_DIGEST_PREFIX));
+  });
+
+  it('a mark an earlier takeover covered is neither shown nor recorded again: only the new editor’s is', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'a@x.ch' });
+    renewed(b, 'a@x.ch');
+    // An earlier takeover covered the creator's mark, while it was the only one.
+    b.db.prepare(`UPDATE workflows SET ${COVER_FROM_MARKS} WHERE id = 'w'`).run(nowS());
+    editor(b, 'workflows', 'w', 'f@x.ch');
+    ended(b, 'f@x.ch');
+    const p = workflowTakeoverPreview(deps(b), 'w');
+    expect(p.kind === 'preview' && p.preview.marks).toEqual([{ name: 'f@x.ch', role: 'workflow-edited', ended: true }]);
+    expect(takeOverWorkflow(deps(b), 'w', expectOf(b, 'w')).kind).toBe('taken_over');
+    expect(auditRows(b)).toEqual([{ actor_kind: 'owner', target: 'workflow=w mandates=g-f@x.ch' }]);
   });
 
   it('mixed: a live creator and an ended editor — available, and both marks are covered and recorded', () => {
@@ -340,6 +374,7 @@ describe('the connections a run as the owner no longer uses', () => {
     const pv = workflowTakeoverPreview(deps(b), 'w');
     expect(pv.kind === 'preview' && pv.preview.connections).toEqual([{ profileId: 'mine', account: 'Main store', by: 'h@x.ch' }]);
     // s2 calls the shop, which another mandate connected: marked though its person is not one shown.
+    // s3 names the same host through another tool, which sends no connection: not marked.
     expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual(['s2']);
   });
 
@@ -385,6 +420,24 @@ describe('the digest: anything shown that moved between preview and takeover is 
     editor(b, 'workflows', 'w', 'h@x.ch');
     const shown = expectOf(b, 'w');
     editor(b, 'workflows', 'w', 'h@x.ch', 'g-h@x.ch', '2026-03-01 10:00:00');
+    refusedChanged(b, shown);
+  });
+
+  it('a default of a parameter, which the stamp binds beside the steps', () => {
+    const b = ready();
+    b.db.prepare(`UPDATE workflows SET definition_json = json_set(definition_json, '$.parameters', json('[{"name":"recipient","type":"string","description":"","defaultValue":"me@x.ch"}]')) WHERE id = 'w'`).run();
+    const shown = expectOf(b, 'w');
+    b.db.prepare("UPDATE workflows SET definition_json = json_set(definition_json, '$.parameters[0].defaultValue', 'stranger@y.ch') WHERE id = 'w'").run();
+    refusedChanged(b, shown);
+  });
+
+  it('the plans that stay paused: a plan with its own mark of the mandate is paused in between', () => {
+    const b = ready();
+    plan(b, 'p', 'w', 'h@x.ch');
+    const shown = expectOf(b, 'w');
+    pause(b, 'p', 'h@x.ch');
+    const p = workflowTakeoverPreview(deps(b), 'w');
+    expect(p.kind === 'preview' && [p.preview.stillPaused, p.preview.alsoReleased]).toEqual([[{ id: 'p', title: 'Plan p' }], []]);
     refusedChanged(b, shown);
   });
 
@@ -448,20 +501,25 @@ describe('the digest: anything shown that moved between preview and takeover is 
     expect(takeOverWorkflow(deps(b), 'w', shown).kind).toBe('taken_over');
   });
 
-  it('the decision read inside the transaction: a change between its first read and the write is changed', () => {
+  it('the decision read again inside the transaction: steps moved after the first read are changed, and nothing is written', () => {
     const b = ready();
+    plan(b, 'p', 'w');
+    pause(b, 'p', 'h@x.ch');
     const shown = expectOf(b, 'w');
-    let reads = 0;
-    // The workflow row is read once per decision; the second read sees the steps moved.
-    const d = deps(b, {
-      isLive: (id) => {
-        if (id === 'g-h@x.ch' && ++reads === 2) b.db.prepare("UPDATE workflows SET definition_json = json_set(definition_json, '$.steps[0].task', 'X') WHERE id = 'w'").run();
-        return b.ends.isLive(id);
+    // The released plan's prompts are settled after the first read and before the transaction:
+    // the steps move exactly there, so only the read inside the transaction can see it.
+    const prompts = {
+      ...b.prompts,
+      expirePendingForTrigger: (id: string): number => {
+        b.db.prepare("UPDATE workflows SET definition_json = json_set(definition_json, '$.steps[0].task', 'X') WHERE id = 'w'").run();
+        return b.prompts.expirePendingForTrigger(id);
       },
-    });
-    const before = b.db.prepare("SELECT covered_created_by FROM workflows WHERE id = 'w'").get();
-    expect(takeOverWorkflow(d, 'w', shown)).toEqual({ kind: 'refused', refusal: 'changed' });
-    expect(b.db.prepare("SELECT covered_created_by FROM workflows WHERE id = 'w'").get()).toEqual(before);
+    };
+    const before = b.db.prepare("SELECT covered_created_by, covered_at FROM workflows WHERE id = 'w'").get();
+    expect(takeOverWorkflow(deps(b, { prompts }), 'w', shown)).toEqual({ kind: 'refused', refusal: 'changed' });
+    expect(b.prompts.calls).toEqual(['expire p']);
+    expect(b.db.prepare("SELECT covered_created_by, covered_at FROM workflows WHERE id = 'w'").get()).toEqual(before);
+    expect(trow(b, 'p')['paused_at']).not.toBeNull();
     expect(auditRows(b)).toEqual([]);
   });
 });
@@ -485,11 +543,11 @@ describe('a commit that cannot complete leaves nothing behind', () => {
     expect(snapshot(b)).toEqual(before);
   });
 
-  it('a stamp the store refuses: unrecorded, and the cover and release written before it are rolled back', () => {
+  it('a stamp the store refuses: stamp_refused, and the cover and release written before it are rolled back', () => {
     const b = ready();
     const shown = expectOf(b, 'w');
     const before = snapshot(b);
-    expect(takeOverWorkflow(deps(b, { workflows: { stampCurrent: () => false } }), 'w', shown)).toEqual({ kind: 'refused', refusal: 'unrecorded' });
+    expect(takeOverWorkflow(deps(b, { workflows: { stampCurrent: () => false } }), 'w', shown)).toEqual({ kind: 'refused', refusal: 'stamp_refused' });
     expect(snapshot(b)).toEqual(before);
   });
 
@@ -505,12 +563,3 @@ describe('a commit that cannot complete leaves nothing behind', () => {
   });
 });
 
-describe('the decision alone', () => {
-  it('is the same function the preview and the takeover read', () => {
-    const b = box();
-    workflow(b, 'w', { email: 'h@x.ch' });
-    ended(b, 'h@x.ch');
-    const s = workflowTakeoverOf(deps(b), 'w');
-    expect(typeof s === 'object' && s.expect).toBe(expectOf(b, 'w'));
-  });
-});

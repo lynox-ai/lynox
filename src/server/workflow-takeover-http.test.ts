@@ -193,6 +193,27 @@ describe('the workflow takeover routes (real engine)', () => {
     expect((await ask('GET', '/api/workflows/no-such-workflow/takeover-preview', ownerCookie)).status).toBe(404);
   });
 
+  it('the preview shows what the stamp binds beside the steps exactly as the stamp preview does, with non-trivial values in every field', async () => {
+    const id = workflow('m@example.invalid', { steps: [{ id: 's1', task: 'Mail {{params.recipient}} the summary' }] });
+    end('m@example.invalid');
+    const extra = {
+      mode: 'autonomous', on_failure: 'continue', limits: { maxSpendUsd: 2, maxIterations: 7 },
+      capabilityContract: { hostPatterns: ['api.example.invalid'], pathPatterns: ['/v1/*'], httpMethods: ['POST'] },
+      parameters: [{ name: 'recipient', type: 'string', description: '', defaultValue: 'stranger@example.invalid' }, { name: 'subject', type: 'string', description: '' }],
+    };
+    db().prepare('UPDATE workflows SET definition_json = json_patch(definition_json, ?) WHERE id = ?').run(JSON.stringify(extra), id);
+    const fields = ['mode', 'onFailure', 'limits', 'contract', 'parameters'] as const;
+    const stamp = await ask('GET', `/api/workflows/${id}/stamp-preview`, ownerCookie);
+    const p = await ask('GET', `/api/workflows/${id}/takeover-preview`, ownerCookie);
+    expect(fields.map((f) => [f, p.json[f]])).toEqual(fields.map((f) => [f, stamp.json[f]]));
+    // The values are the ones written, not empty defaults on both sides.
+    expect(stamp.json['onFailure']).toBe('continue');
+    expect(stamp.json['contract']).toEqual(['POST https://api.example.invalid/v1/*']);
+    expect(stamp.json['parameters']).toEqual([{ name: 'recipient', required: false, default: 'stranger@example.invalid' }, { name: 'subject', required: true, default: null }]);
+    expect(stamp.json['limits']).toEqual({ maxSpendUsd: 2, maxIterations: 7 });
+    expect(stamp.json['mode']).toBe('autonomous');
+  });
+
   it('the preview shows the steps as the stamp preview does, each with its connection flag, and the marks', async () => {
     const id = workflow('g@example.invalid');
     end('g@example.invalid');

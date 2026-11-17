@@ -23,17 +23,17 @@ import { isMandateConnection, type ApiProfile, type ApiStore } from './api-store
 import type { StampEntry } from './plan-run-context.js';
 import { stampFromRow } from './plan-stamp.js';
 import {
-  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, planAuthorshipOf, principalHasEnded, principalTag,
+  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, creatorCovered, editorCovered, isMandateTag, planAuthorshipOf, principalHasEnded, principalTag,
   type RequestPrincipal,
 } from './request-principal.js';
 import {
-  COVER_FROM_MARKS, TakeoverUnrecorded, commitTakeover, coverAuditTarget, coverEffects, marksOf, release, releasedForDigest,
+  COVER_FROM_MARKS, commitTakeover, coverAuditTarget, coverEffects, marksOf, release, releasedForDigest,
   workflowConfirmedAt, workflowCover, workflowRowOf,
   type TakeoverCoreDeps, type TakeoverMemberChange, type WorkflowRow,
 } from './takeover-core.js';
 import type { TriggerStore } from './trigger-store.js';
 import type { GrantHasher } from './workflow-grant.js';
-import { nextWorkflowStamp, workflowStampDigest } from './workflow-stamp.js';
+import { nextWorkflowStamp, withWorkflowDefaults, workflowStampDigest } from './workflow-stamp.js';
 import type { WorkflowStore } from './workflow-store.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import type { TriggerRecord } from '../types/index.js';
@@ -54,7 +54,7 @@ export interface WorkflowTakeoverDeps extends TakeoverCoreDeps {
   readonly profiles: Pick<ApiStore, 'knownProfiles' | 'getByHostname'> | null;
 }
 
-/** A mandate mark on the workflow, as the owner is shown it. */
+/** A mandate mark on the workflow the takeover covers (one an earlier takeover covered is not shown), as the owner is shown it. */
 export interface WorkflowTakeoverMark {
   readonly name: string;
   readonly role: 'workflow-created' | 'workflow-edited';
@@ -75,7 +75,7 @@ export interface WorkflowTakeoverConnection {
 export interface WorkflowTakeoverPreview {
   readonly expect: string;
   readonly workflow: { readonly id: string; readonly name: string };
-  /** The definition as stored, whose steps the preview shows. */
+  /** The definition as stored, with its defaults filled as the stamp reads it (`withWorkflowDefaults`): what the preview shows. */
   readonly planned: PlannedPipeline;
   readonly marks: readonly WorkflowTakeoverMark[];
   readonly memberChanges: readonly TakeoverMemberChange[];
@@ -96,8 +96,11 @@ export type WorkflowTakeoverPreviewResult =
 
 export type WorkflowTakeoverResult =
   | { readonly kind: 'taken_over'; readonly id: string; readonly runsAs: string }
-  | { readonly kind: 'refused'; readonly refusal: WorkflowTakeoverRefusal | 'changed' | 'prompts' | 'unrecorded' }
+  | { readonly kind: 'refused'; readonly refusal: WorkflowTakeoverRefusal | 'changed' | 'prompts' | 'unrecorded' | 'stamp_refused' }
   | { readonly kind: 'not_found' };
+
+/** The workflow store refused the stamp inside the transaction: everything is rolled back. */
+class StampRefused extends Error {}
 
 /** Everything the takeover decides, from one synchronous read. */
 export interface WorkflowTakeoverState {
@@ -113,16 +116,19 @@ export interface WorkflowTakeoverState {
   readonly foreignConnectionSteps: readonly string[];
   /** The digest of the steps as they are, the stamp is held to. */
   readonly stampDigest: string;
-  /** The grant ids of every mandate mark the takeover covers, for the audit row. */
+  /** The grant ids of the mandate marks the takeover covers that were not covered yet, for the audit row. */
   readonly coveredMandates: readonly string[];
   readonly expect: string;
 }
 
-/** The profile a captured step's call goes to: its literal `url`'s host, as the request tool maps it. */
+/** The tool whose call the runtime sends with a profile's connection (`http.ts`). */
+const REQUEST_TOOL = 'http_request';
+
+/** The profile a captured request step's call goes to: its literal `url`'s host, as the request tool maps it. */
 function stepProfile(profiles: Pick<ApiStore, 'getByHostname'>, step: unknown): ApiProfile | undefined {
   if (step === null || typeof step !== 'object') return undefined;
   const { tool, input_template: input } = step as { tool?: unknown; input_template?: unknown };
-  if (typeof tool !== 'string' || input === null || typeof input !== 'object') return undefined;
+  if (tool !== REQUEST_TOOL || input === null || typeof input !== 'object') return undefined;
   const url = (input as Record<string, unknown>)['url'];
   if (typeof url !== 'string') return undefined;
   try {
@@ -164,15 +170,17 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
   if (effects === 'running') return 'running';
   const { memberChanges, released } = effects;
 
-  // Every mandate mark is covered (`COVER_FROM_MARKS`), whichever the decision read.
+  // Every mandate mark is covered (`COVER_FROM_MARKS`), whichever the decision read. A mark an
+  // earlier takeover covered is the owner's already: it is not shown, and not recorded again.
+  const authorship = planAuthorshipOf(wf);
   const marks: WorkflowTakeoverMark[] = [];
   const grantEmail = new Map<string, string>();
-  const markCols: Array<{ tag: string | null; id: string | null; role: WorkflowTakeoverMark['role'] }> = [
-    { tag: wf.created_by ?? null, id: wf.created_mandate_id ?? null, role: 'workflow-created' },
-    { tag: wf.mandate_editor ?? null, id: wf.mandate_editor_id ?? null, role: 'workflow-edited' },
+  const markCols: Array<{ tag: string | null; id: string | null; role: WorkflowTakeoverMark['role']; covered: boolean }> = [
+    { tag: wf.created_by ?? null, id: wf.created_mandate_id ?? null, role: 'workflow-created', covered: creatorCovered(authorship) },
+    { tag: wf.mandate_editor ?? null, id: wf.mandate_editor_id ?? null, role: 'workflow-edited', covered: editorCovered(authorship) },
   ];
   for (const m of markCols) {
-    if (!isMandateTag(m.tag)) continue;
+    if (!isMandateTag(m.tag) || m.covered) continue;
     const email = m.tag!.slice(MANDATE_TAG_PREFIX.length);
     if (m.id === null || m.id === '') {
       marks.push({ name: email, role: m.role, ended: true, undetermined: true });
@@ -229,11 +237,11 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
     WORKFLOW_TAKEOVER_DIGEST_PREFIX,
     wf.id,
     createHash('sha256').update(wf.definition_json).digest('hex'),
-    marksOf(wf),
+    marksOf(wf), markCols.map((m) => m.covered),
     coverWorkflow, principalTag(runsAs),
     memberChanges, releasedForDigest(released),
-    stillPaused.map((t) => t.id),
-    lapsing.map((l) => [l.trigger.id, l.entries]),
+    stillPaused.map((t) => [t.id, t.title]),
+    lapsing.map((l) => [l.trigger.id, l.trigger.title, l.entries]),
     marks.map((m) => [m.role, m.name, m.ended, m.undetermined === true]),
     connections.map((c) => [c.profileId, c.grant, c.account]),
     foreignConnectionSteps,
@@ -256,7 +264,7 @@ export function workflowTakeoverPreview(deps: WorkflowTakeoverDeps, wfId: string
     preview: {
       expect: s.expect,
       workflow: { id: s.wf.id, name: s.wf.name },
-      planned: s.planned,
+      planned: withWorkflowDefaults(structuredClone(s.planned)),
       marks: s.marks,
       memberChanges: s.memberChanges,
       alsoReleased: s.released.map(brief),
@@ -272,10 +280,19 @@ export function workflowTakeoverPreview(deps: WorkflowTakeoverDeps, wfId: string
  * Takes the workflow over, against the digest the owner was shown (`expect`), through
  * `commitTakeover`: the prompts of the plans it releases are settled first, then one immediate
  * engine.db transaction decides again and writes the cover, the releases, the owner's stamp over
- * the steps and the audit row. A stamp that cannot be written (the steps moved under it) rolls
- * all of it back as `unrecorded`.
+ * the steps and the audit row. A stamp the store refuses (the steps moved under it) rolls all of
+ * it back as `stamp_refused`.
  */
 export function takeOverWorkflow(deps: WorkflowTakeoverDeps, wfId: string, expect: string): WorkflowTakeoverResult {
+  try {
+    return commitWorkflowTakeover(deps, wfId, expect);
+  } catch (err: unknown) {
+    if (err instanceof StampRefused) return { kind: 'refused', refusal: 'stamp_refused' };
+    throw err;
+  }
+}
+
+function commitWorkflowTakeover(deps: WorkflowTakeoverDeps, wfId: string, expect: string): WorkflowTakeoverResult {
   return commitTakeover(deps, expect, () => {
     const s = workflowTakeoverOf(deps, wfId);
     if (s === 'not_found') return { stop: { kind: 'not_found' } as WorkflowTakeoverResult };
@@ -287,7 +304,7 @@ export function takeOverWorkflow(deps: WorkflowTakeoverDeps, wfId: string, expec
     const nowS = Math.floor(now.getTime() / 1000);
     deps.db.prepare(`UPDATE workflows SET ${COVER_FROM_MARKS} WHERE id = ?`).run(nowS, s.wf.id);
     for (const t of s.released) release(deps, t, now);
-    if (!deps.workflows.stampCurrent(s.wf.id, now.toISOString(), s.stampDigest)) throw new TakeoverUnrecorded('the stamp could not be written');
+    if (!deps.workflows.stampCurrent(s.wf.id, now.toISOString(), s.stampDigest)) throw new StampRefused('the stamp could not be written');
     record({
       principal: OWNER_PRINCIPAL, action: 'workflow.takeover', phase: 'done', correlationId: newCorrelationId(),
       target: coverAuditTarget(`workflow=${s.wf.id}`, s.coveredMandates, s.released),
