@@ -1756,6 +1756,8 @@ async function executeThinker(
     maxIterations,
     isolation: childIsolation,
     autonomy: parentAgent.autonomy,
+    // A child asks in its parent's language.
+    language: parentAgent.dialogLanguage,
     // A child of a run nobody watches files a mail like its parent: under the parent's trigger
     // (so the flooding limit counts the whole tree) and naming the root run. Taken from the
     // parent agent only, never from this tool's input; a chat's child gets none.

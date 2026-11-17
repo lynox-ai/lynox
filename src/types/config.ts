@@ -39,6 +39,9 @@ export interface AbortScope {
 
 export interface AgentConfig {
   name:             string;
+  /** The instance's configured language (`config.language`), from which the agent's
+   *  confirmation dialogs take theirs (`noticeLanguage`). */
+  language?:        string | undefined;
   model:            string;
   systemPrompt?:    string | undefined;
   tools?:           ToolEntry[] | undefined;

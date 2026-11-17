@@ -75,7 +75,7 @@ describe('the rule that decides a hard block marks it', () => {
   it('every unattended [BLOCKED return of the guard says which class it is', () => {
     const source = readFileSync(join(__dirname, '..', 'tools', 'permission-guard.ts'), 'utf8').split('\n');
     const blockedReturns = source.filter((l) => /return\b.*framed`/.test(l) && /\[BLOCKED|blockReason/.test(l));
-    expect(blockedReturns.length, 'positive control: the guard\'s blocked returns are found').toBe(13);
+    expect(blockedReturns.length, 'positive control: the guard\'s blocked returns are found').toBe(14);
     expect(blockedReturns.filter((l) => !/return (hardBlock|askable)\(framed`/.test(l))).toEqual([]);
   });
 });

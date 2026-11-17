@@ -433,6 +433,8 @@ export interface IAgent {
   readonly activeScopes?: MemoryScopeRef[] | undefined;
   readonly isolation?: IsolationConfig | undefined;
   readonly autonomy?: AutonomyLevel | undefined;
+  /** The language this agent asks its confirmation questions in (`'de' | 'en'`). */
+  readonly dialogLanguage?: 'de' | 'en' | undefined;
   /**
    * The capability contract that governs a tool call dispatched now, or why none does.
    * The one question both readers ask — the danger check in the agent loop and the

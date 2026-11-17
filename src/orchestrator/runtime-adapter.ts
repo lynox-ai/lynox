@@ -990,6 +990,7 @@ export async function spawnViaAgent(
     // By reference: what this step fetches is in the run's set before a later step writes.
     conversationGrants: runGrantSet(runTaint),
     name: step.agent,
+    language: config.language,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,
     model: agentModel,
@@ -1501,6 +1502,7 @@ export async function spawnInline(
     // By reference: what this step fetches is in the run's set before a later step writes.
     conversationGrants: runGrantSet(runTaint),
     name: step.id,
+    language: config.language,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,
     model: agentModel,
