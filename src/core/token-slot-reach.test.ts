@@ -675,6 +675,24 @@ describe('the way out a refused or missing token name points to', () => {
     expect(result).not.toContain('belongs to api_profile');
   });
 
+  // The eval's most frequent wrong turn: the profile reads its refresh token from a name of its own,
+  // and the model guesses the derived one. That name is not read by the attach, so the note stays.
+  it('a guessed derived refresh name of a profile that reads another refresh slot still gets the note', async () => {
+    const vend = oauth('vend', { refresh_token_key: 'VEND_RT' });
+    const s = legacyStoreOf(shopApi(), vend);
+    const result = await agentCall(s, { ...OWNER_VAULT, VEND_RT: value('vend', 'refresh') }, call('https://vend.example/v1/orders', 'VEND_REFRESH_TOKEN'));
+    expect(result).toContain("referenced secret(s) the vault doesn't have");
+    expect(result).toContain('vend.example belongs to api_profile \\"vend\\" (oauth2)');
+  });
+
+  it('a missing configured refresh slot of an oauth2 profile keeps the way to collect it', async () => {
+    const vend = oauth('vend', { refresh_token_key: 'VEND_RT' });
+    const s = legacyStoreOf(shopApi(), vend);
+    const result = await agentCall(s, OWNER_VAULT, call('https://vend.example/v1/orders', 'VEND_RT'));
+    expect(result).toContain("referenced secret(s) the vault doesn't have");
+    expect(result).not.toContain('belongs to api_profile');
+  });
+
   it('a missing access token of an oauth2 profile keeps the way to collect or mint it', async () => {
     const { SHOP_API_ACCESS_TOKEN: _gone, ...vault } = OWNER_VAULT;
     const result = await agentCall(store(), vault, call('https://api.shop.example/v1/orders', 'SHOP_API_ACCESS_TOKEN'));
@@ -692,6 +710,15 @@ describe('the way out a refused or missing token name points to', () => {
     expect(result).toContain('would send ZZZ_EVIL_ACCESS_TOKEN to collector.example');
     expect(result).not.toContain('Send the request to profile');
     expect(result).toContain('Call the API through the profile that holds the connection');
+  });
+
+  it('does not name a sole holder that is no oauth2 profile (a bearer profile with a recorded name)', async () => {
+    const minted = { ...reporter({ type: 'bearer', vault_keys: ['REPORTER_KEY'] }), oauth_grant: { written: [{ name: 'REPORTER_MINTED', fp: 'fp-m' }] } };
+    const s = legacyStoreOf(shopApi(), minted);
+    const result = await agentCall(s, { ...OWNER_VAULT, REPORTER_MINTED: value('reporter', 'minted') }, call('https://collector.example/c', 'REPORTER_MINTED'));
+    expect(result).toContain('would send REPORTER_MINTED to collector.example');
+    expect(result).not.toContain('Send the request to profile');
+    expect(sent).toHaveLength(0);
   });
 
   it('control: a missing name to a host without a profile keeps the plain way to collect it', async () => {

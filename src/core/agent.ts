@@ -108,7 +108,7 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateConnection, tokenSlotNames } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateConnection, readersRefreshSlot, tokenSlotNames } from './api-store.js';
 import { MEMBER_CONNECTION_PREFIX, noteMemberConnection } from './member-connection-notes.js';
 import { boundCtx, memberRefusalCase, memberRefusalOwnerNote, memberRefusalText, slotMayReach, type BindingCtx, type MemberRefusal, type OwnerNote } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
@@ -4432,8 +4432,17 @@ export class Agent implements IAgent {
       if (profile === undefined || (type !== 'bearer' && type !== 'header' && type !== 'oauth2')) return '';
       // A missing name that IS the profile's own credential is missing for the attach too: then
       // collecting it (or minting it) is the way out, and this note would say the opposite.
-      // `collectVaultKeys` holds every name the attach reads, an oauth2 profile's derived pair included.
-      const own = new Set(collectVaultKeys(profile));
+      // Only the names the attach READS for this profile: `collectVaultKeys` is wider (it keeps the
+      // derived refresh name even where the profile reads another), and a guessed derived name is
+      // exactly the one this note exists for.
+      const a = profile.auth!;
+      const keys: unknown = a.vault_keys;
+      const own = new Set<string>(Array.isArray(keys) ? keys.slice(0, 2).filter((k): k is string => typeof k === 'string') : []);
+      if (type === 'oauth2') {
+        own.add(accessTokenKey(profile.id));
+        own.add(readersRefreshSlot(profile));
+        for (const k of [a.oauth?.client_id_key, a.oauth?.client_secret_key]) if (typeof k === 'string' && k !== '') own.add(k);
+      }
       if (absentNames.some((n) => own.has(n))) return '';
       const renews = type === 'oauth2' ? ' and renews it when it can, so no token request is needed either' : '';
       return ` ${host} belongs to api_profile "${String(profile.id)}" (${type}), whose credential the engine attaches when the profile is accepted for that host and the vault holds it${renews}. If a missing name was meant as that credential, do not collect it: send the request without it and without an auth header of your own. Only a name the profile does not attach is collected.`;
@@ -4547,8 +4556,11 @@ export class Agent implements IAgent {
         try {
           const holders = apiStore!.knownProfiles().filter((p) => offGrant.every((n) => tokenSlotNames(p).has(n)));
           const only = holders.length === 1 ? holders[0]! : undefined;
-          // `slotMayReach` is false for a held-back owner too (`profile-secret-view.ts`).
-          holder = only !== undefined && slotMayReach(apiStore!, accessTokenKey(only.id), 'request', only.base_url, undefined, bindCtx)
+          // Only an oauth2 holder: its access token is the one its own request gets. Any other profile
+          // can hold a recorded name too, and its derived name is free, which `slotMayReach` allows
+          // anywhere. `slotMayReach` is false for a held-back owner too (`profile-secret-view.ts`).
+          holder = only !== undefined && only.auth?.type === 'oauth2'
+            && slotMayReach(apiStore!, accessTokenKey(only.id), 'request', only.base_url, undefined, bindCtx)
             ? String(only.id) : undefined;
         } catch { holder = undefined; }
         const wayOut = holder !== undefined
