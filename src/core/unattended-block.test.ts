@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import type { ToolEntry, PromptMeta } from '../types/index.js';
+import type { ToolEntry, PromptMeta, PromptText } from '../types/index.js';
+import { flattenPrompt } from './prompt-value.js';
 
 /**
  * A hard block (`DangerSignal.hardBlock`) is refused in a run nobody watches instead of being
@@ -171,6 +172,21 @@ describe('a tool from outside the engine that confirms by itself', () => {
     await call(agent, 'Merge', {});
     expect(promptUser).not.toHaveBeenCalled();
     expect(tool.calls).toHaveLength(1);
+  });
+});
+
+describe('the agent asks in the instance\'s language', () => {
+  it.each([
+    ['de-CH', '⚠ Befehl: rm -rf / — "rm -rf /tmp/x" [BLOCKED — diese Aktion musst du aus Sicherheitsgründen selbst ausführen]'],
+    ['en', '⚠ Command: rm -rf / — "rm -rf /tmp/x" [BLOCKED — this action needs to be run manually for safety]'],
+  ])('configured %s', async (language, question) => {
+    const bash = stub('bash');
+    const asked: string[] = [];
+    const promptUser = vi.fn(async (q: unknown) => { asked.push(flattenPrompt(q as PromptText)); return 'Deny'; });
+    const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [bash], autonomy: 'autonomous', promptUser, language } as ConstructorParameters<typeof Agent>[0]);
+    await call(agent, 'bash', { command: 'rm -rf /tmp/x' });
+    expect(asked).toEqual([question]);
+    expect(bash.calls).toEqual([]);
   });
 });
 
