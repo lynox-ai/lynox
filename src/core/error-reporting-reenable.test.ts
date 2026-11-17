@@ -158,6 +158,57 @@ it('reports from a timer a request started before reporting was turned off and o
   expect(sent.some((e) => e.includes('"message":"feedback-from-an-old-timer"'))).toBe(true);
 });
 
+// Off means off for what an old scope records too: nothing it captures then is sent, and no
+// breadcrumb it records then rides along with its next report once reporting is on again.
+it('sends nothing an old timer captures or records while reporting is off', async () => {
+  expect(await initErrorReporting(DSN)).toBe(true);
+  let whileOff!: () => void;
+  const offGate = new Promise<void>((resolve) => { whileOff = resolve; });
+  let offDone!: () => void;
+  const recordedOff = new Promise<void>((resolve) => { offDone = resolve; });
+  let afterOn!: () => void;
+  const onGate = new Promise<void>((resolve) => { afterOn = resolve; });
+  let onDone!: () => void;
+  const capturedOn = new Promise<void>((resolve) => { onDone = resolve; });
+  const server = http.createServer((_req, res) => {
+    setTimeout(() => {
+      void offGate.then(() => {
+        captureError(new Error('captured-while-off'));
+        Sentry.addBreadcrumb({ message: 'crumb-while-off' });
+        offDone();
+        return onGate;
+      }).then(() => {
+        Sentry.addBreadcrumb({ message: 'crumb-while-on' });
+        captureError(new Error('captured-after-on'));
+        onDone();
+      });
+    }, 0);
+    res.writeHead(200);
+    res.end();
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve, reject) => {
+    const rq = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/' }, (r) => { r.resume(); r.on('end', resolve); });
+    rq.on('error', reject);
+    rq.end();
+  });
+
+  await shutdownErrorReporting();
+  whileOff();
+  await recordedOff;
+  expect(await initErrorReporting(DSN)).toBe(true);
+  afterOn();
+  await capturedOn;
+  await Sentry.flush(2000);
+  expect(reached('captured-while-off')).toBe(false);
+  // Control: the report after the re-init is sent and carries a breadcrumb recorded while on.
+  expect(reached('captured-after-on')).toBe(true);
+  expect(sent.some((e) => e.includes('"message":"crumb-while-on"'))).toBe(true);
+  expect(sent.some((e) => e.includes('"message":"crumb-while-off"'))).toBe(false);
+});
+
 it('turns reporting on when the toggle arrives while a shutdown is still running', async () => {
   expect(await initErrorReporting(DSN)).toBe(true);
   const off = shutdownErrorReporting();

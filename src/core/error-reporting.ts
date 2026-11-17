@@ -270,6 +270,10 @@ async function startErrorReporting(dsn: string | undefined): Promise<boolean> {
       },
 
       beforeBreadcrumb(breadcrumb) {
+        // The SDK records a breadcrumb through any client a scope names, closed or not, and its
+        // integrations (console, http) keep running after an off. One recorded while reporting is
+        // off would ride along with the next report once it is on again.
+        if (!_enabled) return null;
         if (breadcrumb.data) {
           delete breadcrumb.data['prompt'];
           delete breadcrumb.data['response'];
