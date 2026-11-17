@@ -202,6 +202,8 @@
 	// offers no Run for it (the engine refuses one), and its schedule names the asking steps.
 	// A workflow whose mandate's access ended runs for no one (the run is refused, 1055), so it is not
 	// run, scheduled or changed from here; renaming and deleting stay (UX-053, ux U-079).
+	// Its name is set apart too: `runs_as` is the mandate that made or last changed it, and a change
+	// is not recorded by field, so the name may be that person's (a renamed workflow counts the same).
 	function accessEnded(wf: SavedWorkflow): boolean {
 		return wf.runs_as?.ended === true;
 	}
@@ -778,7 +780,7 @@
 								/>
 							{:else}
 								<!-- With a takeover to give, the title is someone else's value, as in the sentence below it. -->
-								<p class="text-sm font-medium line-clamp-2 break-words">{#if accessEnded(wf)}<MarkedLine text={shownValue(wf.name)} />{:else}{wf.name}{/if}</p>
+								<p class="text-sm font-medium line-clamp-2 break-words">{#if accessEnded(wf)}<MarkedLine text={shownValue(wf.name)} mono={false} />{:else}{wf.name}{/if}</p>
 								{#if wf.description}
 									<p class="text-xs text-text-subtle mt-1 line-clamp-2 break-words">{wf.description}</p>
 								{/if}

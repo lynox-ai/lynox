@@ -38,6 +38,7 @@ const before = getLocale();
 
 const PAUSED = {
 	id: 'p1', title: 'Wochenreport', status: 'open', effect: 'run_agent', source: 'cron', confirmed_at: '2026-10-01T00:00:00.000Z',
+	created_by: 'mandate:ida@treuhand-mueller-partner.ch',
 	paused: true, paused_who: ['ida@treuhand-mueller-partner.ch'],
 	paused_ended: [{ email: 'ida@treuhand-mueller-partner.ch', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: false }],
 };
@@ -227,6 +228,32 @@ describe('the confirmation', () => {
 		const titleBox = (title: string): Element | null | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === title)?.querySelector('bdi[data-foreign-value]');
 		expect(titleBox('Wochenreport')?.textContent).toBe('Wochenreport');
 		expect(titleBox('Monatsabschluss')).toBeNull();
+	});
+
+	it('sets a paused title apart only where someone with access may have written it', async () => {
+		const owner = { created_by: 'owner', edited_by: undefined, mandate_editor: undefined };
+		rows = [
+			{ ...PAUSED, ...owner, id: 'o1', title: 'Owner plan' },
+			{ ...PAUSED, ...owner, id: 'o2', title: 'Owner changed', edited_by: 'owner' },
+			{ ...PAUSED, id: 'm1', title: 'Mandate made' },
+			{ ...PAUSED, ...owner, id: 'm2', title: 'Mandate last', edited_by: 'mandate:ida@treuhand-mueller-partner.ch', mandate_editor: 'mandate:ida@treuhand-mueller-partner.ch' },
+			{ ...PAUSED, ...owner, id: 'm3', title: 'Mandate before', edited_by: 'owner', mandate_editor: 'mandate:ida@treuhand-mueller-partner.ch' },
+			{ ...PAUSED, ...owner, id: 'u1', title: 'Unknown', created_by: undefined },
+		];
+		await render();
+		const title = (t: string): Element | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === t);
+		// The owner's own titles stay plain, beside the paused label all the same.
+		for (const t of ['Owner plan', 'Owner changed']) {
+			expect(title(t), t).toBeDefined();
+			expect(title(t)!.querySelector('bdi'), t).toBeNull();
+		}
+		for (const t of ['Mandate made', 'Mandate last', 'Mandate before', 'Unknown']) {
+			const box = title(t)?.querySelector('bdi[data-foreign-value]');
+			expect(box?.textContent, t).toBe(t);
+			// A grey box in the list's font: the title keeps its width.
+			expect(box!.classList.contains('bg-bg-muted'), t).toBe(true);
+			expect(box!.classList.contains('font-mono'), t).toBe(false);
+		}
 	});
 
 	it('sets every value someone else wrote apart, wherever a sentence of the plan takeover names it', async () => {

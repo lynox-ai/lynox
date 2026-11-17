@@ -449,6 +449,39 @@ describe('the dialog', () => {
 		for (const title of ['Daily', 'Nightly', 'Quarterly', 'Weekly', 'Monthly']) expect(outside.split(title).length - 1, title).toBe(1);
 	});
 
+	it('says that a released plan\'s connections lapse right after the sentence that names it', async () => {
+		const p = FULL();
+		p['alsoReleased'] = [{ id: 'p-r', title: 'Daily' }, { id: 'p-n', title: 'Nightly' }, { id: 'p-q', title: 'Quarterly' }];
+		p['memberChanges'] = [
+			{ id: 'p-r', title: 'Daily', before: `mandate:${EVA}`, after: null, runsNoMore: false },
+			{ id: 'p-n', title: 'Nightly', before: `mandate:${EVA}`, after: null, runsNoMore: false },
+		];
+		p['lapsing'] = [{ id: 'p-l', title: 'Hourly' }, { id: 'p-r', title: 'Daily' }, { id: 'p-q', title: 'Quarterly' }];
+		await open([ENDED], [p]);
+		const d = await openDialog();
+		const parts = [...d.querySelectorAll('[data-takeover-part="lapsing"], [data-takeover-part="released"]')].map((e) => e.textContent?.trim() ?? '');
+		expect(parts).toEqual([
+			'Beim Plan „Hourly“ gelten die freigegebenen Verbindungen danach nicht mehr. Gib sie unter Automation → Trigger mit „Verbindungen prüfen“ neu frei. Bis dahin scheitern seine Schritte, die eine Verbindung brauchen.',
+			`Diese Pläne laufen danach wieder, unter deinem Namen statt unter dem von ${EVA}: Daily, Nightly.`,
+			'Dabei verfallen beim Plan „Daily“ die bisher freigegebenen Verbindungen. Bis du sie unter Automation → Trigger mit „Verbindungen prüfen“ neu freigibst, scheitern seine Schritte, die eine Verbindung brauchen.',
+			'Dann läuft auch der Plan „Quarterly“ wieder.',
+			'Dabei verfallen seine bisher freigegebenen Verbindungen. Bis du sie unter Automation → Trigger mit „Verbindungen prüfen“ neu freigibst, scheitern seine Schritte, die eine Verbindung brauchen.',
+		]);
+	});
+
+	it('says that several released plans\' connections lapse in one sentence after theirs', async () => {
+		const p = FULL();
+		p['alsoReleased'] = [{ id: 'p-r', title: 'Daily' }, { id: 'p-n', title: 'Nightly' }];
+		p['lapsing'] = [{ id: 'p-r', title: 'Daily' }, { id: 'p-n', title: 'Nightly' }];
+		await open([ENDED], [p]);
+		const d = await openDialog();
+		const parts = [...d.querySelectorAll('[data-takeover-part="lapsing"], [data-takeover-part="released"]')].map((e) => e.textContent?.trim() ?? '');
+		expect(parts).toEqual([
+			'Dann laufen auch diese Pläne wieder: Daily, Nightly.',
+			'Dabei verfallen bei diesen Plänen die bisher freigegebenen Verbindungen: Daily, Nightly. Bis du sie je Plan unter Automation → Trigger mit „Verbindungen prüfen“ neu freigibst, scheitern ihre Schritte, die eine Verbindung brauchen.',
+		]);
+	});
+
 	it('says one plan that runs again under the owner\'s name in one sentence', async () => {
 		const p = FULL();
 		p['alsoReleased'] = [{ id: 'p-r', title: 'Daily' }];
@@ -690,11 +723,44 @@ describe('the library\'s own sentences', () => {
 		expect(titleBox('Own one')).toBeUndefined();
 	});
 
-	it('draws the box flush, with no space of its own outside the value', async () => {
+	it('gives an empty value a box of its own width, and only an empty one', async () => {
+		const p = FULL();
+		p['stillPaused'] = [{ id: 'p-s', title: '   ' }];
+		await open([ENDED], [p]);
+		const d = await openDialog();
+		const empty = d.querySelector<HTMLElement>('[data-takeover-part="paused"] bdi[data-foreign-value]')!;
+		expect(empty.textContent).toBe('');
+		expect(empty.classList.contains('px-1')).toBe(true);
+		const filled = d.querySelector<HTMLElement>('[data-takeover-part="released"] bdi[data-foreign-value]')!;
+		expect(filled.textContent).toBe('Daily');
+		expect(filled.classList.contains('px-1')).toBe(false);
+	});
+
+	it('sets a card title apart where the access of whoever made or changed it ended, in the list font', async () => {
+		await open([
+			base('wf-o', 'Owner one'),
+			ENDED,
+			{ ...base('wf-u', 'Unknown one'), runs_as: { person: EVA, ended: true, undetermined: true, covered_by_takeover: 0 } },
+		]);
+		const title = (t: string): Element | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === t);
+		expect(title('Owner one'), 'Owner one').toBeDefined();
+		expect(title('Owner one')!.querySelector('bdi')).toBeNull();
+		for (const t of ['Ended one', 'Unknown one']) {
+			const box = title(t)?.querySelector('bdi[data-foreign-value]');
+			expect(box?.textContent, t).toBe(t);
+			expect(box!.classList.contains('bg-bg-muted'), t).toBe(true);
+			expect(box!.classList.contains('font-mono'), t).toBe(false);
+		}
+	});
+
+	it('keeps a 2 px margin around the box and no inner space on a value', async () => {
 		await open([ENDED]);
-		const boxes = [...target.querySelectorAll('bdi[data-foreign-value]')];
+		const boxes = [...target.querySelectorAll('bdi[data-foreign-value]')].filter((b) => b.textContent !== '');
 		expect(boxes.length).toBeGreaterThan(0);
-		for (const b of boxes) expect(b.className).not.toMatch(/(^|\s)-?(p|px|pl|pr|m|mx|ml|mr)-/);
+		for (const b of boxes) {
+			const spacing = [...b.classList].filter((c) => /^-?(p|px|py|pl|pr|m|mx|my|ml|mr)-/.test(c));
+			expect(spacing).toEqual(['mx-0.5']);
+		}
 	});
 
 	it('sets the person apart in the note at an ended workflow, with and without paused plans', async () => {

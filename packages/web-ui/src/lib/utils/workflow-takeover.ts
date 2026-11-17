@@ -133,8 +133,11 @@ export interface WorkflowTakeoverLine {
  * A connection gets its sentence only where a marked step uses it: the sentence speaks of the
  * marked steps. A plan that stays paused runs for no one, so it is not one that runs for someone
  * else: it gets only its sentence that it stays paused. A plan that runs again and then runs under
- * the owner's name instead of a person's gets one sentence that says both; every plan is said once,
- * except where its allowed connections lapse.
+ * the owner's name instead of a person's gets one sentence that says both. A plan that runs again
+ * and then runs under another person's name is said twice: once among the plans that run again,
+ * once with whom it runs for. A plan whose allowed connections lapse is said right after the
+ * sentence that names it among the plans that run again; one that does not run again gets its own
+ * sentence before those.
  */
 export function workflowTakeoverLines(p: WorkflowTakeoverPreview): WorkflowTakeoverLine[] {
 	const lines: WorkflowTakeoverLine[] = [];
@@ -157,22 +160,41 @@ export function workflowTakeoverLines(p: WorkflowTakeoverPreview): WorkflowTakeo
 	const toOwner = p.memberChanges.filter((c) => released.has(c.id) && !paused.has(c.id) && !c.runsNoMore && c.before !== null && c.after === null);
 	const saidWithRelease = new Set(toOwner.map((c) => c.id));
 	for (const line of memberChangeLines(p.memberChanges.filter((c) => !paused.has(c.id) && !saidWithRelease.has(c.id)))) lines.push({ kind: 'member_change', text: line.text });
-	if (p.lapsing.length === 1) lines.push({ kind: 'lapsing', text: tf('workflow_library.takeover.lapsing_one', { plan: shownValue(p.lapsing[0]!.title) }) });
-	else if (p.lapsing.length > 1) lines.push({ kind: 'lapsing', text: tf('workflow_library.takeover.lapsing_many', { plans: planList(p.lapsing.map((l) => l.title)) }) });
-	const byPerson = new Map<string, string[]>();
-	for (const c of toOwner) byPerson.set(c.before!, [...(byPerson.get(c.before!) ?? []), c.title]);
-	for (const [before, titles] of byPerson) {
+	// A plan that lapses and is named in a sentence of plans that run again is said right after that
+	// sentence; the others in a sentence of their own, here.
+	const lapsingIds = new Set(p.lapsing.map((l) => l.id));
+	const lapsingAlone = p.lapsing.filter((l) => !released.has(l.id));
+	if (lapsingAlone.length === 1) lines.push({ kind: 'lapsing', text: tf('workflow_library.takeover.lapsing_one', { plan: shownValue(lapsingAlone[0]!.title) }) });
+	else if (lapsingAlone.length > 1) lines.push({ kind: 'lapsing', text: tf('workflow_library.takeover.lapsing_many', { plans: planList(lapsingAlone.map((l) => l.title)) }) });
+	const saidLapsing = new Set<string>();
+	// After a sentence naming `named`, the plans among them whose allowed connections lapse.
+	const lapsingAfter = (named: ReadonlyArray<{ id: string; title: string }>): void => {
+		const these = named.filter((n) => lapsingIds.has(n.id) && !saidLapsing.has(n.id));
+		for (const n of these) saidLapsing.add(n.id);
+		if (these.length === 0) return;
+		const text = named.length === 1
+			? t('workflow_library.takeover.lapsing_after_same')
+			: these.length === 1
+				? tf('workflow_library.takeover.lapsing_after_one', { plan: shownValue(these[0]!.title) })
+				: tf('workflow_library.takeover.lapsing_after_many', { plans: planList(these.map((n) => n.title)) });
+		lines.push({ kind: 'lapsing', text });
+	};
+	const byPerson = new Map<string, Array<{ id: string; title: string }>>();
+	for (const c of toOwner) byPerson.set(c.before!, [...(byPerson.get(c.before!) ?? []), { id: c.id, title: c.title }]);
+	for (const [before, named] of byPerson) {
 		const person = shownValue(nameOfTag(before));
 		lines.push({
 			kind: 'released',
-			text: titles.length === 1
-				? tf('workflow_library.takeover.released_owner_one', { plan: shownValue(titles[0]!), person })
-				: tf('workflow_library.takeover.released_owner_many', { plans: planList(titles), person }),
+			text: named.length === 1
+				? tf('workflow_library.takeover.released_owner_one', { plan: shownValue(named[0]!.title), person })
+				: tf('workflow_library.takeover.released_owner_many', { plans: planList(named.map((n) => n.title)), person }),
 		});
+		lapsingAfter(named);
 	}
 	const rest = p.alsoReleased.filter((r) => !saidWithRelease.has(r.id));
 	if (rest.length === 1) lines.push({ kind: 'released', text: tf('takeover.f2.released_one', { plan: shownValue(rest[0]!.title) }) });
 	else if (rest.length > 1) lines.push({ kind: 'released', text: tf('takeover.f2.released', { plans: planList(rest.map((r) => r.title)) }) });
+	lapsingAfter(rest);
 	const where = { tab: t('hub.automation.triggers'), button: t('takeover.button') };
 	if (p.stillPaused.length === 1) lines.push({ kind: 'paused', text: tf('workflow_library.takeover.paused_one', { plan: shownValue(p.stillPaused[0]!.title), ...where }) });
 	else if (p.stillPaused.length > 1) lines.push({ kind: 'paused', text: tf('workflow_library.takeover.paused_many', { plans: planList(p.stillPaused.map((s) => s.title)), ...where }) });
