@@ -53,6 +53,16 @@ export const MIGRATION_MEMORY = {
    * proven bound; no source sends a plaintext store before that measurement.
    */
   k: 7.1,
+  /**
+   * The SOURCE's peak over its resident memory before the export, per byte of a store on the
+   * plaintext path: the snapshot, its raw parts, the rewrite's copies and the framed form, with
+   * the other chunks small. The upper bound of every run, not a fit: 2026-11-17, core 97a921d0,
+   * on the build host (not the image), node 22 with tsx, one process per run, VmHWM reset at the
+   * baseline; engine.db with 4 KiB encrypted memories at 36.7 / 84.7 / 156.7 MiB, two runs each:
+   * 6.82 / 6.98, 6.04 / 5.73, 5.68 / 5.62 (the raw path 3.95 / 2.92 / 2.67). The merge ledgers'
+   * plaintext form is not counted in it (it is built only for ledgers within the 64 MiB cap).
+   */
+  kSource: 7.0,
 } as const;
 
 /**
@@ -112,6 +122,12 @@ export function readImportLimitMb(
 
 let cachedLimitMb: number | null = null;
 
+/** This process's memory limit in MiB (`readImportLimitMb`), read once per process. */
+export function ownMemoryLimitMb(): number {
+  cachedLimitMb ??= readImportLimitMb();
+  return cachedLimitMb;
+}
+
 /** The `migration` block of the health body. The limit is read once per process. */
 export function migrationCeiling(): MigrationCeiling {
   cachedLimitMb ??= readImportLimitMb();
@@ -158,7 +174,8 @@ export function storePath(ceiling: MigrationCeiling, sizes: MigrationSizes): Sto
  * The largest store, in bytes, that takes the plaintext path next to `otherBytes` of other
  * chunks (the rest among them) and `restBytes` of decoded rest: the predicate solved for S,
  * with B = otherBytes + S. Negative when nothing fits, and -1 for inputs `storePath` would
- * not judge (a k below 1, a number that is not finite or is negative), never Infinity or NaN.
+ * not judge (a k below 1, a number that is not finite or is negative); never NaN, and Infinity
+ * only for a limit so large that the product overflows (the source's own checks still apply).
  */
 export function maxPlainStoreBytes(ceiling: MigrationCeiling, otherBytes: number, restBytes: number): number {
   const { import_limit_mb: limit, baseline_mb: baseline, k, rest_factor: restFactor } = ceiling;

@@ -25,9 +25,9 @@ import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
 import { hiddenAddsToCopy, targetHiddenAdds, type FieldHiddenAdds } from './bulk-hidden-adds.js';
-import { checkMarkup, sameHtmlField, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
+import { checkMarkup, sameHtmlField, shortcodeRefusalOf, htmlFieldsOfFormName, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
-import { canonicalHtml, htmlEqual, withinReadingBounds } from './html-tree.js';
+import { canonicalHtml, htmlEqualIgnoringLayout, withinReadingBounds } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter, shopifySeoEntityFields } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
@@ -153,6 +153,9 @@ export type BulkInvalidReason =
   | 'verdict_invalid'
   /** the verdict said to change the target (`keep: false`) and gave no new values */
   | 'verdict_without_after'
+  /** the canonical form of a verdict's HTML field is longer than the rule's bound for it, which the
+   *  raw verdict kept (PRD shopify-preset §21.2 item 5, N6) */
+  | 'html_too_long'
   // What a value may not add over the before-image (PRD shopify-preset §20.2 item 5,
   // `bulk-html.ts`). Every code of `MarkupRefusal` is one of these; the type below holds it so.
   /** a verdict for a text field that is not HTML adds `<`, `>` or a tag (S20-2) */
@@ -405,6 +408,8 @@ export const BULK_HALT_REASONS = {
   formCost: 'the store refused a read as too costly for one request',
   shopifyReadOff: 'reading a Shopify store in a bulk run is switched off on this instance',
   shopifyWriteOff: 'writing to a Shopify store in a bulk run is switched off on this instance',
+  // Fixed like every reason: the fields are named in the outcome's summary, not here.
+  consentOutdated: 'the Shopify connection does not yet let lynox change a field this run writes; nothing was written in this call',
   // Fixed like every reason: the target is named by its mark (`shop_added_markup`), not here.
   markupAddedByShop: 'the store kept a written description with markup the run did not send',
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
@@ -1809,7 +1814,7 @@ export class BulkLedger {
   private judgeRuleRefusal(row: Pick<RunRow, 'judge_rule' | 'list_source'>): string | null {
     try {
       const source = row.list_source === null ? null : JSON.parse(this.engineDb.dec(row.list_source)) as BulkListSource;
-      normalizeJudgeRule(this.judgeRuleOf(row), source === null ? {} : { idField: source.idField, contextFields: contextFieldsOfListForm(source.form) });
+      normalizeJudgeRule(this.judgeRuleOf(row), source === null ? {} : { idField: source.idField, contextFields: contextFieldsOfListForm(source.form), htmlFields: htmlFieldsOfFormName(source.form) });
       return null;
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return err.message;
@@ -2063,6 +2068,15 @@ export class BulkLedger {
     return this.listFormOfFamily(run) === SHOPIFY_MEDIA_LIST_FORM ? 'shopify_media_alt' : 'shopify_product';
   }
 
+  /** Whether a judged run's rule decides one of its HTML fields ({@link htmlFieldsOf}): a cut-off or
+   *  over-long verdict there is a description the owner may keep by hand, and is worded so. */
+  judgesHtml(runId: string): boolean {
+    const run = this.runRow(runId);
+    if (run === undefined || run.judge_rule === null) return false;
+    const html = this.htmlFieldsOf(runId);
+    return Object.keys(this.judgeRuleOf(run).schema.properties).some((f) => html.includes(f));
+  }
+
   /**
    * The fields of a run whose values are HTML (PRD shopify-preset §21.2 item 2): those of the list
    * form its family was planned from — for an undo, and an undo of an undo, the run the family
@@ -2076,6 +2090,21 @@ export class BulkLedger {
     const fields = new Set(htmlFieldsOfListForm(this.listFormOfFamily(run)));
     if (this.shopifyFormOfRun(run) === 'shopify_product') for (const f of htmlFieldsOfListForm('shopify')) fields.add(f);
     return [...fields];
+  }
+
+  /** Whether an HTML field a judged run's verdict changes is longer, in its canonical form, than
+   *  the rule's `maxLength` for that field, counted in code points as the schema counts it
+   *  (`validateAgainstSchema`). A run without a rule, or a field the rule does not bound, is not over. */
+  private canonicalOverBound(run: RunRow, after: unknown, before: unknown): boolean {
+    if (run.judge_rule === null || !isPlainRecord(after)) return false;
+    const props = this.judgeRuleOf(run).schema.properties;
+    const held = isPlainRecord(before) ? before : {};
+    return this.htmlFieldsOf(run.id).some((f) => {
+      const value = after[f];
+      const prop = Object.hasOwn(props, f) ? props[f] : undefined;
+      const max = prop?.type === 'string' ? prop.maxLength : undefined;
+      return typeof value === 'string' && value !== held[f] && max !== undefined && [...value].length > max;
+    });
   }
 
   /**
@@ -2655,7 +2684,8 @@ export class BulkLedger {
    * read-back held the same markup, sent by it and so unmarked, would otherwise launder it. The
    * undone target's own mark is not read: its `actual` is not what the undo writes, and its
    * before-image may hold the same markup from before the run, which restoring is.
-   * Compared under `htmlEqual`, the strict direction: a reformatted copy of the value still counts.
+   * Compared under `htmlEqualIgnoringLayout`, the loose direction: a reformatted copy of the value,
+   * or one a store laid out with a line break more or less, still counts.
    */
   private restoresShopAddedMarkup(runId: string, seq: number, after: unknown, htmlFields: readonly string[]): boolean {
     if (after === null || typeof after !== 'object') return false;
@@ -2682,7 +2712,7 @@ export class BulkLedger {
             const a = restored[f];
             const k = held[f];
             // Beyond the reading bounds the two are not parsed: counted as the same, the strict direction.
-            return typeof a === 'string' && typeof k === 'string' && (!withinReadingBounds(a) || !withinReadingBounds(k) || htmlEqual(a, k));
+            return typeof a === 'string' && typeof k === 'string' && (!withinReadingBounds(a) || !withinReadingBounds(k) || htmlEqualIgnoringLayout(a, k));
           })) return true;
         }
       }
@@ -2810,8 +2840,9 @@ export class BulkLedger {
 
   /**
    * The latest write, in any run but `exceptRun` and in any family, whose read-back of the target
-   * `key` was marked (`shop_added_markup`) and equals `value` under `htmlEqual` — the strict
-   * direction: a reformatted copy still counts — in a field that could hold the markup:
+   * `key` was marked (`shop_added_markup`) and equals `value` under `htmlEqualIgnoringLayout` — the
+   * loose direction: a reformatted copy, or one laid out with a line break more or less, still counts —
+   * in a field that could hold the markup:
    * one of the marked run's HTML fields that the write sent as text and the store kept otherwise
    * than `sameHtmlField` explains. A field the write did not send, or that came back as sent, is
    * the store's or lynox's own and marks nothing. The fields come from the marked write, not from
@@ -2847,7 +2878,7 @@ export class BulkLedger {
       // A value beyond the reading bounds is not parsed: it counts as the marked value, as down an
       // undo chain.
       if (marked.some((f) => typeof now[f] === 'string' && (!withinReadingBounds(now[f] as string)
-        || !withinReadingBounds(held[f] as string) || htmlEqual(now[f] as string, held[f] as string)))) {
+        || !withinReadingBounds(held[f] as string) || htmlEqualIgnoringLayout(now[f] as string, held[f] as string)))) {
         return { appliedAt: r.applied_at };
       }
     }
@@ -3290,6 +3321,13 @@ export class BulkLedger {
       const after = this.canonicalAfterOf(runId, run !== undefined && this.shopifyFormOfRun(run) !== null && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
         ? shopifyPairedAfter(verdict.after, before.value)
         : verdict.after, before.absent ? null : before.value);
+      // The rule bounds the verdict as the model wrote it; the canonical form, which is what is
+      // stored, checked and sent, re-escapes text and can be longer (N6). Bounded again here.
+      if (run !== undefined && this.canonicalOverBound(run, after, before.absent ? null : before.value)) {
+        return db.prepare(
+          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = 'html_too_long', judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+        ).run(at, runId, seq, token, runId).changes === 1;
+      }
       return db.prepare(
         `UPDATE bulk_targets SET after_planned = ?, change = ?, error = NULL, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
       ).run(this.engineDb.enc(JSON.stringify(after)), classifyChange(before, after, this.comparedAsHtml(runId)), at, runId, seq, token, runId).changes === 1;

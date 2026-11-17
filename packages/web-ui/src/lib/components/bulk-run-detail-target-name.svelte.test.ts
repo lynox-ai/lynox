@@ -125,6 +125,15 @@ describe('a Shopify run\'s page', () => {
 		expect(target.textContent).not.toContain('gid://shopify/Product/1');
 	});
 
+	it('names the changed field by its label, not its raw name, as the sent-unchanged line does', async () => {
+		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1 });
+		targets = [seoTarget(1)];
+		await render();
+		const names = [...target.querySelectorAll('[data-testid="bulk-field-name"]')].map((e) => e.textContent?.trim());
+		expect(names).toEqual([`${t('bulk.field.shopify.seo_title')}:`]);
+		expect(target.textContent).not.toContain('seo_title:');
+	});
+
 	it('shows no old title on a run that rewrites the title', async () => {
 		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1 });
 		targets = [titleTarget(1, 'Alte Teekanne')];
@@ -163,11 +172,12 @@ describe('a Shopify run\'s page', () => {
 		expect(target.textContent).not.toContain('gid://shopify/Product/9');
 	});
 
-	it('a local run keeps showing its keys', async () => {
+	it('a local run keeps showing its keys and its field names as written', async () => {
 		run = makeRun({ phase: 'done', undone: 0, undoneBy: null, targetSystem: 'workspace' });
 		targets = [written(1, false)];
 		await render();
 		expect(target.querySelector('[data-testid="bulk-target-admin"]')).toBeNull();
 		expect(target.textContent).toContain('gid://shopify/Product/1');
+		expect(target.querySelector('[data-testid="bulk-field-name"]')?.textContent?.trim()).toBe('seo_title:');
 	});
 });
