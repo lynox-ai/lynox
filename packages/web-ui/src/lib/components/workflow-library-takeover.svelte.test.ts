@@ -760,8 +760,8 @@ describe('the library\'s own sentences', () => {
 		expect(inSentence?.textContent).toBe('Daily');
 		for (const b of [card!.querySelector('bdi[data-foreign-value]')!, inSentence!]) {
 			const classes = [...b.classList];
-			expect(classes.filter((c) => /^-?m[lrx]?-/.test(c))).toEqual([]);
-			expect(classes.filter((c) => /^-?p[xylr]?-/.test(c))).toEqual(['px-1']);
+			expect(classes.filter((c) => /^-?m[lrxytbse]?-/.test(c))).toEqual([]);
+			expect(classes.filter((c) => /^-?p[xylrtbse]?-/.test(c))).toEqual(['px-1']);
 			expect(classes).toContain('box-decoration-clone');
 			// The 1 px edge that draws the box on every ground, in a title and in a sentence.
 			expect(classes.filter((c) => c.startsWith('border'))).toEqual(['border', 'border-text-subtle']);

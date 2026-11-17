@@ -263,7 +263,7 @@ describe('the confirmation', () => {
 			expect(box!.classList.contains('bg-bg-muted'), line).toBe(true);
 			expect(box!.classList.contains('font-mono'), line).toBe(false);
 			// No space of its own outside; 4 px inside, on each line of a wrapped title.
-			expect([...box!.classList].filter((c) => /^-?m[lrx]?-/.test(c)), line).toEqual([]);
+			expect([...box!.classList].filter((c) => /^-?m[lrxytbse]?-/.test(c)), line).toEqual([]);
 			expect(box!.classList.contains('px-1'), line).toBe(true);
 			expect(box!.classList.contains('box-decoration-clone'), line).toBe(true);
 			// Its 1 px edge, the part of the box that shows on every ground.
