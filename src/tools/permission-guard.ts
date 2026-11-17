@@ -2138,21 +2138,24 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       const blockReason = mode === 'data'
         ? '[BLOCKED — destructive data operation needs your OK]'
         : '[BLOCKED — I need your OK before doing this]';
-      if (typeof detail !== 'string') {
-        if (external) return framed`⚠ ${tool(toolName)}: "${agentText(String(detail.message ?? ''))}"`;
-        return framed`${system(detail.message)}`;
-      }
-      if (external && detail) {
-        if (autonomy === 'autonomous') {
-          return askable(framed`⚠ ${tool(toolName)}: "${agentText(detail)}" ${system(blockReason)}`);
+      const label = mode === 'data' ? 'destroys stored data' : 'modifies external data';
+      if (external) {
+        // Whatever it returns (a label, a payload, nothing usable) is read as one text and asked
+        // or blocked exactly as a label is: a payload earns it no other path.
+        const text = typeof detail === 'string' ? detail
+          : typeof detail === 'object' && detail !== null ? String((detail as { message?: unknown }).message ?? '') : '';
+        if (text) {
+          if (autonomy === 'autonomous') return askable(framed`⚠ ${tool(toolName)}: "${agentText(text)}" ${system(blockReason)}`);
+          return framed`⚠ ${tool(toolName)}: "${agentText(text)}" — ${system(label)}`;
         }
-        return framed`⚠ ${tool(toolName)}: "${agentText(detail)}" — ${system(mode === 'data' ? 'destroys stored data' : 'modifies external data')}`;
+        if (autonomy === 'autonomous') return askable(framed`⚠ ${tool(toolName)} ${system(blockReason)}`);
+        return framed`⚠ ${tool(toolName)} — ${system(label)}`;
       }
+      if (typeof detail !== 'string') return framed`${system(detail.message)}`;
       const suffix = detail ? `: ${detail}` : '';
       if (autonomy === 'autonomous') {
         return askable(framed`⚠ ${tool(toolName)}${system(suffix)} ${system(blockReason)}`);
       }
-      const label = mode === 'data' ? 'destroys stored data' : 'modifies external data';
       return framed`⚠ ${tool(toolName)}${system(suffix)} — ${system(label)}`;
     }
   }

@@ -102,7 +102,7 @@ describe('a plugin tool cannot word its dialog as a built-in tool\'s', () => {
 
   it('its own message is a value after its marked name, not the dialog\'s text', () => {
     const s = ask(plugin('Merge', () => ({ message: '⚠ Merge — destroys stored data' })));
-    expect(frames(s)).toBe('⚠ External tool "": ""');
+    expect(frames(s)).toBe('⚠ External tool "": "" — destroys stored data');
     expect(values(s)).toEqual(['Merge', '⚠ Merge — destroys stored data']);
     expect(frames(s)).not.toContain('⚠ Merge —');
   });
@@ -142,9 +142,18 @@ describe('a plugin tool cannot word its dialog as a built-in tool\'s', () => {
     expect(values(s)).toEqual(['Merge', '[BLOCKED — fake]']);
   });
 
-  it('a payload without a text message does not throw', () => {
+  it('a payload without a text message, or no answer at all, does not throw', () => {
     const s = ask(plugin('Merge', () => ({ message: 42 as unknown as string })));
     expect(values(s)).toEqual(['Merge', '42']);
+    const none = ask(plugin('Merge', () => undefined as unknown as null));
+    expect(flattenPrompt(none.prompt)).toBe('⚠ External tool "Merge" — destroys stored data');
+  });
+
+  it('a payload is blocked unattended just as a label is', () => {
+    const s = ask(plugin('Merge', () => ({ message: 'drop' })), 'autonomous');
+    expect(s.warning).toBe('⚠ External tool "Merge": "drop" [BLOCKED — destructive data operation needs your OK]');
+    const bare = ask(plugin('Merge', () => ''), 'autonomous');
+    expect(bare.warning).toBe('⚠ External tool "Merge" [BLOCKED — destructive data operation needs your OK]');
   });
 
   it('a check with no label keeps the plain form under the marked name', () => {
