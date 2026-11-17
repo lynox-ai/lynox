@@ -447,6 +447,11 @@ describe('the dialog', () => {
 		await open([ENDED], [both]);
 		d = await openDialog();
 		expect(boxes(d, 'lapsing')).toEqual([['FX-relx', 'FX-rely']]);
+		// It is the sentence that follows the released one, not the stand-alone lapsing sentence.
+		const parts = [...d.querySelectorAll('[data-takeover-part]')];
+		const lapsingAt = parts.findIndex((e) => e.getAttribute('data-takeover-part') === 'lapsing');
+		expect(parts[lapsingAt - 1]?.getAttribute('data-takeover-part')).toBe('released');
+		expect(parts[lapsingAt]!.textContent).toMatch(new RegExp(`^${t('workflow_library.takeover.lapsing_after_many').split('{plans}')[0]!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 		expect(foreignPlaces(d).filter(([, apart]) => !apart)).toEqual([]);
 	});
 
@@ -802,7 +807,7 @@ describe('the library\'s own sentences', () => {
 			expect(classes.filter((c) => MARGIN_CLASS.test(c))).toEqual([]);
 			expect(classes.filter((c) => PADDING_CLASS.test(c))).toEqual(['px-1']);
 			expect(classes).toContain('box-decoration-clone');
-			// The 1 px edge that draws the box on every ground, in a title and in a sentence.
+			// The 1 px edge that draws the box on the measured grounds, in a title and in a sentence.
 			expect(classes.filter((c) => c.startsWith('border'))).toEqual(['border', 'border-text-subtle']);
 		}
 	});
