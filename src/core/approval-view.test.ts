@@ -248,11 +248,23 @@ describe('the card\'s fields', () => {
   it('never carries the binding or the raw result, and only allowlisted fields', () => {
     const card = approvalCard(entry({ status: 'failed', resultJson: '{"reason":"rate_limit","message":"secret-ish"}' }), owner);
     expect(Object.keys(card).sort()).toEqual([
-      'afterUntrusted', 'ageMs', 'chatThreadId', 'checksum', 'createdAt', 'decidedAt', 'executable', 'executedAt', 'expiresAt', 'held',
+      'afterUntrusted', 'afterUntrustedBy', 'ageMs', 'chatThreadId', 'checksum', 'createdAt', 'decidedAt', 'executable', 'executedAt', 'expiresAt', 'held',
       'id', 'kind', 'mail', 'massSend', 'origin', 'outcome', 'recipientDiffers', 'replyToElsewhere', 'setup', 'status', 'tombstoned',
     ]);
     expect(JSON.stringify(card)).not.toContain('secret-ish');
     expect(JSON.stringify(card)).not.toContain('keyed');
+  });
+
+  it.each([
+    ['nothing outside', { afterUntrusted: false }, null],
+    ['the run read it', { afterUntrusted: true, runUntrusted: true }, 'run'],
+    ['only the instruction (its trigger was set up after outside content)', { afterUntrusted: true, instructionUntrusted: true }, 'instruction'],
+    ['both', { afterUntrusted: true, instructionUntrusted: true, runUntrusted: true }, 'both'],
+    ['a record from before U-209 (no side stored)', { afterUntrusted: true }, 'run'],
+  ] as const)('says which side of after-outside-content held (U-209): %s', (_label, flags, by) => {
+    const card = approvalCard(entry({ origin: { source: 'task', triggerId: 'trg-u', runId: 'run-u', rootRunId: 'run-u', ...flags } }), owner);
+    expect(card.afterUntrustedBy).toBe(by);
+    expect(card.afterUntrusted).toBe(flags.afterUntrusted);
   });
 
   it('shows a reply\'s original, persona and the origin it came from', () => {

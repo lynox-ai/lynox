@@ -14,7 +14,8 @@ import { randomUUID } from 'node:crypto';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { CRM } from '../../core/crm.js';
 import { reportMeteredCost, type HookHost } from '../../core/metered-request.js';
-import { getModelId } from '../../types/index.js';
+import { getModelId, MISTRAL_MODEL_MAP, MODEL_CAPABILITIES, type InboxItem } from '../../types/index.js';
+import { isFeatureEnabled } from '../../core/features.js';
 import type { LLMCaller } from './classifier/index.js';
 import {
   type AnthropicLike,
@@ -52,9 +53,16 @@ import {
   type OnInboundMailHook,
 } from './watcher-hook.js';
 import type { MailStateDb } from '../mail/state.js';
-import type { InboxReader } from '../mail/context.js';
+import type { InboxReader, InboxRuleProposer } from '../mail/context.js';
 import { PROVIDER_NOT_ON_LIST_REFUSAL, providerListApplies } from '../../core/contained-providers.js';
 import { FixedTextError } from '../../core/error-egress.js';
+
+/**
+ * Waiting rule proposals per account (a proposal applies only once the owner confirms it), as
+ * `MAX_PENDING_PER_TRIGGER` caps the approval queue (`core/approval-filing.ts`): a run that reads
+ * hostile mail cannot fill the owner's rule view.
+ */
+export const MAX_PENDING_RULE_PROPOSALS = 10;
 
 /** Bundle the Engine retains. `shutdown()` drains the queue. */
 export interface InboxRuntime {
@@ -75,6 +83,8 @@ export interface InboxRuntime {
   inboxLabelOf: NonNullable<import('../mail/context.js').MailHooks['inboxLabelOf']>;
   /** Wire as `MailHooks.inboxReader` — the store as `inbox_read` reads it. */
   inboxReader: InboxReader;
+  /** Wire as `MailHooks.inboxRuleProposer` — waiting rules for `inbox_rule_propose`. */
+  inboxRuleProposer: InboxRuleProposer;
   /**
    * Operator-driven cold-start re-run. The HTTP layer resolves the
    * `MailProvider` from its registry and hands it in; runtime closes over
@@ -269,13 +279,46 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       }
     }
   };
+  // The description-rule check: its own cheap model — ministral-8b in
+  // the EU, Haiku in the US — priced at that model's rates, against the same daily cap, debited
+  // and recorded like the classifier, as its own run.
+  const ruleModelId = region === 'eu' ? MISTRAL_MODEL_MAP.fast : getModelId('fast');
+  const rulePricing = region === 'eu'
+    ? { inputCostPerMtok: MODEL_CAPABILITIES[MISTRAL_MODEL_MAP.fast]!.pricing.input, outputCostPerMtok: MODEL_CAPABILITIES[MISTRAL_MODEL_MAP.fast]!.pricing.output }
+    : { inputCostPerMtok: DEFAULT_INPUT_COST_PER_MTOK, outputCostPerMtok: DEFAULT_OUTPUT_COST_PER_MTOK };
+  const onRuleUsage = (usage: { inputTokens: number; outputTokens: number }): void => {
+    const costUsd =
+      (usage.inputTokens / 1_000_000) * rulePricing.inputCostPerMtok
+      + (usage.outputTokens / 1_000_000) * rulePricing.outputCostPerMtok;
+    budget.recordCost(costUsd);
+    if (opts.meteredHost) reportMeteredCost(opts.meteredHost, randomUUID(), costUsd, 'fast');
+    if (opts.runHistory) {
+      try {
+        const id = opts.runHistory.insertRun({
+          taskText: 'inbox rule check',
+          modelTier: 'fast',
+          modelId: ruleModelId,
+          runType: 'single',
+          tenantId: opts.tenantId,
+          kind: 'llm',
+        });
+        opts.runHistory.updateRun(id, { tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd, status: 'completed' });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[inbox/bootstrap] RunHistory bridge failed: ${msg}\n`);
+      }
+    }
+  };
+
   let llm: LLMCaller;
+  let ruleLlm: LLMCaller;
   if (opts.llmRegion === 'eu' && providerListApplies()) {
     // On an instance connected to a Shopify store the EU caller — a direct request to Mistral —
     // is not on the provider list (`core/contained-providers.ts`). Nor is the US path a stand-in:
     // the operator chose that mail stays in the EU. Every classification is refused instead: the
     // queue retries and then dead-letters the item to `requires_user`, as for any classifier failure.
     llm = async () => { throw new FixedTextError(PROVIDER_NOT_ON_LIST_REFUSAL, PROVIDER_NOT_ON_LIST_REFUSAL); };
+    ruleLlm = llm;
   } else if (opts.llmRegion === 'eu') {
     if (!opts.mistralApiKey) {
       throw new Error('bootstrapInbox: llmRegion=eu requires mistralApiKey');
@@ -286,12 +329,14 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     };
     if (opts.modelIdOverride !== undefined) mistralOpts.modelId = opts.modelIdOverride;
     llm = createMistralEuLLMCaller(mistralOpts);
+    ruleLlm = createMistralEuLLMCaller({ apiKey: opts.mistralApiKey, onUsage: onRuleUsage, modelId: ruleModelId });
   } else {
     llm = wrapAnthropicAsLLMCaller(
       opts.anthropicClient as unknown as AnthropicLike,
       opts.modelIdOverride ?? getModelId('fast'),
       { onUsage },
     );
+    ruleLlm = wrapAnthropicAsLLMCaller(opts.anthropicClient as unknown as AnthropicLike, ruleModelId, { onUsage: onRuleUsage });
   }
 
   // Build the inbox notifier when a router is wired. Created here (not
@@ -303,6 +348,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const notifier = opts.notificationRouter
     ? createInboxNotifier({
         router: opts.notificationRouter,
+        language: opts.language,
         isEnabled: () => state.getSetting('push.inbox_enabled', 'true') !== 'false',
         perMinute: () => parseIntSetting(state.getSetting('push.per_minute'), 1),
         perHour: () => parseIntSetting(state.getSetting('push.per_hour'), 10),
@@ -325,6 +371,8 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     policy: opts.policy,
     ...(opts.meteredHost ? { meteredHost: opts.meteredHost } : {}),
     ...(notifier ? { notifier } : {}),
+    // Behind the flag, as the rest of the user rules: with it off no description rule is checked.
+    ...(isFeatureEnabled('inbox-user-rules') ? { ruleCheck: { rules, llm: ruleLlm } } : {}),
   });
 
   const accounts: AccountResolver = {
@@ -380,10 +428,11 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   // The store as the inbox view reads it (api.ts handleGetCounts / handleListItems /
   // handleGetItemFull / handleGetItemThread), scoped to this runtime's tenant.
   const readerTenant = opts.tenantId ?? DEFAULT_TENANT_ID;
+  const sensitiveAtIngest = (item: InboxItem): string[] => state.sensitiveCategoriesAtIngest(item);
   const inboxReader: InboxReader = {
     countByBucket: (exclude) => state.countItemsByBucket(readerTenant, exclude),
-    listItems: (bucket, limit, offset, exclude) =>
-      state.listOpenItems({ tenantId: readerTenant, bucket, limit, offset, excludeAccounts: exclude }),
+    listItems: (bucket, limit, offset, exclude, ruleId) =>
+      state.listOpenItems({ tenantId: readerTenant, bucket, limit, offset, excludeAccounts: exclude, ruleId }),
     getItem: (id) => state.getItem(id, readerTenant),
     bodyOf: (item) => {
       const tm = item.messageId !== undefined && item.messageId.length > 0
@@ -394,17 +443,15 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       return legacy !== null && legacy.bodyMd.length > 0 ? legacy.bodyMd : null;
     },
     threadOf: (item, limit) => state.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit }),
-    sensitiveAtIngest: (item) => {
-      const found = new Set<string>();
-      for (const entry of state.listAuditForItem(item.id, item.tenantId)) {
-        let payload: unknown;
-        try { payload = JSON.parse(entry.payloadJson); } catch { continue; }
-        const cats = (payload as { sensitive_categories?: unknown } | null)?.sensitive_categories;
-        if (Array.isArray(cats)) for (const c of cats) if (typeof c === 'string' && c.length > 0) found.add(c);
-      }
-      return [...found];
-    },
+    sensitiveAtIngest,
     disabledAccounts: disabledAccounts ?? new Set<string>(),
+  };
+
+  // A proposal waits for the owner and does not apply, so the rule cache is not touched here; the
+  // confirm route invalidates it.
+  const inboxRuleProposer: InboxRuleProposer = {
+    maxPending: MAX_PENDING_RULE_PROPOSALS,
+    propose: (input) => state.proposeRule({ ...input, tenantId: opts.tenantId }, MAX_PENDING_RULE_PROPOSALS),
   };
 
   const onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']> =
@@ -438,6 +485,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       state,
       router: opts.notificationRouter,
       language: opts.language,
+      isFlagged: (item) => sensitiveAtIngest(item).length > 0,
     };
     if (opts.reminderPollIntervalMs !== undefined) {
       pollerOpts.intervalMs = opts.reminderPollIntervalMs;
@@ -457,6 +505,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     onOutboundReconcile,
     inboxLabelOf,
     inboxReader,
+    inboxRuleProposer,
     runColdStart,
     sensitiveMode: opts.sensitiveMode ?? 'skip',
     shutdown: async (shutdownOpts) => {

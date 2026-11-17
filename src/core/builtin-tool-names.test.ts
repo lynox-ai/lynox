@@ -146,6 +146,22 @@ describe('BUILTIN_TOOL_NAMES', () => {
     expect(all.filter(n => !BUILTIN_TOOL_NAMES.has(n))).toEqual([]);
   });
 
+  it('fail_step is reserved, and no booted registry tool (the chat\'s tools) carries it', async () => {
+    expect(BUILTIN_TOOL_NAMES.has('fail_step')).toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-builtin-names-'));
+    dirs.push(dir);
+    setEnv('LYNOX_FEATURE_PLUGINS', '0');
+    const engine = await boot(dir);
+    const names = engine.getRegistry().getEntries().map(t => t.definition.name);
+    // A real registry, or the absence proves nothing.
+    expect(names.length).toBeGreaterThan(20);
+    expect(names).toContain('http_request');
+    expect(names).not.toContain('fail_step');
+    const catalog = Object.values(builtinTools).filter((v): v is ToolEntry =>
+      typeof v === 'object' && v !== null && typeof (v as { definition?: { name?: unknown } }).definition?.name === 'string');
+    expect(catalog.map(t => t.definition.name)).not.toContain('fail_step');
+  });
+
   it('reserves the names the engine decides by although no tool defines them', () => {
     for (const name of Object.keys(RESERVED_TOOL_NAMES)) expect(BUILTIN_TOOL_NAMES.has(name), name).toBe(true);
     expect(BUILTIN_TOOL_NAMES.has('mail_send')).toBe(true);

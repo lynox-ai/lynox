@@ -150,6 +150,37 @@ describe('projectMessages', () => {
     expect(out[0]?.toolCalls?.[0]?.result).toBe('boom');
   });
 
+  it('marks a done call the ledger records as failed as unsuccessful, and only that one', () => {
+    const assistant = [
+      { type: 'tool_use', id: 'tu_1', name: 'api_setup', input: {} },
+      { type: 'tool_use', id: 'tu_2', name: 'api_setup', input: {} },
+    ];
+    const carrier = [
+      { type: 'tool_result', tool_use_id: 'tu_1', content: 'Error: nothing was saved.' },
+      { type: 'tool_result', tool_use_id: 'tu_2', content: 'Saved.' },
+    ];
+    const out = projectMessages([rec(0, 'assistant', assistant), rec(1, 'user', carrier)], { unsuccessfulToolUseIds: new Set(['tu_1']) });
+    expect(out[0]?.toolCalls?.[0]).toEqual(expect.objectContaining({ status: 'done', unsuccessful: true }));
+    expect(out[0]?.toolCalls?.[1]?.status).toBe('done');
+    expect(out[0]?.toolCalls?.[1]?.unsuccessful).toBeUndefined();
+  });
+
+  it('keeps a call stored with is_error an error, not unsuccessful, when the ledger has it too', () => {
+    const assistant = [{ type: 'tool_use', id: 'tu_1', name: 'bash', input: {} }];
+    const carrier = [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'boom', is_error: true }];
+    const out = projectMessages([rec(0, 'assistant', assistant), rec(1, 'user', carrier)], { unsuccessfulToolUseIds: new Set(['tu_1']) });
+    expect(out[0]?.toolCalls?.[0]?.status).toBe('error');
+    expect(out[0]?.toolCalls?.[0]?.unsuccessful).toBeUndefined();
+  });
+
+  it('control: without the ledger set no call is unsuccessful', () => {
+    const assistant = [{ type: 'tool_use', id: 'tu_1', name: 'api_setup', input: {} }];
+    const carrier = [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'Error: nothing was saved.' }];
+    const out = projectMessages([rec(0, 'assistant', assistant), rec(1, 'user', carrier)]);
+    expect(out[0]?.toolCalls?.[0]?.status).toBe('done');
+    expect(out[0]?.toolCalls?.[0]?.unsuccessful).toBeUndefined();
+  });
+
   it('builds interleaved blocks[] with text + tool_call placeholders', () => {
     const assistant = [
       { type: 'text', text: 'Thinking.' },

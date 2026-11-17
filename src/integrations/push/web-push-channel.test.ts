@@ -403,3 +403,24 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(migrated.subscriptionCount()).toBe(1);
 	});
 });
+
+describe('WebPushNotificationChannel — a vapid-keys.json that does not parse', () => {
+	it('fails naming the file, and quotes none of it: the file holds the private key', async () => {
+		const { writeFileSync } = await import('node:fs');
+		const dir = await mkdtemp(join(tmpdir(), 'lynox-webpush-corrupt-'));
+		try {
+			// An unquoted value: V8's message for it quotes the input around the fault.
+			writeFileSync(join(dir, 'vapid-keys.json'), '{"publicKey": "pub", "privateKey": PRIVATE-KEY-MATERIAL-zz}');
+			let err: unknown = null;
+			try { new WebPushNotificationChannel(dir); } catch (e) { err = e; }
+			expect(err).toBeInstanceOf(Error);
+			expect((err as Error).message).toBe(`${join(dir, 'vapid-keys.json')} is not valid JSON`);
+			// The seed is one whose parser message does quote it, or the assert above proves nothing.
+			let parserMessage = '';
+			try { JSON.parse('{"publicKey": "pub", "privateKey": PRIVATE-KEY-MATERIAL-zz}'); } catch (e) { parserMessage = (e as Error).message; }
+			expect(parserMessage).toContain('PRIVATE-KE');
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+});

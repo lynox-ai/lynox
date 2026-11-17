@@ -61,7 +61,12 @@ function loadOrGenerateVapidKeys(dataDir: string): VapidKeys {
 
   if (existsSync(keysPath)) {
     const raw = readFileSync(keysPath, 'utf-8');
-    return JSON.parse(raw) as VapidKeys;
+    try {
+      return JSON.parse(raw) as VapidKeys;
+    } catch {
+      // Not the parser's message: it quotes the text around the fault, and this file holds the private key.
+      throw new Error(`${keysPath} is not valid JSON`);
+    }
   }
 
   const keys = webPush.generateVAPIDKeys();

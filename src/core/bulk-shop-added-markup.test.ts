@@ -8,10 +8,12 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import { externalWriter, mintBulkContract, type ExternalClient, type ExternalImage, type ExternalRead } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { markupAddedByHost } from './bulk-html.js';
+import { htmlEqual } from './html-tree.js';
 import { runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import type { BeforeImage } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
+import { MARKUP_MAX_DEPTH } from './html-tree.js';
 
 // The read-back after a write and the undo of a description (PRD shopify-preset §21.2 items 2, 6
 // and 7). Until descriptions are written on Shopify (item 1), the ledger's side runs here on a
@@ -322,6 +324,40 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     expect(byKey(planned(u1), `${LIST}/2`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
   });
 
+  /** Puts `to` where a run's targets hold the value the store kept in {@link markedRun}. */
+  const swap = (runId: string, column: 'before' | 'after_actual', to: string): void => {
+    const kept = JSON.stringify(`<p>Neu</p>${SCRIPT}`);
+    const db = engineDb.getDb();
+    for (const r of db.prepare(`SELECT seq, ${column} AS v FROM bulk_targets WHERE run_id = ?`).all(runId) as { seq: number; v: string | null }[]) {
+      if (r.v === null) continue;
+      const plain = engineDb.dec(r.v);
+      if (plain.includes(kept)) db.prepare(`UPDATE bulk_targets SET ${column} = ? WHERE run_id = ? AND seq = ?`).run(engineDb.enc(plain.replace(kept, JSON.stringify(to))), runId, r.seq);
+    }
+  };
+
+  it('counts a value beyond the reading bounds down the chain as marked, unread', async () => {
+    const { id, store } = await markedRun();
+    const u1 = planned(id);
+    approve(u1);
+    await run(u1, stubWriter(store), 'bulk_undo');
+    // Down the chain the store kept one value and the undo restores another, both beyond the depth
+    // the reading bounds take: neither is parsed, so the two are not told apart.
+    const deep = (text: string): string => '<span>'.repeat(MARKUP_MAX_DEPTH + 10) + text + '</span>'.repeat(MARKUP_MAX_DEPTH + 10);
+    swap(id, 'after_actual', deep('kept'));
+    swap(u1, 'before', deep('restored'));
+    expect(byKey(planned(u1), `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+  });
+
+  it('CONTROL: does not count a value within the bounds that differs from the one the store kept', async () => {
+    const { id, store } = await markedRun();
+    const u1 = planned(id);
+    approve(u1);
+    await run(u1, stubWriter(store), 'bulk_undo');
+    swap(id, 'after_actual', '<p>kept</p>');
+    swap(u1, 'before', '<p>restored</p>');
+    expect(byKey(planned(u1), `${LIST}/1`).change).toBe('update');
+  });
+
   it('lists what an undo restores, the HTML fields resolved from the run its family started from', async () => {
     const id = approvedRun({ description: '<p>Neu</p>' }, [{ description: `<p>Alt</p>${SCRIPT}` }]);
     const store = new Map([[`${LIST}/1`, { description: `<p>Alt</p>${SCRIPT}` } as Record<string, unknown>]]);
@@ -334,6 +370,142 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
       addsOutsideAllowlist: true,
     }]);
     expect(ledger.htmlFieldsOf(undo)).toEqual(['description', 'short_description']);
+  });
+
+  // A new run whose before-image is the value a write of another run kept marked.
+  it('leaves a product out of a new run whose before-image is the marked value, reformatted too; plans the others', async () => {
+    const { id } = await markedRun();
+    const marked = `<p>Neu</p>${SCRIPT}`;
+    for (const before of [marked, `<P>Neu</P>${SCRIPT.replace('<script>', '<SCRIPT >')}`]) {
+      const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: before }, { description: '<p>Alt 2</p>' }]);
+      expect(next).not.toBe(id);
+      expect(byKey(next, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+      // Kept with its before-image, so the preview shows what the product holds.
+      expect(byKey(next, `${LIST}/1`).before).toEqual({ absent: false, value: { description: before } });
+      expect(byKey(next, `${LIST}/2`).change).toBe('update');
+      // Its undo never sees the product: it was never written.
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(next);
+    }
+  });
+
+  it('leaves out a product whose before-image and marked value lie beyond the reading bounds, unread', async () => {
+    const { id } = await markedRun();
+    const deep = (text: string): string => '<span>'.repeat(MARKUP_MAX_DEPTH + 10) + text + '</span>'.repeat(MARKUP_MAX_DEPTH + 10);
+    swap(id, 'after_actual', deep('kept'));
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: deep('now') }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(next, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+    expect(byKey(next, `${LIST}/2`).change).toBe('update');
+  });
+
+  it('plans a product whose before-image the owner changed since: one word is enough', async () => {
+    await markedRun();
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: `<p>Neu!</p>${SCRIPT}` }]);
+    expect(byKey(next, `${LIST}/1`).change).toBe('update');
+    // The control: the marked value itself on the same product is refused.
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(next);
+    const refused = approvedRun({ description: '<p>Neuer</p>' }, [{ description: `<p>Neu</p>${SCRIPT}` }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(refused, `${LIST}/1`).change).toBe('invalid');
+  });
+
+  it('names when the marked write was applied, and no date once that run is gone', async () => {
+    const { id } = await markedRun();
+    const at = (engineDb.getDb().prepare('SELECT applied_at FROM bulk_targets WHERE run_id = ? AND shop_added_markup = 1').get(id) as { applied_at: string }).applied_at;
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: `<p>Neu</p>${SCRIPT}` }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(next, `${LIST}/1`).shopMarkedAt).toBe(at);
+    // Only on that reason: a planned product carries no date.
+    expect(byKey(next, `${LIST}/2`)).not.toHaveProperty('shopMarkedAt');
+    engineDb.getDb().prepare('DELETE FROM bulk_targets WHERE run_id = ?').run(id);
+    expect(byKey(next, `${LIST}/1`)).toMatchObject({ error: 'before_has_shop_markup', shopMarkedAt: null });
+  });
+
+  it('counts a marked read-back that does not parse as the marked value', async () => {
+    const { id } = await markedRun();
+    engineDb.getDb().prepare('UPDATE bulk_targets SET after_actual = ? WHERE run_id = ? AND shop_added_markup = 1').run(engineDb.enc('{broken'), id);
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>anything</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(next, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+    // Only the product the broken mark is on.
+    expect(byKey(next, `${LIST}/2`).change).toBe('update');
+  });
+
+  it('reads the mark only in a field the store kept otherwise than sent: a sibling sent as it came back marks nothing', async () => {
+    // Both fields sent; the store added the script to the description only.
+    const id = approvedRun({ description: '<p>Neu</p>', short_description: '<p>kurz</p>' }, [{ description: '<p>Alt</p>', short_description: '<p>alt</p>' }]);
+    const store = new Map([[`${LIST}/1`, { description: '<p>Alt</p>', short_description: '<p>alt</p>' } as Record<string, unknown>]]);
+    await run(id, stubWriter(store, (v) => ({ ...v, description: `${String(v['description'])}${SCRIPT}` })));
+    expect(ledger.getPreview(id)[0]).toMatchObject({ shopAddedMarkup: true });
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(id);
+    // The owner rewrote the description since; the short description is still lynox's, as sent.
+    const owned = approvedRun({ short_description: '<p>kürzer</p>' }, [{ description: '<p>Meins</p>', short_description: '<p>kurz</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(owned, `${LIST}/1`).change).toBe('update');
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(owned);
+    // The control on the same mark: the description still the marked value is refused.
+    const refused = approvedRun({ short_description: '<p>kürzer</p>' }, [{ description: `<p>Neu</p>${SCRIPT}`, short_description: '<p>kurz</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(refused, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+  });
+
+  it('reads no mark in a field the read-back holds but the write never sent', async () => {
+    const { id } = await markedRun();
+    const db = engineDb.getDb();
+    const row = db.prepare('SELECT seq, after_actual FROM bulk_targets WHERE run_id = ? AND shop_added_markup = 1').get(id) as { seq: number; after_actual: string };
+    const actual = JSON.parse(engineDb.dec(row.after_actual)) as { value: Record<string, unknown> };
+    // The store's own short description, read back beside the description the write sent.
+    db.prepare('UPDATE bulk_targets SET after_actual = ? WHERE run_id = ? AND seq = ?')
+      .run(engineDb.enc(JSON.stringify({ ...actual, value: { ...actual.value, short_description: '<p>kurz</p>' } })), id, row.seq);
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>Meins</p>', short_description: '<p>kurz</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(next, `${LIST}/1`).change).toBe('update');
+  });
+
+  it('counts a marked row whose sent value does not parse as the marked value', async () => {
+    const { id } = await markedRun();
+    engineDb.getDb().prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND shop_added_markup = 1').run(engineDb.enc('{broken'), id);
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>anything</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(next, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+  });
+
+  it('reads a marked row whose product key does not decrypt for every product: the marked value is refused, another is planned', async () => {
+    const { id } = await markedRun();
+    // A key encrypted under this database's key, its last bytes broken: it does not decrypt.
+    const sealed = engineDb.enc(`${LIST}/1`);
+    const broken = `${sealed.slice(0, -6)}AAAAAA`;
+    expect(engineDb.decStrict(broken).ok).toBe(false);
+    engineDb.getDb().prepare('UPDATE bulk_targets SET target_key = ? WHERE run_id = ? AND shop_added_markup = 1').run(broken, id);
+    // Whose mark it is cannot be read, so it is read for each product. Product 2 holds the marked
+    // value now (the key is unknown, it could be its), product 1 another value.
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>Meins</p>' }, { description: `<p>Neu</p>${SCRIPT}` }]);
+    expect(byKey(next, `${LIST}/2`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
+    expect(byKey(next, `${LIST}/1`).change).toBe('update');
+  });
+
+  it('refuses, and does not fail, where the marked run\'s list form does not decrypt either', async () => {
+    const { id } = await markedRun();
+    const db = engineDb.getDb();
+    const broken = (plain: string): string => { const sealed = engineDb.enc(plain); return `${sealed.slice(0, -6)}AAAAAA`; };
+    const source = (db.prepare('SELECT list_source FROM bulk_runs WHERE id = ?').get(id) as { list_source: string | null }).list_source;
+    expect(source).not.toBeNull();
+    db.prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(broken('{"form":"x"}'), id);
+    db.prepare('UPDATE bulk_targets SET target_key = ? WHERE run_id = ? AND shop_added_markup = 1').run(broken(`${LIST}/1`), id);
+    // Which fields it marked is not known, so every product a read meets counts as marked: nothing is
+    // left to write, and the run says so rather than throwing on the broken row.
+    expect(() => approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>Meins</p>' }, { description: `<p>Neu</p>${SCRIPT}` }])).toThrow('nothing_to_apply');
+  });
+
+  it('mints no undo that restores a value another family left marked, read while that write was still unmarked', async () => {
+    // r2 read the product before the refusal could see the mark: its before-image is the marked value.
+    const { id } = await markedRun();
+    const marked = `<p>Neu</p>${SCRIPT}`;
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET shop_added_markup = 0 WHERE run_id = ?').run(id);
+    const r2 = approvedRun({ description: '<p>Neuer</p>' }, [{ description: marked }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(r2, `${LIST}/1`).change).toBe('update');
+    const store = new Map([[`${LIST}/1`, { description: marked } as Record<string, unknown>], [`${LIST}/2`, { description: '<p>Alt 2</p>' } as Record<string, unknown>]]);
+    await run(r2, stubWriter(store));
+    // The mark lands after r2's read.
+    db.prepare(`UPDATE bulk_targets SET shop_added_markup = 1 WHERE run_id = ? AND target_key = (SELECT target_key FROM bulk_targets WHERE run_id = ? AND seq = ?)`)
+      .run(id, id, byKey(id, `${LIST}/1`).seq);
+    const undo = planned(r2);
+    expect(byKey(undo, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+    // The other product's undo is minted.
+    expect(byKey(undo, `${LIST}/2`).change).not.toBe('invalid');
   });
 });
 
@@ -385,6 +557,37 @@ describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.
     expect(sameValue({ description: '<p>a</p></div><p>b</p>' }, { description: '<p>a</p><p>b</p></div>' }, html)).toBe(false);
     // The same bytes stay equal.
     expect(sameValue({ description: '<p>a</p></div>' }, { description: '<p>a</p></div>' }, html)).toBe(true);
+  });
+
+  it('compares a field byte for byte where whitespace shows: white-space in a style, pre and its kin', () => {
+    const html = ['description'];
+    // The normalised form alone collapses the two spaces below a `div`: equal without the rule.
+    expect(htmlEqual('<div style="white-space:pre">a  b</div>', '<div style="white-space:pre">a b</div>')).toBe(true);
+    for (const [a, b] of [
+      ['<div style="white-space:pre">a  b</div>', '<div style="white-space:pre">a b</div>'],
+      ['<p style="color:red; WHITE-SPACE: pre-wrap">a\nb</p>', '<p style="color:red; WHITE-SPACE: pre-wrap">a b</p>'],
+      // The rest of the value reformatted, not the whitespace shown: byte for byte all the same.
+      ['<P>x</P><pre>a\nb</pre>', '<p>x</p><pre>a\nb</pre>'],
+      ['<P>x</P><xmp>a</xmp>', '<p>x</p><xmp>a</xmp>'],
+      ['<P>x</P><listing>a</listing>', '<p>x</p><listing>a</listing>'],
+      ['<P>x</P><textarea>a</textarea>', '<p>x</p><textarea>a</textarea>'],
+      ['<P>x</P><plaintext>a', '<p>x</p><plaintext>a'],
+    ] as const) {
+      expect(sameValue({ description: a }, { description: b }, html)).toBe(false);
+      expect(sameValue({ description: a }, { description: a }, html)).toBe(true);
+    }
+    // What else in the value can show a line break: an inline display, a CSS escape the name test
+    // does not read, a style element's own rules.
+    for (const [a, b] of [
+      ['<ul><li style="display:inline">\n<b>x</b></li></ul>', '<ul><li style="display:inline"><b>x</b></li></ul>'],
+      ['<ul><li style="white\\-space:pre">\n<b>x</b></li></ul>', '<ul><li style="white\\-space:pre"><b>x</b></li></ul>'],
+      ['<style>li{white-space:pre}</style><ul><li>\n<b>x</b></li></ul>', '<style>li{white-space:pre}</style><ul><li><b>x</b></li></ul>'],
+    ] as const) {
+      expect(htmlEqual(a, b)).toBe(true);
+      expect(sameValue({ description: a }, { description: b }, html)).toBe(false);
+    }
+    // A style that names no white-space keeps the normalised comparison.
+    expect(sameValue({ description: '<P style="color:red">a  b</P>' }, { description: '<p style="color:red">a b</p>' }, html)).toBe(true);
   });
 
   it('keeps every other field byte for byte, and a field one side lacks as a difference', () => {

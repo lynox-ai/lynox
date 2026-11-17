@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
 import { reset, setTarget, startMigration, getStep, getDoneSkipped } from '../stores/migration.svelte.js';
 import { getToasts, dismissToast } from '../stores/toast.svelte.js';
+import { _resetManagedStatus } from '../stores/integrations/managed.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -22,7 +23,7 @@ const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLI
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let done: Record<string, unknown>;
-let config: Record<string, unknown>;
+let config: Record<string, unknown> | 'fail' | 'hold';
 
 const VERIFICATION = { secretsImported: 1, databasesRestored: ['engine.db'], artifactsImported: 0, memoryFilesImported: 0, configApplied: true };
 
@@ -32,9 +33,12 @@ beforeEach(() => {
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	done = { success: true, verification: VERIFICATION };
-	config = {};
+	config = { billing_tier_set: false };
+	_resetManagedStatus();
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
+		if (u.endsWith('/config') && config === 'hold') return new Promise<Response>(() => { /* never answers */ });
+		if (u.endsWith('/config') && config === 'fail') return new Response('{}', { status: 500 });
 		if (u.endsWith('/migration/export')) {
 			return new Response(`event: done\ndata: ${JSON.stringify(done)}\n\n`, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		}
@@ -183,10 +187,63 @@ describe('files the migration could not transfer', () => {
 		expect(skippedBlock()).toBeNull();
 	});
 
-	// Last: the managed status the wizard loads stays in its store for the rest of the file.
+	// U-302: the way out is the engine's switch (any tier value), never a guess.
+	it('names support for a tier value that does not normalize, as the engine refusals do', async () => {
+		setLocale('en');
+		config = { managed: null, billing_tier_set: true };
+		done = { ...done, workspace: 'omitted-sidecar' };
+		await migrate();
+		expect(omittedLine()).toBe(t('migration.workspace_omitted_managed'));
+		done = { ...done, workspace: undefined, skipped: ['workspace/a'] };
+		await migrate();
+		expect(nextLine()).toBe(t('migration.skipped_next_managed_one'));
+	});
+
+	it('states the fact alone and names no next step while the instance kind loads', async () => {
+		setLocale('en');
+		config = 'hold';
+		done = { ...done, workspace: 'omitted-sidecar' };
+		await migrate();
+		expect(omittedLine()).toBe(t('migration.workspace_omitted_fact'));
+		done = { ...done, workspace: undefined, skipped: ['workspace/a'] };
+		await migrate();
+		expect(nextLine()).toBeUndefined();
+	});
+
+	it('says to reload when the instance kind could not be read, naming no way out', async () => {
+		setLocale('en');
+		config = 'fail';
+		done = { ...done, workspace: 'omitted-sidecar' };
+		await migrate();
+		expect(omittedLine()).toBe(t('migration.workspace_omitted_unknown'));
+		done = { ...done, workspace: undefined, skipped: ['workspace/a'] };
+		await migrate();
+		expect(nextLine()).toBe(t('migration.skipped_next_unknown_one'));
+		done = { ...done, skipped: ['workspace/a', 'workspace/b'] };
+		await migrate();
+		expect(nextLine()).toBe(t('migration.skipped_next_unknown_many'));
+	});
+
+	it('the texts for an unknown instance kind, word for word (U-302)', () => {
+		setLocale('de');
+		expect(t('backups.coverage_omitted_fact')).toBe('Die Dateien des Arbeitsbereichs sind nicht in diesem Backup.');
+		expect(t('backups.coverage_omitted_unknown')).toBe('Die Dateien des Arbeitsbereichs sind nicht in diesem Backup. Lade die Seite neu, dann steht hier, wie du sie sicherst.');
+		expect(t('migration.workspace_omitted_fact')).toBe('Diese Dateien hat die Migration nicht übertragen.');
+		expect(t('migration.workspace_omitted_unknown')).toBe('Diese Dateien hat die Migration nicht übertragen. Lade die Seite neu, dann steht hier, wie du sie überträgst.');
+		expect(t('migration.skipped_next_unknown_one')).toBe('Lade die Seite neu, dann steht hier, wie du sie überträgst.');
+		expect(t('migration.skipped_next_unknown_many')).toBe('Lade die Seite neu, dann steht hier, wie du sie überträgst.');
+		setLocale('en');
+		expect(t('backups.coverage_omitted_fact')).toBe('The workspace files are not in this backup.');
+		expect(t('backups.coverage_omitted_unknown')).toBe('The workspace files are not in this backup. Reload the page to see how to back them up.');
+		expect(t('migration.workspace_omitted_fact')).toBe('The migration did not transfer these files.');
+		expect(t('migration.workspace_omitted_unknown')).toBe('The migration did not transfer these files. Reload the page to see how to move them.');
+		expect(t('migration.skipped_next_unknown_one')).toBe('Reload the page to see how to move it.');
+		expect(t('migration.skipped_next_unknown_many')).toBe('Reload the page to see how to move them.');
+	});
+
 	it('names support as the next step on a managed instance', async () => {
 		setLocale('en');
-		config = { managed: 'managed' };
+		config = { managed: 'managed', billing_tier_set: true };
 		done = { ...done, skipped: ['workspace/a'] };
 		await migrate();
 		expect(nextLine()).toBe(t('migration.skipped_next_managed_one'));
@@ -194,7 +251,7 @@ describe('files the migration could not transfer', () => {
 
 	it('names support for several files on a managed instance', async () => {
 		setLocale('en');
-		config = { managed: 'managed' };
+		config = { managed: 'managed', billing_tier_set: true };
 		done = { ...done, skipped: ['workspace/a', 'workspace/b'] };
 		await migrate();
 		expect(nextLine()).toBe(t('migration.skipped_next_managed_many'));

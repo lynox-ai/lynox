@@ -14,8 +14,9 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import { markHidden } from '../utils/trigger-consent.js';
+	import BulkStartDomains from './BulkStartDomains.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -42,12 +43,17 @@
 	let capInput = $state('');
 	// The started, unapproved judged run a judged start would end, once the engine has named it.
 	let supersedable = $state<{ id: string; costUsd: number } | null>(null);
+	// The link domains a judged list run's start allows, as the owner typed them, and whether
+	// every line reads as a domain: a start with a wrong line waits, the engine's check is a net.
+	let startDomains = $state<string[]>([]);
+	let startDomainsValid = $state(true);
 	// Whether this is a managed instance: two halt sentences name a different next step there.
 	// Unknown (not yet loaded, or the config could not be read) reads as managed.
 	let managed = $state<boolean | null>(null);
 
 	async function json<T>(path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; body: T }> {
 		const res = await fetch(`${getApiBase()}${path}`, init);
+		if (res.status === 429) lastRetryAfter = Number(res.headers.get('Retry-After'));
 		const body = (await res.json().catch(() => ({}))) as T;
 		return { ok: res.ok, status: res.status, body };
 	}
@@ -63,17 +69,17 @@
 
 	/** A page of the run's targets. A failed fetch throws: an empty page would read as a run
 	 *  with fewer targets than the approval covers. */
-	async function loadTargets(offset: number, limit: number): Promise<BulkTarget[]> {
-		const r = await json<{ targets?: BulkTarget[] }>(`/bulk/runs/${encodeURIComponent(runId)}/targets?offset=${offset}&limit=${limit}`);
+	async function loadTargets(id: string, offset: number, limit: number): Promise<BulkTarget[]> {
+		const r = await json<{ targets?: BulkTarget[] }>(`/bulk/runs/${encodeURIComponent(id)}/targets?offset=${offset}&limit=${limit}`);
 		if (!r.ok || !Array.isArray(r.body.targets)) throw new Error('targets');
 		return r.body.targets;
 	}
 
 	/** Every target from `offset` on, page by page (the route serves at most PAGE at once). */
-	async function loadFrom(offset: number, total: number): Promise<BulkTarget[]> {
+	async function loadFrom(id: string, offset: number, total: number): Promise<BulkTarget[]> {
 		const out: BulkTarget[] = [];
 		for (let at = offset; at < total; at += PAGE) {
-			const page = await loadTargets(at, PAGE);
+			const page = await loadTargets(id, at, PAGE);
 			out.push(...page);
 			if (page.length < PAGE) break;
 		}
@@ -84,17 +90,71 @@
 	 *  approval deletes all of them, so a list shorter than the run's own count is not shown
 	 *  as the whole: it fails, and approving waits for a page that lists them all. */
 	async function loadCreates(r: BulkRunDetailData): Promise<BulkTarget[]> {
-		const out = (await loadFrom(0, r.total)).filter((x) => x.change === 'delete');
+		const out = (await loadFrom(r.id, 0, r.total)).filter((x) => x.change === 'delete');
 		if (out.length !== r.changes.delete) throw new Error('creates');
 		return out;
 	}
 
-	async function load(): Promise<void> {
-		loading = true;
-		error = '';
+	// The run a follow loop (below) belongs to: a new load for another run, or the page going
+	// away, ends the loop of the one before.
+	let following = 0;
+	// What the engine's last 429 said to wait (Retry-After, seconds), for a follow loop's next wait.
+	let lastRetryAfter: number | null = null;
+
+	/** Ask for the run again while the engine moves it on by itself (a list read, a judging, a
+	 *  write the owner started), so the page shows the next step without a reload. Only while the
+	 *  tab is visible, one request an ask. While the run still works the page keeps what it shows:
+	 *  its counts and the marks on its targets come from one load and agree. Once the run stopped
+	 *  working, the page loads it once as on opening. A refused or failed ask or load leaves the
+	 *  page as it is and waits longer ({@link bulkFollowDelay}); the loop ends once that load
+	 *  succeeded, after `BULK_FOLLOW_MAX_MS`, or when the page shows another run. */
+	async function follow(): Promise<void> {
+		const mine = ++following;
+		const until = Date.now() + BULK_FOLLOW_MAX_MS;
+		let delay = BULK_FOLLOW_MS;
+		while (mine === following && run !== null && bulkEngineWorking(run) && Date.now() < until) {
+			await new Promise((r) => setTimeout(r, delay));
+			if (mine !== following) return;
+			if (busy || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) continue;
+			let res: Response | null = null;
+			try {
+				res = await fetch(`${getApiBase()}/bulk/runs/${encodeURIComponent(runId)}`);
+			} catch {
+				res = null;
+			}
+			if (mine !== following) return;
+			const body = res?.ok ? ((await res.json().catch(() => null)) as BulkRunDetailData | null) : null;
+			let retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
+			let ok = body !== null;
+			if (body !== null && !bulkEngineWorking(body)) {
+				lastRetryAfter = null;
+				ok = await load({ quiet: true });
+				if (!ok) retryAfter = lastRetryAfter;
+			}
+			delay = bulkFollowDelay(delay, ok, retryAfter);
+		}
+	}
+
+	// Each load counts up; an answer is the page's only while no later load has begun. The run's id
+	// alone does not tell: after A, B and back to A, the first load of A is no longer the page's.
+	let loadGen = 0;
+
+	/** Load the run and its targets. True when the page now shows them; false when the load
+	 *  failed (a quiet load leaves the page as it was), the page moved on to another run, or a
+	 *  later load replaced this one. */
+	async function load(opts: { quiet?: boolean } = {}): Promise<boolean> {
+		const quiet = opts.quiet === true;
+		const id = runId;
+		const gen = ++loadGen;
+		const left = (): boolean => gen !== loadGen || id !== runId;
+		if (!quiet) {
+			loading = true;
+			error = '';
+		}
 		try {
-			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(runId)}`);
-			if (!r.ok) { error = t('common.load_failed'); loading = false; return; }
+			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
+			if (left()) return false;
+			if (!r.ok) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
@@ -105,54 +165,98 @@
 			// An undo the owner approves is loaded whole too: each target that writes markup back is
 			// listed with it (1010), and an approval covers every one.
 			const approving = r.body.phase === 'previewed';
-			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0;
-			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
+			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0
+				// A run whose targets add hidden characters: its count says they are marked in the
+				// preview, at a probe too, so each has to be on the page.
+				|| (r.body.hiddenAddsTargets ?? 0) > 0
+				// So does one with a field that could not be checked for them: its sentence stands under it.
+				|| (r.body.hiddenUncheckedTargets ?? 0) > 0;
+			// Every page is asked for the run this load opened, never for one the page has moved to since.
+			const shown = whole ? await loadFrom(id, 0, r.body.total) : await loadTargets(id, 0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
-			if (whole && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
+			if (left()) return false;
+			if (whole && shown.length !== r.body.total) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
 			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
+			// A load for a run the page no longer shows, or that a later load replaced, writes nothing.
+			if (left()) return false;
+			// Another run's domains are never sent with this one, and its wrong line never holds
+			// this one's start.
+			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; }
 			run = r.body;
 			targets = shown;
 			creates = deleted;
+			// A follow ask runs only while the engine works, when the page offers the owner no input.
 			maxTargets = Math.max(1, bulkWriting(run));
 			unmeasuredOk = false;
 			probeOk = false;
 			supersedable = null;
 		} catch {
-			error = t('common.load_failed');
+			if (left()) return false;
+			if (!quiet) error = t('common.load_failed');
+			loading = false;
+			return false;
 		}
 		loading = false;
+		if (!quiet && run !== null && bulkEngineWorking(run)) void follow();
+		return true;
 	}
 
 	async function showMore(): Promise<void> {
-		if (!run) return;
+		// While another run loads, the page still shows the one before: its rest is not asked for.
+		if (!run || run.id !== runId) return;
+		// A list that a load has replaced since, or a run the page has left, is not appended to; a
+		// load of this run that failed and replaced nothing does not drop it.
+		const id = run.id;
+		const shown = targets;
+		const left = (): boolean => runId !== id || targets !== shown;
 		try {
-			targets = [...targets, ...(await loadFrom(targets.length, run.total))];
+			const more = await loadFrom(id, targets.length, run.total);
+			if (left()) return;
+			targets = [...targets, ...more];
 		} catch {
+			if (left()) return;
 			actionError = t('common.load_failed');
 		}
 	}
 
-	async function act(fn: () => Promise<string | null>): Promise<void> {
+	async function act(fn: (id: string) => Promise<string | null>): Promise<void> {
+		// While another run loads, the page still shows the one before: nothing it shows is sent
+		// for the run it opens. Each act is bound to the run it began on: every request names that
+		// run, and what comes back after the page moved to another run is not shown there.
+		if (run === null || run.id !== runId) return;
+		const id = runId;
 		busy = true;
 		actionError = '';
 		try {
-			const refusal = await fn();
-			if (refusal !== null) actionError = refusal;
-			else await load();
+			const refusal = await fn(id);
+			if (runId === id) {
+				if (refusal !== null) actionError = refusal;
+				else await load();
+			}
 		} catch {
-			actionError = t('common.load_failed');
+			if (runId === id) actionError = t('common.load_failed');
 		}
 		busy = false;
 	}
 
 	// A run no one can be shown to have planned is refused a resume by its code, worded here.
-	const refusalOf = (r: { ok: boolean; body: { error?: string; code?: string } }): string | null =>
-		r.ok ? null : r.body.code === 'planner_unknown' ? t('bulk.resume.refused.planner_unknown') : (r.body.error ?? t('common.load_failed'));
+	// The refusals with a sentence of the page's own; the engine's English is the fallback.
+	const REFUSAL_KEYS: Readonly<Record<string, string>> = {
+		planner_unknown: 'bulk.resume.refused.planner_unknown',
+		start_domains_invalid: 'bulk.start_domains.invalid',
+		start_domains_frozen: 'bulk.start_domains.frozen',
+	};
+	const refusalOf = (r: { ok: boolean; body: { error?: string; code?: string } }): string | null => {
+		if (r.ok) return null;
+		const code = r.body.code;
+		const key = code !== undefined && Object.hasOwn(REFUSAL_KEYS, code) ? REFUSAL_KEYS[code] : undefined;
+		return key !== undefined ? t(key) : (r.body.error ?? t('common.load_failed'));
+	};
 
 	function approve(oneFirst: boolean): Promise<void> {
-		return act(async () => {
+		return act(async (id) => {
 			if (!run?.checksum) return t('common.load_failed');
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/approve`, {
+			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(id)}/approve`, {
 				checksum: run.checksum,
 				maxTargets: oneFirst ? 1 : maxTargets,
 				...(run.writeForm === 'unmeasured' ? { unmeasuredConfirmed: unmeasuredOk } : {}),
@@ -163,10 +267,10 @@
 	/** Take one target out of the write, or put it back, against the checksum this page showed:
 	 *  each moves the checksum, so the page reloads and approves only the run as it now is. */
 	function toggleSelected(target: BulkTarget): Promise<void> {
-		return act(async () => {
+		return act(async (id) => {
 			if (!run?.checksum) return t('common.load_failed');
 			const verb = target.deselected ? 'reselect' : 'deselect';
-			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/targets/${target.seq}/${verb}`, { checksum: run.checksum });
+			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/targets/${target.seq}/${verb}`, { checksum: run.checksum });
 			// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
 			const code = r.body.code;
 			if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) return t(`bulk.deselect.refused.${code}`);
@@ -175,9 +279,9 @@
 	}
 
 	function approveUndo(): Promise<void> {
-		return act(async () => {
+		return act(async (id) => {
 			if (!run?.checksum) return t('common.load_failed');
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/approve`, { checksum: run.checksum }));
+			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(id)}/approve`, { checksum: run.checksum }));
 		});
 	}
 
@@ -185,12 +289,13 @@
 	 *  run as this page showed it. The checksum does not cover the probe, so confirming does
 	 *  not move it; a run that changed since it was shown is refused, never resumed. */
 	function confirmProbeAndResume(): Promise<void> {
-		return act(async () => {
+		return act(async (id) => {
 			if (!run?.checksum) return t('common.load_failed');
 			const shown = run.checksum;
-			const confirmed = await post(`/bulk/runs/${encodeURIComponent(runId)}/confirm-probe`);
+			const confirmed = await post(`/bulk/runs/${encodeURIComponent(id)}/confirm-probe`);
 			if (!confirmed.ok) return refusalOf(confirmed);
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, { checksum: shown, maxTargets }));
+			if (runId !== id) return null;
+			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(id)}/resume`, { checksum: shown, maxTargets }));
 		});
 	}
 
@@ -199,7 +304,7 @@
 	 *  A judged start never ends another run unasked: the engine names it, the owner sees what
 	 *  it has spent, and only a second click with its id ends it. */
 	function start(supersedes?: string): Promise<void> {
-		return act(async () => {
+		return act(async (id) => {
 			if (!run) return t('common.load_failed');
 			const kind = bulkStartKind(run);
 			let body: Record<string, unknown> = {};
@@ -210,11 +315,18 @@
 				const cap = bulkCostCap(capInput);
 				if (cap === null) return t('bulk.start.cap_invalid');
 				if (!run.judgeRuleHash) return t('common.load_failed');
-				body = { judgeRuleHash: run.judgeRuleHash, costCapUsd: cap, ...(supersedes !== undefined ? { supersedes } : {}) };
+				body = {
+					judgeRuleHash: run.judgeRuleHash, costCapUsd: cap,
+					// Sent only when the owner gave some: without a list the run has none, as before.
+					...(bulkTakesStartDomains(run) && startDomains.length > 0 ? { startDomains } : {}),
+					...(supersedes !== undefined ? { supersedes } : {}),
+				};
 			} else if (kind !== 'read') {
 				return t('common.load_failed');
 			}
-			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body);
+			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/resume`, body);
+			// The page moved to another run meanwhile: nothing of this answer is that run's.
+			if (runId !== id) return null;
 			if (!r.ok && r.body.code === 'supersede_required' && r.body.supersedable) {
 				supersedable = r.body.supersedable;
 				return '';
@@ -224,6 +336,7 @@
 			const refusal = refusalOf(r);
 			if (refusal !== null) {
 				await load();
+				if (runId !== id) return null;
 				if (error) error = refusal;
 			} else {
 				// A started run that halts on its limit later offers an empty field, not this one.
@@ -238,7 +351,7 @@
 	 *  limit the higher limit as typed. Without a new limit a judged run keeps the one it started
 	 *  with. A judged restart ends another started judged run only as a start does: named first. */
 	function restart(supersedes?: string): Promise<void> {
-		return act(async () => {
+		return act(async (id) => {
 			if (!run) return t('common.load_failed');
 			const kind = bulkRestartKind(run);
 			let body: Record<string, unknown> = {};
@@ -256,7 +369,9 @@
 			} else if (kind !== 'read') {
 				return t('common.load_failed');
 			}
-			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body);
+			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/resume`, body);
+			// The page moved to another run meanwhile: nothing of this answer is that run's.
+			if (runId !== id) return null;
 			if (!r.ok && r.body.code === 'supersede_required' && r.body.supersedable) {
 				supersedable = r.body.supersedable;
 				return '';
@@ -264,6 +379,7 @@
 			const refusal = refusalOf(r);
 			if (refusal !== null) {
 				await load();
+				if (runId !== id) return null;
 				if (error) error = refusal;
 			} else {
 				capInput = '';
@@ -277,7 +393,7 @@
 	 *  halted at its maximum writes on only under the higher maximum the owner typed. `check` is
 	 *  the same resume: its pass would send nothing and only reads the unclear targets. */
 	function resume(): Promise<void> {
-		return act(async () => {
+		return act(async (id) => {
 			if (!run?.checksum) return t('common.load_failed');
 			const kind = bulkResumeKind(run);
 			const body: Record<string, unknown> = { checksum: run.checksum };
@@ -288,16 +404,17 @@
 			} else if (kind !== 'write' && kind !== 'check') {
 				return t('common.load_failed');
 			}
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body));
+			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(id)}/resume`, body));
 		});
 	}
 
 	/** Plan the undo of this run; it is a run of its own, opened for its second approval. */
 	function planUndo(): Promise<void> {
-		return act(async () => {
-			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/undo`);
+		return act(async (id) => {
+			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/undo`);
 			if (!r.ok) return refusalOf(r);
-			if (r.body.id) onOpen(r.body.id);
+			// The undo opens over the run it was planned from, not over one the page moved to since.
+			if (r.body.id && runId === id) onOpen(r.body.id);
 			return null;
 		});
 	}
@@ -307,8 +424,15 @@
 		if (Number.isNaN(d.getTime())) return iso;
 		return d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 	}
+	/** The day an earlier write was applied, as the owner reads a date. */
+	function markedDateText(iso: string): string | null {
+		const d = new Date(iso);
+		return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric' });
+	}
 
-	$effect(() => { void runId; void load(); });
+	$effect(() => { void runId; following++; void load(); });
+	// The page going away ends a follow loop.
+	$effect(() => () => { following++; });
 	$effect(() => {
 		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
@@ -325,7 +449,12 @@
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
 	const step = $derived(run ? bulkStep(run) : 'planned');
 	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
+	const undoneText = $derived(run ? bulkUndoneText(run, getLocale(), i18n) : null);
 	const provider = $derived(run ? bulkSystemName(run.targetSystem, i18n) : '');
+	// The probe's target by its title where the loaded targets hold its before-image.
+	const probeLabel = $derived(run?.probe ? bulkTargetLabel(run.targetSystem, { key: run.probe.key }, i18n) : '');
+	// The probe's admin link: its target is often not among the targets the page shows.
+	const probeName = $derived(run?.probe ? bulkTargetName(run.targetSystem, { key: run.probe.key }) : null);
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
 	// With one target to write the note keeps its first two sentences, here and in the engine's own (EN).
 	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote
@@ -350,6 +479,8 @@
 	let filtersShownFor = $state<string | null>(null);
 	const filtersFolded = $derived(run !== null && filtersShownFor !== run.id ? bulkListFilterFolded(run.listFilters) : 0);
 	const listFilterText = $derived(run ? bulkListFilterText(run.listFilters, i18n, filtersFolded > 0) : null);
+	// Which statuses a store's product list reads: drafts, archived products and gift cards unless a status narrows it.
+	const listStatusText = $derived(run ? bulkListStatusText(run.listFilters, i18n) : null);
 	let filterLine = $state<HTMLParagraphElement | null>(null);
 	async function showAllFilters(): Promise<void> {
 		if (run === null) return;
@@ -370,6 +501,17 @@
 	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
 	const foldedUnchanged = $derived(targets.length - shownTargets.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
+	// The sentence under a field not checked for hidden characters: the way out only where the owner
+	// can take the target out on this page (U-294).
+	const uncheckedNoteKey = (x: BulkTarget): string =>
+		approving && ownerActs && writes(x) && !x.deselected ? 'bulk.unchecked.field_take_out' : 'bulk.unchecked.field';
+	// Hidden characters a target adds where text may carry one: the legend over the list
+	// once any shown target is marked, and the count wherever the run is approved or confirmed.
+	// A value taken back no longer holds what the legend says will be written (U-218): its mark
+	// turns grey with it, and it calls for no legend.
+	const hiddenMarked = $derived(run !== null && shownTargets.some((x) => (x.hiddenAdds?.length ?? 0) > 0 && !bulkAfterTakenBack(run!, x)));
+	const hiddenCount = $derived(run ? bulkHiddenCountText(run.hiddenAddsTargets, shopify, view) : null);
+	const uncheckedCount = $derived(run ? bulkUncheckedCountText(run.hiddenUncheckedTargets, shopify, view) : null);
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -390,9 +532,24 @@
 	</div>
 {/snippet}
 
+<!-- A target's new value with a mark behind each hidden character it adds where text may carry
+     one: the word in the text, the kind and code point only in the label. -->
+{#snippet markedValue(text: string, codePoints: number[], html: boolean, takenBack = false)}
+	{#each bulkHiddenSegments(text, codePoints, view, html) as part, i (i)}{#if 'mark' in part}<span class="mx-0.5 inline-block rounded-full px-1.5 text-[11px] {takenBack ? 'bg-bg-muted text-text-subtle' : 'bg-warning/15 border border-warning/40 text-warning'}" title={part.label} aria-label={part.label} data-testid="bulk-hidden-mark">{part.mark}</span>{:else}{part.text}{/if}{/each}
+{/snippet}
+
 <!-- The markup a target's new value adds and removes in an HTML field (1010), as code text with
      every attribute whole (sec-core M3): set as text, never rendered, and wrapped so a long value
      stays in view. On an undo it says what the undo writes back and takes out. -->
+{#snippet targetName(target: { key: string })}
+	{@const name = bulkTargetName(run?.targetSystem ?? '', target)}
+	{#if name.adminUrl === null}
+		<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+	{:else}
+		<a class="text-sm underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{tf('bulk.target.product', { n: name.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
+	{/if}
+{/snippet}
+
 {#snippet markupList(target: BulkTarget, undo: boolean)}
 	{#each target.markupChanges ?? [] as change (change.field)}
 		{@const list = bulkMarkupList(change, undo, shopify ? bulkFieldNamesText(host, [change.field], t) : bulkVisibleText(change.field), view)}
@@ -423,9 +580,17 @@
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
 				{#each steps as s (s)}
-					<li class="rounded-full px-2 py-0.5 {s === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={s === step ? 'step' : undefined}>{t(`bulk.step.${s}`)}</li>
+					<li class="rounded-full px-2 py-0.5 {s === step ? 'bg-accent text-accent-fg' : 'bg-bg-muted text-text-muted'}" aria-current={s === step ? 'step' : undefined}>{t(bulkStepLabelKey(run, s))}</li>
 				{/each}
 			</ol>
+			{#if undoneText}
+				<p class="text-sm rounded-[var(--radius-sm)] bg-bg-muted border border-border px-3 py-2" data-testid="bulk-undone">
+					{undoneText}
+					{#if run.undoneBy}
+						<button type="button" class="{btnPlain} ml-1" onclick={() => onOpen(run!.undoneBy!.runId)}>{t('bulk.undone.open')}</button>
+					{/if}
+				</p>
+			{/if}
 
 			<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
@@ -473,6 +638,9 @@
 					{#if seoEntity > 0}
 						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-seo-entity-count">{seoEntity === 1 ? t('bulk.preview.seo_entity_one') : tf('bulk.preview.seo_entity', { n: String(seoEntity) })}</p>
 					{/if}
+					{#if hiddenMarked}
+						<p class="text-sm mb-2 text-text-muted" data-testid="bulk-hidden-legend">{t('bulk.hidden.legend')}</p>
+					{/if}
 					<div class="overflow-x-auto">
 						<table class="w-full text-sm">
 							<thead>
@@ -485,7 +653,7 @@
 								{#each shownTargets as target (target.seq)}
 									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
 										<td class="py-1.5 pr-3">
-											<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+											{@render targetName(target)}
 											{#if target.shopAddedMarkup}
 												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
 											{/if}
@@ -505,23 +673,27 @@
 													<div>
 														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
-														→ <ins class="text-success no-underline">{bulkValueText(f.after)}</ins>
+														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{#if bulkHiddenAddsOf(target, f.field).length > 0}{@render markedValue(bulkRawText(f.after), bulkHiddenAddsOf(target, f.field), bulkHiddenHtml(target, f.field), bulkAfterTakenBack(run, target))}{:else}{bulkValueText(f.after)}{/if}</ins>
+														{#if bulkHiddenUnchecked(target, f.field)}
+															<!-- Not checked for hidden characters: said under the field, and the way out only where the owner can take the target out here. -->
+															<div class="text-xs text-text-subtle" data-testid="bulk-unchecked">{view.t(uncheckedNoteKey(target))}</div>
+														{/if}
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
 												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
-{/each}{#each target.diff.added as line, i (i)}<ins class="text-success no-underline">+ {bulkVisibleText(line)}</ins>
+{/each}{#each target.diff.added as line, i (i)}<ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">+ {@render markedValue(line, bulkHiddenAddsOf(target, ''), false, bulkAfterTakenBack(run, target))}</ins>
 {/each}</pre>
 											{:else if target.error && target.change !== 'invalid'}
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
 											{@render markupList(target, false)}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store' })}</p>
+												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
-													{#each target.refusedValues as { field, value } (field)}
+													{#each target.refusedValues as { field, value, codePoints } (field)}
 														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle">{bulkVisibleText(field)}:</div>{/if}
-														<BulkRefusedValue {value} />
+														<BulkRefusedValue {value} codePoints={codePoints ?? []} />
 													{/each}
 												{/if}
 											{/if}
@@ -566,7 +738,7 @@
 			{:else if startKind === 'list' && run.listFirstPage}
 				<div class="space-y-3 border-t border-border pt-4">
 					<p class="text-sm">{tf('bulk.start.list_explain', { provider, address: bulkVisibleText(run.listFirstPage) })}</p>
-					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}
+					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}{#if listStatusText}<p class="text-sm">{listStatusText}</p>{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t(startButton ?? 'bulk.start.list')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
@@ -614,17 +786,22 @@
 							<p class="text-danger">{t('bulk.start.cap_invalid')}</p>
 						{/if}
 					</div>
+					{#if host !== null && bulkTakesStartDomains(run)}
+						{#key run.id}
+							<BulkStartDomains storeHost={host} editable={true} bind:domains={startDomains} bind:valid={startDomainsValid} />
+						{/key}
+					{/if}
 					{#if supersedable}
 						<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p>{tf('bulk.start.supersede', { cost: formatCost(supersedable.costUsd) })}</p>
 							<div class="flex flex-wrap gap-2">
-								<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null} onclick={() => start(supersedable!.id)}>{t(startButton ?? 'bulk.start.supersede_yes')}</button>
+								<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null || !startDomainsValid} onclick={() => start(supersedable!.id)}>{t(startButton ?? 'bulk.start.supersede_yes')}</button>
 								<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
 							</div>
 						</div>
 					{:else}
 						<div class="flex flex-wrap gap-2">
-							<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null} onclick={() => start()}>{t(startButton ?? 'bulk.start.judge')}</button>
+							<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null || !startDomainsValid} onclick={() => start()}>{t(startButton ?? 'bulk.start.judge')}</button>
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
 					{/if}
@@ -658,6 +835,9 @@
 									<p class="text-danger">{tf('bulk.restart.cap_low', { cap: bulkUsd(run.costCapUsd ?? 0) })}</p>
 								{/if}
 							</div>
+						{/if}
+						{#if (restartKind === 'judge' || restartKind === 'judge_cap') && host !== null && bulkTakesStartDomains(run)}
+							<BulkStartDomains storeHost={host} editable={false} domains={run.startDomains ?? []} />
 						{/if}
 						<p class="text-sm text-text-muted">{t(restartKind === 'list' ? 'bulk.restart.kept_list' : 'bulk.restart.kept')}</p>
 						{#if supersedable}
@@ -735,13 +915,22 @@
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
 					{:else}
-					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}
+					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}{#if listStatusText}<p class="text-sm">{listStatusText}</p>{/if}
+					{#if host !== null && bulkTakesStartDomains(run)}
+						<BulkStartDomains storeHost={host} editable={false} domains={run.startDomains ?? []} />
+					{/if}
 					{#if run.writeForm === 'unmeasured'}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{unmeasuredNote}</p>
 						<label class="flex gap-2 items-start text-sm">
 							<input type="checkbox" bind:checked={unmeasuredOk} class="mt-1" />
 							<span>{unmeasuredConfirmation}</span>
 						</label>
+					{/if}
+					{#if hiddenCount}
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-hidden-count">{hiddenCount}</p>
+					{/if}
+					{#if uncheckedCount}
+						<p class="text-sm" data-testid="bulk-unchecked-count">{uncheckedCount}</p>
 					{/if}
 					{#if bulkIsShopifyHost(host)}
 						<p class="text-sm">{t('bulk.approve.shopify_visible')}</p>
@@ -778,8 +967,17 @@
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
 					<p class="text-sm">{run.probe.fields.length > 0
-						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
-						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: bulkVisibleText(run.probe.key), provider })}</p>
+						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: probeLabel, provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
+						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider })}</p>
+					{#if hiddenCount}
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-hidden-count">{hiddenCount}</p>
+					{/if}
+					{#if uncheckedCount}
+						<p class="text-sm" data-testid="bulk-unchecked-count">{uncheckedCount}</p>
+					{/if}
+					{#if probeName?.adminUrl}
+						<a class="text-sm underline hover:text-text" href={probeName.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-probe-admin">{tf('bulk.target.product', { n: probeName.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
+					{/if}
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
 						<span>{tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
@@ -801,7 +999,7 @@
 					<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
 					{#each targets.filter((x) => (x.markupChanges?.length ?? 0) > 0) as target (target.seq)}
 						<div class="text-sm" data-testid="bulk-undo-markup">
-							<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+							{@render targetName(target)}
 							{@render markupList(target, true)}
 						</div>
 					{/each}
@@ -809,7 +1007,7 @@
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
 							<ul class="list-disc pl-5 mt-1">
-								{#each creates as c (c.seq)}<li><code class="text-xs break-all">{bulkVisibleText(c.key)}</code></li>{/each}
+								{#each creates as c (c.seq)}<li>{@render targetName(c)}</li>{/each}
 							</ul>
 						</div>
 					{/if}
