@@ -300,6 +300,7 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
 
   it('names a hand-damaged row whose id is no text without failing', () => {
     expect(() => stepRunNames([{ id: undefined as unknown as string, task: 'a' }, { id: OLD, task: 'b' }])).not.toThrow();
+    expect(() => stepRunNames([{ id: 'fetch', task: undefined as unknown as string }, { id: OLD, task: 'b' }])).not.toThrow();
   });
 
   it('never touches a {{params.…}} placeholder, also where a stored id starts with params.', () => {

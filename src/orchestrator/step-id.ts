@@ -122,7 +122,8 @@ export function storedStepOrder(row: { manifest_json: string } | undefined): str
 export type RunnableStep = { id: string; task: string; input_from?: string[] | undefined; input_template?: Record<string, unknown> | undefined };
 
 /** The first segment of each `{{…}}` placeholder in a text. */
-function placeholderHeads(text: string): string[] {
+function placeholderHeads(text: unknown): string[] {
+  if (typeof text !== 'string') return [];
   return [...text.matchAll(/\{\{([^}]+)\}\}/g)].map(m => m[1]!.trim().split('.')[0]!);
 }
 
