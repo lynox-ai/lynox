@@ -1877,7 +1877,7 @@ const shownUrl = (value: string): string => {
   try { return `${new URL(value).origin} (the rest is shaped like a credential, not shown)`; } catch { return shown; }
 };
 
-const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
+export const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
 
 /**
  * Which secret name each place of a profile reads, by place rather than as a set: a name moved to
@@ -1891,15 +1891,15 @@ const secretPlacesOf = (p: ApiProfile, several: boolean): Map<string, string> =>
   const put = (label: string, name: string | undefined): void => { if (typeof name === 'string' && name !== '') places.set(label, name); };
   const a = p.auth;
   (a?.vault_keys ?? []).forEach((name, i) => { put(several ? `secret read (${ordinal(i + 1)})` : 'secret read', name); });
-  put('secret read for username_key', a?.username_key);
-  put('secret read for password_key', a?.password_key);
+  put('secret read for the user name (username_key)', a?.username_key);
+  put('secret read for the password (password_key)', a?.password_key);
   if (a?.type === 'basic') {
-    put('secret read for the user name sent', a.username_key ?? a.vault_keys?.[0]);
-    put('secret read for the password sent', a.password_key ?? a.vault_keys?.[1]);
+    put('secret read for the user name sent (basic auth)', a.username_key ?? a.vault_keys?.[0]);
+    put('secret read for the password sent (basic auth)', a.password_key ?? a.vault_keys?.[1]);
   }
-  put('secret read for oauth.client_id_key', a?.oauth?.client_id_key);
-  put('secret read for oauth.client_secret_key', a?.oauth?.client_secret_key);
-  put('secret read for oauth.refresh_token_key', a?.oauth?.refresh_token_key);
+  put('secret read for the OAuth client id (oauth.client_id_key)', a?.oauth?.client_id_key);
+  put('secret read for the OAuth client secret (oauth.client_secret_key)', a?.oauth?.client_secret_key);
+  put('secret read for the OAuth refresh token (oauth.refresh_token_key)', a?.oauth?.refresh_token_key);
   return places;
 };
 

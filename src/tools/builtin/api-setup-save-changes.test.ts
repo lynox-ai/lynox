@@ -10,7 +10,7 @@ vi.mock('node:dns/promises', () => ({
 let lynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => lynoxDir }));
 
-import { apiSetupTool } from './api-setup.js';
+import { apiSetupTool, ordinal } from './api-setup.js';
 import { ApiStore, type ApiProfile } from '../../core/api-store.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
@@ -255,7 +255,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
 
   it.each([
     ['another order of vault_keys', { auth: { type: 'bearer', vault_keys: ['KP_KEY_B', 'KP_KEY_A'] } }, '- secret read (1st): KP_KEY_A → KP_KEY_B\n- secret read (2nd): KP_KEY_B → KP_KEY_A'],
-    ['a name moved into another place', { auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], username_key: 'KP_KEY_B' } }, '- secret read for username_key: (none) → KP_KEY_B'],
+    ['a name moved into another place', { auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], username_key: 'KP_KEY_B' } }, '- secret read for the user name (username_key): (none) → KP_KEY_B'],
     ['the key put in the query string', { auth: { type: 'query', query_param: 'key', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] } }, '- how the secret is attached (auth.type): bearer → query'],
   ] as const)('a key profile: %s sends a credential differently with the same names, and is asked about and refused with nobody to ask', async (_n, over, line) => {
     const store = new ApiStore();
@@ -276,7 +276,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     } });
     await save(store, 'create', basic('KP_USER'), 'Allow');
     const denied = await save(store, 'update', basic(), 'Deny');
-    expect(denied.asked[0]).toContain('- secret read for the user name sent: KP_USER → KP_KEY_A');
+    expect(denied.asked[0]).toContain('- secret read for the user name sent (basic auth): KP_USER → KP_KEY_A');
     const nobody = await save(store, 'update', basic(), undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
     expect(stored(store, 'kp')?.auth?.username_key).toBe('KP_USER');
@@ -325,10 +325,14 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(lines).toEqual([
       '- address (base_url)',
       '- secret read (2nd)',
-      '- secret read for oauth.client_secret_key',
+      '- secret read for the OAuth client secret (oauth.client_secret_key)',
       '- audience',
       '- scopes added',
     ]);
+  });
+
+  it('counts several secrets in words: 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st, 22nd, 23rd, 111th', () => {
+    expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 111].map(ordinal)).toEqual(['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd', '111th']);
   });
 
   it('a save that only takes a scope away narrows the profile: it saves with nobody to ask', async () => {
