@@ -199,7 +199,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect((await save(store, 'create', keyProfile(), 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
     const denied = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), 'Deny');
     expect(denied.asked).toHaveLength(1);
-    expect(denied.asked[0]).toContain('This save changes:\n- secrets it reads, added: KP_KEY_B\n- secrets it reads, removed: KP_KEY_A');
+    expect(denied.asked[0]).toContain('This save changes:\n- secret read for vault_keys[0]: KP_KEY_A → KP_KEY_B');
     const nobody = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
     expect(stored(store, 'kp')?.auth?.vault_keys).toEqual(['KP_KEY_A']);
@@ -251,6 +251,56 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(result).toContain('Invalid auth.oauth.client_secret_key: a profile on the built-in "shopify" provider reads its app from');
     expect(asked).toEqual([]);
     expect(stored(store, 'shop')?.auth?.oauth?.client_secret_key).toBe(before);
+  });
+
+  it.each([
+    ['another order of vault_keys', { auth: { type: 'bearer', vault_keys: ['KP_KEY_B', 'KP_KEY_A'] } }, '- secret read for vault_keys[0]: KP_KEY_A → KP_KEY_B'],
+    ['a name moved into another place', { auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], username_key: 'KP_KEY_B' } }, '- secret read for username_key: (none) → KP_KEY_B'],
+    ['the key put in the query string', { auth: { type: 'query', query_param: 'key', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] } }, '- how the secret is attached (auth.type): bearer → query'],
+  ] as const)('a key profile: %s sends a credential differently with the same names, and is asked about and refused with nobody to ask', async (_n, over, line) => {
+    const store = new ApiStore();
+    await save(store, 'create', { ...keyProfile(), auth: { type: 'bearer', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] } }, 'Allow');
+    const before = structuredClone(stored(store, 'kp')?.auth);
+    const next = { ...keyProfile(), ...over } as ApiProfile;
+    const denied = await save(store, 'update', next, 'Deny');
+    expect(denied.asked[0]).toContain(line);
+    const nobody = await save(store, 'update', next, undefined);
+    expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
+    expect(stored(store, 'kp')?.auth).toEqual(before);
+  });
+
+  it('basic auth: dropping username_key sends vault_keys[0] as the user instead, and that is named and asked about', async () => {
+    const store = new ApiStore();
+    const basic = (username?: string): ApiProfile => ({ ...keyProfile(), auth: {
+      type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], ...(username === undefined ? {} : { username_key: username }),
+    } });
+    await save(store, 'create', basic('KP_USER'), 'Allow');
+    const denied = await save(store, 'update', basic(), 'Deny');
+    expect(denied.asked[0]).toContain('- secret read for the user name sent: KP_USER → KP_KEY_A');
+    const nobody = await save(store, 'update', basic(), undefined);
+    expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
+    expect(stored(store, 'kp')?.auth?.username_key).toBe('KP_USER');
+  });
+
+  it('a save that takes the last scope away leaves the choice to the provider: that is asked about', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant({ scope: 'read' }), 'Allow');
+    const none = ownGrant();
+    delete none.auth!.oauth!.scope;
+    const nobody = await save(store, 'update', none, undefined);
+    expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
+    const denied = await save(store, 'update', none, 'Deny');
+    expect(denied.asked[0]).toContain('- scopes removed: read (none left: the provider decides which it grants)');
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
+  });
+
+  it('an address whose path is shaped like a credential still shows its host', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', keyProfile(), 'Allow');
+    const key = ['sk', 'ant', 'api03', 'Q'.repeat(40)].join('-');
+    const { asked } = await save(store, 'update', keyProfile({ base_url: `https://api.mistral.ai/${key}` }), 'Deny');
+    expect(asked[0]).toContain('- address (base_url): https://api.openai.com/v1 → https://api.mistral.ai (the rest is shaped like a credential, not shown)');
+    expect(asked[0]).not.toContain(key);
   });
 
   it('a save that only takes a scope away narrows the profile: it saves with nobody to ask', async () => {
