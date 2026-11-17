@@ -2260,6 +2260,14 @@ export class LynoxHTTPApi {
    * intent.
    */
   private _lookupRouteScope(method: string, pathname: string): RouteScope | null {
+    return this._matchRoute(method, pathname)?.scope ?? null;
+  }
+
+  /**
+   * The route a request matches: its scope and its path as registered. One walk for both, so the
+   * scope check and the row that names a refused route never disagree on the route.
+   */
+  private _matchRoute(method: string, pathname: string): { readonly scope: RouteScope; readonly path: string } | null {
     const dispatchMethods = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
     const candidates: string[] = [pathname];
     if (pathname.endsWith('/') && pathname.length > 1) {
@@ -2269,10 +2277,10 @@ export class LynoxHTTPApi {
       const key = `${method} ${candidate}`;
       const staticScope = this.staticRouteScopes.get(key)
         ?? (method === 'HEAD' ? this.staticRouteScopes.get(`GET ${candidate}`) : undefined);
-      if (staticScope !== undefined) return staticScope;
+      if (staticScope !== undefined) return { scope: staticScope, path: candidate };
       for (const route of this.dynamicRoutes) {
         if (!dispatchMethods.includes(route.method)) continue;
-        if (route.pattern.test(candidate)) return route.scope;
+        if (route.pattern.test(candidate)) return { scope: route.scope, path: route.path };
       }
     }
     return null;
@@ -2863,7 +2871,7 @@ export class LynoxHTTPApi {
       if (log === null) throw new Error('no audit log');
       log.record({ principal, action: `${route.method} ${route.routePath}`, target: target ?? requestPathTarget(route.pathname), phase: 'refused', correlationId: newCorrelationId() });
     } catch (err: unknown) {
-      process.stderr.write(`[lynox] a mandate's refused attempt could not be recorded: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`[lynox] a mandate's refused attempt could not be recorded: ${processErrorText(err)}\n`);
     }
   }
 
@@ -2874,15 +2882,7 @@ export class LynoxHTTPApi {
 
   /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
   private _routeTemplateOf(method: string, pathname: string): string | null {
-    const candidates = pathname.endsWith('/') && pathname.length > 1 ? [pathname, pathname.slice(0, -1)] : [pathname];
-    const dispatchMethods = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
-    for (const candidate of candidates) {
-      for (const m of dispatchMethods) if (this.staticRouteScopes.has(`${m} ${candidate}`)) return candidate;
-      for (const route of this.dynamicRoutes) {
-        if (dispatchMethods.includes(route.method) && route.pattern.test(candidate)) return route.path;
-      }
-    }
-    return null;
+    return this._matchRoute(method, pathname)?.path ?? null;
   }
 
   /**
