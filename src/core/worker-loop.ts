@@ -3715,8 +3715,14 @@ export class WorkerLoop {
     // assistant's own words. It is named by its position in the stored workflow, as the model sees it
     // (`#2`); the run and workflow ids below still lead to it (diagnose_workflow_run). The position is
     // read from the workflow as stored now: an edit between the run and this thread can shift it, and
-    // an id no longer there is named without one.
-    const order = task.pipeline_id ? storedStepOrder(this.engine.getRunHistory()?.getPlannedPipeline(task.pipeline_id)) : undefined;
+    // an id no longer there is named without one. A lookup that fails costs the position, never the
+    // thread: the owner hears of the failure either way.
+    let order: string[] | undefined;
+    try {
+      order = task.pipeline_id ? storedStepOrder(this.engine.getRunHistory()?.getPlannedPipeline(task.pipeline_id)) : undefined;
+    } catch {
+      order = undefined;
+    }
     const positionOf = (id: string): number | undefined => { const at = order?.indexOf(id) ?? -1; return at === -1 ? undefined : at + 1; };
     const shownId = (id: string): string => (isStepIdShape(id) ? id : notices.unnamedStep(positionOf(id)));
     const failedSteps = (result.stepErrors ?? []).filter(s => s.error);
