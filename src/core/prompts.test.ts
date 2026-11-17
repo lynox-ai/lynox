@@ -263,6 +263,15 @@ describe('withCurrentTimePrefix', () => {
     expect(out).toBe('[Now: 2026-01-15T11:20:50.123Z; user local 2026-01-15 12:20:50 Europe/Zurich]\n\nhi');
   });
 
+  it('names the language the message is written in, with and without a timezone', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-05T11:20:50.123Z'));
+    expect(withCurrentTimePrefix('hi', 'Europe/Zurich', 'en')).toBe('[Now: 2026-05-05T11:20:50.123Z; user local 2026-05-05 13:20:50 Europe/Zurich; message written in English]\n\nhi');
+    expect(withCurrentTimePrefix('hallo', undefined, 'de')).toBe('[Now: 2026-05-05T11:20:50.123Z; message written in German]\n\nhallo');
+    // Control: no language, the marker as before.
+    expect(withCurrentTimePrefix('hi', 'Europe/Zurich', null)).toBe('[Now: 2026-05-05T11:20:50.123Z; user local 2026-05-05 13:20:50 Europe/Zurich]\n\nhi');
+  });
+
   it('routes empty-string tz through the UTC-only path', () => {
     // The web-ui sends '' when Intl is somehow missing; the http-api
     // sanitiser also emits '' for invalid input. Either should land on

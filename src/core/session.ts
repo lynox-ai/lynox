@@ -70,6 +70,7 @@ import type { TierModelInfo } from './prompts.js';
 import { isFeatureEnabled } from './features.js';
 import { opensLoadedApprovalDraft, stripLoadedContext } from './chat-context.js';
 import { approvalChatTitle } from './approval-chat-title.js';
+import { messageLanguage, type MessageLanguage } from './message-language.js';
 import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
@@ -1282,7 +1283,13 @@ export class Session {
     // cache. Computed once so the durable persist below and the agent buffer
     // carry byte-identical user content (keeps the count-based eager-persist
     // delta aligned — no duplicate row).
-    const userContent = withCurrentTimePrefix(task, this._userTimezone ?? undefined);
+    // The marker also names the language the user wrote in, where the words settle it: the
+    // user's own words, without a loaded-context preamble or a scheduled run's engine lead.
+    const ownWords = Array.isArray(task)
+      ? task.flatMap(b => (typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'text'
+        && typeof (b as { text?: unknown }).text === 'string' ? [(b as { text: string }).text] : [])).join('\n')
+      : task;
+    const userContent = withCurrentTimePrefix(task, this._userTimezone ?? undefined, messageLanguage(llmTitleSource(ownWords)));
 
     // Seq floor for this run's footprint — captured BEFORE the durable persist
     // so the failed-turn catch flips exactly the rows this run created.
@@ -2479,7 +2486,7 @@ export class Session {
       // instance's spending caps, which this run already passed at its start.
       const titleGate = await fireBeforeRunGate(this.engine, 'fast');
       if (titleGate.blockedReason !== null) return;
-      const prompt = LLM_TITLE_PROMPT;
+      const prompt = llmTitlePrompt(firstMessage);
       const stream = titleClient.beta.messages.stream({
         model: fastSnap.modelId,
         max_tokens: 64,
@@ -3130,11 +3137,29 @@ export function llmTitleSource(taskText: string): string {
  * message: a German conversation listed under an English title reads as someone else's. Title
  * Case is an English rule, so it is asked only for an English title. Exported for the test that
  * pins it.
+ *
+ * The fast models do not follow "the language of that message" on their own (one titled English
+ * messages in Portuguese, German or Russian in more than half its runs), so where the words decide
+ * it ({@link messageLanguage}) the prompt names the language. Elsewhere it keeps the general
+ * sentence.
  */
 export const LLM_TITLE_PROMPT =
   'Write a concise 3-6 word title for a conversation that begins with the message below. ' +
   'Write it in the language of that message; use Title Case only for an English title. ' +
   'No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
+
+const LLM_TITLE_IN: Record<MessageLanguage, string> = {
+  de: 'Write it in German, as a German speaker would; do not use Title Case. ',
+  en: 'Write it in English, in Title Case. ',
+};
+
+export function llmTitlePrompt(firstMessage: string): string {
+  const language = messageLanguage(firstMessage);
+  if (language === null) return LLM_TITLE_PROMPT;
+  return 'Write a concise 3-6 word title for a conversation that begins with the message below. ' +
+    LLM_TITLE_IN[language] +
+    'No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
+}
 
 /**
  * Clean a raw LLM title response into a usable thread title: take the first

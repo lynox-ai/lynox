@@ -786,6 +786,27 @@ describe('Engine + Session (Orchestrator)', () => {
       );
     });
 
+    it('names the language the user wrote in, in the marker of that turn', async () => {
+      const { session } = await createEngineAndSession();
+      mockSend.mockResolvedValue('ok');
+      await session.run('What should I check before raising my prices by 5 %?');
+      expect(mockSend).toHaveBeenLastCalledWith(
+        expect.stringMatching(/^\[Now: [^\]\n]*; message written in English\]\n\nWhat should I check/),
+        expect.anything(),
+      );
+      await session.run('Was sollte ich prüfen, bevor ich meine Preise um 5 % erhöhe?');
+      expect(mockSend).toHaveBeenLastCalledWith(
+        expect.stringMatching(/^\[Now: [^\]\n]*; message written in German\]\n\nWas sollte ich/),
+        expect.anything(),
+      );
+      // The engine's own English around the user's words does not count: a loaded-context preamble.
+      await session.run(`${closeLoadedContext('[Loaded the mail "Invoice reminder" from the inbox so that the owner can answer it]')}Bitte antworte ihm kurz, dass wir die Rechnung diese Woche bezahlen.`);
+      expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*; message written in German\]/), expect.anything());
+      // Control: where the words do not decide, the marker names no language.
+      await session.run('ok, mach');
+      expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*Z\]\n\nok, mach$/), expect.anything());
+    });
+
     it('extended debug capture: wires onWireSnapshot → insertWireSnapshot when debug_wire_capture is ON', async () => {
       // userConfig is loaded from disk, not the engine ctor — mutate it BEFORE the
       // session's _createAgent reads it (the flag gates the callback at build time).
