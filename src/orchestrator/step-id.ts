@@ -35,9 +35,17 @@ export function stepIdRefusal(where: string, { refs = true }: { refs?: boolean }
  * named first as every other text names a step to the model, counted from 1 (`step #3`), then by the
  * path into the list it just wrote, counted from 0 (`steps[2].id`) (U-316).
  */
-export function stepIdIssue(steps: ReadonlyArray<{ id?: unknown }>, path = 'steps'): string | null {
+export function stepIdIssue(steps: ReadonlyArray<{ id?: unknown; input_from?: unknown }>, path = 'steps'): string | null {
   const at = steps.findIndex(s => !isStepIdShape(s.id));
-  return at === -1 ? null : stepIdRefusal(`step #${String(at + 1)} (${path}[${String(at)}].id)`);
+  if (at !== -1) return stepIdRefusal(`step #${String(at + 1)} (${path}[${String(at)}].id)`);
+  // A step's `input_from` names step ids too, and the graph check quotes one it cannot find: an entry
+  // outside the shape is refused here, by its place, before that check could repeat its text.
+  for (const [i, s] of steps.entries()) {
+    const refs = Array.isArray(s.input_from) ? s.input_from as unknown[] : [];
+    const j = refs.findIndex(r => !isStepIdShape(r));
+    if (j !== -1) return stepIdRefusal(`step #${String(i + 1)} (${path}[${String(i)}].input_from[${String(j)}])`, { refs: false });
+  }
+  return null;
 }
 
 /** What stands in for a stored id outside the shape where the model reads it. */
