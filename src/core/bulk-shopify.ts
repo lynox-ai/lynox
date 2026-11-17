@@ -19,7 +19,7 @@ import type { BulkInvalidReason, BulkRunStatus, ListPageItem } from './bulk-ledg
 import type { BulkNotices, ShopifyFilterKind } from './bulk-notices.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, asciiLower, isShopifyFilterValues, isShopifyStatusValues, mediaImageGidNumber, productGidNumber, shopifyFilterValues, type ShopifyListFilterValue, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
-import { presetStoreHost } from './oauth-presets.js';
+import { presetStoreHost, SHOPIFY_CONSENT_VERSION } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
 
 /**
@@ -51,6 +51,33 @@ export function shopifyMediaAccess(profile: Pick<ApiProfile, 'base_url' | 'auth'
   return (profile.oauth_grant?.granted_scope ?? []).includes('write_files') ? 'writable' : 'not_granted';
 }
 
+/**
+ * The fields a Shopify bulk run writes whatever customer text its connection was confirmed under:
+ * the ones the text before the current one named (a product's title and its SEO texts).
+ */
+export const SHOPIFY_FIELDS_BEFORE_CONSENT_TEXT: readonly string[] = Object.freeze(['title', 'seo_title', 'seo_description']);
+
+/**
+ * The fields of an apply that its connection does not cover yet, sorted; empty when it covers them
+ * all. A connection covers every field once it was confirmed under the current customer text
+ * ({@link SHOPIFY_CONSENT_VERSION}, recorded by the connect callback as `consent_version`). Under
+ * any other version, or none recorded — a grant from before it was recorded, or no grant, or a
+ * record that is no string — only {@link SHOPIFY_FIELDS_BEFORE_CONSENT_TEXT} on the product form,
+ * and nothing on the image form. Every field an after-state names counts, whether or not its value
+ * differs: the write sends it.
+ */
+export function shopifyConsentBlock(
+  apply: { readonly form: ShopifyWriteForm; readonly writes: readonly { readonly after: Readonly<Record<string, unknown>> }[] },
+  grant: unknown,
+): string[] {
+  const recorded: unknown = isPlainObject(grant) ? grant['consent_version'] : undefined;
+  if (recorded === SHOPIFY_CONSENT_VERSION) return [];
+  const allowed = new Set(apply.form === 'shopify_product' ? SHOPIFY_FIELDS_BEFORE_CONSENT_TEXT : []);
+  const fields = new Set<string>();
+  for (const w of apply.writes) for (const f of Object.keys(w.after)) if (!allowed.has(f)) fields.add(f);
+  return [...fields].sort();
+}
+
 /** Whether this instance reads Shopify stores in bulk runs. Asked when a run is planned and on
  *  every tick of one, so turning it off stops a run that is already under way. */
 export function shopifyBulkReadEnabled(): boolean {
@@ -70,7 +97,9 @@ export const SHOPIFY_PRODUCT_FIELDS = ['title', 'descriptionHtml', 'seo_title', 
  *
  * The page's title is the SEO title, or the product's title where the SEO title is empty (measured
  * on a store), so it is that text which is compared, and the field it comes from which is named. The
- * description's own fallback is not followed: a run does not write `descriptionHtml` yet.
+ * description's own fallback, the product description where the SEO description is empty, is not
+ * followed: the description is HTML, where an `&` is mostly written `&amp;`, and how a theme shows
+ * the text it takes from it is not measured.
  * A product not read yet holds no before-image to compare with, and is not named.
  */
 export function shopifySeoEntityFields(prior: unknown, after: unknown): string[] {

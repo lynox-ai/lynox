@@ -5,6 +5,7 @@
  * contract, the in-memory copies that grant each exact body, and the real client.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { SHOPIFY_CONSENT_VERSION } from './oauth-presets.js';
 
 vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn().mockResolvedValue([{ address: '23.227.38.65', family: 4 }]) },
@@ -404,7 +405,8 @@ describe('reading a store\'s images', () => {
 
 describe('applying a media run', () => {
   const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
-    ledger, trailFor: () => null,
+    // A connection confirmed under the current consent text: the alt text is beyond what an older one covers.
+    ledger, trailFor: () => null, shopifyGrantOf: () => ({ consent_version: SHOPIFY_CONSENT_VERSION }),
     // The worker's own writer: the form it reads and writes with comes from the run's rows.
     writerFor: (run) => bulkWriterFor(run, null, (r) => externalRunWriter(r, ledger, (rr, _q, _r, shopifyApply) => {
       const stored = rr.contractJson === null ? null : parseBulkContract(rr.contractJson);

@@ -554,7 +554,7 @@
 		{@const list = bulkMarkupList(change, undo, shopify ? bulkFieldNamesText(host, [change.field], t) : bulkVisibleText(change.field), view)}
 		<div class="mt-1 text-xs" data-testid="bulk-markup">
 			{#if list.head}<div class="text-text-subtle">{list.head}</div>{/if}
-			{#if list.restoresNote}<p class="text-warning" data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
+			{#if list.restoresNote}<p class={list.restoresActive ? 'text-warning' : 'text-text-subtle'} data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
 			<ul class="space-y-0.5">
 				{#each list.lines as markupLine, i (i)}
 					<li class="min-w-0"><span class="text-text-subtle">{markupLine.label}</span> <code class="whitespace-pre-wrap break-all">{bulkVisibleText(markupLine.code)}</code><span class="text-text-subtle">{markupLine.template === null ? '' : ` ${markupLine.template}`}</span></li>
@@ -688,7 +688,7 @@
 											{/if}
 											{@render markupList(target, false)}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}</p>
+												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', listForm: run.listForm, judgesHtml: run.judgesHtml, markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
 													{#each target.refusedValues as { field, value, codePoints } (field)}
 														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle">{bulkVisibleText(field)}:</div>{/if}

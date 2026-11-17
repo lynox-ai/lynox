@@ -256,13 +256,15 @@ describe('approving a preview', () => {
 			targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'new_link_domain', linkDomain: c.domain ?? 'video.example' } : x));
 			await render();
 			const where = t('bulk.invalid.where_shopify');
+			const domain = c.domain ?? 'video.example';
 			const text = target.textContent ?? '';
+			// The domain is named in either sentence (U-311).
 			if (c.judged) {
-				expect(text).toContain(t('bulk.invalid.new_link_domain_judged').replace('{where}', where));
-				expect(text).not.toContain(t('bulk.invalid.new_link_domain').replace('{where}', where));
+				expect(text).toContain(tf('bulk.invalid.new_link_domain_judged_named', { domain, where }));
+				expect(text).not.toContain(tf('bulk.invalid.new_link_domain_named', { domain, where }));
 			} else {
-				expect(text).toContain(t('bulk.invalid.new_link_domain').replace('{where}', where));
-				expect(text).not.toContain(t('bulk.invalid.new_link_domain_judged').split('{where}')[0]!.slice(0, 120));
+				expect(text).toContain(tf('bulk.invalid.new_link_domain_named', { domain, where }));
+				expect(text).not.toContain(tf('bulk.invalid.new_link_domain_judged_named', { domain, where }).slice(0, 200));
 			}
 			resetSettingsViewer();
 		});
@@ -800,8 +802,50 @@ describe('the markup a target changes (1010)', () => {
 		expect(undo[0]!.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
 		expect(codes(undo[0]!)).toEqual(['<script>steal()</script>']);
 		expect(undo[0]!.textContent).toContain(t('bulk.markup.restores'));
-		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note'));
+		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note_active'));
+		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.className).toBe('text-warning');
 		expect(target.querySelectorAll('script')).toHaveLength(0);
+	});
+
+	it('says of an undo that restores the owner\'s own table only that it was there before', async () => {
+		const table = { kind: 'element' as const, namespace: 'html', element: 'table', attributes: [['width', '100%']] as [string, string][], text: null, inTemplate: false };
+		run = makeRun({ kind: 'undo', sourceRunId: 'r0', total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false,
+			markupChanges: [{ field: 'descriptionHtml', added: [table], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: true }] }];
+		await render();
+		const note = target.querySelector('[data-testid="bulk-undo-markup"] [data-testid="bulk-markup-restores-note"]');
+		expect(note?.textContent).toBe(t('bulk.markup.restores_note'));
+		// Neutral, as the head and the footnote: not a warning about the owner's own table.
+		expect(note?.className).toBe('text-text-subtle');
+	});
+});
+
+describe('the reason under a value lynox leaves out, as the run\'s page words it', () => {
+	const invalid = (error: string, o: Partial<BulkTarget> = {}): BulkTarget[] => [
+		TARGETS[0]!, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error, deselected: false, ...o },
+	];
+
+	it('names the refused domain as text, never as a link (U-311)', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		targets = invalid('new_link_domain', { linkDomain: '<a href="https://evil.example">evil.example</a>' } as Partial<BulkTarget>);
+		await render();
+		expect(target.textContent).toContain('„<a href="https://evil.example">evil.example</a>“');
+		expect(target.querySelector('a[href="https://evil.example"]')).toBeNull();
+	});
+
+	it('words a cut-off answer of a judge that decides an HTML field as a description to keep by hand', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 }, judge: {} as BulkRunDetailData['judge'], judgesHtml: true } as Partial<BulkRunDetailData>);
+		targets = invalid('cut_off');
+		await render();
+		expect(target.textContent).toContain(tf('bulk.invalid.cut_off_html', { where: t('bulk.invalid.where_shopify') }));
+	});
+
+	it('control: the same cut-off answer of a judge that decides no HTML field keeps the plain sentence', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 }, judge: {} as BulkRunDetailData['judge'], judgesHtml: false } as Partial<BulkRunDetailData>);
+		targets = invalid('cut_off');
+		await render();
+		expect(target.textContent).toContain(t('bulk.invalid.cut_off'));
+		expect(target.textContent).not.toContain(tf('bulk.invalid.cut_off_html', { where: t('bulk.invalid.where_shopify') }));
 	});
 });
 

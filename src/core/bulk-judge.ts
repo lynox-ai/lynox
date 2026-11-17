@@ -29,7 +29,7 @@ import {
 import { getPricing } from './pricing.js';
 import { refuseExternalAfter } from './bulk-external.js';
 import { checkMarkup, htmlFieldsOfListForm, plainTextMarkupOf } from './bulk-html.js';
-import type { BulkListSourceForm } from './bulk-list.js';
+import { isEmptyShopifyDescription, type BulkListSourceForm } from './bulk-list.js';
 import { checkSeoAfter } from './seo-text.js';
 import { hiddenCharIndexes } from './hidden-chars.js';
 import { parseHtmlFragment, walkHtml, withinReadingBounds } from './html-tree.js';
@@ -572,6 +572,21 @@ function writtenDomain(hostWritten: string | undefined, domain: string): string 
   return hostWritten.toLowerCase().replace(/\.$/, '') === domain ? hostWritten : undefined;
 }
 
+/**
+ * Whether a verdict sets a Shopify product description to `null` or to a text that shows nothing:
+ * Shopify ignores the one and the other leaves the page empty (PRD shopify-preset §16.8 M6b (iii)),
+ * and a model that gives either gave no new text. A description that already showed nothing is not
+ * emptied by it.
+ * Asked of a verdict only, never of a judged target's planned after-state: that is the rule's
+ * template, every field `null` until its verdict.
+ */
+export function emptiesDescription(
+  form: BulkListSourceForm | null, after: Readonly<Record<string, unknown>>, before: Readonly<Record<string, unknown>>,
+): boolean {
+  return Object.entries(after).some(([field, value]) => isEmptyShopifyDescription(form, field, value)
+    && !isEmptyShopifyDescription(form, field, before[field]));
+}
+
 /** {@link verdictTextRefusal} with the domain of a refused link. */
 export function verdictTextRefusalOf(
   after: Readonly<Record<string, unknown>>, before: Readonly<Record<string, unknown>>, run: VerdictTextRun,
@@ -829,6 +844,10 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
           return;
         }
         verdict = changed as Record<string, unknown>;
+      }
+      if (emptiesDescription(textRun.listForm, verdict, beforeRow)) {
+        record({ invalid: 'verdict_without_after' });
+        return;
       }
       const refusal = verdictTextRefusalOf(verdict, beforeRow, textRun);
       if (refusal !== null) {
