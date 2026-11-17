@@ -27,7 +27,7 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
@@ -65,7 +65,7 @@ import { billingTierSet, eraseRefusal, importRefusal } from '../core/sidecar-ref
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
-import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
+import { shopifyBulkReadEnabled, shopifyConsentBlock } from '../core/bulk-shopify.js';
 import { containedThreadStates, containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
@@ -1746,8 +1746,9 @@ function scopeNameOf(consent: ConsentNotice, scope: string): string {
  */
 export function consentPageHtml(consent: ConsentNotice | undefined, scopes: readonly string[], note?: ConnectNote): string {
   // The note's version travels with the confirmation, so a confirmation is refused when the
-  // provider's note is another one by the time it arrives (`shown_note`).
-  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}${note ? `&shown_note=${note.version}` : ''}`;
+  // provider's note is another one by the time it arrives (`shown_note`). So does the customer
+  // text's (`shown_consent`): the grant records the text the person read, not a later one.
+  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}${note ? `&shown_note=${note.version}` : ''}${consent ? `&shown_consent=${consentNoticeVersion(consent)}` : ''}`;
   const noteIn = (lang: NoteLang): string =>
     note ? `<p data-connect-note="${note.version}">${escapeHtml(noteText(note.version, lang, note.provider))}</p>` : '';
   if (!consent) {
@@ -9912,6 +9913,10 @@ export class LynoxHTTPApi {
     };
     /** Which halt a run stands at, by name: the owner's page words its own sentences on the
      *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
+    const bulkConsentFieldsOf = (ledger: import('../core/bulk-ledger.js').BulkLedger, runId: string): string[] => {
+      const apply = ledger.shopifyApplyOf(runId);
+      return apply === null ? [] : shopifyConsentBlock(apply, undefined);
+    };
     const bulkHaltKey = (haltReason: string | null): string | null =>
       haltReason === null ? null : (Object.entries(BULK_HALT_REASONS).find(([, text]) => text === haltReason)?.[0] ?? null);
     const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed'; haltReason: string | null }>(status: T): T & { checksumNote?: string; haltKey: string | null } => {
@@ -10036,6 +10041,10 @@ export class LynoxHTTPApi {
         // A Shopify product list's filters ({} for every product): shown wherever the run is started or
         // approved, so the owner sees which group and which statuses it reads (PRD shopify-preset §22.2 item 5).
         listFilters: shopifyListFiltersOf(status.list === null ? null : ledger.getListRun(params['id']!)),
+        // The form a list run reads, as stored, and whether its judge decides an HTML field: the
+        // sentences under a target lynox leaves out and the halt's step are worded on them.
+        listForm: status.list === null ? null : ledger.getListRun(params['id']!)?.source.form ?? null,
+        judgesHtml: ledger.judgesHtml(params['id']!),
         // An unmeasured apply run writes one target first and is approved only with this
         // confirmation. An undo is neither: it restores what its source wrote, under the
         // source's confirmation, so the note's promise of one target first would not hold.
@@ -10063,6 +10072,9 @@ export class LynoxHTTPApi {
         // Why a run halted for want of a probe cannot go past one target, read now: the effect
         // checks the probe again when it starts, so a resume the route let through can halt here.
         probeBlock: bulkHaltKey(status.haltReason) === 'probeRequired' ? ledger.probeBlockFor(status.id) : null,
+        // The fields a connection confirmed under no or another text does not cover, for the halt's
+        // sentence: the same check the apply ran, read under no grant.
+        consentFields: bulkHaltKey(status.haltReason) === 'consentOutdated' ? bulkConsentFieldsOf(ledger, status.id) : null,
         // What an undo would take back now; for an external run that includes a failed write,
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
@@ -12171,6 +12183,9 @@ export class LynoxHTTPApi {
 
       const { verifier, challenge, method } = createPkcePair();
       const state = randomUUID();
+      // The version of the customer text this start shows, and the confirmation below is checked
+      // against: the callback records it as the text the connection was confirmed under.
+      const consentVersion = decision.consent ? consentNoticeVersion(decision.consent) : undefined;
       const signed = signProfileOAuthState(
         {
           state, profileId: id, verifier,
@@ -12178,6 +12193,7 @@ export class LynoxHTTPApi {
           // What the link asks for, from the same decision the confirmation is checked against
           // below (`shown_scopes`) and the link is built from: the callback records it as asked.
           asked: decision.scopes,
+          consent: consentVersion,
         },
         httpSecret,
         Math.floor(Date.now() / 1000),
@@ -12251,6 +12267,12 @@ export class LynoxHTTPApi {
       // page never named.
       if (decision.consent && new URL(req.url ?? '', 'http://x').searchParams.get('shown_scopes') !== decision.scopes.join(' ')) {
         sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.scopesChanged, 'apis');
+        return;
+      }
+      // The confirmation holds for the customer text the page showed. A page rendered by an engine
+      // before an upgrade that changed the text would otherwise record the new text as confirmed.
+      if (consentVersion !== undefined && new URL(req.url ?? '', 'http://x').searchParams.get('shown_consent') !== consentVersion) {
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.consentChanged, 'apis');
         return;
       }
 
@@ -12716,6 +12738,14 @@ export class LynoxHTTPApi {
           // between changes the next link, not this consent.
           const asked = signed.asked ?? [];
           grantNext.asked_scope = [...asked];
+          // Which customer text the person confirmed, from the same signed start: a start that
+          // showed none records none, so a connection reads as confirmed under no text. Only the
+          // owner's: the owner approves a bulk run against what the text promises, and a text a
+          // mandate confirmed is one the owner never read, so it opens no further field.
+          if (signed.consent !== undefined && by.tag === 'owner') {
+            grantNext.consent_version = signed.consent;
+            grantNext.consented_at = new Date().toISOString();
+          }
           const grantedNow = scopesOfAnswer(parsed.scope);
           if (grantedNow !== undefined) {
             grantNext.granted_scope = grantedNow;

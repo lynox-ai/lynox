@@ -65,7 +65,7 @@ describe('the derivation purpose separates this flow from the Google one', () =>
   // properties that a later edit can collapse. This asserts the separation
   // that survives such an edit.
   it('refuses a payload signed with the Google flow purpose', () => {
-    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${ASKED}.${String(NOW)}`;
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${ASKED}.none.${String(NOW)}`;
     const googleKey = createHmac('sha256', 'lynox-oauth-state').update(SECRET).digest();
     const googleSig = createHmac('sha256', googleKey).update(payload).digest('hex');
     expect(verifyProfileOAuthState(`${payload}.${googleSig}`, SECRET, NOW)).toBeNull();
@@ -121,7 +121,7 @@ describe('the shape is refused before anything is trusted', () => {
     // length guard this input is an exception, not a refusal.
     const cookie = signProfileOAuthState(good, SECRET, NOW) ?? '';
     const parts = cookie.split('.');
-    const tampered = [...parts.slice(0, 6), 'zzzz'].join('.');
+    const tampered = [...parts.slice(0, 7), 'zzzz'].join('.');
     expect(() => verifyProfileOAuthState(tampered, SECRET, NOW)).not.toThrow();
     expect(verifyProfileOAuthState(tampered, SECRET, NOW)).toBeNull();
   });
@@ -129,7 +129,7 @@ describe('the shape is refused before anything is trusted', () => {
   it('refuses a truncated signature without throwing', () => {
     const cookie = signProfileOAuthState(good, SECRET, NOW) ?? '';
     const parts = cookie.split('.');
-    const tampered = [...parts.slice(0, 6), (parts[6] ?? '').slice(0, 10)].join('.');
+    const tampered = [...parts.slice(0, 7), (parts[7] ?? '').slice(0, 10)].join('.');
     expect(() => verifyProfileOAuthState(tampered, SECRET, NOW)).not.toThrow();
     expect(verifyProfileOAuthState(tampered, SECRET, NOW)).toBeNull();
   });
@@ -188,7 +188,7 @@ describe('who started the connection rides inside the signature (PRD §3.13)', (
 
   it('carries a mandate with its id across, an address with dots included', () => {
     const cookie = signProfileOAuthState({ ...good, by: MANDATE }, SECRET, NOW) ?? '';
-    expect(cookie.split('.')).toHaveLength(7);
+    expect(cookie.split('.')).toHaveLength(8);
     expect(verifyProfileOAuthState(cookie, SECRET, NOW)).toEqual({ ...good, by: MANDATE });
   });
 
@@ -270,7 +270,7 @@ describe('the asked scopes ride inside the signature', () => {
 
   it('carries them across, a scope with dots and slashes included', () => {
     const cookie = signProfileOAuthState({ ...good, asked: ASKED_LIST }, SECRET, NOW) ?? '';
-    expect(cookie.split('.')).toHaveLength(7);
+    expect(cookie.split('.')).toHaveLength(8);
     expect(verifyProfileOAuthState(cookie, SECRET, NOW)).toEqual({ ...good, asked: ASKED_LIST });
   });
 
@@ -301,8 +301,14 @@ describe('the asked scopes ride inside the signature', () => {
     ['a scope with a space', enc(['read_products write_files'])],
     ['no JSON', Buffer.from('[write_files').toString('base64url')],
   ])('refuses a well-signed asked field that is %s', (_what, field) => {
-    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${field}.${String(NOW)}`;
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${field}.none.${String(NOW)}`;
     expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  // The control for the case above: the same payload with a good field is read.
+  it('reads a well-signed asked field that is a list of scopes', () => {
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${enc(['write_files'])}.none.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)?.asked).toEqual(['write_files']);
   });
 
   // The browser drops a cookie over about 4 KB without a word, after the person consented.
@@ -319,5 +325,52 @@ describe('the asked scopes ride inside the signature', () => {
     ['more scopes than a link asks for', Array.from({ length: 65 }, (_, i) => `scope_${String(i)}`)],
   ])('does not sign %s', (_what, asked) => {
     expect(signProfileOAuthState({ ...good, asked }, SECRET, NOW)).toBeNull();
+  });
+});
+
+// Which customer text the page showed rides inside the signature: the callback records it as the
+// grant's consent version, so a connection reads as confirmed under the text the person read.
+describe('the version of the customer text rides inside the signature', () => {
+  const ourSig = (payload: string): string => {
+    const key = createHmac('sha256', 'lynox-profile-oauth-state').update(SECRET).digest();
+    return createHmac('sha256', key).update(payload).digest('hex');
+  };
+  const V = '0123456789abcdef';
+
+  it('carries it across, and reads a start without a text back without one', () => {
+    const cookie = signProfileOAuthState({ ...good, consent: V }, SECRET, NOW) ?? '';
+    expect(cookie.split('.')).toHaveLength(8);
+    expect(verifyProfileOAuthState(cookie, SECRET, NOW)).toEqual({ ...good, consent: V });
+    const none = verifyProfileOAuthState(signProfileOAuthState(good, SECRET, NOW) ?? '', SECRET, NOW);
+    expect(none).toEqual(good);
+    expect(none !== null && 'consent' in none).toBe(false);
+  });
+
+  it('refuses a cookie whose version was swapped, or added to a start that showed none', () => {
+    const cookie = signProfileOAuthState({ ...good, consent: V }, SECRET, NOW) ?? '';
+    const parts = cookie.split('.');
+    const swapped = [...parts.slice(0, 5), 'fedcba9876543210', ...parts.slice(6)].join('.');
+    expect(verifyProfileOAuthState(swapped, SECRET, NOW)).toBeNull();
+    const plain = (signProfileOAuthState(good, SECRET, NOW) ?? '').split('.');
+    expect(plain[5]).toBe('none');
+    const added = [...plain.slice(0, 5), V, ...plain.slice(6)].join('.');
+    expect(verifyProfileOAuthState(added, SECRET, NOW)).toBeNull();
+  });
+
+  it('refuses a cookie from before the version was carried, though its signature is good', () => {
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${ASKED}.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  it.each([['upper case', '0123456789ABCDEF'], ['too short', '0123'], ['a word', 'anything'], ['empty', '']])(
+    'neither signs nor reads a version that is %s', (_what, consent) => {
+      expect(signProfileOAuthState({ ...good, consent }, SECRET, NOW)).toBeNull();
+      const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${ASKED}.${consent}.${String(NOW)}`;
+      expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+    });
+
+  it('reads a well-signed version field', () => {
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${ASKED}.${V}.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)?.consent).toBe(V);
   });
 });

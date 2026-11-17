@@ -136,7 +136,10 @@ describe('what a stranger gets', () => {
     const asked = Buffer.from(JSON.stringify([])).toString('base64url');
     const noAsked = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${owner}.${at}`));
     expect(noAsked.status).toBe(400);
-    const withPrincipal = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${owner}.${asked}.${at}`));
+    // Nor without the consent field, which says which text the page showed (`none` where it showed none).
+    const noConsent = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${owner}.${asked}.${at}`));
+    expect(noConsent.status).toBe(400);
+    const withPrincipal = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${owner}.${asked}.none.${at}`));
     expect(withPrincipal.status).toBe(409);
     expect(await withPrincipal.text()).toContain('no longer exists');
   });
