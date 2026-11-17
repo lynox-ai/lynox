@@ -1155,6 +1155,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'backups.creating': { de: 'Erstelle Backup...', en: 'Creating backup...' },
 	'backups.encrypted': { de: 'Verschlüsselt', en: 'Encrypted' },
 	'backups.files': { de: 'Dateien', en: 'files' },
+	'backups.files_one': { de: 'Datei', en: 'file' },
 	'backups.restore': { de: 'Wiederherstellen', en: 'Restore' },
 	'backups.restoring': { de: 'Wiederherstellen...', en: 'Restoring...' },
 	'backups.restore_confirm': { de: 'Dieses Backup wirklich wiederherstellen? Ein Sicherheits-Backup wird vorher erstellt.', en: 'Restore this backup? A safety backup will be created first.' },
@@ -1346,6 +1347,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'setup.hint_mistral': { de: 'API Key hier:', en: 'Get a key at' },
 	'setup.hint_openai': { de: 'Funktioniert mit Ollama, LM Studio, LiteLLM, Groq, vLLM und jedem anderen OpenAI-kompatiblen Endpoint. API Key leer lassen wenn das Backend keinen verlangt.', en: 'Works with Ollama, LM Studio, LiteLLM, Groq, vLLM, and any other OpenAI-compatible endpoint. Leave the API key blank if the backend doesn\'t require auth.' },
 	'setup.save': { de: 'Speichern & Starten', en: 'Save & Start' },
+	// The engine refused to check a key the owner typed: the instance is connected to a Shopify store
+	// and sends text only through access lynox manages (U-307). The way out: the switch is lynox's.
+	'setup.key_refused_store': { de: 'Diese Instanz ist mit einem Shopify-Store verbunden. Dann schickt lynox Text nur über einen Zugang, den lynox selbst verwaltet, nicht über einen eigenen Key. Dein Key wurde nicht geprüft und nicht gespeichert.', en: 'This instance is connected to a Shopify store. lynox then sends text only through access that lynox manages itself, not through a key of your own. Your key was not checked and not saved.' },
+	'setup.key_refused_store_way_out': { de: 'Schreib an support@lynox.ai, damit wir das mit dir klären.', en: 'Write to support@lynox.ai so we can sort this out with you.' },
 	'setup.skip': { de: 'Später — KI bleibt deaktiviert', en: 'Later — AI stays disabled' },
 	'setup.success': { de: 'Verbindung hergestellt — los geht\'s!', en: 'Connected — let\'s go!' },
 	'setup.save_error': { de: 'Speichern fehlgeschlagen. Bitte erneut versuchen.', en: 'Failed to save. Please try again.' },
@@ -1812,7 +1817,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'setup.subtitle_byok': { de: 'Gib deinen API Key ein, um loszulegen.', en: 'Enter your API key to get started.' },
 
 	// Settings
-	'settings.title': { de: 'Settings', en: 'Settings' },
+	'settings.title': { de: 'Einstellungen', en: 'Settings' },
 	'settings.config': { de: 'Konfiguration', en: 'Configuration' },
 	'settings.config_desc': { de: 'KI-Modell, Provider, Erweitert', en: 'AI model, provider, advanced' },
 	'settings.section_main': { de: 'Haupteinstellungen', en: 'Main Settings' },
@@ -2114,7 +2119,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// A save the server refused, with its reason (ux U-102). {reason} is the server's sentence.
 	'settings.save_refused': { de: 'Nicht gespeichert: {reason}', en: 'Not saved: {reason}' },
 	'settings.delete': { de: 'Löschen', en: 'Delete' },
-	'settings.back': { de: 'Settings', en: 'Settings' },
+	'settings.back': { de: 'Einstellungen', en: 'Settings' },
 
 	// Config
 	'config.title': { de: 'Konfiguration', en: 'Configuration' },
@@ -2965,9 +2970,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'migration.success_without_workspace': { de: 'Migration abgeschlossen, ohne die Dateien des Arbeitsbereichs.', en: 'Migration complete, without the workspace files.' },
 	'migration.success_desc_without_workspace': { de: 'Deine Daten sind jetzt auf deiner Managed-Instanz verfügbar, ausser den Dateien des Arbeitsbereichs.', en: 'Your data is now available on your managed instance, except for the workspace files.' },
 	'migration.workspace_omitted_managed': { de: 'Diese Dateien hat die Migration nicht übertragen. Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.', en: 'The migration did not transfer these files. To have them copied to the new instance, write to support@lynox.ai.' },
-	'migration.workspace_omitted_self': { de: 'Diese Dateien hat die Migration nicht übertragen. Übertrage sie dort, wo du sie verwaltest.', en: 'The migration did not transfer these files. Move them where you manage them.' },
-	'migration.workspace_omitted_fact': { de: 'Diese Dateien hat die Migration nicht übertragen.', en: 'The migration did not transfer these files.' },
-	'migration.workspace_omitted_unknown': { de: 'Diese Dateien hat die Migration nicht übertragen. Lade die Seite neu, dann steht hier, wie du sie überträgst.', en: 'The migration did not transfer these files. Reload the page to see how to move them.' },
 	// Files the export could not carry (row 1033, ux U-056).
 	'migration.skipped_one': { de: '1 Datei wurde nicht übertragen. Verknüpfungen, Sonderdateien und manche Namen lassen sich nicht übertragen.', en: '1 file was not transferred. Links, special files and some names cannot be transferred.' },
 	'migration.skipped_many': { de: '{n} Dateien wurden nicht übertragen. Verknüpfungen, Sonderdateien und manche Namen lassen sich nicht übertragen.', en: '{n} files were not transferred. Links, special files and some names cannot be transferred.' },
@@ -2978,10 +2980,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'migration.success_desc_skipped_many': { de: 'Deine Daten sind jetzt auf deiner Managed-Instanz verfügbar, ausser den Dateien unten.', en: 'Your data is now available on your managed instance, except for the files below.' },
 	'migration.skipped_next_managed_one': { de: 'Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.', en: 'To have it copied to the new instance, write to support@lynox.ai.' },
 	'migration.skipped_next_managed_many': { de: 'Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.', en: 'To have them copied to the new instance, write to support@lynox.ai.' },
-	'migration.skipped_next_self_one': { de: 'Übertrage sie dort, wo du sie verwaltest.', en: 'Move it where you manage it.' },
-	'migration.skipped_next_self_many': { de: 'Übertrage sie dort, wo du sie verwaltest.', en: 'Move them where you manage them.' },
-	'migration.skipped_next_unknown_one': { de: 'Lade die Seite neu, dann steht hier, wie du sie überträgst.', en: 'Reload the page to see how to move it.' },
-	'migration.skipped_next_unknown_many': { de: 'Lade die Seite neu, dann steht hier, wie du sie überträgst.', en: 'Reload the page to see how to move them.' },
 	'migration.open_instance': { de: 'Instanz öffnen', en: 'Open Instance' },
 	'migration.error_preview': { de: 'Vorschau konnte nicht geladen werden.', en: 'Failed to load preview.' },
 	'migration.error_incomplete': { de: 'Migration unvollständig abgebrochen.', en: 'Migration ended unexpectedly.' },

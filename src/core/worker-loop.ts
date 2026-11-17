@@ -15,7 +15,7 @@ import { noticeLanguage } from './notice-language.js';
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
-  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices, type ShownMandate,
+  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -26,7 +26,7 @@ import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
@@ -61,6 +61,8 @@ import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
+import { storedStepOrder } from '../orchestrator/step-id.js';
+import { failedRunBody } from './escalation-failure.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { WEBHOOK_AWAITS_STAMP_REASON, workflowAwaitsStampResult, workflowStampStateOf } from './workflow-stamp.js';
@@ -669,35 +671,6 @@ export function reservationEstimate(task: TriggerRecord): number {
 /** Re-exported where it was born; it lives beside the tags it reads. */
 export { mandateNeedsOwnerStamp };
 
-/**
- * Whether a plan was set up or last changed by someone other than the owner: the last mandate
- * that changed it, else its creator. The owner's stamp and the owner's later edit leave
- * `mandate_editor` as it is, and so the text as written (PRD customer-granted-operator-access B6).
- * Fail-closed: any tag but the owner's (or none: a row from before tags, or the owner's agent)
- * counts.
- */
-export function setUpByOther(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): boolean {
-  const tag = t.mandate_editor ?? t.created_by;
-  return !(tag === undefined || tag === null || tag === principalTag(OWNER_PRINCIPAL));
-}
-
-/** A plain address: what an owner types when letting someone in. Anything else is not shown. */
-const SHOWN_ADDRESS = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$/;
-
-/**
- * The mandate an escalation's title may name: who changed the plan, if a mandate other
- * than its creator did, else the mandate that set it up. The engine sets these tags from the
- * grant, so the address is not the helper's text. `undefined` for a plan no mandate set up or
- * changed, an unknown tag, or an address of another shape; the title then says "someone you let in".
- */
-export function shownMandate(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): ShownMandate | undefined {
-  const editor = t.mandate_editor ?? undefined;
-  const changed = editor !== undefined && editor !== t.created_by;
-  const tag = changed ? editor : t.created_by;
-  if (tag === undefined || tag === null || !isMandateTag(tag)) return undefined;
-  const address = tag.slice(MANDATE_TAG_PREFIX.length);
-  return address.length <= 254 && SHOWN_ADDRESS.test(address) ? { address, changed } : undefined;
-}
 
 /**
  * Whether a hand-run grant covers this trigger: only the proposal of the person who holds
@@ -3707,18 +3680,24 @@ export class WorkerLoop {
     // its error can carry a third party's text, which a thread would hand the owner's next
     // turn as the assistant's own.
     if (event !== undefined) return;
-    // A reported failure's reason (`fail_step`) is the model's text, often written after reading
-    // untrusted content; the thread hands its body to the owner's next turn in the assistant's
-    // voice. So the body names the step in lynox's own words, and the reason stays in the run's
-    // record, readable through diagnose_workflow_run.
+    // Neither a step's error (it can carry a third party's text) nor a reported reason (model text)
+    // goes into the thread, which hands its body to the owner's next turn in the assistant's voice:
+    // the body names the failed steps in lynox's own words, and the errors stay in the run's record,
+    // readable through diagnose_workflow_run (U-192, U-201).
     const notices = this.#notices();
-    const failedSteps = (result.stepErrors ?? []).filter(s => s.error);
-    const stepDetail = failedSteps
-      .map(s => (s.reported === true ? notices.stepReportedItem(s.stepId) : `• ${s.stepId}: ${s.error}`))
-      .join('\n');
-    const runError = result.errorReportedBy !== undefined ? notices.stepReported(result.errorReportedBy) : result.error;
-    // Said once, after the steps, when a step reported: the owner learns the reason is there to ask for (U-192).
-    const reported = result.errorReportedBy !== undefined || failedSteps.some(s => s.reported === true);
+    // A step id stored before ids had a shape (`step-id.ts`) is not shown: this body reads as the
+    // assistant's own words. It is named by its position in the stored workflow, as the model sees it
+    // (`#2`); the run and workflow ids below still lead to it (diagnose_workflow_run). The position is
+    // read from the workflow as stored now: an edit between the run and this thread can shift it, and
+    // an id no longer there is named without one. A lookup that fails costs the position, never the
+    // thread: the owner hears of the failure either way.
+    let order: string[] | undefined;
+    try {
+      order = task.pipeline_id ? storedStepOrder(this.engine.getRunHistory()?.getPlannedPipeline(task.pipeline_id)) : undefined;
+    } catch {
+      order = undefined;
+    }
+    const positionOf = (id: string): number | undefined => { const at = order?.indexOf(id) ?? -1; return at === -1 ? undefined : at + 1; };
     // The run + workflow ids ride in the seeded body so the agent, when the user
     // replies, can diagnose the run (diagnose_workflow_run), edit the workflow
     // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
@@ -3734,12 +3713,7 @@ export class WorkerLoop {
       opener: notices.reportOpener,
       body: othersPlan
         ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
-        : `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
-        (runError ? `${notices.errorLabel} ${runError}\n\n` : '') +
-        (stepDetail ? `${notices.failedStepsLabel}\n${stepDetail}\n\n` : '') +
-        (reported ? `${notices.reportedReasonWhere}\n\n` : '') +
-        (grantLines.length > 0 ? `${notices.writesLabel}\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
-        notices.workflowReply(ref),
+        : failedRunBody(notices, { title: task.title, status: result.status, run: result, grantLines, ref, positionOf }),
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
       onReported: this.#recordEscalation(task.id),
     });

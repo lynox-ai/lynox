@@ -1,5 +1,6 @@
 import type { ToolEntry, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { applyModifications, quotedId, type StepModification } from '../../orchestrator/workflow-edit.js';
+import { isStepIdShape, OUTSIDE_SHAPE, STEP_ID_MAX } from '../../orchestrator/step-id.js';
 import { getPipeline, forgetPipeline, buildManifest } from './pipeline.js';
 import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
@@ -121,24 +122,6 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     if (steps.length > MAX_STEPS) {
       return `Error: The edit exceeds the maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
     }
-    const seen = new Set<string>();
-    for (const s of steps) {
-      // An id the edit kept may be stored text from before the save refused hidden characters.
-      if (seen.has(s.id)) return `Error: Duplicate step id ${quotedId(s.id)} after the edit.`;
-      seen.add(s.id);
-    }
-
-    // Graph parity with every RUN path: validate the edited steps as a manifest
-    // (zod shape + dependency-graph check — no dangling input_from, no cycle)
-    // BEFORE persisting, so a structurally broken edit is rejected here at save
-    // rather than deferred to a failed cron run. The run-volatile path validates
-    // the same way (executePipelineById → buildManifest → validateManifest).
-    try {
-      validateManifest(buildManifest(planned.name, steps, planned.on_failure ?? 'stop'));
-    } catch (err: unknown) {
-      return `Error: The edit produces an invalid workflow: ${getErrorMessage(err)}`;
-    }
-
     // Re-infer the interaction mode: adding an ask_user step flips an autonomous
     // (cron-eligible) workflow to interactive, which can no longer run headless.
     // Text stored before the save refused characters that render as nothing: the save below would
@@ -156,9 +139,15 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const goal = input.goal ?? planned.goal;
     const fixes: string[] = [];
     const named = new Set<number>();
+    let outsideShape = false;
+    const shapeFix = new Map<number, string>();
+    let hiddenText = false;
     steps.forEach((s, i) => {
-      if (findHiddenInName(s.id, 'id') !== null) { named.add(i); fixes.push(`rename_step for step #${i + 1} (${quotedId(s.id)}): step_id "#${i + 1}", value a new id you type; the steps that read it follow`); }
-      if (findHiddenChar(s.task) !== null) { named.add(i); fixes.push(`update_task for step #${i + 1}: step_id "#${i + 1}", value its task typed again in your own words`); }
+      // An id with a character that does not show is outside the shape too: named by its position alone.
+      if (findHiddenInName(s.id, 'id') !== null) { named.add(i); hiddenText = true; fixes.push(`rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id in that form, for example fetch_orders; the steps that read it follow`); }
+      // An id stored before step ids had a shape (`step-id.ts`): named by its position, never its text.
+      else if (!isStepIdShape(s.id)) { named.add(i); outsideShape = true; shapeFix.set(i, `rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id in that form, for example fetch_orders; the steps that read it follow`); fixes.push(shapeFix.get(i)!); }
+      if (findHiddenChar(s.task) !== null) { named.add(i); hiddenText = true; fixes.push(`update_task for step #${i + 1}: step_id "#${i + 1}", value its task typed again in your own words`); }
     });
     // A step stored with the id `#<n>` is what `#<n>` names (`stepIndex`): each one that takes a
     // position named above is renamed first, once, so that the position means the step again.
@@ -166,10 +155,37 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       const j = steps.findIndex((s, k) => k !== i && s.id === `#${i + 1}`);
       return j === -1 ? [] : [`first, rename_step for step #${j + 1}, stored with the id "#${i + 1}": step_id "#${i + 1}", value a new id you type`];
     });
+    // A step renamed first above is not named a second time for its shape.
+    for (const [i, fix] of shapeFix) {
+      if (clears.some(c => c.startsWith(`first, rename_step for step #${i + 1},`))) fixes.splice(fixes.indexOf(fix), 1);
+    }
     fixes.unshift(...clears);
-    if (findHiddenChar(goal) !== null) fixes.push('a new "goal", written in your own words');
+    if (findHiddenChar(goal) !== null) { hiddenText = true; fixes.push('a new "goal", written in your own words'); }
     if (fixes.length > 0) {
-      return `Error: This workflow holds text saved with a character that does not show, which a save now refuses. Nothing was saved. Call again with this call's modifications and, after them:\n${fixes.map(f => `- ${f}`).join('\n')}`;
+      const why = [
+        ...(hiddenText ? ['text saved with a character that does not show'] : []),
+        ...(outsideShape ? [`a step id saved before step ids were limited to 1 to ${String(STEP_ID_MAX)} characters (lowercase a-z, digits 0-9, _ or -)`] : []),
+      ].join(', and ');
+      return `Error: This workflow holds ${why}, which a save now refuses. Nothing was saved. Call again with this call's modifications and, after them:\n${fixes.map(f => `- ${f}`).join('\n')}`;
+    }
+
+    const seen = new Set<string>();
+    for (const s of steps) {
+      // An id the edit kept may be stored text from before the save refused hidden characters.
+      if (seen.has(s.id)) return `Error: Duplicate step id ${quotedId(s.id)} after the edit.`;
+      seen.add(s.id);
+    }
+
+    // After the stored text above: these refusals quote ids, so every id here is in the shape.
+    // Graph parity with every RUN path: validate the edited steps as a manifest
+    // (zod shape + dependency-graph check — no dangling input_from, no cycle)
+    // BEFORE persisting, so a structurally broken edit is rejected here at save
+    // rather than deferred to a failed cron run. The run-volatile path validates
+    // the same way (executePipelineById → buildManifest → validateManifest).
+    try {
+      validateManifest(buildManifest(planned.name, steps, planned.on_failure ?? 'stop'));
+    } catch (err: unknown) {
+      return `Error: The edit produces an invalid workflow: ${getErrorMessage(err)}`;
     }
 
     const newMode = inferPipelineMode(steps);

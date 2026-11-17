@@ -238,6 +238,16 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('short_description:');
 	});
 
+	it('names each refused field of a Shopify product by its label, as the row above does', async () => {
+		const a = '[box a="1&2"]x[/box]';
+		const b = '[pbutton]Los[/pbutton]';
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'shortcode_changed', refusedValues: [{ field: 'descriptionHtml', value: a }, { field: 'seo_title', value: b }] } : x));
+		await render();
+		const names = [...target.querySelectorAll('[data-testid="bulk-refused-field"]')].map((e) => e.textContent?.trim());
+		expect(names).toEqual([`${t('bulk.field.shopify.descriptionHtml')}:`, `${t('bulk.field.shopify.seo_title')}:`]);
+		expect(target.textContent).not.toContain('descriptionHtml:');
+	});
+
 	// The sentence names the field for allowed link domains only where it is a way out: a judged
 	// list run on a shop, read by the owner, who alone starts judging (U-157).
 	const listed: Partial<BulkRunDetailData> = { judge: { tier: 'standard', unjudged: 0 }, judgeRuleHash: 'h1', list: { state: 'done' }, startDomains: null };

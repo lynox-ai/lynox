@@ -1,5 +1,6 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
+import { isStepIdShape, stepIdRefusal } from './step-id.js';
 
 /**
  * A single step-level edit to a workflow's step list. The vocabulary is shared
@@ -22,14 +23,11 @@ export interface StepModification {
   after?: string | undefined;
 }
 
-/** Why `id` cannot be a new step's id, or null. A template reference (`{{<id>.result}}`) is cut at
- *  each dot and ends at `}`, and `#<n>` names a step by its position. */
-function newIdProblem(id: string): string | null {
-  if (id.length === 0 || id.length > 64) return 'is empty or longer than 64 characters';
-  if (id.startsWith('#')) return 'starts with "#", which names a step by its position';
-  if (/[.{}]/.test(id)) return 'holds ".", "{" or "}", which a reference {{<id>.result}} cannot name';
-  if (id.trim() !== id || /\p{Cc}/u.test(id)) return 'starts or ends with a space, or holds a control character';
-  return null;
+/** Why `id` cannot be a new step's id, or null: an id outside the shape (`step-id.ts`). The shape
+ *  also keeps out what a reference could not name: a dot or a brace (`{{<id>.result}}` is cut at each
+ *  dot and ends at `}`) and a leading `#`, which names a step by its position. */
+function newIdProblem(id: string, action: 'add_step' | 'rename_step'): string | null {
+  return isStepIdShape(id) ? null : `Error: ${action}: ${stepIdRefusal('the new id', { refs: false })}`;
 }
 
 /** A step id as a refusal quotes it: as it reads, escaped, and short. */
@@ -127,11 +125,12 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
   };
   for (const mod of modifications) {
     if (mod.action === 'add_step') {
+      // The shape first, so no refusal quotes an id outside it back to the model.
+      const problem = newIdProblem(mod.step_id, 'add_step');
+      if (problem) return problem;
       if (steps.some(s => s.id === mod.step_id)) {
         return `Error: Step ${quotedId(mod.step_id)} already exists — cannot add a duplicate id.`;
       }
-      const problem = newIdProblem(mod.step_id);
-      if (problem) return `Error: add_step: the new id ${quotedId(mod.step_id)} ${problem}. Choose another.`;
       if (!mod.value) {
         return `Error: "value" (the task) is required for add_step ${quotedId(mod.step_id)}.`;
       }
@@ -175,10 +174,10 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       if (!to) return `Error: "value" (the new id) is required for rename_step ${quotedId(mod.step_id)}.`;
       const hidden = findHiddenInName(to, 'the new id');
       if (hidden) return `Error: rename_step: the new id contains a character that renders as nothing (${hidden.codePoint}). Type the id again.`;
-      const problem = newIdProblem(to);
-      if (problem) return `Error: rename_step: the new id ${quotedId(to)} ${problem}. Choose another.`;
+      const problem = newIdProblem(to, 'rename_step');
+      if (problem) return problem;
       const from = steps[idx]!.id;
-      if (to !== from && steps.some(s => s.id === to)) return `Error: Step ${quotedId(to)} already exists — cannot rename ${quotedId(from)} to it.`;
+      if (to !== from && steps.some(s => s.id === to)) return `Error: Step ${quotedId(to)} already exists — cannot rename step #${idx + 1} to it.`;
       steps[idx]!.id = to;
       for (const s of steps) {
         if (s.input_from) s.input_from = s.input_from.map(dep => (dep === from ? to : dep));
