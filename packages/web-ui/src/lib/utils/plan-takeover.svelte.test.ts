@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { takeoverLines as markedLines, refusalText, endedNotices, planList, plainText, segments, shownValue, nameOfTag, type TakeoverPreview, type TakeoverMember } from './plan-takeover.js';
+import { takeoverLines as markedLines, refusalText as markedRefusal, endedNotices as markedNotices, planList, plainText, segments, shownValue, nameOfTag, type TakeoverPreview, type TakeoverMember } from './plan-takeover.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
 
 const before = getLocale();
@@ -10,6 +10,8 @@ afterEach(() => setLocale(before));
 const fmt = (iso: string | null): string => `[${String(iso).slice(0, 10)}]`;
 // The lines as their text reads, without the marks around values someone else wrote.
 const takeoverLines = (...a: Parameters<typeof markedLines>): ReturnType<typeof markedLines> => markedLines(...a).map((l) => ({ ...l, text: plainText(l.text) }));
+const refusalText = (...a: Parameters<typeof markedRefusal>): string => plainText(markedRefusal(...a));
+const endedNotices = (...a: Parameters<typeof markedNotices>): string[] => markedNotices(...a).map(plainText);
 
 function preview(over: Partial<TakeoverPreview> = {}): TakeoverPreview {
 	return {

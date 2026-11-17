@@ -131,8 +131,8 @@ function roleLines(m: TakeoverMember, workflow: string | null, saidByF2: Takeove
 	return m.roles.filter((role) => role !== saidByF2).map((role) => ({
 		kind: 'role' as const,
 		text: role === 'created' || role === 'edited'
-			? tf(`takeover.role.${role}`, { name: m.name })
-			: tf(`takeover.role.${role}`, { name: m.name, workflow: workflow ?? '' }),
+			? tf(`takeover.role.${role}`, { name: shownValue(m.name) })
+			: tf(`takeover.role.${role}`, { name: shownValue(m.name), workflow: workflow === null ? '' : shownValue(workflow) }),
 	}));
 }
 
@@ -150,7 +150,7 @@ function f2Line(p: TakeoverPreview): { line: TakeoverLine; by: TakeoverMember; r
 	if (by === undefined) return null;
 	const role = marked !== undefined && from !== null ? from.role : by.roles.includes('workflow-edited') ? 'workflow-edited' : 'workflow-created';
 	const changed = role === 'workflow-edited';
-	const vars = { workflow: p.workflow.name, name: by.name };
+	const vars = { workflow: shownValue(p.workflow.name), name: shownValue(by.name) };
 	const head = tf(changed ? 'takeover.f2.changed' : 'takeover.f2.created', vars);
 	const text = p.alsoReleased.length === 0 ? head : `${head} ${tf('takeover.f2.released', { plans: planList(p.alsoReleased.map((r) => r.title)) })}`;
 	return { line: { kind: 'f2', text }, by, role };
@@ -190,9 +190,9 @@ function connectionLines(p: TakeoverPreview): TakeoverLine[] {
 	return p.connections.map((c) => ({
 		kind: 'connection' as const,
 		text: tf('takeover.connection', {
-			name: c.by ?? t('takeover.connection_someone'),
-			provider: c.provider,
-			account: c.account !== null && c.account !== '' && c.account.toLowerCase() !== c.by?.toLowerCase() ? ` (${c.account})` : '',
+			name: c.by !== null ? shownValue(c.by) : t('takeover.connection_someone'),
+			provider: shownValue(c.provider),
+			account: c.account !== null && c.account !== '' && c.account.toLowerCase() !== c.by?.toLowerCase() ? ` (${shownValue(c.account)})` : '',
 		}),
 	}));
 }
@@ -207,7 +207,7 @@ function runsAsLine(p: TakeoverPreview): TakeoverLine {
 	const changed = member?.roles.includes('workflow-edited') === true;
 	return {
 		kind: 'runs_as_member',
-		text: tf(changed ? 'takeover.runs_as_member.changed' : 'takeover.runs_as_member.created', { name, workflow: p.workflow?.name ?? '' }),
+		text: tf(changed ? 'takeover.runs_as_member.changed' : 'takeover.runs_as_member.created', { name: shownValue(name), workflow: p.workflow === null ? '' : shownValue(p.workflow.name) }),
 	};
 }
 
@@ -271,7 +271,7 @@ export function endedNotices(plans: ReadonlyArray<{ title: string; paused_ended?
 	// One plan is named by its title: the notice stands above the whole list, not at the plan (ux).
 	return [...byAccess.values()].map(({ ended, titles }) => {
 		const form = titles.length === 1 ? 'one' : 'many';
-		const text = tf(`takeover.notice.${ended.reason}_${form}`, { name: ended.email, date: formatDate(ended.ends_at), count: String(titles.length), plan: titles[0] ?? '' });
+		const text = tf(`takeover.notice.${ended.reason}_${form}`, { name: shownValue(ended.email), date: formatDate(ended.ends_at), count: String(titles.length), plan: titles[0] === undefined ? '' : shownValue(titles[0]) });
 		return ended.reason === 'expired' && !ended.warned ? `${text} ${t('takeover.notice.no_advance')}` : text;
 	});
 }
@@ -287,7 +287,7 @@ export type TakeoverRefusal = (typeof TAKEOVER_REFUSAL_CODES)[number];
 export function refusalText(code: string, opts: { workflow: string | null; managed: boolean; fallback: string }): string {
 	switch (code) {
 		case 'unreadable':
-			return opts.workflow !== null && opts.workflow !== '' ? tf('takeover.refused.unreadable_named', { workflow: opts.workflow }) : t('takeover.refused.unreadable');
+			return opts.workflow !== null && opts.workflow !== '' ? tf('takeover.refused.unreadable_named', { workflow: shownValue(opts.workflow) }) : t('takeover.refused.unreadable');
 		case 'prompts':
 		case 'unrecorded':
 			return opts.managed ? `${t(`takeover.refused.${code}`)} ${t('takeover.refused.support')}` : t(`takeover.refused.${code}`);

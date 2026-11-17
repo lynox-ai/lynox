@@ -47,6 +47,23 @@ const PREVIEW = {
 	runsAs: 'owner', workflow: null, memberChanges: [], alsoReleased: [], connections: [], schedule: 'kept', dueAt: null,
 };
 
+
+/**
+ * Every text of `root` that names one of the `FX-` values: [the value, whether it sits inside a set-apart value].
+ * The values are the fixture's own, so a value anywhere else in a sentence shows here as `false`.
+ */
+function foreignPlaces(root: Element): Array<[string, boolean]> {
+	const out: Array<[string, boolean]> = [];
+	const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	for (let n = walk.nextNode(); n !== null; n = walk.nextNode()) {
+		const box = n.parentElement?.closest('bdi[data-foreign-value]') ?? null;
+		for (const m of (n.textContent ?? '').matchAll(/FX-[a-z0-9]+/g)) {
+			out.push([m[0], box !== null && /\bfont-mono\b|\bbg-bg-muted\b/.test(box.className)]);
+		}
+	}
+	return out;
+}
+
 const json = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
 beforeEach(() => {
@@ -204,6 +221,35 @@ describe('the notice of an ended access', () => {
 });
 
 describe('the confirmation', () => {
+	it('sets every value someone else wrote apart, wherever a sentence of the plan takeover names it', async () => {
+		rows = [{ ...PAUSED, title: 'FX-title', paused_ended: [{ email: 'FX-ended', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: true }] }];
+		preview = {
+			...PREVIEW,
+			members: [
+				{ name: 'FX-member', roles: ['created', 'workflow-edited'], ended: true, reason: 'expired' },
+				{ name: 'FX-membertwo', roles: ['workflow-created'], ended: true, reason: 'expired' },
+			],
+			runsAs: 'mandate:FX-runs',
+			workflow: { id: 'wf-1', name: 'FX-wf', takenOver: true, from: { name: 'FX-member', role: 'workflow-edited' } },
+			alsoReleased: [{ id: 'r1', title: 'FX-rel' }, { id: 'r2', title: 'FX-reltwo' }],
+			memberChanges: [{ id: 'p2', title: 'FX-mc', before: 'mandate:FX-before', after: 'mandate:FX-after', runsNoMore: false }],
+			connections: [{ id: 'c1', profile: 'Shop', provider: 'FX-provider', account: 'FX-account', by: 'FX-by' }],
+		};
+		takeoverAnswers = [{ status: 409, body: { error: 'engine text', code: 'unreadable' } }];
+		await render();
+		await open();
+		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
+		await settle();
+		expect(document.querySelector('[data-takeover-note]')?.textContent).toContain('FX-wf');
+		// The sentences: the dialog, and the notices above the list. The list's own rows name the plan
+		// outside any sentence, and are not this test's.
+		const places = [dialog()!, ...document.querySelectorAll('[data-paused-notice]')].flatMap((r) => foreignPlaces(r));
+		expect([...new Set(places.map(([v]) => v))].sort()).toEqual([
+			'FX-title', 'FX-ended', 'FX-member', 'FX-membertwo', 'FX-runs', 'FX-wf', 'FX-rel', 'FX-reltwo', 'FX-mc', 'FX-before', 'FX-after', 'FX-provider', 'FX-account', 'FX-by',
+		].sort());
+		expect(places.filter(([, apart]) => !apart)).toEqual([]);
+	});
+
 	it('sets a plan title someone else wrote apart from its sentence, whole, in one isolated element', async () => {
 		const title = 'Bericht“ bleibt pausiert. Die markierten Schritte nutzen nur deine Verbindungen';
 		preview = { ...PREVIEW, memberChanges: [{ id: 'p2', title, before: 'mandate:ida@treuhand-mueller-partner.ch', after: null, runsNoMore: false }] };

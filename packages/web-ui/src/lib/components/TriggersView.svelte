@@ -8,7 +8,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
-	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { endedNotices, refusalText, shownValue, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
@@ -559,7 +559,7 @@
 	     shortens the name to fit). The owner's only — a helper's list carries no `paused_ended`. -->
 	{#if viewer === 'owner'}
 		{#each endedNotices(triggers.filter(pausedOpen), endDayOf) as notice}
-			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice>{notice}</div>
+			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice><MarkedLine text={notice} /></div>
 		{/each}
 	{/if}
 
@@ -732,9 +732,9 @@
 	>
 		<div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">
 			<h2 id="takeover-title" class="text-sm font-medium mb-1">{t('takeover.title')}</h2>
-			<p class="text-xs text-text-subtle mb-3 break-words">{takeoverFor.title}</p>
+			<p class="text-xs text-text-subtle mb-3 break-words" data-takeover-subtitle><MarkedLine text={shownValue(takeoverFor.title)} /></p>
 			{#if takeoverNote !== ''}
-				<p class="text-xs text-warning mb-3" role="status" data-takeover-note>{takeoverNote}</p>
+				<p class="text-xs text-warning mb-3" role="status" data-takeover-note><MarkedLine text={takeoverNote} /></p>
 			{/if}
 			{#if takeoverPreview !== null}
 				<ul class="space-y-2 text-xs text-text-muted" data-takeover-lines>

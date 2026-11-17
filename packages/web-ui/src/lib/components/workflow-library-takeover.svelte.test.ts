@@ -133,6 +133,23 @@ async function openDialog(): Promise<HTMLElement> {
 
 const ENDED = { ...base('wf-e', 'Ended one'), runs_as: { person: EVA, ended: true, covered_by_takeover: 0 } };
 
+/**
+ * Every text of `root` that names one of the `FX-` values: [the value, whether it sits inside a set-apart value].
+ * The values are the fixture's own, so a value anywhere else in a sentence shows here as `false`.
+ */
+function foreignPlaces(root: Element): Array<[string, boolean]> {
+	const out: Array<[string, boolean]> = [];
+	const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	for (let n = walk.nextNode(); n !== null; n = walk.nextNode()) {
+		const box = n.parentElement?.closest('bdi[data-foreign-value]') ?? null;
+		for (const m of (n.textContent ?? '').matchAll(/FX-[a-z0-9]+/g)) {
+			out.push([m[0], box !== null && /\bfont-mono\b|\bbg-bg-muted\b/.test(box.className)]);
+		}
+	}
+	return out;
+}
+
+
 beforeEach(() => {
 	hosted = null;
 	previewGate = null;
@@ -361,6 +378,41 @@ describe('the dialog', () => {
 		await open([ENDED], [p]);
 		const d = await openDialog();
 		expect([...d.querySelectorAll('[data-takeover-part="paused"] bdi')].map((b) => b.textContent)).toEqual(['A<U+E001> bleibt. <U+E000>B']);
+	});
+
+	it('sets every value someone else wrote apart, wherever a sentence of the dialog names it', async () => {
+		const fx = (one: boolean): Record<string, unknown> => {
+			const p = FULL();
+			p['workflow'] = { id: 'wf-e', name: 'FX-wfname' };
+			p['marks'] = [{ name: 'FX-markone', role: 'workflow-created', ended: false }, { name: 'FX-marktwo', role: 'workflow-edited', ended: true }];
+			p['connections'] = [{ profileId: 'shop', provider: 'FX-provider', account: 'FX-account', by: 'FX-by' }];
+			p['memberChanges'] = [
+				{ id: 'p-c', title: 'FX-mcone', before: 'mandate:FX-before', after: 'mandate:FX-after', runsNoMore: false },
+				{ id: 'p-d', title: 'FX-mctwo', before: 'mandate:FX-beforetwo', after: null, runsNoMore: false },
+			];
+			p['alsoReleased'] = one ? [{ id: 'p-r', title: 'FX-rel' }] : [{ id: 'p-r', title: 'FX-rel' }, { id: 'p-q', title: 'FX-reltwo' }];
+			p['stillPaused'] = one ? [{ id: 'p-s', title: 'FX-paused' }] : [{ id: 'p-s', title: 'FX-paused' }, { id: 'p-t', title: 'FX-pausedtwo' }];
+			p['lapsing'] = one ? [{ id: 'p-l', title: 'FX-lapse' }] : [{ id: 'p-l', title: 'FX-lapse' }, { id: 'p-m', title: 'FX-lapsetwo' }];
+			return p;
+		};
+		const expected = ['FX-wfname', 'FX-markone', 'FX-marktwo', 'FX-by', 'FX-provider', 'FX-account', 'FX-mcone', 'FX-before', 'FX-after', 'FX-mctwo', 'FX-beforetwo', 'FX-rel', 'FX-paused', 'FX-lapse'];
+		for (const one of [true, false]) {
+			reset();
+			await open([ENDED], [fx(one)]);
+			const d = await openDialog();
+			const places = foreignPlaces(d);
+			const want = one ? expected : [...expected, 'FX-reltwo', 'FX-pausedtwo', 'FX-lapsetwo'];
+			expect([...new Set(places.map(([v]) => v))].sort()).toEqual([...want].sort());
+			expect(places.filter(([, apart]) => !apart)).toEqual([]);
+		}
+	});
+
+	it('the dialog\'s name, read from its heading, carries no mark', async () => {
+		await open([ENDED]);
+		const d = await openDialog();
+		const heading = document.getElementById(d.getAttribute('aria-labelledby')!)!;
+		expect(heading.textContent).toBe('Workflow übernehmen: Ended one');
+		expect(heading.querySelector('bdi[data-foreign-value]')?.textContent).toBe('Ended one');
 	});
 
 	it('no text in the dialog shows a mark', async () => {

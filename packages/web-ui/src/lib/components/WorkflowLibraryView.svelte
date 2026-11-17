@@ -6,6 +6,8 @@
 	import Icon from '../primitives/Icon.svelte';
 	import StampPreviewBody from './StampPreviewBody.svelte';
 	import WorkflowTakeoverDialog from './WorkflowTakeoverDialog.svelte';
+	import MarkedLine from './MarkedLine.svelte';
+	import { shownValue } from '../utils/plan-takeover.js';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
@@ -207,8 +209,9 @@
 	// workflow to the owner, the way through them; otherwise the workflow's own
 	// takeover, whose button stands beside it.
 	function endedNote(wf: SavedWorkflow): string {
-		const person = wf.runs_as?.person ?? '';
-		const unnamed = person === '' ? '_unnamed' : '';
+		const raw = wf.runs_as?.person ?? '';
+		const unnamed = raw === '' ? '_unnamed' : '';
+		const person = raw === '' ? '' : shownValue(raw);
 		const paused = wf.runs_as?.covered_by_takeover ?? 0;
 		if (paused > 0) {
 			return tf(`workflow_library.ended_note_paused_${paused === 1 ? 'one' : 'other'}${unnamed}`, {
@@ -635,8 +638,8 @@
 					notice = '';
 					await loadWorkflows();
 					error = typeof msg.runs_as === 'string' && msg.runs_as !== ''
-						? tf('workflow_library.takeover.author_ended', { person: msg.runs_as, name })
-						: tf('workflow_library.takeover.author_ended_unnamed', { name });
+						? tf('workflow_library.takeover.author_ended', { person: shownValue(msg.runs_as), name: shownValue(name) })
+						: tf('workflow_library.takeover.author_ended_unnamed', { name: shownValue(name) });
 					return;
 				}
 				error = msg?.error ?? t('workflow_library.run_failed');
@@ -743,7 +746,7 @@
 	<h1 bind:this={libraryHeading} tabindex="-1" class="text-xl font-light tracking-tight mb-4">{t('workflow_library.title')}</h1>
 
 	{#if error}
-		<div data-page-error class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+		<div data-page-error class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4"><MarkedLine text={error} /></div>
 	{/if}
 	{#if notice}
 		<div class="rounded-[var(--radius-md)] bg-success/10 border border-success/20 px-4 py-3 text-sm text-success mb-4">{notice}</div>
@@ -893,7 +896,7 @@
 					</div>
 					<!-- Why a button above is off, in the open, not in a tooltip (ux U-079, U-119). -->
 					{#if accessEnded(wf)}
-						<p data-library-note="ended" class="mt-2 text-xs text-warning break-words">{endedNote(wf)}</p>
+						<p data-library-note="ended" class="mt-2 text-xs text-warning break-words"><MarkedLine text={endedNote(wf)} /></p>
 					{:else if wf.schedule_refusal !== undefined && (wf.schedulable ?? wf.mode === 'autonomous')}
 						<p data-library-note={wf.schedule_refusal} class="mt-2 text-xs text-text-muted break-words">{t(`workflow_library.${wf.schedule_refusal}_note`)}</p>
 					{/if}
@@ -1137,7 +1140,7 @@
 			{/if}
 			<!-- The schedule's line for a preview that did not load already says it did not load. -->
 			{#if error && !(stampLine === 'awaits_at_schedule' && !stampPreview && !stampLoading)}
-				<p class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
+				<p class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3"><MarkedLine text={error} /></p>
 			{/if}
 			<!-- "This is what runs" only above something that runs: without a preview it introduces nothing. -->
 			{#if stampPreview}
