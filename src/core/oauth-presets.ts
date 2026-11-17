@@ -29,6 +29,8 @@
  * extension point: production callers pass nothing.
  */
 
+import { createHash } from 'node:crypto';
+
 /**
  * The words around a preset's customer text on the consent page, in the text's language. Each
  * one is binding customer text like the paragraphs, so it comes from here as approved. Absent,
@@ -64,6 +66,38 @@ export interface ConsentNotice {
    */
   readonly scopeNames?: Readonly<Record<string, string>>;
 }
+
+/**
+ * The version of a customer text: the first 16 hex digits of a SHA-256 over everything the consent
+ * page shows of it — its language, its paragraphs, its frame and the names of its write scopes.
+ * Which of the write scopes a link asks for is left out: a page that lists fewer of them shows the
+ * same text. A change to any word gives a new version, and a consent recorded under the old one no
+ * longer reads as a consent to this text ({@link SHOPIFY_CONSENT_VERSION}).
+ */
+export function consentNoticeVersion(notice: ConsentNotice): string {
+  // A literal in a fixed order and the scope names sorted: the digest moves with the text only.
+  const shown = {
+    lang: notice.lang,
+    paragraphs: [...notice.paragraphs],
+    frame: notice.frame === undefined ? null : {
+      title: notice.frame.title, scopesIntro: notice.frame.scopesIntro, scopesNote: notice.frame.scopesNote,
+      button: notice.frame.button, afterButton: notice.frame.afterButton ?? null,
+    },
+    scopeNames: notice.scopeNames === undefined ? null
+      : Object.fromEntries(Object.keys(notice.scopeNames).sort().map((k) => [k, notice.scopeNames![k]])),
+  };
+  return createHash('sha256').update(JSON.stringify(shown)).digest('hex').slice(0, 16);
+}
+
+/**
+ * The version of the Shopify customer text a connection must have been confirmed under before a
+ * bulk run writes a field beyond a product's title and SEO texts (`shopifyConsentBlock`). Written
+ * out, not computed: a test holds it equal to {@link consentNoticeVersion} of the Shopify text, so
+ * a change to the text fails that test until this line is changed with it, in the same review.
+ */
+// One language today (`lang: 'de'`). A second one gets its own version, and the check must then
+// compare with the version of the language the page showed, not with this one constant.
+export const SHOPIFY_CONSENT_VERSION = 'bd121d2355d89db5';
 
 /**
  * What is wrong with a customer text's frame, empty when nothing is: a frame without names or

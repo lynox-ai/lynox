@@ -20,7 +20,10 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.intro', 'bulk.deselect.taken_out',
 	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
 	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
-	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note',
+	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note', 'bulk.markup.restores_note_active',
+	// Only the owner approves: a mandate reads that the owner can still approve the rest.
+	'bulk.invalid.html_too_long', 'bulk.invalid.html_too_long_woocommerce',
+	'bulk.halt.consentOutdated', 'bulk.halt.consentOutdated_more',
 	'bulk.invalid.before_has_shop_markup', 'bulk.invalid.before_has_shop_markup_undated',
 ]);
 
@@ -74,6 +77,10 @@ export interface BulkRun {
 	costUsd: number;
 	costCapUsd: number | null;
 	judge: { tier: string; unjudged: number } | null;
+	/** The form a list run reads, as stored (detail only). */
+	listForm?: string | null | undefined;
+	/** A judged run whose rule decides an HTML field (detail only). */
+	judgesHtml?: boolean | undefined;
 	/** The most different targets the approval lets the write reach; null before an approval. */
 	maxTargets: number | null;
 	/** Targets that failed in any pass; null for a run approved before this was counted. */
@@ -105,6 +112,9 @@ export interface BulkRunDetailData extends BulkRun {
 	/** The target the run waits on as its probe. `found`: lynox sent to it without a clear answer
 	 *  and then found it as planned, so it cannot say it wrote it; absent reads as written. */
 	probe: { key: string; fields: string[]; found?: boolean } | null;
+	/** A Shopify run halted because its connection does not yet cover some of its fields: those
+	 *  fields. Absent or null for every other run. */
+	consentFields?: string[] | null;
 	/** Whether this run confirmed a probe of its own: it stays a step the run went through once
 	 *  the probe holds. Absent reads as false. */
 	probeOwn?: boolean;
@@ -210,7 +220,7 @@ const BULK_BEFORE_PROMISES_GOING_ON: ReadonlySet<string> = new Set([
  *  plan: a write run halts on some of the same keys for other reasons (three failed writes,
  *  not reads), so it keeps the engine's reason. */
 export function bulkHaltText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge' | 'listFirstPage' | 'judgeServedBy' | 'judgeOwnKey'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge' | 'listFirstPage' | 'judgeServedBy' | 'judgeOwnKey'> & { listForm?: string | null | undefined },
 	managed: boolean | null,
 	i18n: BulkI18n,
 ): { cause: string; before: string | null } | null {
@@ -230,6 +240,8 @@ export function bulkHaltText(
 	const judgedUnavailable = key === 'unavailable' && run.judge !== null;
 	const beforeKey = key === 'blocked' || key === 'spendLimit' ? `bulk.halt.${key}_before_${tier}`
 		: judgedUnavailable ? 'bulk.halt.unavailable_judge_before'
+		// A Shopify list narrows by product type or vendor; any other list only where its source splits (U-186).
+		: key === 'listTooLarge' && (run.listForm === 'shopify' || run.listForm === 'shopify_filtered') ? 'bulk.halt.listTooLarge_before_shopify'
 		: `bulk.halt.${key}_before`;
 	// A step that promises going on stands only where the page offers to go on (ux U-105 L1): a
 	// run that cannot be moved on as it is gets the warning's way instead.
@@ -246,7 +258,17 @@ const BULK_RESUME_WRITE = new Set([
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
-const BULK_RESUME_NONE = new Set(['checksum', 'contract']);
+const BULK_RESUME_NONE = new Set(['checksum', 'contract', 'consentOutdated']);
+
+/** The fields a connection does not cover yet, by name with their article, joined with "und"/"and";
+ *  "these fields" where one has no name on this page (U-281). */
+export function bulkConsentFields(fields: readonly string[] | null | undefined, i18n: BulkI18n): string {
+	const known = new Set(['title', 'descriptionHtml', 'seo_title', 'seo_description', 'alt']);
+	const list = fields ?? [];
+	if (list.length === 0 || list.some((f) => !known.has(f))) return i18n.t('bulk.consent.fields_other');
+	const names = list.map((f) => i18n.t(`bulk.consent.field.${f}`));
+	return names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')} ${i18n.t('bulk.consent.and')} ${names[names.length - 1]!}`;
+}
 
 /** How an approved run that halted goes on: write on (`write`), write on under a higher maximum
  *  (`max`), only check the targets an earlier send left unclear (`check`: the next pass would send
@@ -285,7 +307,7 @@ export function bulkResumeKind(
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
 export function bulkResumeText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'> & Partial<Pick<BulkRunDetailData, 'consentFields'>>,
 	managed: boolean | null,
 	i18n: BulkI18n,
 ): { cause: string; before: string | null; check: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
@@ -302,6 +324,10 @@ export function bulkResumeText(
 		: key === 'consecutiveFailures' ? i18n.t('bulk.halt.consecutiveFailures_write')
 		: key === 'unrecorded' ? i18n.tf('bulk.halt.unrecorded_write', vars)
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
+		// "wrote nothing" only where nothing of the run was written or sent.
+		: key === 'consentOutdated' ? i18n.tf(run.applied === 0 && run.sentUnknown === 0 ? 'bulk.halt.consentOutdated' : 'bulk.halt.consentOutdated_more', {
+			field: bulkConsentFields(run.consentFields, i18n), path: `${i18n.t('nav.settings')} → ${i18n.t('settings.apis')}`,
+		})
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'credential' ? 'bulk.halt.credential_before'
@@ -471,6 +497,15 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
+/** At most this many characters of a refused link's domain on the page (U-311). */
+export const BULK_LINK_DOMAIN_SHOWN_MAX = 64;
+/** A refused link's domain as the page names it: visible as text, and cut with „…“ past
+ *  {@link BULK_LINK_DOMAIN_SHOWN_MAX} characters, the „…“ counted. */
+export function bulkLinkDomainShown(domain: string): string {
+	const chars = [...bulkVisibleText(domain)];
+	return chars.length <= BULK_LINK_DOMAIN_SHOWN_MAX ? chars.join('') : `${chars.slice(0, BULK_LINK_DOMAIN_SHOWN_MAX - 1).join('')}…`;
+}
+
 /** A list of more values than this is folded until the owner shows it all (ux U-175). */
 export const BULK_LIST_FILTER_UNFOLDED_MAX = 5;
 /** How many values a folded list shows before the count of the rest. */
@@ -624,6 +659,9 @@ export interface BulkFieldMarkupChange {
 	/** An added item lies outside what a write may add (the engine's allowlist): on an undo, markup
 	 *  from before the run that it writes back. Optional: an older engine sends none. */
 	addsOutsideAllowlist?: boolean | undefined;
+	/** Every added item is one the engine can tell is harmless: the undo's
+	 *  sentence then says only that it was there before. Absent (an older engine) reads as false. */
+	addsOnlyPassive?: boolean | undefined;
 	/** The value or its before-image is larger or nested deeper than the engine reads: nothing is
 	 *  listed, and the note says so instead of calling the list complete. */
 	unread?: boolean | undefined;
@@ -659,13 +697,19 @@ export interface BulkMarkupLine {
  *  without which the list would read as complete. */
 export function bulkMarkupList(
 	change: BulkFieldMarkupChange, undo: boolean, fieldName: string, i18n: BulkI18n,
-): { head: string | null; restoresNote: string | null; lines: BulkMarkupLine[]; note: string } {
+): { head: string | null; restoresNote: string | null; restoresActive: boolean; lines: BulkMarkupLine[]; note: string } {
 	const template = i18n.t('bulk.markup.in_template');
 	const line = (key: string) => (item: BulkMarkupItem): BulkMarkupLine =>
 		({ label: i18n.t(key), code: bulkMarkupItemText(item), template: item.inTemplate ? template : null });
+	// Only harmless markup restored: the sentence stands neutral, not as a warning about the owner's
+	// own table. An engine that does not say reads as active.
+	const restoresActive = change.addsOnlyPassive !== true;
 	return {
 		head: undo ? null : i18n.tf('bulk.markup.head', { field: fieldName }),
-		restoresNote: undo && change.addsOutsideAllowlist === true ? i18n.t('bulk.markup.restores_note') : null,
+		restoresNote: undo && change.addsOutsideAllowlist === true
+			? i18n.t(restoresActive ? 'bulk.markup.restores_note_active' : 'bulk.markup.restores_note')
+			: null,
+		restoresActive,
 		lines: [
 			...change.added.map(line(undo ? 'bulk.markup.restores' : 'bulk.markup.added')),
 			...change.removed.map(line(undo ? 'bulk.markup.removes' : 'bulk.markup.removed')),
@@ -1026,6 +1070,10 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	not_in_filter: 'not_in_filter',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
 	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
+	// The HTML check's refusals reach a Shopify owner since descriptions are written.
+	element_not_allowed: 'markup_not_allowed', attribute_not_allowed: 'markup_not_allowed', content_changed: 'content_changed',
+	new_img: 'new_img', not_canonical: 'not_canonical',
+	comment_added: 'comment_added_shopify', html_too_long: 'html_too_long',
 };
 /** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
  *  of tags the page reads, whose way out differs from planning again, and of links, in a
@@ -1050,9 +1098,13 @@ export function bulkInvalidText(
 	reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n,
 	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's.
 	 *  With `before_has_shop_markup`: the date of the earlier write, already formatted, or null.
+	 *  `listForm`: the stored list form; `judgesHtml`: the run's rule decides an HTML field;
 	 *  `startDomains`: the run takes allowed link domains at the start of judging ({@link bulkTakesStartDomains});
 	 *  `linkDomain`: with `new_link_domain`, the domain the refused link points to. */
-	context?: { field: string | undefined; host: string | null; dataStore: boolean; markedDate?: string | null | undefined; startDomains?: boolean; linkDomain?: string | undefined },
+	context?: {
+		field: string | undefined; host: string | null; dataStore: boolean; markedDate?: string | null | undefined;
+		listForm?: string | null | undefined; judgesHtml?: boolean | undefined; startDomains?: boolean; linkDomain?: string | undefined;
+	},
 ): string {
 	// The description an earlier run wrote and the store added markup to: named
 	// by that run's date, so the owner can find it; without the date where the run is gone.
@@ -1071,6 +1123,15 @@ export function bulkInvalidText(
 		const key = shopify ? 'secret_in_context' : context?.dataStore === true ? 'secret_in_context_column' : 'secret_in_context_field';
 		return i18n.tf(`bulk.invalid.${key}`, { field });
 	}
+	// A WooCommerce run has two HTML fields and the ledger names neither: its own sentence (U-186).
+	if (reason === 'html_too_long' && context?.listForm === 'woocommerce') return i18n.t('bulk.invalid.html_too_long_woocommerce');
+	// WooCommerce's block editor reads a comment as a block: its own sentence there.
+	if (reason === 'comment_added' && context?.listForm === 'woocommerce') return i18n.t('bulk.invalid.comment_added_woocommerce');
+	// A description cut off is one the owner may keep by hand, where the products are managed (U-101).
+	if (reason === 'cut_off' && context?.judgesHtml === true) {
+		const where = shopify ? 'where_shopify' : context.listForm === 'woocommerce' ? 'where_woocommerce' : 'where_other';
+		return i18n.tf('bulk.invalid.cut_off_html', { where: i18n.t(`bulk.invalid.${where}`) });
+	}
 	const anyForm = BULK_INVALID_ANY_FORM[reason];
 	if (anyForm !== undefined) {
 		// A run that takes allowed link domains at the start of judging names that field as a way out,
@@ -1079,7 +1140,17 @@ export function bulkInvalidText(
 		// page was not told, reads the sentence without it.
 		const addable = context?.linkDomain !== undefined && startDomainOf(context.linkDomain) !== null;
 		const key = anyForm === 'new_link_domain' && context?.startDomains === true && addable ? 'new_link_domain_judged' : anyForm;
-		return i18n.tf(`bulk.invalid.${key}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
+		const where = i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other');
+		// The refused domain by name where the engine may show it (U-311): written by the model, so
+		// shown as text only and cut to a length; without it, the sentence that names none.
+		if (anyForm === 'new_link_domain' && context?.linkDomain !== undefined && context.linkDomain !== '') {
+			const domain = bulkLinkDomainShown(context.linkDomain);
+			// The judged sentence asks the owner to enter this domain: a cut one would be entered cut.
+			if (key !== 'new_link_domain_judged' || domain === bulkVisibleText(context.linkDomain)) {
+				return i18n.tf(`bulk.invalid.${key}_named`, { domain, where });
+			}
+		}
+		return i18n.tf(`bulk.invalid.${key}`, { where });
 	}
 	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
 	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });

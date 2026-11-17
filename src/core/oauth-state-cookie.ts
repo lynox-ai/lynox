@@ -67,6 +67,10 @@ const ASKED_FIELD = /^[A-Za-z0-9_-]{1,4000}$/;
 const SCOPE_PATTERN = /^[\x21-\x7e]{1,256}$/;
 const ASKED_MAX = 64;
 
+/** The consent field: the version of the customer text the page showed, or `none` when it showed none. */
+const CONSENT_FIELD = /^(?:[0-9a-f]{16}|none)$/;
+const CONSENT_VERSION = /^[0-9a-f]{16}$/;
+
 /**
  * The longest signed value this module hands out. A browser keeps a cookie of about 4096 bytes,
  * name and attributes included, and drops a longer Set-Cookie without a word: the person would
@@ -100,6 +104,13 @@ export interface ProfileOAuthState {
    * signing (none asked), always present when read back.
    */
   readonly asked?: readonly string[] | undefined;
+  /**
+   * The version of the customer text the consent page showed and the confirmation was checked
+   * against (`consentNoticeVersion`), when the page showed one. The callback records it as the
+   * grant's `consent_version`: the text the person agreed to, not the one the engine holds at a
+   * later read. Absent when signing (no text shown) and when read back for such a start.
+   */
+  readonly consent?: string | undefined;
 }
 
 /** The principal of a connection's start, as the state cookie carries it. */
@@ -192,6 +203,8 @@ export function signProfileOAuthState(
   if (!PRINCIPAL_FIELD.test(encodePrincipal(v.by))) return null;
   const asked = v.asked ?? [];
   if (!validAsked(asked) || !ASKED_FIELD.test(encodeAsked(asked))) return null;
+  if (v.consent !== undefined && !CONSENT_VERSION.test(v.consent)) return null;
+  const consent = v.consent ?? 'none';
   if (!Number.isInteger(nowSec) || nowSec < 0) return null;
   // The verifier's own charset admits `.` and `~`; the payload is dot-separated,
   // so a verifier carrying a dot would split into the wrong number of fields.
@@ -199,7 +212,7 @@ export function signProfileOAuthState(
   // generator that emits dots is a defect to fix, not input to accommodate.
   if (v.verifier.includes('.')) return null;
 
-  const payload = `${v.state}.${v.profileId}.${v.verifier}.${encodePrincipal(v.by)}.${encodeAsked(asked)}.${String(nowSec)}`;
+  const payload = `${v.state}.${v.profileId}.${v.verifier}.${encodePrincipal(v.by)}.${encodeAsked(asked)}.${consent}.${String(nowSec)}`;
   const value = `${payload}.${sign(payload, secret)}`;
   return value.length <= PROFILE_OAUTH_STATE_MAX_LEN ? value : null;
 }
@@ -223,12 +236,12 @@ export function verifyProfileOAuthState(
 ): ProfileOAuthState | null {
   if (!secret || !raw) return null;
 
-  // Seven fields. A cookie from before the asked scopes were carried has six and is refused: it
-  // cannot say what the person confirmed, and it lived ten minutes at most.
+  // Eight fields. A cookie from before the customer text's version was carried has seven and is
+  // refused: it cannot say which text the person confirmed, and it lived ten minutes at most.
   const parts = raw.split('.');
-  if (parts.length !== 7) return null;
-  const [state, profileId, verifier, byField, askedField, tsStr, sig] = parts;
-  if (!state || !profileId || !verifier || !byField || !askedField || !tsStr || !sig) return null;
+  if (parts.length !== 8) return null;
+  const [state, profileId, verifier, byField, askedField, consentField, tsStr, sig] = parts;
+  if (!state || !profileId || !verifier || !byField || !askedField || !consentField || !tsStr || !sig) return null;
 
   // `parseInt` accepts leading garbage ("12abc" → 12) and a leading `+`/`-`;
   // the pattern is what makes the timestamp a number this engine wrote.
@@ -241,7 +254,7 @@ export function verifyProfileOAuthState(
   if (nowSec < ts) return null;
   if (nowSec - ts > PROFILE_OAUTH_STATE_TTL_SEC) return null;
 
-  const expected = sign(`${state}.${profileId}.${verifier}.${byField}.${askedField}.${tsStr}`, secret);
+  const expected = sign(`${state}.${profileId}.${verifier}.${byField}.${askedField}.${consentField}.${tsStr}`, secret);
   const sigBuf = Buffer.from(sig, 'hex');
   const expBuf = Buffer.from(expected, 'hex');
   // `Buffer.from(x, 'hex')` truncates at the first non-hex character rather
@@ -257,8 +270,9 @@ export function verifyProfileOAuthState(
   if (by === null) return null;
   const asked = decodeAsked(askedField);
   if (asked === null) return null;
+  if (!CONSENT_FIELD.test(consentField)) return null;
 
-  return { state, profileId, verifier, by, asked };
+  return { state, profileId, verifier, by, asked, ...(consentField === 'none' ? {} : { consent: consentField }) };
 }
 
 /** States a callback has used, each with the second after which its cookie is refused anyway. */
