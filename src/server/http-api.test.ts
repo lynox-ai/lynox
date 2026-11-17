@@ -13401,6 +13401,10 @@ describe('LynoxHTTPApi', () => {
         // No engine.db here, so no paused plan whose takeover covers it: none counted.
         expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 });
         expect(body.workflows.find((w) => w.id === 'wf-o')).not.toHaveProperty('runs_as');
+        // A mark without a grant id: whose access it was cannot be told, and the answer says so.
+        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' ? { ...mandateMade, createdMandateId: null } : undefined));
+        const undetermined = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+        expect(undetermined.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true, undetermined: true, covered_by_takeover: 0 });
         mockHistoryGetWorkflowAuthorship.mockReset();
         mockHistoryGetPlannedPipelines.mockReturnValue([]);
       });

@@ -8,6 +8,15 @@ import { getLocale, setLocale, tf } from '../i18n.svelte.js';
 const VALUES = {"person": "Eva", "name": "Eva", "plan": "Weekly", "plans": "Daily, Nightly", "provider": "Shop", "account": " (Main store)", "tab": "TAB", "button": "BUTTON", "n": "2", "review": "REVIEW"};
 
 const SENTENCES: Array<[string, string, string]> = [
+	["workflow_library.takeover.access_ended",
+		"Zugang beendet",
+		"access ended"],
+	["workflow_library.takeover.released_owner_one",
+		"Der Plan „Weekly“ läuft danach wieder, unter deinem Namen statt unter dem von Eva.",
+		"The plan “Weekly” then runs again, under your name instead of Eva's."],
+	["workflow_library.takeover.released_owner_many",
+		"Diese Pläne laufen danach wieder, unter deinem Namen statt unter dem von Eva: Daily, Nightly.",
+		"These plans then run again, under your name instead of Eva's: Daily, Nightly."],
 	["stamp.workflow_unconfirmed_ended",
 		"Übernimm zuerst seinen Workflow unter Automation → Workflows, mit „BUTTON“.",
 		"Take over its workflow first under Automation → Workflows, with “BUTTON”."],
@@ -63,8 +72,8 @@ const SENTENCES: Array<[string, string, string]> = [
 		"Diese Pläne sind pausiert und bleiben es: Daily, Nightly. Übernimm jeden, der weiterlaufen soll, einzeln unter „TAB“ mit „BUTTON“.",
 		"These plans are paused and stay paused: Daily, Nightly. Take over each one that should keep running on its own, under “TAB” with “BUTTON”."],
 	["workflow_library.takeover.afterwards",
-		"Danach gehört der Workflow keiner Person mit Zugang mehr. Jede Person, die Zugang hat, kann ihn dann im Chat ausführen oder planen lassen, unter ihrem eigenen Namen. Macht sie eine Kopie davon, gehört die Kopie ihr.",
-		"Afterwards the workflow no longer belongs to anyone you gave access to. Anyone who has access can then have it run or scheduled in the chat, under their own name. If they make a copy of it, the copy is theirs."],
+		"Danach gehört der Workflow keiner Person mit Zugang mehr. Jede Person, die Zugang hat, kann ihn dann im Chat ausführen oder planen lassen, unter ihrem eigenen Namen. Macht diese Person eine Kopie davon, gehört die Kopie ihr.",
+		"Afterwards the workflow no longer belongs to anyone you gave access to. Anyone who has access can then have it run or scheduled in the chat, under their own name. If that person makes a copy of it, the copy is theirs."],
 	["workflow_library.takeover.confirm",
 		"Übernehmen und Schritte bestätigen",
 		"Take over and confirm steps"],
@@ -100,16 +109,16 @@ const SENTENCES: Array<[string, string, string]> = [
 		"The plan “Weekly” then runs again too."],
 	["workflow_library.ended_note_paused_one",
 		"Eva hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Ein Plan, der ihn ausführt, ist deshalb pausiert. Übernimmst du diesen Plan unter „TAB“ mit „BUTTON“, läuft danach auch dieser Workflow unter dir. Hier ausführen kannst du ihn danach erst, wenn du seine Schritte mit „REVIEW“ bestätigt hast.",
-		"Eva created or last changed this workflow, and their access has ended. One schedule that runs it is paused for that reason. If you take that schedule over under “TAB” with “BUTTON”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “REVIEW”."],
+		"Eva created or last changed this workflow, and their access has ended. One plan that runs it is paused for that reason. If you take that plan over under “TAB” with “BUTTON”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “REVIEW”."],
 	["workflow_library.ended_note_paused_other",
 		"Eva hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. 2 Pläne, die ihn ausführen, sind deshalb pausiert. Übernimmst du einen davon unter „TAB“ mit „BUTTON“, läuft danach auch dieser Workflow unter dir. Hier ausführen kannst du ihn danach erst, wenn du seine Schritte mit „REVIEW“ bestätigt hast.",
-		"Eva created or last changed this workflow, and their access has ended. 2 schedules that run it are paused for that reason. If you take one of them over under “TAB” with “BUTTON”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “REVIEW”."],
+		"Eva created or last changed this workflow, and their access has ended. 2 plans that run it are paused for that reason. If you take one of them over under “TAB” with “BUTTON”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “REVIEW”."],
 	["workflow_library.ended_note_paused_one_unnamed",
 		"Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Ein Plan, der ihn ausführt, ist deshalb pausiert. Übernimmst du diesen Plan unter „TAB“ mit „BUTTON“, läuft danach auch dieser Workflow unter dir. Hier ausführen kannst du ihn danach erst, wenn du seine Schritte mit „REVIEW“ bestätigt hast.",
-		"Someone with access created or last changed this workflow, and their access has ended. One schedule that runs it is paused for that reason. If you take that schedule over under “TAB” with “BUTTON”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “REVIEW”."],
+		"Someone with access created or last changed this workflow, and their access has ended. One plan that runs it is paused for that reason. If you take that plan over under “TAB” with “BUTTON”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “REVIEW”."],
 	["workflow_library.ended_note_paused_other_unnamed",
 		"Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. 2 Pläne, die ihn ausführen, sind deshalb pausiert. Übernimmst du einen davon unter „TAB“ mit „BUTTON“, läuft danach auch dieser Workflow unter dir. Hier ausführen kannst du ihn danach erst, wenn du seine Schritte mit „REVIEW“ bestätigt hast.",
-		"Someone with access created or last changed this workflow, and their access has ended. 2 schedules that run it are paused for that reason. If you take one of them over under “TAB” with “BUTTON”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “REVIEW”."],
+		"Someone with access created or last changed this workflow, and their access has ended. 2 plans that run it are paused for that reason. If you take one of them over under “TAB” with “BUTTON”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “REVIEW”."],
 ];
 
 const before = getLocale();

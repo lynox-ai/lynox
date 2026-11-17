@@ -221,6 +221,14 @@ describe('the notice of an ended access', () => {
 });
 
 describe('the confirmation', () => {
+	it('sets the title apart on a plan with a takeover to give, and on no other plan', async () => {
+		rows = [PAUSED, { ...PAUSED, id: 'p2', title: 'Monatsabschluss', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await render();
+		const titleBox = (title: string): Element | null | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === title)?.querySelector('bdi[data-foreign-value]');
+		expect(titleBox('Wochenreport')?.textContent).toBe('Wochenreport');
+		expect(titleBox('Monatsabschluss')).toBeNull();
+	});
+
 	it('sets every value someone else wrote apart, wherever a sentence of the plan takeover names it', async () => {
 		rows = [{ ...PAUSED, title: 'FX-title', paused_ended: [{ email: 'FX-ended', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: true }] }];
 		preview = {

@@ -209,7 +209,7 @@ describe('the dialog', () => {
 		expect(text('member_change')).toBe(`Der Plan „Weekly“ läuft danach unter deinem Namen statt unter dem von ${EVA}.`);
 		expect(text('lapsing')).toBe('Beim Plan „Hourly“ gelten die freigegebenen Verbindungen danach nicht mehr. Gib sie unter Automation → Trigger mit „Verbindungen prüfen“ neu frei. Bis dahin scheitern seine Schritte, die eine Verbindung brauchen.');
 		expect(text('paused')).toBe('Der Plan „Monthly“ ist pausiert und bleibt es. Soll er weiterlaufen, übernimm ihn einzeln unter „Trigger“ mit „Übernehmen“.');
-		expect(text('afterwards')).toBe('Danach gehört der Workflow keiner Person mit Zugang mehr. Jede Person, die Zugang hat, kann ihn dann im Chat ausführen oder planen lassen, unter ihrem eigenen Namen. Macht sie eine Kopie davon, gehört die Kopie ihr.');
+		expect(text('afterwards')).toBe('Danach gehört der Workflow keiner Person mit Zugang mehr. Jede Person, die Zugang hat, kann ihn dann im Chat ausführen oder planen lassen, unter ihrem eigenen Namen. Macht diese Person eine Kopie davon, gehört die Kopie ihr.');
 		// The stamp's own part: the fields beside the steps, and the steps.
 		const stamp = d.querySelector<HTMLElement>('[data-takeover-part="stamp"]')!;
 		expect(stamp.textContent).toContain('continue');
@@ -427,6 +427,38 @@ describe('the dialog', () => {
 		expect([...d.querySelectorAll('*')].some((e) => [...e.attributes].some((a) => /[\uE000\uE001]/.test(a.value)))).toBe(false);
 	});
 
+	it('says a plan that runs again under the owner\'s name once, in one sentence, and every plan once', async () => {
+		const p = FULL();
+		p['alsoReleased'] = [{ id: 'p-r', title: 'Daily' }, { id: 'p-n', title: 'Nightly' }, { id: 'p-q', title: 'Quarterly' }];
+		p['memberChanges'] = [
+			{ id: 'p-r', title: 'Daily', before: `mandate:${EVA}`, after: null, runsNoMore: false },
+			{ id: 'p-n', title: 'Nightly', before: `mandate:${EVA}`, after: null, runsNoMore: false },
+			{ id: 'p-c', title: 'Weekly', before: `mandate:${EVA}`, after: null, runsNoMore: false },
+		];
+		p['lapsing'] = [{ id: 'p-r', title: 'Daily' }];
+		await open([ENDED], [p]);
+		const d = await openDialog();
+		const said = (kind: string): string[] => [...d.querySelectorAll(`[data-takeover-part="${kind}"]`)].map((e) => e.textContent ?? '');
+		expect(said('released')).toEqual([
+			`Diese Pläne laufen danach wieder, unter deinem Namen statt unter dem von ${EVA}: Daily, Nightly.`,
+			'Dann läuft auch der Plan „Quarterly“ wieder.',
+		]);
+		expect(said('member_change')).toEqual([`Der Plan „Weekly“ läuft danach unter deinem Namen statt unter dem von ${EVA}.`]);
+		// Every plan once, outside the sentence that its allowed connections lapse.
+		const outside = [...d.querySelectorAll('[data-takeover-part]')].filter((e) => e.getAttribute('data-takeover-part') !== 'lapsing').map((e) => e.textContent ?? '').join(' ');
+		for (const title of ['Daily', 'Nightly', 'Quarterly', 'Weekly', 'Monthly']) expect(outside.split(title).length - 1, title).toBe(1);
+	});
+
+	it('says one plan that runs again under the owner\'s name in one sentence', async () => {
+		const p = FULL();
+		p['alsoReleased'] = [{ id: 'p-r', title: 'Daily' }];
+		p['memberChanges'] = [{ id: 'p-r', title: 'Daily', before: `mandate:${EVA}`, after: null, runsNoMore: false }];
+		await open([ENDED], [p]);
+		const d = await openDialog();
+		expect([...d.querySelectorAll('[data-takeover-part="released"]')].map((e) => e.textContent)).toEqual([`Der Plan „Daily“ läuft danach wieder, unter deinem Namen statt unter dem von ${EVA}.`]);
+		expect(d.querySelector('[data-takeover-part="member_change"]')).toBeNull();
+	});
+
 	it('says a connection only where a marked step uses it', async () => {
 		await open([ENDED]);
 		const d = await openDialog();
@@ -448,8 +480,8 @@ describe('the dialog', () => {
 		setLocale('en');
 		await open([ENDED]);
 		const d = await openDialog();
-		expect(d.querySelector('[data-testid="takeover-mark"]')?.textContent?.trim()).toBe(`Created by ${JAN} · still has access`);
-		expect(d.querySelector('[data-takeover-part="afterwards"]')?.textContent?.trim()).toBe('Afterwards the workflow no longer belongs to anyone you gave access to. Anyone who has access can then have it run or scheduled in the chat, under their own name. If they make a copy of it, the copy is theirs.');
+		expect([...d.querySelectorAll('[data-testid="takeover-mark"]')].map((m) => m.textContent?.trim())).toEqual([`Created by ${JAN} · still has access`, `Edited by ${EVA} · access ended`]);
+		expect(d.querySelector('[data-takeover-part="afterwards"]')?.textContent?.trim()).toBe('Afterwards the workflow no longer belongs to anyone you gave access to. Anyone who has access can then have it run or scheduled in the chat, under their own name. If that person makes a copy of it, the copy is theirs.');
 	});
 });
 
@@ -636,6 +668,35 @@ describe('the dialog for keyboard and screen reader', () => {
 });
 
 describe('the library\'s own sentences', () => {
+	it('at a mark whose person cannot be told, names no one: neither in the note nor after a refused run', async () => {
+		const wf: Record<string, unknown> = { ...base('wf-u', 'Undetermined'), runs_as: { person: 'extern@kanzlei.example', ended: false, undetermined: true } };
+		runAnswer = { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: 'extern@kanzlei.example' } };
+		await open([wf]);
+		wf['runs_as'] = { person: 'extern@kanzlei.example', ended: true, undetermined: true, covered_by_takeover: 0 };
+		const run = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Ausführen');
+		run!.click();
+		await settle();
+		expect(target.querySelector('[data-page-error]')?.textContent).toBe('Eine Person mit Zugang hat den Workflow „Undetermined“ angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
+		expect(target.querySelector('[data-library-note="ended"]')?.textContent).toBe('Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst.');
+		expect(target.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Zugang beendet');
+		expect(target.textContent).not.toContain('extern@kanzlei.example');
+	});
+
+	it('sets the title apart on a card with a takeover to give, and on no other card', async () => {
+		await open([ENDED, { ...base('wf-l', 'Live one'), runs_as: { person: JAN, ended: false } }, base('wf-o', 'Own one')]);
+		const titleBox = (name: string): string | null | undefined => card(name).querySelector('p')?.querySelector('bdi[data-foreign-value]')?.textContent;
+		expect(titleBox('Ended one')).toBe('Ended one');
+		expect(titleBox('Live one')).toBeUndefined();
+		expect(titleBox('Own one')).toBeUndefined();
+	});
+
+	it('draws the box flush, with no space of its own outside the value', async () => {
+		await open([ENDED]);
+		const boxes = [...target.querySelectorAll('bdi[data-foreign-value]')];
+		expect(boxes.length).toBeGreaterThan(0);
+		for (const b of boxes) expect(b.className).not.toMatch(/(^|\s)-?(p|px|pl|pr|m|mx|ml|mr)-/);
+	});
+
 	it('sets the person apart in the note at an ended workflow, with and without paused plans', async () => {
 		await open([
 			{ ...base('wf-a', 'Plain'), runs_as: { person: 'FX-person', ended: true, covered_by_takeover: 0 } },

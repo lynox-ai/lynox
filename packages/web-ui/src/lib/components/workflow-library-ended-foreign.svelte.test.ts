@@ -88,7 +88,7 @@ describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)
 			{ ...base('wf-l', 'Live one'), runs_as: { person: 'jan@kanzlei.example', ended: false } },
 		]);
 		const ended = card('Ended one');
-		expect(ended.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe(`Zugang beendet: ${EVA}`);
+		expect(ended.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Zugang beendet');
 		expect(ended.querySelector('[data-testid="runs-as-badge"]')).toBeNull();
 		expect([button(ended, 'workflow_library.run')?.disabled, button(ended, 'workflow_library.schedule')?.disabled, button(ended, 'workflow_library.edit_in_chat')?.disabled]).toEqual([true, true, true]);
 		expect([button(ended, 'workflow_library.rename')?.disabled, button(ended, 'workflow_library.delete')?.disabled]).toEqual([false, false]);
@@ -129,8 +129,8 @@ describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)
 		setLocale('en');
 		await open('owner', [{ ...base('wf-e', 'Ended one'), runs_as: { person: EVA, ended: true, covered_by_takeover: 1 } }]);
 		const c = card('Ended one');
-		expect(c.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe(`Access ended: ${EVA}`);
-		expect(note(c)).toBe(`${EVA} created or last changed this workflow, and their access has ended. One schedule that runs it is paused for that reason. If you take that schedule over under “Triggers” with “Take over”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “Review steps”.`);
+		expect(c.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Access ended');
+		expect(note(c)).toBe(`${EVA} created or last changed this workflow, and their access has ended. One plan that runs it is paused for that reason. If you take that plan over under “Triggers” with “Take over”, this workflow runs under you afterwards too. You can run it here only after that, once you have confirmed its steps with “Review steps”.`);
 	});
 });
 

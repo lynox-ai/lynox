@@ -7,4 +7,4 @@
 	let { text }: { text: string } = $props();
 </script>
 
-{#each segments(text) as s, i (i)}{#if s.foreign}<bdi data-foreign-value class="rounded-[var(--radius-sm)] bg-bg-muted px-1 font-mono">{s.text}</bdi>{:else}{s.text}{/if}{/each}
+{#each segments(text) as s, i (i)}{#if s.foreign}<bdi data-foreign-value class="rounded-[var(--radius-sm)] bg-bg-muted font-mono">{s.text}</bdi>{:else}{s.text}{/if}{/each}

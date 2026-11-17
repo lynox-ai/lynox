@@ -62,7 +62,8 @@
 		awaitsStamp?: boolean;
 		// Whom Run runs it as, when that is a person the owner let in (1055): the email, and whether
 		// their access ended, which refuses the run. Sent to the owner only; absent for the owner's own.
-		runs_as?: { person: string; ended: boolean; covered_by_takeover?: number };
+		/** `undetermined`: the mark carries no grant id, so whose access it was cannot be told. */
+		runs_as?: { person: string; ended: boolean; undetermined?: boolean; covered_by_takeover?: number };
 		// Sent to a mandate for a workflow it may not schedule as it is (UX-058, ux U-085): another
 		// person's, or one whose author lynox cannot read. Never whose it is.
 		schedule_refusal?: 'foreign' | 'unreadable';
@@ -209,7 +210,8 @@
 	// workflow to the owner, the way through them; otherwise the workflow's own
 	// takeover, whose button stands beside it.
 	function endedNote(wf: SavedWorkflow): string {
-		const raw = wf.runs_as?.person ?? '';
+		// A mark whose person cannot be told is not named by the address it carries.
+		const raw = wf.runs_as?.undetermined === true ? '' : wf.runs_as?.person ?? '';
 		const unnamed = raw === '' ? '_unnamed' : '';
 		const person = raw === '' ? '' : shownValue(raw);
 		const paused = wf.runs_as?.covered_by_takeover ?? 0;
@@ -637,7 +639,8 @@
 					// end: read it again, then say where the button is.
 					notice = '';
 					await loadWorkflows();
-					error = typeof msg.runs_as === 'string' && msg.runs_as !== ''
+					const undetermined = workflows.find((w) => w.id === id)?.runs_as?.undetermined === true;
+					error = typeof msg.runs_as === 'string' && msg.runs_as !== '' && !undetermined
 						? tf('workflow_library.takeover.author_ended', { person: shownValue(msg.runs_as), name: shownValue(name) })
 						: tf('workflow_library.takeover.author_ended_unnamed', { name: shownValue(name) });
 					return;
@@ -774,7 +777,8 @@
 									class="w-full min-h-11 md:[@media(hover:hover)]:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 								/>
 							{:else}
-								<p class="text-sm font-medium line-clamp-2 break-words">{wf.name}</p>
+								<!-- With a takeover to give, the title is someone else's value, as in the sentence below it. -->
+								<p class="text-sm font-medium line-clamp-2 break-words">{#if accessEnded(wf)}<MarkedLine text={shownValue(wf.name)} />{:else}{wf.name}{/if}</p>
 								{#if wf.description}
 									<p class="text-xs text-text-subtle mt-1 line-clamp-2 break-words">{wf.description}</p>
 								{/if}
@@ -804,7 +808,8 @@
 									{#if wf.runs_as && accessEnded(wf)}
 										<span data-testid="access-ended-badge" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-1.5 text-warning break-all">
 											<Icon name="warning" size="xs" />
-											{wf.runs_as.person === '' ? t('workflow_library.access_ended_unnamed') : tf('workflow_library.access_ended', { person: wf.runs_as.person })}
+											<!-- Without the address: the sentence below names the person, set apart. -->
+											{t('workflow_library.access_ended_unnamed')}
 										</span>
 									{:else if wf.runs_as}
 										<span data-testid="runs-as-badge" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 break-all">

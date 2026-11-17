@@ -579,7 +579,8 @@
 							<!-- Wrapping, so the badges move to their own line on a narrow card instead
 							     of squeezing the title: the badges are `shrink-0` and the title clamps. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-								<p class="text-sm font-medium line-clamp-2 break-words">{trigger.title}</p>
+								<!-- A plan to take over: its title is someone else's value, as in the notice above. -->
+								<p class="text-sm font-medium line-clamp-2 break-words">{#if pausedOpen(trigger)}<MarkedLine text={shownValue(trigger.title)} />{:else}{trigger.title}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
