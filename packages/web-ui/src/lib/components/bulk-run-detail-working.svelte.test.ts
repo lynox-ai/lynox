@@ -2,14 +2,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
-import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep } from './bulk-runs.js';
+import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep, bulkWorkingLine } from './bulk-runs.js';
 import { t, tf } from '../i18n.svelte.js';
 
-// While the engine moves a run on by itself, the page keeps the counts and marks of its last load,
-// so they agree with each other. Before, nothing showed that anything was happening: a walk saw
-// „0 Ziele“ standing while lynox was already writing, and after ten minutes the page stopped
-// asking without a word. Now a line names the step the engine works on and says the numbers move
-// once it is done, and a sentence says when the page has stopped asking.
+// While the engine moves a run on by itself, a line names the step it works on, with the run's
+// numbers where the engine counts them, and the head takes the counts of each ask. Before, nothing
+// showed that anything was happening: a walk saw „0 Ziele“ standing while lynox was already
+// writing, a running undo looked like a finished one, and after ten minutes the page stopped
+// asking without a word. While the list or the targets are read, the head shows a dash, not a
+// count that reads as done; a sentence says when the page has stopped asking.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -120,79 +121,122 @@ const shown = (): string => target.textContent ?? '';
 
 const HOST = 'demo.myshopify.com';
 const line = (): string | null => target.querySelector('[data-testid="bulk-working"]')?.textContent ?? null;
+const counts = (): string | null => target.querySelector('[data-testid="bulk-counts"]')?.textContent ?? null;
 const stopped = (): string | null => target.querySelector('[data-testid="bulk-follow-stopped"]')?.textContent ?? null;
-const working = (key: string): string => `${tf(key, { provider: HOST })} ${t('bulk.working.numbers')}`;
+const UPDATES = (n: number) => ({ update: n, create: 0, delete: 0, unchanged: 0, invalid: 0 });
 
 describe('the step the engine works on', () => {
-	it('is the list while its first page is set, the targets without a judge, the judging with one, and the writing once approved', () => {
-		const base = { haltKey: null, haltReason: null, listFirstPage: null, judge: null };
+	it('is the list while its first page is set, the targets without a judge, the judging with one, the writing once approved, and the taking back for an undo', () => {
+		const base = { haltKey: null, haltReason: null, listFirstPage: null, judge: null, kind: 'apply' as const };
 		expect(bulkWorkingStep({ ...base, phase: 'planned', listFirstPage: `https://${HOST}/admin/api/2026-10/graphql.json` })).toBe('list');
 		expect(bulkWorkingStep({ ...base, phase: 'planned', listFirstPage: 'x', judge: { tier: 'standard', unjudged: 3 } })).toBe('list');
 		expect(bulkWorkingStep({ ...base, phase: 'planned' })).toBe('read');
 		expect(bulkWorkingStep({ ...base, phase: 'planned', judge: { tier: 'standard', unjudged: 3 } })).toBe('judge');
 		expect(bulkWorkingStep({ ...base, phase: 'approved' })).toBe('write');
 		expect(bulkWorkingStep({ ...base, phase: 'writing', judge: { tier: 'standard', unjudged: 0 } })).toBe('write');
+		expect(bulkWorkingStep({ ...base, phase: 'writing', kind: 'undo' })).toBe('undo');
+		expect(bulkWorkingStep({ ...base, phase: 'approved', kind: 'undo' })).toBe('undo');
 		expect(bulkWorkingStep({ ...base, phase: 'writing', haltKey: 'unavailable', haltReason: 'unavailable' })).toBeNull();
+		expect(bulkWorkingStep({ ...base, phase: 'writing', kind: 'undo', haltKey: 'unavailable', haltReason: 'unavailable' })).toBeNull();
 		expect(bulkWorkingStep({ ...base, phase: 'planned', haltKey: 'awaitingStart', haltReason: 'awaitingStart' })).toBeNull();
 		expect(bulkWorkingStep({ ...base, phase: 'previewed' })).toBeNull();
 		expect(bulkWorkingStep({ ...base, phase: 'done' })).toBeNull();
 	});
+
+	it('counts the verdicts out of what the judge reads, and the written targets out of what the approval reaches', () => {
+		const r = { applied: 2, changes: UPDATES(5), maxTargets: null, judge: { tier: 'fast', unjudged: 3, judged: 4 } };
+		expect(bulkWorkingLine('judge', r)).toEqual({ key: 'bulk.working.judge', params: { k: '4', n: '7' } });
+		expect(bulkWorkingLine('judge', { ...r, judge: { tier: 'fast', unjudged: 3 } })).toEqual({ key: 'bulk.working.judge_open', params: {} });
+		expect(bulkWorkingLine('write', r)).toEqual({ key: 'bulk.working.write', params: { a: '2', n: '5' } });
+		expect(bulkWorkingLine('write', { ...r, maxTargets: 3 })).toEqual({ key: 'bulk.working.write', params: { a: '2', n: '3' } });
+		expect(bulkWorkingLine('write', { ...r, maxTargets: 9 })).toEqual({ key: 'bulk.working.write', params: { a: '2', n: '5' } });
+		expect(bulkWorkingLine('undo', r)).toEqual({ key: 'bulk.working.undo', params: { a: '2', n: '5' } });
+		expect(bulkWorkingLine('list', r)).toEqual({ key: 'bulk.working.list', params: {} });
+		expect(bulkWorkingLine('read', r)).toEqual({ key: 'bulk.working.read', params: {} });
+	});
 });
 
 describe('a run the engine works on', () => {
-	it('shows no working line while it reads the list, and the stopped sentence after the follow limit', async () => {
+	it('says lynox reads the list, with a dash for the counts, and the stopped sentence after the follow limit', async () => {
 		run = makeRun({ listFirstPage: `https://${HOST}/admin/api/2026-10/graphql.json` });
 		await render();
-		expect(line()).toBeNull();
-		expect(shown()).not.toContain(t('bulk.working.numbers'));
+		expect(line()).toBe('lynox liest die Liste …');
+		expect(counts()).toBe('–');
 		await pass(BULK_FOLLOW_MAX_MS + BULK_FOLLOW_MS);
 		expect(stopped()).toBe('Die Seite fragt nicht mehr nach; lade sie neu, um den Stand zu sehen.');
 	});
 
-	it('says lynox reads the targets', async () => {
+	it('says lynox reads the targets, with a dash for the counts, not a zero that reads as done', async () => {
+		run = makeRun({ total: 4, changes: UPDATES(4) });
 		await render();
-		expect(line()).toBe(`lynox liest die Ziele bei ${HOST} … Die Zahlen hier ändern sich, wenn dieser Schritt fertig ist.`);
+		expect(line()).toBe(`lynox liest die Ziele bei ${HOST} …`);
+		expect(counts()).toBe('–');
+		expect(shown()).not.toContain('geschrieben 0');
 	});
 
-	it('says lynox judges the targets', async () => {
+	it('says lynox judges, with the verdicts so far out of the targets it reads, and moves with each ask', async () => {
+		run = makeRun({ total: 5, judge: { tier: 'standard', unjudged: 4, judged: 1 } });
+		await render();
+		expect(line()).toBe('lynox urteilt … 1 von 5');
+		run = { ...run, judge: { tier: 'standard', unjudged: 1, judged: 4 } };
+		await pass(BULK_FOLLOW_MS);
+		expect(line()).toBe('lynox urteilt … 4 von 5');
+		expect(counts()).toBe(tf('bulk.head.counts', { n: '5', a: '0', c: '0', f: '0' }));
+	});
+
+	it('says lynox judges without numbers where the engine does not count the verdicts', async () => {
 		run = makeRun({ judge: { tier: 'standard', unjudged: 4 } });
 		await render();
-		expect(line()).toBe('lynox beurteilt die Ziele … Die Zahlen hier ändern sich, wenn dieser Schritt fertig ist.');
+		expect(line()).toBe('lynox urteilt …');
 	});
 
-	it('says lynox writes the new values, approved and while writing', async () => {
-		run = makeRun({ phase: 'approved', total: 3, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+	it('says lynox writes, with the written targets out of those it writes, approved and while writing, and the head moves too', async () => {
+		run = makeRun({ phase: 'approved', total: 4, changes: { ...UPDATES(3), unchanged: 1 } });
 		await render();
-		expect(line()).toBe(`lynox schreibt die neuen Werte zu ${HOST} … Die Zahlen hier ändern sich, wenn dieser Schritt fertig ist.`);
-		run = { ...run, phase: 'writing', applied: 1 };
+		expect(line()).toBe('lynox schreibt … 0 von 3');
+		run = { ...run, phase: 'writing', applied: 2 };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe(working('bulk.working.write'));
+		expect(line()).toBe('lynox schreibt … 2 von 3');
+		expect(counts()).toBe(tf('bulk.head.counts', { n: '4', a: '2', c: '0', f: '0' }));
 	});
 
-	it('keeps the counts of its last load while it writes, and takes the new ones once the run is done', async () => {
-		run = makeRun({ phase: 'writing', total: 3, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+	it('says lynox takes back an undo with its numbers, so a running undo does not look finished', async () => {
+		run = makeRun({ kind: 'undo', sourceRunId: 'r0', phase: 'writing', total: 3, changes: UPDATES(3), applied: 1 });
 		await render();
-		const before = tf('bulk.head.counts', { n: '3', a: '0', c: '0', f: '0' });
-		expect(shown()).toContain(before);
+		expect(line()).toBe('lynox nimmt zurück … 1 von 3');
 		run = { ...run, applied: 2 };
 		await pass(BULK_FOLLOW_MS);
-		expect(shown()).toContain(before);
-		expect(line()).toBe(working('bulk.working.write'));
+		expect(line()).toBe('lynox nimmt zurück … 2 von 3');
+	});
+
+	it('takes the whole run once it is done, and shows no line then', async () => {
+		run = makeRun({ phase: 'writing', total: 3, changes: UPDATES(3) });
+		await render();
 		run = { ...run, phase: 'done', applied: 3 };
 		await pass(BULK_FOLLOW_MS);
-		expect(shown()).toContain(tf('bulk.head.counts', { n: '3', a: '3', c: '0', f: '0' }));
+		expect(counts()).toBe(tf('bulk.head.counts', { n: '3', a: '3', c: '0', f: '0' }));
 		expect(line()).toBeNull();
 		expect(stopped()).toBeNull();
 	});
 
+	it('says it in English too', async () => {
+		const { setLocale } = await import('../i18n.svelte.js');
+		setLocale('en');
+		try {
+			run = makeRun({ kind: 'undo', sourceRunId: 'r0', phase: 'writing', total: 3, changes: UPDATES(3), applied: 1 });
+			await render();
+			expect(line()).toBe('lynox is undoing … 1 of 3');
+		} finally { setLocale('de'); }
+	});
+
 	it('stays as it is on a 429, with its line and without an error', async () => {
-		run = makeRun({ phase: 'writing', total: 3 });
+		run = makeRun({ phase: 'writing', total: 3, changes: UPDATES(3) });
 		await render();
 		nextStatuses = [429, 429];
 		retryAfter = '4';
 		await pass(BULK_FOLLOW_MS);
 		await pass(10_000);
-		expect(line()).toBe(working('bulk.working.write'));
+		expect(line()).toBe('lynox schreibt … 0 von 3');
 		expect(shown()).not.toContain(t('common.load_failed'));
 	});
 
@@ -214,17 +258,21 @@ describe('a run the engine works on', () => {
 		expect(shown()).toContain('Unterbrochen. lynox setzt den Lauf ab');
 	});
 
-	it('shows no line on a run that waits for the owner, has halted, or is done', async () => {
+	it('shows no line and its counts on a run that waits for the owner, has halted, or is done', async () => {
 		for (const o of [
 			{ haltKey: 'awaitingStart', haltReason: 'awaitingStart' },
 			{ phase: 'writing' as const, haltKey: 'unavailable', haltReason: 'unavailable' },
+			{ phase: 'writing' as const, kind: 'undo' as const, haltKey: 'unavailable', haltReason: 'unavailable' },
 			{ phase: 'previewed' as const },
 			{ phase: 'done' as const },
 		]) {
-			run = makeRun(o);
+			// A preview loads every target to be approved; this one has none to load.
+			const n = 'phase' in o && o.phase === 'previewed' ? 0 : 2;
+			run = makeRun({ total: n, ...o });
 			await render();
 			expect(line(), JSON.stringify(o)).toBeNull();
 			expect(stopped(), JSON.stringify(o)).toBeNull();
+			expect(counts(), JSON.stringify(o)).toBe(tf('bulk.head.counts', { n: String(n), a: '0', c: '0', f: '0' }));
 			if (component) unmount(component);
 			component = undefined;
 		}

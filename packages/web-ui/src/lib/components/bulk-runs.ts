@@ -72,7 +72,8 @@ export interface BulkRun {
 	haltKey: string | null;
 	costUsd: number;
 	costCapUsd: number | null;
-	judge: { tier: string; unjudged: number } | null;
+	/** `judged`: targets with a verdict, a refused one included; absent on an older engine. */
+	judge: { tier: string; unjudged: number; judged?: number | undefined } | null;
 	/** The most different targets the approval lets the write reach; null before an approval. */
 	maxTargets: number | null;
 	/** Targets that failed in any pass; null for a run approved before this was counted. */
@@ -785,16 +786,43 @@ export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKe
 }
 
 /** The step the engine is working on while it moves a run on by itself, for the page's working
- *  line (`bulk.working.<step>`): reading the list (its first page is set only while the list is
- *  still being read; the page shows no working line then, the head names the step), reading the
- *  targets, judging them (a judged run reads them in the same step), or writing. Null for a run the engine is not working on ({@link bulkEngineWorking}). */
-export type BulkWorkingStep = 'list' | 'read' | 'judge' | 'write';
+ *  line: reading the list (its first page is set only while the list is still being read),
+ *  reading the targets, judging them (a judged run reads them in the same step), writing, or
+ *  taking a run back (an undo writes too). Null for a run the engine is not working on ({@link bulkEngineWorking}). */
+export type BulkWorkingStep = 'list' | 'read' | 'judge' | 'write' | 'undo';
 
-export function bulkWorkingStep(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason' | 'listFirstPage' | 'judge'>): BulkWorkingStep | null {
+export function bulkWorkingStep(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason' | 'listFirstPage' | 'judge' | 'kind'>): BulkWorkingStep | null {
 	if (!bulkEngineWorking(run)) return null;
-	if (run.phase === 'approved' || run.phase === 'writing') return 'write';
+	if (run.phase === 'approved' || run.phase === 'writing') return run.kind === 'undo' ? 'undo' : 'write';
 	if (run.listFirstPage !== null) return 'list';
 	return run.judge !== null ? 'judge' : 'read';
+}
+
+/** The working line of a step: its key and the run's numbers it names. Judging counts the
+ *  verdicts out of the targets the judge reads (an engine that does not count them gets the
+ *  line without numbers); writing and taking back count the targets done out of those the run
+ *  writes, as far as its approval reaches. Reading the list or the targets names no number: the engine does not count it. */
+export function bulkWorkingLine(
+	step: BulkWorkingStep,
+	run: Pick<BulkRun, 'judge' | 'applied' | 'changes' | 'maxTargets'>,
+): { key: string; params: Record<string, string> } {
+	if (step === 'judge') {
+		const judged = run.judge?.judged;
+		if (judged === undefined) return { key: 'bulk.working.judge_open', params: {} };
+		return { key: 'bulk.working.judge', params: { k: String(judged), n: String(judged + (run.judge?.unjudged ?? 0)) } };
+	}
+	if (step === 'write' || step === 'undo') {
+		// The approval may let the write reach fewer targets than the run plans.
+		const n = run.maxTargets === null ? bulkWriting(run) : Math.min(bulkWriting(run), run.maxTargets);
+		return { key: `bulk.working.${step}`, params: { a: String(run.applied), n: String(n) } };
+	}
+	return { key: `bulk.working.${step}`, params: {} };
+}
+
+/** Whether the run's counts stand for nothing yet: while the list or the targets are read, a
+ *  „0 geschrieben“ would read as a finished run, so the head shows a dash there. */
+export function bulkCountsPending(step: BulkWorkingStep | null): boolean {
+	return step === 'list' || step === 'read';
 }
 
 /** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`

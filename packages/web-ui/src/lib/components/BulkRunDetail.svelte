@@ -14,7 +14,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkWorkingStep,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkWorkingStep, bulkWorkingLine, bulkCountsPending,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -123,6 +123,9 @@
 			const body = res?.ok ? ((await res.json().catch(() => null)) as BulkRunDetailData | null) : null;
 			let retryAfter = res?.status === 429 ? Number(res.headers.get('Retry-After')) : null;
 			let ok = body !== null;
+			// While the engine works, the page takes the run's counts from each ask: the working line
+			// and the head move with the run. Its targets stay as loaded; no input is offered then.
+			if (body !== null && bulkEngineWorking(body) && body.id === runId) run = body;
 			if (body !== null && !bulkEngineWorking(body)) {
 				lastRetryAfter = null;
 				ok = await load({ quiet: true });
@@ -405,6 +408,7 @@
 	// judge is fixed at planning, and approved and writing are both the write. An interrupted run
 	// that resumes later says so in its own line and gets no working line.
 	const workingStep = $derived(run && !run.resumesAt ? bulkWorkingStep(run) : null);
+	const workingLine = $derived(run && workingStep !== null ? bulkWorkingLine(workingStep, run) : null);
 	// The probe's target by its title where the loaded targets hold its before-image.
 	const probeLabel = $derived(run?.probe ? bulkTargetLabel(run.targetSystem, { key: run.probe.key }, i18n) : '');
 	// The probe's admin link: its target is often not among the targets the page shows.
@@ -550,7 +554,8 @@
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
 				<dd>{provider}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
 				<dt class="text-text-subtle">{t('bulk.head.targets')}</dt>
-				<dd>{tf('bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) })}</dd>
+				<!-- While the list or the targets are read, the counts stand for nothing yet: a dash, not a „0 geschrieben“ that reads as done. -->
+				<dd data-testid="bulk-counts">{bulkCountsPending(workingStep) ? t('bulk.head.counts_pending') : tf('bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) })}</dd>
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
 					<dt class="text-text-subtle">{t('bulk.head.cost')}</dt>
 					<dd class="font-mono">{formatCost(run.costUsd)}{run.costCapUsd !== null ? ` / ${formatCost(run.costCapUsd)}` : ''}</dd>
@@ -566,10 +571,8 @@
 			{/if}
 			{#if workingStep !== null && followStopped}
 				<p class="text-sm text-text-muted" data-testid="bulk-follow-stopped">{t('bulk.follow.stopped')}</p>
-			{:else if workingStep !== null && workingStep !== 'list'}
-				<!-- While the list is read, the head names that step, and the run has no numbers yet for
-				     the second sentence to point at; so only the stopped sentence shows in that step. -->
-				<p class="text-sm text-text-muted" data-testid="bulk-working">{tf(`bulk.working.${workingStep}`, { provider })} {t('bulk.working.numbers')}</p>
+			{:else if workingLine !== null}
+				<p class="text-sm text-text-muted" data-testid="bulk-working">{tf(workingLine.key, { provider, ...workingLine.params })}</p>
 			{/if}
 			{#if bulkWaitsForStart(run)}
 				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
