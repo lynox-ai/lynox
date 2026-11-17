@@ -398,11 +398,19 @@ describe('an image plan on a store connection that may not write image alt texts
 
     // A mandate may connect again a profile it set up itself, so it is offered the link as the
     // owner is; a profile another mandate set up names the owner only.
-    it('offers the new link to the mandate that set the connection up, and names the owner to another', async () => {
-      const own = connection({ ...preset({ ...full, state: 'revoked' }, fullScope), created_by: `mandate:${MANDATE.email}` });
-      expect(await planOn(own, { source_list: { form: 'shopify', after: { seo_title: 'x' } } }, MANDATE)).toBe(`Error: The bulk run cannot change this store's products: ${REVOKED} Tell the user this in one sentence. ${OFFER}`);
-      const other = connection({ ...preset({ ...full, state: 'revoked' }, fullScope), created_by: 'mandate:jan@kanzlei.example' });
-      expect(await planOn(other, { source_list: { form: 'shopify', after: { seo_title: 'x' } } }, MANDATE)).toBe(`Error: The bulk run cannot change this store's products: ${REVOKED} ${OWNER_ONLY}`);
+    it.each(cases)('offers the new link to the mandate that set the connection up, and names the owner to another: %s', async (_what, store, start, note) => {
+      const withAuthor = (author: string) => ({ getByHostname: (h: string) => { const p = (store as { getByHostname: (h: string) => unknown }).getByHostname(h); return p === undefined ? undefined : { ...(p as object), created_by: author }; } });
+      const own = withAuthor(`mandate:${MANDATE.email}`);
+      expect(await planOn(own, { source_list: { form: 'shopify', after: { seo_title: 'x' } } }, MANDATE)).toBe(`Error: The bulk run cannot change this store's products: ${start} Tell the user this in one sentence. ${OFFER}`);
+      expect(await planOn(own, { source_list: { form: 'shopify_media', after: { alt: 'x' } } }, MANDATE)).toBe(`Error: The bulk run cannot change image alt texts: ${start} Tell the user this in one sentence. ${OFFER}`);
+      const woo = { source_list: { form: 'woocommerce', path: '/admin/api/2025-01/products.json', after: { title: 'x' } } };
+      const ownHint = await planOn(own, woo, MANDATE);
+      expect(ownHint.endsWith(`(product fields). ${note} ${NOTE_TAIL}`), ownHint).toBe(true);
+      const other = withAuthor('mandate:jan@kanzlei.example');
+      expect(await planOn(other, { source_list: { form: 'shopify', after: { seo_title: 'x' } } }, MANDATE)).toBe(`Error: The bulk run cannot change this store's products: ${start} ${OWNER_ONLY}`);
+      expect(await planOn(other, { source_list: { form: 'shopify_media', after: { alt: 'x' } } }, MANDATE)).toBe(`Error: The bulk run cannot change image alt texts: ${start} ${OWNER_ONLY}`);
+      const otherHint = await planOn(other, woo, MANDATE);
+      expect(otherHint.endsWith(`(product fields). ${note} ${NOTE_OWNER_ONLY}`), otherHint).toBe(true);
       expect(runs()).toEqual({ n: 0 });
     });
 
