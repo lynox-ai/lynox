@@ -482,7 +482,15 @@ function measureStaticPrefixTokens(): number {
 // main d33659095, the only file that differs) — `update_workflow_steps` gains `rename_step` and a
 // `goal` field: the way out for a workflow stored with a step id or goal the save now refuses, and
 // `#2` names a step by its position. The rules for a new id stay in the refusals, not the schema.
-const STATIC_PREFIX_BUDGET = 24061;
+// 2026-11-17: +56 (24061 → 24117, both measured the same day with the budget set to 1, the base
+// main 22d3046b, the only prefix file that differs being http.ts) — `http_request`'s description
+// says that a bearer, header or oauth2 profile gets its credential from the engine, so the model
+// writes no auth header, `secret:` reference or token request for it. Without it, models guess a
+// connection's derived token name and write it as `secret:NAME`; the online eval
+// tests/online/ask-secret-token-slot-eval.test.ts measured runs with such a reference at 13 of 24
+// on main and 3 of 24 with this sentence and the refusal texts that go with it. The refusal texts
+// are not part of this prefix; they reach the model when a reference is refused.
+const STATIC_PREFIX_BUDGET = 24117;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a
