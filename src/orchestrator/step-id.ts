@@ -18,7 +18,7 @@ export function isStepIdShape(id: unknown): id is string {
 }
 
 /**
- * Why a step id outside the shape is refused, naming where it is (`steps[2].id`) and never the id
+ * Why a step id outside the shape is refused, naming where it is (`step #3 (steps[2].id)`) and never the id
  * itself: the model reads this text, so it carries no stored or typed text back (U-314). Where the
  * model writes the whole step list (a save, an inline run), the last sentence asks it to carry the new
  * id into the steps that read this one: their `input_from` is checked against the ids, so a missed one
@@ -30,10 +30,14 @@ export function stepIdRefusal(where: string, { refs = true }: { refs?: boolean }
     + 'Choose an id in that form.' + (refs ? ' If other steps refer to this step, use the new id there too.' : '');
 }
 
-/** The first step whose id is outside the shape, as `stepIdRefusal` names it, or null. */
+/**
+ * The first step whose id is outside the shape, as `stepIdRefusal` names it, or null. The step is
+ * named first as every other text names a step to the model, counted from 1 (`step #3`), then by the
+ * path into the list it just wrote, counted from 0 (`steps[2].id`) (U-316).
+ */
 export function stepIdIssue(steps: ReadonlyArray<{ id?: unknown }>, path = 'steps'): string | null {
   const at = steps.findIndex(s => !isStepIdShape(s.id));
-  return at === -1 ? null : stepIdRefusal(`${path}[${String(at)}].id`);
+  return at === -1 ? null : stepIdRefusal(`step #${String(at + 1)} (${path}[${String(at)}].id)`);
 }
 
 /** What stands in for a stored id outside the shape where the model reads it. */

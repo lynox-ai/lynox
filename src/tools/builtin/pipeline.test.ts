@@ -311,7 +311,7 @@ describe('run_workflow — inline steps', () => {
       { name: 'test', steps: [makeStep('fetch', 'first'), makeStep('sum', 'second'), makeStep('Send It', 'third'), makeStep('Send It', 'fourth')] },
       makePipelineAgent(),
     );
-    expect(result).toBe('Error: steps[2].id: a step id is 1 to 40 characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. Choose an id in that form. If other steps refer to this step, use the new id there too.');
+    expect(result).toBe('Error: step #3 (steps[2].id): a step id is 1 to 40 characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. Choose an id in that form. If other steps refer to this step, use the new id there too.');
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 

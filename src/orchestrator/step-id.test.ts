@@ -17,8 +17,8 @@ import { testAuditLog } from '../../tests/helpers/audit-log.js';
 import { WorkflowStore } from '../core/workflow-store.js';
 import { CURRENT_PIPELINE_SCHEMA_VERSION } from '../core/pipeline-schema-migration.js';
 
-// The refusal, word for word as reviewed (U-314).
-const REFUSAL_AT_2 = 'steps[2].id: a step id is 1 to 40 characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. '
+// The refusal, word for word as reviewed (U-314, U-316): the step counted from 1, then the path from 0.
+const REFUSAL_AT_2 = 'step #3 (steps[2].id): a step id is 1 to 40 characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. '
   + 'Choose an id in that form. If other steps refer to this step, use the new id there too.';
 
 describe('the shape of a step id', () => {
@@ -35,9 +35,11 @@ describe('the shape of a step id', () => {
   });
 
   it('says where, never what: the refusal word for word, at the first id outside the shape', () => {
-    expect(stepIdRefusal('steps[2].id')).toBe(REFUSAL_AT_2);
+    expect(stepIdRefusal('step #3 (steps[2].id)')).toBe(REFUSAL_AT_2);
     expect(stepIdIssue([{ id: 'a' }, { id: 'b' }, { id: 'Fetch Orders' }, { id: 'Also Bad' }])).toBe(REFUSAL_AT_2);
     expect(stepIdIssue([{ id: 'a' }, { id: 'b' }])).toBeNull();
+    // The first step: #1, at index 0.
+    expect(stepIdIssue([{ id: 'Fetch' }])).toMatch(/^step #1 \(steps\[0\]\.id\): /);
   });
 
   it('shows a stored id outside the shape by its position, or by the note alone', () => {
