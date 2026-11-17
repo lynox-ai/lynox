@@ -8,10 +8,11 @@ import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from './artifact-evictio
 import { artifactRestoreTool } from '../tools/builtin/artifact.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 
-// The store refuses content that holds only the engine's placeholder, not a document, by the
-// same test as the "lost on save" mark, whichever way the save comes: artifact_save checked it before, the gallery route and a restore did not. A restore of a
-// version like that is refused the same way, and artifact_restore says so. A larger document
-// that quotes the placeholder is still a document, and is saved and restored.
+// The store refuses content that holds only the engine's placeholder, not a document, by the same
+// test as the "lost on save" mark, whichever way the save comes: artifact_save checked it before,
+// the gallery route and a restore did not. A restore of a version like that is refused the same
+// way, and artifact_restore says so. A larger document that quotes the placeholder is still a
+// document, and is saved and restored.
 
 // The two forms a model can copy: the note the real eviction appends, built rather than typed,
 // and the in-field form older threads still carry.
