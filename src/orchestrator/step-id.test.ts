@@ -223,9 +223,10 @@ describe('a stored id outside the shape, where the model reads it', () => {
     const ctx = createToolContext({});
     ctx.runHistory = history;
     const out = await diagnoseWorkflowTool.handler({ run_id: 'run-g' }, { toolContext: ctx, principal: OWNER_PRINCIPAL } as unknown as IAgent);
-    expect(out).toContain('Gate rejected step "#2 (id outside the allowed form)", reason:');
-    expect(out).toContain('Gate rejected step "#2 (id outside the allowed form)"\n');
-    expect(out).toContain('Gate timed out for step "#3 (id outside the allowed form)"');
+    // Quoted is only what update_workflow_steps takes as step_id: the position, the note after it.
+    expect(out).toContain('Gate rejected step "#2" (id outside the allowed form), reason:');
+    expect(out).toContain('Gate rejected step "#2" (id outside the allowed form)\n');
+    expect(out).toContain('Gate timed out for step "#3" (id outside the allowed form)');
     expect(out).not.toContain('Approve');
     expect(out).not.toContain('Second Old');
   });

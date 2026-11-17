@@ -109,13 +109,21 @@ const RUN_RECORDED = 'as recorded, not checked';
 function shownError(error: string, at: { run: boolean; stepIds: readonly string[]; stepErrors: ReadonlyMap<string, readonly string[]>; shownId: (id: string) => string }): ShownError {
   const recordedBy = at.stepErrors.get(error) ?? [];
   if (at.run && OWN_RUN_ERRORS.has(error) && recordedBy.length === 0) return { text: error, quoted: false };
+  // The step as a gate text names it: quoted is only what `update_workflow_steps` takes as `step_id`
+  // (the id, or the position `#2`); the note on an id outside the shape stands after it (U-316).
+  const step = (id: string): string => {
+    const shown = at.shownId(id);
+    if (shown === id) return `"${id}"`;
+    const m = /^(#\d+) (.+)$/.exec(shown);
+    return m ? `"${m[1]!}" ${m[2]!}` : shown;
+  };
   for (const id of at.stepIds) {
     if (at.run && recordedBy.some(by => by !== id)) continue;
-    if (error === new GateExpiredError(id).message) return { text: `Gate timed out for step "${at.shownId(id)}"`, quoted: false };
+    if (error === new GateExpiredError(id).message) return { text: `Gate timed out for step ${step(id)}`, quoted: false };
     const rejected = new GateRejectedError(id).message;
-    if (error === rejected) return { text: `Gate rejected step "${at.shownId(id)}"`, quoted: false };
+    if (error === rejected) return { text: `Gate rejected step ${step(id)}`, quoted: false };
     if (error.startsWith(`${rejected}: `)) {
-      return { text: `Gate rejected step "${at.shownId(id)}", reason: ${quoted(error.slice(rejected.length + 2))}`, quoted: true };
+      return { text: `Gate rejected step ${step(id)}, reason: ${quoted(error.slice(rejected.length + 2))}`, quoted: true };
     }
   }
   return { text: quoted(error), quoted: true, recordedLabel: !at.run ? RECORDED_BY_STEP : recordedBy.length > 0 ? RUN_RECORDED_BY_STEP : RUN_RECORDED };
