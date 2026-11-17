@@ -98,7 +98,14 @@ export function storedSteps(row: { manifest_json: string } | undefined): Runnabl
     return Array.isArray(steps)
       ? steps.map((s: unknown) => {
         const step = (s ?? {}) as Partial<RunnableStep>;
-        return { ...step, id: typeof step.id === 'string' ? step.id : '', task: typeof step.task === 'string' ? step.task : '' };
+        const from = Array.isArray(step.input_from) ? step.input_from.filter((r): r is string => typeof r === 'string') : undefined;
+        const template = step.input_template !== null && typeof step.input_template === 'object' && !Array.isArray(step.input_template) ? step.input_template : undefined;
+        return {
+          id: typeof step.id === 'string' ? step.id : '',
+          task: typeof step.task === 'string' ? step.task : '',
+          ...(from !== undefined ? { input_from: from } : {}),
+          ...(template !== undefined ? { input_template: template } : {}),
+        };
       })
       : undefined;
   } catch {
@@ -195,6 +202,17 @@ export function stepRunPositions(steps: readonly RunnableStep[]): Map<string, nu
     if (name !== undefined && !at.has(name)) at.set(name, i);
   });
   return at;
+}
+
+/** Each run name of a step stored outside the shape, with the stored id it stands for. */
+export function stepRunIds(steps: readonly RunnableStep[]): Map<string, string> {
+  const names = stepRunNames(steps);
+  const ids = new Map<string, string>();
+  for (const s of steps) {
+    const name = names.get(s.id);
+    if (name !== undefined && !ids.has(name)) ids.set(name, s.id);
+  }
+  return ids;
 }
 
 /**

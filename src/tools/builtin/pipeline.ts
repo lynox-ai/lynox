@@ -894,9 +894,9 @@ export async function runSavedWorkflow(
     };
   }
 
-  // Asked of the workflow as read here, so no edit can fall between the check and the run, with its
-  // steps under the names the run uses: a refusal quotes no step id stored before ids had a shape.
-  const refused = runtime?.checkWorkflow?.({ ...planned, steps: runStepIds(planned.steps) }) ?? null;
+  // Asked of the workflow as read here, so no edit can fall between the check and the run. As stored:
+  // the owner's stamp binds the stored definition, so the check must see that, not a renamed copy.
+  const refused = runtime?.checkWorkflow?.(planned) ?? null;
   if (refused !== null) return { ok: false, error: refused };
 
   // Whether this run passes the workflow's contract on — decided before binding, because a

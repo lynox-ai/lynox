@@ -1,6 +1,6 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
-import { isStepIdShape, stepIdRefusal, stepRunPositions } from './step-id.js';
+import { isStepIdShape, stepIdRefusal, stepRunIds } from './step-id.js';
 
 /**
  * A single step-level edit to a workflow's step list. The vocabulary is shared
@@ -50,7 +50,7 @@ function alikeIndexes(steps: readonly InlinePipelineStep[], id: string): number[
  * either by its position instead, `#<n>` as the step list numbers it. A step stored with the id
  * `#<n>` (before new ids refused it) is what `#<n>` names; renamed, `#<n>` is position n again.
  */
-function resolveStep(steps: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' {
+function resolveStep(steps: readonly InlinePipelineStep[], id: string, runNames?: ReadonlyMap<string, string>): number | 'missing' | 'ambiguous' {
   // The stored id first, so every step stays reachable by its own id, whatever ids it shares a
   // list with; a refusal that names a position someone's id takes says to rename that step first
   // (`byPosition`).
@@ -63,7 +63,14 @@ function resolveStep(steps: readonly InlinePipelineStep[], id: string): number |
   }
   const alike = alikeIndexes(steps, id);
   // A run names a step stored outside the shape `step-<n>` (`stepRunNames`): that name reaches it too.
-  if (alike.length === 0) return stepRunPositions(steps).get(id) ?? 'missing';
+  // It stands for the stored id it had before this call's first change, so a step this call removed
+  // or renamed earlier does not hand its name to another one.
+  if (alike.length === 0) {
+    const storedId = runNames?.get(id);
+    if (storedId === undefined) return 'missing';
+    const at = steps.findIndex(s => s.id === storedId);
+    return at === -1 ? 'missing' : at;
+  }
   if (alike.length === 1) return alike[0]!;
   const exact = steps.findIndex(s => s.id === id);
   return exact !== -1 && id !== stripHiddenInName(id) ? exact : 'ambiguous';
@@ -118,8 +125,10 @@ function renamedInTemplate(value: unknown, from: string, to: string): unknown {
  * says which step it reached.
  */
 export function applyModifications(steps: InlinePipelineStep[], modifications: StepModification[], notes?: string[]): string | null {
+  // The names runs give steps stored outside the shape, taken once from the list as it came in.
+  const runNames = stepRunIds(steps);
   const stepIndex = (list: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' => {
-    const at = resolveStep(list, id);
+    const at = resolveStep(list, id, runNames);
     if (typeof at === 'number' && /^#\d+$/.test(id) && at !== Number(id.slice(1)) - 1) {
       notes?.push(`${quotedId(id)} named step #${at + 1}, stored with that id, not the step at position ${id.slice(1)}.`);
     }

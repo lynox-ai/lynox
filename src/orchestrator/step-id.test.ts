@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { isStepIdShape, runStepIds, shownRunStepId, stepRunNames, shownStepId, stepIdIssue, stepIdRefusal, storedStepOrder, STEP_ID_MAX } from './step-id.js';
+import { isStepIdShape, runStepIds, shownRunStepId, stepRunNames, storedSteps, shownStepId, stepIdIssue, stepIdRefusal, storedStepOrder, STEP_ID_MAX } from './step-id.js';
 import { RunHistory } from '../core/run-history.js';
 import { EngineDb } from '../core/engine-db.js';
 import { createToolContext } from '../core/tool-context.js';
@@ -296,6 +296,13 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
     const stripped = stored.map(st => ({ ...st, task: st.task.replace('\u200B', '') }));
     expect([...stepRunNames(stored)]).toEqual([...stepRunNames(stripped)]);
     expect(stepRunNames(stored).get(OLD)).toBe('step-2a');
+  });
+
+  it('reads a stored row whose references are no list of text without failing', () => {
+    const stored = storedSteps({ manifest_json: JSON.stringify({ steps: [{ id: 'fetch', task: 'a', input_from: 5 }, { id: OLD, task: 'b', input_from: ['fetch', 3] }] }) })!;
+    expect(stored.map(st => st.input_from)).toEqual([undefined, ['fetch']]);
+    expect(() => stepRunNames(stored)).not.toThrow();
+    expect(shownRunStepId('step-2', stored)).toBe('#2 (id outside the allowed form; runs as "step-2")');
   });
 
   it('names a hand-damaged row whose id is no text without failing', () => {
