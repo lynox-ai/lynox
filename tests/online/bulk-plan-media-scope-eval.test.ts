@@ -37,7 +37,7 @@ const RUNS = Number(process.env['MEDIA_RUNS'] ?? 3);
 const STORE = 'acme-demo.myshopify.com';
 // The engine's own Shopify connection to STORE, granted what the preset asks for: no image scope.
 const PRODUCT_ONLY_STORE = {
-  getByHostname: (h: string) => h === STORE ? { base_url: `https://${STORE}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: STORE.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products'] } } : undefined,
+  getByHostname: (h: string) => h === STORE ? { base_url: `https://${STORE}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: STORE.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products'], store_binding: 'bound' } } : undefined,
 };
 
 const PRODUCTS = JSON.stringify({
