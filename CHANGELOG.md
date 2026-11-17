@@ -17,7 +17,9 @@
   `fs.protected_hardlinks=1`; the refusal says how to set it. (#2164)
 - On first start `engine.db` moves from schema **53** to **68**, `history.db`
   from **69** to **72** and `mail-state.db` from **18** to **20**. The steps add
-  tables, columns and indexes; there is no down path. (#2137, #2139, #2183, #2100,
+  tables, columns and indexes and fill two new columns for existing rows: a bulk
+  target whose write was sent but never confirmed is marked as unclear, so it is
+  not sent again. There is no down path. (#2137, #2139, #2183, #2100,
   #2130, #2154, #2167, #2254, #2337, #2389)
 - On Anthropic and Vertex the bulk-run judge is now Sonnet 4.6 instead of Haiku 4.5.
   A judge call costs about three times as much, so the owner's cost limit covers
@@ -27,9 +29,17 @@
   unchanged. (#2431)
 - `POST /api/speak` answers 400 when the request names a `model` other than
   `voxtral-mini-tts-3-0`; leave `model` out. (#2415)
-- The request log goes to stderr. Lines written before 2.18.0, for example in
-  `docker logs`, may hold query values; clear them, or rotate a key that was
-  passed in a URL. (#2369)
+- The request log (on stderr) no longer writes query values, path segments
+  that hold an address, or a contact's name in a CRM route. Lines written before
+  2.18.0, for example in `docker logs`, may hold them; clear them, or rotate a
+  key that was passed in a URL. (#2369)
+- With `LYNOX_SHOPIFY_EXCHANGE` on, lynox sends model, speech and transcription
+  requests only to Anthropic's API or Fireworks' endpoint with the key the
+  control plane supplies. Mistral, Vertex, another base URL and a key the owner
+  brings get a client that sends nothing and says why, so a self-hosted or
+  own-key instance with the switch on makes no model calls. The batch API and
+  speech output are off, and transcription uses only the local whisper.cpp.
+  (#2239)
 - `StreamProcessor.process` now throws `StreamIncompleteError` when a stream ends
   before any stop reason (no `message_delta` naming one, no `message_stop`), instead
   of returning the partial reply as finished. The Agent retries such a call.
@@ -240,7 +250,8 @@
 - A provider error's own type decides whether it is retried, also inside the
   stream, and the failed attempt is booked. (#2397, #2391)
 - A run stops after two thinking-only or three blank truncated turns in a row,
-  and a reply that writes a tool call out as text. A continuation loop keeps
+  and a reply that writes the same tool call out as text three times in a row
+  instead of calling the tool. A continuation loop keeps
   its completed work. (#2220, #2238, #2376, #2242)
 - Voice output moves to Voxtral TTS 3 (`voxtral-mini-tts-3-0`), which speaks the
   German voice; German text is read aloud when the model refuses a voice.
