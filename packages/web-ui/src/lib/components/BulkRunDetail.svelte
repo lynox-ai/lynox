@@ -13,6 +13,7 @@
 	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
+	import { markHidden } from '../utils/trigger-consent.js';
 	import {
 		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
@@ -754,6 +755,10 @@
 							<input type="number" class={inputClass} min="1" max={bulkWriting(run)} bind:value={maxTargets} />
 							{t('bulk.approve.targets_write')}
 						</label>
+					{/if}
+					{#if run.connectedBy}
+						<!-- Directly above the button: whose connection the write goes through, where a mandate set it up. -->
+						<p class="text-sm" data-bulk-connected-by>{tf('bulk.approve.connected_by', { provider: markHidden(run.connectedBy.provider), person: markHidden(run.connectedBy.by ?? t('takeover.connection_someone')) })}</p>
 					{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary}

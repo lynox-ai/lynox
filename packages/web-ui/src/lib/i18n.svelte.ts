@@ -463,6 +463,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.approve.write_one': { de: 'Ein Ziel schreiben', en: 'Write one target' },
 	'bulk.approve.write_only': { de: 'Das Ziel schreiben', en: 'Write the target' },
 	'bulk.approve.approve': { de: 'Freigeben', en: 'Approve' },
+	// U-301: over whose connection a Shopify run writes, where a mandate set it up; above the approve button.
+	'bulk.approve.connected_by': { de: 'lynox schreibt über die {provider}-Verbindung, die {person} eingerichtet hat.', en: 'lynox writes through the {provider} connection that {person} set up.' },
 	'bulk.approve.shopify_visible': { de: 'Bei veröffentlichten Produkten sind Titel und SEO-Texte sofort in deinem Shop sichtbar, sobald lynox sie schreibt.', en: 'For published products, titles and SEO texts are visible in your shop as soon as lynox writes them.' },
 	'bulk.approve.confirm_first': { de: 'Setz zuerst das Häkchen oben, dann kannst du freigeben.', en: 'Tick the box above first, then you can approve.' },
 	'bulk.field.shopify.title': { de: 'Titel', en: 'Title' },
