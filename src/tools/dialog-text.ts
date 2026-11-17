@@ -362,7 +362,7 @@ export const SPAWN_DIALOG: Readonly<Record<DialogLanguage, SpawnDialog>> = {
     children: (count) => count === 1 ? 'Eine Teilaufgabe würde laufen' : `${count} Teilaufgaben würden laufen`,
     tierUnknownBand: 'einem Modell der Stufe DEEP (oder einem nicht registrierten eigenen Modell, dessen Kostenrahmen lynox nicht belegen kann)',
     tierDeep: 'der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer)',
-    tailDowngrade: 'Erlaube das nur, wenn die Arbeit wirklich DEEP braucht; sonst wähle "Run on balanced".',
+    tailDowngrade: 'Erlaube das nur, wenn die Arbeit wirklich DEEP braucht; sonst wähle „Auf balanced ausführen“.',
     tailPinned: 'Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.',
     sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} auf ${tier}. Geschätzte Kosten ~$${costUsd} für diese Sitzung. Anbieter: ${providers}. ${tail}`,
   },

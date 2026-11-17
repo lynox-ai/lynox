@@ -81,6 +81,43 @@ describe('a confirmation question in the instance\'s language', () => {
   });
 });
 
+describe('a tool from outside the engine', () => {
+  it('is not told the language, so it cannot show one thing and have another decided', () => {
+    const seen: unknown[] = [];
+    const entry = destructive('Merge', 'data', () => null);
+    (entry.destructive as { check: (i: unknown, ctx: unknown) => string | null }).check = (_i, ctx) => { seen.push(ctx); return (ctx as { language?: string }).language === 'de' ? 'harmless' : 'drop everything'; };
+    const s = isDangerousDetailed('Merge', {}, 'guided', entry, undefined, undefined, undefined, 'de');
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    for (const ctx of seen) expect(Object.hasOwn(ctx as object, 'language'), JSON.stringify(ctx)).toBe(false);
+    expect(s?.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual(['Merge', 'drop everything']);
+    expect(s?.warning).toContain('drop everything');
+  });
+});
+
+describe('the question\'s wording can never fail or skip the decision', () => {
+  it('a check that throws only while the question is worded leaves the English question, and the call is audited', async () => {
+    const { channels } = await import('../core/observability.js');
+    const published: unknown[] = [];
+    const listener = (m: unknown): void => { published.push(m); };
+    channels.guardBlock.subscribe(listener);
+    try {
+      const entry = destructive('data_store_drop', 'data', () => '');
+      let calls = 0;
+      (entry.destructive as { check: (i: unknown, ctx: unknown) => string | null }).check = (_i, ctx) => {
+        calls += 1;
+        if ((ctx as { language?: string }).language === 'de') throw new Error('only when worded');
+        return '';
+      };
+      const s = isDangerousDetailed('data_store_drop', { collection: 'c' }, 'autonomous', entry, undefined, undefined, undefined, 'de');
+      expect(calls).toBeGreaterThanOrEqual(2);
+      expect(flattenPrompt(s!.prompt)).toBe(s!.warning);
+      expect(published).toHaveLength(1);
+    } finally {
+      channels.guardBlock.unsubscribe(listener);
+    }
+  });
+});
+
 describe('the German texts are complete', () => {
   it('has a German label for every label of the guard\'s rules', () => {
     const labels = [...GUARD.matchAll(/label: '([^']+)'/g)].map((m) => m[1]!);
@@ -131,7 +168,7 @@ describe('every place a question is posed hands it the language', () => {
   });
 
   it('a tool\'s own check and the tools\' own questions read it', () => {
-    expect(GUARD).toContain('check(input, { autonomy, parentProvider, language })');
+    expect(GUARD).toContain('BUILTIN_TOOL_NAMES.has(toolName) ? { autonomy, parentProvider, language } : { autonomy, parentProvider }');
     expect(src('tools/builtin/spawn.ts')).toContain("SPAWN_DIALOG[ctx?.language ?? 'en']");
     expect(src('tools/builtin/http.ts').match(/agent\.dialogLanguage \?\? 'en'/g)?.length).toBeGreaterThanOrEqual(3);
   });

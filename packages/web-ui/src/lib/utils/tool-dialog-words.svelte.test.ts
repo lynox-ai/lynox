@@ -75,3 +75,15 @@ describe('the German dialog word and the chat\'s German tool-line word', () => {
     }
   });
 });
+
+describe('the delegation consent names its button as the button reads', () => {
+  it('in German', () => {
+    let root = process.cwd();
+    while (!existsSync(join(root, 'src/tools/dialog-text.ts')) && dirname(root) !== root) root = dirname(root);
+    const text = readFileSync(join(root, 'src/tools/dialog-text.ts'), 'utf8');
+    setLocale('de');
+    expect(text).toContain(`sonst wähle „${t('chat.consent_run_balanced')}“.`);
+    setLocale('en');
+    expect(text).toContain(`otherwise choose "${t('chat.consent_run_balanced')}".`);
+  });
+});

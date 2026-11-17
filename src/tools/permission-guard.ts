@@ -639,8 +639,9 @@ export interface DangerSignal {
  * destructive check — avoids threading a payload through `_detectDanger`'s many
  * string-return paths. A non-destructive tool, or a check that returned a plain
  * action-label string, yields null: those dangers offer no downgrade.
- * Consistent with `_detectDanger` by construction: both call the same
- * `check(input, { autonomy, parentProvider })`.
+ * Consistent with `_detectDanger`'s English run by construction: both call
+ * `check(input, { autonomy, parentProvider })` without a language (the English run gives
+ * none, `language` is only handed to a built-in's check in the run that words the question).
  */
 function extractDangerPayload(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, parentProvider: ProviderConfigSnapshot | null | undefined): WarningPayload | null {
   const check = entry?.destructive?.check;
@@ -675,7 +676,6 @@ function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel
   const danger = _detectDanger(toolName, input, autonomy, entry, parentProvider);
   if (!danger) return null;
   const { warning } = danger;
-  const prompt = language === 'en' ? danger.prompt : (_detectDanger(toolName, input, autonomy, entry, parentProvider, asIs, language)?.prompt ?? danger.prompt);
 
   // A capability contract can override NON-critical dangers only.
   // Critical ops ([BLOCKED]) are never auto-approved — they carry the "[BLOCKED"
@@ -702,6 +702,17 @@ function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel
   // contract is present; null/undefined for an ungoverned run).
   if (channels.guardBlock.hasSubscribers) {
     channels.guardBlock.publish({ toolName, warning, autonomy, runId, contractVersion: contract?.version });
+  }
+
+  // Worded in `language` only for a question that is asked: after the grant, after the audit,
+  // and never able to fail the call. A rule that throws in the second run leaves the English.
+  let prompt = danger.prompt;
+  if (language !== 'en') {
+    try {
+      prompt = _detectDanger(toolName, input, autonomy, entry, parentProvider, asIs, language)?.prompt ?? danger.prompt;
+    } catch {
+      prompt = danger.prompt;
+    }
   }
 
   const payload = extractDangerPayload(toolName, input, autonomy, entry, parentProvider);
@@ -2126,7 +2137,10 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   // Workspace write actions.
   if (entry?.destructive) {
     const { mode, check } = entry.destructive;
-    const detail = check ? check(input, { autonomy, parentProvider, language }) : '';
+    // Only a built-in tool's check is told the language, to word its own payload. A tool from
+    // outside the engine is shown as one value whatever it returns, and is asked in both runs
+    // without it, so it cannot answer the shown question differently from the decided one.
+    const detail = check ? check(input, BUILTIN_TOOL_NAMES.has(toolName) ? { autonomy, parentProvider, language } : { autonomy, parentProvider }) : '';
     if (detail !== null) {
       // A built-in tool's WarningPayload carries its OWN fully-formed GO message (spawn-agent
       // deep-tier consent: tier + cost + provider). Render it verbatim — the
