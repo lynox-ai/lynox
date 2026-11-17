@@ -4,6 +4,11 @@
 
 ### Upgrade notes
 
+- Managed instances now sign the Google connect start token in the
+  provider-bound v2 format. A control plane that does not accept v2 yet answers
+  every Connect with `bad_signature`, so the control plane has to be updated
+  before the engine. Self-hosted instances are unaffected: the brokered connect
+  only exists on managed hosting.
 - `docker-compose.yml` and the compose file the installer writes no longer pin
   `platform: linux/amd64`. ARM and Apple Silicon hosts get the native arm64 image
   after `docker compose pull && docker compose up -d` instead of the amd64 image

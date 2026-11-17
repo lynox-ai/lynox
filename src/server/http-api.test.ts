@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, onTestFinished } from 'vitest';
 import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
-import { parseBrokerStartToken } from '../contract/broker-start.js';
+import { parseBrokerStartTokenV2 } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
@@ -16646,12 +16646,12 @@ describe('LynoxHTTPApi', () => {
 
       const token = parsedUrl.searchParams.get('token');
       expect(token, 'no token — the control plane answers missing_token').toBeTruthy();
-      const parsed = parseBrokerStartToken(token!);
+      const parsed = parseBrokerStartTokenV2(token!);
       expect(parsed, 'token does not even parse as the contract framing').not.toBeNull();
 
       const key = createHmac('sha256', TEST_SECRET).update('lynox-broker-start-v1').digest();
       const expected = createHmac('sha256', key)
-        .update(`v1.inst-42.${parsed!.ts}.${parsed!.nonce}`)
+        .update(`v2.google.inst-42.${parsed!.ts}.${parsed!.nonce}`)
         .digest('hex');
       expect(parsed!.sig, 'signed with the wrong key or over the wrong bytes').toBe(expected);
     });
@@ -16659,7 +16659,7 @@ describe('LynoxHTTPApi', () => {
     it('mints a fresh nonce per call — the control plane consumes each one', async () => {
       const nonceOf = async () => {
         const { url } = await (await jsonFetch('/api/google/oauth-url')).json() as { url: string };
-        return parseBrokerStartToken(new URL(url).searchParams.get('token')!)?.nonce;
+        return parseBrokerStartTokenV2(new URL(url).searchParams.get('token')!)?.nonce;
       };
       expect(await nonceOf()).not.toBe(await nonceOf());
     });
