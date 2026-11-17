@@ -83,6 +83,12 @@ export interface HandshakeServerPayload {
    * does not take plaintext refuses such a manifest at `setManifest`.
    */
   acceptsPlainStores?: boolean | undefined;
+  /**
+   * This handshake's session, random and not derived from anything: the source names it when it
+   * ends the session before its manifest (`POST /api/migration/abort`), so a late abort cannot end
+   * a newer attempt's session. Absent on an older destination, which has no abort either.
+   */
+  sessionId?: string | undefined;
 }
 
 export interface HandshakeClientPayload {

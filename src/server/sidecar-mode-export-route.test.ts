@@ -70,7 +70,16 @@ const target: {
   okBodies: Response[];
   /** Answer the restore with this `verification`. */
   restoreReport?: unknown;
-} = { importer: null, manifest: null, healthCalls: 0, okBodies: [] };
+  /**
+   * How the target answers `POST /api/migration/abort`: with its importer (`real`), with this status
+   * and body, or not at all (absent: 404, as an older target without the route).
+   */
+  abort?: 'real' | { status: number; body: unknown } | undefined;
+  /** The session ids every abort the source sent named. */
+  abortCalls: unknown[];
+  /** Answer the handshake without its session id, as an older target. */
+  noSessionId?: boolean;
+} = { importer: null, manifest: null, healthCalls: 0, okBodies: [], abortCalls: [] };
 /** A body that sends its first bytes and then breaks off. */
 const brokenOff = (status: number): Response => new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode('{"error":"x')); c.error(new Error('other side closed')); } }), { status });
 /** A body that sends its first bytes and never ends. */
@@ -133,7 +142,17 @@ vi.mock('../core/network-guard.js', async (original) => {
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.handshakeRaw !== undefined) return new Response(target.handshakeRaw, { status: 200 });
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.large?.at === 'handshake') return new Response(sized({ ...imp.startHandshake(TOKEN) }, target.large.bytes), { status: 200 });
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.large?.at === 'handshake-refusal') return new Response('x'.repeat(target.large.bytes), { status: 503 });
-        if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET') return json({ ...imp.startHandshake(TOKEN), ...(target.claimsPlain ? { acceptsPlainStores: true } : {}) });
+        if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET') {
+          const { sessionId, ...older } = imp.startHandshake(TOKEN);
+          return json({ ...older, ...(target.noSessionId ? {} : { sessionId }), ...(target.claimsPlain ? { acceptsPlainStores: true } : {}) });
+        }
+        if (path === '/api/migration/abort' && target.abort !== undefined) {
+          const named = (body as { sessionId?: unknown } | undefined)?.sessionId;
+          target.abortCalls.push(named);
+          if (target.abort !== 'real') return json(target.abort.body, target.abort.status);
+          const outcome = imp.abortBeforeManifest(typeof named === 'string' ? named : '');
+          return outcome === 'in-transfer' ? json({ error: 'in transfer', code: 'migration_in_transfer' }, 409) : json({ aborted: outcome === 'aborted' });
+        }
         if (path === '/api/migration/handshake') {
           if (target.failCompletion) return json({ error: 'completion refused' }, 500);
           imp.completeHandshake((body as { clientPubKey: string }).clientPubKey); return json({ ready: true });
@@ -237,6 +256,9 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.otherCurve = false;
     target.guardBlocksRestore = false;
     target.guardText = undefined;
+    target.abort = undefined;
+    target.abortCalls = [];
+    target.noSessionId = false;
     derivedKeys.length = 0;
   });
 
@@ -256,8 +278,11 @@ describe('the migration export route in sidecar mode (real engine)', () => {
   });
 
   /** Runs the export and returns the SSE events by name. */
-  async function exportTo(opts: { acceptPlainStores?: boolean } = {}): Promise<Map<string, unknown>> {
-    target.importer = new MigrationImporter({ lynoxDir: dst, vaultKey: 'a-dst-vault-key-for-the-route-test', acceptPlainStores: opts.acceptPlainStores === true });
+  async function exportTo(opts: { acceptPlainStores?: boolean; sameTarget?: boolean } = {}): Promise<Map<string, unknown>> {
+    // `sameTarget`: the importer of the attempt before, with whatever session it still holds.
+    if (opts.sameTarget !== true || target.importer === null) {
+      target.importer = new MigrationImporter({ lynoxDir: dst, vaultKey: 'a-dst-vault-key-for-the-route-test', acceptPlainStores: opts.acceptPlainStores === true });
+    }
     const res = await fetch(`${baseUrl}/api/migration/export`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' },
@@ -408,6 +433,54 @@ describe('the migration export route in sidecar mode (real engine)', () => {
       target.handshakeRefusal = { error };
       expect(await message()).toBe('The target instance did not accept the migration. Nothing was transferred.');
     }
+  });
+
+  it('ends the target\'s session when it stops before the manifest, so the next attempt goes through at once', async () => {
+    setShellIsolationForTest(sidecar);
+    target.abort = 'real';
+    target.failCompletion = true;
+    const first = await exportTo();
+    expect((first.get('error') as { message: string }).message).toBe('Handshake completion failed. You can start the migration again now.');
+    expect(target.abortCalls).toHaveLength(1);
+    expect(target.abortCalls[0]).toMatch(/^[0-9a-f]{32}$/);
+    // The same target, at once: its session is gone, so the handshake is not turned away.
+    target.failCompletion = false;
+    const second = await exportTo({ sameTarget: true });
+    expect(second.get('error')).toBeUndefined();
+    expect(second.get('done')).toMatchObject({ success: true });
+  });
+
+  it('keeps the 30 minutes where the target did not confirm that it ended the session', async () => {
+    setShellIsolationForTest(sidecar);
+    const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
+    const later = 'Handshake completion failed. You can start the migration again in 30 minutes at the latest.';
+    target.failCompletion = true;
+    // An older target: no route (404), or no session id in its handshake, so no abort is sent.
+    expect(await message()).toBe(later);
+    target.abort = 'real';
+    target.noSessionId = true;
+    expect(await message()).toBe(later);
+    expect(target.abortCalls).toEqual([]);
+    target.noSessionId = false;
+    // The target answers, but does not say it ended the session.
+    for (const abort of [{ status: 200, body: { aborted: false } }, { status: 200, body: { aborted: 'true' } }, { status: 409, body: { error: 'in transfer' } }, { status: 500, body: { aborted: true } }]) {
+      target.abort = abort;
+      expect(await message()).toBe(later);
+    }
+    expect(target.abortCalls).toHaveLength(4);
+  });
+
+  it('sends no abort once the target took the manifest, nor after a refused handshake', async () => {
+    setShellIsolationForTest(sidecar);
+    target.abort = 'real';
+    target.chunkError = { at: 0, error: 'chunk refused' };
+    const after = (await exportTo()).get('error') as { message: string };
+    expect(after.message).toMatch(/You can start the migration again in 30 minutes at the latest\.$/);
+    target.chunkError = undefined;
+    target.handshakeRefusal = { error: 'Migration session already active. Finalize or cleanup first.' };
+    const refused = (await exportTo()).get('error') as { message: string };
+    expect(refused.message).toMatch(/still holding an earlier migration attempt/);
+    expect(target.abortCalls).toEqual([]);
   });
 
   it('gives up on a target that does not start answering, per step, with what the user can know', async () => {

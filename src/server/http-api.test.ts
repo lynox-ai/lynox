@@ -23691,6 +23691,68 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     }
   });
 
+  it('ends a session before its manifest for the token and the session id the handshake named, and nothing else', async () => {
+    const token = randomBytes(32).toString('hex');
+    const holder = api as unknown as { _migrationImporter: { cleanup(): void; session: { manifest: unknown } | null } | null };
+    const handshake = async (): Promise<Response> => fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+    const abort = async (body: unknown, tok: string | null = token, admin = false): Promise<Response> => fetch(`${baseUrl}/api/migration/abort`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(tok === null ? {} : { 'x-migration-token': tok }), ...(admin ? { Authorization: `Bearer ${TEST_SECRET}` } : {}) },
+      body: JSON.stringify(body),
+    });
+    try {
+    await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token, LYNOX_VAULT_KEY: 'a-vault-key-for-the-abort-test' }, async () => {
+      const a = (await (await handshake()).json()) as { sessionId: string };
+      expect(a.sessionId).toMatch(/^[0-9a-f]{32}$/);
+      // Without the token, with another, or without a session id: refused, the session stays.
+      expect((await abort({ sessionId: a.sessionId }, null)).status).toBe(401);
+      expect((await abort({ sessionId: a.sessionId }, randomBytes(32).toString('hex'))).status).toBe(403);
+      expect((await abort({})).status).toBe(400);
+      expect((await abort({ sessionId: 'A'.repeat(32) })).status).toBe(400);
+      // Past the door another way (a bearer that is admin here: no separate admin secret), the
+      // routes still check the token themselves.
+      await withEnv({ LYNOX_HTTP_ADMIN_SECRET: undefined }, async () => {
+        // Control: this bearer is admin here, so a 403 below is the route's own.
+        expect((await as(TEST_SECRET, ADMIN_ROUTE)).status).toBe(200);
+        const refused = await abort({ sessionId: a.sessionId }, 'not-the-token', true);
+        expect(refused.status).toBe(403);
+        expect(((await refused.json()) as { error: string }).error).toBe('Invalid migration token');
+        const bare = await abort({ sessionId: a.sessionId }, null, true);
+        expect(bare.status).toBe(401);
+        const shaken = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': 'not-the-token', Authorization: `Bearer ${TEST_SECRET}` } });
+        expect(shaken.status).toBe(403);
+        expect(((await shaken.json()) as { error: string }).error).toBe('Invalid migration token');
+      });
+      expect((await handshake()).status).toBe(400);
+      // With both: ended, and a new handshake goes through at once.
+      const ended = await abort({ sessionId: a.sessionId });
+      expect(ended.status).toBe(200);
+      expect(await ended.json()).toEqual({ aborted: true });
+      const b = await handshake();
+      expect(b.status).toBe(200);
+      const bId = ((await b.json()) as { sessionId: string }).sessionId;
+      expect(bId).not.toBe(a.sessionId);
+      // A late abort for the earlier session leaves the newer one as it is.
+      const late = await abort({ sessionId: a.sessionId });
+      expect(await late.json()).toEqual({ aborted: false });
+      expect((await handshake()).status).toBe(400);
+      // A session that took its manifest is not ended: its transfer runs on.
+      holder._migrationImporter!.session!.manifest = { chunks: [] };
+      const running = await abort({ sessionId: bId });
+      expect(running.status).toBe(409);
+      expect(((await running.json()) as { code?: string }).code).toBe('migration_in_transfer');
+      expect((await handshake()).status).toBe(400);
+      // No session at all: nothing to end.
+      holder._migrationImporter!.cleanup();
+      holder._migrationImporter = null;
+      expect(await (await abort({ sessionId: bId })).json()).toEqual({ aborted: false });
+    });
+    } finally {
+      holder._migrationImporter?.cleanup();
+      holder._migrationImporter = null;
+    }
+  });
+
   it('with no secret at all, a local request is admin, on a managed instance too', async () => {
     await withEnv({ LYNOX_HTTP_SECRET: undefined, LYNOX_HTTP_ADMIN_SECRET: undefined, LYNOX_BILLING_TIER: 'managed' }, async () => {
       const open = new LynoxHTTPApi();
