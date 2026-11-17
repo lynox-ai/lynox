@@ -59,10 +59,14 @@ describe('the word a confirmation dialog names a tool by', () => {
   it('knows every destructive gate in the sources', () => {
     const gates = sources().reduce((n, [, text]) => n + (text.match(/^\s*destructive:/gm)?.length ?? 0), 0);
     expect(gates).toBe(Object.keys(DESTRUCTIVE).length);
-    for (const [tool, file] of Object.entries(DESTRUCTIVE)) {
+    // Per file: as many gates as listed tools, so a gate moved to another tool of a different
+    // file cannot keep the total and slip past.
+    const perFile = new Map<string, string[]>();
+    for (const [tool, file] of Object.entries(DESTRUCTIVE)) perFile.set(file, [...(perFile.get(file) ?? []), tool]);
+    for (const [file, tools] of perFile) {
       const text = read(file);
-      expect(text.includes(`name: '${tool}'`), tool).toBe(true);
-      expect(/^\s*destructive:/m.test(text), file).toBe(true);
+      expect(text.match(/^\s*destructive:/gm)?.length, file).toBe(tools.length);
+      for (const tool of tools) expect(text.includes(`name: '${tool}'`), tool).toBe(true);
     }
   });
 
@@ -88,7 +92,7 @@ describe('the word a confirmation dialog names a tool by', () => {
     expect(dialogToolWord('toString')).toBe('toString');
   });
 
-  it('is what every dialog opens with: no dialog spells a raw tool name', () => {
+  it('opens every ⚠ dialog of the guard, api_setup, http_request and spawn_agent', () => {
     const reach = toolsThatReachADialog();
     for (const path of ['tools/permission-guard.ts', 'tools/builtin/api-setup.ts', 'tools/builtin/http.ts', 'tools/builtin/spawn.ts']) {
       const text = read(path);

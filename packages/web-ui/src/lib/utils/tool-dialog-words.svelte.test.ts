@@ -20,6 +20,9 @@ function engineTable(name: 'TOOL_LINE_WORDS' | 'DIALOG_ONLY_WORDS'): Record<stri
   expect(block, `${name} is found`).not.toBeNull();
   const entries: Record<string, string> = {};
   for (const m of block![1]!.matchAll(/^\s*([a-z_]+): '([^']+)',$/gm)) entries[m[1]!] = m[2]!;
+  // Every line of the block is an entry this reads: none is skipped unread.
+  const lines = block![1]!.split('\n').filter((line) => line.trim() !== '');
+  expect(Object.keys(entries).length, `${name}: every line is read`).toBe(lines.length);
   return entries;
 }
 
