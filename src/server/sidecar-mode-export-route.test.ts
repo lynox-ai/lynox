@@ -447,10 +447,10 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(events.get('done')).toMatchObject({ success: true });
   });
 
-  it('passes the network guard\'s refusal of the restore request on, and asks to check the target', async () => {
+  it('passes the network guard\'s refusal of the restore request on with the retry sentence, and asks to check the target for anything else', async () => {
     setShellIsolationForTest(sidecar);
     target.guardBlocksRestore = true;
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Blocked: the redirect points to a private address. Check on the target instance whether your data arrived before you migrate again.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Blocked: the redirect points to a private address. You can start the migration again in 30 minutes at the latest.');
     // One without any words of its own.
     target.guardText = '';
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The request to restore the data ended unexpectedly. Check on the target instance whether your data arrived before you migrate again.');
@@ -495,6 +495,9 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     const proto = (await import('../core/migration-export.js')).MigrationExporter.prototype as unknown as { collectConfig: () => unknown };
     const spy = vi.spyOn(proto, 'collectConfig').mockImplementation(() => { throw new Error('config unreadable'); });
     try {
+      expect(((await exportTo()).get('error') as { message: string }).message).toBe('config unreadable. You can start the migration again in 30 minutes at the latest.');
+      // Any text reaching the user is cleaned, also one that did not come from the target.
+      spy.mockImplementation(() => { throw new Error('config\u202e unreadable\n'); });
       expect(((await exportTo()).get('error') as { message: string }).message).toBe('config unreadable. You can start the migration again in 30 minutes at the latest.');
     } finally { spy.mockRestore(); }
   });

@@ -15474,10 +15474,11 @@ export class LynoxHTTPApi {
         } catch (err: unknown) {
           if (err instanceof TargetDidNotAnswer) throw new Error(restoreUnknown('silent'));
           if (isConnectionFailure(err)) throw new Error(restoreUnknown('broken'));
-          // Anything else, such as the network guard refusing a redirect: the request may have reached
-          // the target before that, so the user checks it first. The text names a host the target chose.
+          // The network guard refusing the address (it follows no redirects): nothing was sent, so a
+          // new attempt can get past it. Anything else: the user checks the target first.
           const text = relayedText(err instanceof Error ? err.message : String(err)).trim();
-          throw new Error(`${text === '' ? 'The request to restore the data ended unexpectedly' : text}${/[.!?…]$/.test(text) ? '' : '.'} Check on the target instance whether your data arrived before you migrate again.`);
+          const next = text.startsWith('Blocked:') ? AGAIN : 'Check on the target instance whether your data arrived before you migrate again.';
+          throw new Error(`${text === '' ? 'The request to restore the data ended unexpectedly' : text}${/[.!?…]$/.test(text) ? '' : '.'} ${next}`);
         }
         // A 4xx is the target turning the restore down before it started (a missing chunk, sidecar
         // mode); a 5xx is the restore failing on the way, which can leave part of it applied.
@@ -15495,7 +15496,9 @@ export class LynoxHTTPApi {
           ...(exportPlain !== undefined ? { plain: exportPlain } : {}),
         });
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Migration failed';
+        // Every text to the user goes through the same cleaning, the guard's and the exporter's too.
+        const { relayedText: clean } = await import('../core/migration-target-reply.js');
+        const message = clean(err instanceof Error ? err.message : 'Migration failed', 2000).trim() || 'Migration failed';
         // A stop after the handshake that names no next step (a read failing on this instance) gets
         // the retry sentence. A stop that names one (check the target, write to support) does not:
         // there the same attempt fails again, and the sentence would send the user round in a loop.
