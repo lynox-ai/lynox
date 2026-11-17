@@ -14,6 +14,7 @@
  * before, or by an instance in the other language, is said in the owner's language too.
  */
 import type { NoticeLanguage } from './notice-language.js';
+import type { ShownMandate } from './request-principal.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON } from '../server/webhook-receiver.js';
@@ -108,8 +109,7 @@ function saidWorkflowId(id: string): string {
   return `${kept}…`;
 }
 
-/** A mandate's address an escalation title may name, and whether it set the plan up or changed it. */
-export interface ShownMandate { readonly address: string; readonly changed: boolean }
+export type { ShownMandate };
 
 export interface WorkerNotices {
   /** The summary of more than a few triggers waiting for confirmation. */

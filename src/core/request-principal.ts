@@ -20,6 +20,7 @@
  * that tell the kinds apart switch on `kind` with a `never` check, so a new kind does not compile
  * until each of them is decided.
  */
+
 export type RequestPrincipal =
   | { readonly kind: 'owner' }
   | {
@@ -89,6 +90,39 @@ export function mandateNeedsOwnerStamp(t: { confirmed_at?: string | undefined; c
  *  the engine itself wrote) is not a mandate. */
 export function isMandateTag(tag: string | null | undefined): boolean {
   return typeof tag === 'string' && tag.startsWith(MANDATE_TAG_PREFIX);
+}
+
+/**
+ * Whether a plan was set up or last changed by someone other than the owner: the last mandate
+ * that changed it, else its creator. The owner's stamp and the owner's later edit leave
+ * `mandate_editor` as it is, and so the text as written (PRD customer-granted-operator-access B6).
+ * Fail-closed: any tag but the owner's (or none: a row from before tags, or the owner's agent)
+ * counts.
+ */
+export function setUpByOther(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): boolean {
+  const tag = t.mandate_editor ?? t.created_by;
+  return !(tag === undefined || tag === null || tag === principalTag(OWNER_PRINCIPAL));
+}
+
+/** A mandate's address an escalation title or a diagnosis may name, and whether it set the plan up or changed it. */
+export interface ShownMandate { readonly address: string; readonly changed: boolean }
+
+/** A plain address: what an owner types when letting someone in. Anything else is not shown. */
+const SHOWN_ADDRESS = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$/;
+
+/**
+ * The mandate an escalation's title may name: who changed the plan, if a mandate other
+ * than its creator did, else the mandate that set it up. The engine sets these tags from the
+ * grant, so the address is not the helper's text. `undefined` for a plan no mandate set up or
+ * changed, an unknown tag, or an address of another shape; the title then says "someone you let in".
+ */
+export function shownMandate(t: { created_by?: string | null | undefined; mandate_editor?: string | null | undefined }): ShownMandate | undefined {
+  const editor = t.mandate_editor ?? undefined;
+  const changed = editor !== undefined && editor !== t.created_by;
+  const tag = changed ? editor : t.created_by;
+  if (tag === undefined || tag === null || !isMandateTag(tag)) return undefined;
+  const address = tag.slice(MANDATE_TAG_PREFIX.length);
+  return address.length <= 254 && SHOWN_ADDRESS.test(address) ? { address, changed } : undefined;
 }
 
 /**
