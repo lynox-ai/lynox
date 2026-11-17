@@ -1,4 +1,5 @@
 import type { ToolEntry } from '../../types/index.js';
+import { HTTP_DIALOG, exfilWarning as exfilWarningText } from '../dialog-text.js';
 import { DEFAULT_MAX_TOOL_RESULT_CHARS } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
 import { shellIsolation } from '../../core/shell-isolation.js';
@@ -3490,8 +3491,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         if (!agent.promptUser) {
           blockedVerbatim(`Blocked: ${exfilWarning}`);
         }
+        const language = agent.dialogLanguage ?? 'en';
         const answer = await agent.promptUser(
-          pv`⚠ ${toolWordFrame('http_request')}: ${exfilWarning} — Allow?`,
+          HTTP_DIALOG[language].exfil(toolWordFrame('http_request', language), exfilWarningText(exfilWarning, language)),
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
@@ -3770,9 +3772,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const sentQuery = new URL(input.url).search;
         const querySize = sentBytes(sentQuery.slice(1));
         const query = sentQuery === '' || querySize > SHOWN_BODY_MAX_BYTES ? undefined : queryForQuestion(sentQuery, mask);
+        const said = HTTP_DIALOG[agent.dialogLanguage ?? 'en'];
         const queryBlock = sentQuery === '' ? pv``
-          : query === undefined ? pv` The query (${querySize} bytes) is too large to show; the path above names its keys, cut short where it is long.`
-            : pv`${onBoxBlock(query.text)}${query.secret ? pv` A stored secret is sent in this query; it is shown masked (***).` : pv``}`;
+          : query === undefined ? said.queryTooLarge(querySize)
+            : pv`${onBoxBlock(query.text)}${query.secret ? said.querySecret : pv``}`;
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
         // N12-4 (2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
@@ -3853,13 +3856,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
         // The headers' names leave the box with the question; their values stay on it, like the body's.
         const headersBlock = 'lines' in askedHeaders && askedHeaders.lines.length > 0
-          ? pv` It sets the headers ${askedHeaders.names.join(', ')}.${onBoxBlock(askedHeaders.lines.join('\n'))}`
+          ? said.headers(askedHeaders.names.join(', '), onBoxBlock(askedHeaders.lines.join('\n')))
           : pv``;
         const bodyBlock = shown !== undefined && 'text' in shown
           ? onBoxBlock(shown.text)
           : !bodyGoesOut ? pv``
-            : shown !== undefined ? pv` The body holds a stored secret and is not shown.`
-              : pv` The body (${bodySize} bytes) is too large to show; its field names are listed.`;
+            : shown !== undefined ? said.bodySecret
+              : said.bodyTooLarge(bodySize);
         // Parallel calls of the same batch with the SAME question share one answer, and an Allow
         // sends that write as many times as the question named: the number of calls that are this
         // same call. A call that only asks the same question (the same write, written another way)
@@ -3893,20 +3896,18 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // How far an Allow reaches, or why this write is asked every time. Engine text, so
             // spliced in as frame (a nested `pv`), never as a value.
             const note = remembers
-              ? (twins === 1
-                ? pv` Allowing sends this request once, now; it will ask again next time.`
-                : pv` This step makes the same request ${String(twins)} times; allowing sends all ${String(twins)} now, and it will ask again next time.`)
-              : outboundEffect ? pv` This sends or issues something and is asked every time.`
-                : gatedMethod === 'DELETE' ? pv` A DELETE is asked every time.`
-                  : connectedAccount ? pv` A write to a connected account is asked every time.`
-                  : pv` In this session every write is asked.`;
+              ? (twins === 1 ? said.noteOnce : said.noteTwins(String(twins)))
+              : outboundEffect ? said.noteEffect
+                : gatedMethod === 'DELETE' ? said.noteDelete
+                  : connectedAccount ? said.noteConnected
+                  : said.noteSession;
             // What goes on the wire when an override names other methods: a server may run any of
             // them, so the question names them all.
             const alsoNamed = named.filter((m) => m !== sentMethod);
             const sentNote = alsoNamed.length === 0 ? pv``
-              : pv` It is sent as a ${sentMethod} that also names ${alsoNamed.join(', ')}; a server may run any of these.`;
+              : said.sentNote(sentMethod, alsoNamed.join(', '));
             const answer = await promptUser(
-              pv`⚠ ${toolWordFrame('http_request')}: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`,
+              HTTP_DIALOG[agent.dialogLanguage ?? 'en'].outbound(toolWordFrame('http_request', agent.dialogLanguage ?? 'en'), gatedMethod, hostname, path, fields, pv`${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`),
               ['Allow', 'Deny', '\x00'],
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());

@@ -14,6 +14,7 @@
  * Profiles are written to ~/.lynox/apis/<id>.json and hot-reloaded into ApiStore.
  */
 
+import { API_SETUP_DIALOG, PRESET_NOTE, presetParamDescribe, type DialogLanguage } from '../dialog-text.js';
 import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
@@ -2312,7 +2313,8 @@ ${draftJson}
       // direction. Refusing the save instead was the other candidate and is
       // worse: a provider retired from the register would make every profile
       // naming it unsaveable, including the update that would remove the field.
-      let presetNote: string | undefined;
+      // The model reads the English; the person is asked in the agent's language.
+      let presetNoteFor: ((language: DialogLanguage) => string) | undefined;
       const redirectUrls: string[] = [];
       // Set only where a human actually answered. An acceptance nobody gave is
       // the one thing this record must never contain.
@@ -2337,18 +2339,16 @@ ${draftJson}
           // a human's prompt. When the id IS known the two arms below do name it
           // — that string equals one of ours, so it discloses nothing.
           const known = presetIds();
-          presetNote = known.length > 0
-            ? `No authorization address could be derived: this profile names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known.join(', ')}.`
-            : 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.';
+          presetNoteFor = (l) => known.length > 0 ? PRESET_NOTE[l].unknownProvider(known.join(', ')) : PRESET_NOTE[l].noProviders;
         } else if (derived.kind === 'bad-preset') {
-          presetNote = `No authorization address could be derived: the built-in provider "${presetId}" is defined wrongly in this engine — ${derived.detail}. Nothing on this profile fixes that; report it.`;
+          presetNoteFor = (l) => PRESET_NOTE[l].badPreset(String(presetId), derived.detail);
         } else if (derived.kind === 'missing-param') {
-          presetNote = `No authorization address could be derived: the provider "${presetId}" needs ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`;
+          presetNoteFor = (l) => PRESET_NOTE[l].missingParam(String(presetId), presetParamDescribe(derived.param.describe, l), derived.param.name);
         } else {
           // Supplied and REFUSED, which is a different sentence: telling someone
           // to set a value they already set is the advice that sends them round
           // a loop. The value itself is not repeated back.
-          presetNote = `No authorization address could be derived: the value this profile supplies for ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}) is not one the provider "${presetId}" accepts. Correct it with api_setup update — the host is disclosed then.`;
+          presetNoteFor = (l) => PRESET_NOTE[l].refusedParam(String(presetId), presetParamDescribe(derived.param.describe, l), derived.param.name);
         }
       }
       // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
@@ -2387,16 +2387,14 @@ ${draftJson}
         ));
         // One paragraph per host, not per URL: a store preset puts its base, token and authorize
         // URLs on one host, and the same paragraph three times reads as three destinations.
-        const disclosureParts = [
+        const disclosureIn = (l: DialogLanguage): string => [
           nonVetted.length > 0
             ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n')}`
             : undefined,
-          redirectHostNames.length > 0
-            ? `You will be sent to ${redirectHostNames.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`
-            : undefined,
-          presetNote,
-        ].filter((part): part is string => part !== undefined && part !== '');
-        const disclosure = disclosureParts.join('\n\n');
+          redirectHostNames.length > 0 ? API_SETUP_DIALOG[l].redirect(redirectHostNames) : undefined,
+          presetNoteFor?.(l),
+        ].filter((part): part is string => part !== undefined && part !== '').join('\n\n');
+        const disclosure = disclosureIn('en');
         if (!agent.promptUser) {
           // Two halves, two answers, because they fail in opposite directions.
           // The egress half has to refuse the SAVE: a stored profile with a
@@ -2419,7 +2417,7 @@ ${draftJson}
           }
         } else {
           const answer = await agent.promptUser(
-            pv`⚠ ${toolWordFrame('api_setup')}: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].save(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), profile.name, disclosureIn(agent.dialogLanguage ?? 'en')),
             ['Allow', 'Deny', '\x00'],
           );
           if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
@@ -2608,6 +2606,7 @@ ${draftJson}
         // was non-vetted. A profile whose base_url is vetted saves with no prompt
         // at all, and that is the case where the missing authorize host would
         // otherwise leave no trace anywhere.
+        const presetNote = presetNoteFor?.('en');
         if (presetNote) parts.push(presetNote);
         if (redirectUrls.length > 0 && !redirectAccepted) {
           // Two sentences, because the two cases are not the same event. On a
@@ -2855,7 +2854,7 @@ ${draftJson}
         const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
           ? Promise.resolve(null)
           : promptUser(
-            pv`⚠ ${toolWordFrame('api_setup')}: delete the stored API profile ${id}, which could not be read (${singleLine(unreadableSource)})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].deleteUnreadable(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), id, singleLine(unreadableSource)),
             ['Allow', 'Deny', '\x00'],
           ));
         if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`; }
@@ -2874,15 +2873,14 @@ ${draftJson}
         let host = '';
         try { host = new URL(existing.base_url).hostname; } catch { /* no host to name */ }
         const tokens = recordedWrites(existing).length;
-        const loses = tokens > 0
-          ? pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again.`
-          : pv` Its settings (endpoints, guidelines, sign-in method) are removed.`;
+        const said = API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'];
+        const loses = tokens > 0 ? said.losesTokens(tokens) : said.losesSettings;
         // A waiter whose run was stopped asks nothing: the question would outlive the run as a
         // pending row and block the session's next prompt (the same rule as `http_request`).
         const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
           ? Promise.resolve(null)
           : promptUser(
-            pv`⚠ ${toolWordFrame('api_setup')}: delete the API profile ${singleLine(String(existing.name))} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].deleteProfile(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), singleLine(String(existing.name)), id, host, loses),
             ['Allow', 'Deny', '\x00'],
           ));
         if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile "${id}" not deleted — the run was stopped before the question was asked.`; }
@@ -3657,7 +3655,7 @@ ${draftJson}
       const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
         ? Promise.resolve(null)
         : promptUser(
-          pv`⚠ ${toolWordFrame('api_setup')}: release the vault name ${shownName} to API profile ${id}, set up in the session of ${singleLine(author)}? The engine then sends its value, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}${authority ? ` (${authority})` : ''}, for every request and run through this profile, the user's own and bulk runs included, until that mandate ends or the user withdraws it.${role === 'oauth.client_id_key' ? ' A client id also goes into the sign-in link, to the browser of whoever opens it.' : ''} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where it goes ends the release. Release it?`,
+          API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].release(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), { name: shownName, id, author: singleLine(author), role, hosts, authority, clientId: role === 'oauth.client_id_key', held }),
           ['Allow', 'Deny', '\x00'],
         ));
       if (answer === null) { noteOwnStopSentence(); return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`; }
@@ -3727,11 +3725,10 @@ ${draftJson}
       const names = collectVaultKeys(asked).map((k) => { const one = singleLine(k); return JSON.stringify(one.length > 80 ? `${one.slice(0, 80)}…` : one); });
       const ends = agent.toolContext?.mandateEnds ?? null;
       const known = asked.oauth_grant?.connected_mandate_id !== undefined && ends !== null;
-      const shownNames = names.slice(0, 30).join(', ') + (names.length > 30 ? ` and ${String(names.length - 30)} more` : '');
       const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
         ? Promise.resolve(null)
         : promptUser(
-          pv`⚠ ${toolWordFrame('api_setup')}: adopt the connection of API profile ${singleLine(String(asked.name))} (id ${id})? It was authorized at the provider in the session of ${by}, ${known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the profile is yours. The engine then sends to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}, for your requests and runs, the connection's tokens and the vault names this profile names, read like any of your profiles, values from the environment included: ${shownNames.length > 0 ? shownNames : 'none'}. Adopt it?`,
+          API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].adopt(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), { name: singleLine(String(asked.name)), id, by, known, hosts, names }),
           ['Allow', 'Deny', '\x00'],
         ));
       if (answer === null) { noteOwnStopSentence(); return `Blocked: the connection of API profile "${id}" was not adopted — the run was stopped before the question was asked.`; }
