@@ -23694,6 +23694,9 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   it('ends a session before its manifest for the token and the session id the handshake named, and nothing else', async () => {
     const token = randomBytes(32).toString('hex');
     const holder = api as unknown as { _migrationImporter: { cleanup(): void; session: { manifest: unknown } | null } | null };
+    // Some twenty requests below; the tests before this one in the same server may have used up
+    // this client's rate window, and a 429 would stand in for the answer under test.
+    (api as unknown as { rateCounts: Map<string, unknown> }).rateCounts.clear();
     const handshake = async (): Promise<Response> => fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
     const abort = async (body: unknown, tok: string | null = token, admin = false): Promise<Response> => fetch(`${baseUrl}/api/migration/abort`, {
       method: 'POST',
@@ -23722,6 +23725,12 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
         const shaken = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': 'not-the-token', Authorization: `Bearer ${TEST_SECRET}` } });
         expect(shaken.status).toBe(403);
         expect(((await shaken.json()) as { error: string }).error).toBe('Invalid migration token');
+        // The token with anything appended is not the token: refused by both routes.
+        const appended = await abort({ sessionId: a.sessionId }, `${token}z`, true);
+        expect(appended.status).toBe(403);
+        expect(((await appended.json()) as { error: string }).error).toBe('Invalid migration token');
+        const appendedShake = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': `${token}z`, Authorization: `Bearer ${TEST_SECRET}` } });
+        expect(appendedShake.status).toBe(403);
       });
       expect((await handshake()).status).toBe(400);
       // With both: ended, and a new handshake goes through at once.

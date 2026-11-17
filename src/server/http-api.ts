@@ -15572,13 +15572,20 @@ export class LynoxHTTPApi {
               headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Migration-Token': migrationToken },
               body: JSON.stringify({ sessionId: targetSession }),
             }, TARGET_REQUEST_TIMEOUTS_MS.handshake);
+            let unfreed: string | null = null;
             if (aRes.ok) {
               const told = await readTargetJson(aRes, TARGET_BODY_CAPS.handshake, () => 'unreadable', TARGET_BODY_TIMEOUT_MS) as { aborted?: unknown } | null;
               freed = told?.aborted === true;
+              if (!freed) unfreed = 'the target did not confirm it';
             } else {
               await discardBody(aRes);
+              unfreed = `the target answered ${String(aRes.status)}`;
             }
-          } catch { /* the stop's own words stand */ }
+            if (unfreed !== null) process.stderr.write(`[lynox:http] migration: the target's session was not ended (${unfreed}); a new attempt waits for it to expire\n`);
+          } catch (abortErr: unknown) {
+            // The stop's own words stand. Only the error's kind: its text may carry the target's address.
+            process.stderr.write(`[lynox:http] migration: ending the target's session failed (${abortErr instanceof Error ? abortErr.name : 'unknown error'}); a new attempt waits for it to expire\n`);
+          }
         }
         const message = clean(err instanceof Error ? err.message : '', 2000).trim()
           || `The migration stopped for a reason lynox could not read.${sessionMayBeHeld ? '' : ' Nothing was transferred.'}`;
