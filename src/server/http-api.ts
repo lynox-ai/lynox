@@ -2735,8 +2735,8 @@ export class LynoxHTTPApi {
     const principal = this._principalOf(req);
     if (!writesMandateTrail(principal)) return true;
     // Asked again here, not only at sign-in: a revoke can land while the body is still arriving,
-    // and a change that has not begun by the revoke must not begin. One already begun keeps its
-    // attempt row before the revoke row; its own acts are checked as they come.
+    // and a change that has not begun by the revoke must not begin. One already begun is not
+    // stopped here; its attempt row stands before the revoke row.
     if (principalHasEnded(principal, (id) => this._mandateLive(id))) {
       errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
       return false;
