@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
-import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep, bulkWorkingLine } from './bulk-runs.js';
+import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep, bulkWorkingLine, bulkHeadCounts } from './bulk-runs.js';
 import { t, tf } from '../i18n.svelte.js';
 import { formatCost } from '../format.js';
 
@@ -352,7 +352,7 @@ describe('a run the engine works on', () => {
 		}
 	});
 
-	it('names only the targets in the head until the run writes, at the approval too, and the counts once one failed before', async () => {
+	it('names only the targets in the head until the run writes, at the approval too, and the counts once one failed, conflicts or is written before', async () => {
 		run = makeRun({ phase: 'approved', total: 3, changes: UPDATES(3), haltKey: 'awaitingStart', haltReason: 'awaitingStart' });
 		await render();
 		expect(counts()).toBe('3');
@@ -362,5 +362,11 @@ describe('a run the engine works on', () => {
 		run = makeRun({ phase: 'approved', total: 3, changes: UPDATES(3), failed: 1, haltKey: 'unavailable', haltReason: 'unavailable' });
 		await render();
 		expect(counts()).toBe(tf('bulk.head.counts', { n: '3', a: '0', c: '0', f: '1' }));
+		// Each count on its own opens the counts: a conflict the read found, a target written.
+		const i18n = { t, tf };
+		const before = { kind: 'apply' as const, phase: 'planned' as const, total: 3, applied: 0, conflicts: 0, failed: 0 };
+		expect(bulkHeadCounts(null, before, i18n)).toBe('3');
+		expect(bulkHeadCounts(null, { ...before, conflicts: 1 }, i18n)).toBe(tf('bulk.head.counts', { n: '3', a: '0', c: '1', f: '0' }));
+		expect(bulkHeadCounts(null, { ...before, phase: 'approved', applied: 1 }, i18n)).toBe(tf('bulk.head.counts', { n: '3', a: '1', c: '0', f: '0' }));
 	});
 });
