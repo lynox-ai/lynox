@@ -2034,7 +2034,13 @@ describe('applying a Shopify run', () => {
       expect(ledger.shopifyApplyOf(redo)!.writes).toEqual([]);
     });
 
-    it('sends nothing for an undo planted with the marked description, as a ledger from before the check would hold it (#11)', async () => {
+    it.each([
+      // As a ledger from before the check at planning would hold it.
+      ['the marked description', `<p>Neu</p>${SCRIPT}`],
+      // Laid out with a line break more. Constructed: it isolates the comparison the check before
+      // sending makes against the marked read-back, which reads past such a line break.
+      ['the marked description laid out otherwise', `<p>Neu</p>\n${SCRIPT}`],
+    ])('sends nothing for an undo planted with %s (#11)', async (_name, planted) => {
       const id = await markedRun();
       const u1 = approvedUndo(id);
       await applyLive(u1, 'bulk_undo');
@@ -2045,9 +2051,14 @@ describe('applying a Shopify run', () => {
         `UPDATE bulk_targets SET change = 'update', undo = 'restorable', error = NULL, before = ?, after_planned = ? WHERE run_id = ? AND seq = 0`,
       ).run(
         engineDb.enc(JSON.stringify({ absent: false, value: { descriptionHtml: '<p>1</p>' } })),
-        engineDb.enc(JSON.stringify({ descriptionHtml: `<p>Neu</p>${SCRIPT}` })),
+        engineDb.enc(JSON.stringify({ descriptionHtml: planted })),
         u2,
       );
+      // u1's before-image set to the planted value too. A real undo copies its source's read-back
+      // here; the test sets it so the planted value passes the byte check before sending and only
+      // the comparison with the marked read-back can stop it.
+      engineDb.getDb().prepare(`UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = 0`)
+        .run(engineDb.enc(JSON.stringify({ absent: false, value: { descriptionHtml: planted } })), u1);
       expect(ledger.approve(u2, { checksum: ledger.computeChecksum(u2)! })).toMatchObject({ ok: true });
       s.requests.length = 0;
       await applyLive(u2, 'bulk_undo');
