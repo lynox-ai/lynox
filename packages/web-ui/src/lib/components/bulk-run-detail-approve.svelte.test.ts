@@ -1470,29 +1470,40 @@ describe('the allowed link domains of a judged list run', () => {
 // below says to plan again, so the halt ends at the reconnect; a mandate's page has no such box, so
 // its halt says it.
 describe('the next step of a halt for an outdated connection consent', () => {
-	const halted = (): BulkRunDetailData => makeRun({
-		targetSystem: 'http:demo.myshopify.com', phase: 'approved', applied: 0, sentUnknown: 0,
+	// Nothing written yet, or some of the run already written: the two halt sentences.
+	const halted = (applied: number): BulkRunDetailData => makeRun({
+		targetSystem: 'http:demo.myshopify.com', phase: 'approved', applied, sentUnknown: 0,
 		haltReason: 'engine English', haltKey: 'consentOutdated', consentFields: ['descriptionHtml'],
 	});
-	// Pinned, not read from the key under test: a halt that drops the step must fail here.
-	const planAgain = (): string => (getLocale() === 'de' ? 'den Lauf neu zu planen' : 'plan the run again');
+	// Pinned, not read from the keys under test: a halt that drops the step must fail here.
+	const planAgain = (): RegExp => (getLocale() === 'de' ? /neu (zu )?planen/ : /plan the run again/);
 	// The halt line of the head, not the page: target rows say to plan again for their own reasons.
 	const haltLine = (): string => [...target.querySelectorAll('dt')].find((d) => d.textContent === t('bulk.head.halted'))!.nextElementSibling!.textContent!;
+	const cases = (['de', 'en'] as const).flatMap((lang) => [0, 1].map((applied) => [lang, applied] as const));
+	const inLocale = (lang: 'de' | 'en'): void => {
+		const before = getLocale();
+		setLocale(lang);
+		onTestFinished(() => setLocale(before));
+	};
 
-	it('says to plan again in the box below on the owner\'s page, and not in the halt', async () => {
-		run = halted();
+	it.each(cases)('says to plan again in the box below on the owner\'s page, and not in the halt (%s, %i written)', async (lang, applied) => {
+		inLocale(lang);
+		run = halted(applied);
 		await render();
-		expect(t('bulk.resume.none')).toContain(planAgain());
+		expect(t('bulk.resume.none')).toMatch(planAgain());
 		expect(target.textContent).toContain(t('bulk.resume.none'));
-		expect(haltLine()).toBe(tf('bulk.halt.consentOutdated', { field: t('bulk.consent.field.descriptionHtml'), path: `${t('nav.settings')} → ${t('settings.apis')}` }));
-		expect(haltLine()).not.toContain(planAgain());
+		expect(haltLine()).toContain(t('bulk.consent.field.descriptionHtml'));
+		expect(haltLine()).not.toMatch(planAgain());
 	});
 
-	it('says to plan again in the halt on a mandate\'s page, which has no box', async () => {
+	// The box is looked for by its words; the owner's case above shows those words are the box's.
+	it.each(cases)('says to plan again in the halt on a mandate\'s page, which has no box (%s, %i written)', async (lang, applied) => {
+		inLocale(lang);
 		viewerOf = 'mandate';
-		run = halted();
+		run = halted(applied);
 		await render();
 		expect(target.textContent).not.toContain(t('bulk.resume.none'));
-		expect(haltLine()).toContain(planAgain());
+		expect(haltLine()).toContain(t('bulk.consent.field.descriptionHtml'));
+		expect(haltLine()).toMatch(planAgain());
 	});
 });
