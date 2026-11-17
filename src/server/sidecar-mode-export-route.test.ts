@@ -450,6 +450,18 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(second.get('done')).toMatchObject({ success: true });
   });
 
+  it('after a refused manifest, lets the target\'s words stand alone once it ended the session', async () => {
+    setShellIsolationForTest(sidecar);
+    const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
+    target.manifestError = 'The bundle names a store this instance does not know';
+    target.abort = 'real';
+    expect(await message()).toBe('The target instance refused the migration. It says: The bundle names a store this instance does not know.');
+    // Not confirmed: the session may still be held, so the 30 minutes stay.
+    target.abort = { status: 200, body: { aborted: false } };
+    expect(await message()).toBe('The target instance refused the migration. It says: The bundle names a store this instance does not know You can start the migration again in 30 minutes at the latest.');
+    expect(target.abortCalls).toHaveLength(2);
+  });
+
   it('keeps the 30 minutes where the target did not confirm that it ended the session', async () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;

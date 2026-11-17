@@ -15341,6 +15341,9 @@ export class LynoxHTTPApi {
       // stop before that ends the session (the target holds it 30 minutes otherwise).
       let targetSession: string | null = null;
       let manifestAccepted = false;
+      // The target refused the manifest itself: its words say what to change, and the same attempt
+      // fails again, so a freed session is not an invitation to try again as it is.
+      let manifestRefused = false;
       try {
         const crypto = await import('../core/migration-crypto.js');
         const { MigrationExporter } = await import('../core/migration-export.js');
@@ -15505,7 +15508,10 @@ export class LynoxHTTPApi {
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
         }, TARGET_REQUEST_TIMEOUTS_MS.manifest, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.manifest)}.` : 'lynox could not reach the target instance.'} lynox stopped before sending your data. ${AGAIN}`);
-        if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+        if (!mRes.ok) {
+          manifestRefused = true;
+          throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+        }
         manifestAccepted = true;
         await discardBody(mRes);
 
@@ -15602,7 +15608,14 @@ export class LynoxHTTPApi {
         const NOW_TEXT = 'You can start the migration again now.';
         const said = message.includes(AGAIN_TEXT) || message.includes('Check on the target instance') || message.includes('support@lynox.ai');
         const shown = sessionMayBeHeld && !said ? `${message}${/[.!?…]$/.test(message) ? '' : '.'} ${AGAIN_TEXT}` : message;
-        sendEvent('error', { message: freed ? shown.replace(AGAIN_TEXT, NOW_TEXT) : shown });
+        // Once the target has ended the session nothing holds a new attempt. After a refused manifest
+        // the target's words stand alone; elsewhere the user can start again now.
+        const unheld = (): string => {
+          if (!manifestRefused) return shown.replace(AGAIN_TEXT, NOW_TEXT);
+          const bare = shown.replace(` ${AGAIN_TEXT}`, '').trim();
+          return `${bare}${/[.!?…]$/.test(bare) ? '' : '.'}`;
+        };
+        sendEvent('error', { message: freed ? unheld() : shown });
       } finally {
         res.end();
       }
