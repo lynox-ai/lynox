@@ -290,7 +290,8 @@ async function applyRunEffect(
   // A Shopify run that writes a field its connection was not confirmed for writes nothing: halted
   // before its writer is built, on the first call and on every resume. An undo of a run that was not
   // itself an undo restores what that run found and is not held back; an undo of an undo writes the
-  // new values again and is held like the run that first wrote them.
+  // new values again and is held like the run that first wrote them. Further down a chain every undo
+  // is held, also one that only restores: held too much, never too little.
   const source = run.kind === 'undo' && run.sourceRunId !== null ? ledger.getRunForApply(run.sourceRunId) : null;
   const restoresOnly = source !== null && source.kind !== 'undo';
   if (!restoresOnly) {

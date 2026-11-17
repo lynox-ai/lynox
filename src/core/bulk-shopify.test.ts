@@ -1602,7 +1602,10 @@ describe('applying a Shopify run', () => {
 
     // A run on a store host whose rows do not make it a Shopify run is read by neither the consent
     // nor the markup check before sending: it halts before its writer is built.
-    it('halts a run on a store host that is not a Shopify run by its rows, under any connection', async () => {
+    it.each([
+      ['no grant', undefined],
+      ['the current text', CURRENT],
+    ])('halts a run on a store host that is not a Shopify run by its rows, under %s', async (_what, grant) => {
       fill(1);
       vi.stubEnv(FLAG, '1');
       const id = startedList(source({ seo_title: 'New title', descriptionHtml: '<p>Neu</p>' }));
@@ -1614,7 +1617,7 @@ describe('applying a Shopify run', () => {
       expect(ledger.shopifyApplyOf(id)).toBeNull();
       expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
       s.requests.length = 0;
-      const out = await applyUnder(id, CURRENT);
+      const out = await applyUnder(id, grant);
       expect(out.status).toBe('refused');
       expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.contract);
       expect(s.requests).toEqual([]);
