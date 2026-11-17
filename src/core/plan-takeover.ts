@@ -67,7 +67,7 @@ export interface TakeoverPreview {
   readonly members: readonly TakeoverMember[];
   /** `owner`, or the tag of the workflow's member, which stays. */
   readonly runsAs: string;
-  /** `from`: whose mark on the workflow the takeover reads (`planMandate`), by address, and as which role: F2 names that member. */
+  /** F2 names the member in `from`. */
   readonly workflow: TakeoverWorkflowView | null;
   readonly memberChanges: readonly TakeoverMemberChange[];
   readonly alsoReleased: ReadonlyArray<{ readonly id: string; readonly title: string }>;

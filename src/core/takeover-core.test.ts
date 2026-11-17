@@ -36,6 +36,8 @@ describe('commitTakeover', () => {
   it('writes and records once the state still has the digest shown, after settling the prompts it names', () => {
     const s = setup();
     const r = commitTakeover(s.deps, 'd1', () => ({ ok: { expect: 'd1' } as State }), () => ['p1', 'p2'], (_st, _now, record) => {
+      // The prompts are settled before the write starts.
+      expect(s.cleared).toEqual(['p1', 'p2']);
       s.db.prepare("INSERT INTO written VALUES ('x')").run();
       record({ action: 'x.takeover' } as never);
       return 'done' as const;
