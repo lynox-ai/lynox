@@ -9,6 +9,8 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
 import { ACCEPTED } from '../scripts/osv-report-gate.mjs';
+import { parse as parseYaml } from 'yaml';
+import { runtimeReach, type LockDoc } from './helpers/osv-runtime-reach.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.svelte-kit', 'coverage']);
@@ -41,14 +43,84 @@ export function remoteFunctionUse(tree: Array<[string, string]>): string[] {
 function tree(): Array<[string, string]> {
   // Tests are left out: they hold the planted forms below as strings, and a test is not served.
   return files(ROOT)
-    .filter((p) => /\.(ts|js|mjs|svelte)$/.test(p) && !/\.test\.(ts|js)$/.test(p) && !p.startsWith('tests/'))
+    .filter((p) => /\.(ts|mts|cts|js|mjs|cjs|svelte)$/.test(p) && !/\.test\.(ts|js)$/.test(p) && !p.startsWith('tests/'))
     .map((p) => [p, readFileSync(join(ROOT, p), 'utf8')] as [string, string]);
 }
+
+/** The importers whose runtime dependencies ship: the npm package and the web UI in the image. */
+const SHIPPED = ['.', 'packages/web-ui'];
+const lock = (path: string): LockDoc => parseYaml(readFileSync(join(ROOT, path), 'utf8')) as LockDoc;
+
+/**
+ * Why the docs site could ship, or nothing: it must stay a private package, out of the npm
+ * package's `files` (no entry naming docs, no glob, not the whole tree) and out of the image
+ * (no COPY/ADD naming docs, and `.dockerignore` keeps `docs/` out of a broad COPY).
+ */
+export function docsShipped(docsPackage: string, rootPackage: string, dockerfile: string, dockerignore: string): string[] {
+  const out: string[] = [];
+  if ((JSON.parse(docsPackage) as { private?: unknown }).private !== true) out.push('docs/package.json is not private');
+  const files = (JSON.parse(rootPackage) as { files?: unknown }).files;
+  if (!Array.isArray(files) || files.some((f) => typeof f !== 'string' || /docs|\*/.test(f) || /^\.?\/?$/.test(f))) out.push('package.json files may carry docs');
+  if (/^\s*(COPY|ADD)\b[^\n]*\bdocs\b/m.test(dockerfile)) out.push('the Dockerfile copies docs');
+  if (!/^\/?docs\/?\s*$/m.test(dockerignore)) out.push('.dockerignore does not keep docs/ out');
+  return out;
+}
+
+/**
+ * Where shipped source names a package that carries picomatch: the glob packages themselves (picomatch,
+ * tinyglobby, fdir, micromatch, anymatch, vite), whose import from web-ui code would get them bundled
+ * into the server build; rollup and the Sentry CLI package `sentry`, which each inline their own copy
+ * that no lockfile scan sees; and the bundler plugin entries that load them (`@sentry/bundler-plugins`,
+ * `@sentry/node/<bundler>`). Quoted and backtick specifiers count; a computed one cannot be read here.
+ * Any such quoted name counts, not only an import, so a plain string of that name fails closed.
+ */
+export function globCodeUse(tree: Array<[string, string]>): string[] {
+  const re = /['"`](rollup|sentry|@sentry\/bundler-plugins|@sentry\/node\/(rollup|vite|webpack|esbuild)|picomatch|tinyglobby|fdir|micromatch|anymatch|vite)(\/[^'"`]*)?['"`]/;
+  return tree.filter(([, text]) => re.test(text)).map(([path]) => `${path}: names a package that carries picomatch`);
+}
+
+/** What the picomatch premise reads: the root lockfile, the docs and image files, and the source. */
+interface PicomatchInputs {
+  readonly lock: LockDoc;
+  readonly docsPackage: string;
+  readonly rootPackage: string;
+  readonly dockerfile: string;
+  readonly dockerignore: string;
+  readonly source: Array<[string, string]>;
+}
+
+/** Every reason the picomatch acceptance would no longer hold, or nothing. */
+export function picomatchPremise(i: PicomatchInputs): string[] {
+  return [
+    ...runtimeReach(i.lock, 'picomatch', SHIPPED),
+    ...docsShipped(i.docsPackage, i.rootPackage, i.dockerfile, i.dockerignore),
+    ...globCodeUse(i.source.filter(([p]) => p.startsWith('src/') || p.startsWith('packages/web-ui/src/'))),
+  ];
+}
+
+const realPicomatchInputs = (): PicomatchInputs => ({
+  lock: lock('pnpm-lock.yaml'),
+  docsPackage: readFileSync(join(ROOT, 'docs/package.json'), 'utf8'),
+  rootPackage: readFileSync(join(ROOT, 'package.json'), 'utf8'),
+  dockerfile: readFileSync(join(ROOT, 'Dockerfile'), 'utf8'),
+  dockerignore: readFileSync(join(ROOT, '.dockerignore'), 'utf8'),
+  source: tree(),
+});
+
+/** The picomatch premise on this tree; a patch replaces inputs, so a control can plant a finding. */
+const picomatchCheck = (patch: Partial<PicomatchInputs> = {}): string[] => picomatchPremise({ ...realPicomatchInputs(), ...patch });
 
 /** One premise check per accepted advisory id. */
 const PREMISES: Record<string, () => string[]> = {
   // Advisory scope: only apps that enable the experimental remote functions and use form, query or command.
   'GHSA-3r8g-jcqq-3p5j': () => remoteFunctionUse(tree()),
+  // Advisory scope: an attacker-chosen glob pattern. picomatch must not be a runtime dependency of
+  // what ships, the docs that also carry it must stay out of what ships, and shipped source may not
+  // load a glob package or the code (rollup, the Sentry CLI) that inlines its own copy.
+  // Known limit: the web UI's server build bundles any devDependency its server code imports. The
+  // glob packages are caught by name in the source; a devDependency that only carries picomatch
+  // transitively (a glob library built on it, say) would not be.
+  'GHSA-fc5q-39xc-vjpf': picomatchCheck,
 };
 
 describe('the premise of each accepted OSV finding holds in this tree', () => {
@@ -69,9 +141,74 @@ describe('the premise of each accepted OSV finding holds in this tree', () => {
     expect(remoteFunctionUse([['packages/web-ui/src/lib/c.ts', "import { browser } from '$app/environment';"]])).toEqual([]);
   });
 
+  it('the runtime walk finds a package the shipped code does depend on, and a planted path (positive controls)', () => {
+    // A real runtime dependency is found through the same walk, and one only reached transitively
+    // (rollup, through the error reporter's bundler plugins), so the snapshot lookups really walk.
+    expect(runtimeReach(lock('pnpm-lock.yaml'), 'better-sqlite3', SHIPPED).length).toBeGreaterThan(0);
+    expect(runtimeReach(lock('pnpm-lock.yaml'), 'rollup', SHIPPED).some((p) => p.split(' > ').length > 3)).toBe(true);
+    // The web UI importer is walked too: one of its own runtime dependencies is found through it.
+    expect(runtimeReach(lock('pnpm-lock.yaml'), 'dompurify', SHIPPED).some((p) => p.startsWith('packages/web-ui > '))).toBe(true);
+    // An importer's optional dependencies are walked, and a listed importer the lockfile lacks is reported.
+    const optional: LockDoc = { importers: { '.': { optionalDependencies: { picomatch: { version: '4.0.7' } } }, 'packages/web-ui': {} }, snapshots: { 'picomatch@4.0.7': {} } };
+    expect(runtimeReach(optional, 'picomatch', SHIPPED)).toEqual(['. > picomatch']);
+    expect(runtimeReach({ importers: { '.': {} }, snapshots: {} }, 'picomatch', SHIPPED)).toEqual(['missing importer: packages/web-ui']);
+    // A dependency whose snapshot is missing is reported, never treated as a clean leaf.
+    const unknownKey: LockDoc = { importers: { '.': { dependencies: { alias: { version: 'picomatch@4.0.7' } } }, 'packages/web-ui': {} }, snapshots: {} };
+    expect(runtimeReach(unknownKey, 'picomatch', SHIPPED)).toEqual(['missing snapshot: alias@picomatch@4.0.7 (. > alias)']);
+    // A planted transitive path is found; the same package as a dev dependency only is not.
+    const planted: LockDoc = {
+      importers: { '.': { dependencies: { a: { version: '1.0.0(p@2)' } } }, 'packages/web-ui': {} },
+      snapshots: { 'a@1.0.0(p@2)': { dependencies: { '@s/b': '2.0.0' } }, '@s/b@2.0.0': { optionalDependencies: { picomatch: '4.0.7' } }, 'picomatch@4.0.7': {} },
+    };
+    expect(runtimeReach(planted, 'picomatch', SHIPPED)).toEqual(['. > a > @s/b > picomatch']);
+    const devOnly = { importers: { '.': { devDependencies: { picomatch: { version: '4.0.7' } } }, 'packages/web-ui': {} }, snapshots: {} } as unknown as LockDoc;
+    expect(runtimeReach(devOnly, 'picomatch', SHIPPED)).toEqual([]);
+  });
+
+  it('the docs check names each way the docs could ship (positive controls)', () => {
+    const ok = ['{"private": true}', '{"files": ["dist/", "README.md"]}', 'COPY --from=build /app/dist/ /app/dist/', 'node_modules\ndocs/\n'] as const;
+    expect(docsShipped(...ok)).toEqual([]);
+    expect(docsShipped('{"private": false}', ok[1], ok[2], ok[3])).toHaveLength(1);
+    for (const files of ['["dist/", "docs/"]', '["./docs"]', '["*"]', '["**/*.md"]', '["."]']) {
+      expect(docsShipped(ok[0], `{"files": ${files}}`, ok[2], ok[3])).toHaveLength(1);
+    }
+    expect(docsShipped(ok[0], '{}', ok[2], ok[3])).toHaveLength(1);
+    expect(docsShipped(ok[0], ok[1], 'COPY docs/ /app/docs/', ok[3])).toHaveLength(1);
+    expect(docsShipped(ok[0], ok[1], ok[2], 'node_modules\n')).toHaveLength(1);
+  });
+
+  it('the glob code check finds each package and specifier form (positive controls)', () => {
+    for (const text of [
+      "import x from 'rollup';", "await import('@sentry/node/rollup')", "require('@sentry/bundler-plugins/vite')", 'import "@sentry/node/esbuild";',
+      "import cli from 'sentry';", "import pm from 'picomatch';", "import { glob } from 'tinyglobby';", "import { fdir } from 'fdir';",
+      "import mm from 'micromatch';", "import am from 'anymatch';", "import { createServer } from 'vite';", 'await import(`rollup`)', "require('rollup/dist/rollup.js')",
+    ]) {
+      expect(globCodeUse([['src/core/x.ts', text]])).toHaveLength(1);
+    }
+    expect(globCodeUse([['src/core/x.ts', "await import('@sentry/node');"]])).toEqual([]);
+    expect(globCodeUse([['src/core/x.ts', "import Database from 'better-sqlite3';"]])).toEqual([]);
+    // A config-named file is not exempt: inside src/ it is compiled and shipped like any other.
+    expect(globCodeUse([['src/core/vite.config.ts', "import { rollup } from 'rollup';"]])).toHaveLength(1);
+  });
+
+  it('the picomatch premise reports each of its three conditions (wiring controls)', () => {
+    expect(PREMISES['GHSA-fc5q-39xc-vjpf']).toBe(picomatchCheck);
+    const real = realPicomatchInputs();
+    expect(picomatchCheck()).toEqual([]);
+    const reached: LockDoc = { ...real.lock, importers: { ...real.lock.importers, '.': { dependencies: { picomatch: { version: '4.0.7' } } } } };
+    expect(picomatchCheck({ lock: reached })).toEqual(['. > picomatch']);
+    expect(picomatchCheck({ dockerfile: `${real.dockerfile}\nCOPY docs/ /app/docs/\n` })).toEqual(['the Dockerfile copies docs']);
+    expect(picomatchCheck({ source: [...real.source, ['src/core/x.ts', "await import('@sentry/node/rollup');"]] })).toEqual(['src/core/x.ts: names a package that carries picomatch']);
+    expect(picomatchCheck({ source: [...real.source, ['packages/web-ui/src/lib/vite.config.ts', "import cli from 'sentry';"]] })).toEqual(['packages/web-ui/src/lib/vite.config.ts: names a package that carries picomatch']);
+    // Only shipped source counts: a file outside src/ is not read.
+    expect(picomatchCheck({ source: [...real.source, ['scripts/x.mjs', "import pm from 'picomatch';"]] })).toEqual([]);
+  });
+
   it('the walk reaches the web-ui source and its svelte config', () => {
     const paths = tree().map(([p]) => p);
     expect(paths).toContain('packages/web-ui/svelte.config.js');
+    // .cjs modules are read too (the package's postinstall is one).
+    expect(paths).toContain('scripts/postinstall.cjs');
     expect(paths.some((p) => p.startsWith('packages/web-ui/src/') && p.endsWith('.svelte'))).toBe(true);
   });
 });
