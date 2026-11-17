@@ -466,6 +466,7 @@ export function installGlobalHandlers(): void {
   _uncaughtHandler = (error) => {
     process.stderr.write(`[lynox] uncaught exception: ${processErrorText(error, true)}\n`);
     withCurrentClient(Sentry, () => Sentry.captureException(error));
+    // run-group-starter: a one-shot callback that ends the process, nothing long-lived.
     void Promise.resolve((_currentClient ?? Sentry).flush(2000)).finally(() => {
       process.exit(1);
     });
