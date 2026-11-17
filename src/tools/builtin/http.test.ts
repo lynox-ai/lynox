@@ -9191,29 +9191,20 @@ describe('write approvals for the write the question showed (270)', () => {
         expect(question(prompt, 0)).toContain(' The body has too many percent-encoded characters to check for a stored secret, so it is not shown here. If you do not know what this write sends, decline it.');
       });
 
-      // The headers are read under one budget, each bounded, their number not: past it they are an
-      // unreadable part like the body (here 2000 plain headers one character past the budget).
+      // The headers are read under one budget, each bounded, their number not: past it they are
+      // refused for everyone, the owner included (here 2000 plain headers one character past it).
       const slowHeaders = (): Record<string, string> => Object.fromEntries(
         Array.from({ length: 2000 }, (_, i) => [`x-hdr-${String(i).padStart(4, '0')}`, 'v'.repeat(i === 0 ? 163 : 162)]));
-      const headersRefusal = 'Blocked: the headers of this POST to h.example have too many percent-encoded characters for the approval question to check them for a stored secret. Nothing was sent. Send the values as plain text where the service accepts that, or fewer of them per request.';
+      const headersRefusal = 'Blocked: the headers of this POST to h.example are too many or too heavily encoded for the approval question to check them for a stored secret. Nothing was sent. Send fewer headers, with plain values.';
 
-      it('refuses headers too costly to read in a mandate\'s session, without asking', async () => {
+      it.each([['a mandate', true], ['the owner', false]] as const)('refuses headers too costly to read for %s, without asking', async (_who, isMandate) => {
         const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
         vi.stubGlobal('fetch', fetchMock);
-        const { agent, prompt } = agent270({ principal: MANDATE, mask: (t) => t });
+        const { agent, prompt } = isMandate ? agent270({ principal: MANDATE, mask: (t) => t }) : agent270({ answer: 'Allow' });
         const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: slowHeaders(), body: '{}' }, agent);
         expect(out).toContain(headersRefusal);
         expect(prompt).not.toHaveBeenCalled();
         expect(fetchMock).not.toHaveBeenCalled();
-      });
-
-      it('asks the owner about headers too costly to read, and says they are not shown', async () => {
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
-        const { agent, prompt } = agent270({ answer: 'Deny' });
-        await visible({ url: 'https://h.example/a', method: 'POST', headers: slowHeaders(), body: '{}' }, agent);
-        const q = question(prompt, 0);
-        expect(q).toContain(' The headers have too many percent-encoded characters to check for a stored secret, so they are not shown here. If you do not know what this write sends, decline it.');
-        expect(q).not.toContain('x-hdr-0001');
       });
 
       describe('a query or a path the question cannot read', () => {
