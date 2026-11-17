@@ -141,8 +141,9 @@
 		} finally {
 			sending = false;
 			// The confirm was turned off, or the content it sat in was replaced: focus goes back to the
-			// head of the dialog, not to the page behind it.
-			if (dialog?.isConnected === true) heading?.focus();
+			// head of the dialog rather than to the page behind it, unless something outside the
+			// dialog took it meanwhile, such as an overlay above it.
+			if (dialog?.isConnected === true && keyIsOurs()) heading?.focus();
 		}
 	}
 </script>

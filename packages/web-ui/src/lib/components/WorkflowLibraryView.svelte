@@ -221,13 +221,18 @@
 	// The workflow's own takeover: offered wherever its person's access ended, which is exactly where
 	// the engine allows it (the library's `ended` and the takeover read the same mark and end).
 	let takeoverWf = $state<SavedWorkflow | null>(null);
-	// The button that opened it: focus goes back there when the dialog closes. Gone once the workflow
-	// no longer needs taking over (a card has no focusable head): then to the library's heading.
+	// The button that opened it: focus goes back there when the dialog closes, or to the same
+	// workflow's button where the list was drawn again; with none on the page, to the library's
+	// heading (a card has no focusable head).
 	let takeoverOpener: HTMLElement | null = null;
 	let libraryHeading = $state<HTMLElement | null>(null);
 
 	function focusAfterTakeover(opener: HTMLElement | null): void {
-		if (opener?.isConnected === true) opener.focus();
+		const id = opener?.dataset['takeoverFor'];
+		const again = opener?.isConnected === true
+			? opener
+			: [...document.querySelectorAll<HTMLElement>('[data-testid="takeover-open"]')].find((b) => id !== undefined && b.dataset['takeoverFor'] === id);
+		if (again !== undefined) again.focus();
 		else libraryHeading?.focus();
 	}
 
@@ -245,15 +250,27 @@
 
 	async function takenOver(stillOff: unknown): Promise<void> {
 		takeoverWf = null;
+		const opener = takeoverOpener;
 		takeoverOpener = null;
 		error = '';
 		const once = stillOffLine(stillOff);
 		stampOnceLine = once ? tf(once.key, { n: String(once.n) }) : '';
 		await loadWorkflows();
 		notice = t('workflow_library.takeover.done');
-		// Taken over, the workflow no longer offers the button that opened the dialog.
-		libraryHeading?.focus();
+		refocus = { opener };
 	}
+
+	// After the takeover, once the list loaded again is on screen: focus goes where
+	// `focusAfterTakeover` says, but only if nothing took it meanwhile (it fell to the page when the
+	// dialog closed), so a dialog or field opened during the reload keeps it.
+	let refocus = $state<{ opener: HTMLElement | null } | null>(null);
+	$effect(() => {
+		const r = refocus;
+		if (r === null) return;
+		refocus = null;
+		const at = document.activeElement;
+		if (at === null || at === document.body) focusAfterTakeover(r.opener);
+	});
 
 	// The schedule refusals the engine names by code, in the reader's language (ux U-085, U-119).
 	const SCHEDULE_REFUSALS: Record<string, string> = {
@@ -814,6 +831,7 @@
 									<!-- Always visible, not on hover: it is the one way this workflow runs again. -->
 									<button
 										data-testid="takeover-open"
+										data-takeover-for={wf.id}
 										onclick={(e) => openTakeover(wf, e.currentTarget)}
 										class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 {actionSize} text-warning hover:bg-warning/20 transition-colors"
 									>

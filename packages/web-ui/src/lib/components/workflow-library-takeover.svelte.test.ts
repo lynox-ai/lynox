@@ -64,13 +64,19 @@ interface Served { posts: unknown[]; previews: number; lists: number }
 let hosted: string | null = null;
 // Set, a preview answers only once it is called: the dialog is seen while it loads.
 let previewGate: Promise<void> | null = null;
+// Set, the library's list answers only once it is called: the page is seen while it loads again.
+let listGate: Promise<void> | null = null;
 
 function serve(workflows: Array<Record<string, unknown>>, previews: Array<Record<string, unknown>>, post: { status: number; body: unknown } = { status: 200, body: { takenOver: true, runsAs: 'owner', stillOff: 0 } }): Served {
 	const served: Served = { posts: [], previews: 0, lists: 0 };
 	vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
 		const path = new URL(String(input), 'http://localhost').pathname.replace(/^\/api/, '');
 		const method = init?.method ?? 'GET';
-		if (method === 'GET' && path === '/workflows/library') { served.lists++; return new Response(JSON.stringify({ workflows, viewer: 'owner' }), { status: 200 }); }
+		if (method === 'GET' && path === '/workflows/library') {
+			served.lists++;
+			if (listGate !== null) await listGate;
+			return new Response(JSON.stringify({ workflows, viewer: 'owner' }), { status: 200 });
+		}
 		if (method === 'GET' && /^\/workflows\/[^/]+\/takeover-preview$/.test(path)) {
 			const p = previews[Math.min(served.previews, previews.length - 1)]!;
 			served.previews++;
@@ -130,6 +136,7 @@ const ENDED = { ...base('wf-e', 'Ended one'), runs_as: { person: EVA, ended: tru
 beforeEach(() => {
 	hosted = null;
 	previewGate = null;
+	listGate = null;
 	setLocale('de');
 	target = document.createElement('div');
 	document.body.appendChild(target);
@@ -456,14 +463,71 @@ describe('the dialog for keyboard and screen reader', () => {
 		expect(d.querySelector('h2')?.textContent?.trim()).toBe('Workflow übernehmen: Ended, renamed');
 	});
 
-	it('once taken over, the button that opened it is gone: focus goes to the library\'s heading', async () => {
-		await open([ENDED]);
+	it('once taken over and the button that opened it is gone, focus goes to the library\'s heading', async () => {
+		const wf: Record<string, unknown> = { ...ENDED };
+		await open([wf]);
 		await openDialog();
 		const h1 = target.querySelector('h1')!;
+		// The list loaded again shows the workflow taken over: no button to take it over.
+		delete wf['runs_as'];
 		dialog()!.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
 		await settle();
 		expect(dialog()).toBeNull();
+		expect(openButton(card('Ended one'))).toBeNull();
 		expect(document.activeElement).toBe(h1);
+	});
+
+	it('once taken over, focus goes back to the button that opened it where the list loaded again still has it', async () => {
+		await open([ENDED]);
+		await openDialog();
+		dialog()!.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(document.activeElement).toBe(openButton(card('Ended one')));
+	});
+
+	it('once taken over, a field focused while the list loads again keeps the focus', async () => {
+		await open([ENDED]);
+		await openDialog();
+		let let_go: (() => void) | undefined;
+		listGate = new Promise<void>((r) => { let_go = r; });
+		dialog()!.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(dialog()).toBeNull();
+		const field = document.createElement('input');
+		document.body.appendChild(field);
+		try {
+			field.focus();
+			let_go!();
+			await settle();
+			expect(document.activeElement).toBe(field);
+		} finally {
+			field.remove();
+		}
+	});
+
+	it('a refusal leaves the focus where it went outside the dialog while the takeover was sent', async () => {
+		let release: (() => void) | undefined;
+		await open([ENDED], [FULL()], { status: 409, body: { code: 'running', error: 'engine sentence' } });
+		const inner = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+			if (init?.method === 'POST') await new Promise<void>((r) => { release = r; });
+			return inner(input, init);
+		}));
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		const overlay = document.createElement('input');
+		document.body.appendChild(overlay);
+		try {
+			overlay.focus();
+			release!();
+			await settle();
+			expect(d.querySelector('[data-testid="takeover-error"]')).not.toBeNull();
+			expect(document.activeElement).toBe(overlay);
+		} finally {
+			overlay.remove();
+		}
 	});
 
 	it('a workflow that needed no takeover any more: once closed, focus goes to the library\'s heading', async () => {

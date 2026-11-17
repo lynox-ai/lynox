@@ -2695,7 +2695,7 @@ export class LynoxHTTPApi {
     const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
     const workflow = trigger.effect === 'run_workflow'
       // `ended` is shown only: the view then names the workflow's takeover as the way on.
-      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null, ended: !plan.unreadable && this._workflowAuthorEnded(plan.workflowMember) }
+      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null, ended: this._workflowAuthorEnded(plan.workflowMember) }
       : null;
     if (plan.unreadable || plan.of === undefined) return { listed: null, by: null, workflow };
     return {

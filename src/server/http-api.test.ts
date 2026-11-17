@@ -22159,6 +22159,11 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         live = false;
         authorship = { ...eva, coveredCreatedBy: eva.createdBy, coveredCreatedId: MID, coveredCreatedAt: AT };
         expect(await shownWorkflow()).toEqual({ name: 'W', confirmed: true, ended: false });
+        // No store of ends: no access can be shown to last, so the person counts as ended.
+        authorship = eva;
+        live = true;
+        ref['getMandateEnds'] = () => undefined;
+        expect(await shownWorkflow()).toEqual({ name: 'W', confirmed: true, ended: true });
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();
