@@ -174,6 +174,14 @@ describe('a start on an instance the platform hosts', () => {
     expect(process.env['LYNOX_VAULT_KEY']).toBe(KEY64);
   });
 
+  it('starts on a well-formed key in the environment when no entrypoint said where it came from', () => {
+    // A process started inside the container by hand inherits the delivered key, not the entrypoint's word.
+    managedDir();
+    vi.stubEnv('LYNOX_VAULT_KEY', KEY64);
+    expect(() => ensureVaultKey()).not.toThrow();
+    expect(vaultKeySource()).toBe('env');
+  });
+
   it('refuses without a key, and neither reads vault.key nor generates one', () => {
     const dir = managedDir();
     vi.stubEnv('LYNOX_VAULT_KEY', '');

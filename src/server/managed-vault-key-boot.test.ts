@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { MANAGED_VAULT_KEY_REFUSAL } from '../core/engine-init.js';
-import { _resetVaultKeySource } from '../core/vault-key-source.js';
+import { _resetVaultKeySource, vaultKeySource } from '../core/vault-key-source.js';
 
 /**
  * A REAL boot of an instance the platform hosts: it starts only on the vault key the platform
@@ -69,11 +69,13 @@ describe('a managed boot and its vault key', () => {
   it('gets past the key on the one the environment delivered (control)', async () => {
     // The managed hook needs its control plane; the status poll gets an allowing answer.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ allowed: true, balance_cents: 100, spend_gate: 'balance' }) }));
-    const { init } = await boot({
+    const { data, init } = await boot({
       LYNOX_BILLING_TIER: 'managed', LYNOX_VAULT_KEY: KEY, LYNOX_VAULT_KEY_SOURCE: 'env',
       LYNOX_MANAGED_CONTROL_PLANE_URL: 'https://cp.test', LYNOX_MANAGED_INSTANCE_ID: 'inst-1',
     });
     await expect(init).resolves.toBeUndefined();
+    expect(vaultKeySource()).toBe('env');
+    expect(existsSync(join(data, 'vault.key'))).toBe(false);
   });
 
   it('leaves a self-hosted first boot as it was: it generates a key (control)', async () => {

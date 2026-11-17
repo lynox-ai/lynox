@@ -349,6 +349,7 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, on an instance t
     const run = start(home, { LYNOX_MANAGED_MODE: 'managed' });
     expect(run.status).toBe(1);
     expect(run.engineKey).toBeNull();
+    expect(run.err).toContain('the platform did not hand it');
   });
 
   it('leaves a self-hosted first start as it was: it generates a key (control)', () => {
