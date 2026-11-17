@@ -4435,9 +4435,10 @@ export class Agent implements IAgent {
       // Only the names the attach READS for this profile: `collectVaultKeys` is wider (it keeps the
       // derived refresh name even where the profile reads another), and a guessed derived name is
       // exactly the one this note exists for.
+      // bearer and header read `vault_keys[0]` only; oauth2 reads no `vault_keys` at all.
       const a = profile.auth!;
-      const keys: unknown = a.vault_keys;
-      const own = new Set<string>(Array.isArray(keys) ? keys.slice(0, 2).filter((k): k is string => typeof k === 'string') : []);
+      const first: unknown = Array.isArray(a.vault_keys) ? a.vault_keys[0] : undefined;
+      const own = new Set<string>(type !== 'oauth2' && typeof first === 'string' ? [first] : []);
       if (type === 'oauth2') {
         own.add(accessTokenKey(profile.id));
         own.add(readersRefreshSlot(profile));

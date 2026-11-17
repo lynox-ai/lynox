@@ -693,6 +693,20 @@ describe('the way out a refused or missing token name points to', () => {
     expect(result).not.toContain('belongs to api_profile');
   });
 
+  it('a guessed second vault key of a header profile still gets the note (the attach reads the first only)', async () => {
+    const s = legacyStoreOf(shopApi(), reporter({ type: 'header', header_name: 'X-Key', vault_keys: ['REPORTER_KEY', 'REPORTER_SPARE'] }));
+    const result = await agentCall(s, OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTER_SPARE'));
+    expect(result).toContain('reports.example belongs to api_profile \\"reporter\\" (header)');
+  });
+
+  it('a guessed vault key of an oauth2 profile still gets the note (the oauth2 attach reads no vault_keys)', async () => {
+    const vend: ApiProfile = { ...oauth('vend', { refresh_token_key: 'VEND_RT' }) };
+    vend.auth = { ...vend.auth!, vault_keys: ['VEND_SPARE'] };
+    const s = legacyStoreOf(shopApi(), vend);
+    const result = await agentCall(s, { ...OWNER_VAULT, VEND_RT: value('vend', 'refresh') }, call('https://vend.example/v1/orders', 'VEND_SPARE'));
+    expect(result).toContain('vend.example belongs to api_profile \\"vend\\" (oauth2)');
+  });
+
   it('a missing access token of an oauth2 profile keeps the way to collect or mint it', async () => {
     const { SHOP_API_ACCESS_TOKEN: _gone, ...vault } = OWNER_VAULT;
     const result = await agentCall(store(), vault, call('https://api.shop.example/v1/orders', 'SHOP_API_ACCESS_TOKEN'));
