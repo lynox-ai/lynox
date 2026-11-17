@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { runTaskTitle, RUN_TASK_LEAD } from './run-task-turn.js';
+import { runTaskTitle, runTaskWords } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -2465,7 +2465,7 @@ export class Session {
   /**
    * The language the marker names for this turn ({@link withCurrentTimePrefix}), or `null` for none.
    * Read from the user's own words: without a loaded-context preamble, and for a scheduled run the
-   * task's title and description without the engine's lead. None for an internal run (a compaction
+   * task's title and description alone ({@link runTaskWords}). None for an internal run (a compaction
    * or a summary writes in the thread's language, which its own prompt asks for; its English lead
    * would read as English) and none where the instance has a language set (`config.language`): that
    * explicit preference is in the system prompt and must not be contradicted turn by turn.
@@ -2477,7 +2477,7 @@ export class Session {
       ? task.flatMap(b => (typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'text'
         && typeof (b as { text?: unknown }).text === 'string' ? [(b as { text: string }).text] : [])).join('\n')
       : task;
-    const own = runTaskTitle(words) !== null ? words.replace(RUN_TASK_LEAD, '') : stripLoadedContext(words);
+    const own = runTaskTitle(words) !== null ? runTaskWords(words) ?? '' : stripLoadedContext(words);
     return messageLanguage(own);
   }
 

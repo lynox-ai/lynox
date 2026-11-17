@@ -10,9 +10,11 @@
  *
  * Function words decide, counted on both sides. Words spelled the same in both languages (`in`,
  * `an`, `will`, `am`, `also`, `so`, `was`, `die`, `es`, `da`) count for neither. Quoted passages,
- * inline code and links are removed first, so an English message quoting a German sentence still
- * reads as English. A lowercase word with an umlaut or ß counts for German; a capitalised one does not, so a
- * name like "Zürich" or "Müller AG" in an English sentence does not tip it.
+ * inline code, links and domain names (also the one in a mail address) are removed first, so an
+ * English message quoting a German sentence still reads as English, and `info@firma.de` does not
+ * count. A
+ * lowercase word with an umlaut or ß counts for German; a capitalised one does not, so a name like
+ * "Zürich" or "Müller AG" in an English sentence does not tip it.
  */
 
 export type MessageLanguage = 'de' | 'en';
@@ -42,14 +44,15 @@ const EN = new Set([
  * Common words of the other languages the product offers (French, Italian, Spanish, Dutch,
  * Portuguese, Swedish). Several of them would otherwise count as English (`a`, `no`, `me`, `is`,
  * `on`) and turn a Spanish or Dutch message English. Two of them in a message and it is not
- * decided. Left out: words that are also German or English (`du`, `des`, `je`, `um`, `da`, `van`,
- * `non`, `per`, `do`, `den`, `os`).
+ * decided. Left out: words that are also German or English, or that a German or English message
+ * carries as a part or an abbreviation (`du`, `des`, `je`, `um`, `da`, `van`, `non`, `per`, `do`,
+ * `den`, `os`; `e` and `eu` from "E-Mail" and "EU", `mi` for Mittwoch, `se` from "SAP SE", `y`).
  */
 const OTHER = new Set([
   'le', 'la', 'les', 'et', 'est', 'une', 'un', 'que', 'qui', 'pour', 'pas', 'vous', 'nous', 'il',
-  'avec', 'toi', 'moi', 'sont', 'mais', 'très', 'el', 'los', 'las', 'de', 'del', 'y', 'muy', 'por',
-  'para', 'con', 'una', 'mi', 'pero', 'se', 'lo', 'gusta', 'che', 'della', 'sono', 'sia', 'troppo',
-  'e', 'questo', 'het', 'een', 'ik', 'niet', 'voor', 'ons', 'dit', 'zijn', 'wij', 'eu', 'não', 'é',
+  'avec', 'toi', 'moi', 'sont', 'mais', 'très', 'el', 'los', 'las', 'de', 'del', 'muy', 'por',
+  'para', 'con', 'una', 'pero', 'lo', 'gusta', 'che', 'della', 'sono', 'sia', 'troppo', 'questo',
+  'het', 'een', 'ik', 'niet', 'voor', 'ons', 'dit', 'zijn', 'wij', 'não', 'é',
   'uma', 'och', 'jag', 'har', 'är', 'inte', 'att', 'det', 'som', 'på', 'bor', 'en',
 ]);
 const OTHER_WORDS = 2;
@@ -77,6 +80,7 @@ export function messageLanguage(text: string): MessageLanguage | null {
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`[^`\n]*`/g, ' ')
     .replace(/\bhttps?:\/\/\S+/g, ' ')
+    .replace(/\b[\w-]+\.(?:de|ch|at|com|net|org|io|fr|it|es|nl|pt|se)\b/gi, ' ')
     .replace(/[„“"«»][^„“"«»\n]*[“"«»]/g, ' ');
   const all = count(plain);
   if (all.other >= OTHER_WORDS) return null;
@@ -87,7 +91,12 @@ export function messageLanguage(text: string): MessageLanguage | null {
   // The opening words are the user's own instruction; what follows may be pasted text in another
   // language ("Fass das zusammen: The quarterly report …"). If the opening leans the other way,
   // the message is not decided.
-  const head = count(plain.trimStart().split(/[:\n.?!]/u, 1)[0] ?? '');
-  const other = language === 'de' ? head.en > head.de : head.de > head.en;
+  // A single word ("Thanks!", "Check:") is not an instruction in the other language; an opening of
+  // three words or more with one, or two such words, is.
+  const opening = plain.trimStart().split(/[:\n.?!]/u, 1)[0] ?? '';
+  const head = count(opening);
+  const words = opening.split(/[^\p{L}']+/u).filter((w) => w.length > 0).length;
+  const [against, forIt] = language === 'de' ? [head.en, head.de] : [head.de, head.en];
+  const other = against > forIt && (against >= 2 || words >= 3);
   return other ? null : language;
 }

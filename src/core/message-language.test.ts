@@ -47,6 +47,19 @@ describe('messageLanguage', () => {
     expect(messageLanguage('Please make exactly these three tool calls, one after the other, without asking: 1) api_setup with action list.')).toBe('en');
   });
 
+  it('still decides ordinary German and English work messages with mail words, addresses and abbreviations', () => {
+    expect(messageLanguage('Bitte schick die E-Mail an Anna und kopiere die E-Mail-Adresse in den Verteiler.')).toBe('de');
+    expect(messageLanguage('Please forward the e-mail to Anna and add her e-mail address to the list.')).toBe('en');
+    expect(messageLanguage('Schreib eine Antwort an info@firma.de und an verkauf@firma.de, dass wir am Montag liefern.')).toBe('de');
+    expect(messageLanguage('Die neue EU-Richtlinie gilt ab Januar, z.B. für alle Shops in der EU, und wir müssen das prüfen.')).toBe('de');
+    expect(messageLanguage('Bitte prüfe die Verträge mit SAP SE und verschiebe den Termin mit Herrn de Vries auf Mi.')).toBe('de');
+  });
+
+  it('lets one word of the other language at the start stand, not decide', () => {
+    expect(messageLanguage('Thanks! Kannst du mir bitte die offenen Rechnungen von diesem Monat zeigen?')).toBe('de');
+    expect(messageLanguage('Check: sind alle Bestellungen von dieser Woche schon bei uns im System?')).toBe('de');
+  });
+
   it('counts words spelled alike in both languages for neither side', () => {
     // "in", "an", "will", "am", "also", "so", "was", "die", "es", "da": none of them may decide.
     expect(messageLanguage('in an will am also so was die es da')).toBeNull();

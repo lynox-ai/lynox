@@ -37,6 +37,17 @@ export function runTaskPrompt(rawTitle: string, rawDescription: string | null | 
  * The task's title when `text` opens with a scheduled run's turn, else `null`: what a thread's
  * title, a history row or a briefing line names, instead of the engine's lead.
  */
+/**
+ * The task's own words when `text` opens with a scheduled run's turn (its title and description,
+ * the text of the `scheduled_task` fence), else `null`. Leaves out the engine's lead and, on a turn
+ * that resumes after an answered question, the question and the answer that follow the fence.
+ */
+export function runTaskWords(text: string): string | null {
+  if (runTaskTitle(text) === null) return null;
+  const body = /<scheduled_task>\n([\s\S]*?)\n<\/scheduled_task>/.exec(text)?.[1];
+  return body === undefined ? null : body.replace(/^Task: /, '');
+}
+
 export function runTaskTitle(text: string): string | null {
   // A stored run's text can start with the time the engine put before it (`withCurrentTimePrefix`).
   const turn = text.replace(/^\[Now:[^\]\n]*\](?:\n\n|\n)?/, '');
