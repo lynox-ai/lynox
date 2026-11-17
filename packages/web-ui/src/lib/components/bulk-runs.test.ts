@@ -767,11 +767,11 @@ describe('going on from a run that halted', () => {
 	it('words a halt for a connection that does not cover the run\'s fields', () => {
 		const none = { applied: 0, sentUnknown: 0 };
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, DE)).toEqual({
-			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Verbinde Shopify neu (Einstellungen → APIs); dann bitte lynox im Chat, den Lauf neu zu planen.',
+			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Verbinde Shopify neu (Einstellungen → APIs).',
 			before: null, check: null, kept: null, soFar: null, allows: null,
 		});
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, EN)?.cause)
-			.toBe('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.');
+			.toBe('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → APIs).');
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['alt', 'descriptionHtml', 'title'] }), true, DE)?.cause)
 			.toContain('noch nicht, die Alt-Texte der Bilder, die Beschreibung und den Titel zu ändern.');
 		// A field this page has no name for, or none given: "these fields".
@@ -784,7 +784,7 @@ describe('going on from a run that halted', () => {
 			expect(de.startsWith('lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern.')).toBe(true);
 		}
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(DE))?.cause)
-			.toBe('lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Das ändert sich nur, wenn der Inhaber dieser Instanz Shopify neu verbindet; bitte den Inhaber darum, dann bitte lynox im Chat, den Lauf neu zu planen.');
+			.toBe('lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Das ändert sich nur, wenn der Inhaber dieser Instanz Shopify neu verbindet; bitte den Inhaber darum.');
 		// A mandate's session is not sent to a connection only the owner's reconnect sets right.
 		for (const [i, lang] of [[DE, 'de'], [EN, 'en']] as const) {
 			const mandate = bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(i))!.cause;
@@ -1344,7 +1344,7 @@ describe('the markup list of a target (1010)', () => {
 
 	it('lists a write under a head naming the field, added and removed, and says plain formatting is left out', () => {
 		const list = bulkMarkupList({ field: 'description', added: [link, templated], removed: [image], addsOutsideAllowlist: true }, false, 'Beschreibung', DE);
-		expect(list.head).toBe('Geändertes Markup in Beschreibung:');
+		expect(list.head).toBe('Geändertes Markup (Beschreibung):');
 		expect(list.restoresNote).toBeNull();
 		expect(list.lines).toEqual([
 			{ label: 'neu:', code: '<a href="https://partner.example/p?q=1&r=2">', template: null },
@@ -1354,7 +1354,7 @@ describe('the markup list of a target (1010)', () => {
 		expect(list.note).toBe('Einfache Formatierung wie Absätze, Fettschrift oder Listen ist nicht aufgeführt.');
 		const en = bulkMarkupList({ field: 'description', added: [templated], removed: [image] }, false, 'Description', EN);
 		expect([en.head, en.lines.map((l) => [l.label, l.template]), en.note]).toEqual([
-			'Markup that changes in Description:', [['added:', '(inside a <template> block)'], ['removed:', null]],
+			'Changed markup (Description):', [['added:', '(inside a <template> block)'], ['removed:', null]],
 			'Plain formatting such as paragraphs, bold text or lists is not listed.',
 		]);
 	});
@@ -1362,7 +1362,7 @@ describe('the markup list of a target (1010)', () => {
 	it('says a field it could not read was not listed, instead of calling the list complete', () => {
 		const de = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: false, unread: true }, false, 'Beschreibung', DE);
 		expect([de.head, de.lines, de.note]).toEqual([
-			'Geändertes Markup in Beschreibung:', [],
+			'Geändertes Markup (Beschreibung):', [],
 			'Das Markup dieses Felds ist zu gross oder zu tief verschachtelt, um hier aufgelistet zu werden.',
 		]);
 		// On an undo the engine sets addsOutsideAllowlist with it and never addsOnlyPassive, so the undo
@@ -1577,7 +1577,7 @@ describe('the sentences the page words by the list\'s form, the judge and the re
 
 	it('words the markup refusals on Shopify without the bracket of what it found', () => {
 		for (const reason of ['element_not_allowed', 'attribute_not_allowed']) {
-			expect(bulkInvalidText(reason, true, true, DE, ctx())).toBe('Der neue Text enthält Formatierung, die lynox nicht schreibt. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf neu zu planen; das Modell lässt sie dann weg.');
+			expect(bulkInvalidText(reason, true, true, DE, ctx())).toBe('Der neue Text enthält Formatierung, die lynox nicht schreibt. Darum ändert lynox dieses Produkt nicht. Bitte lynox im Chat, den Lauf neu zu planen; die Formatierung fällt dann weg.');
 		}
 		for (const reason of ['content_changed', 'new_img', 'not_canonical']) expect(bulkInvalidText(reason, true, true, DE, ctx())).toBe(de[`bulk.invalid.${reason}`]);
 		// The page's tags dropped by the fragment name where to remove them: the Shopify admin (U-103).

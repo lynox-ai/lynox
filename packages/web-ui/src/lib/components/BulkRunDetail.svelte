@@ -552,7 +552,7 @@
 {#snippet markupList(target: BulkTarget, undo: boolean)}
 	{#each target.markupChanges ?? [] as change (change.field)}
 		{@const list = bulkMarkupList(change, undo, shopify ? bulkFieldNamesText(host, [change.field], t) : bulkVisibleText(change.field), view)}
-		<div class="mt-1 text-xs" data-testid="bulk-markup">
+		<div class="mt-1 text-xs [overflow-wrap:anywhere]" data-testid="bulk-markup">
 			{#if list.head}<div class="text-text-subtle">{list.head}</div>{/if}
 			{#if list.restoresNote}<p class={list.restoresActive ? 'text-warning' : 'text-text-subtle'} data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
 			<ul class="space-y-0.5">
@@ -669,7 +669,8 @@
 										<td class="py-1.5">
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}
-													<div>
+													<!-- A long value without spaces (HTML, a URL) breaks inside the cell instead of running past it. -->
+													<div class="[overflow-wrap:anywhere]">
 														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
 														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{#if bulkHiddenAddsOf(target, f.field).length > 0}{@render markedValue(bulkRawText(f.after), bulkHiddenAddsOf(target, f.field), bulkHiddenHtml(target, f.field), bulkAfterTakenBack(run, target))}{:else}{bulkValueText(f.after)}{/if}</ins>
