@@ -249,6 +249,9 @@ describe('writing a plan or a workflow with a character that renders as nothing'
       .toThrow('refused to save this workflow — step #3 (steps[2].task) contains a character that renders as nothing (U+200B).');
     expect(() => history.insertPlannedPipeline({ ...base, goal: `Send${ZWSP}` }, OWNER_PRINCIPAL))
       .toThrow('refused to save this workflow — goal contains a character that renders as nothing (U+200B).');
+    // A numbered place outside the step list is not a step.
+    expect(() => history.insertPlannedPipeline({ ...base, parameters: [{ name: 'list', description: `which${ZWSP}` }] } as typeof base, OWNER_PRINCIPAL))
+      .toThrow(/refused to save this workflow — parameters\[0\]\S* contains a character/);
     // Only the workflow's step list is numbered: a plan's or a task's own paths keep their form.
     expect(hiddenCharRefusal('plan', { path: 'steps[1]', codePoint: 'U+200B' } as never)).toContain('— steps[1] contains');
   });
