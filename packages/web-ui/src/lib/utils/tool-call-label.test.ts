@@ -14,12 +14,11 @@ describe('toolCallLabel', () => {
       expect(out).toEqual({ action: 'tool.knowledge_recalled', subject: 'pricing strategy' });
     });
 
-    it('falls back to namespace when LLM uses the no-query recency-dump path', () => {
+    it('names no subject on the no-query path: the namespace is an internal value', () => {
       // memory_recall accepts namespace-only — see core/src/tools/builtin/memory.ts.
-      // Without this fallback the bubble would render "Knowledge recalled —"
-      // with no signal at all.
-      const out = toolCallLabel('memory_recall', { namespace: 'status' }, tk);
-      expect(out).toEqual({ action: 'tool.knowledge_recalled', subject: 'status' });
+      for (const namespace of ['knowledge', 'methods', 'status', 'learnings']) {
+        expect(toolCallLabel('memory_recall', { namespace }, tk)).toEqual({ action: 'tool.knowledge_recalled', subject: '' });
+      }
     });
 
     it('NEVER renders the literal string "undefined" as subject', () => {
@@ -34,11 +33,10 @@ describe('toolCallLabel', () => {
       expect(nullInput?.subject).not.toBe('undefined');
     });
 
-    it('trims whitespace-only query then falls back to namespace', () => {
-      // Defensive: a query of "  " should not pass as a real query — that
-      // would render the bubble as "Knowledge recalled —    " with no signal.
+    it('treats a whitespace-only query as none', () => {
+      // A query of "  " is not a real query and must not render as one.
       const out = toolCallLabel('memory_recall', { namespace: 'knowledge', query: '   ' }, tk);
-      expect(out?.subject).toBe('knowledge');
+      expect(out?.subject).toBe('');
     });
 
     it('is NOT in HIDDEN_TOOLS — must always be visible alongside other tools', () => {
