@@ -237,6 +237,8 @@ describe('the confirmation', () => {
 			// The owner's plan may run a workflow someone else named, and carry that name: boxed too.
 			{ ...PAUSED, ...owner, id: 'o1', title: 'Owner plan' },
 			{ ...PAUSED, ...owner, id: 'o2', title: 'Scheduled: Forged', edited_by: 'owner' },
+			{ ...PAUSED, ...owner, id: 'o3', title: 'Scheduled: Never changed' },
+			{ ...PAUSED, ...owner, id: 'e1', title: 'Scheduled: Edited only', edited_by: ida },
 			{ ...PAUSED, id: 'm1', title: 'Scheduled: Mandate made' },
 			{ ...PAUSED, ...owner, id: 'm2', title: 'Scheduled: Mandate last', edited_by: ida, mandate_editor: ida },
 			{ ...PAUSED, ...owner, id: 'm3', title: 'Scheduled: Mandate before', edited_by: 'owner', mandate_editor: ida },
@@ -247,6 +249,8 @@ describe('the confirmation', () => {
 		const boxed: Array<[string, string, string]> = [
 			['Owner plan', 'Owner plan', 'mr-0.5'],
 			['Scheduled: Forged', 'Forged', 'mx-0.5'],
+			['Scheduled: Never changed', 'Never changed', 'mx-0.5'],
+			['Scheduled: Edited only', 'Scheduled: Edited only', 'mr-0.5'],
 			['Scheduled: Mandate made', 'Scheduled: Mandate made', 'mr-0.5'],
 			['Scheduled: Mandate last', 'Scheduled: Mandate last', 'mr-0.5'],
 			['Scheduled: Mandate before', 'Scheduled: Mandate before', 'mr-0.5'],
@@ -259,6 +263,9 @@ describe('the confirmation', () => {
 			expect(box!.classList.contains('bg-bg-muted'), line).toBe(true);
 			expect(box!.classList.contains('font-mono'), line).toBe(false);
 			expect(box!.classList.contains(margin), line).toBe(true);
+			// Its 1 px edge, the part of the box that shows on every ground.
+			expect(box!.classList.contains('border'), line).toBe(true);
+			expect(box!.classList.contains('border-text-subtle'), line).toBe(true);
 		}
 	});
 

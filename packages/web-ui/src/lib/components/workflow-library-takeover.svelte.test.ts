@@ -762,6 +762,8 @@ describe('the library\'s own sentences', () => {
 		const inSentence = d.querySelector('[data-takeover-part="released"] bdi[data-foreign-value]');
 		expect(inSentence?.textContent).toBe('Daily');
 		expect(spacing(inSentence!)).toEqual(['mx-0.5']);
+		// The 1 px edge that draws the box on every ground, in a title and in a sentence.
+		for (const b of [card!.querySelector('bdi[data-foreign-value]')!, inSentence!]) expect([...b.classList].filter((c) => c.startsWith('border'))).toEqual(['border', 'border-text-subtle']);
 	});
 
 	it('sets the workflow name in the dialog\'s heading in the heading\'s font, a value in a sentence in the code font', async () => {

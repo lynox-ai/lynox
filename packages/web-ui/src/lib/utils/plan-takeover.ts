@@ -316,9 +316,12 @@ export interface PlanAuthorship {
  * The title of a plan with a takeover to give, as a line with the value set apart. The title is
  * someone else's value on every such plan: even one the owner set up runs a workflow a person with
  * access made or changed, and its title may be that workflow's name, put there by lynox's agent or
- * by the engine. Only where the owner alone set up and changed the plan does a title the engine
- * starts with its own words keep those words outside the box; on any other plan the whole title is
- * the value, so a person with access cannot borrow them.
+ * by the engine. Only where the owner alone set up and changed the plan does a title that starts
+ * with the engine's prefix keep that prefix outside the box. The engine writes it when a workflow
+ * is scheduled without a title, and the owner may have typed it into a title of their own; either
+ * way only the constant stands outside, and the rest is the value. On any other plan the whole
+ * title is the value, so a person with access cannot borrow lynox's words. Sentences that name
+ * plans (`planList`, the dialog's lines) keep every title whole in its box.
  */
 export function pausedTitleLine(plan: PlanAuthorship): string {
 	const ownerOnly = plan.created_by === 'owner' && (plan.edited_by ?? 'owner') === 'owner' && (plan.mandate_editor ?? '') === '';
