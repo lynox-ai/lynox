@@ -58,7 +58,15 @@ describe('a run name of a step stored outside the shape, in a call\'s changes', 
   it('is refused when two steps are stored with the same id and so share it, and changes neither', () => {
     const steps = [{ id: OLD, task: 'First' }, { id: 'write', task: 'Write' }, { id: OLD, task: 'Second' }];
     const out = applyModifications(steps, [{ action: 'update_task', step_id: 'step-1', value: 'Changed' }]);
-    expect(out).toBe('Error: Steps #1, #3 were stored with the same id, which runs as "step-1", so task update cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#3".');
+    expect(out).toBe('Error: Steps #1 and #3 were stored with the same id, which runs as "step-1", so this update cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#3". To end the clash, give one of them its own id (rename_step with step_id "#3").');
     expect(steps.map(s => s.task)).toEqual(['First', 'Write', 'Second']);
+  });
+
+  it('lists three steps that share a run name, and the rename it suggests ends the clash', () => {
+    const steps = [{ id: OLD, task: 'A' }, { id: OLD, task: 'B' }, { id: 'write', task: 'W' }, { id: OLD, task: 'C' }];
+    const out = applyModifications(steps, [{ action: 'remove', step_id: 'step-1' }]);
+    expect(out).toBe('Error: Steps #1, #2 and #4 were stored with the same id, which runs as "step-1", so this removal cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#4". To end the clash, give one of them its own id (rename_step with step_id "#4").');
+    expect(applyModifications(steps, [{ action: 'rename_step', step_id: '#4', value: 'fetch-last' }])).toBeNull();
+    expect(steps.map(s => s.id)).toEqual([OLD, OLD, 'write', 'fetch-last']);
   });
 });

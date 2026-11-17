@@ -99,7 +99,10 @@ function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: s
     const storedId = runNames?.get(id);
     const shared = steps.flatMap((s, i) => (s.id === storedId ? [i] : []));
     const at = shared[shared.length - 1] ?? 0;
-    return `Error: Steps ${shared.map(i => `#${i + 1}`).join(', ')} were stored with the same id, which runs as ${quotedId(id)}, so ${what} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, at)}.`;
+    const positions = shared.map(i => `#${i + 1}`);
+    const listed = positions.length > 1 ? `${positions.slice(0, -1).join(', ')} and ${positions[positions.length - 1]}` : positions.join('');
+    const change = what === 'task update' ? 'this update' : what === 'removal' ? 'this removal' : what === 'renaming' ? 'this rename' : what;
+    return `Error: Steps ${listed} were stored with the same id, which runs as ${quotedId(id)}, so ${change} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, at)}. To end the clash, give one of them its own id (rename_step with step_id "#${at + 1}").`;
   }
   const last = alike[alike.length - 1]!;
   return `Error: Steps ${alike.map(i => `#${i + 1}`).join(', ')} all read as ${quotedId(id)} (their ids differ only in characters that do not show), so ${what} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, last)}.`;
