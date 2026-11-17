@@ -35,11 +35,12 @@
   2.18.0, for example in `docker logs`, may hold them; clear them, or rotate a
   key that was passed in a URL. (#2369)
 - With `LYNOX_SHOPIFY_EXCHANGE` set to `1` or `true`, chats, runs, workers, the
-  bulk-run judge, the mail classifier and the connection test send model
-  requests only to Anthropic's API or Fireworks' endpoint, with the key the
-  control plane supplies. Mistral, Vertex, another base URL and a key the owner
-  brings are refused before anything is sent, so on a self-hosted or own-key
-  instance with the switch on these make no model calls. The batch API and
+  bulk-run judge, the mail classifier and the "Test connection" button in the
+  model settings send model requests only to Anthropic's API or Fireworks'
+  endpoint, with the key the control plane supplies. For these, Mistral, Vertex,
+  another base URL and a key the owner brings are refused before anything is
+  sent, so on a self-hosted or own-key instance with the switch on they make no
+  model calls. The batch API and
   speech output are off, and transcription uses only the local whisper.cpp.
   (#2239)
 - `StreamProcessor.process` now throws `StreamIncompleteError` when a stream ends
