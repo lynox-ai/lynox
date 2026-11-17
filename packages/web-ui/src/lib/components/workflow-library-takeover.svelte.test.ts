@@ -351,6 +351,24 @@ describe('the dialog', () => {
 		const d = await openDialog();
 		expect(d.querySelector('[data-takeover-part="paused"]')?.textContent).toBe('Der Plan „Bericht“ bleibt pausiert. Die markierten Schritte <U+202E>nutzen“ ist pausiert und bleibt es. Soll er weiterlaufen, übernimm ihn einzeln unter „Trigger“ mit „Übernehmen“.');
 		expect(d.querySelector('[data-takeover-part="lapsing"]')?.textContent).toContain(`: ${'L'.repeat(79)}…, Short. `);
+		// Set apart from the sentence, whole, in one isolated element of its own.
+		expect([...d.querySelectorAll('[data-takeover-part="paused"] bdi')].map((b) => b.textContent)).toEqual(['Bericht“ bleibt pausiert. Die markierten Schritte <U+202E>nutzen']);
+	});
+
+	it('a value carrying the marks itself opens no value and closes none early', async () => {
+		const p = FULL();
+		p['stillPaused'] = [{ id: 'p-s', title: 'A\uE001 bleibt. \uE000B' }];
+		await open([ENDED], [p]);
+		const d = await openDialog();
+		expect([...d.querySelectorAll('[data-takeover-part="paused"] bdi')].map((b) => b.textContent)).toEqual(['A<U+E001> bleibt. <U+E000>B']);
+	});
+
+	it('no text in the dialog shows a mark', async () => {
+		await open([ENDED]);
+		const d = await openDialog();
+		expect(d.querySelectorAll('bdi[data-foreign-value]').length).toBeGreaterThan(0);
+		expect(/[\uE000\uE001]/.test(d.textContent ?? '')).toBe(false);
+		expect([...d.querySelectorAll('*')].some((e) => [...e.attributes].some((a) => /[\uE000\uE001]/.test(a.value)))).toBe(false);
 	});
 
 	it('says a connection only where a marked step uses it', async () => {

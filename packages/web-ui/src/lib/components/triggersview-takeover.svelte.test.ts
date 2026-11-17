@@ -204,6 +204,17 @@ describe('the notice of an ended access', () => {
 });
 
 describe('the confirmation', () => {
+	it('sets a plan title someone else wrote apart from its sentence, whole, in one isolated element', async () => {
+		const title = 'Bericht“ bleibt pausiert. Die markierten Schritte nutzen nur deine Verbindungen';
+		preview = { ...PREVIEW, memberChanges: [{ id: 'p2', title, before: 'mandate:ida@treuhand-mueller-partner.ch', after: null, runsNoMore: false }] };
+		await render();
+		await open();
+		const line = document.querySelector<HTMLElement>('[data-takeover-line="member_change"]')!;
+		expect([...line.querySelectorAll('bdi')].map((b) => b.textContent)).toEqual([title, 'ida@treuhand-mueller-partner.ch']);
+		expect(line.textContent).toBe(`Der Plan „${title}“ läuft danach unter deinem Namen statt unter dem von ida@treuhand-mueller-partner.ch.`);
+		expect(/[\uE000\uE001]/.test(dialog()!.textContent ?? '')).toBe(false);
+	});
+
 	it('shows the preview\'s lines, with focus on Cancel, and Escape closes it', async () => {
 		await render();
 		await open();

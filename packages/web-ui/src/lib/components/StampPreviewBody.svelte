@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { t } from '../i18n.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
+	import MarkedLine from './MarkedLine.svelte';
 	import { stepHeading, templateText, timeoutText, visible, type StampPreview } from '../utils/workflow-stamp.js';
 
 	// What a workflow's stamp binds, as the owner is shown it before confirming: its mode, failure
@@ -49,7 +50,7 @@
 			{#if stepNote}
 				{@const note = stepNote(i)}
 				{#if note !== null}
-					<p data-testid="stamp-step-note" class="mt-1 inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-1.5 text-warning break-words"><Icon name="warning" size="xs" />{note}</p>
+					<p data-testid="stamp-step-note" class="mt-1 inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-1.5 text-warning break-words"><Icon name="warning" size="xs" /><span><MarkedLine text={note} /></span></p>
 				{/if}
 			{/if}
 			<!-- Everything that decides what the step does is printed, never folded away: a

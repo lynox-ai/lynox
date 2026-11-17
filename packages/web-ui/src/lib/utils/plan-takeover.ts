@@ -4,15 +4,53 @@ import { visible } from './workflow-stamp.js';
 /** How many characters of a value someone else wrote a sentence shows, the cut one included. */
 export const SHOWN_VALUE_MAX = 80;
 
+/** Where a value someone else wrote starts and ends inside a sentence of lynox's (Private Use). */
+export const VALUE_OPEN = '\uE000';
+export const VALUE_CLOSE = '\uE001';
+const VALUE_MARK = /[\uE000\uE001]/g;
+
 /**
  * A value someone else wrote (a plan's title, a name, an account) as a sentence of lynox's shows
- * it: on one line, cut to {@link SHOWN_VALUE_MAX} characters, and with the characters that change
- * how text reads without being seen printed as their code point (`visible`). A title that reads as
- * the end of the sentence and the start of another can then neither run long nor hide a turn.
+ * it: on one line, cut to {@link SHOWN_VALUE_MAX} characters, with the characters that change how
+ * text reads without being seen printed as their code point (`visible`), and between the two
+ * marks the view draws as a value set apart ({@link segments}). A mark inside the value is printed
+ * as its code point too, so a value can neither close its own marks nor open new ones: whatever
+ * it says, it cannot read as lynox's own words.
  */
 export function shownValue(text: string): string {
 	const chars = Array.from(text.replace(/\s+/g, ' ').trim());
-	return visible(chars.length > SHOWN_VALUE_MAX ? `${chars.slice(0, SHOWN_VALUE_MAX - 1).join('')}…` : chars.join(''));
+	const cut = chars.length > SHOWN_VALUE_MAX ? `${chars.slice(0, SHOWN_VALUE_MAX - 1).join('')}…` : chars.join('');
+	const shown = visible(cut).replace(VALUE_MARK, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase()}>`);
+	return `${VALUE_OPEN}${shown}${VALUE_CLOSE}`;
+}
+
+/** One piece of a sentence: lynox's words, or a value someone else wrote (`foreign`). */
+export interface Segment { text: string; foreign: boolean }
+
+/**
+ * A sentence split at the marks {@link shownValue} sets. A mark without its partner is dropped and
+ * what follows it stays lynox's text: only a whole pair sets a value apart.
+ */
+export function segments(line: string): Segment[] {
+	const out: Segment[] = [];
+	const push = (text: string, foreign: boolean): void => {
+		const clean = text.replace(VALUE_MARK, '');
+		if (clean !== '' || foreign) out.push({ text: clean, foreign });
+	};
+	const pair = /\uE000([^\uE000\uE001]*)\uE001/g;
+	let at = 0;
+	for (let m = pair.exec(line); m !== null; m = pair.exec(line)) {
+		push(line.slice(at, m.index), false);
+		push(m[1]!, true);
+		at = m.index + m[0].length;
+	}
+	push(line.slice(at), false);
+	return out;
+}
+
+/** A sentence as plain text, without its marks: for a label, a title or a log. */
+export function plainText(line: string): string {
+	return segments(line).map((s) => s.text).join('');
 }
 
 /**

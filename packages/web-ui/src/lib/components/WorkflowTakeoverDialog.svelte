@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import StampPreviewBody from './StampPreviewBody.svelte';
+	import MarkedLine from './MarkedLine.svelte';
 	import { visible } from '../utils/workflow-stamp.js';
 	import {
 		markLine, parseWorkflowTakeoverPreview, refusalNamesSupport, stepConnectionNote, takeoverOutcome, takeoverRefusalText, workflowTakeoverLines,
@@ -174,7 +175,7 @@
 			{@const p = preview}
 			<ul class="mb-2 space-y-0.5 text-xs" data-takeover-part="marks">
 				{#each p.marks as m, i (i)}
-					<li data-testid="takeover-mark" class="break-words">{markLine(m)}</li>
+					<li data-testid="takeover-mark" class="break-words"><MarkedLine text={markLine(m)} /></li>
 				{/each}
 			</ul>
 			<p class="text-xs text-text-subtle mb-3" data-takeover-part="intro">{t('workflow_library.takeover.intro')}</p>
@@ -183,7 +184,7 @@
 			</div>
 			<div class="mt-3 space-y-2 text-xs">
 				{#each workflowTakeoverLines(p) as line, i (i)}
-					<p data-takeover-part={line.kind} class="break-words">{line.text}</p>
+					<p data-takeover-part={line.kind} class="break-words"><MarkedLine text={line.text} /></p>
 				{/each}
 			</div>
 		{/if}

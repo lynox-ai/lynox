@@ -12,6 +12,7 @@
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
+	import MarkedLine from './MarkedLine.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
@@ -738,7 +739,7 @@
 			{#if takeoverPreview !== null}
 				<ul class="space-y-2 text-xs text-text-muted" data-takeover-lines>
 					{#each takeoverLines(takeoverPreview, dayOf) as line}
-						<li class="break-words" data-takeover-line={line.kind}>{line.text}</li>
+						<li class="break-words" data-takeover-line={line.kind}><MarkedLine text={line.text} /></li>
 					{/each}
 				</ul>
 			{:else if takeoverNote === ''}
