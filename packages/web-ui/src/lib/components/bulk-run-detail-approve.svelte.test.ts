@@ -1465,3 +1465,34 @@ describe('the allowed link domains of a judged list run', () => {
 		expect(target.querySelector('[data-testid="bulk-start-domains"]')).toBeNull();
 	});
 });
+
+// The halt for an outdated connection consent names the next step once: on the owner's page the box
+// below says to plan again, so the halt ends at the reconnect; a mandate's page has no such box, so
+// its halt says it.
+describe('the next step of a halt for an outdated connection consent', () => {
+	const halted = (): BulkRunDetailData => makeRun({
+		targetSystem: 'http:demo.myshopify.com', phase: 'approved', applied: 0, sentUnknown: 0,
+		haltReason: 'engine English', haltKey: 'consentOutdated', consentFields: ['descriptionHtml'],
+	});
+	// Pinned, not read from the key under test: a halt that drops the step must fail here.
+	const planAgain = (): string => (getLocale() === 'de' ? 'den Lauf neu zu planen' : 'plan the run again');
+	// The halt line of the head, not the page: target rows say to plan again for their own reasons.
+	const haltLine = (): string => [...target.querySelectorAll('dt')].find((d) => d.textContent === t('bulk.head.halted'))!.nextElementSibling!.textContent!;
+
+	it('says to plan again in the box below on the owner\'s page, and not in the halt', async () => {
+		run = halted();
+		await render();
+		expect(t('bulk.resume.none')).toContain(planAgain());
+		expect(target.textContent).toContain(t('bulk.resume.none'));
+		expect(haltLine()).toBe(tf('bulk.halt.consentOutdated', { field: t('bulk.consent.field.descriptionHtml'), path: `${t('nav.settings')} → ${t('settings.apis')}` }));
+		expect(haltLine()).not.toContain(planAgain());
+	});
+
+	it('says to plan again in the halt on a mandate\'s page, which has no box', async () => {
+		viewerOf = 'mandate';
+		run = halted();
+		await render();
+		expect(target.textContent).not.toContain(t('bulk.resume.none'));
+		expect(haltLine()).toContain(planAgain());
+	});
+});

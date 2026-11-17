@@ -784,7 +784,7 @@ describe('going on from a run that halted', () => {
 			expect(de.startsWith('lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern.')).toBe(true);
 		}
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(DE))?.cause)
-			.toBe('lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Das ändert sich nur, wenn der Inhaber dieser Instanz Shopify neu verbindet; bitte den Inhaber darum.');
+			.toBe('lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Das ändert sich nur, wenn der Inhaber dieser Instanz Shopify neu verbindet; bitte den Inhaber darum, dann bitte lynox im Chat, den Lauf neu zu planen.');
 		// A mandate's session is not sent to a connection only the owner's reconnect sets right.
 		for (const [i, lang] of [[DE, 'de'], [EN, 'en']] as const) {
 			const mandate = bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(i))!.cause;

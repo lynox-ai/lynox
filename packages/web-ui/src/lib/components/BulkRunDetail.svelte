@@ -681,7 +681,7 @@
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
-												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
+												<pre class="text-xs whitespace-pre-wrap [overflow-wrap:anywhere]">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
 {/each}{#each target.diff.added as line, i (i)}<ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">+ {@render markedValue(line, bulkHiddenAddsOf(target, ''), false, bulkAfterTakenBack(run, target))}</ins>
 {/each}</pre>
 											{:else if target.error && target.change !== 'invalid'}
