@@ -71,7 +71,9 @@ function realBulkPlan(ledger: BulkLedger, calls: Call[]): ToolEntry {
   } as ToolEntry;
 }
 
-const REFUSED = /^Error: source_list\.form shopify_media writes image alt texts/;
+// The refusal of the image form: the scope cases open with what the run cannot change, the
+// granted-but-refused case names the form.
+const REFUSED = /^Error: (?:source_list\.form shopify_media writes image alt texts|The bulk run cannot change image alt texts:)/;
 // The note the product rules and the store hint carry on a connection without the image scope.
 const NOTED = /Image alt texts: a bulk run cannot change them in this store/;
 
