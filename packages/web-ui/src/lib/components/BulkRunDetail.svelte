@@ -670,7 +670,7 @@
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}
 													<div>
-														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
+														<span class="text-text-subtle" data-testid="bulk-field-name">{bulkFieldNamesText(host, [f.field], t)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
 														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{#if bulkHiddenAddsOf(target, f.field).length > 0}{@render markedValue(bulkRawText(f.after), bulkHiddenAddsOf(target, f.field), bulkHiddenHtml(target, f.field), bulkAfterTakenBack(run, target))}{:else}{bulkValueText(f.after)}{/if}</ins>
 														{#if bulkHiddenUnchecked(target, f.field)}
