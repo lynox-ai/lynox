@@ -46,19 +46,12 @@ function strOrEmpty(value: unknown): string {
 }
 
 /**
- * Build the inline label for memory_recall. When the LLM passes a `query`
- * we show it directly. When the LLM uses the no-query path (recency-ranked
- * namespace dump), we show the namespace so the user still sees WHAT was
- * being recalled — otherwise the bubble would read "Knowledge recalled —"
- * with a trailing dash and no signal at all.
+ * Build the inline label for memory_recall: the query, cut, as subject. Without a
+ * query the call reads its namespace's latest entries; the namespace is an internal
+ * value, so the line names no subject then and reads as the word alone.
  */
 function memoryRecallLabel(input: Record<string, unknown> | undefined, t: Translator): ToolLabelParts {
-  const query = strOrEmpty(input?.['query']).trim();
-  if (query.length > 0) {
-    return { action: t('tool.knowledge_recalled'), subject: cut(query) };
-  }
-  const namespace = strOrEmpty(input?.['namespace']).trim();
-  return { action: t('tool.knowledge_recalled'), subject: namespace };
+  return { action: t('tool.knowledge_recalled'), subject: cut(strOrEmpty(input?.['query'])) };
 }
 
 function lastPathSegment(path: string): string {
@@ -161,8 +154,7 @@ function subjectsMergeSubject(input: Record<string, unknown> | undefined): strin
  *
  * The side panel calls this without an input, so every label holds without one.
  * A subject is only ever a readable field: never an opaque id, a mail's text, a
- * secret's value or a raw enum value (memory_recall's namespace fallback, older than
- * this rule, is the one exception). A tool that asks before it acts is named by
+ * secret's value or a raw enum value. A tool that asks before it acts is named by
  * a noun ("New email"), since a declined call still shows the done mark; so is a tool
  * with several actions ("Google Drive", "Credentials") and one that reports a state
  * ("Bulk run status"). A file name is shown whole; other free text is cut at 50.
