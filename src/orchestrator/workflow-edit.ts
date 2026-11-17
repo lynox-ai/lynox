@@ -207,6 +207,18 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       if (problem) return problem;
       const from = steps[idx]!.id;
       if (to !== from && steps.some(s => s.id === to)) return `Error: Step ${quotedId(to)} already exists — cannot rename step #${idx + 1} to it.`;
+      // A step that reads this one and already holds `{{<to>.…}}` as text (a placeholder for the
+      // system a tool writes to) would read this step's output there once its input_from names `to`.
+      if (to !== from) {
+        for (const [i, s] of steps.entries()) {
+          if (!(s.input_from ?? []).includes(from)) continue;
+          const field = fieldReferencing(s, to);
+          if (!field) continue;
+          const reader = isStepIdShape(s.id) ? `step "${s.id}"` : `step #${String(i + 1)}`;
+          return `Error: rename_step: ${reader} reads step #${String(idx + 1)} and holds text starting with "{{${to}" in its ${field}, `
+            + 'which the new id would turn into a reference to this step. Choose another id.';
+        }
+      }
       steps[idx]!.id = to;
       for (const s of steps) {
         // A `{{<from>.…}}` is a reference only in a step that lists `from` in its input_from: the

@@ -50,6 +50,12 @@ export function fieldReferencing(step: RefStep, id: string): string | null {
   return null;
 }
 
+/** Whether a placeholder path may be quoted back: one or two parts, each in the step id shape. */
+function quotablePlaceholder(ref: string): boolean {
+  const parts = ref.split('.');
+  return parts.length <= 2 && parts.every(isStepIdShape);
+}
+
 /** A referenced step as a refusal shows it: its id when that has the step id shape, otherwise described. */
 function shownStep(name: string): string {
   return isStepIdShape(name) ? `step "${name}"` : 'a step whose id is outside the allowed form';
@@ -101,9 +107,10 @@ export function templateRefIssue(
             + `Add ${named} to this step's input_from (in a saved workflow: set_input_from)`
             // In a tool's argument it may be text for the system the tool writes to: renaming the step
             // it matches leaves that text as written (`rename_step` rewrites only the steps that read it).
-            // The placeholder is quoted only when every part of it has the step id shape (`step-id.ts`).
+            // The placeholder is quoted only as `<id>.<part>`, each in the step id shape (`step-id.ts`),
+            // so it stays as short as two ids; any longer one is described.
             + (inTemplate
-              ? `. If ${ref.split('.').every(isStepIdShape) ? `"{{${ref}}}"` : 'the placeholder'} is text for the system the tool writes to (for example a mail-merge field), `
+              ? `. If ${quotablePlaceholder(ref) ? `"{{${ref}}}"` : 'the placeholder'} is text for the system the tool writes to (for example a mail-merge field), `
                 + `not this workflow's step, rename ${isStepIdShape(name) ? `step "${name}"` : named} (rename_step) so its id no longer matches; `
                 + 'the text then stays as written. If you cannot tell which is meant, ask the user.'
               : ', or leave the reference out.');
