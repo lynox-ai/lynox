@@ -470,13 +470,17 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(target.abortCalls).toHaveLength(4);
   });
 
-  it('sends no abort once the target took the manifest, nor after a refused handshake', async () => {
+  it('sends no abort once the target took the manifest, nor after a refused handshake or a signature that does not check', async () => {
     setShellIsolationForTest(sidecar);
     target.abort = 'real';
     target.chunkError = { at: 0, error: 'chunk refused' };
     const after = (await exportTo()).get('error') as { message: string };
     expect(after.message).toMatch(/You can start the migration again in 30 minutes at the latest\.$/);
     target.chunkError = undefined;
+    // A target whose signature does not check is not asked anything further.
+    target.badSignature = true;
+    expect(((await exportTo()).get('error') as { message: string }).message).toMatch(/^Handshake signature invalid/);
+    target.badSignature = false;
     target.handshakeRefusal = { error: 'Migration session already active. Finalize or cleanup first.' };
     const refused = (await exportTo()).get('error') as { message: string };
     expect(refused.message).toMatch(/still holding an earlier migration attempt/);
