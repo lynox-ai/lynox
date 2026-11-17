@@ -7535,6 +7535,16 @@ export class LynoxHTTPApi {
       // Mistral's global endpoint is checked where a model request would go: the EU one.
       const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? toMistralEuBase(b['api_base_url']) : '';
       if (!provider || !key) { errorResponse(res, 400, 'Missing provider or key'); return; }
+      // On an instance connected to a Shopify store a request goes only where a model request may
+      // go (`contained-providers.ts`). The key checked here is always one the user typed, so every
+      // provider is refused before anything is sent. `invalid` keeps the page from saving it.
+      {
+        const { providerListApplies, PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+        if (providerListApplies()) {
+          jsonResponse(res, 200, { state: 'invalid', error: PROVIDER_NOT_ON_LIST_REFUSAL });
+          return;
+        }
+      }
       const { validateAnthropicKey, validateMistralKey, validateOpenAICompatKey } = await import('../cli/docker-installer.js');
       try {
         if (provider === 'anthropic') {
