@@ -33,6 +33,7 @@ export interface WorkflowTakeoverStep extends StampStep {
 }
 
 export interface WorkflowTakeoverPreview extends Omit<StampPreview, 'steps'> {
+	workflow: { id: string; name: string };
 	steps: WorkflowTakeoverStep[];
 	marks: WorkflowTakeoverMark[];
 	memberChanges: TakeoverMemberChange[];
@@ -62,6 +63,9 @@ function plans(v: unknown): Array<{ id: string; title: string }> | null {
 export function parseWorkflowTakeoverPreview(body: unknown): WorkflowTakeoverPreview | null {
 	const stamp = parseStampPreview(body);
 	if (stamp === null || !isRecord(body) || !Array.isArray(body['steps'])) return null;
+	const wf = body['workflow'];
+	if (!isRecord(wf) || typeof wf['id'] !== 'string' || typeof wf['name'] !== 'string') return null;
+	const workflow = { id: wf['id'], name: wf['name'] };
 	const rawSteps = body['steps'] as unknown[];
 	const steps: WorkflowTakeoverStep[] = [];
 	for (let i = 0; i < stamp.steps.length; i++) {
@@ -99,7 +103,7 @@ export function parseWorkflowTakeoverPreview(body: unknown): WorkflowTakeoverPre
 		if (account !== null && typeof account !== 'string') return null;
 		connections.push({ profileId: c['profileId'], provider: c['provider'], account, by: c['by'] });
 	}
-	return { ...stamp, steps, marks, memberChanges, alsoReleased, stillPaused, lapsing, connections };
+	return { ...stamp, workflow, steps, marks, memberChanges, alsoReleased, stillPaused, lapsing, connections };
 }
 
 /** The line of one mark in the dialog's head: who, in which role, and whether their access ended. */

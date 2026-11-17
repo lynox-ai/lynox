@@ -221,8 +221,15 @@
 	// The workflow's own takeover: offered wherever its person's access ended, which is exactly where
 	// the engine allows it (the library's `ended` and the takeover read the same mark and end).
 	let takeoverWf = $state<SavedWorkflow | null>(null);
-	// The button that opened it: focus goes back there when the dialog closes without a takeover.
+	// The button that opened it: focus goes back there when the dialog closes. Gone once the workflow
+	// no longer needs taking over (a card has no focusable head): then to the library's heading.
 	let takeoverOpener: HTMLElement | null = null;
+	let libraryHeading = $state<HTMLElement | null>(null);
+
+	function focusAfterTakeover(opener: HTMLElement | null): void {
+		if (opener?.isConnected === true) opener.focus();
+		else libraryHeading?.focus();
+	}
 
 	function openTakeover(wf: SavedWorkflow, opener: HTMLElement): void {
 		takeoverOpener = opener;
@@ -233,7 +240,7 @@
 		takeoverWf = null;
 		const opener = takeoverOpener;
 		takeoverOpener = null;
-		if (opener?.isConnected === true) opener.focus();
+		focusAfterTakeover(opener);
 	}
 
 	async function takenOver(stillOff: unknown): Promise<void> {
@@ -244,6 +251,8 @@
 		stampOnceLine = once ? tf(once.key, { n: String(once.n) }) : '';
 		await loadWorkflows();
 		notice = t('workflow_library.takeover.done');
+		// Taken over, the workflow no longer offers the button that opened the dialog.
+		libraryHeading?.focus();
 	}
 
 	// The schedule refusals the engine names by code, in the reader's language (ux U-085, U-119).
@@ -714,7 +723,7 @@
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
-	<h1 class="text-xl font-light tracking-tight mb-4">{t('workflow_library.title')}</h1>
+	<h1 bind:this={libraryHeading} tabindex="-1" class="text-xl font-light tracking-tight mb-4">{t('workflow_library.title')}</h1>
 
 	{#if error}
 		<div data-page-error class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>

@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
 	import StampPreviewBody from './StampPreviewBody.svelte';
+	import { visible } from '../utils/workflow-stamp.js';
 	import {
 		markLine, parseWorkflowTakeoverPreview, refusalNamesSupport, stepConnectionNote, takeoverOutcome, takeoverRefusalText, workflowTakeoverLines,
 		type WorkflowTakeoverPreview,
@@ -43,14 +44,16 @@
 		changedEl?.scrollIntoView?.({ block: 'nearest' });
 	});
 
-	// Escape is the dialog's when focus is in it, or nowhere (a reload can take the focused button);
-	// focus in an overlay above it, such as the command palette, keeps Escape for that.
-	function escapeIsOurs(): boolean {
+	// A key is the dialog's when focus is in it, or nowhere (a reload, or a button turned off, can
+	// take the focused element); focus in an overlay above it, such as the command palette, keeps
+	// Escape and Tab for that.
+	function keyIsOurs(): boolean {
 		const at = document.activeElement;
 		return at === null || at === document.body || (dialog?.contains(at) ?? false);
 	}
 
-	// Tab stays inside while the dialog is open: the page behind it is not reachable.
+	// Tab stays inside while the dialog is open: the page behind it is not reachable, also from
+	// where focus fell to the page when what held it went away.
 	function trapTab(e: KeyboardEvent): void {
 		if (e.key !== 'Tab' || dialog === null) return;
 		const stops = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
@@ -137,24 +140,26 @@
 			error = t('common.save_failed');
 		} finally {
 			sending = false;
+			// The confirm was turned off, or the content it sat in was replaced: focus goes back to the
+			// head of the dialog, not to the page behind it.
+			if (dialog?.isConnected === true) heading?.focus();
 		}
 	}
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && escapeIsOurs()) onclose(); }} />
+<svelte:window onkeydown={(e) => { if (!keyIsOurs()) return; if (e.key === 'Escape') onclose(); else trapTab(e); }} />
 <div
 	bind:this={dialog}
 	class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
 	role="dialog"
 	aria-modal="true"
 	aria-labelledby="workflow-takeover-title"
-	aria-busy={sending}
+	aria-busy={sending || loading}
 	tabindex="-1"
-	onkeydown={trapTab}
 	data-testid="takeover-dialog"
 >
 	<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
-		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words">{t('workflow_library.takeover.title')}</h2>
+		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words">{tf('workflow_library.takeover.title', { name: visible(preview?.workflow.name ?? workflow.name) })}</h2>
 		{#if changedLine}
 			<p bind:this={changedEl} role="status" data-testid="takeover-changed" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{changedLine}</p>
 		{/if}

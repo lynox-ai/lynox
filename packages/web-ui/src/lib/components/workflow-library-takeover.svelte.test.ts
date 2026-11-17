@@ -62,6 +62,8 @@ const FULL = (): Record<string, unknown> => ({
 
 interface Served { posts: unknown[]; previews: number; lists: number }
 let hosted: string | null = null;
+// Set, a preview answers only once it is called: the dialog is seen while it loads.
+let previewGate: Promise<void> | null = null;
 
 function serve(workflows: Array<Record<string, unknown>>, previews: Array<Record<string, unknown>>, post: { status: number; body: unknown } = { status: 200, body: { takenOver: true, runsAs: 'owner', stillOff: 0 } }): Served {
 	const served: Served = { posts: [], previews: 0, lists: 0 };
@@ -72,6 +74,7 @@ function serve(workflows: Array<Record<string, unknown>>, previews: Array<Record
 		if (method === 'GET' && /^\/workflows\/[^/]+\/takeover-preview$/.test(path)) {
 			const p = previews[Math.min(served.previews, previews.length - 1)]!;
 			served.previews++;
+			if (previewGate !== null) await previewGate;
 			return new Response(JSON.stringify(p), { status: 200 });
 		}
 		if (method === 'POST' && /^\/workflows\/[^/]+\/takeover$/.test(path)) {
@@ -126,6 +129,7 @@ const ENDED = { ...base('wf-e', 'Ended one'), runs_as: { person: EVA, ended: tru
 
 beforeEach(() => {
 	hosted = null;
+	previewGate = null;
 	setLocale('de');
 	target = document.createElement('div');
 	document.body.appendChild(target);
@@ -151,7 +155,7 @@ describe('the button', () => {
 		expect(openButton(card('Own one'))).toBeNull();
 	});
 
-	it('at an ended workflow that also awaits its stamp, offers only the takeover, which stamps it as well', async () => {
+	it('at an ended workflow that also awaits its stamp, offers only the takeover', async () => {
 		await open([
 			{ ...ENDED, awaitsStamp: true },
 			{ ...base('wf-l', 'Live one'), runs_as: { person: JAN, ended: false }, awaitsStamp: true },
@@ -294,6 +298,15 @@ describe('the dialog', () => {
 		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe(prompts);
 	});
 
+	it('a takeover that cannot be recorded names support where lynox hosts the instance', async () => {
+		hosted = 'managed';
+		await open([ENDED], [FULL()], { status: 503, body: { code: 'unrecorded', error: 'engine sentence' } });
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe(`Die Übernahme lässt sich gerade nicht im Instanz-Protokoll festhalten. Darum hat lynox den Workflow nicht übernommen. Versuch es in ein paar Minuten noch einmal. ${t('takeover.refused.support')}`);
+	});
+
 	it('a preview refused as unreadable names support where lynox hosts the instance', async () => {
 		hosted = 'managed';
 		await open([ENDED], [{ refusal: 'unreadable', message: 'engine sentence' }]);
@@ -391,5 +404,85 @@ describe('the dialog for keyboard and screen reader', () => {
 		await settle();
 		expect(d.getAttribute('aria-busy')).toBe('false');
 		expect(d.querySelector('[data-testid="takeover-error"]')?.getAttribute('role')).toBe('alert');
+	});
+
+	it('keeps Tab inside also from the page, where focus falls when what held it goes away', async () => {
+		await open([ENDED]);
+		const d = await openDialog();
+		(document.activeElement as HTMLElement | null)?.blur();
+		expect(document.activeElement).toBe(document.body);
+		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+		expect(d.contains(document.activeElement)).toBe(true);
+	});
+
+	it('after a refusal, focus is on the dialog\'s heading, not on the page behind it', async () => {
+		await open([ENDED], [FULL()], { status: 409, body: { code: 'running', error: 'engine sentence' } });
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.focus();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(document.activeElement?.id).toBe('workflow-takeover-title');
+	});
+
+	it('leaves Escape and Tab to an element outside it that has the focus, such as an overlay above it', async () => {
+		await open([ENDED]);
+		await openDialog();
+		const overlay = document.createElement('input');
+		document.body.appendChild(overlay);
+		try {
+			overlay.focus();
+			overlay.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+			expect(document.activeElement).toBe(overlay);
+			overlay.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+			await settle();
+			expect(dialog()).not.toBeNull();
+		} finally {
+			overlay.remove();
+		}
+	});
+
+	it('is busy while it loads, and names the workflow: from the list while loading, from the preview once loaded', async () => {
+		const p = FULL();
+		p['workflow'] = { id: 'wf-e', name: 'Ended, renamed' };
+		let let_go: (() => void) | undefined;
+		previewGate = new Promise<void>((r) => { let_go = r; });
+		await open([ENDED], [p]);
+		const d = await openDialog();
+		expect(d.getAttribute('aria-busy')).toBe('true');
+		expect(d.querySelector('h2')?.textContent?.trim()).toBe('Workflow übernehmen: Ended one');
+		let_go!();
+		await settle();
+		expect(d.getAttribute('aria-busy')).toBe('false');
+		expect(d.querySelector('h2')?.textContent?.trim()).toBe('Workflow übernehmen: Ended, renamed');
+	});
+
+	it('once taken over, the button that opened it is gone: focus goes to the library\'s heading', async () => {
+		await open([ENDED]);
+		await openDialog();
+		const h1 = target.querySelector('h1')!;
+		dialog()!.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(document.activeElement).toBe(h1);
+	});
+
+	it('a workflow that needed no takeover any more: once closed, focus goes to the library\'s heading', async () => {
+		const wf: Record<string, unknown> = { ...ENDED };
+		const served = serve([wf], [FULL()], { status: 409, body: { code: 'nothing_to_take_over', error: 'engine sentence' } });
+		const { default: WorkflowLibraryView } = await import('./WorkflowLibraryView.svelte');
+		component = mount(WorkflowLibraryView, { target });
+		await settle();
+		const d = await openDialog();
+		// The list loaded again now shows the workflow as taken over: the button that opened it goes.
+		delete wf['runs_as'];
+		const before = served.lists;
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(served.lists).toBe(before + 1);
+		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe('Dieser Workflow muss nicht mehr übernommen werden. Die Liste ist aktualisiert.');
+		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(document.activeElement).toBe(target.querySelector('h1'));
 	});
 });
