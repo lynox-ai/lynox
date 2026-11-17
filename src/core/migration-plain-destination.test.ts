@@ -1362,7 +1362,7 @@ describe('the source judges a store by its raw size before building its plaintex
   const ceiling = (over: Partial<MigrationCeiling> = {}): MigrationCeiling => ({ import_limit_mb: 100, baseline_mb: 0, k: 2, rest_factor: 1, ...over });
   const input = (over: Partial<Parameters<typeof plainFormRefusal>[0]> = {}): Parameters<typeof plainFormRefusal>[0] => ({
     ceiling: ceiling(), rawBytes: 10 * MIB, othersBytes: 20 * MIB, restBytes: 20 * MIB, maxTotalBytes: 500 * MIB,
-    source: { limitMb: 1e9, rssMb: 200, k: 7 }, ...over,
+    source: { limitMb: 1e9, rssMb: 200, baseMb: 80, k: 5 }, ...over,
   });
 
   it('allows a store at the destination\'s bound and refuses one byte over it', () => {
@@ -1378,16 +1378,25 @@ describe('the source judges a store by its raw size before building its plaintex
   });
 
   it('allows a store whose rewrite fits this instance\'s own memory and refuses one byte more, whatever the destination announces', () => {
-    // 200 MiB resident + 7 * 100 MiB = 900 MiB.
+    // 200 MiB resident + 80 MiB fixed + 5 * 100 MiB = 780 MiB.
     const vast = ceiling({ import_limit_mb: 1e12 });
-    const own = { limitMb: 900, rssMb: 200, k: 7 };
+    const own = { limitMb: 780, rssMb: 200, baseMb: 80, k: 5 };
     expect(plainFormRefusal(input({ ceiling: vast, source: own, rawBytes: 100 * MIB }))).toBeNull();
     expect(plainFormRefusal(input({ ceiling: vast, source: own, rawBytes: 100 * MIB + 1 }))).toBe('source-memory');
     expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, rssMb: 200.001 }, rawBytes: 100 * MIB }))).toBe('source-memory');
+    // The fixed part counts on its own: one more MiB of it is over, whatever the store.
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, baseMb: 80.001 }, rawBytes: 100 * MIB }))).toBe('source-memory');
+  });
+
+  it('counts the source\'s fixed part even for a tiny store', () => {
+    // A store of 1 byte next to 700 MiB resident fits under 780 only without the fixed part.
+    const vast = ceiling({ import_limit_mb: 1e12 });
+    expect(plainFormRefusal(input({ ceiling: vast, source: { limitMb: 780, rssMb: 700, baseMb: 80, k: 5 }, rawBytes: 1 }))).toBe('source-memory');
+    expect(plainFormRefusal(input({ ceiling: vast, source: { limitMb: 781, rssMb: 700, baseMb: 80, k: 5 }, rawBytes: 1 }))).toBeNull();
   });
 
   it('refuses when it cannot judge its own memory', () => {
-    for (const source of [{ limitMb: Number.NaN, rssMb: 1, k: 7 }, { limitMb: 1e9, rssMb: -1, k: 7 }, { limitMb: 1e9, rssMb: 1, k: 0.5 }]) {
+    for (const source of [{ limitMb: Number.NaN, rssMb: 1, baseMb: 80, k: 5 }, { limitMb: 1e9, rssMb: -1, baseMb: 80, k: 5 }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 0.5 }, { limitMb: 1e9, rssMb: 1, baseMb: Number.NaN, k: 5 }, { limitMb: 1e9, rssMb: 1, baseMb: -1, k: 5 }]) {
       expect(plainFormRefusal(input({ rawBytes: 1, source }))).toBe('source-memory');
     }
   });

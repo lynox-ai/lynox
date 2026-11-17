@@ -12,6 +12,7 @@ import { EngineDb, deriveEngineEncKey } from './engine-db.js';
 import { encryptStoredText } from './migration-rekey.js';
 import { RunHistory } from './run-history.js';
 import { generateEphemeralKeypair, deriveTransferKey, deserializePublicKey, serializePublicKey } from './migration-crypto.js';
+import { MIGRATION_MEMORY } from './migration-ceiling.js';
 
 const calls = { stores: 0, ledgers: 0, rewritten: [] as string[], judged: [] as Array<{ store: string; input: { rawBytes: number; othersBytes: number; restBytes: number; maxTotalBytes: number } }> };
 /** Every plaintext buffer the source makes: the framed payloads and the bodies they were framed from. */
@@ -262,8 +263,8 @@ describe('a store is judged by its raw size before its plaintext form is built',
     source();
     const at = engineInput();
     const vast = { import_limit_mb: 1e12, baseline_mb: 0, k: 1, rest_factor: 0 };
-    // Resident 100 MiB, so the limit sits exactly at 100 + kSource * engine.db.
-    const fits = 100 + (7.0 * at.rawBytes) / MIB;
+    // Resident 100 MiB, so the limit sits exactly at 100 + the fixed part + kSource * engine.db.
+    const fits = 100 + MIGRATION_MEMORY.kSourceBaseMb + (MIGRATION_MEMORY.kSource * at.rawBytes) / MIB;
     const own = (limitMb: number) => ({ limitMb: () => limitMb, rssMb: () => 100 });
     new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: own(fits) }).export(key(), undefined, { plain: { ceiling: vast } });
     expect(calls.rewritten).toContain('engine.db');

@@ -28,6 +28,21 @@ const files = (map: Record<string, string>) => (path: string): string => {
   return text;
 };
 
+describe('the source\'s memory line on the plaintext path', () => {
+  // Peak over the resident memory at the check, in MiB, per store size in MiB: the readings the
+  // constants' comment cites (engine image, tenant limit, two runs each).
+  const readings: Array<[number, number]> = [
+    [12.7, 102.2], [12.7, 102.7], [36.7, 238.3], [36.7, 237.9], [84.7, 448.4], [84.7, 440.8],
+    [156.7, 757.2], [156.7, 759.4], [216.7, 977.4], [216.7, 965.8],
+  ];
+
+  it('lies above every reading, with at least 10 % to spare', () => {
+    for (const [storeMib, peakMib] of readings) {
+      expect(MIGRATION_MEMORY.kSourceBaseMb + MIGRATION_MEMORY.kSource * storeMib).toBeGreaterThanOrEqual(peakMib * 1.1);
+    }
+  });
+});
+
 describe('readImportLimitMb', () => {
   it('takes the cgroup v2 limit when one is set', () => {
     expect(readImportLimitMb(files({ '/sys/fs/cgroup/memory.max': '1610612736\n' }), 4 * GIB)).toBe(1536);

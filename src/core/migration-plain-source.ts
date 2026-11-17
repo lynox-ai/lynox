@@ -311,8 +311,8 @@ export function choosePlainPaths(input: PathInput): Map<PlainStore, { path: 'pla
  * The third is new and may be stricter than the choice, on purpose: the choice judges the
  * destination's memory, this one the source's own.
  * - `source-memory`: building the form would take this instance over its own memory limit: its
- *   resident memory now plus `kSource` times the store (the measured upper bound of the source's
- *   peak per byte, which counts the snapshot it already holds once more).
+ *   resident memory now plus `kSourceBaseMb` and `kSource` times the store (a line above the
+ *   source's measured peak over its resident memory at this moment).
  * The destination's numbers are untrusted. A destination that announces a vast limit still meets
  * `bounds` and `source-memory`, which are the source's own; `bounds` caps the bundle's size,
  * `source-memory` what the rewrite may hold.
@@ -327,15 +327,15 @@ export function plainFormRefusal(input: {
   restBytes: number;
   /** The source's bound on a bundle's total size. */
   maxTotalBytes: number;
-  /** This instance's memory: its limit and its resident memory now, in MiB, and the source's k. */
-  source: { limitMb: number; rssMb: number; k: number };
+  /** This instance's memory: its limit and its resident memory now, in MiB; the source's fixed part (MiB) and k. */
+  source: { limitMb: number; rssMb: number; baseMb: number; k: number };
 }): 'bounds' | 'memory' | 'source-memory' | null {
   if (input.rawBytes > input.maxTotalBytes - input.othersBytes) return 'bounds';
   if (input.rawBytes > maxPlainStoreBytes(input.ceiling, input.othersBytes, input.restBytes)) return 'memory';
-  const { limitMb, rssMb, k } = input.source;
+  const { limitMb, rssMb, baseMb, k } = input.source;
   // Anything it cannot judge refuses, as `storePath` does.
-  if (![limitMb, rssMb, k].every((n) => Number.isFinite(n) && n >= 0) || k < 1) return 'source-memory';
-  if (rssMb + (k * input.rawBytes) / (1024 * 1024) > limitMb) return 'source-memory';
+  if (![limitMb, rssMb, baseMb, k].every((n) => Number.isFinite(n) && n >= 0) || k < 1) return 'source-memory';
+  if (rssMb + baseMb + (k * input.rawBytes) / (1024 * 1024) > limitMb) return 'source-memory';
   return null;
 }
 

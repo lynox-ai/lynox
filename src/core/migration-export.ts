@@ -415,7 +415,7 @@ export class MigrationExporter {
       const othersBytes = restBytes + databases.reduce((n, o) => n + (o === d ? 0 : bytes(o.raw)), 0);
       const refused = plainFormRefusal({
         ceiling, rawBytes: image.length, othersBytes, restBytes, maxTotalBytes: this.bounds.maxTotalBytes,
-        source: { limitMb: this.ownMemory.limitMb(), rssMb: this.ownMemory.rssMb(), k: MIGRATION_MEMORY.kSource },
+        source: { limitMb: this.ownMemory.limitMb(), rssMb: this.ownMemory.rssMb(), baseMb: MIGRATION_MEMORY.kSourceBaseMb, k: MIGRATION_MEMORY.kSource },
       });
       if (refused) d.refused = refused;
       else d.plain = this.plainForm(image, d.name);

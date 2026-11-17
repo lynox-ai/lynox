@@ -54,15 +54,23 @@ export const MIGRATION_MEMORY = {
    */
   k: 7.1,
   /**
-   * The SOURCE's peak over its resident memory before the export, per byte of a store on the
-   * plaintext path: the snapshot, its raw parts, the rewrite's copies and the framed form, with
-   * the other chunks small. The upper bound of every run, not a fit: 2026-11-17, core 97a921d0,
-   * on the build host (not the image), node 22 with tsx, one process per run, VmHWM reset at the
-   * baseline; engine.db with 4 KiB encrypted memories at 36.7 / 84.7 / 156.7 MiB, two runs each:
-   * 6.82 / 6.98, 6.04 / 5.73, 5.68 / 5.62 (the raw path 3.95 / 2.92 / 2.67). The merge ledgers'
-   * plaintext form is not counted in it (it is built only for ledgers within the 64 MiB cap).
+   * The SOURCE's peak on the plaintext path, over its resident memory at the moment it judges a
+   * store (the raw snapshots are held by then): `kSourceBaseMb + kSource` MiB per MiB of the store.
+   * It is a line above every reading, not a fit; the peak is not proportional to the store (a fixed
+   * part plus a falling slope), so a factor alone would undercount small stores.
+   * Measured 2026-11-17 in the engine image (sha256:3fe4b651b272b3e7dba17e6b5e9e5c42d9af1dc2dbf491c6692af06a85dc8c8d,
+   * core 9d9c96b4), one container per run with `--memory=1536m --memory-swap=1536m` (the tenant
+   * container's limit), node 22.23; engine.db with 4 KiB encrypted memories, both stores on the
+   * plaintext path, the own-memory check let through to read the peak; VmHWM reset after the
+   * fixture, the resident memory read when the check reads it. Peak over it, two runs each:
+   * 12.7 MiB → 102.2 / 102.7; 36.7 → 238.3 / 237.9; 84.7 → 448.4 / 440.8; 156.7 → 757.2 / 759.4;
+   * 216.7 → 977.4 / 965.8. `80 + 5.0 · S` is above each, by 10.6 % at the closest (36.7 MiB).
+   * Not covered: other row shapes (many small rows, large blobs), the host's swap and load. The
+   * merge ledgers' plaintext form is not counted in it (it is built only for ledgers within the
+   * 64 MiB cap).
    */
-  kSource: 7.0,
+  kSourceBaseMb: 80,
+  kSource: 5.0,
 } as const;
 
 /**
