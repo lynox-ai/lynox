@@ -69,6 +69,8 @@ function resolveStep(steps: readonly InlinePipelineStep[], id: string, runNames?
     const storedId = runNames?.get(id);
     if (storedId === undefined) return 'missing';
     const at = steps.findIndex(s => s.id === storedId);
+    // Two steps stored with the same id share a run name: it names neither for sure.
+    if (at !== -1 && steps.some((s, j) => j !== at && s.id === storedId)) return 'ambiguous';
     return at === -1 ? 'missing' : at;
   }
   if (alike.length === 1) return alike[0]!;

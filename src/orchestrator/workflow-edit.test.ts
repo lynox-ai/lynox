@@ -45,3 +45,21 @@ describe('applyModifications (shared workflow-step mutation)', () => {
     expect(applyModifications(steps(), [{ action: 'update_task', step_id: 'a' }])).toContain('"value" is required');
   });
 });
+
+describe('a run name of a step stored outside the shape, in a call\'s changes', () => {
+  const OLD = 'Fetch the data';
+
+  it('names the stored step it stands for', () => {
+    const steps = [{ id: OLD, task: 'First' }, { id: 'write', task: 'Write' }];
+    expect(applyModifications(steps, [{ action: 'update_task', step_id: 'step-1', value: 'Changed' }])).toBeNull();
+    expect(steps.map(s => s.task)).toEqual(['Changed', 'Write']);
+  });
+
+  it('is refused when two steps are stored with the same id and so share it, and changes neither', () => {
+    const steps = [{ id: OLD, task: 'First' }, { id: 'write', task: 'Write' }, { id: OLD, task: 'Second' }];
+    const out = applyModifications(steps, [{ action: 'update_task', step_id: 'step-1', value: 'Changed' }]);
+    expect(out).toMatch(/^Error: /);
+    expect(out).not.toContain(OLD);
+    expect(steps.map(s => s.task)).toEqual(['First', 'Write', 'Second']);
+  });
+});
