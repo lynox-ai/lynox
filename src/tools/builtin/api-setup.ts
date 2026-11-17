@@ -1855,8 +1855,10 @@ function consentOf(agent: IAgent, profile: ApiProfile): Pick<OAuthGrantRecord, '
   return p.mandateId === undefined ? { connected_by: principalTag(p) } : { connected_by: principalTag(p), connected_mandate_id: p.mandateId };
 }
 
+// Split as the engine sends it: on whitespace only. A comma is part of a scope, so "read,write" is
+// one scope and "read write" two.
 const scopeTokens = (scope: string | undefined): string[] =>
-  (scope ?? '').split(/[\s,]+/).filter((s) => s !== '');
+  (scope ?? '').split(/\s+/).filter((s) => s !== '');
 
 /**
  * A profile value as the save question shows it: on one line, so a value cannot draw a list line

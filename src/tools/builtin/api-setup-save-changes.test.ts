@@ -303,6 +303,16 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(asked[0]).not.toContain(key);
   });
 
+  it('a scope list written with commas is one scope as sent: rewriting it with spaces adds scopes, and is asked about', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant({ scope: 'read,write' }), 'Allow');
+    const nobody = await save(store, 'update', ownGrant({ scope: 'read write' }), undefined);
+    expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
+    const denied = await save(store, 'update', ownGrant({ scope: 'read write' }), 'Deny');
+    expect(denied.asked[0]).toContain('- scopes added: read write');
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read,write');
+  });
+
   it('a save that only takes a scope away narrows the profile: it saves with nobody to ask', async () => {
     const store = new ApiStore();
     await save(store, 'create', ownGrant({ scope: 'read write' }), 'Allow');
