@@ -494,7 +494,7 @@ import { InputRequiredError } from './input-required.js';
 import { reportMeteredCost } from './metered-request.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from './chat-context.js';
 import { approvalChatTitle } from './approval-chat-title.js';
-import { compose } from './data-boundary.js';
+import { compose, engineText, renderFence } from './data-boundary.js';
 import { runTaskPrompt, RUN_TASK_ANSWERED, RUN_TASK_ANSWER_PREAMBLE } from './run-task-turn.js';
 import { ChangesetManager } from './changeset.js';
 import { setTenantWorkspace } from './workspace.js';
@@ -809,7 +809,13 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*; message written in German\]/), expect.anything());
       // A scheduled run resumed after an answered question: the question and the answer are not the
       // task's words, and the engine's English around them does not count either.
-      await session.run(`${compose(runTaskPrompt('Wochenbericht', 'Fasse bitte die Umsätze der letzten Woche für mich zusammen und schicke sie an das Team.'), '\n')}\n${RUN_TASK_ANSWERED}\n<asked>\nShould the report include the returns as well, or only the sales for this week?\n</asked>\n${RUN_TASK_ANSWER_PREAMBLE}\nOnly the sales, please, the returns are in another report that is sent on Mondays.`);
+      // Composed as the worker composes it (worker-loop.ts, the answered path).
+      await session.run(compose([
+        ...runTaskPrompt('Wochenbericht', 'Fasse bitte die Umsätze der letzten Woche für mich zusammen und schicke sie an das Team.'),
+        engineText(`\n${RUN_TASK_ANSWERED}`),
+        renderFence('asked', 'Should the report include the returns as well, or only the sales for this week?'),
+        renderFence('answer', 'Only the sales, please, the returns are in another report that is sent on Mondays.', { preamble: RUN_TASK_ANSWER_PREAMBLE }),
+      ], '\n'));
       expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*; message written in German\]/), expect.anything());
       // An internal run (compaction, a summary) names none: its prompt asks for the thread's language.
       await session.run('Summarize the conversation above for the next part of the thread, in its language.', { internal: true });

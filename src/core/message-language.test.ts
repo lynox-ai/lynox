@@ -36,6 +36,8 @@ describe('messageLanguage', () => {
       'Dit is een test en het is belangrijk voor ons bedrijf.',
       'Eu não sei se a reunião do projeto é amanhã, me diga.',
       'Jag bor i Stockholm och jag har en bil i garaget.',
+      'Puoi mandare la fattura a Marco e a Giulia entro domani?',
+      'Yo no se si mi jefe is in the office today.',
     ]) expect(messageLanguage(message), message).toBeNull();
   });
 
@@ -43,6 +45,8 @@ describe('messageLanguage', () => {
     expect(messageLanguage('Bitte beantworte diese Mail kurz:\n\nHi, could you send us the updated price list for the spring season? We would like to place an order by Friday and need the new numbers for that.')).toBeNull();
     expect(messageLanguage('Fass das zusammen: The quarterly report shows that revenue grew by 4 % and that the costs of the new warehouse were higher than planned.')).toBeNull();
     expect(messageLanguage('Summarize this for me: Der Quartalsbericht zeigt, dass der Umsatz um 4 % gewachsen ist und die Kosten für das neue Lager höher waren als geplant.')).toBeNull();
+    expect(messageLanguage('Please summarize: Der Quartalsbericht zeigt, dass der Umsatz um 4 % gewachsen ist und die Kosten für das neue Lager höher waren als geplant.')).toBeNull();
+    expect(messageLanguage('Bitte zusammenfassen: The quarterly report shows that revenue grew by 4 % and that the costs of the new warehouse were higher than planned.')).toBeNull();
     // Control: an opening in the same language decides as before.
     expect(messageLanguage('Please make exactly these three tool calls, one after the other, without asking: 1) api_setup with action list.')).toBe('en');
   });
@@ -51,6 +55,7 @@ describe('messageLanguage', () => {
     expect(messageLanguage('Bitte schick die E-Mail an Anna und kopiere die E-Mail-Adresse in den Verteiler.')).toBe('de');
     expect(messageLanguage('Please forward the e-mail to Anna and add her e-mail address to the list.')).toBe('en');
     expect(messageLanguage('Schreib eine Antwort an info@firma.de und an verkauf@firma.de, dass wir am Montag liefern.')).toBe('de');
+    expect(messageLanguage('Please send the offer to info@müller-ag.ch and to the-agency.co.uk before we talk to them.')).toBe('en');
     expect(messageLanguage('Die neue EU-Richtlinie gilt ab Januar, z.B. für alle Shops in der EU, und wir müssen das prüfen.')).toBe('de');
     expect(messageLanguage('Bitte prüfe die Verträge mit SAP SE und verschiebe den Termin mit Herrn de Vries auf Mi.')).toBe('de');
   });

@@ -44,17 +44,22 @@ const EN = new Set([
  * Common words of the other languages the product offers (French, Italian, Spanish, Dutch,
  * Portuguese, Swedish). Several of them would otherwise count as English (`a`, `no`, `me`, `is`,
  * `on`) and turn a Spanish or Dutch message English. Two of them in a message and it is not
- * decided. Left out: words that are also German or English, or that a German or English message
- * carries as a part or an abbreviation (`du`, `des`, `je`, `um`, `da`, `van`, `non`, `per`, `do`,
- * `den`, `os`; `e` and `eu` from "E-Mail" and "EU", `mi` for Mittwoch, `se` from "SAP SE", `y`).
+ * decided. Left out: words that are also German or English (`du`, `des`, `je`, `um`, `da`, `van`,
+ * `non`, `per`, `do`, `den`, `os`).
  */
 const OTHER = new Set([
   'le', 'la', 'les', 'et', 'est', 'une', 'un', 'que', 'qui', 'pour', 'pas', 'vous', 'nous', 'il',
-  'avec', 'toi', 'moi', 'sont', 'mais', 'très', 'el', 'los', 'las', 'de', 'del', 'muy', 'por',
+  'avec', 'toi', 'moi', 'sont', 'mais', 'très', 'el', 'los', 'las', 'de', 'del', 'muy', 'por', 'puoi',
   'para', 'con', 'una', 'pero', 'lo', 'gusta', 'che', 'della', 'sono', 'sia', 'troppo', 'questo',
   'het', 'een', 'ik', 'niet', 'voor', 'ons', 'dit', 'zijn', 'wij', 'não', 'é',
   'uma', 'och', 'jag', 'har', 'är', 'inte', 'att', 'det', 'som', 'på', 'bor', 'en',
 ]);
+/**
+ * Short words of those languages that a German or English message carries only capitalised or as
+ * part of a word ("E-Mail", "EU", "Mi" for Mittwoch, "SAP SE", "Y-Achse"): they count only written
+ * in lowercase, and "e-mail" is removed before counting.
+ */
+const OTHER_LOWERCASE = new Set(['e', 'eu', 'mi', 'se', 'y']);
 const OTHER_WORDS = 2;
 
 /** Each side's count must reach this, and beat the other side by more than double. */
@@ -67,7 +72,7 @@ function count(text: string): Count {
   for (const raw of text.split(/[^\p{L}']+/u)) {
     if (raw.length === 0) continue;
     const word = raw.toLowerCase();
-    if (OTHER.has(word)) c.other += 1;
+    if (OTHER.has(word) || OTHER_LOWERCASE.has(raw)) c.other += 1;
     else if (DE.has(word)) c.de += 1;
     else if (EN.has(word)) c.en += 1;
     else if (/^[a-zäöüß]+$/.test(raw) && /[äöüß]/.test(raw)) c.de += 1;
@@ -80,7 +85,8 @@ export function messageLanguage(text: string): MessageLanguage | null {
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`[^`\n]*`/g, ' ')
     .replace(/\bhttps?:\/\/\S+/g, ' ')
-    .replace(/\b[\w-]+\.(?:de|ch|at|com|net|org|io|fr|it|es|nl|pt|se)\b/gi, ' ')
+    .replace(/[\p{L}\d-]+(?:\.[\p{L}\d-]+)*\.(?:de|ch|at|li|eu|swiss|com|net|org|io|ai|fr|it|es|nl|pt|se|uk)\b/gu, ' ')
+    .replace(/\be-mail/gi, ' ')
     .replace(/[„“"«»][^„“"«»\n]*[“"«»]/g, ' ');
   const all = count(plain);
   if (all.other >= OTHER_WORDS) return null;
@@ -92,11 +98,11 @@ export function messageLanguage(text: string): MessageLanguage | null {
   // language ("Fass das zusammen: The quarterly report …"). If the opening leans the other way,
   // the message is not decided.
   // A single word ("Thanks!", "Check:") is not an instruction in the other language; an opening of
-  // three words or more with one, or two such words, is.
+  // two words or more with one ("Please summarize:") is.
   const opening = plain.trimStart().split(/[:\n.?!]/u, 1)[0] ?? '';
   const head = count(opening);
   const words = opening.split(/[^\p{L}']+/u).filter((w) => w.length > 0).length;
   const [against, forIt] = language === 'de' ? [head.en, head.de] : [head.de, head.en];
-  const other = against > forIt && (against >= 2 || words >= 3);
+  const other = against > forIt && words >= 2;
   return other ? null : language;
 }
