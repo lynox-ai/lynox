@@ -1858,6 +1858,19 @@ function consentOf(agent: IAgent, profile: ApiProfile): Pick<OAuthGrantRecord, '
 const scopeTokens = (scope: string | undefined): string[] =>
   (scope ?? '').split(/[\s,]+/).filter((s) => s !== '');
 
+/**
+ * A profile value as the save question shows it: on one line, so a value cannot draw a list line
+ * of its own, and withheld where it has the shape of a credential. Tool input passes through the
+ * secret resolver before the handler, so a field written as a vault reference holds the value.
+ */
+const shownValue = (value: string): string => {
+  const line = singleLine(value);
+  return maskSecretPatterns(line, { includeGeneric: true }) === line ? line : '(a value shaped like a credential, not shown)';
+};
+
+/** The grant an own OAuth sign-in uses: `fetch_token` takes a missing one as `client_credentials`. */
+const effectiveGrant = (o: { grant_type?: string | undefined } | undefined): string => o?.grant_type ?? 'client_credentials';
+
 const secretNamesOf = (p: ApiProfile | undefined): string[] => {
   const a = p?.auth;
   const o = a?.oauth;
@@ -1880,19 +1893,19 @@ export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile)
   const now = new Set(scopeTokens(next.auth?.oauth?.scope));
   const added = [...now].filter((s) => !was.has(s));
   const removed = [...was].filter((s) => !now.has(s));
-  if (added.length > 0) out.push(pv`scopes added: ${added.join(' ')}`);
-  if (removed.length > 0) out.push(pv`scopes removed: ${removed.join(' ')}`);
+  if (added.length > 0) out.push(pv`scopes added: ${shownValue(added.join(' '))}`);
+  if (removed.length > 0) out.push(pv`scopes removed: ${shownValue(removed.join(' '))}`);
   const pp = (p: ApiProfile): Record<string, unknown> =>
     isPlainRecord(p.auth?.oauth?.preset_params) ? p.auth!.oauth!.preset_params as Record<string, unknown> : {};
   const [ppWas, ppNow] = [pp(prior), pp(next)];
   for (const key of [...new Set([...Object.keys(ppWas), ...Object.keys(ppNow)])].sort()) {
     const [a, b] = [ppWas[key], ppNow[key]];
     if (JSON.stringify(a) !== JSON.stringify(b)) {
-      out.push(pv`provider parameter ${key}: ${a === undefined ? '(none)' : String(a)} → ${b === undefined ? '(none)' : String(b)}`);
+      out.push(pv`provider parameter ${shownValue(key)}: ${a === undefined ? '(none)' : shownValue(String(a))} → ${b === undefined ? '(none)' : shownValue(String(b))}`);
     }
   }
   const field = (label: string, a: string | undefined, b: string | undefined): void => {
-    if ((a ?? '') !== (b ?? '')) out.push(pv`${label}: ${a ?? '(none)'} → ${b ?? '(none)'}`);
+    if ((a ?? '') !== (b ?? '')) out.push(pv`${label}: ${a === undefined ? '(none)' : shownValue(a)} → ${b === undefined ? '(none)' : shownValue(b)}`);
   };
   field('address (base_url)', prior.base_url, next.base_url);
   field('token address (token_url)', prior.auth?.oauth?.token_url, next.auth?.oauth?.token_url);
@@ -1901,23 +1914,24 @@ export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile)
   const [sWas, sNow] = [secretNamesOf(prior), secretNamesOf(next)];
   const sAdded = sNow.filter((n) => !sWas.includes(n));
   const sRemoved = sWas.filter((n) => !sNow.includes(n));
-  if (sAdded.length > 0) out.push(pv`secrets it reads, added: ${sAdded.join(', ')}`);
-  if (sRemoved.length > 0) out.push(pv`secrets it reads, removed: ${sRemoved.join(', ')}`);
+  if (sAdded.length > 0) out.push(pv`secrets it reads, added: ${shownValue(sAdded.join(', '))}`);
+  if (sRemoved.length > 0) out.push(pv`secrets it reads, removed: ${shownValue(sRemoved.join(', '))}`);
   return out;
 }
 
 /**
  * An OAuth sign-in of the profile's own (no built-in provider) whose token the agent fetches by
  * itself (`client_credentials`, `fetch_token`): a change of its scope, audience or grant type
- * takes effect with no person and no consent page, so the save asks the owner first.
+ * takes effect with no person and no consent page, so the save asks the owner first. A missing
+ * grant type counts as `client_credentials`, as `fetch_token` reads it.
  */
 export function ownGrantChanges(prior: ApiProfile | undefined, next: ApiProfile): boolean {
   if (prior === undefined || next.auth?.type !== 'oauth2' || builtInPresetOf(next) !== undefined) return false;
   const [a, b] = [prior.auth?.oauth, next.auth.oauth];
-  if (a?.grant_type !== 'client_credentials' && b?.grant_type !== 'client_credentials') return false;
+  if (effectiveGrant(a) !== 'client_credentials' && effectiveGrant(b) !== 'client_credentials') return false;
   return scopeTokens(a?.scope).sort().join(' ') !== scopeTokens(b?.scope).sort().join(' ')
     || (a?.audience ?? '') !== (b?.audience ?? '')
-    || (a?.grant_type ?? '') !== (b?.grant_type ?? '');
+    || effectiveGrant(a) !== effectiveGrant(b);
 }
 
 /**

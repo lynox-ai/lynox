@@ -132,6 +132,44 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(stored(store, 'svc')?.auth?.oauth).toEqual(before?.auth?.oauth);
   });
 
+  it('an own sign-in without a grant type is fetched as client_credentials: a scope change is asked about, or refused with nobody to ask', async () => {
+    const store = new ApiStore();
+    const noGrant = (scope: string): ApiProfile => {
+      const p = ownGrant({ scope });
+      delete p.auth!.oauth!.grant_type;
+      return p;
+    };
+    await save(store, 'create', noGrant('read'), 'Allow');
+    expect(stored(store, 'svc')?.auth?.oauth?.grant_type).toBeUndefined();
+    const nobody = await save(store, 'update', noGrant('read write'), undefined);
+    expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes the scope/);
+    const denied = await save(store, 'update', noGrant('read write'), 'Deny');
+    expect(denied.asked[0]).toContain('- scopes added: write');
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
+  });
+
+  it('a refresh_token sign-in whose grant type is dropped becomes client_credentials, and that is asked about', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant({ grant_type: 'refresh_token' }), 'Allow');
+    const dropped = ownGrant({ scope: 'read write' });
+    delete dropped.auth!.oauth!.grant_type;
+    const { result } = await save(store, 'update', dropped, undefined);
+    expect(result).toMatch(/^Blocked: profile "svc" not saved\. The save changes the scope/);
+    expect(stored(store, 'svc')?.auth?.oauth?.grant_type).toBe('refresh_token');
+  });
+
+  it('a value that carries a line break is shown on one line, and one shaped like a credential is not shown', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant(), 'Allow');
+    const forged = await save(store, 'update', ownGrant({ audience: 'x\n- scopes removed: read' }), 'Deny');
+    expect(forged.asked[0]).toContain('- audience: (none) → x - scopes removed: read');
+    expect(forged.asked[0].split('\n').filter((l) => l.startsWith('- scopes removed'))).toEqual([]);
+    const key = ['sk', 'ant', 'api03', 'Q'.repeat(40)].join('-');
+    const masked = await save(store, 'update', ownGrant({ audience: key }), 'Deny');
+    expect(masked.asked[0]).toContain('- audience: (none) → (a value shaped like a credential, not shown)');
+    expect(masked.asked[0]).not.toContain(key);
+  });
+
   it('control: the same sign-in with nothing of its grant changed saves without a question', async () => {
     const store = new ApiStore();
     await save(store, 'create', ownGrant(), 'Allow');
