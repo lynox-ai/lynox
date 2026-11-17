@@ -395,6 +395,27 @@ describe('the effect can only come from the approval (§7 b, the derivation prop
     expect(ledger.getStatus(runId)!.haltReason).toBeNull();
   });
 
+  // The customer texts count an undo as a bulk run of its own: it writes only after the owner
+  // confirmed its list, like the run it takes back.
+  it('refuses an undo that was never approved and takes nothing back', async () => {
+    const { runId } = recordMemoryRun(2);
+    approve(runId);
+    const { writer, state } = memory({ k000: 'v0', k001: 'v1' });
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    expect(state.get('k000')).toBe('w0');
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('refused');
+    expect([state.get('k000'), state.get('k001')]).toEqual(['w0', 'w1']);
+    expect(ledger.getStatus(undo.status.id)!.phase).toBe('previewed');
+    // Refused by the phase check itself — the expiry check would halt it instead.
+    expect(ledger.getStatus(undo.status.id)!.haltReason).toBeNull();
+    // Control: the same undo, approved, takes both back.
+    approve(undo.status.id);
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([state.get('k000'), state.get('k001')]).toEqual(['v0', 'v1']);
+  });
+
   it('refuses an effect that does not match the run kind', async () => {
     const { runId } = recordMemoryRun(2);
     approve(runId);
