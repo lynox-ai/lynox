@@ -128,7 +128,7 @@ const DE_HALT_REST: Readonly<Partial<Record<keyof typeof BULK_HALT_REASONS, stri
   listed: 'Liste gelesen. Wartet, bis die Ziele geprüft sind und das Lesen gestartet wird.',
   listNotAList: 'Eine Seite der Liste ist keine Liste.',
   listUnreadable: 'Eine Seite der Liste liess sich nicht lesen.',
-  listTooLarge: 'Die Liste ist länger oder grösser, als ein Massenlauf fassen kann.',
+  listTooLarge: 'Die Liste ist länger oder grösser, als ein Massenlauf fassen kann; nichts geändert. Neu planen mit einem Teil der Liste, falls die Quelle das zulässt.',
   listNoProgress: 'Eine volle Seite der Liste brachte kein neues Ziel.',
   listFormWithdrawn: 'Die Adresse der Liste darf ein Massenlauf nicht mehr lesen.',
   listFilterWithdrawn: 'Mit diesem Filter darf ein Massenlauf die Liste nicht mehr lesen. Geändert hat lynox nichts.',
@@ -361,6 +361,10 @@ describe('the notice tables', () => {
   // the longest title the reminder lets through (80 units) with the outside-content note.
   // A bulk outcome is pushed whole: the longest a run produces in ordinary use must fit, and when
   // a body runs long the cut takes the counts, never the unclear-send warning before them.
+  it('holds the released German halt reason for an outdated Shopify consent word for word (U-281)', () => {
+    expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.consentOutdated)).toBe('Massenlauf angehalten: Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.');
+  });
+
   it('keeps a bulk outcome within the web-push cut, the warning first, in both languages', () => {
     const c = { applied: 12_400, foundAsPlanned: 3_120, failed: 130, conflicts: 20, undone: 10, total: 15_000, sentUnknown: 30 };
     for (const lang of ['de', 'en'] as const) {

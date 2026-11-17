@@ -2436,6 +2436,8 @@ export class WorkerLoop {
         ownerStopped,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
         notices: this.#bulkNotices(),
+        // Read at the call, so a connection confirmed again since the run halted counts.
+        shopifyGrantOf: (host) => this.engine.getApiStore()?.getByHostname(host)?.oauth_grant,
       });
     } catch (err: unknown) {
       // What leaves here reaches the run result, the notification, the follow-up prompt and the

@@ -27,7 +27,7 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
@@ -39,7 +39,7 @@ import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfi
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
-import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
+import { scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
@@ -65,7 +65,7 @@ import { billingTierSet, eraseRefusal, importRefusal } from '../core/sidecar-ref
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
-import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
+import { shopifyBulkReadEnabled, shopifyConsentBlock } from '../core/bulk-shopify.js';
 import { containedThreadStates, containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
@@ -1390,6 +1390,9 @@ function keyInputRefused(res: ServerResponse, err: unknown): boolean {
   return true;
 }
 
+/** How the destination's importer starts its refusal of a second handshake while a session runs. */
+const MIGRATION_SESSION_ACTIVE = 'Migration session already active';
+
 function errorResponse(
   res: ServerResponse,
   status: number,
@@ -1743,8 +1746,9 @@ function scopeNameOf(consent: ConsentNotice, scope: string): string {
  */
 export function consentPageHtml(consent: ConsentNotice | undefined, scopes: readonly string[], note?: ConnectNote): string {
   // The note's version travels with the confirmation, so a confirmation is refused when the
-  // provider's note is another one by the time it arrives (`shown_note`).
-  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}${note ? `&shown_note=${note.version}` : ''}`;
+  // provider's note is another one by the time it arrives (`shown_note`). So does the customer
+  // text's (`shown_consent`): the grant records the text the person read, not a later one.
+  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}${note ? `&shown_note=${note.version}` : ''}${consent ? `&shown_consent=${consentNoticeVersion(consent)}` : ''}`;
   const noteIn = (lang: NoteLang): string =>
     note ? `<p data-connect-note="${note.version}">${escapeHtml(noteText(note.version, lang, note.provider))}</p>` : '';
   if (!consent) {
@@ -9909,6 +9913,10 @@ export class LynoxHTTPApi {
     };
     /** Which halt a run stands at, by name: the owner's page words its own sentences on the
      *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
+    const bulkConsentFieldsOf = (ledger: import('../core/bulk-ledger.js').BulkLedger, runId: string): string[] => {
+      const apply = ledger.shopifyApplyOf(runId);
+      return apply === null ? [] : shopifyConsentBlock(apply, undefined);
+    };
     const bulkHaltKey = (haltReason: string | null): string | null =>
       haltReason === null ? null : (Object.entries(BULK_HALT_REASONS).find(([, text]) => text === haltReason)?.[0] ?? null);
     const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed'; haltReason: string | null }>(status: T): T & { checksumNote?: string; haltKey: string | null } => {
@@ -10033,6 +10041,10 @@ export class LynoxHTTPApi {
         // A Shopify product list's filters ({} for every product): shown wherever the run is started or
         // approved, so the owner sees which group and which statuses it reads (PRD shopify-preset §22.2 item 5).
         listFilters: shopifyListFiltersOf(status.list === null ? null : ledger.getListRun(params['id']!)),
+        // The form a list run reads, as stored, and whether its judge decides an HTML field: the
+        // sentences under a target lynox leaves out and the halt's step are worded on them.
+        listForm: status.list === null ? null : ledger.getListRun(params['id']!)?.source.form ?? null,
+        judgesHtml: ledger.judgesHtml(params['id']!),
         // An unmeasured apply run writes one target first and is approved only with this
         // confirmation. An undo is neither: it restores what its source wrote, under the
         // source's confirmation, so the note's promise of one target first would not hold.
@@ -10060,6 +10072,9 @@ export class LynoxHTTPApi {
         // Why a run halted for want of a probe cannot go past one target, read now: the effect
         // checks the probe again when it starts, so a resume the route let through can halt here.
         probeBlock: bulkHaltKey(status.haltReason) === 'probeRequired' ? ledger.probeBlockFor(status.id) : null,
+        // The fields a connection confirmed under no or another text does not cover, for the halt's
+        // sentence: the same check the apply ran, read under no grant.
+        consentFields: bulkHaltKey(status.haltReason) === 'consentOutdated' ? bulkConsentFieldsOf(ledger, status.id) : null,
         // What an undo would take back now; for an external run that includes a failed write,
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
@@ -12168,10 +12183,17 @@ export class LynoxHTTPApi {
 
       const { verifier, challenge, method } = createPkcePair();
       const state = randomUUID();
+      // The version of the customer text this start shows, and the confirmation below is checked
+      // against: the callback records it as the text the connection was confirmed under.
+      const consentVersion = decision.consent ? consentNoticeVersion(decision.consent) : undefined;
       const signed = signProfileOAuthState(
         {
           state, profileId: id, verifier,
           by: principal.kind === 'mandate' ? { tag: principalTag(principal), mandateId: principal.mandateId } : { tag: 'owner' },
+          // What the link asks for, from the same decision the confirmation is checked against
+          // below (`shown_scopes`) and the link is built from: the callback records it as asked.
+          asked: decision.scopes,
+          consent: consentVersion,
         },
         httpSecret,
         Math.floor(Date.now() / 1000),
@@ -12179,9 +12201,10 @@ export class LynoxHTTPApi {
       if (!signed) {
         // `decideConnect` has already established the secret and the profile, and
         // the id it saw is the id signed here. What still lands here is a value the
-        // format cannot carry: a mandate address with enough non-ASCII characters
-        // that its encoding exceeds what the reader accepts. Refused before the
-        // user is sent anywhere, and never asserted, because this is the one place
+        // format cannot carry: a mandate address whose encoding exceeds what the
+        // reader accepts, a list of asked scopes the format refuses, or a whole value
+        // longer than a browser keeps (`PROFILE_OAUTH_STATE_MAX_LEN`). Refused before
+        // the user is sent anywhere, and never asserted, because this is the one place
         // where a wrong value would mint a cookie that verifies as a DIFFERENT one.
         sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.startFailed, 'apis');
         return;
@@ -12244,6 +12267,12 @@ export class LynoxHTTPApi {
       // page never named.
       if (decision.consent && new URL(req.url ?? '', 'http://x').searchParams.get('shown_scopes') !== decision.scopes.join(' ')) {
         sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.scopesChanged, 'apis');
+        return;
+      }
+      // The confirmation holds for the customer text the page showed. A page rendered by an engine
+      // before an upgrade that changed the text would otherwise record the new text as confirmed.
+      if (consentVersion !== undefined && new URL(req.url ?? '', 'http://x').searchParams.get('shown_consent') !== consentVersion) {
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.consentChanged, 'apis');
         return;
       }
 
@@ -12705,11 +12734,22 @@ export class LynoxHTTPApi {
           if (lapsed.length > 0) grantNext.lapsed_slots = lapsed;
           // What the token can do, as the provider says: a narrower grant is recorded as granted.
           // A broader one is recorded too, and the page below names what it holds beyond the ask.
+          // What was asked is what the confirmed start signed, not the profile now: a save in
+          // between changes the next link, not this consent.
+          const asked = signed.asked ?? [];
+          grantNext.asked_scope = [...asked];
+          // Which customer text the person confirmed, from the same signed start: a start that
+          // showed none records none, so a connection reads as confirmed under no text. Only the
+          // owner's: the owner approves a bulk run against what the text promises, and a text a
+          // mandate confirmed is one the owner never read, so it opens no further field.
+          if (signed.consent !== undefined && by.tag === 'owner') {
+            grantNext.consent_version = signed.consent;
+            grantNext.consented_at = new Date().toISOString();
+          }
           const grantedNow = scopesOfAnswer(parsed.scope);
           if (grantedNow !== undefined) {
             grantNext.granted_scope = grantedNow;
-            const asked = askedScopes(fresh.auth?.oauth ?? {});
-            if (asked !== undefined) grantedBeyond = scopesBeyondAsked(grantedNow, asked);
+            if (preset?.compareGrantedScope === true) grantedBeyond = scopesBeyondAsked(grantedNow, asked);
           }
           // The account this consent signed in with, for the person to read: the store the
           // provider signed for, or the account an OpenID Connect preset's id_token names.
@@ -15289,9 +15329,43 @@ export class LynoxHTTPApi {
         res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       };
 
+      // From the first handshake request on, the target may hold a session: a stop says when to
+      // try again (the catch below adds it where a step did not), unless it asks to check the target.
+      let sessionMayBeHeld = false;
       try {
         const crypto = await import('../core/migration-crypto.js');
         const { MigrationExporter } = await import('../core/migration-export.js');
+        const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, askTarget, capText, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } = await import('../core/migration-target-reply.js');
+        // Why an answer of the target could not be used, in the user's words.
+        type Why = 'large' | 'format' | 'slow' | 'broken' | 'silent' | 'unreachable';
+        const why = (w: Why, cap: number, unread: string, waited: number = TARGET_BODY_TIMEOUT_MS): string =>
+          w === 'large' ? `its answer is over ${capText(cap)}${unread}`
+            : w === 'format' ? 'its answer is not in the expected format'
+              : w === 'slow' ? `it did not finish its answer within ${durationText(TARGET_BODY_TIMEOUT_MS)}`
+                : w === 'silent' ? `it did not answer within ${durationText(waited)}`
+                  : w === 'unreachable' ? 'it could not be reached'
+                    : 'the connection broke before its answer was complete';
+        // Nothing leaves the instance before the handshake is complete: the first request is this
+        // one, and the data goes only with the manifest and the chunks.
+        // After the first handshake request the target may hold a session for 30 minutes and turns
+        // a new attempt away until then; every stop from here says when to try again, except where
+        // the user has to check the target first.
+        const AGAIN = 'You can start the migration again in 30 minutes at the latest.';
+        const handshakeFailed = (w: Why): string =>
+          `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred. ${AGAIN}`;
+        /**
+         * A request to the target with its deadline for the answer to start. Past it, or when the
+         * connection fails, the step's own words (`words`); the transport's text never reaches the user.
+         */
+        const ask = async (path: string, init: RequestInit, ms: number, words: (w: 'silent' | 'unreachable') => string): Promise<Response> => {
+          try {
+            return await askTarget(fetchPinned, `${targetUrl}${path}`, init, ms);
+          } catch (err: unknown) {
+            if (err instanceof TargetDidNotAnswer) throw new Error(words('silent'));
+            if (isConnectionFailure(err)) throw new Error(words('unreachable'));
+            throw err;
+          }
+        };
 
         // 1. Preview
         sendEvent('progress', { phase: 'preview', message: 'Collecting data inventory...' });
@@ -15302,14 +15376,34 @@ export class LynoxHTTPApi {
         // 2. ECDH Handshake with target
         sendEvent('progress', { phase: 'handshake', message: 'Establishing secure connection...' });
 
-        const hsRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
+        const hsRes = await ask('/api/migration/handshake', {
           headers: { 'X-Migration-Token': migrationToken, 'Accept': 'application/json' },
-        });
+        }, TARGET_REQUEST_TIMEOUTS_MS.handshake, handshakeFailed);
         if (!hsRes.ok) {
-          const errText = await hsRes.text();
-          throw new Error(`Handshake failed: ${errText}`);
+          let errText: string | null;
+          try { errText = await readTargetBody(hsRes, TARGET_BODY_CAPS.handshake, TARGET_BODY_TIMEOUT_MS); } catch (err: unknown) {
+            throw new Error(handshakeFailed(err instanceof TargetAnswerTooSlow ? 'slow' : 'broken'));
+          }
+          if (errText === null) throw new Error(handshakeFailed('large'));
+          // A target still holding an earlier attempt: by its code, or by its text on an older one.
+          let refused: { error?: unknown; code?: unknown } | null = null;
+          try { refused = JSON.parse(errText) as { error?: unknown; code?: unknown }; } catch { /* not JSON */ }
+          if (refused?.code === 'migration_session_active' || (typeof refused?.error === 'string' && refused.error.startsWith(MIGRATION_SESSION_ACTIVE))) {
+            throw new Error(`The target instance is still holding an earlier migration attempt, so it did not accept a new one. Nothing was transferred. ${AGAIN}`);
+          }
+          // The target's own words, cleaned and cut; a refusal here starts no session on it.
+          const said = typeof refused?.error === 'string' ? refused.error : errText;
+          const words = relayedText(said).trim();
+          throw new Error(words === ''
+            ? 'The target instance did not accept the migration. Nothing was transferred.'
+            : `The target instance did not accept the migration. It says: ${words}${/[.!?…]$/.test(words) ? '' : '.'} Nothing was transferred.`);
         }
-        const handshake = await hsRes.json() as { serverPubKey: string; signature: string; challengeNonce: string };
+        // The target answered the handshake: from here it holds a session (a refusal above starts none).
+        sessionMayBeHeld = true;
+        const answer = await readTargetJson(hsRes, TARGET_BODY_CAPS.handshake, handshakeFailed, TARGET_BODY_TIMEOUT_MS);
+        const field = (k: string): unknown => (answer !== null && typeof answer === 'object' ? (answer as Record<string, unknown>)[k] : undefined);
+        if (!['serverPubKey', 'signature', 'challengeNonce'].every((k) => typeof field(k) === 'string')) throw new Error(handshakeFailed('format'));
+        const handshake = answer as { serverPubKey: string; signature: string; challengeNonce: string; acceptsPlainStores?: unknown };
 
         // Verify the server's signature over its public key — without this, a MITM
         // can substitute the responder's keypair and decrypt the entire transfer.
@@ -15323,14 +15417,18 @@ export class LynoxHTTPApi {
           crypto.zeroize(signingKey);
         }
         if (!handshakeValid) {
-          throw new Error('Handshake signature invalid — refusing to derive transfer key');
+          // Not passing: it fails the same way on every attempt (a wrong token or a foreign key).
+          throw new Error('Handshake signature invalid — refusing to derive transfer key. If this happens again, write to support@lynox.ai.');
         }
 
         // Client key agreement
         const clientKp = crypto.generateEphemeralKeypair();
-        const serverPub = crypto.deserializePublicKey(handshake.serverPubKey);
+        // A key or nonce the target sent that does not parse is its answer in the wrong format.
+        let serverPub: ReturnType<typeof crypto.deserializePublicKey>;
+        try { serverPub = crypto.deserializePublicKey(handshake.serverPubKey); } catch { throw new Error(handshakeFailed('format')); }
         const nonce = Buffer.from(handshake.challengeNonce, 'hex');
-        const transferKey = crypto.deriveTransferKey(clientKp.privateKey, serverPub, nonce);
+        let transferKey: Buffer;
+        try { transferKey = crypto.deriveTransferKey(clientKp.privateKey, serverPub, nonce); } catch { throw new Error(handshakeFailed('format')); }
 
         const migrationHeaders = {
           'Content-Type': 'application/json',
@@ -15342,19 +15440,20 @@ export class LynoxHTTPApi {
         // completion or the export fails or refuses (a bundle over the destination's bounds).
         let exported: ReturnType<typeof exporter.export>;
         try {
-          const completeRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
+          const completeRes = await ask('/api/migration/handshake', {
             method: 'POST',
             headers: migrationHeaders,
             body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
-          });
-          if (!completeRes.ok) throw new Error('Handshake completion failed');
+          }, TARGET_REQUEST_TIMEOUTS_MS.handshake, handshakeFailed);
+          await discardBody(completeRes);
+          if (!completeRes.ok) throw new Error(`Handshake completion failed. ${AGAIN}`);
 
           sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
 
           // A destination that takes plaintext stores says so in its handshake; its numbers come
           // from its health route. Anything short of both is the raw path, as for an older one.
           const { plainOffer, readDestinationHealth } = await import('../core/migration-plain-source.js');
-          const ceiling = (handshake as { acceptsPlainStores?: unknown }).acceptsPlainStores === true
+          const ceiling = handshake.acceptsPlainStores === true
             ? plainOffer(handshake, await readDestinationHealth(fetchPinned, targetUrl))
             : null;
 
@@ -15371,22 +15470,30 @@ export class LynoxHTTPApi {
         // person migrating; the raw response only when it carries none.
         // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
         // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
-        const refusal = async (r: Response, step: string, told: string): Promise<Error> => {
-          const text = await r.text();
+        // The answer is read up to its cap, and the target's words lose control and bidi characters.
+        // `then` is what the user can do next: try again later, or, once the restore ran, check the target.
+        const refusal = async (r: Response, step: string, told: string, then: string = AGAIN): Promise<Error> => {
+          let text: string | null;
+          try { text = await readTargetBody(r, TARGET_BODY_CAPS.refusal, TARGET_BODY_TIMEOUT_MS); } catch (err: unknown) {
+            if (err instanceof TargetAnswerTooSlow) return new Error(`${told} It did not finish its answer within ${durationText(TARGET_BODY_TIMEOUT_MS)}. ${then}`);
+            return new Error(`${told} The connection broke before its answer was complete. ${then}`);
+          }
+          if (text === null) return new Error(`${told} Its answer is over ${capText(TARGET_BODY_CAPS.refusal)}, so lynox did not read it. ${then}`);
           let message: unknown;
           try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
-          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${text.slice(0, 500)}`);
-          return new Error(`${told} It says: ${message.length > 500 ? `${message.slice(0, 500)}…` : message}`);
+          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${relayedText(text)} ${then}`);
+          return new Error(`${told} It says: ${relayedText(message)} ${then}`);
         };
 
         // 4. Send manifest
         sendEvent('progress', { phase: 'transferring', message: 'Sending manifest...' });
-        const mRes = await fetchPinned(`${targetUrl}/api/migration/manifest`, {
+        const mRes = await ask('/api/migration/manifest', {
           method: 'POST',
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
-        });
+        }, TARGET_REQUEST_TIMEOUTS_MS.manifest, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.manifest)}.` : 'lynox could not reach the target instance.'} lynox stopped before sending your data. ${AGAIN}`);
         if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+        await discardBody(mRes);
 
         // 5. Send chunks
         for (let i = 0; i < chunks.length; i++) {
@@ -15397,34 +15504,62 @@ export class LynoxHTTPApi {
             total: chunks.length,
           });
 
-          const cRes = await fetchPinned(`${targetUrl}/api/migration/chunk`, {
+          const cRes = await ask('/api/migration/chunk', {
             method: 'POST',
             headers: migrationHeaders,
             body: JSON.stringify(chunks[i]),
-          });
+          }, TARGET_REQUEST_TIMEOUTS_MS.chunk, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.chunk)} while receiving part ${String(i + 1)} of the data.` : `lynox lost the connection to the target instance while sending part ${String(i + 1)} of the data.`} lynox stopped; the target instance has not restored anything. ${AGAIN}`);
           if (!cRes.ok) throw await refusal(cRes, `Chunk ${String(i)} rejected`, `The target instance refused part ${String(i + 1)} of the data.`);
+          await discardBody(cRes);
         }
 
         // 6. Restore
         sendEvent('progress', { phase: 'restoring', message: 'Restoring data on target...' });
-        const rRes = await fetchPinned(`${targetUrl}/api/migration/restore`, {
-          method: 'POST',
-          headers: migrationHeaders,
-        });
-        if (!rRes.ok) throw await refusal(rRes, 'Restore failed', 'The target instance could not restore the data.');
+        // From here the data has gone out: when the source cannot tell whether the restore ran, it
+        // says where to look instead of what failed inside.
+        const restoreUnknown = (w: Why): string =>
+          `The target instance's report on restoring the data could not be read: ${why(w, TARGET_BODY_CAPS.restore, '', TARGET_REQUEST_TIMEOUTS_MS.restore)}. Check on the target instance whether your data arrived before you migrate again.`;
+        let rRes: Response;
+        try {
+          rRes = await askTarget(fetchPinned, `${targetUrl}/api/migration/restore`, { method: 'POST', headers: migrationHeaders }, TARGET_REQUEST_TIMEOUTS_MS.restore);
+        } catch (err: unknown) {
+          if (err instanceof TargetDidNotAnswer) throw new Error(restoreUnknown('silent'));
+          if (isConnectionFailure(err)) throw new Error(restoreUnknown('broken'));
+          // The network guard refusing the address (it follows no redirects): nothing was sent, so a
+          // new attempt can get past it. Anything else: the user checks the target first.
+          const text = relayedText(err instanceof Error ? err.message : String(err)).trim();
+          if (text.startsWith('Blocked:')) {
+            const reason = text.slice('Blocked:'.length).trim().replace(/[.!?…]+$/, '');
+            throw new Error(`lynox did not send the request to restore the data${reason === '' ? '' : `: ${reason}`}. The target instance has not restored anything. ${AGAIN}`);
+          }
+          throw new Error(`${text === '' ? 'The request to restore the data ended unexpectedly' : text}${/[.!?…]$/.test(text) ? '' : '.'} Check on the target instance whether your data arrived before you migrate again.`);
+        }
+        // A 4xx is the target turning the restore down before it started (a missing chunk, sidecar
+        // mode); a 5xx is the restore failing on the way, which can leave part of it applied.
+        if (!rRes.ok) throw await refusal(rRes, 'Restore failed', 'The target instance could not restore the data.', rRes.status >= 500 ? 'Check on the target instance whether your data arrived before you migrate again.' : AGAIN);
 
-        const result = await rRes.json() as { success: boolean; verification: unknown };
+        const result = await readTargetJson(rRes, TARGET_BODY_CAPS.restore, restoreUnknown, TARGET_BODY_TIMEOUT_MS) as { success?: unknown; verification?: unknown } | null;
         // Files the export could not carry (a link, a name that cannot travel) are named in the result,
         // and so is a workspace left out in shell sidecar mode (PRD D7, walker 2).
         sendEvent('done', {
-          success: true, verification: result.verification,
+          // The report is the target's: shown, so its strings lose what would not display as itself.
+          success: true, verification: relayedReport(result?.verification),
           ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}),
           ...(exportWorkspace !== undefined ? { workspace: exportWorkspace } : {}),
           // Per store the path it took and why a store took the raw path, for the report.
           ...(exportPlain !== undefined ? { plain: exportPlain } : {}),
         });
       } catch (err: unknown) {
-        sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
+        // Every text to the user goes through the same cleaning, the guard's and the exporter's too.
+        const { relayedText: clean } = await import('../core/migration-target-reply.js');
+        const message = clean(err instanceof Error ? err.message : '', 2000).trim()
+          || `The migration stopped for a reason lynox could not read.${sessionMayBeHeld ? '' : ' Nothing was transferred.'}`;
+        // A stop after the handshake that names no next step (a read failing on this instance) gets
+        // the retry sentence. A stop that names one (check the target, write to support) does not:
+        // there the same attempt fails again, and the sentence would send the user round in a loop.
+        const AGAIN_TEXT = 'You can start the migration again in 30 minutes at the latest.';
+        const said = message.includes(AGAIN_TEXT) || message.includes('Check on the target instance') || message.includes('support@lynox.ai');
+        sendEvent('error', { message: sessionMayBeHeld && !said ? `${message}${/[.!?…]$/.test(message) ? '' : '.'} ${AGAIN_TEXT}` : message });
       } finally {
         res.end();
       }
@@ -15475,7 +15610,9 @@ export class LynoxHTTPApi {
         const payload = importer.startHandshake(storedToken);
         jsonResponse(res, 200, payload);
       } catch (err: unknown) {
-        errorResponse(res, 400, err instanceof Error ? err.message : 'Handshake failed');
+        const message = err instanceof Error ? err.message : 'Handshake failed';
+        // The source words this refusal for the person migrating; the code lets it tell it apart.
+        errorResponse(res, 400, message, message.startsWith(MIGRATION_SESSION_ACTIVE) ? 'migration_session_active' : undefined);
       }
     });
 
