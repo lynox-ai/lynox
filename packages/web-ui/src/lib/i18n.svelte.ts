@@ -2868,7 +2868,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tool.knowledge_updated': { de: 'Wissen aktualisiert', en: 'Knowledge updated' },
 	'tool.file_written': { de: 'Datei geschrieben', en: 'File written' },
 	'tool.file_read': { de: 'Datei gelesen', en: 'File read' },
-	'tool.file_created': { de: 'Datei erstellt', en: 'File created' },
 	'tool.delegated': { de: 'Delegiert', en: 'Delegated' },
 	'tool.artifact_saved': { de: 'Artifact gespeichert', en: 'Artifact saved' },
 	'tool.task_created': { de: 'Aufgabe erstellt', en: 'Task created' },
