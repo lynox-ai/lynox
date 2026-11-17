@@ -66,6 +66,8 @@ let hosted: string | null = null;
 let previewGate: Promise<void> | null = null;
 // Set, the library's list answers only once it is called: the page is seen while it loads again.
 let listGate: Promise<void> | null = null;
+// What Run answers, when a test presses it.
+let runAnswer: { status: number; body: unknown } = { status: 200, body: {} };
 
 function serve(workflows: Array<Record<string, unknown>>, previews: Array<Record<string, unknown>>, post: { status: number; body: unknown } = { status: 200, body: { takenOver: true, runsAs: 'owner', stillOff: 0 } }): Served {
 	const served: Served = { posts: [], previews: 0, lists: 0 };
@@ -87,6 +89,7 @@ function serve(workflows: Array<Record<string, unknown>>, previews: Array<Record
 			served.posts.push(JSON.parse(String(init?.body ?? 'null')));
 			return new Response(JSON.stringify(post.body), { status: post.status });
 		}
+		if (method === 'POST' && /^\/workflows\/[^/]+\/run$/.test(path)) return new Response(JSON.stringify(runAnswer.body), { status: runAnswer.status });
 		if (method === 'GET' && path === '/secrets/status') return new Response(JSON.stringify({ managed: hosted }), { status: 200 });
 		return new Response('{}', { status: 404 });
 	}));
@@ -154,6 +157,7 @@ beforeEach(() => {
 	hosted = null;
 	previewGate = null;
 	listGate = null;
+	runAnswer = { status: 200, body: {} };
 	setLocale('de');
 	target = document.createElement('div');
 	document.body.appendChild(target);
@@ -628,5 +632,34 @@ describe('the dialog for keyboard and screen reader', () => {
 		await settle();
 		expect(dialog()).toBeNull();
 		expect(document.activeElement).toBe(target.querySelector('h1'));
+	});
+});
+
+describe('the library\'s own sentences', () => {
+	it('sets the person apart in the note at an ended workflow, with and without paused plans', async () => {
+		await open([
+			{ ...base('wf-a', 'Plain'), runs_as: { person: 'FX-person', ended: true, covered_by_takeover: 0 } },
+			{ ...base('wf-b', 'With plans'), runs_as: { person: 'FX-personpaused', ended: true, covered_by_takeover: 2 } },
+		]);
+		const notes = [...target.querySelectorAll('[data-library-note="ended"]')];
+		expect(notes.length).toBe(2);
+		const places = notes.flatMap((n) => foreignPlaces(n));
+		expect(places.map(([v]) => v).sort()).toEqual(['FX-person', 'FX-personpaused']);
+		expect(places.filter(([, apart]) => !apart)).toEqual([]);
+	});
+
+	it('sets the workflow and the person apart in the banner after a run refused because that access ended', async () => {
+		const wf: Record<string, unknown> = { ...base('wf-r', 'FX-wfname'), runs_as: { person: 'FX-person', ended: false } };
+		runAnswer = { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: 'FX-person' } };
+		await open([wf]);
+		const run = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Ausführen');
+		expect(run, 'the Run button').toBeDefined();
+		run!.click();
+		await settle();
+		const banner = target.querySelector('[data-page-error]');
+		expect(banner?.textContent).toContain('angelegt oder zuletzt geändert');
+		const places = foreignPlaces(banner!);
+		expect(places.map(([v]) => v).sort()).toEqual(['FX-person', 'FX-wfname']);
+		expect(places.filter(([, apart]) => !apart)).toEqual([]);
 	});
 });
