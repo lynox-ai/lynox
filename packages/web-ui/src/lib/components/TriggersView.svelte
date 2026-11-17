@@ -8,7 +8,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
-	import { endedNotices, refusalText, shownValue, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { endedNotices, pausedTitleLine, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
@@ -44,8 +44,7 @@
 		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
 		created_by?: string;
 		edited_by?: string;
-		// The last mandate that changed the trigger, kept after the owner changes it again: the
-		// title it wrote may still stand.
+		// The last mandate that changed the trigger, kept after the owner changes it again.
 		mandate_editor?: string;
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
 		stamp_listed?: StampListed | null;
@@ -295,13 +294,6 @@
 	// due on it: no label, no button, not in the notices, as the badge's count leaves it out too.
 	function pausedOpen(trigger: Trigger): boolean {
 		return trigger.paused === true && trigger.status !== 'completed';
-	}
-
-	// Whether someone with delegated access may have written the title: a mandate set the plan up or
-	// changed it (a change is not told apart by field, so any change counts), or who set it up is
-	// not recorded. Only such a title is set apart on a paused plan; the owner's own stays plain.
-	function titleMayBeForeign(trigger: Trigger): boolean {
-		return trigger.created_by !== 'owner' || (trigger.edited_by ?? 'owner') !== 'owner' || (trigger.mandate_editor ?? '') !== '';
 	}
 
 	// Run now on a completed plan that keeps its pause is refused with the paused sentence, which
@@ -589,8 +581,8 @@
 							<!-- Wrapping, so the badges move to their own line on a narrow card instead
 							     of squeezing the title: the badges are `shrink-0` and the title clamps. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-								<!-- A plan to take over: its title is someone else's value, as in the notice above. -->
-								<p class="text-sm font-medium line-clamp-2 break-words">{#if pausedOpen(trigger) && titleMayBeForeign(trigger)}<MarkedLine text={shownValue(trigger.title)} mono={false} />{:else}{trigger.title}{/if}</p>
+								<!-- A plan to take over: its title is someone else's value, as in the notice above (`pausedTitleLine`). -->
+								<p class="text-sm font-medium line-clamp-2 break-words">{#if pausedOpen(trigger)}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{trigger.title}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
@@ -743,7 +735,7 @@
 	>
 		<div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">
 			<h2 id="takeover-title" class="text-sm font-medium mb-1">{t('takeover.title')}</h2>
-			<p class="text-xs text-text-subtle mb-3 break-words" data-takeover-subtitle><MarkedLine text={shownValue(takeoverFor.title)} /></p>
+			<p class="text-xs text-text-subtle mb-3 break-words" data-takeover-subtitle><MarkedLine text={pausedTitleLine(takeoverFor)} mono={false} /></p>
 			{#if takeoverNote !== ''}
 				<p class="text-xs text-warning mb-3" role="status" data-takeover-note><MarkedLine text={takeoverNote} /></p>
 			{/if}

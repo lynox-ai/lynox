@@ -230,29 +230,35 @@ describe('the confirmation', () => {
 		expect(titleBox('Monatsabschluss')).toBeNull();
 	});
 
-	it('sets a paused title apart only where someone with access may have written it', async () => {
+	it('sets every paused title apart, and keeps the engine\'s prefix outside only on the owner\'s own plan', async () => {
 		const owner = { created_by: 'owner', edited_by: undefined, mandate_editor: undefined };
+		const ida = 'mandate:ida@treuhand-mueller-partner.ch';
 		rows = [
+			// The owner's plan may run a workflow someone else named, and carry that name: boxed too.
 			{ ...PAUSED, ...owner, id: 'o1', title: 'Owner plan' },
-			{ ...PAUSED, ...owner, id: 'o2', title: 'Owner changed', edited_by: 'owner' },
-			{ ...PAUSED, id: 'm1', title: 'Mandate made' },
-			{ ...PAUSED, ...owner, id: 'm2', title: 'Mandate last', edited_by: 'mandate:ida@treuhand-mueller-partner.ch', mandate_editor: 'mandate:ida@treuhand-mueller-partner.ch' },
-			{ ...PAUSED, ...owner, id: 'm3', title: 'Mandate before', edited_by: 'owner', mandate_editor: 'mandate:ida@treuhand-mueller-partner.ch' },
-			{ ...PAUSED, ...owner, id: 'u1', title: 'Unknown', created_by: undefined },
+			{ ...PAUSED, ...owner, id: 'o2', title: 'Scheduled: Forged', edited_by: 'owner' },
+			{ ...PAUSED, id: 'm1', title: 'Scheduled: Mandate made' },
+			{ ...PAUSED, ...owner, id: 'm2', title: 'Scheduled: Mandate last', edited_by: ida, mandate_editor: ida },
+			{ ...PAUSED, ...owner, id: 'm3', title: 'Scheduled: Mandate before', edited_by: 'owner', mandate_editor: ida },
+			{ ...PAUSED, ...owner, id: 'u1', title: 'Scheduled: Unknown', created_by: undefined },
 		];
 		await render();
 		const title = (t: string): Element | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === t);
-		// The owner's own titles stay plain, beside the paused label all the same.
-		for (const t of ['Owner plan', 'Owner changed']) {
-			expect(title(t), t).toBeDefined();
-			expect(title(t)!.querySelector('bdi'), t).toBeNull();
-		}
-		for (const t of ['Mandate made', 'Mandate last', 'Mandate before', 'Unknown']) {
-			const box = title(t)?.querySelector('bdi[data-foreign-value]');
-			expect(box?.textContent, t).toBe(t);
+		const boxed: Array<[string, string, string]> = [
+			['Owner plan', 'Owner plan', 'mr-0.5'],
+			['Scheduled: Forged', 'Forged', 'mx-0.5'],
+			['Scheduled: Mandate made', 'Scheduled: Mandate made', 'mr-0.5'],
+			['Scheduled: Mandate last', 'Scheduled: Mandate last', 'mr-0.5'],
+			['Scheduled: Mandate before', 'Scheduled: Mandate before', 'mr-0.5'],
+			['Scheduled: Unknown', 'Scheduled: Unknown', 'mr-0.5'],
+		];
+		for (const [line, value, margin] of boxed) {
+			const box = title(line)?.querySelector('bdi[data-foreign-value]');
+			expect(box?.textContent, line).toBe(value);
 			// A grey box in the list's font: the title keeps its width.
-			expect(box!.classList.contains('bg-bg-muted'), t).toBe(true);
-			expect(box!.classList.contains('font-mono'), t).toBe(false);
+			expect(box!.classList.contains('bg-bg-muted'), line).toBe(true);
+			expect(box!.classList.contains('font-mono'), line).toBe(false);
+			expect(box!.classList.contains(margin), line).toBe(true);
 		}
 	});
 

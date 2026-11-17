@@ -161,7 +161,7 @@
 	data-testid="takeover-dialog"
 >
 	<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
-		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words"><MarkedLine text={tf('workflow_library.takeover.title', { name: shownValue(preview?.workflow.name ?? workflow.name) })} /></h2>
+		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words"><MarkedLine text={tf('workflow_library.takeover.title', { name: shownValue(preview?.workflow.name ?? workflow.name) })} mono={false} /></h2>
 		{#if changedLine}
 			<p bind:this={changedEl} role="status" data-testid="takeover-changed" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{changedLine}</p>
 		{/if}

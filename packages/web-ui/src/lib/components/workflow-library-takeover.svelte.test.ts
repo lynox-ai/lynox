@@ -753,14 +753,26 @@ describe('the library\'s own sentences', () => {
 		}
 	});
 
-	it('keeps a 2 px margin around the box and no inner space on a value', async () => {
+	it('keeps a 2 px margin around a value inside a line, only on its right at the line\'s start', async () => {
 		await open([ENDED]);
-		const boxes = [...target.querySelectorAll('bdi[data-foreign-value]')].filter((b) => b.textContent !== '');
-		expect(boxes.length).toBeGreaterThan(0);
-		for (const b of boxes) {
-			const spacing = [...b.classList].filter((c) => /^-?(p|px|py|pl|pr|m|mx|my|ml|mr)-/.test(c));
-			expect(spacing).toEqual(['mx-0.5']);
-		}
+		const spacing = (b: Element): string[] => [...b.classList].filter((c) => /^-?(p|px|py|pl|pr|m|mx|my|ml|mr)-/.test(c));
+		const card = [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === 'Ended one');
+		expect(spacing(card!.querySelector('bdi[data-foreign-value]')!)).toEqual(['mr-0.5']);
+		const d = await openDialog();
+		const inSentence = d.querySelector('[data-takeover-part="released"] bdi[data-foreign-value]');
+		expect(inSentence?.textContent).toBe('Daily');
+		expect(spacing(inSentence!)).toEqual(['mx-0.5']);
+	});
+
+	it('sets the workflow name in the dialog\'s heading in the heading\'s font, a value in a sentence in the code font', async () => {
+		await open([ENDED]);
+		const d = await openDialog();
+		const heading = d.querySelector('#workflow-takeover-title bdi[data-foreign-value]');
+		expect(heading?.textContent).toBe('Ended one');
+		expect(heading!.classList.contains('font-mono')).toBe(false);
+		const inSentence = d.querySelector('[data-takeover-part="released"] bdi[data-foreign-value]');
+		expect(inSentence?.textContent).toBe('Daily');
+		expect(inSentence!.classList.contains('font-mono')).toBe(true);
 	});
 
 	it('sets the person apart in the note at an ended workflow, with and without paused plans', async () => {

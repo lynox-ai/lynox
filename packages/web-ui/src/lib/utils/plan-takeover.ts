@@ -300,3 +300,28 @@ export function refusalText(code: string, opts: { workflow: string | null; manag
 			return opts.fallback;
 	}
 }
+
+/** The engine's start of a title it derives from a workflow's name (`SCHEDULED_TITLE_PREFIX`), kept equal by a test. */
+export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
+
+/** Who set a plan up and changed it, as the trigger list carries it (tags: `owner`, `mandate:<address>`). */
+export interface PlanAuthorship {
+	title: string;
+	created_by?: string | undefined;
+	edited_by?: string | undefined;
+	mandate_editor?: string | undefined;
+}
+
+/**
+ * The title of a plan with a takeover to give, as a line with the value set apart. The title is
+ * someone else's value on every such plan: even one the owner set up runs a workflow a person with
+ * access made or changed, and its title may be that workflow's name, put there by lynox's agent or
+ * by the engine. Only where the owner alone set up and changed the plan does a title the engine
+ * starts with its own words keep those words outside the box; on any other plan the whole title is
+ * the value, so a person with access cannot borrow them.
+ */
+export function pausedTitleLine(plan: PlanAuthorship): string {
+	const ownerOnly = plan.created_by === 'owner' && (plan.edited_by ?? 'owner') === 'owner' && (plan.mandate_editor ?? '') === '';
+	if (ownerOnly && plan.title.startsWith(SCHEDULED_TITLE_PREFIX)) return SCHEDULED_TITLE_PREFIX + shownValue(plan.title.slice(SCHEDULED_TITLE_PREFIX.length));
+	return shownValue(plan.title);
+}
