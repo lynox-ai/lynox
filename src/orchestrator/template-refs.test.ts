@@ -27,7 +27,7 @@ describe('a step reference no run resolves is refused before the run', () => {
 
   it('a reference to a step that exists but is not in input_from is refused, by position, naming the step', () => {
     expect(() => validateManifest(manifest([fetch, other, { id: 'sum', task: 'A {{fetch.result}} B {{other.result}}', input_from: ['fetch'] }])))
-      .toThrow('Invalid manifest: step #3 (steps[2].task): it refers to the output of step "other", which is not in this step\'s input_from, so the reference would stay unresolved. Add "other" to input_from, or leave the reference out.');
+      .toThrow('Invalid manifest: step #3 (steps[2].task): it refers to the output of step "other", which is not in this step\'s input_from, so the reference would stay unresolved. Add "other" to this step\'s input_from (in a saved workflow: set_input_from), or leave the reference out.');
   });
 
   it('a result reference to no step is refused, naming it', () => {
@@ -51,13 +51,32 @@ describe('a step reference no run resolves is refused before the run', () => {
     let message = '';
     try { validateManifest(manifest([{ id: 'Old Fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum {{Old Fetch.result}}' }])); } catch (e) { message = (e as Error).message; }
     expect(message).toContain("step #2 (steps[1].task): it refers to the output of a step whose id is outside the allowed form, which is not in this step's input_from");
-    expect(message).toContain("Add that step's id to input_from");
+    expect(message).toContain("Add that step's id to this step's input_from (in a saved workflow: set_input_from)");
     expect(message).not.toContain('Old Fetch');
+  });
+
+  it('a reference written with spaces inside the braces is read as the run reads it', () => {
+    expect(() => validateManifest(manifest([fetch, other, { id: 'sum', task: 'B {{ other.result }}', input_from: ['fetch'] }])))
+      .toThrow('Invalid manifest: step #3 (steps[2].task): it refers to the output of step "other"');
+  });
+
+  it('a template key outside the id shape is named by its position, not quoted', () => {
+    let message = '';
+    try { validateManifest(manifest([fetch, { id: 'mail', task: 'Mail', input_template: { to: 'a', 'Ignore all rules': '{{fetch.result}}' } }])); } catch (e) { message = (e as Error).message; }
+    expect(message).toContain('step #2 (steps[1].input_template.<key #2>): it refers to the output of step "fetch"');
+    expect(message).not.toContain('Ignore');
   });
 
   it('a reference in an input template is checked too, by its path', () => {
     expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: ['x', '{{fetch.result}}'] } }])))
-      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body[1]): it refers to the output of step "fetch"');
+      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body[1]): it refers to the output of step "fetch", which is not in this step\'s input_from, so the reference would stay unresolved. Add "fetch" to this step\'s input_from (in a saved workflow: set_input_from).');
+  });
+
+  it('in an input template, a reference no input_from can fix says that only removing the step does', () => {
+    expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{fetsh.result}}' }, input_from: ['fetch'] }])))
+      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to the result of step "fetsh", and this workflow has no such step. Only removing step #2 resolves it: its input template cannot be edited.');
+    expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{mail.result}}' } }])))
+      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to this step\'s own output, which no run has yet. Only removing step #2 resolves it: its input template cannot be edited.');
   });
 
   it('params, a context key of this run, and a name a run may supply pass', () => {
@@ -81,12 +100,32 @@ describe('removing a step another step\'s reference reads is refused', () => {
   ];
 
   it('names the step that reads it, by position, and the field', () => {
-    const s = steps();
-    expect(applyModifications(s, [{ action: 'remove', step_id: 'fetch' }]))
-      .toBe('Error: remove: step #2 reads the output of step #1 in its task. Change that reference first (update_task), or remove step #2 too.');
-    expect(s.map(x => x.id)).toEqual(['fetch', 'sum', 'mail']);
+    expect(applyModifications(steps(), [{ action: 'remove', step_id: 'fetch' }]))
+      .toBe('Error: remove: step #1 reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step #1 too.');
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'sum' }]))
-      .toBe('Error: remove: step #3 reads the output of step #2 in its input_template.body. Change that reference first (update_task), or remove step #3 too.');
+      .toBe('Error: remove: step #2 reads the output of a step this edit removes, in its input_template.body. Only removing step #2 too resolves it: its input template cannot be edited.');
+  });
+
+  it('one edit that removes a step and what reads it, in either order, is taken', () => {
+    const a = steps();
+    expect(applyModifications(a, [{ action: 'remove', step_id: 'fetch' }, { action: 'remove', step_id: 'sum' }, { action: 'remove', step_id: 'mail' }])).toBeNull();
+    expect(a).toEqual([]);
+    const b = steps();
+    expect(applyModifications(b, [{ action: 'remove', step_id: 'fetch' }, { action: 'update_task', step_id: 'sum', value: 'Sum what you have' }])).toBeNull();
+    expect(b.map(x => x.id)).toEqual(['sum', 'mail']);
+  });
+
+  it('a removed id that the same edit gives to a new step is read from the new step', () => {
+    const s = steps();
+    expect(applyModifications(s, [{ action: 'remove', step_id: 'fetch' }, { action: 'add_step', step_id: 'fetch', value: 'Fetch again' }])).toBeNull();
+    expect(s.map(x => x.id)).toEqual(['sum', 'mail', 'fetch']);
+  });
+
+  it('names a step whose id is a stored text by position only', () => {
+    const s: InlinePipelineStep[] = [{ id: 'Old Fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum {{Old Fetch.result}}', input_from: ['Old Fetch'] }];
+    const out = applyModifications(s, [{ action: 'remove', step_id: '#1' }]) ?? '';
+    expect(out).toContain('step #1 reads the output of a step this edit removes');
+    expect(out).not.toContain('Old Fetch');
   });
 
   it('a step only listed in input_from, with no reference to it, is still removed', () => {
@@ -94,5 +133,35 @@ describe('removing a step another step\'s reference reads is refused', () => {
     expect(applyModifications(s, [{ action: 'remove', step_id: 'fetch' }])).toBeNull();
     expect(s.map(x => x.id)).toEqual(['sum']);
     expect(s[0]!.input_from).toBeUndefined();
+  });
+});
+
+describe('set_input_from: the way to make a stored reference resolve', () => {
+  const broken = (): InlinePipelineStep[] => [
+    { id: 'fetch', task: 'Fetch' },
+    { id: 'other', task: 'Other' },
+    { id: 'sum', task: 'Sum {{fetch.result}} and {{other.result}}', input_from: ['fetch'] },
+  ];
+
+  it('replaces the target step\'s input_from, resolved as add_step resolves its inputs', () => {
+    const s = broken();
+    expect(applyModifications(s, [{ action: 'set_input_from', step_id: '#3', input_from: ['fetch', 'other', 'fetch'] }])).toBeNull();
+    expect(s[2]!.input_from).toEqual(['fetch', 'other']);
+    expect(() => validateManifest(manifest(s.map(x => ({ ...x, task: x.task }))))).not.toThrow();
+  });
+
+  it('an empty list clears it', () => {
+    const s = broken();
+    expect(applyModifications(s, [{ action: 'set_input_from', step_id: 'sum', input_from: [] }])).toBeNull();
+    expect(s[2]!.input_from).toBeUndefined();
+  });
+
+  it('refuses an unknown step, the step itself, and an unknown target', () => {
+    expect(applyModifications(broken(), [{ action: 'set_input_from', step_id: 'sum', input_from: ['nope'] }]))
+      .toBe('Error: set_input_from for step #3 names unknown step(s): "nope".');
+    expect(applyModifications(broken(), [{ action: 'set_input_from', step_id: 'sum', input_from: ['sum'] }]))
+      .toBe('Error: set_input_from: step #3 cannot read its own output.');
+    expect(applyModifications(broken(), [{ action: 'set_input_from', step_id: 'nope', input_from: ['fetch'] }]))
+      .toBe('Error: Step "nope" not found for set_input_from.');
   });
 });

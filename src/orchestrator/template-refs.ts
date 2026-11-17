@@ -26,12 +26,15 @@ function referencePaths(text: string): string[] {
   return [...text.matchAll(PLACEHOLDER)].map(m => m[1]!.trim());
 }
 
-/** Every string leaf of an input template with its path below `input_template`. */
+/** Every string leaf of an input template with its path below `input_template`. A key is part of
+ *  the path only when it has the step id shape; any other key is stored text and is named by its
+ *  position among its siblings instead (`step-id.ts`). */
 function templateStrings(value: unknown, path: string): Array<[string, string]> {
   if (typeof value === 'string') return [[path, value]];
   if (Array.isArray(value)) return value.flatMap((v, i) => templateStrings(v, `${path}[${String(i)}]`));
   if (value !== null && typeof value === 'object') {
-    return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) => templateStrings(v, `${path}.${k}`));
+    return Object.entries(value as Record<string, unknown>).flatMap(([k, v], i) =>
+      templateStrings(v, isStepIdShape(k) ? `${path}.${k}` : `${path}.<key #${String(i + 1)}>`));
   }
   return [];
 }
@@ -80,18 +83,22 @@ export function templateRefIssue(
         const [name = '', second] = ref.split('.');
         if (name === 'params' || (context !== undefined && Object.hasOwn(context, name))) continue;
         const where = `step #${String(i + 1)} (${path}[${String(i)}].${field})`;
+        // An input template cannot be edited in a saved workflow; a task can (update_task).
+        const removeOnly = `Only removing step #${String(i + 1)} resolves it: its input template cannot be edited.`;
+        const inTemplate = field !== 'task';
         if (name === step.id) {
           return `${where}: it refers to this step's own output, which no run has yet. `
-            + 'Refer to an earlier step, listed in input_from, or leave the reference out.';
+            + (inTemplate ? removeOnly : 'Refer to an earlier step, listed in input_from, or leave the reference out.');
         }
         if (ids.has(name)) {
           if ((step.input_from ?? []).includes(name)) continue;
           return `${where}: it refers to the output of ${shownStep(name)}, which is not in this step's input_from, so the reference would stay unresolved. `
-            + `Add ${isStepIdShape(name) ? `"${name}"` : 'that step\'s id'} to input_from, or leave the reference out.`;
+            + `Add ${isStepIdShape(name) ? `"${name}"` : 'that step\'s id'} to this step's input_from (in a saved workflow: set_input_from)`
+            + (inTemplate ? '.' : ', or leave the reference out.');
         }
         if (second === 'result') {
           return `${where}: it refers to the result of ${isStepIdShape(name) ? `step "${name}"` : 'a step id outside the allowed form'}, and this workflow has no such step. `
-            + "Refer to the step it should read by that step's id, and list it in input_from.";
+            + (inTemplate ? removeOnly : "Refer to the step it should read by that step's id, and list it in input_from.");
         }
       }
     }

@@ -377,6 +377,25 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(getPipeline('wf-1', history)).toBeUndefined();
   });
 
+  it('a stored workflow whose reference misses input_from is repaired by set_input_from, and only an edit that repairs it is saved', async () => {
+    // Saved before references were checked: step-1 reads step-0 without listing it.
+    storePipeline('wf-1', makePlanned({ steps: [
+      { id: 'step-0', task: 'Fetch the data' },
+      { id: 'step-1', task: 'Write {{step-0.result}}' },
+    ] }));
+    const agent = makeAgent(history);
+    const unrelated = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-0', value: 'Fetch it all' }] }, agent);
+    expect(unrelated).toContain('Add "step-0" to this step\'s input_from (in a saved workflow: set_input_from)');
+    // One edit that starts from the broken list and repairs it is checked after all of its actions.
+    const repaired = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-0', value: 'Fetch it all' }, { action: 'set_input_from', step_id: 'step-1', input_from: ['step-0'] }] }, agent);
+    expect(repaired).not.toMatch(/^Error/);
+    const reread = getPipeline('wf-1', history)!;
+    expect(reread.steps[1]!.input_from).toEqual(['step-0']);
+    expect(reread.steps[0]!.task).toBe('Fetch it all');
+  });
+
   it('removes a step and drops it from dependents input_from', async () => {
     history.insertPlannedPipeline(makePlanned(), null);
     const agent = makeAgent(history);
