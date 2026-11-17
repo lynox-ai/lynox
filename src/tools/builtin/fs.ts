@@ -133,8 +133,8 @@ export function refuseEvictionPlaceholder(written: string, realPath: string): vo
   throw new Error(
     'refused: the text contains the engine\'s placeholder ("[evicted after ' +
     'successful save …]", "[The body of this document was removed …]" or "[The content of this ' +
-    'call was the engine\'s placeholder …]"). The engine puts it in ' +
-    'your context in place of text it took out of an earlier call — it is not content. ' +
+    'call was the engine\'s placeholder …]"). The engine leaves it in your context in place ' +
+    'of text it took out of an earlier call; a copy of it is not content. ' +
     'Nothing was written. Write the actual text instead; artifact_history lists earlier versions ' +
     'of an artifact.',
   );

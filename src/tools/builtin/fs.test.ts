@@ -643,7 +643,7 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
       const err = await editFileTool.handler({ path: p, old_string: 'Three budget options.', new_string: placeholder }, makeAgent())
         .then(() => null, (e: unknown) => e as Error);
       expect(err?.message).toContain("refused: the text contains the engine's placeholder (");
-      expect(err?.message).toContain('in place of text it took out of an earlier call — it is not content.');
+      expect(err?.message).toContain('in place of text it took out of an earlier call; a copy of it is not content.');
       expect(err?.message).not.toMatch(/already saved|a saved artifact/);
     });
   });

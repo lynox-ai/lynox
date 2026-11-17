@@ -79,9 +79,9 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       throw new Error(
         'artifact_save refused: `content` contains the engine\'s placeholder ' +
         '("[evicted after successful save …]", "[The body of this document was removed …]" or ' +
-        '"[The content of this call was the engine\'s placeholder …]"). The ' +
-        'engine puts it in your context in place of text it took out of an earlier call — it is ' +
-        'not a document, and it does not show that a document was saved. Nothing was saved, and any existing artifact is unchanged. To change an ' +
+        '"[The content of this call was the engine\'s placeholder …]"). The engine leaves it in ' +
+        'your context in place of text it took out of an earlier call; a copy of it is not a ' +
+        'document. Nothing was saved, and any existing artifact is unchanged. To change an ' +
         'artifact, read_file its path and apply edit_file. To create one, write the full document ' +
         'into `content`. If read_file returns this placeholder too, the file itself holds it: ' +
         'artifact_history lists earlier versions, or write the document anew.',
