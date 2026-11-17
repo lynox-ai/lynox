@@ -351,6 +351,11 @@ function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: st
     case 'escaped-secret':
       return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Write the value plainly.`);
+    case 'unreadable':
+      // Refused for the owner too, unlike an unreadable body: a header the question cannot show was
+      // always refused, and enough headers before it would otherwise turn that refusal into a
+      // question that shows none of them.
+      return `Blocked: the headers of this ${write} to ${service} are too many or too heavily encoded for the approval question to check them for a stored secret. Nothing was sent. Send fewer headers, with plain values. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in ${service}.`;
     case 'secret-name':
       return `Blocked: this ${write} to ${service} sets a header whose name holds a stored secret. A header name is shown in the approval question as it is. Nothing was sent. ` +
         (mandate ? STORED_SECRET_VIA_PROFILE : `Put the secret in the value, as secret:NAME.`);
