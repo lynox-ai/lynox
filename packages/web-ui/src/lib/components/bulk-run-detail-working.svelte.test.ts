@@ -123,6 +123,7 @@ const shown = (): string => target.textContent ?? '';
 const HOST = 'demo.myshopify.com';
 const line = (): string | null => target.querySelector('[data-testid="bulk-working"]')?.textContent ?? null;
 const counts = (): string | null => target.querySelector('[data-testid="bulk-counts"]')?.textContent ?? null;
+const title = (): string | null => target.querySelector('[data-testid="bulk-title"]')?.textContent ?? null;
 const stopped = (): string | null => target.querySelector('[data-testid="bulk-follow-stopped"]')?.textContent ?? null;
 const UPDATES = (n: number) => ({ update: n, create: 0, delete: 0, unchanged: 0, invalid: 0 });
 
@@ -159,20 +160,22 @@ describe('the step the engine works on', () => {
 });
 
 describe('a run the engine works on', () => {
-	it('says lynox reads the list, with a dash for the counts, and the stopped sentence after the follow limit', async () => {
-		run = makeRun({ listFirstPage: `https://${HOST}/admin/api/2026-10/graphql.json` });
+	it('says lynox reads the list, with a dash for the counts and the title, and the stopped sentence after the follow limit', async () => {
+		run = makeRun({ total: 0, changes: UPDATES(0), listFirstPage: `https://${HOST}/admin/api/2026-10/graphql.json` });
 		await render();
 		expect(line()).toBe('lynox liest die Liste …');
 		expect(counts()).toBe('–');
+		expect(title()).toMatch(/^– Ziele · /);
 		await pass(BULK_FOLLOW_MAX_MS + BULK_FOLLOW_MS);
 		expect(stopped()).toBe('Die Seite fragt nicht mehr nach; lade sie neu, um den Stand zu sehen.');
 	});
 
-	it('says lynox reads the targets, with a dash for the counts, not a zero that reads as done', async () => {
+	it('says lynox reads the targets, with a dash for the counts and the title, not a number that reads as done', async () => {
 		run = makeRun({ total: 4, changes: UPDATES(4) });
 		await render();
 		expect(line()).toBe(`lynox liest die Ziele bei ${HOST} …`);
 		expect(counts()).toBe('–');
+		expect(title()).toMatch(/^– Ziele · /);
 		expect(shown()).not.toContain('geschrieben 0');
 	});
 
@@ -184,6 +187,7 @@ describe('a run the engine works on', () => {
 		await pass(BULK_FOLLOW_MS);
 		expect(line()).toBe('lynox urteilt … 4 von 5');
 		expect(counts()).toBe(tf('bulk.head.counts', { n: '5', a: '0', c: '0', f: '0' }));
+		expect(title()).toMatch(/^5 Ziele · /);
 	});
 
 	it('says lynox judges without numbers where the engine does not count the verdicts', async () => {

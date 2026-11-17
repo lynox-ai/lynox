@@ -743,10 +743,12 @@ export function bulkSystemName(targetSystem: string, i18n: BulkI18n): string {
 	return name === key ? targetSystem : name;
 }
 
-/** A run has no title: it is named by its size and where it writes. */
-export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): string {
-	const one = run.total === 1 ? '_one' : '';
-	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n: String(run.total), target: bulkSystemName(run.targetSystem, i18n) });
+/** A run has no title: it is named by its size and where it writes. While its counts are still
+ *  pending (see bulkCountsPending) the size reads "–", as the head's counts do. */
+export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n, countsPending = false): string {
+	const one = !countsPending && run.total === 1 ? '_one' : '';
+	const n = countsPending ? i18n.t('bulk.head.counts_pending') : String(run.total);
+	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n, target: bulkSystemName(run.targetSystem, i18n) });
 }
 
 /** The line about targets that held another value than expected when lynox last read them, or

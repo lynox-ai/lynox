@@ -551,7 +551,7 @@
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">{error || t('common.load_failed')}</div>
 	{:else}
 		<section class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-4">
-			<h1 class="text-lg font-medium">{bulkLabel(run, i18n)}</h1>
+			<h1 class="text-lg font-medium" data-testid="bulk-title">{bulkLabel(run, i18n, bulkCountsPending(workingStep))}</h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
 				{#each steps as s (s)}
