@@ -1049,6 +1049,25 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
     }
   });
 
+  it('titles a handler that halted its run and then threw past its catch as halted', async () => {
+    const s = shop();
+    const restore = serve(s);
+    let held = '';
+    const thrown = vi.spyOn(WorkerLoop.prototype as unknown as { executeBulkPreview: () => Promise<void> }, 'executeBulkPreview')
+      .mockImplementation(async () => { ledger.haltPreview(held, BULK_HALT_REASONS.unavailable); throw new Error('boom'); });
+    try {
+      held = planRun([{ target: url(0), after: { price: '1' } }]);
+      const w = workerFor();
+      await w.tick();
+      await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
+      expect(ledger.getStatus(held)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+      expect((w.notify.mock.calls[0] as unknown as [{ title: string }])[0].title).toBe(`\u2717 Preview halted · ${HOST}`);
+    } finally {
+      thrown.mockRestore();
+      restore();
+    }
+  });
+
   it('names a bulk run by stage and host also when its handler throws past its own catch, never by its id', async () => {
     const s = shop();
     const restore = serve(s);

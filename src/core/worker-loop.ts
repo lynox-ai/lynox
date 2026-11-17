@@ -2341,7 +2341,7 @@ export class WorkerLoop {
         const pushedMsg = reduce && !isTimeout ? errorText(err, true) : errorMsg;
         const notices = this.#notices();
         await this.notificationRouter.notify({
-          title: `${stopped ? '\u23f9' : '\u2717'} ${this.#pushTitleOf(task, stopped ? 'stopped' : 'failed')}`,
+          title: `${stopped ? '\u23f9' : '\u2717'} ${this.#pushTitleOf(task, stopped ? 'stopped' : this.#bulkRunHalted(task) ? 'halted' : 'failed')}`,
           body: stopped ? notices.stoppedWith(pushedMsg) : notices.failed(pushedMsg),
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
@@ -3877,23 +3877,24 @@ export class WorkerLoop {
     }
   }
 
-  /**
-   * The words after a push's end mark. A bulk run's trigger is titled with its run id, for the
-   * model that lists it; its push names the stage, how it ended and the host instead (U-324),
-   * in the owner's language. Every other trigger's push carries its title as it is.
-   */
   /** Whether a bulk run's trigger leads to a run its ledger holds halted and not ended. */
   #bulkRunHalted(task: TriggerRecord): boolean {
     if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return false;
     try {
       const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
-      const st = ledger?.getStatus(task.bulk_run_id);
-      return st != null && st.haltReason !== null && st.phase !== 'aborted' && st.phase !== 'done' && st.phase !== 'undone';
+      // A plain row read: `getStatus` frees dead reads as it reads, and a title must not write.
+      const st = ledger?.getRunForApply(task.bulk_run_id);
+      return st != null && typeof st.haltReason === 'string' && st.phase !== 'aborted' && st.phase !== 'done' && st.phase !== 'undone';
     } catch {
       return false;
     }
   }
 
+  /**
+   * The words after a push's end mark. A bulk run's trigger is titled with its run id, for the
+   * model that lists it; its push names the stage, how it ended and the host instead (U-324),
+   * in the owner's language. Every other trigger's push carries its title as it is.
+   */
   #pushTitleOf(task: TriggerRecord, end: keyof typeof RUN_END_LOOK): string {
     const effect = task.effect;
     if (effect !== 'bulk_preview' && effect !== 'bulk_judge' && effect !== 'bulk_apply' && effect !== 'bulk_undo') return task.title;
