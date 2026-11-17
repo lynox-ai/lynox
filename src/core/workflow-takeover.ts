@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 import { newCorrelationId } from './audit-log.js';
 import { isMandateConnection, type ApiProfile, type ApiStore } from './api-store.js';
 import type { StampEntry } from './plan-run-context.js';
+import { connectionShown } from './profile-secret-view.js';
 import { stampFromRow } from './plan-stamp.js';
 import {
   MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, creatorCovered, editorCovered, isMandateTag, planAuthorshipOf, principalHasEnded, principalTag,
@@ -67,6 +68,8 @@ export interface WorkflowTakeoverMark {
 /** A connection a covered mark's mandate made, which a run as the owner does not use. */
 export interface WorkflowTakeoverConnection {
   readonly profileId: string;
+  /** The service, as the plan takeover names it (`connectionShown`). */
+  readonly provider: string;
   readonly account: string | null;
   /** The address of the mandate that connected it. */
   readonly by: string;
@@ -221,7 +224,8 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
       const grant = p.oauth_grant?.connected_mandate_id;
       if (!isMandateConnection(p) || grant === undefined) continue;
       const by = grantEmail.get(grant);
-      if (by !== undefined) connections.push({ profileId: p.id, grant, account: p.oauth_grant?.account?.label ?? null, by });
+      // The provider is read here, with the rest: a profile gone or moved by the commit is `changed`.
+      if (by !== undefined) connections.push({ profileId: p.id, grant, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null, by });
     }
     connections.sort((a, b) => (a.profileId < b.profileId ? -1 : a.profileId > b.profileId ? 1 : 0));
     // A step is marked only where its target can be read off its literal call; others have none.
@@ -243,7 +247,7 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
     stillPaused.map((t) => [t.id, t.title]),
     lapsing.map((l) => [l.trigger.id, l.trigger.title, l.entries]),
     marks.map((m) => [m.role, m.name, m.ended, m.undetermined === true]),
-    connections.map((c) => [c.profileId, c.grant, c.account]),
+    connections.map((c) => [c.profileId, c.grant, c.account, c.provider]),
     foreignConnectionSteps.map((f) => [f.step, f.profileId]),
   ])).digest('hex');
 
@@ -270,7 +274,7 @@ export function workflowTakeoverPreview(deps: WorkflowTakeoverDeps, wfId: string
       alsoReleased: s.released.map(brief),
       stillPaused: s.stillPaused.map(brief),
       lapsing: s.lapsing.map((l) => brief(l.trigger)),
-      connections: s.connections.map(({ profileId, account, by }) => ({ profileId, account, by })),
+      connections: s.connections.map(({ profileId, provider, account, by }) => ({ profileId, provider, account, by })),
       foreignConnectionSteps: s.foreignConnectionSteps,
     },
   };

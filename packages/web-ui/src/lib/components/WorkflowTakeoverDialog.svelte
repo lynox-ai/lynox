@@ -2,19 +2,20 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import StampPreviewBody from './StampPreviewBody.svelte';
-	import { visible } from '../utils/workflow-stamp.js';
 	import {
-		markLine, parseWorkflowTakeoverPreview, stepConnectionNote, takeoverOutcome, takeoverRefusalText, workflowTakeoverLines,
+		markLine, parseWorkflowTakeoverPreview, refusalNamesSupport, stepConnectionNote, takeoverOutcome, takeoverRefusalText, workflowTakeoverLines,
 		type WorkflowTakeoverPreview,
 	} from '../utils/workflow-takeover.js';
 
 	// The owner's takeover of a workflow whose person's access ended: what it covers and stamps, read
 	// from the engine's preview, and the one act that takes it over against the digest of exactly
 	// what was shown.
-	let { workflow, onclose, ondone }: {
+	let { workflow, onclose, ondone, onstale }: {
 		workflow: { id: string; name: string };
 		onclose: () => void;
 		ondone: (stillOff: unknown) => void;
+		/** The library's list is out of date: the workflow no longer needs taking over. */
+		onstale: () => void;
 	} = $props();
 
 	let preview = $state<WorkflowTakeoverPreview | null>(null);
@@ -22,8 +23,44 @@
 	let sending = $state(false);
 	let error = $state('');
 	// Set once a takeover was refused because something shown moved, and the new state is shown.
-	let changedLine = $state(false);
+	let changedLine = $state('');
 	let generation = 0;
+	let dialog = $state<HTMLElement | null>(null);
+	let heading = $state<HTMLElement | null>(null);
+	let errorLine = $state<HTMLElement | null>(null);
+	let changedEl = $state<HTMLElement | null>(null);
+
+	// Focus on the heading when the dialog opens: a reader hears what it is, and the confirm, which
+	// consents to something, is not one Enter away.
+	$effect(() => {
+		heading?.focus();
+	});
+	// The buttons sit at the foot, these lines at the head: on a phone they would be out of sight.
+	$effect(() => {
+		errorLine?.scrollIntoView?.({ block: 'nearest' });
+	});
+	$effect(() => {
+		changedEl?.scrollIntoView?.({ block: 'nearest' });
+	});
+
+	// Escape is the dialog's when focus is in it, or nowhere (a reload can take the focused button);
+	// focus in an overlay above it, such as the command palette, keeps Escape for that.
+	function escapeIsOurs(): boolean {
+		const at = document.activeElement;
+		return at === null || at === document.body || (dialog?.contains(at) ?? false);
+	}
+
+	// Tab stays inside while the dialog is open: the page behind it is not reachable.
+	function trapTab(e: KeyboardEvent): void {
+		if (e.key !== 'Tab' || dialog === null) return;
+		const stops = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+		if (stops.length === 0) { e.preventDefault(); return; }
+		const first = stops[0]!;
+		const last = stops[stops.length - 1]!;
+		const at = document.activeElement;
+		if (e.shiftKey && (at === first || at === heading || !dialog.contains(at))) { e.preventDefault(); last.focus(); }
+		else if (!e.shiftKey && (at === last || !dialog.contains(at))) { e.preventDefault(); first.focus(); }
+	}
 
 	// Whether lynox hosts this instance, for the support line under a lasting failure. Unknown reads
 	// as not hosted, so no address is offered that may not help.
@@ -48,7 +85,11 @@
 			const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
 			if (mine !== generation) return false;
 			if (res.ok && body !== null && typeof body['refusal'] === 'string') {
-				error = takeoverRefusalText(body['refusal'], false, typeof body['message'] === 'string' ? body['message'] : t('common.load_failed'));
+				const code = body['refusal'];
+				const managed = refusalNamesSupport(code) ? await isHosted() : false;
+				if (mine !== generation) return false;
+				error = takeoverRefusalText(code, managed, typeof body['message'] === 'string' ? body['message'] : t('common.load_failed'));
+				if (code === 'nothing_to_take_over') onstale();
 				return false;
 			}
 			const parsed = res.ok ? parseWorkflowTakeoverPreview(body) : null;
@@ -81,15 +122,17 @@
 				body: JSON.stringify({ expect: shown.expect }),
 			});
 			const body = (await res.json().catch(() => null)) as { code?: string; error?: string; stillOff?: unknown } | null;
-			const outcome = takeoverOutcome(res.status, body, res.status === 503 ? await isHosted() : false);
+			// Hosting is asked only for a refusal whose sentence can name support.
+			const outcome = takeoverOutcome(res.status, body, !res.ok && refusalNamesSupport(body?.code) ? await isHosted() : false);
 			if (outcome.kind === 'taken_over') { ondone(outcome.stillOff); return; }
 			if (outcome.kind === 'changed') {
 				// The line says the new state is shown below, so it goes up only once it is.
-				changedLine = false;
-				if (await load()) changedLine = true;
+				changedLine = '';
+				if (await load()) changedLine = outcome.text;
 				return;
 			}
 			error = outcome.text;
+			if (body?.code === 'nothing_to_take_over') onstale();
 		} catch {
 			error = t('common.save_failed');
 		} finally {
@@ -98,20 +141,25 @@
 	}
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && escapeIsOurs()) onclose(); }} />
 <div
+	bind:this={dialog}
 	class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
 	role="dialog"
 	aria-modal="true"
-	aria-label={t('workflow_library.takeover.title')}
+	aria-labelledby="workflow-takeover-title"
+	aria-busy={sending}
+	tabindex="-1"
+	onkeydown={trapTab}
 	data-testid="takeover-dialog"
 >
 	<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
-		<h2 class="text-sm font-medium mb-1 break-words">{t('workflow_library.takeover.title')}: {visible(workflow.name)}</h2>
+		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words">{t('workflow_library.takeover.title')}</h2>
 		{#if changedLine}
-			<p role="status" data-testid="takeover-changed" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.takeover.refused.changed')}</p>
+			<p bind:this={changedEl} role="status" data-testid="takeover-changed" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{changedLine}</p>
 		{/if}
 		{#if error}
-			<p data-testid="takeover-error" class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
+			<p bind:this={errorLine} role="alert" data-testid="takeover-error" class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
 		{/if}
 
 		{#if loading}

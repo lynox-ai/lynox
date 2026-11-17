@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { setLocale, getLocale } from '../i18n.svelte.js';
+import { setLocale, getLocale, t } from '../i18n.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -49,21 +49,26 @@ const FULL = (): Record<string, unknown> => ({
 		step('s2', 'Post the summary', { tool: 'http_request', inputTemplate: { url: 'https://chat.example.invalid/post' }, foreignConnection: true, connectionProfile: 'chat' }),
 		step('s3', 'Write it up'),
 	],
-	connections: [{ profileId: 'shop', provider: 'Shop', account: 'Main store', by: EVA }],
+	// The mail connection is Eva's too, but no marked step uses it.
+	connections: [
+		{ profileId: 'shop', provider: 'Shop', account: 'Main store', by: EVA },
+		{ profileId: 'mail', provider: 'Mail', account: null, by: EVA },
+	],
 	memberChanges: [{ id: 'p-c', title: 'Weekly', before: `mandate:${EVA}`, after: null, runsNoMore: false }],
 	alsoReleased: [{ id: 'p-r', title: 'Daily' }],
 	stillPaused: [{ id: 'p-s', title: 'Monthly' }],
 	lapsing: [{ id: 'p-l', title: 'Hourly' }],
 });
 
-interface Served { posts: unknown[]; previews: number }
+interface Served { posts: unknown[]; previews: number; lists: number }
+let hosted: string | null = null;
 
 function serve(workflows: Array<Record<string, unknown>>, previews: Array<Record<string, unknown>>, post: { status: number; body: unknown } = { status: 200, body: { takenOver: true, runsAs: 'owner', stillOff: 0 } }): Served {
-	const served: Served = { posts: [], previews: 0 };
+	const served: Served = { posts: [], previews: 0, lists: 0 };
 	vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
 		const path = new URL(String(input), 'http://localhost').pathname.replace(/^\/api/, '');
 		const method = init?.method ?? 'GET';
-		if (method === 'GET' && path === '/workflows/library') return new Response(JSON.stringify({ workflows, viewer: 'owner' }), { status: 200 });
+		if (method === 'GET' && path === '/workflows/library') { served.lists++; return new Response(JSON.stringify({ workflows, viewer: 'owner' }), { status: 200 }); }
 		if (method === 'GET' && /^\/workflows\/[^/]+\/takeover-preview$/.test(path)) {
 			const p = previews[Math.min(served.previews, previews.length - 1)]!;
 			served.previews++;
@@ -73,10 +78,16 @@ function serve(workflows: Array<Record<string, unknown>>, previews: Array<Record
 			served.posts.push(JSON.parse(String(init?.body ?? 'null')));
 			return new Response(JSON.stringify(post.body), { status: post.status });
 		}
-		if (method === 'GET' && path === '/secrets/status') return new Response(JSON.stringify({ managed: null }), { status: 200 });
+		if (method === 'GET' && path === '/secrets/status') return new Response(JSON.stringify({ managed: hosted }), { status: 200 });
 		return new Response('{}', { status: 404 });
 	}));
 	return served;
+}
+
+function reset(): void {
+	if (component) unmount(component);
+	component = undefined;
+	target.replaceChildren();
 }
 
 async function settle(): Promise<void> {
@@ -114,6 +125,7 @@ async function openDialog(): Promise<HTMLElement> {
 const ENDED = { ...base('wf-e', 'Ended one'), runs_as: { person: EVA, ended: true, covered_by_takeover: 0 } };
 
 beforeEach(() => {
+	hosted = null;
 	setLocale('de');
 	target = document.createElement('div');
 	document.body.appendChild(target);
@@ -138,6 +150,18 @@ describe('the button', () => {
 		expect(openButton(card('Live one'))).toBeNull();
 		expect(openButton(card('Own one'))).toBeNull();
 	});
+
+	it('at an ended workflow that also awaits its stamp, offers only the takeover, which stamps it as well', async () => {
+		await open([
+			{ ...ENDED, awaitsStamp: true },
+			{ ...base('wf-l', 'Live one'), runs_as: { person: JAN, ended: false }, awaitsStamp: true },
+		]);
+		const ended = card('Ended one');
+		expect(ended.querySelectorAll('[data-testid="takeover-open"]').length).toBe(1);
+		expect(ended.querySelector('[data-testid="stamp-review"]')).toBeNull();
+		// CONTROL: without the end, the stamp is offered as before.
+		expect(card('Live one').querySelector('[data-testid="stamp-review"]')).not.toBeNull();
+	});
 });
 
 describe('the dialog', () => {
@@ -145,6 +169,7 @@ describe('the dialog', () => {
 		await open([ENDED]);
 		const d = await openDialog();
 		const parts = [...d.querySelectorAll<HTMLElement>('[data-takeover-part]')].map((e) => e.dataset['takeoverPart']);
+		// One connection sentence: the mail connection no marked step uses gets none.
 		expect(parts).toEqual(['marks', 'intro', 'stamp', 'connection', 'member_change', 'lapsing', 'released', 'paused', 'afterwards']);
 		const text = (part: string): string | undefined => d.querySelector<HTMLElement>(`[data-takeover-part="${part}"]`)?.textContent?.trim();
 		expect(text('intro')).toBe('Übernimmst du den Workflow, gehört er dir, und „Ausführen“ läuft unter deinem Namen.');
@@ -226,20 +251,93 @@ describe('the dialog', () => {
 		expect(served.posts).toEqual([{ expect: 'digest-1' }, { expect: 'digest-2' }]);
 	});
 
-	it('words a refusal by its code: a stamp the engine refused, and a code it does not know keeps the engine\'s sentence', async () => {
-		await open([ENDED], [FULL()], { status: 409, body: { code: 'stamp_refused', error: 'engine sentence' } });
+	it('a stamp the engine refused reloads like a change, and says so above the new state', async () => {
+		const moved = FULL();
+		moved['expect'] = 'digest-2';
+		const served = await open([ENDED], [FULL(), moved], { status: 409, body: { code: 'stamp_refused', error: 'engine sentence' } });
 		const d = await openDialog();
 		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
 		await settle();
-		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe('Die Schritte lassen sich gerade nicht so bestätigen, wie sie gezeigt wurden. Darum hat lynox den Workflow nicht übernommen. Versuch es in ein paar Minuten noch einmal.');
-		if (component) unmount(component);
-		component = undefined;
-		target.replaceChildren();
+		expect(served.previews).toBe(2);
+		expect(d.querySelector('[data-testid="takeover-changed"]')?.textContent?.trim()).toBe('Der Workflow hat sich beim Übernehmen geändert. Darum hat lynox ihn nicht übernommen. Unten steht der neue Stand. Prüf ihn und übernimm ihn dann.');
+		expect(d.querySelector('[data-testid="takeover-error"]')).toBeNull();
+	});
+
+	it('words a refusal by its code, and a code it does not know keeps the engine\'s sentence', async () => {
 		await open([ENDED], [FULL()], { status: 409, body: { code: 'running', error: 'engine sentence' } });
-		const d2 = await openDialog();
-		d2.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		let d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
 		await settle();
-		expect(d2.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe('engine sentence');
+		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe('Ein Lauf eines Plans auf diesem Workflow ist noch nicht zu Ende. Versuch es in ein paar Minuten noch einmal.');
+		reset();
+		await open([ENDED], [FULL()], { status: 409, body: { code: 'not_a_code', error: 'engine sentence' } });
+		d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe('engine sentence');
+	});
+
+	it('names support under a lasting refusal where lynox hosts the instance, and only there', async () => {
+		hosted = 'managed';
+		await open([ENDED], [FULL()], { status: 503, body: { code: 'prompts', error: 'engine sentence' } });
+		let d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		const prompts = 'lynox kann die offenen Fragen der Pläne, die danach wieder laufen sollen, gerade nicht schliessen. Darum hat lynox den Workflow nicht übernommen. Versuch es in ein paar Minuten noch einmal.';
+		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe(`${prompts} ${t('takeover.refused.support')}`);
+		reset();
+		hosted = null;
+		await open([ENDED], [FULL()], { status: 503, body: { code: 'prompts', error: 'engine sentence' } });
+		d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe(prompts);
+	});
+
+	it('a preview refused as unreadable names support where lynox hosts the instance', async () => {
+		hosted = 'managed';
+		await open([ENDED], [{ refusal: 'unreadable', message: 'engine sentence' }]);
+		const d = await openDialog();
+		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe(`lynox kann die gespeicherten Schritte dieses Workflows nicht lesen und kann ihn darum nicht übernehmen. Du kannst ihn löschen und lynox im Chat beschreiben, was er tun soll. ${t('takeover.refused.support')}`);
+	});
+
+	it('a workflow that no longer needs taking over says so and loads the list again', async () => {
+		const served = await open([ENDED], [{ refusal: 'nothing_to_take_over', message: 'engine sentence' }]);
+		const before = served.lists;
+		const d = await openDialog();
+		expect(d.querySelector('[data-testid="takeover-error"]')?.textContent?.trim()).toBe('Dieser Workflow muss nicht mehr übernommen werden. Die Liste ist aktualisiert.');
+		expect(served.lists).toBe(before + 1);
+	});
+
+	it('a paused plan whose person would change is said only to stay paused, not to run under someone', async () => {
+		const p = FULL();
+		p['memberChanges'] = [
+			{ id: 'p-s', title: 'Monthly', before: `mandate:${EVA}`, after: null, runsNoMore: false },
+			{ id: 'p-c', title: 'Weekly', before: `mandate:${EVA}`, after: null, runsNoMore: false },
+		];
+		await open([ENDED], [p]);
+		const d = await openDialog();
+		expect([...d.querySelectorAll('[data-takeover-part="member_change"]')].map((e) => e.textContent?.trim())).toEqual([
+			`Der Plan „Weekly“ läuft danach unter deinem Namen statt unter dem von ${EVA}.`,
+		]);
+		expect(d.querySelector('[data-takeover-part="paused"]')?.textContent).toContain('Monthly');
+	});
+
+	it('says a connection only where a marked step uses it', async () => {
+		await open([ENDED]);
+		const d = await openDialog();
+		const lines = [...d.querySelectorAll<HTMLElement>('[data-takeover-part="connection"]')].map((e) => e.textContent ?? '');
+		expect(lines.length).toBe(1);
+		expect(lines[0]).toContain(' Shop ');
+		expect(lines.join(' ')).not.toContain('Mail');
+	});
+
+	it('after the takeover, says how many plans it switched off', async () => {
+		await open([ENDED], [FULL()], { status: 200, body: { takenOver: true, runsAs: 'owner', stillOff: 2 } });
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="stamp-once"]')?.textContent?.trim()).toBe('2 Pläne warteten auf diese Bestätigung und sind jetzt ausgeschaltet. Schalte sie unter Automation → Trigger wieder ein.');
 	});
 
 	it('in English, the marks and the closing sentence', async () => {
@@ -248,5 +346,50 @@ describe('the dialog', () => {
 		const d = await openDialog();
 		expect(d.querySelector('[data-testid="takeover-mark"]')?.textContent?.trim()).toBe(`Created by ${JAN} · still has access`);
 		expect(d.querySelector('[data-takeover-part="afterwards"]')?.textContent?.trim()).toBe('Afterwards the workflow no longer belongs to anyone you gave access to. Anyone who has access can then have it run or scheduled in the chat, under their own name. If they make a copy of it, the copy is theirs.');
+	});
+});
+
+describe('the dialog for keyboard and screen reader', () => {
+	it('focuses its heading on opening, closes on Escape, and gives focus back to the button that opened it', async () => {
+		await open([ENDED]);
+		const opener = openButton(card('Ended one'))!;
+		opener.focus();
+		const d = await openDialog();
+		expect(document.activeElement?.id).toBe('workflow-takeover-title');
+		document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(document.activeElement).toBe(openButton(card('Ended one')));
+		expect(d.isConnected).toBe(false);
+	});
+
+	it('keeps Tab inside: from the last button to the first, and back', async () => {
+		await open([ENDED]);
+		const d = await openDialog();
+		const buttons = [...d.querySelectorAll<HTMLButtonElement>('button:not([disabled])')];
+		const last = buttons[buttons.length - 1]!;
+		last.focus();
+		last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+		expect(document.activeElement).toBe(buttons[0]);
+		buttons[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+		expect(document.activeElement).toBe(last);
+	});
+
+	it('announces a refusal as an alert, and is busy while it sends', async () => {
+		let release: (() => void) | undefined;
+		await open([ENDED], [FULL()], { status: 409, body: { code: 'running', error: 'engine sentence' } });
+		const inner = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+			if (init?.method === 'POST') await new Promise<void>((r) => { release = r; });
+			return inner(input, init);
+		}));
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.getAttribute('aria-busy')).toBe('true');
+		release!();
+		await settle();
+		expect(d.getAttribute('aria-busy')).toBe('false');
+		expect(d.querySelector('[data-testid="takeover-error"]')?.getAttribute('role')).toBe('alert');
 	});
 });

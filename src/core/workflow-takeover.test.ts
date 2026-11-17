@@ -210,7 +210,7 @@ describe('a workflow whose mandate ended is taken over: covered, stamped and rec
       [['p', 'Plan p']],
       [['q', 'Plan q', [entry]]],
       [['workflow-created', 'h@x.ch', true, false]],
-      [['mine', 'g-h@x.ch', 'Main store']],
+      [['mine', 'g-h@x.ch', 'Main store', 'shop.example.invalid']],
       [['s2', 'mine']],
     ]));
     expect(WORKFLOW_TAKEOVER_DIGEST_PREFIX).toBe('lynox:workflow-takeover:v1');
@@ -383,7 +383,7 @@ describe('the connections a run as the owner no longer uses', () => {
       profile('owners', 'owner.example.invalid', null),
     );
     const pv = workflowTakeoverPreview(deps(b), 'w');
-    expect(pv.kind === 'preview' && pv.preview.connections).toEqual([{ profileId: 'mine', account: 'Main store', by: 'h@x.ch' }]);
+    expect(pv.kind === 'preview' && pv.preview.connections).toEqual([{ profileId: 'mine', provider: 'mine.example.invalid', account: 'Main store', by: 'h@x.ch' }]);
     // s2 calls the shop, which another mandate connected: marked though its person is not one shown.
     // s3 names the same host through another tool, which sends no connection: not marked.
     expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual([{ step: 's2', profileId: 'shop' }]);
@@ -518,6 +518,22 @@ describe('the digest: anything shown that moved between preview and takeover is 
     b.profiles.push(profile('mine', 'mine.example.invalid', 'h@x.ch', 'g-h@x.ch', 'Main store'));
     const shown = expectOf(b, 'w');
     b.profiles.splice(0, 1, profile('mine', 'mine.example.invalid', 'h@x.ch', 'g-h@x.ch', 'Other store'));
+    refusedChanged(b, shown);
+  });
+
+  it('the service of a connection shown, moved in between', () => {
+    const b = ready();
+    b.profiles.push(profile('mine', 'mine.example.invalid', 'h@x.ch', 'g-h@x.ch', 'Main store'));
+    const shown = expectOf(b, 'w');
+    b.profiles.splice(0, 1, profile('mine', 'elsewhere.example.invalid', 'h@x.ch', 'g-h@x.ch', 'Main store'));
+    refusedChanged(b, shown);
+  });
+
+  it('a connection shown, deleted in between', () => {
+    const b = ready();
+    b.profiles.push(profile('mine', 'mine.example.invalid', 'h@x.ch', 'g-h@x.ch', 'Main store'));
+    const shown = expectOf(b, 'w');
+    b.profiles.splice(0, 1);
     refusedChanged(b, shown);
   });
 

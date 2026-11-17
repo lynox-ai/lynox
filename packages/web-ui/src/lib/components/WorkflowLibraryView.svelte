@@ -9,7 +9,7 @@
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stepHeading, templateText, timeoutText, visible, type StampPreview } from '../utils/workflow-stamp.js';
+	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, visible, type StampPreview } from '../utils/workflow-stamp.js';
 
 	// The card actions show on hover only where there is room beside the name AND a pointer that
 	// hovers. Below `md` they sit under the name and stay visible, and on a device without hover
@@ -204,7 +204,7 @@
 	}
 
 	// The sentence under an ended workflow's buttons: with paused plans whose takeover moves the
-	// workflow to the owner, the way through them (U-079 (b), U-119); otherwise the workflow's own
+	// workflow to the owner, the way through them; otherwise the workflow's own
 	// takeover, whose button stands beside it.
 	function endedNote(wf: SavedWorkflow): string {
 		const person = wf.runs_as?.person ?? '';
@@ -212,7 +212,7 @@
 		const paused = wf.runs_as?.covered_by_takeover ?? 0;
 		if (paused > 0) {
 			return tf(`workflow_library.ended_note_paused_${paused === 1 ? 'one' : 'other'}${unnamed}`, {
-				person, n: String(paused), tab: t('hub.automation.triggers'), button: t('takeover.button'),
+				person, n: String(paused), tab: t('hub.automation.triggers'), button: t('takeover.button'), review: t('workflow_library.stamp.review'),
 			});
 		}
 		return tf(`workflow_library.takeover.note${unnamed}`, { person });
@@ -221,9 +221,24 @@
 	// The workflow's own takeover: offered wherever its person's access ended, which is exactly where
 	// the engine allows it (the library's `ended` and the takeover read the same mark and end).
 	let takeoverWf = $state<SavedWorkflow | null>(null);
+	// The button that opened it: focus goes back there when the dialog closes without a takeover.
+	let takeoverOpener: HTMLElement | null = null;
+
+	function openTakeover(wf: SavedWorkflow, opener: HTMLElement): void {
+		takeoverOpener = opener;
+		takeoverWf = wf;
+	}
+
+	function closeTakeover(): void {
+		takeoverWf = null;
+		const opener = takeoverOpener;
+		takeoverOpener = null;
+		if (opener?.isConnected === true) opener.focus();
+	}
 
 	async function takenOver(stillOff: unknown): Promise<void> {
 		takeoverWf = null;
+		takeoverOpener = null;
 		error = '';
 		const once = stillOffLine(stillOff);
 		stampOnceLine = once ? tf(once.key, { n: String(once.n) }) : '';
@@ -790,7 +805,7 @@
 									<!-- Always visible, not on hover: it is the one way this workflow runs again. -->
 									<button
 										data-testid="takeover-open"
-										onclick={() => { takeoverWf = wf; }}
+										onclick={(e) => openTakeover(wf, e.currentTarget)}
 										class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 {actionSize} text-warning hover:bg-warning/20 transition-colors"
 									>
 										<Icon name="warning" size="xs" />
@@ -1127,5 +1142,5 @@
 {/if}
 
 {#if takeoverWf}
-	<WorkflowTakeoverDialog workflow={takeoverWf} onclose={() => { takeoverWf = null; }} ondone={(stillOff) => void takenOver(stillOff)} />
+	<WorkflowTakeoverDialog workflow={takeoverWf} onclose={closeTakeover} ondone={(stillOff) => void takenOver(stillOff)} onstale={() => void loadWorkflows()} />
 {/if}

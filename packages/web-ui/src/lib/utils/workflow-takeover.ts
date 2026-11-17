@@ -126,10 +126,15 @@ export interface WorkflowTakeoverLine {
  * Every sentence below the steps, in the order of the design: the connections that are no longer
  * used, the plans that then run for someone else, the plans whose allowed connections lapse, the
  * plans that run again, the plans that stay paused, and who may start the workflow afterwards.
+ * A connection gets its sentence only where a marked step uses it: the sentence speaks of the
+ * marked steps. A plan that stays paused runs for no one, so it is not one that runs for someone
+ * else: it gets only its sentence that it stays paused.
  */
 export function workflowTakeoverLines(p: WorkflowTakeoverPreview): WorkflowTakeoverLine[] {
 	const lines: WorkflowTakeoverLine[] = [];
+	const used = new Set(p.steps.filter((s) => s.foreignConnection && s.connectionProfile !== null).map((s) => s.connectionProfile));
 	for (const c of p.connections) {
+		if (!used.has(c.profileId)) continue;
 		lines.push({
 			kind: 'connection',
 			text: tf('workflow_library.takeover.connection', {
@@ -140,7 +145,8 @@ export function workflowTakeoverLines(p: WorkflowTakeoverPreview): WorkflowTakeo
 			}),
 		});
 	}
-	for (const line of memberChangeLines(p.memberChanges)) lines.push({ kind: 'member_change', text: line.text });
+	const paused = new Set(p.stillPaused.map((s) => s.id));
+	for (const line of memberChangeLines(p.memberChanges.filter((c) => !paused.has(c.id)))) lines.push({ kind: 'member_change', text: line.text });
 	if (p.lapsing.length === 1) lines.push({ kind: 'lapsing', text: tf('workflow_library.takeover.lapsing_one', { plan: p.lapsing[0]!.title }) });
 	else if (p.lapsing.length > 1) lines.push({ kind: 'lapsing', text: tf('workflow_library.takeover.lapsing_many', { plans: planList(p.lapsing.map((l) => l.title)) }) });
 	if (p.alsoReleased.length === 1) lines.push({ kind: 'released', text: tf('takeover.f2.released_one', { plan: p.alsoReleased[0]!.title }) });
@@ -155,32 +161,46 @@ export function workflowTakeoverLines(p: WorkflowTakeoverPreview): WorkflowTakeo
 /** What an answer of `POST /api/workflows/:id/takeover` means for the view. */
 export type WorkflowTakeoverOutcome =
 	| { kind: 'taken_over'; stillOff: unknown }
-	/** Something shown moved: the view loads the preview again and says so above it. */
-	| { kind: 'changed' }
+	/** Something shown moved: the view loads the preview again and puts `text` above it. */
+	| { kind: 'changed'; text: string }
 	| { kind: 'failed'; text: string };
 
+/** The refusals after which the dialog loads the preview again: what was shown moved. */
+const RELOADS = new Set(['changed', 'stamp_refused']);
+/** The refusals that do not pass by waiting or acting, and so name support where lynox hosts the instance. */
+const TO_SUPPORT = new Set(['prompts', 'unrecorded', 'unreadable']);
+
+/** Whether the sentence of `code` carries the support line where lynox hosts the instance: only then is it worth asking. */
+export function refusalNamesSupport(code: string | undefined): boolean {
+	return code !== undefined && TO_SUPPORT.has(code);
+}
+
 /**
- * Only a 2xx takes over. `changed` reloads; every other code has its sentence, and a code the view
- * does not know keeps the engine's text. `managed`: lynox hosts the instance, so a lasting failure
- * goes to support.
+ * Only a 2xx takes over. `changed` and `stamp_refused` reload; every other code has its sentence,
+ * and a code the view does not know keeps the engine's text. `managed`: lynox hosts the instance,
+ * so a lasting failure goes to support.
  */
 export function takeoverOutcome(status: number, body: { code?: string; error?: string; stillOff?: unknown } | null, managed: boolean): WorkflowTakeoverOutcome {
 	if (status >= 200 && status < 300) return { kind: 'taken_over', stillOff: body?.stillOff };
 	const code = body?.code;
-	if (code === 'changed') return { kind: 'changed' };
-	return { kind: 'failed', text: takeoverRefusalText(code, managed, body?.error ?? t('common.save_failed')) };
+	const text = takeoverRefusalText(code, managed, body?.error ?? t('common.save_failed'));
+	return code !== undefined && RELOADS.has(code) ? { kind: 'changed', text } : { kind: 'failed', text };
 }
 
 /** A refusal in the reader's language; `fallback` (the engine's sentence) for a code without one. */
 export function takeoverRefusalText(code: string | undefined, managed: boolean, fallback: string): string {
 	switch (code) {
-		case 'changed':
-			return t('workflow_library.takeover.refused.changed');
 		case 'mandate_live':
 			// The answer does not say who has access again: the sentence without a name.
 			return t('workflow_library.takeover.refused.mandate_live_unnamed');
-		case 'unrecorded':
+		case 'changed':
 		case 'stamp_refused':
+		case 'running':
+		case 'nothing_to_take_over':
+			return t(`workflow_library.takeover.refused.${code}`);
+		case 'prompts':
+		case 'unrecorded':
+		case 'unreadable':
 			return managed ? `${t(`workflow_library.takeover.refused.${code}`)} ${t('takeover.refused.support')}` : t(`workflow_library.takeover.refused.${code}`);
 		default:
 			return fallback;
