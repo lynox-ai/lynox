@@ -904,6 +904,19 @@ describe('the switch', () => {
     expect(s.requests).toEqual([]);
   });
 
+  it('halts as unreachable, not as a missing setting, when the run\'s host is not a store\'s', async () => {
+    fill(3);
+    const src = source();
+    const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: 'api.example.com', source: src, readContract: listReadContract('api.example.com', src) });
+    if (!out.ok) throw new Error(out.reason);
+    const started = ledger.resumePreview(out.status.id, Date.now(), { listChecksum: ledger.listStartChecksum(out.status.id)! });
+    if (!started.ok) throw new Error(started.reason);
+    expect((await runBulkPreview(out.status.id, deps())).status).toBe('halted');
+    expect(ledger.getStatus(out.status.id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+    expect(minted).toEqual([]);
+    expect(s.requests).toEqual([]);
+  });
+
   it('is the engine flag when the worker gives no answer of its own', async () => {
     fill(3);
     const id = startedList();

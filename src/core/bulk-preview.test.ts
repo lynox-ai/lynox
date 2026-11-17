@@ -404,7 +404,7 @@ describe('the preview effect', () => {
     }
   });
 
-  it('a store\'s refusal at the send stays blocked: the request, not the store\'s set-up, is refused', async () => {
+  it('a store\'s refusal at the send stays blocked and a broken connection failed: neither names a cause of the store\'s', async () => {
     // The send-time refusals of a store request depend on the request (its path, body, headers),
     // so they name no cause of the store's and offer no resume as one.
     for (const [thrown, kind] of [
