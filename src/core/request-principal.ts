@@ -20,7 +20,6 @@
  * that tell the kinds apart switch on `kind` with a `never` check, so a new kind does not compile
  * until each of them is decided.
  */
-
 export type RequestPrincipal =
   | { readonly kind: 'owner' }
   | {
