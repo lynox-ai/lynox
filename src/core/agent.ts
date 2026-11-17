@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { noticeLanguage } from './notice-language.js';
-import type { DialogLanguage } from '../tools/dialog-text.js';
+import { SECRET_DIALOG, type DialogLanguage } from '../tools/dialog-text.js';
+import { dialogToolHead } from '../tools/tool-words.js';
 import { processErrorText } from './error-egress.js';
 import { APIError } from '@anthropic-ai/sdk';
 import type {
@@ -4602,7 +4603,7 @@ export class Agent implements IAgent {
     return {
       kind: 'ask',
       pending: () => secretNames,
-      question: () => pv`Tool "${tc.name}" wants to use secret(s) ${secretNames.join(', ')} in: ${shown} — Allow?`,
+      question: () => SECRET_DIALOG[this.dialogLanguage].inInput(dialogToolHead(tc.name, this.dialogLanguage), secretNames.join(', '), shown),
       denied: () => `Use of secret(s) ${secretNames.join(', ')} in tool "${tc.name}" was denied by the user.`,
       approve: () => { for (const n of secretNames) this.secretStore!.recordConsent(n); },
     };
@@ -5337,7 +5338,7 @@ export class Agent implements IAgent {
         if (unconsented.length > 0) {
           if (this.promptUser) {
             const answer = await this.promptUser(
-              pv`Tool "${tc.name}" wants to use secret(s): ${unconsented.join(', ')}. Allow?`,
+              SECRET_DIALOG[this.dialogLanguage].plain(dialogToolHead(tc.name, this.dialogLanguage), unconsented.join(', ')),
               ['Allow', 'Deny', '\x00'],
             );
             if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {

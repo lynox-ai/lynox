@@ -130,7 +130,7 @@ export interface ToolEntry<TInput = unknown> {
    */
   destructive?: {
     mode: 'data' | 'external';
-    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined; parentProvider?: ProviderConfigSnapshot | null | undefined }) => string | WarningPayload | null;
+    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined; parentProvider?: ProviderConfigSnapshot | null | undefined; /** The language a payload's message is written in. */ language?: 'de' | 'en' | undefined }) => string | WarningPayload | null;
   } | undefined;
   /**
    * What a call writes OUTSIDE the instance — sends, creates or changes something at a

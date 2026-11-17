@@ -2126,7 +2126,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   // Workspace write actions.
   if (entry?.destructive) {
     const { mode, check } = entry.destructive;
-    const detail = check ? check(input, { autonomy, parentProvider }) : '';
+    const detail = check ? check(input, { autonomy, parentProvider, language }) : '';
     if (detail !== null) {
       // A built-in tool's WarningPayload carries its OWN fully-formed GO message (spawn-agent
       // deep-tier consent: tier + cost + provider). Render it verbatim — the

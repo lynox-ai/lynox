@@ -3380,8 +3380,8 @@ describe('isDangerous — WarningPayload check (spawn-style consent)', () => {
     // headlessly instead of clamped — the D2 regression at the guard layer.
     expect(isDangerous('spawn_agent', {}, 'autonomous', entry)).toBeNull();
     expect(isDangerous('spawn_agent', {}, 'guided', entry)).toBe('⚠ Delegation: needs your OK');
-    expect(seen).toContainEqual({ autonomy: 'autonomous' });
-    expect(seen).toContainEqual({ autonomy: 'guided' });
+    expect(seen).toContainEqual({ autonomy: 'autonomous', language: 'en' });
+    expect(seen).toContainEqual({ autonomy: 'guided', language: 'en' });
   });
 
   it('a plain-string check still gets the wrapped form (backward compatible)', () => {

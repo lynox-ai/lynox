@@ -119,15 +119,20 @@ describe('the word a confirmation dialog names a tool by', () => {
 
   it('opens every ⚠ dialog of the guard, api_setup, http_request and spawn_agent', () => {
     const reach = toolsThatReachADialog();
-    for (const path of ['tools/permission-guard.ts', 'tools/builtin/api-setup.ts', 'tools/builtin/http.ts', 'tools/builtin/spawn.ts']) {
+    for (const path of ['tools/permission-guard.ts', 'tools/builtin/api-setup.ts', 'tools/builtin/http.ts', 'tools/builtin/spawn.ts', 'tools/dialog-text.ts', 'core/agent.ts']) {
       const text = read(path);
       expect(text.includes('⚠ ${system(toolName)}'), path).toBe(false);
       expect(text.includes('system(dialogToolWord('), `${path} puts a tool name into frame`).toBe(false);
+      expect(text.includes('pv`Tool "${tc.name}"'), `${path} asks naming a tool by its raw name`).toBe(false);
       for (const tool of reach) expect(text.includes(`⚠ ${tool}`), `${path} opens a dialog with ${tool}`).toBe(false);
     }
-    expect(read('tools/permission-guard.ts').match(/⚠ \$\{tool\(toolName\)\}/g)?.length).toBe(29);
-    expect(read('tools/builtin/api-setup.ts').match(/pv`⚠ \$\{toolWordFrame\('api_setup'\)\}: /g)?.length).toBe(5);
-    expect(read('tools/builtin/http.ts').match(/pv`⚠ \$\{toolWordFrame\('http_request'\)\}: /g)?.length).toBe(2);
-    expect(read('tools/builtin/spawn.ts').match(/`⚠ \$\{dialogToolWord\('spawn_agent'\)\}: /g)?.length).toBe(1);
+    expect(read('tools/permission-guard.ts').match(/⚠ \$\{tool\(toolName\)\}/g)?.length).toBe(30);
+    // The tools' own questions open with the word they are handed, in both languages.
+    const dialogs = read('tools/dialog-text.ts');
+    expect(dialogs.match(/pv`⚠ \$\{word\}: /g)?.length).toBe(2 * 7);
+    expect(dialogs.match(/`⚠ \$\{word\}: \$\{children\}/g)?.length).toBe(2);
+    expect(read('tools/builtin/api-setup.ts').match(/toolWordFrame\('api_setup', agent\.dialogLanguage \?\? 'en'\)/g)?.length).toBe(5);
+    expect(read('tools/builtin/http.ts').match(/toolWordFrame\('http_request', (?:language|agent\.dialogLanguage \?\? 'en')\)/g)?.length).toBe(2);
+    expect(read('tools/builtin/spawn.ts').match(/dialogToolWord\('spawn_agent', ctx\?\.language \?\? 'en'\)/g)?.length).toBe(1);
   });
 });
