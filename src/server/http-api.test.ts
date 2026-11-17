@@ -5664,12 +5664,15 @@ describe('LynoxHTTPApi', () => {
         for (const body of probes) {
           const res = await jsonFetch('/api/secrets/validate-key', { method: 'POST', body: JSON.stringify(body) });
           expect(res.status, body.provider).toBe(200);
-          expect(await res.json(), body.provider).toEqual({ state: 'invalid', error: PROVIDER_NOT_ON_LIST_REFUSAL });
+          // The page picks its sentence by this exact code (web UI `utils/setup-key-check.ts`).
+          expect(await res.json(), body.provider).toEqual({ state: 'invalid', error: PROVIDER_NOT_ON_LIST_REFUSAL, code: 'provider_list_own_key' });
         }
         expect(toProviders()).toBe(0);
-        // Control: without the switch each probe goes out to its provider and is not refused.
+        // Control: without the switch a probe goes out to its provider and is not refused. Only the
+        // two with a fixed endpoint: a typed base URL is first resolved for real, which a test
+        // without network would fail for a reason that is not this one.
         delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
-        for (const body of probes) {
+        for (const body of probes.filter((p) => p.api_base_url === undefined)) {
           const before = toProviders();
           const res = await jsonFetch('/api/secrets/validate-key', { method: 'POST', body: JSON.stringify(body) });
           const json = await res.json() as { state?: string; error?: string };
