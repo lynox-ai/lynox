@@ -16,12 +16,22 @@ describe('measured write forms', () => {
     expect(isMeasuredWriteForm('bexio.example.com', '/2.0/contact/7', 'POST')).toBe(false);
   });
 
-  // What a bulk run may write to bexio is this table's bexio entry and nothing else.
-  it('lets a bulk run write exactly one bexio form', () => {
-    const bexio = MEASURED_WRITE_FORMS.filter((f) => f.host === 'api.bexio.com');
-    expect(bexio.map((f) => [String(f.path), f.methods])).toEqual([[String(/^\/2\.0\/contact\/[0-9]+$/), ['POST']]]);
-    // A form for any host would reach bexio's too.
-    expect(MEASURED_WRITE_FORMS.filter((f) => f.host === null).map((f) => f.path.test('/2.0/contact/7') || f.path.test('/2.0/kb_invoice/7'))).not.toContain(true);
+  // What a bulk run may write to bexio is this table's bexio entry and nothing else: the whole table
+  // is pinned, and the check is asked about bexio's other paths and verbs, on its host with and
+  // without the trailing dot a URL may carry. Widening it is a change to make on purpose.
+  it('lets a bulk run write exactly one bexio form, and pins the whole table', () => {
+    expect(MEASURED_WRITE_FORMS.map((f) => [f.host, String(f.path), f.methods])).toEqual([
+      [null, String(/^\/wp-json\/wc\/v3\/products\/[0-9]+$/), ['PUT', 'PATCH', 'POST']],
+      ['api.bexio.com', String(/^\/2\.0\/contact\/[0-9]+$/), ['POST']],
+    ]);
+    const paths = ['/2.0/contact/7', '/2.0/kb_invoice/7', '/2.0/kb_offer/7', '/2.0/note/7', '/2.0/task/7', '/3.0/contact/7', '/2.0/contact/7/relation'];
+    const allowed: string[] = [];
+    for (const host of ['api.bexio.com', 'api.bexio.com.']) {
+      for (const path of paths) {
+        for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) if (isMeasuredWriteForm(host, path, method)) allowed.push(`${method} ${host}${path}`);
+      }
+    }
+    expect(allowed).toEqual(['POST api.bexio.com/2.0/contact/7']);
   });
 
   it('knows nothing else: another resource, a nested one, a prefix, a non-numeric id, another verb', () => {
