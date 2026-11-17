@@ -16,6 +16,14 @@ describe('measured write forms', () => {
     expect(isMeasuredWriteForm('bexio.example.com', '/2.0/contact/7', 'POST')).toBe(false);
   });
 
+  // What a bulk run may write to bexio is this table's bexio entry and nothing else.
+  it('lets a bulk run write exactly one bexio form', () => {
+    const bexio = MEASURED_WRITE_FORMS.filter((f) => f.host === 'api.bexio.com');
+    expect(bexio.map((f) => [String(f.path), f.methods])).toEqual([[String(/^\/2\.0\/contact\/[0-9]+$/), ['POST']]]);
+    // A form for any host would reach bexio's too.
+    expect(MEASURED_WRITE_FORMS.filter((f) => f.host === null).map((f) => f.path.test('/2.0/contact/7') || f.path.test('/2.0/kb_invoice/7'))).not.toContain(true);
+  });
+
   it('knows nothing else: another resource, a nested one, a prefix, a non-numeric id, another verb', () => {
     const host = 'shop.example.com';
     expect(isMeasuredWriteForm(host, '/wp-json/wc/v3/orders/42', 'PUT')).toBe(false);
