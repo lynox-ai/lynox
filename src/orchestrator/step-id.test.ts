@@ -135,7 +135,7 @@ describe('every path that takes a new step id refuses one outside the shape', ()
     const json = JSON.stringify(toPortableWorkflow(planned), null, 2);
     const fence = buildFence(json);
     const out = await importWorkflowTool.handler({ block: `${fence}${LYNOX_WORKFLOW_INFO_STRING}\n${json}\n${fence}` }, agent());
-    expect(out).toBe('Error: step #2 (steps[1].input_from[1]): a step id is 1 to 40 characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. Choose an id in that form.');
+    expect(out).toBe('Error: step #2 (steps[1].input_from[1]): this refers to a step id outside the allowed form (1 to 40 characters, lowercase a-z, digits 0-9, _ or -). Refer to the step it should read by that step\'s id.');
     expect(out).not.toContain('approve');
     expect(getPipelineStore().size).toBe(0);
   });

@@ -31,6 +31,15 @@ export function stepIdRefusal(where: string, { refs = true }: { refs?: boolean }
 }
 
 /**
+ * Why a step reference (`input_from`) outside the shape is refused: it names a step that should exist,
+ * so the model is told to point at that step, not to choose a new id (U-316).
+ */
+export function stepRefRefusal(where: string): string {
+  return `${where}: this refers to a step id outside the allowed form (1 to ${String(STEP_ID_MAX)} characters, lowercase a-z, digits 0-9, _ or -). `
+    + "Refer to the step it should read by that step's id.";
+}
+
+/**
  * The first step whose id is outside the shape, as `stepIdRefusal` names it, or null. The step is
  * named first as every other text names a step to the model, counted from 1 (`step #3`), then by the
  * path into the list it just wrote, counted from 0 (`steps[2].id`) (U-316).
@@ -43,7 +52,7 @@ export function stepIdIssue(steps: ReadonlyArray<{ id?: unknown; input_from?: un
   for (const [i, s] of steps.entries()) {
     const refs = Array.isArray(s.input_from) ? s.input_from as unknown[] : [];
     const j = refs.findIndex(r => !isStepIdShape(r));
-    if (j !== -1) return stepIdRefusal(`step #${String(i + 1)} (${path}[${String(i)}].input_from[${String(j)}])`, { refs: false });
+    if (j !== -1) return stepRefRefusal(`step #${String(i + 1)} (${path}[${String(i)}].input_from[${String(j)}])`);
   }
   return null;
 }
