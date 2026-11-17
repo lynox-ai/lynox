@@ -111,6 +111,12 @@ describe('a mandate\'s refused attempts and its revoke in the actor trail (real 
     });
   });
 
+  it('an owner-only route with a parameter: refused, and its refused row names the route as registered and the path as sent', async () => {
+    const res = await ask('GET', '/api/api-profiles/p-7/client', mandateCookie);
+    expect(res.status).toBe(403);
+    expect(refusedRows()).toEqual([expect.objectContaining({ action: 'GET /api/api-profiles/:id/client', target: '/api/api-profiles/p-7/client', mandate_id: MANDATE_ID })]);
+  });
+
   it('an owner-only write: refused, and its refused row names the method', async () => {
     const res = await ask('POST', '/api/google/disconnect', mandateCookie);
     expect(res.status).toBe(403);
