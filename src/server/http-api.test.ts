@@ -23762,6 +23762,26 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     }
   });
 
+  it('says a stored migration token of the wrong shape is this instance\'s fault, not a wrong token', async () => {
+    const token = randomBytes(32).toString('hex');
+    // At the door (the token alone, as a source sends it) and past it another way (a bearer that is
+    // admin here, no separate admin secret), on both routes.
+    await withEnv({ LYNOX_BILLING_TIER: 'managed', LYNOX_HTTP_ADMIN_SECRET: undefined, LYNOX_MIGRATION_TOKEN: `${token}\n`, LYNOX_VAULT_KEY: 'a-vault-key-for-the-shape-test' }, async () => {
+      for (const bearer of [false, true]) {
+        for (const path of ['/api/migration/handshake', '/api/migration/abort']) {
+          const res = await fetch(`${baseUrl}${path}`, {
+            method: path.endsWith('abort') ? 'POST' : 'GET',
+            headers: { 'x-migration-token': bearer ? `${token}z` : token, ...(bearer ? { Authorization: `Bearer ${TEST_SECRET}` } : {}), 'Content-Type': 'application/json' },
+            ...(path.endsWith('abort') ? { body: JSON.stringify({ sessionId: '0'.repeat(32) }) } : {}),
+          });
+          expect(res.status).toBe(500);
+          expect(((await res.json()) as { error: string }).error).toBe('Migration token has invalid format');
+        }
+      }
+    });
+    (api as unknown as { _migrationImporter: { cleanup(): void } | null })._migrationImporter?.cleanup();
+  });
+
   it('with no secret at all, a local request is admin, on a managed instance too', async () => {
     await withEnv({ LYNOX_HTTP_SECRET: undefined, LYNOX_HTTP_ADMIN_SECRET: undefined, LYNOX_BILLING_TIER: 'managed' }, async () => {
       const open = new LynoxHTTPApi();

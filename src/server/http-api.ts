@@ -4032,6 +4032,11 @@ export class LynoxHTTPApi {
       const isMigrationEndpoint = pathname.startsWith('/api/migration/') && pathname !== '/api/migration/preview';
       if (isMigrationEndpoint && typeof migrationToken === 'string' && migrationToken.length === 64) {
         const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
+        if (storedToken && !/^[0-9a-f]{64}$/i.test(storedToken)) {
+          // Provisioned wrong: this instance's fault, said as such rather than as a wrong token.
+          errorResponse(res, 500, 'Migration token has invalid format');
+          return;
+        }
         if (storedToken) {
           const { verifyMigrationToken } = await import('../core/migration-crypto.js');
           if (verifyMigrationToken(migrationToken, storedToken)) {
@@ -15826,17 +15831,16 @@ export class LynoxHTTPApi {
       errorResponse(res, 403, 'No migration token configured for this instance');
       return null;
     }
+    // The stored token's shape first: a token provisioned wrong is this instance's fault, and says so
+    // instead of looking like a wrong token. It also keeps a low-entropy stored token away from
+    // deriveSigningKey, whatever verifyMigrationToken checks.
+    if (!/^[0-9a-f]{64}$/i.test(storedToken)) {
+      errorResponse(res, 500, 'Migration token has invalid format');
+      return null;
+    }
     const { verifyMigrationToken } = await import('../core/migration-crypto.js');
     if (typeof token !== 'string' || !verifyMigrationToken(token, storedToken)) {
       errorResponse(res, 403, 'Invalid migration token');
-      return null;
-    }
-    // Belt-and-braces: verifyMigrationToken already enforces the 64-hex-char
-    // shape (it parses both sides as hex Buffers and length-checks them), but
-    // re-assert here so a future change that loosens that check can't slip a
-    // low-entropy stored token straight into deriveSigningKey.
-    if (!/^[0-9a-f]{64}$/i.test(storedToken)) {
-      errorResponse(res, 500, 'Migration token has invalid format');
       return null;
     }
     return storedToken;
