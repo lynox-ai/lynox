@@ -67,9 +67,10 @@ export const MIGRATION_MEMORY = {
    * 84.7 + 0 → 448.4 / 440.8; 156.7 + 0 → 757.2 / 759.4; 216.7 + 0 → 977.4 / 965.8;
    * 156.7 + 0.4 → 746.3 / 761.7; 156.7 + 48.4 → 971.1 / 985.9; 108.7 + 108.4 → 1031.1 / 1014.8;
    * 48.7 + 156.4 → 964.6 / 977.6; 12.7 + 156.4 → 845.8 / 827.5. `90 + 5.0 · S` is above each,
-   * by 10.6 % at the closest (12.7 + 156.4). Not covered: other row shapes (many small rows,
-   * large blobs), the host's swap and load. The merge ledgers' plaintext form is not counted in
-   * it (it is built only for ledgers within the 64 MiB cap).
+   * by 10.6 % at the closest (12.7 + 156.4). S is the store files' size; the snapshot the check
+   * reads is about as large for these stores (written once, never vacuumed). Not covered: other
+   * row shapes (many small rows, large blobs), the host's swap and load, and the merge ledgers'
+   * plaintext form (built after the stores', only for ledgers within the 64 MiB cap).
    */
   kSourceBaseMb: 90,
   kSource: 5.0,

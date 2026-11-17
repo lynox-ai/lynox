@@ -285,13 +285,18 @@ describe('a store is judged by its raw size before its plaintext form is built',
     calls.judged.length = 0; calls.rewritten.length = 0;
     const vast = { import_limit_mb: 1e12, baseline_mb: 0, k: 1, rest_factor: 0 };
     const both = 100 + MIGRATION_MEMORY.kSourceBaseMb + (MIGRATION_MEMORY.kSource * (at.rawBytes + historyRaw)) / MIB;
-    // Room for both together: both are rewritten. The resident memory is read once, before the
-    // first rewrite; a later reading (here vast) does not count.
+    // Room for both together: both are rewritten. The memory is read before the first rewrite and
+    // again for history.db; unchanged, the joint line decides.
     let reads = 0;
-    const once = { limitMb: () => both, rssMb: () => (reads++ === 0 ? 100 : 1e9) };
-    new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: once }).export(key(), undefined, { plain: { ceiling: vast } });
-    expect(reads).toBe(1);
+    new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: { limitMb: () => both, rssMb: () => { reads++; return 100; } } }).export(key(), undefined, { plain: { ceiling: vast } });
+    expect(reads).toBe(2);
     expect(calls.rewritten).toEqual(['engine.db', 'history.db']);
+    calls.rewritten.length = 0;
+    // The same room, but the memory has grown past it by history.db's turn: history.db is not rewritten.
+    let later = 0;
+    const grown = new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: { limitMb: () => both, rssMb: () => (later++ === 0 ? 100 : both) } }).export(key(), undefined, { plain: { ceiling: vast } });
+    expect(calls.rewritten).toEqual(['engine.db']);
+    expect(grown.plain?.stores.find((s) => s.store === 'history.db')).toMatchObject({ path: 'raw', reason: 'source-memory' });
     calls.rewritten.length = 0;
     // A thousandth of a MiB less: engine.db still fits alone, history.db not next to it.
     const r = new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: { limitMb: () => both - 0.001, rssMb: () => 100 } }).export(key(), undefined, { plain: { ceiling: vast } });

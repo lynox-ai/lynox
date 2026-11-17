@@ -408,8 +408,9 @@ export class MigrationExporter {
   ): void {
     const bytes = (cs: PlaintextChunk[]): number => cs.reduce((n, c) => n + c.data.length, 0);
     const restBytes = bytes(chunks) + (sweeps ? bytes(sweeps.raw) : 0);
-    // This instance's memory is read once, before the first rewrite: a store judged later is
-    // judged together with the stores already let through, whose forms are then in memory.
+    // This instance's memory is read before the first rewrite: a store judged later is judged
+    // together with the stores already let through, whose forms are then in memory. It is read
+    // again for each later store, so growth the line does not foresee is not missed either.
     const limitMb = this.ownMemory.limitMb();
     const rssMb = this.ownMemory.rssMb();
     let formedBytes = 0;
@@ -420,7 +421,7 @@ export class MigrationExporter {
       const othersBytes = restBytes + databases.reduce((n, o) => n + (o === d ? 0 : bytes(o.raw)), 0);
       const refused = plainFormRefusal({
         ceiling, rawBytes: image.length, othersBytes, restBytes, maxTotalBytes: this.bounds.maxTotalBytes,
-        source: { limitMb, rssMb, baseMb: MIGRATION_MEMORY.kSourceBaseMb, k: MIGRATION_MEMORY.kSource, formedBytes },
+        source: { limitMb, rssMb, rssNowMb: formedBytes === 0 ? rssMb : this.ownMemory.rssMb(), baseMb: MIGRATION_MEMORY.kSourceBaseMb, k: MIGRATION_MEMORY.kSource, formedBytes },
       });
       if (refused) d.refused = refused;
       else {
