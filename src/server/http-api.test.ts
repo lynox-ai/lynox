@@ -22115,7 +22115,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         mockConfirmTrigger.mockClear();
         const shown = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[]; workflow: unknown; subject: Record<string, unknown> };
         expect(shown.connections).toHaveLength(1);
-        expect([shown.workflow, shown.subject['pipeline_id'], shown.subject['wf']]).toEqual([{ name: 'W', confirmed: true }, 'wf-eva', WF]);
+        expect([shown.workflow, shown.subject['pipeline_id'], shown.subject['wf']]).toEqual([{ name: 'W', confirmed: true, ended: false }, 'wf-eva', WF]);
         // The workflow was confirmed again since the preview: the list shown went with the
         // earlier confirmation, so it does not confirm this one.
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-09T00:00:00.000Z' } : undefined));
@@ -22131,7 +22131,34 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         // A workflow nobody confirmed: the preview says so, and the view offers no confirm (a
         // confirmed schedule on it is switched off by its first run).
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W' } : undefined));
-        expect(((await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json()) as { workflow: unknown }).workflow).toEqual({ name: 'W', confirmed: false });
+        expect(((await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json()) as { workflow: unknown }).workflow).toEqual({ name: 'W', confirmed: false, ended: false });
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
+    });
+
+    it('says whether the workflow a schedule runs is one whose person\'s access ended: not where it lives, not where it was taken over', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const MID = 'M-EVA';
+      const AT = '2026-10-01 00:00:00';
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-07T00:00:00.000Z' } : undefined));
+      const trigger = { id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-eva', title: 'Report', description: 'Weekly', created_by: 'owner', created_at: '2026-10-01T00:00:00.000Z' };
+      const eva = { createdBy: 'mandate:eva@kanzlei.example', createdMandateId: MID, createdAt: AT, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null };
+      let authorship: Record<string, unknown> = eva;
+      let live = false;
+      ref['getRunHistory'] = () => ({ getTrigger: (id: string) => (id === 'task-1' ? trigger : undefined), getPlannedPipeline: () => undefined, getWorkflowAuthorship: () => authorship });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      ref['getMandateEnds'] = () => ({ isLive: (id: string) => live && id === MID, record: (): void => {} });
+      const shownWorkflow = async (): Promise<unknown> => ((await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json()) as { workflow: unknown }).workflow;
+      try {
+        expect(await shownWorkflow()).toEqual({ name: 'W', confirmed: true, ended: true });
+        live = true;
+        expect(await shownWorkflow()).toEqual({ name: 'W', confirmed: true, ended: false });
+        live = false;
+        authorship = { ...eva, coveredCreatedBy: eva.createdBy, coveredCreatedId: MID, coveredCreatedAt: AT };
+        expect(await shownWorkflow()).toEqual({ name: 'W', confirmed: true, ended: false });
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();

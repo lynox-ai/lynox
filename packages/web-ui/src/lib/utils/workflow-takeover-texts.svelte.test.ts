@@ -8,6 +8,9 @@ import { getLocale, setLocale, tf } from '../i18n.svelte.js';
 const VALUES = {"person": "Eva", "name": "Eva", "plan": "Weekly", "plans": "Daily, Nightly", "provider": "Shop", "account": " (Main store)", "tab": "TAB", "button": "BUTTON", "n": "2", "review": "REVIEW"};
 
 const SENTENCES: Array<[string, string, string]> = [
+	["stamp.workflow_unconfirmed_ended",
+		"Übernimm zuerst seinen Workflow unter Automation → Workflows, mit „BUTTON“.",
+		"Take over its workflow first under Automation → Workflows, with “BUTTON”."],
 	["workflow_library.takeover.button",
 		"Workflow übernehmen",
 		"Take over workflow"],

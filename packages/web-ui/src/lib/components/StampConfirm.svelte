@@ -166,7 +166,8 @@
 		{#if hidesText(preview)}
 			<p class="text-warning" data-stamp-hidden-text={hiddenIn(preview)}>{hiddenNote(hiddenIn(preview) === 'workflow', mode === 'check')}</p>
 		{:else if as === 'workflow' && !confirmable(preview)}
-			<p class="text-warning" data-stamp-workflow-unconfirmed>{t('stamp.workflow_unconfirmed')}</p>
+			<!-- Its person's access ended: the way on is the workflow's takeover, which confirms its steps too. -->
+			<p class="text-warning" data-stamp-workflow-unconfirmed>{preview.workflow?.ended === true ? tf('stamp.workflow_unconfirmed_ended', { button: t('workflow_library.takeover.button') }) : t('stamp.workflow_unconfirmed')}</p>
 		{:else if !confirmable(preview)}
 			<!-- A watch whose page cannot be read: nothing to agree to, so no button. -->
 		{:else if mode === 'held' || sentence !== null}

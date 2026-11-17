@@ -2608,6 +2608,15 @@ export class LynoxHTTPApi {
   }
 
   /**
+   * Whether the person a workflow runs for, its last uncovered mandate mark, has lost access: the
+   * one reading the library's `runs_as.ended`, the trigger list's `ended_on` and the plan's stamp
+   * preview share. No such person (the owner's, or taken over): false.
+   */
+  private _workflowAuthorEnded(author: RequestPrincipal | undefined): boolean {
+    return author !== undefined && principalHasEnded(author, (id) => this._mandateLive(id));
+  }
+
+  /**
    * What the takeover reads and writes, or null with a 503 when engine.db is not there. The
    * prompt store may be missing; the takeover then refuses, since it could not close the questions.
    */
@@ -2678,14 +2687,15 @@ export class LynoxHTTPApi {
   async #stampPlanOf(trigger: TriggerRecord): Promise<{
     listed: { wf: string | null; entries: readonly StampEntry[] } | null;
     by: string | null;
-    workflow: { name: string | null; confirmed: boolean } | null;
+    workflow: { name: string | null; confirmed: boolean; ended: boolean } | null;
   }> {
     const engine = this.engine;
     const apiStore = engine?.getApiStore();
     if (!engine || !apiStore || !stampUsesConnections(trigger.effect)) return { listed: null, by: null, workflow: null };
     const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
     const workflow = trigger.effect === 'run_workflow'
-      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null }
+      // `ended` is shown only: the view then names the workflow's takeover as the way on.
+      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null, ended: !plan.unreadable && this._workflowAuthorEnded(plan.workflowMember) }
       : null;
     if (plan.unreadable || plan.of === undefined) return { listed: null, by: null, workflow };
     return {
@@ -2720,7 +2730,7 @@ export class LynoxHTTPApi {
     const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
     const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
     const wf = plan.workflowMember;
-    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : principalHasEnded(wf, isLive) ? 'workflow' : 'workflow_other';
+    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : this._workflowAuthorEnded(wf) ? 'workflow' : 'workflow_other';
     return { ...shown, ended: shown.ended || endedOn !== null, ended_on: endedOn };
   }
 
@@ -8668,7 +8678,7 @@ export class LynoxHTTPApi {
             }
             const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
             if (runAs.kind !== 'mandate') return {};
-            const ended = principalHasEnded(runAs, (id) => this._mandateLive(id));
+            const ended = this._workflowAuthorEnded(runAs);
             return { runs_as: { person: runAs.email, ended, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
           })(),
         });
