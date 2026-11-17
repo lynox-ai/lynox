@@ -105,6 +105,8 @@ const SEEDS: readonly string[] = [
   // A form closed by another element's end tag: the parser's form pointer stays set, and the page's
   // next form is not created.
   '<div><form><input name="q"></div>',
+  // Not canonical-idempotent, yet it ends closed: a list item inside a table moves out of it.
+  '<ul><li>a<table><li>b</table></li></ul>',
   // A foreign script with elements below it: where its text sits is part of its body.
   '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>',
   // Every attribute through which a value links somewhere.
@@ -541,7 +543,7 @@ const counted = (name: string): boolean =>
 
 /** Every attribute the oracle counts, by name (event handlers by a few of theirs), and some it does
  *  not: each, held once in a `p`, copied onto a second `p`. */
-const COUNTED_SAMPLES: readonly string[] = [...URL_ATTRS, ...COUNTED_BY_NAME, 'onclick', 'onerror', 'onmouseover', 'ONLOAD'];
+const COUNTED_SAMPLES: readonly string[] = [...URL_ATTRS, ...COUNTED_BY_NAME, 'onclick', 'onerror', 'onmouseover', 'ONLOAD', 'onfocus', 'onanimationstart', 'onpointerdown', 'ontoggle', 'onbeforetoggle'];
 const HELD_ONLY_SAMPLES: readonly string[] = ['class', 'title', 'lang', 'dir', ...URL_VALUED_NOT_LINKS];
 const copyPair = (name: string): [string, string] => {
   const one = `<p ${name}="https://shop.example/x">a</p>`;
@@ -628,19 +630,23 @@ function endsPlain(v: string): boolean {
  *   parser opens again around what follows a misnested end tag);
  * - no `form` stays open: while the parser's form element pointer is set, a form after the value
  *   is not created, whatever end tag closed the element that held it.
- * A template, a foreign element or anything else open around the mark fails the first; a table
- * left open moves the mark before itself, so the mark must also be the last node of the tree.
+ * A template, a foreign element or anything else open around the mark fails the first; the mark
+ * for it is a custom element, which stays inside an `svg` or `math` left open (an `em` would break
+ * out of it). A table left open moves the mark before itself, so it must also be the last node.
  */
 const FORMATTING_ELEMENTS: ReadonlySet<string> = new Set(['a', 'b', 'big', 'code', 'em', 'font', 'i', 'nobr', 's', 'small', 'strike', 'strong', 'tt', 'u']);
 const VOID_ELEMENTS: ReadonlySet<string> = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
 const MAY_STAY_OPEN: ReadonlySet<string> = new Set([...ALLOW_BARE].filter((n) => !FORMATTING_ELEMENTS.has(n) && !VOID_ELEMENTS.has(n)));
+/** A custom element: not one of the tags that break out of foreign content, so in an `svg` or a
+ *  `math` left open it stays inside, as what the page puts after the value would. */
+const OPEN_MARK = '<page-mark></page-mark>';
 function openAroundMark(v: string): HtmlNodeRef[] | null {
-  const nodes = walkHtml(parseHtmlFragment(v + MARK));
+  const nodes = walkHtml(parseHtmlFragment(v + OPEN_MARK));
   let at = -1;
-  nodes.forEach((n, i) => { if (n.kind === 'element' && n.name === 'em' && n.attrs.some((a) => a.name === 'data-page-mark')) at = i; });
+  nodes.forEach((n, i) => { if (n.kind === 'element' && n.name === 'page-mark') at = i; });
   if (at < 0) return null;
   // The mark must be the last thing in the tree: a table left open moves it before itself (foster
-  // parenting), where it comes out whole and below nothing, while what follows is still the table's.
+  // parenting), where it comes out below nothing, while what follows is still the table's.
   const markDepth = nodes[at]!.depth;
   if (nodes.slice(at + 1).some((n) => n.depth <= markDepth)) return null;
   const open: HtmlNodeRef[] = [];
@@ -668,9 +674,7 @@ const wrongCheck = (w: WrongCheck, opts: { canonical?: false; end?: false } = {}
 
 /** Each control: a known-wrong check, and what property 2 must find against it. */
 const PROPERTY_2_CONTROLS: readonly (readonly [string, Check, (before: string | null, after: string) => boolean])[] = [
-  // Without the end rule as well: the values that are not canonical-idempotent are, on most seeds,
-  // also ones that end open, so with the end rule in place this check would accept none of them.
-  ['a check without not_canonical', wrongCheck({}, { canonical: false, end: false }), (_b, a) => !idempotent(a)],
+  ['a check without not_canonical', wrongCheck({}, { canonical: false }), (_b, a) => !idempotent(a)],
   ['a check that lets a value end open', wrongCheck({}, { end: false }), (_b, a) => !endsClosedHere(a)],
   ['(d) a check that holds by element name', wrongCheck({ holdByName: true }), (b, a) => violations(b, a).length > 0],
   ['(e) a check whose URL rule takes any target', wrongCheck({ anyUrl: true }), (b, a) => violations(b, a).length > 0],
@@ -707,14 +711,14 @@ function pairs(rng: Rng): [string | null, string][] {
     else if (extra < 0.5 && before !== null) after = `${before}${before.match(/<[a-z][^>]*>[^<]*<\/[a-z]+>/i)?.[0] ?? ''}`;
     out.push([before, after]);
   }
-  // Every attribute the oracle counts and some it does not, held once and copied once: a gap in
-  // A2's own lists is then a value A2 takes and the oracle refuses, on every seed.
+  // Every attribute the oracle counts and some it does not, held once and copied once, in every
+  // run: a gap in A2's own lists is then a value A2 takes and the oracle refuses.
   for (const name of [...COUNTED_SAMPLES, ...HELD_ONLY_SAMPLES]) out.push(copyPair(name));
   return out;
 }
 
 describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => {
-  it('an accepted value holds nothing outside the allowlist and the before-image, is canonical-idempotent and ends plain', () => {
+  it('an accepted value holds nothing outside the allowlist and the before-image, is canonical-idempotent and ends closed', () => {
     const all = pairs(sfc32(SEED ^ 0x2));
     let accepted = 0;
     let acceptedChanged = 0;
@@ -747,7 +751,10 @@ describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => 
     for (const name of COUNTED_SAMPLES) {
       const [before, after] = copyPair(name);
       if (violations(before, after).length === 0) wrong.push(`oracle takes a copied ${name}`);
-      if (a2(before, after)) wrong.push(`A2 takes a copied ${name}`);
+      const r = checkMarkup({ before, after, storeHost: STORE_HOST, startDomains: START_DOMAINS });
+      // Refused for the copy and for nothing else: the value held as it is passes.
+      if (r.ok || r.reason !== 'attribute_not_allowed') wrong.push(`A2 on a copied ${name}: ${JSON.stringify(r)}`);
+      if (!a2(before, before)) wrong.push(`A2 refuses a held ${name}`);
     }
     for (const name of HELD_ONLY_SAMPLES) {
       const [before, after] = copyPair(name);
