@@ -49,7 +49,10 @@ export interface ThreadMessageRecord {
   display_only: number;
   /** Who wrote this message (v73): the `runAuthorTag` of the run whose typed turn it is. NULL
    *  for every row the engine writes itself and for every row from before the column, and NULL
-   *  is unknown, never the owner. A trigger's turn carries `trigger:<id>`, never `owner`. */
+   *  is unknown, never the owner. A trigger's turn carries `trigger:<id>`, never `owner`.
+   *  `owner` names who sent the row, not who wrote every word in it: the row holds the whole
+   *  user content, so a context preamble (an opened mail, a run's result) and uploaded files
+   *  stand in it too. A reader that needs the owner's own words separates them structurally. */
   author: string | null;
   created_at: string;
 }

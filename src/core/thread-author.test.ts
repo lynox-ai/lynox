@@ -190,7 +190,15 @@ describe('a run\'s agent writes as the run\'s author', { timeout: 60_000 }, () =
     expect(session.getAgent()!.writeAuthor).toBe('owner');
   });
 
-  it('an agent rebuilt during the run keeps the run\'s author', async () => {
+  it('a compaction run after a trigger\'s run keeps the trigger\'s author', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    await session.run('scheduled', { triggerOrigin: 'cron', triggerId: 'trg-c', principal: OWNER_PRINCIPAL });
+    await session.run('summarize', { noTools: true, internal: true });
+    expect(session.getAgent()!.writeAuthor).toBe('trigger:trg-c');
+  });
+
+  it('an agent rebuilt after the run keeps the run\'s author', async () => {
     const engine = await boot();
     const session = engine.createSession();
     await session.run('scheduled', { triggerOrigin: 'cron', triggerId: 'trg-10', principal: OWNER_PRINCIPAL });

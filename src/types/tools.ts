@@ -172,7 +172,9 @@ export interface ToolEntry<TInput = unknown> {
    * target the model chose (a read). Read from the input as the model wrote it, before any
    * secret is resolved. A declaration that throws means the targets are unknown, and unknown
    * counts as foreign. A tool reads its targets with the same parser its handler sends with,
-   * so the list checked is the list sent.
+   * so the list checked is the list sent. An empty list is no assurance: it says the input
+   * names no target, not that the call sends to none (a reply without an override still goes
+   * to the mail's sender). A reader never treats `[]` as owner-known.
    */
   sendTargets?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
   /**
