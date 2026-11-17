@@ -1854,6 +1854,9 @@ async function executeThinker(
     // customer-granted-operator-access §3.13 E5) — again on top of the filtered list. After both
     // spreads for the same reason as the scope: no key a source gains later can rebind it.
     principal: parentAgent.principal,
+    // And who the parent writes as: a child of a trigger's run writes as that trigger, never
+    // as the owner. Unknown when the parent has none.
+    writeAuthor: parentAgent.writeAuthor ?? null,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
     // onto the child and the child's downstream code (memory writes, tool-call
     // recording) can attribute work to this run.

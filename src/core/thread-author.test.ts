@@ -179,3 +179,22 @@ describe('a run records who typed its turn', { timeout: 60_000 }, () => {
     expect(authors(engine, session.sessionId).filter(([role]) => role === 'user')).toEqual([['user', 'trigger:trg-8'], ['user', 'owner']]);
   });
 });
+
+describe('a run\'s agent writes as the run\'s author', { timeout: 60_000 }, () => {
+  it('a trigger run\'s agent writes as the trigger, the owner\'s chat turn as the owner', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    await session.run('scheduled', { triggerOrigin: 'cron', triggerId: 'trg-9', principal: OWNER_PRINCIPAL });
+    expect(session.getAgent()!.writeAuthor).toBe('trigger:trg-9');
+    await session.run('typed', { principal: OWNER_PRINCIPAL });
+    expect(session.getAgent()!.writeAuthor).toBe('owner');
+  });
+
+  it('an agent rebuilt during the run keeps the run\'s author', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    await session.run('scheduled', { triggerOrigin: 'cron', triggerId: 'trg-10', principal: OWNER_PRINCIPAL });
+    session._recreateAgent({});
+    expect(session.getAgent()!.writeAuthor).toBe('trigger:trg-10');
+  });
+});

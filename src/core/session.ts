@@ -1218,6 +1218,8 @@ export class Session {
     // mandate's run reuses. `_createAgent` also builds every new agent with it, which is
     // what carries it across a rebuild in the middle of this run.
     this.agent.principal = this._principal;
+    // Who this run's writes are recorded as, on the agent that will send, for the same reason.
+    this.agent.writeAuthor = this._runAuthor;
 
     const usageBefore = { ...this.usage };
 
@@ -2846,6 +2848,8 @@ export class Session {
       // of the last run: a rebuild in the middle of a mandate's run (compaction, a tier
       // override, a registry change) must not hand the model the tools the lock withholds.
       principal: this._principal,
+      // Who the rebuilt agent writes as: the run in flight's author, as the principal above.
+      writeAuthor: this._runAuthor,
       // ⛔ CARRIED ACROSS THE REBUILD. Without this line every rebuild mints a fresh,
       // empty scope and orphans whatever is registered — a later `abort()` then reaches
       // nothing. `_createAgent` is reached from the ctor, `addTool` and every rebuild that
