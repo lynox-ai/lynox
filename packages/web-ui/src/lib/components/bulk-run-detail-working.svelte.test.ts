@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep, bulkWorkingLine } from './bulk-runs.js';
 import { t, tf } from '../i18n.svelte.js';
+import { formatCost } from '../format.js';
 
 // While the engine moves a run on by itself, a line names the step it works on, with the run's
 // numbers where the engine counts them, and the head takes the counts of each ask. Before, nothing
@@ -218,6 +219,40 @@ describe('a run the engine works on', () => {
 		expect(counts()).toBe(tf('bulk.head.counts', { n: '3', a: '3', c: '0', f: '0' }));
 		expect(line()).toBeNull();
 		expect(stopped()).toBeNull();
+	});
+
+	it('loads the run anew when it moves on from reading the list, and then judges with its numbers', async () => {
+		run = makeRun({ listFirstPage: `https://${HOST}/admin/api/2026-10/graphql.json` });
+		await render();
+		expect(line()).toBe('lynox liest die Liste …');
+		const asks = targetAsks;
+		run = { ...run, listFirstPage: null, total: 4, changes: UPDATES(4), judge: { tier: 'standard', unjudged: 3, judged: 1 } };
+		await pass(BULK_FOLLOW_MS);
+		expect(line()).toBe('lynox urteilt … 1 von 4');
+		expect(counts()).toBe(tf('bulk.head.counts', { n: '4', a: '0', c: '0', f: '0' }));
+		// Loaded anew, its targets with it.
+		expect(targetAsks).toBeGreaterThan(asks);
+	});
+
+	it('loads the run anew when it jumps to writing between two asks, so the line counts its planned targets', async () => {
+		run = makeRun({ total: 3, judge: { tier: 'standard', unjudged: 3, judged: 0 } });
+		await render();
+		run = { ...run, phase: 'writing', changes: UPDATES(3), applied: 1, judge: { tier: 'standard', unjudged: 0, judged: 3 } };
+		await pass(BULK_FOLLOW_MS);
+		expect(line()).toBe('lynox schreibt … 1 von 3');
+	});
+
+	it('takes the cost and a pause with each ask while the run works', async () => {
+		run = makeRun({ total: 4, costUsd: 0.1, costCapUsd: 1, judge: { tier: 'standard', unjudged: 3, judged: 1 } });
+		await render();
+		expect(shown()).toContain(`${formatCost(0.1)} / ${formatCost(1)}`);
+		run = { ...run, costUsd: 0.4, judge: { tier: 'standard', unjudged: 2, judged: 2 } };
+		await pass(BULK_FOLLOW_MS);
+		expect(shown()).toContain(`${formatCost(0.4)} / ${formatCost(1)}`);
+		run = { ...run, resumesAt: '2026-11-14T12:00:00.000Z' };
+		await pass(BULK_FOLLOW_MS);
+		expect(line()).toBeNull();
+		expect(shown()).toContain('Unterbrochen. lynox setzt den Lauf ab');
 	});
 
 	it('says it in English too', async () => {
