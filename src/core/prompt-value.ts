@@ -157,15 +157,6 @@ export function promptValue(text: string): PromptText {
 }
 
 /**
- * System-authored text to splice into a `pv` prompt as FRAME, where a plain `${…}` would
- * make it a value. Only for text the engine itself chose (a tool's dialog word), never for
- * anything a model, a page or a user wrote.
- */
-export function promptFrame(text: string): PromptText {
-  return { [PROMPT_TEXT_BRAND]: true, segments: text === '' ? [] : [{ kind: 'frame', text }] };
-}
-
-/**
  * A block shown on the instance only: `value` inside a code fence the FRAME opens (so a line
  * break in the value shows, and nothing in it can close the fence: it stays a text node).
  * Fence and value are both marked, so the copy that leaves the box carries neither.

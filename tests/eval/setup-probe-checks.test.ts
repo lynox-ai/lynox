@@ -619,8 +619,8 @@ describe('setup probe — operator permission policy', () => {
   it('knows every prompt shape the HTTP tool of this engine asks in (src/tools/builtin/http.ts)', () => {
     const src = readFileSync(join(__dirname, '../../src/tools/builtin/http.ts'), 'utf8');
     // the dialog names the tool by its word, spliced in as frame
-    const HEAD = "⚠ ${promptFrame(dialogToolWord('http_request'))}: ";
-    const templates = [...src.matchAll(/pv`(⚠ \$\{promptFrame\(dialogToolWord\('http_request'\)\)\}: [^`]*)`/g)]
+    const HEAD = "⚠ ${toolWordFrame('http_request')}: ";
+    const templates = [...src.matchAll(/pv`(⚠ \$\{toolWordFrame\('http_request'\)\}: [^`]*)`/g)]
       .map(m => m[1]!.replace(HEAD, '⚠ API request: '));
     expect(templates.length).toBeGreaterThanOrEqual(2);
     // every warning the exfiltration check can return, whatever its wording — a new one the

@@ -12,8 +12,10 @@
  * its name, and the test fails for every tool that can reach a dialog without a word.
  */
 
+import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
+
 /** Tools whose dialog word is the chat's tool-line word, word for word. */
-export const TOOL_LINE_WORDS: Readonly<Record<string, string>> = {
+export const TOOL_LINE_WORDS = {
   bash: 'Command',
   http_request: 'API request',
   api_setup: 'API profiles',
@@ -33,20 +35,33 @@ export const TOOL_LINE_WORDS: Readonly<Record<string, string>> = {
   memory_promote: 'Knowledge promotion',
   subjects_merge: 'Merge',
   update_workflow_steps: 'Workflow edit',
-};
+} as const satisfies Record<string, string>;
 
 /** Tools the tool line names by a participle; the dialog names them by these nouns. */
-export const DIALOG_ONLY_WORDS: Readonly<Record<string, string>> = {
+export const DIALOG_ONLY_WORDS = {
   read_file: 'File access',
   write_file: 'File write',
   edit_file: 'File edit',
   batch_files: 'Bulk file change',
   spawn_agent: 'Delegation',
-};
+} as const satisfies Record<string, string>;
+
+/** A tool this table has a word for. */
+export type DialogTool = keyof typeof TOOL_LINE_WORDS | keyof typeof DIALOG_ONLY_WORDS;
 
 /** The dialog's word for `toolName`, or the name itself for a tool without one. */
 export function dialogToolWord(toolName: string): string {
-  if (Object.hasOwn(DIALOG_ONLY_WORDS, toolName)) return DIALOG_ONLY_WORDS[toolName]!;
-  if (Object.hasOwn(TOOL_LINE_WORDS, toolName)) return TOOL_LINE_WORDS[toolName]!;
+  const dialogOnly: Readonly<Record<string, string>> = DIALOG_ONLY_WORDS;
+  const lineWords: Readonly<Record<string, string>> = TOOL_LINE_WORDS;
+  if (Object.hasOwn(dialogOnly, toolName)) return dialogOnly[toolName]!;
+  if (Object.hasOwn(lineWords, toolName)) return lineWords[toolName]!;
   return toolName;
+}
+
+/**
+ * A tool's dialog word as FRAME, for a `pv` prompt, where a plain `${…}` would be a value.
+ * It takes a tool from this table, never free text: nothing else can be spliced in as frame.
+ */
+export function toolWordFrame(tool: DialogTool): PromptText {
+  return { [PROMPT_TEXT_BRAND]: true, segments: [{ kind: 'frame', text: dialogToolWord(tool) }] };
 }
