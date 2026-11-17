@@ -30,7 +30,7 @@ afterEach(async () => {
 });
 
 async function boot(env: Record<string, string | undefined>): Promise<{ data: string; init: Promise<void> }> {
-  const dir = mkdtempSync(join(tmpdir(), 'lynox-managed-key-boot-'));
+  const dir = mkdtempSync(join(tmpdir(), 'lynox-hosted-start-'));
   const home = join(dir, 'home');
   const data = join(dir, 'data');
   mkdirSync(home);
