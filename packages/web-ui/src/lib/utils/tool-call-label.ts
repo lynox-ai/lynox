@@ -46,15 +46,11 @@ function strOrEmpty(value: unknown): string {
 }
 
 /**
- * Build the inline label for memory_recall. When the LLM passes a `query`
- * we show it directly. When the LLM uses the no-query path (recency-ranked
- * namespace dump), we show the namespace so the user still sees WHAT was
- * being recalled — otherwise the bubble would read "Knowledge recalled —"
- * with a trailing dash and no signal at all.
+ * Build the inline label for memory_recall: the query, cut, as subject. Without a
+ * query the call reads its namespace's latest entries; the namespace is an internal
+ * value, so the line names no subject then and reads as the word alone.
  */
 function memoryRecallLabel(input: Record<string, unknown> | undefined, t: Translator): ToolLabelParts {
-  // Without a query the call reads its namespace's latest entries; the namespace is an
-  // internal value, so the line names no subject then.
   return { action: t('tool.knowledge_recalled'), subject: cut(strOrEmpty(input?.['query'])) };
 }
 
