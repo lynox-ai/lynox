@@ -199,7 +199,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect((await save(store, 'create', keyProfile(), 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
     const denied = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), 'Deny');
     expect(denied.asked).toHaveLength(1);
-    expect(denied.asked[0]).toContain('This save changes:\n- secret read for vault_keys[0]: KP_KEY_A → KP_KEY_B');
+    expect(denied.asked[0]).toContain('This save changes:\n- secret sent as the key: KP_KEY_A → KP_KEY_B');
     const nobody = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
     expect(stored(store, 'kp')?.auth?.vault_keys).toEqual(['KP_KEY_A']);
@@ -254,8 +254,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
   });
 
   it.each([
-    ['another order of vault_keys', { auth: { type: 'bearer', vault_keys: ['KP_KEY_B', 'KP_KEY_A'] } }, '- secret read for vault_keys[0]: KP_KEY_A → KP_KEY_B'],
-    ['a name moved into another place', { auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], username_key: 'KP_KEY_B' } }, '- secret read for username_key: (none) → KP_KEY_B'],
+    ['another order of vault_keys', { auth: { type: 'bearer', vault_keys: ['KP_KEY_B', 'KP_KEY_A'] } }, '- secret sent as the key: KP_KEY_A → KP_KEY_B'],
     ['the key put in the query string', { auth: { type: 'query', query_param: 'key', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] } }, '- how the secret is attached (auth.type): bearer → query'],
   ] as const)('a key profile: %s sends a credential differently with the same names, and is asked about and refused with nobody to ask', async (_n, over, line) => {
     const store = new ApiStore();
@@ -276,10 +275,39 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     } });
     await save(store, 'create', basic('KP_USER'), 'Allow');
     const denied = await save(store, 'update', basic(), 'Deny');
-    expect(denied.asked[0]).toContain('- secret read for the user name sent: KP_USER → KP_KEY_A');
+    expect(denied.asked[0]).toContain('- secret sent as the user name: KP_USER → KP_KEY_A');
     const nobody = await save(store, 'update', basic(), undefined);
     expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
     expect(stored(store, 'kp')?.auth?.username_key).toBe('KP_USER');
+  });
+
+  it('the same credential written another way is no change: a background save goes through', async () => {
+    const store = new ApiStore();
+    const split = { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] } as const;
+    await save(store, 'create', { ...keyProfile(), auth: { ...split } }, 'Allow');
+    const named = await save(store, 'update', { ...keyProfile(), auth: { ...split, username_key: 'KP_KEY_A', password_key: 'KP_KEY_B' } }, undefined);
+    expect(named.result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect(stored(store, 'kp')?.auth?.username_key).toBe('KP_KEY_A');
+    const header = new ApiStore();
+    await save(header, 'create', { ...keyProfile(), auth: { type: 'header', vault_keys: ['KP_KEY_A'] } }, 'Allow');
+    const spelled = await save(header, 'update', { ...keyProfile(), auth: { type: 'header', header_name: 'X-Api-Key', vault_keys: ['KP_KEY_A'] } }, undefined);
+    expect(spelled.result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect(stored(header, 'kp')?.auth?.header_name).toBe('X-Api-Key');
+  });
+
+  it('an own sign-in: dropping refresh_token_key reads another slot, and that is asked about', async () => {
+    const store = new ApiStore();
+    const withRt = (rt?: string): ApiProfile => {
+      const p = ownGrant({ grant_type: 'refresh_token' });
+      if (rt !== undefined) p.auth!.oauth!.refresh_token_key = rt;
+      return p;
+    };
+    await save(store, 'create', withRt('SVC_RT'), 'Allow');
+    const denied = await save(store, 'update', withRt(), 'Deny');
+    expect(denied.asked[0]).toContain("- secret sent as the refresh token: SVC_RT → (this profile's own)");
+    const nobody = await save(store, 'update', withRt(), undefined);
+    expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
+    expect(stored(store, 'svc')?.auth?.oauth?.refresh_token_key).toBe('SVC_RT');
   });
 
   it('a save that takes the last scope away leaves the choice to the provider: that is asked about', async () => {
