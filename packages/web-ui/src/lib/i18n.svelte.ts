@@ -1309,6 +1309,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'setup.hint_mistral': { de: 'API Key hier:', en: 'Get a key at' },
 	'setup.hint_openai': { de: 'Funktioniert mit Ollama, LM Studio, LiteLLM, Groq, vLLM und jedem anderen OpenAI-kompatiblen Endpoint. API Key leer lassen wenn das Backend keinen verlangt.', en: 'Works with Ollama, LM Studio, LiteLLM, Groq, vLLM, and any other OpenAI-compatible endpoint. Leave the API key blank if the backend doesn\'t require auth.' },
 	'setup.save': { de: 'Speichern & Starten', en: 'Save & Start' },
+	// The engine refused to check a key the owner typed: the instance is connected to a Shopify store
+	// and sends text only through access lynox manages (U-307). The way out: the switch is lynox's.
+	'setup.key_refused_store': { de: 'Diese Instanz ist mit einem Shopify-Store verbunden. Dann schickt lynox Text nur über einen Zugang, den lynox selbst verwaltet, nicht über einen eigenen Key. Dein Key wurde nicht geprüft und nicht gespeichert.', en: 'This instance is connected to a Shopify store. lynox then sends text only through access that lynox manages itself, not through a key of your own. Your key was not checked and not saved.' },
+	'setup.key_refused_store_way_out': { de: 'Schreib an support@lynox.ai, damit wir das mit dir klären.', en: 'Write to support@lynox.ai so we can sort this out with you.' },
 	'setup.skip': { de: 'Später — KI bleibt deaktiviert', en: 'Later — AI stays disabled' },
 	'setup.success': { de: 'Verbindung hergestellt — los geht\'s!', en: 'Connected — let\'s go!' },
 	'setup.save_error': { de: 'Speichern fehlgeschlagen. Bitte erneut versuchen.', en: 'Failed to save. Please try again.' },
