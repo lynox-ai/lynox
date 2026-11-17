@@ -1774,7 +1774,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'setup.subtitle_byok': { de: 'Gib deinen API Key ein, um loszulegen.', en: 'Enter your API key to get started.' },
 
 	// Settings
-	'settings.title': { de: 'Settings', en: 'Settings' },
+	'settings.title': { de: 'Einstellungen', en: 'Settings' },
 	'settings.config': { de: 'Konfiguration', en: 'Configuration' },
 	'settings.config_desc': { de: 'KI-Modell, Provider, Erweitert', en: 'AI model, provider, advanced' },
 	'settings.section_main': { de: 'Haupteinstellungen', en: 'Main Settings' },
