@@ -723,17 +723,16 @@ describe('the library\'s own sentences', () => {
 		expect(titleBox('Own one')).toBeUndefined();
 	});
 
-	it('gives an empty value a box of its own width, and only an empty one', async () => {
+	it('draws an empty value as a box of its own width', async () => {
 		const p = FULL();
 		p['stillPaused'] = [{ id: 'p-s', title: '   ' }];
 		await open([ENDED], [p]);
 		const d = await openDialog();
 		const empty = d.querySelector<HTMLElement>('[data-takeover-part="paused"] bdi[data-foreign-value]')!;
 		expect(empty.textContent).toBe('');
+		// Its inner space and its edge are what draw it.
 		expect(empty.classList.contains('px-1')).toBe(true);
-		const filled = d.querySelector<HTMLElement>('[data-takeover-part="released"] bdi[data-foreign-value]')!;
-		expect(filled.textContent).toBe('Daily');
-		expect(filled.classList.contains('px-1')).toBe(false);
+		expect(empty.classList.contains('border')).toBe(true);
 	});
 
 	it('sets a card title apart where the access of whoever made or changed it ended, in the list font', async () => {
@@ -753,17 +752,20 @@ describe('the library\'s own sentences', () => {
 		}
 	});
 
-	it('keeps a 2 px margin around a value inside a line, only on its right at the line\'s start', async () => {
+	it('gives the box 4 px inside, closed on each line, and no space of its own outside', async () => {
 		await open([ENDED]);
-		const spacing = (b: Element): string[] => [...b.classList].filter((c) => /^-?(p|px|py|pl|pr|m|mx|my|ml|mr)-/.test(c));
 		const card = [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === 'Ended one');
-		expect(spacing(card!.querySelector('bdi[data-foreign-value]')!)).toEqual(['mr-0.5']);
 		const d = await openDialog();
 		const inSentence = d.querySelector('[data-takeover-part="released"] bdi[data-foreign-value]');
 		expect(inSentence?.textContent).toBe('Daily');
-		expect(spacing(inSentence!)).toEqual(['mx-0.5']);
-		// The 1 px edge that draws the box on every ground, in a title and in a sentence.
-		for (const b of [card!.querySelector('bdi[data-foreign-value]')!, inSentence!]) expect([...b.classList].filter((c) => c.startsWith('border'))).toEqual(['border', 'border-text-subtle']);
+		for (const b of [card!.querySelector('bdi[data-foreign-value]')!, inSentence!]) {
+			const classes = [...b.classList];
+			expect(classes.filter((c) => /^-?m[lrx]?-/.test(c))).toEqual([]);
+			expect(classes.filter((c) => /^-?p[xylr]?-/.test(c))).toEqual(['px-1']);
+			expect(classes).toContain('box-decoration-clone');
+			// The 1 px edge that draws the box on every ground, in a title and in a sentence.
+			expect(classes.filter((c) => c.startsWith('border'))).toEqual(['border', 'border-text-subtle']);
+		}
 	});
 
 	it('sets the workflow name in the dialog\'s heading in the heading\'s font, a value in a sentence in the code font', async () => {

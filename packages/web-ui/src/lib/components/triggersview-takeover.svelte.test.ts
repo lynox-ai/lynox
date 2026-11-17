@@ -246,23 +246,26 @@ describe('the confirmation', () => {
 		];
 		await render();
 		const title = (t: string): Element | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === t);
-		const boxed: Array<[string, string, string]> = [
-			['Owner plan', 'Owner plan', 'mr-0.5'],
-			['Scheduled: Forged', 'Forged', 'mx-0.5'],
-			['Scheduled: Never changed', 'Never changed', 'mx-0.5'],
-			['Scheduled: Edited only', 'Scheduled: Edited only', 'mr-0.5'],
-			['Scheduled: Mandate made', 'Scheduled: Mandate made', 'mr-0.5'],
-			['Scheduled: Mandate last', 'Scheduled: Mandate last', 'mr-0.5'],
-			['Scheduled: Mandate before', 'Scheduled: Mandate before', 'mr-0.5'],
-			['Scheduled: Unknown', 'Scheduled: Unknown', 'mr-0.5'],
+		const boxed: Array<[string, string]> = [
+			['Owner plan', 'Owner plan'],
+			['Scheduled: Forged', 'Forged'],
+			['Scheduled: Never changed', 'Never changed'],
+			['Scheduled: Edited only', 'Scheduled: Edited only'],
+			['Scheduled: Mandate made', 'Scheduled: Mandate made'],
+			['Scheduled: Mandate last', 'Scheduled: Mandate last'],
+			['Scheduled: Mandate before', 'Scheduled: Mandate before'],
+			['Scheduled: Unknown', 'Scheduled: Unknown'],
 		];
-		for (const [line, value, margin] of boxed) {
+		for (const [line, value] of boxed) {
 			const box = title(line)?.querySelector('bdi[data-foreign-value]');
 			expect(box?.textContent, line).toBe(value);
 			// A grey box in the list's font: the title keeps its width.
 			expect(box!.classList.contains('bg-bg-muted'), line).toBe(true);
 			expect(box!.classList.contains('font-mono'), line).toBe(false);
-			expect(box!.classList.contains(margin), line).toBe(true);
+			// No space of its own outside; 4 px inside, on each line of a wrapped title.
+			expect([...box!.classList].filter((c) => /^-?m[lrx]?-/.test(c)), line).toEqual([]);
+			expect(box!.classList.contains('px-1'), line).toBe(true);
+			expect(box!.classList.contains('box-decoration-clone'), line).toBe(true);
 			// Its 1 px edge, the part of the box that shows on every ground.
 			expect(box!.classList.contains('border'), line).toBe(true);
 			expect(box!.classList.contains('border-text-subtle'), line).toBe(true);
