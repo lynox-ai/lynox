@@ -9195,14 +9195,14 @@ describe('write approvals for the write the question showed (270)', () => {
       // refused for everyone, the owner included (here 2000 plain headers one character past it).
       const slowHeaders = (): Record<string, string> => Object.fromEntries(
         Array.from({ length: 2000 }, (_, i) => [`x-hdr-${String(i).padStart(4, '0')}`, 'v'.repeat(i === 0 ? 163 : 162)]));
-      const headersRefusal = 'Blocked: the headers of this POST to h.example are too many or too heavily encoded for the approval question to check them for a stored secret. Nothing was sent. Send fewer headers, with plain values.';
+      const headersRefusal = 'Blocked: the headers of this POST to h.example are too many or too heavily encoded for the approval question to check them for a stored secret. Nothing was sent. Send fewer headers, with plain values. Do not move the encoded values to another part of the request or encode them another way. If neither is possible, tell the user that this write cannot be sent from here and has to be made directly in h.example.';
 
       it.each([['a mandate', true], ['the owner', false]] as const)('refuses headers too costly to read for %s, without asking', async (_who, isMandate) => {
         const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
         vi.stubGlobal('fetch', fetchMock);
         const { agent, prompt } = isMandate ? agent270({ principal: MANDATE, mask: (t) => t }) : agent270({ answer: 'Allow' });
         const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: slowHeaders(), body: '{}' }, agent);
-        expect(out).toContain(headersRefusal);
+        expect(out).toBe(headersRefusal);
         expect(prompt).not.toHaveBeenCalled();
         expect(fetchMock).not.toHaveBeenCalled();
       });
