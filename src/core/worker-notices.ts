@@ -184,6 +184,16 @@ export interface WorkerNotices {
   stepReported(stepId: string): string;
   stepReportedItem(stepId: string): string;
   readonly reportedReasonWhere: string;
+  /** What stands in for a step id outside the allowed shape (`step-id.ts`): an id stored before the
+   *  limit is not shown in the thread, where it would read as the assistant's own words (U-314). The
+   *  step is named by its position in the workflow, counted from 1 as `#2` is; `undefined` where no
+   *  position is known. */
+  unnamedStep(position: number | undefined): string;
+  /** `stepReported`, `stepFailed` and `stepDeclined` for a step named by `unnamedStep`, which is a
+   *  name and not quoted. */
+  stepReportedUnnamed(position: number | undefined): string;
+  stepFailedUnnamed(position: number | undefined): string;
+  stepDeclinedUnnamed(position: number | undefined): string;
   /** `reportedReasonWhere` when more than one step reported. */
   readonly reportedReasonsWhere: string;
   /**
@@ -324,6 +334,10 @@ const EN: WorkerNotices = Object.freeze({
   stepReported: (stepId: string) => `Step "${stepId}" reported that it could not complete its task.`,
   stepReportedItem: (stepId: string) => `- ${stepId}: reported that it could not complete its task.`,
   reportedReasonWhere: 'You can ask here for the reason the step gave; it is kept in the run\'s record.',
+  unnamedStep: (position: number | undefined) => (position === undefined ? 'A step' : `Step ${String(position)}`),
+  stepReportedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} reported that it could not complete its task.`,
+  stepFailedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} failed.`,
+  stepDeclinedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} was declined at its approval.`,
   reportedReasonsWhere: 'You can ask here for the reasons the steps gave; they are kept in the run\'s record.',
   stepFailed: (stepId: string) => `Step "${stepId}" failed.`,
   stepFailedItem: (stepId: string) => `- ${stepId}: failed.`,
@@ -458,6 +472,10 @@ const DE: WorkerNotices = Object.freeze({
   stepReported: (stepId: string) => `Schritt „${stepId}“ hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
   stepReportedItem: (stepId: string) => `- ${stepId}: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
   reportedReasonWhere: 'Den Grund, den der Schritt angegeben hat, kannst du hier erfragen; er steht im Protokoll des Laufs.',
+  unnamedStep: (position: number | undefined) => (position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`),
+  stepReportedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  stepFailedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} ist fehlgeschlagen.`,
+  stepDeclinedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} wurde bei der Freigabe abgelehnt.`,
   reportedReasonsWhere: 'Die Gründe, die die Schritte angegeben haben, kannst du hier erfragen; sie stehen im Protokoll des Laufs.',
   stepFailed: (stepId: string) => `Schritt „${stepId}“ ist fehlgeschlagen.`,
   stepFailedItem: (stepId: string) => `- ${stepId}: ist fehlgeschlagen.`,

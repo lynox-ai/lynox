@@ -9,6 +9,7 @@
 import { GateExpiredError, GateRejectedError } from '../types/orchestration.js';
 import { isWorkflowBoundError } from '../orchestrator/workflow-stop.js';
 import { OWN_RUN_ERRORS } from '../tools/builtin/diagnose-workflow.js';
+import { isStepIdShape } from '../orchestrator/step-id.js';
 import type { WorkerNotices } from './worker-notices.js';
 
 export interface FailedRun {
@@ -39,7 +40,25 @@ function ownRunError(error: string, recordedBy: readonly string[]): boolean {
     && (error === new GateExpiredError(recordedBy[0]!).message || error === new GateRejectedError(recordedBy[0]!).message);
 }
 
-export function failureAccount(run: FailedRun, notices: WorkerNotices): FailureAccount {
+/**
+ * How the body names a step. A step id stored before ids had a shape (`step-id.ts`) is not shown —
+ * the body reads as the assistant's own words — but named by its position in the workflow
+ * (`positionOf`, counted from 1), or without one (U-314). Every comparison below stays on the raw id;
+ * only what is written changes.
+ */
+function stepNames(notices: WorkerNotices, positionOf: (id: string) => number | undefined) {
+  const outside = (id: string): boolean => !isStepIdShape(id);
+  return {
+    item: (id: string): string => (outside(id) ? notices.unnamedStep(positionOf(id)) : id),
+    reported: (id: string): string => (outside(id) ? notices.stepReportedUnnamed(positionOf(id)) : notices.stepReported(id)),
+    failed: (id: string): string => (outside(id) ? notices.stepFailedUnnamed(positionOf(id)) : notices.stepFailed(id)),
+    declined: (id: string): string => (outside(id) ? notices.stepDeclinedUnnamed(positionOf(id)) : notices.stepDeclined(id)),
+    outside,
+  };
+}
+
+export function failureAccount(run: FailedRun, notices: WorkerNotices, positionOf: (id: string) => number | undefined = () => undefined): FailureAccount {
+  const name = stepNames(notices, positionOf);
   const failed = (run.stepErrors ?? []).filter((s) => s.error);
   const reported = new Set(failed.filter((s) => s.reported === true).map((s) => s.stepId));
   if (run.errorReportedBy !== undefined) reported.add(run.errorReportedBy);
@@ -51,23 +70,27 @@ export function failureAccount(run: FailedRun, notices: WorkerNotices): FailureA
 
   let runError: string | undefined;
   if (run.errorReportedBy !== undefined) {
-    runError = notices.stepReported(run.errorReportedBy);
+    runError = name.reported(run.errorReportedBy);
   } else if (run.error) {
     const recordedBy = failed.filter((s) => s.error === run.error).map((s) => s.stepId);
     if (ownRunError(run.error, recordedBy)) {
-      runError = run.error;
-      if (recordedBy.length === 1 && run.error === new GateRejectedError(recordedBy[0]!).message) declined = recordedBy[0];
+      const rejected = recordedBy.length === 1 && run.error === new GateRejectedError(recordedBy[0]!).message;
+      if (rejected) declined = recordedBy[0];
+      // A gate's own text quotes the step's id: one outside the shape is named instead.
+      runError = recordedBy.length === 1 && name.outside(recordedBy[0]!)
+        ? (rejected ? name.declined(recordedBy[0]!) : name.failed(recordedBy[0]!))
+        : run.error;
     } else if (recordedBy.length > 0) {
       // The step that ended the run recorded it last.
       const by = recordedBy[recordedBy.length - 1]!;
       if (reported.has(by)) {
-        runError = notices.stepReported(by);
+        runError = name.reported(by);
       } else if (run.error.startsWith(`${new GateRejectedError(by).message}: `)) {
-        runError = notices.stepDeclined(by);
+        runError = name.declined(by);
         declined = by;
         declinedWithReason = true;
       } else {
-        runError = notices.stepFailed(by);
+        runError = name.failed(by);
       }
     } else {
       runError = notices.runFailed;
@@ -76,9 +99,9 @@ export function failureAccount(run: FailedRun, notices: WorkerNotices): FailureA
   }
 
   const errors = failed.filter((s) => s.reported !== true && s.stepId !== declined).length + unrecorded;
-  const steps = failed.map((s) => (s.reported === true ? notices.stepReportedItem(s.stepId)
-    : s.stepId === declined ? notices.stepDeclinedItem(s.stepId)
-    : notices.stepFailedItem(s.stepId)));
+  const steps = failed.map((s) => (s.reported === true ? notices.stepReportedItem(name.item(s.stepId))
+    : s.stepId === declined ? notices.stepDeclinedItem(name.item(s.stepId))
+    : notices.stepFailedItem(name.item(s.stepId))));
   let where: string | undefined;
   if (reported.size > 0) {
     // A decline next to a reported step counts with the errors here.
@@ -98,9 +121,9 @@ export function failureAccount(run: FailedRun, notices: WorkerNotices): FailureA
  *  writes to read, and the ids the reply needs (`ref`). */
 export function failedRunBody(
   notices: WorkerNotices,
-  at: { title: string; status: string | undefined; run: FailedRun; grantLines: readonly string[]; ref: string },
+  at: { title: string; status: string | undefined; run: FailedRun; grantLines: readonly string[]; ref: string; positionOf?: (id: string) => number | undefined },
 ): string {
-  const failure = failureAccount(at.run, notices);
+  const failure = failureAccount(at.run, notices, at.positionOf);
   return `${notices.workflowIncomplete(at.title, at.status)}\n\n` +
     (failure.runError !== undefined ? `${notices.errorLabel} ${failure.runError}\n\n` : '') +
     // A list as Markdown reads it, and as plain text does (Telegram): a blank line after the label (U-201).

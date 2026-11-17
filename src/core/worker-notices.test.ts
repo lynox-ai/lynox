@@ -48,7 +48,7 @@ function workerSamples(n: WorkerNotices): Record<string, string> {
     containedResult: n.containedResult, containedQuestion: n.containedQuestion, containedQuestionInquiry: n.containedQuestionInquiry,
     workflowIncomplete: n.workflowIncomplete('Wochenbericht', 'failed'), errorLabel: n.errorLabel,
     affectedStepsLabel: n.affectedStepsLabel, writesLabel: n.writesLabel, workflowRef: n.workflowRef('r-1', 'w-1'),
-    stepReported: n.stepReported('fetch'), stepReportedItem: n.stepReportedItem('fetch'), reportedReasonWhere: n.reportedReasonWhere, reportedReasonsWhere: n.reportedReasonsWhere,
+    stepReported: n.stepReported('fetch'), stepReportedItem: n.stepReportedItem('fetch'), reportedReasonWhere: n.reportedReasonWhere, reportedReasonsWhere: n.reportedReasonsWhere, unnamedStep: n.unnamedStep(2), unnamedStepNoPosition: n.unnamedStep(undefined), stepReportedUnnamed: n.stepReportedUnnamed(2), stepReportedUnnamedNoPosition: n.stepReportedUnnamed(undefined), stepFailedUnnamed: n.stepFailedUnnamed(2), stepDeclinedUnnamed: n.stepDeclinedUnnamed(2),
     stepFailed: n.stepFailed('fetch'), stepFailedItem: n.stepFailedItem('fetch'), stepDeclined: n.stepDeclined('fetch'), stepDeclinedItem: n.stepDeclinedItem('fetch'), runFailed: n.runFailed, errorWhere: n.errorWhere,
     errorsWhere: n.errorsWhere, errorsAndReasonWhere: n.errorsAndReasonWhere, errorsAndReasonsWhere: n.errorsAndReasonsWhere,
     declinedWhere: n.declinedWhere, errorsAndDeclinedWhere: n.errorsAndDeclinedWhere,
