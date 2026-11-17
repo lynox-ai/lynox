@@ -1118,6 +1118,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'backups.creating': { de: 'Erstelle Backup...', en: 'Creating backup...' },
 	'backups.encrypted': { de: 'Verschlüsselt', en: 'Encrypted' },
 	'backups.files': { de: 'Dateien', en: 'files' },
+	'backups.files_one': { de: 'Datei', en: 'file' },
 	'backups.restore': { de: 'Wiederherstellen', en: 'Restore' },
 	'backups.restoring': { de: 'Wiederherstellen...', en: 'Restoring...' },
 	'backups.restore_confirm': { de: 'Dieses Backup wirklich wiederherstellen? Ein Sicherheits-Backup wird vorher erstellt.', en: 'Restore this backup? A safety backup will be created first.' },
@@ -2073,7 +2074,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// A save the server refused, with its reason (ux U-102). {reason} is the server's sentence.
 	'settings.save_refused': { de: 'Nicht gespeichert: {reason}', en: 'Not saved: {reason}' },
 	'settings.delete': { de: 'Löschen', en: 'Delete' },
-	'settings.back': { de: 'Settings', en: 'Settings' },
+	'settings.back': { de: 'Einstellungen', en: 'Settings' },
 
 	// Config
 	'config.title': { de: 'Konfiguration', en: 'Configuration' },

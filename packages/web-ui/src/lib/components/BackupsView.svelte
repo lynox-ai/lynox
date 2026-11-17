@@ -221,7 +221,7 @@
 							{#if coverage}
 								<span data-testid="backup-coverage-badge" class="text-xs rounded-[var(--radius-sm)] px-1.5 py-0.5 {coverage.tone === 'warning' ? 'bg-warning/15 text-warning' : 'bg-border text-text-muted'}">{t(coverage.badge)}</span>
 							{/if}
-							<span class="text-xs text-text-muted">{fileCount(backup)} {t('backups.files')}</span>
+							<span class="text-xs text-text-muted">{fileCount(backup)} {t(fileCount(backup) === 1 ? 'backups.files_one' : 'backups.files')}</span>
 						</div>
 					</div>
 					{#if coverage}

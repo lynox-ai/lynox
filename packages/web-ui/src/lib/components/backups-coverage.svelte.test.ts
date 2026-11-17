@@ -62,7 +62,7 @@ describe('BackupsView: what a backup covers', () => {
 	it('control: a verified backup without a record shows no notice', async () => {
 		listed = [backup('b-1', { provenance: 'verified' })];
 		await render();
-		expect(target.textContent).toContain('1 ' + t('backups.files'));
+		expect(target.textContent).toContain('1 ' + t('backups.files_one'));
 		expect(badges()).toEqual([]);
 		expect(lines()).toEqual([]);
 	});
