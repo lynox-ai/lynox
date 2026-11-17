@@ -1456,8 +1456,8 @@ describe('runSavedWorkflow', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain('step #2 (steps[1].task): it refers to the output of step "fetch", which is not in this step\'s input_from');
     expect(result.error).toContain('(in a saved workflow: set_input_from)');
-    // A contained instance's push says it in fixed words, without the referenced name.
-    expect(result.fixedError).toBe('Step #2 of this workflow refers to the output of a step its run cannot read, so the workflow did not run. Open it in a chat and ask to repair that reference (update_workflow_steps).');
+    // The worker tells the owner which step, in fixed words (`WorkerNotices.workflowRefUnresolved`).
+    expect(result.unresolvedRefStep).toBe(2);
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 

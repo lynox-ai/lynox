@@ -74,9 +74,12 @@ describe('a step reference no run resolves is refused before the run', () => {
 
   it('in an input template, a reference no input_from can fix says that only removing the step does', () => {
     expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{fetsh.result}}' }, input_from: ['fetch'] }])))
-      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to the result of step "fetsh", and this workflow has no such step. Remove step #2 to resolve it: its input template cannot be edited.');
+      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to the result of step "fetsh", and this workflow has no such step. Its input template cannot be edited. To resolve it, rename the step it should read to "fetsh" (rename_step) and add it with set_input_from, or remove step #2.');
+    // No step can be renamed to an id outside the shape: removing is the only way, with the user's word.
+    expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{Fetch It.result}}' }, input_from: ['fetch'] }])))
+      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to the result of a step id outside the allowed form, and this workflow has no such step. Its input template cannot be edited. Remove step #2 only if the user wants that step gone; otherwise tell the user this step cannot run as written.');
     expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{mail.result}}' } }])))
-      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to this step\'s own output, which no run has yet. Remove step #2 to resolve it: its input template cannot be edited.');
+      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to this step\'s own output, which no run has yet. Its input template cannot be edited. Remove step #2 only if the user wants that step gone; otherwise tell the user this step cannot run as written.');
   });
 
   it('params, a context key of this run, and a name a run may supply pass', () => {
@@ -104,9 +107,12 @@ describe('removing a step another step\'s reference reads is refused', () => {
       .toBe('Error: remove: step "sum" reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step "sum" too.');
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'sum' }]))
       .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input_template.body. Remove step "mail" too: its input template cannot be edited.');
-    // A step added in the same edit has an id in the shape too.
+    // A step added in the same edit is not in the list the next edit starts from.
     expect(applyModifications([{ id: 'fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum it' }], [{ action: 'add_step', step_id: 'late', value: 'Use {{fetch.result}}', input_from: ['fetch'] }, { action: 'remove', step_id: 'fetch' }]))
-      .toContain('Error: remove: step "late" reads the output of a step this edit removes');
+      .toContain('Error: remove: the step this edit adds ("late") reads the output of a step this edit removes');
+    // A step this edit renames is named by the id it has in that list.
+    expect(applyModifications(steps(), [{ action: 'rename_step', step_id: 'sum', value: 'total' }, { action: 'remove', step_id: 'fetch' }]))
+      .toContain('Error: remove: step "sum" reads the output of a step this edit removes');
   });
 
   it('one edit that removes a step and what reads it, in either order, is taken', () => {

@@ -128,10 +128,10 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
   // The steps this edit removes: a reference to one that is still read once every action has run is
   // refused below, so an edit that removes a step and changes what read it is one edit.
   const removed = new Set<string>();
-  // Each step's position in the list the edit starts from, the list the caller sees: a refusal after
-  // the edit names a step whose id is outside the shape by it (steps keep their object through
-  // update_task, rename_step and set_input_from).
-  const storedAt = new Map(steps.map((s, i) => [s, i + 1] as const));
+  // Each step's id and position in the list the edit starts from: a refused edit is discarded, so the
+  // caller's next edit starts from that list, and a refusal after the edit names a step as it reads
+  // there (steps keep their object through update_task, rename_step and set_input_from).
+  const stored = new Map(steps.map((s, i) => [s, { id: s.id, at: i + 1 }] as const));
   for (const mod of modifications) {
     if (mod.action === 'add_step') {
       // The shape first, so no refusal quotes an id outside it back to the model.
@@ -238,16 +238,20 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
     }
   }
   // A `{{<id>.…}}` reference to a removed step would stay as raw text in the step that reads it (its
-  // `input_from` entry was dropped with the step), so the edit is refused, naming that step by position.
-  // An id the same edit gave to another step (add_step, rename_step) is not removed any more.
+  // `input_from` entry was dropped with the step), so the edit is refused, naming that step as the list
+  // the edit started from has it. An id the same edit gave to another step (add_step, rename_step) is
+  // not removed any more.
   for (const removedId of removed) {
     if (steps.some(s => s.id === removedId)) continue;
     for (const s of steps) {
       const field = fieldReferencing(s, removedId);
       if (!field) continue;
-      // By its id when that has the shape (a step this edit adds always does, `newIdProblem`): a `#n`
-      // in the next edit counts in the list as that edit has changed it so far, an id does not.
-      const which = isStepIdShape(s.id) ? `step "${s.id}"` : `step #${String(storedAt.get(s) ?? 0)} (its position before this edit)`;
+      // By its stored id when that has the shape: a `#n` in the next edit counts in the list as that
+      // edit has changed it so far, an id does not. A step this edit adds is not in that list; its id
+      // has the shape (`newIdProblem`).
+      const was = stored.get(s);
+      const which = was === undefined ? `the step this edit adds ("${s.id}")`
+        : isStepIdShape(was.id) ? `step "${was.id}"` : `step #${String(was.at)} (its position before this edit)`;
       const fix = field === 'task'
         ? `Change that reference in the same edit (update_task), or remove ${which} too.`
         : `Remove ${which} too: its input template cannot be edited.`;

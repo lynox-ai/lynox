@@ -83,8 +83,10 @@ export function templateRefIssue(
         const [name = '', second] = ref.split('.');
         if (name === 'params' || (context !== undefined && Object.hasOwn(context, name))) continue;
         const where = `step #${String(i + 1)} (${path}[${String(i)}].${field})`;
-        // An input template cannot be edited in a saved workflow; a task can (update_task).
-        const removeOnly = `Remove step #${String(i + 1)} to resolve it: its input template cannot be edited.`;
+        // An input template cannot be edited in a saved workflow; a task can (update_task). Removing the
+        // step is the way that loses the most, so it is named last, and alone only with the user's word.
+        const removeOnly = `Its input template cannot be edited. Remove step #${String(i + 1)} only if the user wants that step gone; `
+          + 'otherwise tell the user this step cannot run as written.';
         const inTemplate = field !== 'task';
         if (name === step.id) {
           return `${where}: it refers to this step's own output, which no run has yet. `
@@ -97,8 +99,12 @@ export function templateRefIssue(
             + (inTemplate ? '.' : ', or leave the reference out.');
         }
         if (second === 'result') {
-          return `${where}: it refers to the result of ${isStepIdShape(name) ? `step "${name}"` : 'a step id outside the allowed form'}, and this workflow has no such step. `
-            + (inTemplate ? removeOnly : "Refer to the step it should read by that step's id, and list it in input_from.");
+          const missing = `${where}: it refers to the result of ${isStepIdShape(name) ? `step "${name}"` : 'a step id outside the allowed form'}, and this workflow has no such step. `;
+          if (!inTemplate) return missing + "Refer to the step it should read by that step's id, and list it in input_from.";
+          // No step can be renamed to an id outside the shape, so removing is the only way there.
+          return missing + (isStepIdShape(name)
+            ? `Its input template cannot be edited. To resolve it, rename the step it should read to "${name}" (rename_step) and add it with set_input_from, or remove step #${String(i + 1)}.`
+            : removeOnly);
         }
       }
     }
@@ -106,10 +112,7 @@ export function templateRefIssue(
   return null;
 }
 
-/** The words a reduced sink (a contained instance's push) may say for a refusal of `templateRefIssue`:
- *  the step's position and the repair, without any referenced name. */
-export function templateRefFixedText(issue: string): string {
-  const at = /^step #(\d+) /.exec(issue)?.[1];
-  return `Step #${at ?? '?'} of this workflow refers to the output of a step its run cannot read, so the workflow did not run. `
-    + 'Open it in a chat and ask to repair that reference (update_workflow_steps).';
+/** The position (1-based) of the step a refusal of `templateRefIssue` names. */
+export function templateRefStep(issue: string): number {
+  return Number(/^step #(\d+) /.exec(issue)?.[1] ?? '0');
 }
