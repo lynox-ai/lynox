@@ -29,7 +29,8 @@ vi.mock('@sentry/node', async () => {
 
 const Sentry = await import('@sentry/node');
 const {
-  initErrorReporting, captureError, captureLynoxError, captureUserFeedback, shutdownErrorReporting, isErrorReportingEnabled, _resetForTesting,
+  initErrorReporting, captureError, captureLynoxError, captureUserFeedback, shutdownErrorReporting, isErrorReportingEnabled,
+  installGlobalHandlers, uninstallGlobalHandlers, _resetForTesting,
 } = await import('./error-reporting.js');
 const { LynoxError } = await import('./errors.js');
 
@@ -84,11 +85,17 @@ it('reports from a timer a request started before reporting was turned off and o
   const gate = new Promise<void>((resolve) => { release = resolve; });
   let fired!: () => void;
   const done = new Promise<void>((resolve) => { fired = resolve; });
+  let timerClient: unknown;
+  let onUncaught: ((e: Error) => void) | undefined;
+  let onRejection: ((r: unknown) => void) | undefined;
   const server = http.createServer((_req, res) => {
     // Started inside the request, so it runs in the request's scope; it captures only once released.
     setTimeout(() => {
       void gate.then(async () => {
+        timerClient = Sentry.getClient();
         captureError(new Error('from-an-old-timer'));
+        onRejection?.(new Error('rejection-in-an-old-timer'));
+        onUncaught?.(new Error('uncaught-in-an-old-timer'));
         captureLynoxError(new LynoxError('lynox-from-an-old-timer', 'TEST_CODE'));
         await captureUserFeedback({ name: 'n', comments: 'feedback-from-an-old-timer' });
         fired();
@@ -109,9 +116,32 @@ it('reports from a timer a request started before reporting was turned off and o
   // Off, then on again from outside the request: the timer's scope still names the closed client.
   await shutdownErrorReporting();
   expect(await initErrorReporting(DSN)).toBe(true);
+  const liveClient = Sentry.getClient();
+  // The process-wide handlers, called by hand from the timer: emitting the events would reach
+  // the test runner's own listeners, and the uncaught one ends the process.
+  const before = { u: process.listeners('uncaughtException'), r: process.listeners('unhandledRejection') };
+  installGlobalHandlers();
+  onUncaught = process.listeners('uncaughtException').find((l) => !before.u.includes(l)) as typeof onUncaught;
+  onRejection = process.listeners('unhandledRejection').find((l) => !before.r.includes(l)) as typeof onRejection;
+  const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+  const liveFlush = vi.spyOn(liveClient!, 'flush');
   release();
   await done;
+  // The uncaught handler waits for the live client's flush before it exits, not the old one's;
+  // read before the flush below, which calls the live client too.
+  expect(liveFlush).toHaveBeenCalledWith(2000);
+  liveFlush.mockRestore();
   await Sentry.flush(2000);
+  await vi.waitFor(() => expect(exit).toHaveBeenCalled());
+  exit.mockRestore();
+  uninstallGlobalHandlers();
+  // Control: the timer still runs in the scope forked before the re-init, which names the old,
+  // disabled client; without that the cases below would pass without the routing.
+  expect(timerClient).toBeDefined();
+  expect(timerClient).not.toBe(liveClient);
+  expect((timerClient as { getOptions(): { enabled?: boolean } }).getOptions().enabled).toBe(false);
+  expect(reached('rejection-in-an-old-timer')).toBe(true);
+  expect(reached('uncaught-in-an-old-timer')).toBe(true);
   expect(reached('from-an-old-timer')).toBe(true);
   expect(reached('lynox-from-an-old-timer')).toBe(true);
   // Matched as the feedback's message field: the comment's bare text also rides along as source

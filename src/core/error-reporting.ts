@@ -162,7 +162,8 @@ let _sentryModule: typeof import('@sentry/node') | null = null;
  * inside a request. An init inside a request binds its client to that request's scope only, so
  * every init also binds its client here; without that, reporting turned on again from the
  * settings reached only the request that turned it on. A scope forked before that (a request or a
- * timer still running) keeps the client of its time.
+ * timer still running) keeps the client of its time; this module's own captures override it with
+ * `_currentClient` below.
  */
 let _defaultScope: ReturnType<typeof import('@sentry/node').getCurrentScope> | null = null;
 /**
@@ -460,16 +461,17 @@ export function installGlobalHandlers(): void {
   if (_uncaughtHandler !== null) return;  // idempotent — re-init in same process keeps single handler
   const Sentry = _sentry;
 
+  // Both can fire inside a scope forked before a later init, so they route like the captures do.
   _uncaughtHandler = (error) => {
     process.stderr.write(`[lynox] uncaught exception: ${processErrorText(error, true)}\n`);
-    Sentry.captureException(error);
-    void Sentry.flush(2000).finally(() => {
+    withCurrentClient(Sentry, () => Sentry.captureException(error));
+    void Promise.resolve((_currentClient ?? Sentry).flush(2000)).finally(() => {
       process.exit(1);
     });
   };
   _rejectionHandler = (reason) => {
     process.stderr.write(`[lynox] unhandled rejection: ${processErrorText(reason, true)}\n`);
-    Sentry.captureException(reason);
+    withCurrentClient(Sentry, () => Sentry.captureException(reason));
   };
 
   process.on('uncaughtException', _uncaughtHandler);
