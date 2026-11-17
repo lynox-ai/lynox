@@ -10,8 +10,9 @@ import { formatCost } from '../format.js';
 // numbers where the engine counts them, and the head takes the counts of each ask. Before, nothing
 // showed that anything was happening: a walk saw „0 Ziele“ standing while lynox was already
 // writing, a running undo looked like a finished one, and after ten minutes the page stopped
-// asking without a word. While the list or the targets are read, the head shows a dash, not a
-// count that reads as done; a sentence says when the page has stopped asking.
+// asking without a word. While the list is read, the title and the head show a dash; while the
+// targets are read, only their number, not a written count that reads as done. A sentence says
+// when the page has stopped asking.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -52,6 +53,8 @@ let targetLimits: number[];
 // The run's targets as the engine serves them, page by page.
 let allTargets: BulkTarget[];
 let r1Fails = false;
+// While set, the run's answer arrives but its body is read only once this settles.
+let holdBody: Promise<void> | null = null;
 
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -68,6 +71,7 @@ beforeEach(() => {
 	targetLimits = [];
 	allTargets = [];
 	r1Fails = false;
+	holdBody = null;
 	Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
@@ -85,7 +89,13 @@ beforeEach(() => {
 		runAsks++;
 		const status = nextStatuses.shift() ?? runStatus;
 		if (status !== 200) return new Response(JSON.stringify({ error: 'Too many requests' }), { status, headers: { 'Content-Type': 'application/json', ...(retryAfter !== null ? { 'Retry-After': retryAfter } : {}) } });
-		return reply(run);
+		const res = reply(run);
+		if (holdBody !== null) {
+			const hold = holdBody;
+			const snap = run;
+			res.json = async () => { await hold; return snap; };
+		}
+		return res;
 	}));
 });
 
@@ -246,6 +256,26 @@ describe('a run the engine works on', () => {
 		run = { ...run, phase: 'writing', changes: UPDATES(3), applied: 1, judge: { tier: 'standard', unjudged: 0, judged: 3 } };
 		await pass(BULK_FOLLOW_MS);
 		expect(line()).toBe('lynox schreibt … 1 von 3');
+	});
+
+	it('drops an answer that arrives after the page is gone, and loads nothing for it', async () => {
+		run = makeRun({ total: 3, judge: { tier: 'standard', unjudged: 3, judged: 0 } });
+		await render();
+		let release!: () => void;
+		holdBody = new Promise((r) => { release = r; });
+		// The answer names another step, which would load the run anew.
+		run = { ...run, phase: 'writing', changes: UPDATES(3), applied: 1, judge: { tier: 'standard', unjudged: 0, judged: 3 } };
+		await pass(BULK_FOLLOW_MS);
+		const asks = runAsks;
+		const tAsks = targetAsks;
+		expect(asks).toBeGreaterThan(1);
+		if (component) unmount(component);
+		component = undefined;
+		holdBody = null;
+		release();
+		await pass(BULK_FOLLOW_MS);
+		expect(runAsks).toBe(asks);
+		expect(targetAsks).toBe(tAsks);
 	});
 
 	it('takes the cost and a pause with each ask while the run works', async () => {
