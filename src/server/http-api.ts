@@ -2481,6 +2481,8 @@ export class LynoxHTTPApi {
 
   /** The principal a request's session cookie carried, set by the auth block. */
   private readonly _sessionPrincipal = new WeakMap<IncomingMessage, RequestPrincipal>();
+  /** The route a request was dispatched to, for a refusal's row in a mandate's trail. */
+  private readonly _dispatchRoute = new WeakMap<IncomingMessage, { readonly method: string; readonly routePath: string; readonly pathname: string }>();
 
   /** The requests the auth block admitted as the control plane's admin bearer (`cp-admin`). */
   private readonly _cpAdminRequests = new WeakSet<IncomingMessage>();
@@ -2832,11 +2834,49 @@ export class LynoxHTTPApi {
     return loop.stopTask(id).kind === 'requested' ? 'stopped' : 'unstoppable_now';
   }
 
-  /** The 403 a mandate gets for an act only the owner may perform. */
-  private _refuseUnlessOwner(req: IncomingMessage, res: ServerResponse, what: string): boolean {
-    if (isOwnerPrincipal(this._principalOf(req))) return false;
+  /**
+   * The 403 a mandate gets for an act only the owner may perform. A mandate's refusal is a row in
+   * its trail ({@link _recordMandateRefusal}); `target` names what was asked for where the path
+   * alone does not (a reveal of a secret, whose route answers a mandate a plain status too).
+   */
+  private _refuseUnlessOwner(req: IncomingMessage, res: ServerResponse, what: string, target?: string): boolean {
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return false;
+    this._recordMandateRefusal(req, principal, target);
     errorResponse(res, 403, `Only the owner of this instance can ${what}.`);
     return true;
+  }
+
+  /**
+   * A `refused` row for an act only the owner may perform, so the owner sees the attempt: the
+   * route as registered, the path as sent (or `target`). Its own correlation id: no attempt row
+   * stands before it, the refusal is the whole act. The refusal stands whether or not the row is
+   * written, as it grants nothing; a row that cannot be written is logged.
+   */
+  private _recordMandateRefusal(req: IncomingMessage, principal: RequestPrincipal, target?: string): void {
+    if (!writesMandateTrail(principal)) return;
+    const route = this._dispatchRoute.get(req);
+    if (route === undefined) return;
+    try {
+      const log = this.engine?.getAuditLog() ?? null;
+      if (log === null) throw new Error('no audit log');
+      log.record({ principal, action: `${route.method} ${route.routePath}`, target: target ?? requestPathTarget(route.pathname), phase: 'refused', correlationId: newCorrelationId() });
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] a mandate's refused attempt could not be recorded: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  }
+
+  /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
+  private _routeTemplateOf(method: string, pathname: string): string | null {
+    const candidates = pathname.endsWith('/') && pathname.length > 1 ? [pathname, pathname.slice(0, -1)] : [pathname];
+    const dispatchMethods = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
+    for (const candidate of candidates) {
+      for (const m of dispatchMethods) if (this.staticRouteScopes.has(`${m} ${candidate}`)) return candidate;
+      for (const route of this.dynamicRoutes) {
+        if (dispatchMethods.includes(route.method) && route.pattern.test(candidate)) return route.path;
+      }
+    }
+    return null;
   }
 
   /**
@@ -4145,6 +4185,12 @@ export class LynoxHTTPApi {
           return;
         }
       } else if (routeScope === 'admin' && authScope !== 'admin') {
+        // A mandate is `user`, so an owner's admin route refuses it here (D6): its attempt too.
+        const routePath = this._routeTemplateOf(method, pathname);
+        if (routePath !== null) {
+          this._dispatchRoute.set(req, { method, routePath, pathname });
+          this._recordMandateRefusal(req, this._principalOf(req));
+        }
         errorResponse(res, 403, 'Admin scope required');
         return;
       }
@@ -4214,9 +4260,10 @@ export class LynoxHTTPApi {
       if (staticHandler) {
         const stanceKey = this.staticRoutes.has(routeKey) ? routeKey : `GET ${pathname}`;
         const stance = this.staticRouteStances.get(stanceKey);
+        const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
+        this._dispatchRoute.set(req, { method, routePath, pathname });
         if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, stance)) return;
-        const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
         if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams, stance, {})) return;
         if (!this._beganMandateChange(req, res, method, routePath, pathname)) return;
         try { await staticHandler(req, res, {}, body); } finally { this._closeTrail(req, res); }
@@ -4236,6 +4283,7 @@ export class LynoxHTTPApi {
               params[name] = value;
             }
           }
+          this._dispatchRoute.set(req, { method, routePath: route.path, pathname });
           if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
           if (this._refusedByStance(req, res, route.stance)) return;
           if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams, route.stance, params)) return;
@@ -14934,7 +14982,7 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
         // The key opens every stored secret: the owner's own session only.
-        if (this._refuseUnlessOwner(req, res, 'see the vault key')) return;
+        if (this._refuseUnlessOwner(req, res, 'see the vault key', requestPathTarget(url.pathname, [['reveal', 'true']]))) return;
         // Managed mode: never expose vault key to users
         if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: vault key is system-controlled');
@@ -14976,7 +15024,7 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
         // The token logs in as the owner: the owner's own session only.
-        if (this._refuseUnlessOwner(req, res, 'see the access token')) return;
+        if (this._refuseUnlessOwner(req, res, 'see the access token', requestPathTarget(url.pathname, [['reveal', 'true']]))) return;
         if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: access token is system-controlled');
           return;

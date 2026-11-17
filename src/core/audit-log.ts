@@ -89,9 +89,21 @@ export const TARGET_MAX = 400;
 export const DISPLAY_NAME_SQL =
   'SELECT actor_display FROM audit_log WHERE mandate_id = ? AND actor_display IS NOT NULL ORDER BY id DESC LIMIT 1';
 
+/** The reads behind {@link AuditLog.mandatePrincipalOf}: a row with a name first, on the partial
+ *  index above; only a grant none of whose rows carries a name walks the trail. */
+const MANDATE_PERSON_NAMED_SQL =
+  'SELECT actor_email, actor_display FROM audit_log WHERE mandate_id = ? AND actor_display IS NOT NULL ORDER BY id DESC LIMIT 1';
+const MANDATE_PERSON_ANY_SQL =
+  'SELECT actor_email, actor_display FROM audit_log WHERE mandate_id = ? AND actor_email IS NOT NULL ORDER BY id DESC LIMIT 1';
+
+/** The action of the row a revoked grant leaves in its person's trail. */
+export const MANDATE_REVOKED_ACTION = 'mandate:revoke';
+
 export class AuditLog {
   private readonly insert: Database.Statement;
   private displayName: Database.Statement | undefined;
+  private personNamed: Database.Statement | undefined;
+  private personAny: Database.Statement | undefined;
 
   constructor(private readonly db: Database.Database) {
     this.insert = db.prepare(
@@ -108,6 +120,20 @@ export class AuditLog {
     this.displayName ??= this.db.prepare(DISPLAY_NAME_SQL);
     const r = this.displayName.get(mandateId) as { actor_display: string } | undefined;
     return r === undefined ? null : r.actor_display;
+  }
+
+  /**
+   * The person of a grant as its latest row names them: address and, when a row carries one, the
+   * name. Null when the grant has no row with an address: it never acted here, so the trail has
+   * no person to put anything under.
+   */
+  mandatePrincipalOf(mandateId: string): RequestPrincipal | null {
+    this.personNamed ??= this.db.prepare(MANDATE_PERSON_NAMED_SQL);
+    this.personAny ??= this.db.prepare(MANDATE_PERSON_ANY_SQL);
+    type Row = { actor_email: string | null; actor_display: string | null };
+    const r = (this.personNamed.get(mandateId) as Row | undefined) ?? (this.personAny.get(mandateId) as Row | undefined);
+    if (r === undefined || r.actor_email === null) return null;
+    return { kind: 'mandate', email: r.actor_email, mandateId, ...(r.actor_display !== null ? { display: r.actor_display } : {}) };
   }
 
   /** Append one row. Throws when it cannot be written; the caller refuses the act then. */
@@ -134,6 +160,21 @@ export class AuditLog {
       TRAIL_FORM,
     );
   }
+}
+
+/**
+ * The row a revoke leaves in the revoked person's trail, so the owner sees when the access ended
+ * there and which reads came before it. Written when the instance learns of the revoke, which is
+ * after the owner's click by however long the control plane takes to tell it; reads in between
+ * stand before this row, and none after it (a revoked session is refused before its read row).
+ * False when the grant never acted here: there is no person in the trail to put it under.
+ * Throws when the row cannot be written.
+ */
+export function recordMandateRevoked(log: AuditLog, mandateId: string): boolean {
+  const principal = log.mandatePrincipalOf(mandateId);
+  if (principal === null) return false;
+  log.record({ principal, action: MANDATE_REVOKED_ACTION, phase: 'done', correlationId: newCorrelationId() });
+  return true;
 }
 
 export function newCorrelationId(): string {

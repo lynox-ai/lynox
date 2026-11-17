@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
-import { AuditLog, DISPLAY_NAME_SQL, OutwardReadUnrecorded, delegatedRedirects, httpTarget, namedTarget, outwardReadRecorder, requestOutcomePhase, requestPathTarget } from './audit-log.js';
+import { AuditLog, DISPLAY_NAME_SQL, MANDATE_REVOKED_ACTION, recordMandateRevoked, OutwardReadUnrecorded, delegatedRedirects, httpTarget, namedTarget, outwardReadRecorder, requestOutcomePhase, requestPathTarget } from './audit-log.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { createMailReadTool } from '../integrations/mail/tools/mail-read.js';
 import { createMailSearchTool } from '../integrations/mail/tools/mail-search.js';
@@ -51,6 +51,31 @@ describe('audit_log in engine.db (v22)', () => {
     expect(log.displayNameOf('TEST-MANDATE-9')).toBeNull();
   });
 
+  it('names a grant\'s person from its latest named row, else from its latest row with an address, else not at all', () => {
+    const log = new AuditLog(db.getDb());
+    const at = (email: string, display: string | undefined, mandateId: string): void =>
+      log.record({ principal: { kind: 'mandate', email, display, mandateId }, action: 'x', phase: 'read', correlationId: 'c' });
+    at('old@example.invalid', 'Old Name', 'TEST-MANDATE-1');
+    at('new@example.invalid', 'New Name', 'TEST-MANDATE-1');
+    at('later@example.invalid', undefined, 'TEST-MANDATE-1');
+    at('plain@example.invalid', undefined, 'TEST-MANDATE-2');
+    // The latest row that carries a name: address and name together, from that one row.
+    expect(log.mandatePrincipalOf('TEST-MANDATE-1')).toEqual({ kind: 'mandate', email: 'new@example.invalid', display: 'New Name', mandateId: 'TEST-MANDATE-1' });
+    // No row with a name: the address alone.
+    expect(log.mandatePrincipalOf('TEST-MANDATE-2')).toEqual({ kind: 'mandate', email: 'plain@example.invalid', mandateId: 'TEST-MANDATE-2' });
+    expect(log.mandatePrincipalOf('TEST-MANDATE-9')).toBeNull();
+  });
+
+  it('a revoke writes one done row under the grant\'s person, and nothing for a grant that never acted', () => {
+    const log = new AuditLog(db.getDb());
+    log.record({ principal: MANDATE, action: 'x', phase: 'read', correlationId: 'c' });
+    expect(recordMandateRevoked(log, 'TEST-MANDATE-1')).toBe(true);
+    expect(recordMandateRevoked(log, 'TEST-MANDATE-9')).toBe(false);
+    const got = rows().slice(1);
+    expect(got).toHaveLength(1);
+    expect(got[0]).toMatchObject({ actor_kind: 'mandate', actor_email: 'recipient@example.invalid', actor_display: 'TEST-DISPLAY', mandate_id: 'TEST-MANDATE-1', action: MANDATE_REVOKED_ACTION, target: null, phase: 'done' });
+  });
+
   it('reads a grant\'s display name through the partial index, not a walk over the trail (v55)', () => {
     const plan = (db.getDb().prepare(`EXPLAIN QUERY PLAN ${DISPLAY_NAME_SQL}`).all('TEST-MANDATE-1') as { detail: string }[]).map((r) => r.detail);
     expect(plan).toEqual(['SEARCH audit_log USING INDEX idx_audit_log_mandate_display (mandate_id=?)']);
@@ -95,9 +120,11 @@ describe('audit_log in engine.db (v22)', () => {
     db = new EngineDb(join(dir, 'engine.db'));
   });
 
-  it('has no way to read the trail back but a grant\'s display name (it never reaches a model\'s context)', () => {
+  it('has no way to read the trail back but a grant\'s person, address and name (it never reaches a model\'s context)', () => {
+    // `mandatePrincipalOf` reads who a grant's person is, for the row its revoke leaves: what the
+    // owner's view shows next to every row of that person anyway. No act, target or content.
     const methods = Object.getOwnPropertyNames(AuditLog.prototype).filter(n => n !== 'constructor');
-    expect(methods.sort()).toEqual(['displayNameOf', 'record']);
+    expect(methods.sort()).toEqual(['displayNameOf', 'mandatePrincipalOf', 'record']);
   });
 });
 
