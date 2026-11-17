@@ -74,6 +74,17 @@ function ownGrant(over: { scope?: string; audience?: string; grant_type?: 'clien
   };
 }
 
+/** A profile that sends a stored key as a bearer token, on a listed host. */
+function keyProfile(over: { base_url?: string; key?: string } = {}): ApiProfile {
+  return {
+    id: 'kp', name: 'Key profile', base_url: over.base_url ?? 'https://api.openai.com/v1', description: 'A key of its own',
+    rate_limit: { requests_per_minute: 60 },
+    endpoints: [{ method: 'GET', path: '/items', description: 'List items' }],
+    guidelines: ['Read only'], avoid: ['No writes'],
+    auth: { type: 'bearer', vault_keys: [over.key ?? 'KP_KEY_A'] },
+  };
+}
+
 const stored = (store: ApiStore, id: string): ApiProfile | undefined => store.storedProfile(id);
 
 describe('api_setup: a save names what it changes, and a refused change is not stored', () => {
@@ -113,7 +124,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     const store = new ApiStore();
     expect((await save(store, 'create', ownGrant(), 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
     const { result } = await save(store, 'update', ownGrant({ scope: 'read write' }), undefined);
-    expect(result).toMatch(/^Blocked: profile "svc" not saved\. The save changes the scope, audience or grant type/);
+    expect(result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
   });
 
@@ -142,7 +153,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     await save(store, 'create', noGrant('read'), 'Allow');
     expect(stored(store, 'svc')?.auth?.oauth?.grant_type).toBeUndefined();
     const nobody = await save(store, 'update', noGrant('read write'), undefined);
-    expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes the scope/);
+    expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
     const denied = await save(store, 'update', noGrant('read write'), 'Deny');
     expect(denied.asked[0]).toContain('- scopes added: write');
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
@@ -154,7 +165,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     const dropped = ownGrant({ scope: 'read write' });
     delete dropped.auth!.oauth!.grant_type;
     const { result } = await save(store, 'update', dropped, undefined);
-    expect(result).toMatch(/^Blocked: profile "svc" not saved\. The save changes the scope/);
+    expect(result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
     expect(stored(store, 'svc')?.auth?.oauth?.grant_type).toBe('refresh_token');
   });
 
@@ -168,6 +179,86 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     const masked = await save(store, 'update', ownGrant({ audience: key }), 'Deny');
     expect(masked.asked[0]).toContain('- audience: (none) → (a value shaped like a credential, not shown)');
     expect(masked.asked[0]).not.toContain(key);
+  });
+
+  it('a refresh_token sign-in: a scope or audience change, which the next refresh sends, is asked about, named, and refused with nobody to ask', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant({ grant_type: 'refresh_token' }), 'Allow');
+    const denied = await save(store, 'update', ownGrant({ grant_type: 'refresh_token', scope: 'read write', audience: 'https://other.example' }), 'Deny');
+    expect(denied.asked[0]).toContain('- scopes added: write');
+    expect(denied.asked[0]).toContain('- audience: (none) → https://other.example');
+    expect(denied.result).toMatch(/^Blocked: .*declined/);
+    const nobody = await save(store, 'update', ownGrant({ grant_type: 'refresh_token', scope: 'read write' }), undefined);
+    expect(nobody.result).toMatch(/^Blocked: profile "svc" not saved\. The save changes its scopes/);
+    expect(stored(store, 'svc')?.auth?.oauth).toMatchObject({ scope: 'read', grant_type: 'refresh_token' });
+    expect(stored(store, 'svc')?.auth?.oauth?.audience).toBeUndefined();
+  });
+
+  it('a key profile: a swap of the secret it reads is asked about first, before any binding question, and refused with nobody to ask', async () => {
+    const store = new ApiStore();
+    expect((await save(store, 'create', keyProfile(), 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
+    const denied = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), 'Deny');
+    expect(denied.asked).toHaveLength(1);
+    expect(denied.asked[0]).toContain('This save changes:\n- secrets it reads, added: KP_KEY_B\n- secrets it reads, removed: KP_KEY_A');
+    const nobody = await save(store, 'update', keyProfile({ key: 'KP_KEY_B' }), undefined);
+    expect(nobody.result).toMatch(/^Blocked: profile "kp" not saved\. The save changes its scopes/);
+    expect(stored(store, 'kp')?.auth?.vault_keys).toEqual(['KP_KEY_A']);
+  });
+
+  it('a key profile: a move to another listed host is asked about and named, and kept out when denied', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', keyProfile(), 'Allow');
+    const { result, asked } = await save(store, 'update', keyProfile({ base_url: 'https://api.mistral.ai/v1' }), 'Deny');
+    expect(asked[0]).toContain('- address (base_url): https://api.openai.com/v1 → https://api.mistral.ai/v1');
+    expect(result).toMatch(/^Blocked: .*declined/);
+    expect(stored(store, 'kp')?.base_url).toBe('https://api.openai.com/v1');
+  });
+
+  it('refine ignores any field outside its patch, so it cannot change where a credential goes', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', keyProfile(), 'Allow');
+    const asked: string[] = [];
+    const patch = { addNotes: ['x'], base_url: 'https://evil.example', auth: { type: 'bearer', vault_keys: ['KP_KEY_B'] } };
+    const result = await apiSetupTool.handler({ action: 'refine', id: 'kp', refine: patch }, agentFor(store, asked, 'Allow')) as string;
+    expect(result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect(stored(store, 'kp')?.notes).toEqual(['x']);
+    expect(stored(store, 'kp')?.base_url).toBe('https://api.openai.com/v1');
+    expect(stored(store, 'kp')?.auth).toEqual({ type: 'bearer', vault_keys: ['KP_KEY_A'] });
+  });
+
+  it('a store profile whose sign-in address cannot be derived: a scope widened while the store is dropped is refused with nobody to ask, and named when asked', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', shop(), 'Allow');
+    const noStore = shop({ scope: 'read_products write_products' });
+    delete noStore.auth!.oauth!.preset_params;
+    const nobody = await save(store, 'update', noStore, undefined);
+    expect(nobody.result).toMatch(/^Blocked: profile "shop" /);
+    expect(stored(store, 'shop')?.auth?.oauth?.scope).toBe('read_products');
+    const denied = await save(store, 'update', noStore, 'Deny');
+    expect(denied.asked[0]).toContain('- scopes added: write_products');
+    expect(denied.asked[0]).toContain('- provider parameter shop: acme → (none)');
+    expect(stored(store, 'shop')?.auth?.oauth).toMatchObject({ scope: 'read_products', preset_params: { shop: 'acme' } });
+  });
+
+  it('a store profile cannot be saved to read its app from other secret names', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', shop(), 'Allow');
+    const before = stored(store, 'shop')?.auth?.oauth?.client_secret_key;
+    expect(before).toBeDefined();
+    const other = shop();
+    other.auth!.oauth!.client_secret_key = 'MY_OWN_SECRET';
+    const { result, asked } = await save(store, 'update', other, 'Allow');
+    expect(result).toContain('Invalid auth.oauth.client_secret_key: a profile on the built-in "shopify" provider reads its app from');
+    expect(asked).toEqual([]);
+    expect(stored(store, 'shop')?.auth?.oauth?.client_secret_key).toBe(before);
+  });
+
+  it('a save that only takes a scope away narrows the profile: it saves with nobody to ask', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant({ scope: 'read write' }), 'Allow');
+    const { result } = await save(store, 'update', ownGrant({ scope: 'read' }), undefined);
+    expect(result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
   });
 
   it('control: the same sign-in with nothing of its grant changed saves without a question', async () => {

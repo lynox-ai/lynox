@@ -1868,9 +1868,6 @@ const shownValue = (value: string): string => {
   return maskSecretPatterns(line, { includeGeneric: true }) === line ? line : '(a value shaped like a credential, not shown)';
 };
 
-/** The grant an own OAuth sign-in uses: `fetch_token` takes a missing one as `client_credentials`. */
-const effectiveGrant = (o: { grant_type?: string | undefined } | undefined): string => o?.grant_type ?? 'client_credentials';
-
 const secretNamesOf = (p: ApiProfile | undefined): string[] => {
   const a = p?.auth;
   const o = a?.oauth;
@@ -1885,27 +1882,32 @@ const secretNamesOf = (p: ApiProfile | undefined): string[] => {
  * goes and what it may do: the scopes, the provider's parameters (such as the store), the
  * addresses, the secrets it reads, and the grant of an OAuth sign-in of its own. One line each,
  * with the values as values. Empty for a new profile or a save that changes none of these.
+ * `widens` is false only for a line that takes something away (a scope, a secret it reads): that
+ * narrows what the profile may do, and needs no acceptance of its own.
  */
-export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile): PromptText[] {
+export interface SecurityChange { readonly text: PromptText; readonly widens: boolean }
+
+export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile): SecurityChange[] {
   if (prior === undefined) return [];
-  const out: PromptText[] = [];
+  const out: SecurityChange[] = [];
+  const add = (text: PromptText, widens = true): void => { out.push({ text, widens }); };
   const was = new Set(scopeTokens(prior.auth?.oauth?.scope));
   const now = new Set(scopeTokens(next.auth?.oauth?.scope));
   const added = [...now].filter((s) => !was.has(s));
   const removed = [...was].filter((s) => !now.has(s));
-  if (added.length > 0) out.push(pv`scopes added: ${shownValue(added.join(' '))}`);
-  if (removed.length > 0) out.push(pv`scopes removed: ${shownValue(removed.join(' '))}`);
+  if (added.length > 0) add(pv`scopes added: ${shownValue(added.join(' '))}`);
+  if (removed.length > 0) add(pv`scopes removed: ${shownValue(removed.join(' '))}`, false);
   const pp = (p: ApiProfile): Record<string, unknown> =>
     isPlainRecord(p.auth?.oauth?.preset_params) ? p.auth!.oauth!.preset_params as Record<string, unknown> : {};
   const [ppWas, ppNow] = [pp(prior), pp(next)];
   for (const key of [...new Set([...Object.keys(ppWas), ...Object.keys(ppNow)])].sort()) {
     const [a, b] = [ppWas[key], ppNow[key]];
     if (JSON.stringify(a) !== JSON.stringify(b)) {
-      out.push(pv`provider parameter ${shownValue(key)}: ${a === undefined ? '(none)' : shownValue(String(a))} → ${b === undefined ? '(none)' : shownValue(String(b))}`);
+      add(pv`provider parameter ${shownValue(key)}: ${a === undefined ? '(none)' : shownValue(String(a))} → ${b === undefined ? '(none)' : shownValue(String(b))}`);
     }
   }
   const field = (label: string, a: string | undefined, b: string | undefined): void => {
-    if ((a ?? '') !== (b ?? '')) out.push(pv`${label}: ${a === undefined ? '(none)' : shownValue(a)} → ${b === undefined ? '(none)' : shownValue(b)}`);
+    if ((a ?? '') !== (b ?? '')) add(pv`${label}: ${a === undefined ? '(none)' : shownValue(a)} → ${b === undefined ? '(none)' : shownValue(b)}`);
   };
   field('address (base_url)', prior.base_url, next.base_url);
   field('token address (token_url)', prior.auth?.oauth?.token_url, next.auth?.oauth?.token_url);
@@ -1914,24 +1916,9 @@ export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile)
   const [sWas, sNow] = [secretNamesOf(prior), secretNamesOf(next)];
   const sAdded = sNow.filter((n) => !sWas.includes(n));
   const sRemoved = sWas.filter((n) => !sNow.includes(n));
-  if (sAdded.length > 0) out.push(pv`secrets it reads, added: ${shownValue(sAdded.join(', '))}`);
-  if (sRemoved.length > 0) out.push(pv`secrets it reads, removed: ${shownValue(sRemoved.join(', '))}`);
+  if (sAdded.length > 0) add(pv`secrets it reads, added: ${shownValue(sAdded.join(', '))}`);
+  if (sRemoved.length > 0) add(pv`secrets it reads, removed: ${shownValue(sRemoved.join(', '))}`, false);
   return out;
-}
-
-/**
- * An OAuth sign-in of the profile's own (no built-in provider) whose token the agent fetches by
- * itself (`client_credentials`, `fetch_token`): a change of its scope, audience or grant type
- * takes effect with no person and no consent page, so the save asks the owner first. A missing
- * grant type counts as `client_credentials`, as `fetch_token` reads it.
- */
-export function ownGrantChanges(prior: ApiProfile | undefined, next: ApiProfile): boolean {
-  if (prior === undefined || next.auth?.type !== 'oauth2' || builtInPresetOf(next) !== undefined) return false;
-  const [a, b] = [prior.auth?.oauth, next.auth.oauth];
-  if (effectiveGrant(a) !== 'client_credentials' && effectiveGrant(b) !== 'client_credentials') return false;
-  return scopeTokens(a?.scope).sort().join(' ') !== scopeTokens(b?.scope).sort().join(' ')
-    || (a?.audience ?? '') !== (b?.audience ?? '')
-    || effectiveGrant(a) !== effectiveGrant(b);
 }
 
 /**
@@ -2438,11 +2425,15 @@ ${draftJson}
       // else-branch below deleted any ack that did exist.
       const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
       // What this save changes in the fields that decide where a credential goes and what it may
-      // do, named in the question: a consent to "save this profile" is not a consent to the scope
-      // a text in a tool result asked the model to add. And a change to an own sign-in's grant,
-      // which the agent's next `fetch_token` would use with nobody asked, is asked about on its own.
+      // do. Any such change is asked about, on any host and for any kind of profile, and named in
+      // the question: a consent to "save this profile" is not a consent to the scope a text in a
+      // tool result asked the model to add. A refresh sends the stored scope and audience, and a
+      // swap to a name already bound to the same address sends another credential there, so
+      // neither the host check nor the binding question covers them.
       const changes = securityChanges(prior, profile);
-      const grantChange = ownGrantChanges(prior, profile);
+      // Only a change that widens or moves something asks on its own; a save that only takes a
+      // scope or a secret away narrows the profile. Every change is still listed when it asks.
+      const widens = changes.some((c) => c.widens);
       // Two questions, one prompt, and the redirect half is asked even when the
       // host IS vetted. That is not thoroughness: it is what keeps the refusal
       // at connect time followable. If this only ran for non-vetted hosts, a
@@ -2450,7 +2441,7 @@ ${draftJson}
       // would refuse for want of an acceptance, and its advice — save again and
       // accept — would point at a prompt that never appears. That dead end is
       // the one this file already carries a scar from.
-      if (nonVetted.length > 0 || redirectUrls.length > 0 || grantChange) {
+      if (nonVetted.length > 0 || redirectUrls.length > 0 || widens) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -2502,12 +2493,12 @@ ${draftJson}
           if (nonVetted.length > 0) {
             return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
           }
-          // Its next token would carry the new scope or audience with nobody asked: refused.
-          if (grantChange) {
-            return `Blocked: profile "${profile.id}" not saved. The save changes the scope, audience or grant type of its own OAuth sign-in, which the next fetch_token would use, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved.`;
+          // A change to where a credential goes or what it may do, with nobody to accept it: refused.
+          if (widens) {
+            return `Blocked: profile "${profile.id}" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved.`;
           }
         } else {
-          const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
+          const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c.text}` : pv`${acc}\n- ${c.text}`, undefined);
           const changeBlock = changeList === undefined ? pv`` : pv`This save changes:${changeList}\n\n`;
           const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
           const answer = await agent.promptUser(
