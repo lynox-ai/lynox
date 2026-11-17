@@ -552,9 +552,9 @@
 {#snippet markupList(target: BulkTarget, undo: boolean)}
 	{#each target.markupChanges ?? [] as change (change.field)}
 		{@const list = bulkMarkupList(change, undo, shopify ? bulkFieldNamesText(host, [change.field], t) : bulkVisibleText(change.field), view)}
-		<div class="mt-1 text-xs" data-testid="bulk-markup">
+		<div class="mt-1 text-xs [overflow-wrap:anywhere]" data-testid="bulk-markup">
 			{#if list.head}<div class="text-text-subtle">{list.head}</div>{/if}
-			{#if list.restoresNote}<p class="text-warning" data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
+			{#if list.restoresNote}<p class={list.restoresActive ? 'text-warning' : 'text-text-subtle'} data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
 			<ul class="space-y-0.5">
 				{#each list.lines as markupLine, i (i)}
 					<li class="min-w-0"><span class="text-text-subtle">{markupLine.label}</span> <code class="whitespace-pre-wrap break-all">{bulkVisibleText(markupLine.code)}</code><span class="text-text-subtle">{markupLine.template === null ? '' : ` ${markupLine.template}`}</span></li>
@@ -669,8 +669,9 @@
 										<td class="py-1.5">
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}
-													<div>
-														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
+													<!-- A long value without spaces (HTML, a URL) breaks inside the cell instead of running past it. -->
+													<div class="[overflow-wrap:anywhere]">
+														<span class="text-text-subtle" data-testid="bulk-field-name">{bulkFieldNamesText(host, [f.field], t)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
 														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{#if bulkHiddenAddsOf(target, f.field).length > 0}{@render markedValue(bulkRawText(f.after), bulkHiddenAddsOf(target, f.field), bulkHiddenHtml(target, f.field), bulkAfterTakenBack(run, target))}{:else}{bulkValueText(f.after)}{/if}</ins>
 														{#if bulkHiddenUnchecked(target, f.field)}
@@ -680,7 +681,7 @@
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
-												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
+												<pre class="text-xs whitespace-pre-wrap [overflow-wrap:anywhere]">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
 {/each}{#each target.diff.added as line, i (i)}<ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">+ {@render markedValue(line, bulkHiddenAddsOf(target, ''), false, bulkAfterTakenBack(run, target))}</ins>
 {/each}</pre>
 											{:else if target.error && target.change !== 'invalid'}
@@ -688,10 +689,10 @@
 											{/if}
 											{@render markupList(target, false)}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}</p>
+												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', listForm: run.listForm, judgesHtml: run.judgesHtml, markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
 													{#each target.refusedValues as { field, value, codePoints } (field)}
-														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle">{bulkVisibleText(field)}:</div>{/if}
+														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle" data-testid="bulk-refused-field">{bulkFieldNamesText(host, [field], t)}:</div>{/if}
 														<BulkRefusedValue {value} codePoints={codePoints ?? []} />
 													{/each}
 												{/if}

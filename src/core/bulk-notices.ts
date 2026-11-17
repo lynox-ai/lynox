@@ -55,6 +55,12 @@ export interface BulkNotices {
   notApproved(phase: string): string;
   /** A halted run that is written on only once resumed (B4). */
   readonly haltedResume: string;
+  /**
+   * A Shopify run halted because its connection does not yet cover `fields` (`shopifyConsentBlock`),
+   * the way on included (U-281). `nothingYet`: no target of the run was written or sent to, so
+   * the sentence may say that nothing was written.
+   */
+  consentOutdated(fields: readonly string[], nothingYet: boolean): string;
   /** A run another loop took over (B9). */
   readonly otherLoop: string;
   /** A run waiting for targets another loop holds (B10, recorded only). */
@@ -103,6 +109,20 @@ function applyCounts(c: BulkApplyCounts, w: CountWords): string {
     w.total(String(c.total)),
   ];
   return `${c.sentUnknown > 0 ? `${w.unclear(String(c.sentUnknown))} ` : ''}${parts.join(', ')}`;
+}
+
+/** The Shopify fields a sentence names after "change" / "zu ändern", with their article (U-281). */
+const SHOPIFY_FIELD_NAMES: Readonly<Record<'de' | 'en', Readonly<Record<string, string>>>> = Object.freeze({
+  de: Object.freeze({ title: 'den Titel', descriptionHtml: 'die Beschreibung', seo_title: 'den SEO-Titel', seo_description: 'die SEO-Beschreibung', alt: 'die Alt-Texte der Bilder' }),
+  en: Object.freeze({ title: 'the title', descriptionHtml: 'the description', seo_title: 'the SEO title', seo_description: 'the SEO description', alt: 'the image alt texts' }),
+});
+
+/** `fields` by name, joined with "und"/"and"; "diese Felder"/"these fields" when one has no name here. */
+export function shopifyFieldsNamed(fields: readonly string[], lang: 'de' | 'en'): string {
+  const names = fields.map((f) => Object.hasOwn(SHOPIFY_FIELD_NAMES[lang], f) ? SHOPIFY_FIELD_NAMES[lang][f] : undefined);
+  if (names.length === 0 || names.some((n) => n === undefined)) return lang === 'de' ? 'diese Felder' : 'these fields';
+  const and = lang === 'de' ? ' und ' : ' and ';
+  return names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')}${and}${names[names.length - 1]!}`;
 }
 
 const EN: BulkNotices = Object.freeze({
@@ -156,6 +176,8 @@ const EN: BulkNotices = Object.freeze({
   effectMismatch: 'The trigger effect does not match the bulk run.',
   notApproved: (phase: string) => `Bulk run is ${phase}, not approved — nothing written.`,
   haltedResume: 'Bulk run is halted — resume it to continue.',
+  consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
+    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} This Shopify connection does not yet let lynox change ${shopifyFieldsNamed(fields, 'en')}. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.`,
   otherLoop: 'Bulk run stopped by another loop.',
   otherLoopHolds: 'Bulk run waiting for targets another loop holds.',
   noJudgedRun: 'No judged bulk run with this id.',
@@ -215,7 +237,8 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.listed]: 'Liste gelesen. Wartet, bis die Ziele geprüft sind und das Lesen gestartet wird.',
     [BULK_HALT_REASONS.listNotAList]: 'Eine Seite der Liste ist keine Liste.',
     [BULK_HALT_REASONS.listUnreadable]: 'Eine Seite der Liste liess sich nicht lesen.',
-    [BULK_HALT_REASONS.listTooLarge]: 'Die Liste ist länger oder grösser, als ein Massenlauf fassen kann.',
+    // The way on for every list form: the reason alone does not tell a Shopify list from another (U-186).
+    [BULK_HALT_REASONS.listTooLarge]: 'Die Liste ist länger oder grösser, als ein Massenlauf fassen kann; nichts geändert. Neu planen mit einem Teil der Liste, falls die Quelle das zulässt.',
     [BULK_HALT_REASONS.listNoProgress]: 'Eine volle Seite der Liste brachte kein neues Ziel.',
     [BULK_HALT_REASONS.listFormWithdrawn]: 'Die Adresse der Liste darf ein Massenlauf nicht mehr lesen.',
     [BULK_HALT_REASONS.listFilterWithdrawn]: 'Mit diesem Filter darf ein Massenlauf die Liste nicht mehr lesen. Geändert hat lynox nichts.',
@@ -232,6 +255,8 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.shopifyNotCleared]: 'Shopify ist für diese Instanz zurzeit nicht freigegeben; freigeben kann nur lynox.',
     [BULK_HALT_REASONS.containmentUnwritable]: 'lynox konnte nicht festhalten, dass dieser Lauf den Shop liest; gesendet wurde nichts. Der Lauf lässt sich später fortsetzen.',
     [BULK_HALT_REASONS.shopifyNoApiVersion]: 'Für Shopify fehlt in lynox eine Einstellung. Fortsetzen hilft nicht; das behebt lynox.',
+    // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
+    [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
     [BULK_HALT_REASONS.judgeModel]: 'Der KI-Anbieter dieses Laufs hat kein Modell zum Beurteilen, oder der Betreiber erlaubt es nicht.',
   });
@@ -293,6 +318,8 @@ const DE: BulkNotices = Object.freeze({
   // The ledger's phase is an English word, and the run page shows the phase (ux Rest-P B3).
   notApproved: () => 'Massenlauf nicht freigegeben; nichts geschrieben.',
   haltedResume: 'Massenlauf angehalten; geschrieben wird erst nach dem Fortsetzen.',
+  consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
+    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} Diese Shopify-Verbindung erlaubt lynox noch nicht, ${shopifyFieldsNamed(fields, 'de')} zu ändern. Verbinde Shopify neu (Einstellungen → APIs); dann bitte lynox im Chat, den Lauf neu zu planen.`,
   otherLoop: 'Massenlauf beendet: Ein anderer Durchgang bearbeitet ihn.',
   otherLoopHolds: 'Massenlauf wartet auf Ziele, die ein anderer Durchgang hält.',
   noJudgedRun: 'Diesen Massenlauf mit Beurteilung gibt es nicht.',

@@ -83,6 +83,21 @@ export const ACCEPTED = [
       '(no flag in svelte.config.js, no .remote files, no $app/server import). The fix is kit 3.1.1, ' +
       'a major upgrade, planned before the expiry.',
   },
+  {
+    id: 'GHSA-fc5q-39xc-vjpf',
+    package: 'picomatch',
+    versions: ['2.3.2', '4.0.4', '4.0.7'],
+    expires: '2026-12-01',
+    reason:
+      'ReDoS in glob patterns with repeated single-branch extglobs; it needs an attacker-chosen ' +
+      'pattern. The picomatch package is only in build and test tooling (vite, vitest, tinyglobby, ' +
+      'fdir) and in the docs site, which is private and in neither package nor the image; no ' +
+      "runtime dependency of either published package reaches it. The error reporter's bundler " +
+      'plugins ship as a runtime dependency and bring two packages that inline their own copy, ' +
+      'which this scan cannot see: ' +
+      'rollup and the Sentry CLI package. The engine loads only the reporter\'s main entry, which ' +
+      'loads neither. No patched release exists yet; bump when one does.',
+  },
 ];
 
 /**
