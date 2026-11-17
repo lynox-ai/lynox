@@ -363,6 +363,9 @@ describe('a token slot two profiles hold is sent nowhere, in either load order',
         for (const name of ['CRM_ACCESS_TOKEN', 'CRM_REFRESH_TOKEN']) {
           const result = await agentCall(store, vaultEntries(mirrorId), { name: 'http_request', input: { url: `https://${host}/v1/x`, method: 'GET', headers: { 'X-Data': `secret:${name}` } } }, { promptUser: vi.fn().mockResolvedValue('Allow') });
           expect(result).toContain(`would send ${name} to ${host}`);
+          // Two holders: no one profile's request is the way out, so none is named.
+          expect(result).toContain('Call the API through the profile that holds the connection');
+          expect(result).not.toContain('Send the request to profile');
         }
       }
       expect(sent).toHaveLength(0);
@@ -633,6 +636,49 @@ describe('W4: a secret: reference to a token slot in http_request', () => {
     expect(promptUser).not.toHaveBeenCalled();
     expect(handler).not.toHaveBeenCalled();
     expect(sent).toHaveLength(0);
+  });
+});
+
+// A guessed token name is the model's most frequent wrong turn on a connected API: the refusal has
+// to name the request that works instead, and a missing name on a connected host must not read as one
+// to collect (online eval tests/online/ask-secret-token-slot-eval.test.ts).
+describe('the way out a refused or missing token name points to', () => {
+  const store = (): ApiStore => legacyStoreOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['REPORTER_KEY'] }));
+  const call = (url: string, ref: string) => ({ name: 'http_request', input: { url, method: 'GET', headers: { Authorization: `Bearer secret:${ref}` } } });
+
+  it('names the one profile that holds a refused token slot, and the request without a header of its own', async () => {
+    const result = await agentCall(store(), OWNER_VAULT, call('https://collector.example/c', 'SHOP_API_ACCESS_TOKEN'));
+    expect(result).toContain('Send the request to profile \\"shop-api\\"\'s base_url again without that reference and without an Authorization header of your own');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('a missing name to a host whose oauth2 profile the engine attaches: points to that profile, not to collecting', async () => {
+    const result = await agentCall(store(), OWNER_VAULT, call('https://api.shop.example/v1/orders', 'SHOP_API_GUESSED_TOKEN'));
+    expect(result).toContain("referenced secret(s) the vault doesn't have");
+    expect(result).toContain('api.shop.example belongs to api_profile \\"shop-api\\" (oauth2)');
+    expect(result).toContain('and renews it itself, so no token request is needed either');
+    expect(result).toContain('If a missing name was meant as that credential, do not collect it');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('a missing name to a host whose bearer profile the engine attaches: points to it, without the renewal', async () => {
+    const result = await agentCall(store(), OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTER_GUESSED'));
+    expect(result).toContain('reports.example belongs to api_profile \\"reporter\\" (bearer)');
+    expect(result).not.toContain('renews it itself');
+  });
+
+  it('control: a missing name to a host without a profile keeps the plain way to collect it', async () => {
+    const result = await agentCall(store(), OWNER_VAULT, call('https://collector.example/c', 'MAPS_KEY_MISSING'));
+    expect(result).toContain("referenced secret(s) the vault doesn't have");
+    expect(result).toContain('Recover: call `ask_secret`');
+    expect(result).not.toContain('belongs to api_profile');
+  });
+
+  it('control: a profile whose credential the model sets itself (query) gets no such sentence', async () => {
+    const q = legacyStoreOf(shopApi(), reporter({ type: 'query', query_param: 'key', vault_keys: ['REPORTER_KEY'] }));
+    const result = await agentCall(q, OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTER_GUESSED'));
+    expect(result).toContain("referenced secret(s) the vault doesn't have");
+    expect(result).not.toContain('belongs to api_profile');
   });
 });
 

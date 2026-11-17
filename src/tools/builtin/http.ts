@@ -3144,7 +3144,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // route it described now stops at a consent step this text cannot grant. A
     // wrong instruction is worse than none; naming a new one is a decision about
     // who may give that consent, and that decision is not this file's to make.
-    description: `Make an HTTP request to a specific API endpoint. Use for authenticated APIs, custom endpoints, or structured data fetching. For general web search or reading public pages, use web_research instead. Capped at ${MAX_REQUESTS_PER_SESSION} per conversation, shared with sub-agents (so splitting into sub-agents buys nothing).`,
+    description: `Make an HTTP request to a specific API endpoint. Use for authenticated APIs, custom endpoints, or structured data fetching. For general web search or reading public pages, use web_research instead. For an API profile with auth bearer, header or oauth2, the engine attaches its credential (and renews an oauth2 token) when you set no auth header: write no secret: reference and no token request for it. Capped at ${MAX_REQUESTS_PER_SESSION} per conversation, shared with sub-agents (so splitting into sub-agents buys nothing).`,
     input_schema: {
       type: 'object' as const,
       properties: {
