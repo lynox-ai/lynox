@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t } from '../i18n.svelte.js';
+import { _resetManagedStatus } from '../stores/integrations/managed.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -20,7 +21,7 @@ const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLI
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let listed: Record<string, unknown>[];
-let config: Record<string, unknown>;
+let config: Record<string, unknown> | 'fail' | 'hold';
 
 const backup = (id: string, over: Record<string, unknown>): Record<string, unknown> => ({
 	backup_id: id, version: '2.17.0', created_at: '2026-10-28T08:00:00.000Z', encrypted: false,
@@ -31,9 +32,13 @@ beforeEach(() => {
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	listed = [];
-	config = { backup_retention_days: 30 };
+	config = { backup_retention_days: 30, billing_tier_set: false };
+	_resetManagedStatus();
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-		const body = String(url).endsWith('/config') ? config : { backups: listed };
+		const isConfig = String(url).endsWith('/config');
+		if (isConfig && config === 'hold') return new Promise<Response>(() => { /* never answers */ });
+		if (isConfig && config === 'fail') return new Response('{}', { status: 500 });
+		const body = isConfig ? config : { backups: listed };
 		return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 	}));
 });
@@ -75,10 +80,52 @@ describe('BackupsView: what a backup covers', () => {
 	});
 
 	it('names support on a managed instance', async () => {
-		config = { backup_retention_days: 30, managed: 'managed' };
+		config = { backup_retention_days: 30, managed: 'managed', billing_tier_set: true };
 		listed = [backup('b-1', { provenance: 'verified', coverage: { workspace: 'omitted-sidecar' } })];
 		await render();
 		expect(lines()).toEqual([t('backups.coverage_omitted_managed')]);
+	});
+
+	// U-302: the way out is the engine's switch (any tier value), never a guess.
+	const omitted = (): Record<string, unknown>[] => [backup('b-1', { provenance: 'verified', coverage: { workspace: 'omitted-sidecar' } })];
+
+	it('names support for a tier value that does not normalize, as the engine refusals do', async () => {
+		config = { backup_retention_days: 30, managed: null, billing_tier_set: true };
+		listed = omitted();
+		await render();
+		expect(lines()).toEqual([t('backups.coverage_omitted_managed')]);
+	});
+
+	it('states the fact alone while the instance kind loads', async () => {
+		config = 'hold';
+		listed = omitted();
+		await render();
+		expect(lines()).toEqual([t('backups.coverage_omitted_fact')]);
+	});
+
+	it('says to reload when the instance kind could not be read, naming no way out', async () => {
+		config = 'fail';
+		listed = omitted();
+		await render();
+		expect(lines()).toEqual([t('backups.coverage_omitted_unknown')]);
+	});
+
+	it('keeps the way out an earlier read gave when a later read fails', async () => {
+		config = { backup_retention_days: 30, billing_tier_set: true };
+		listed = omitted();
+		await render();
+		unmount(component!);
+		component = undefined;
+		config = 'fail';
+		await render();
+		expect(lines()).toEqual([t('backups.coverage_omitted_managed')]);
+	});
+
+	it('counts an answer without the switch as not read', async () => {
+		config = { backup_retention_days: 30, managed: 'managed' };
+		listed = omitted();
+		await render();
+		expect(lines()).toEqual([t('backups.coverage_omitted_unknown')]);
 	});
 
 	it('an unsigned backup is unclear, also without a record, and a keyed engine advises a new backup', async () => {

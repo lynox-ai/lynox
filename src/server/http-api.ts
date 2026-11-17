@@ -61,7 +61,7 @@ import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '.
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js';
-import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
+import { billingTierSet, eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
@@ -7662,6 +7662,10 @@ export class LynoxHTTPApi {
         // re-synced. cpSuppliesLLMKey above already normalizes internally.
         redacted['managed'] = normalizeBillingTier(tier) ?? tier;
       }
+      // Any tier value at all, canonical or not: the switch the engine's refusals name their way
+      // out by (`sidecar-refusals.ts`). The Web UI's notices take theirs from this, not from
+      // `managed`, so both name the same one.
+      redacted['billing_tier_set'] = billingTierSet();
       // Capability probe: what this instance *can* do, independent of tier.
       // Drives capability-based gating in the Web UI so working features stop
       // being hidden by tier checks (see PRD-SETTINGS-REFACTOR Principle 6).

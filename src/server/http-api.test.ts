@@ -27,6 +27,7 @@ import { EngineDb } from '../core/engine-db.js';
 import { ApprovalStore, type ApprovalFiling } from '../core/approval-store.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { secretsForProfile } from '../core/profile-secret-view.js';
+import { eraseRefusal } from '../core/sidecar-refusals.js';
 import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import type { MailConnectPromptData } from '../types/agent.js';
@@ -1275,6 +1276,36 @@ describe('LynoxHTTPApi', () => {
       };
       expect(await viewerOf(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token)).toBe('mandate');
       expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
+    });
+
+    it('GET /api/config hands the Web UI the switch the engine refusals name their way out by', async () => {
+      const keys = ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const;
+      const saved = keys.map(k => process.env[k]);
+      onTestFinished(() => { keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; }); });
+      for (const k of keys) delete process.env[k];
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      const config = async (): Promise<{ managed: unknown; billing_tier_set: unknown }> => {
+        repayRateWindow();
+        const res = await fetch(`${baseUrl}/api/config`, { headers: { cookie: `lynox_session=${owner}` } });
+        expect(res.status).toBe(200);
+        return (await res.json()) as { managed: unknown; billing_tier_set: unknown };
+      };
+      // A value that does not normalize comes back raw in `managed`, where the Web UI's `isManaged()` does not
+      // count it; the engine counts it, and so does the switch.
+      for (const [value, managed, set] of [[undefined, undefined, false], ['managed', 'managed', true], ['gold', 'gold', true]] as const) {
+        if (value === undefined) delete process.env['LYNOX_BILLING_TIER'];
+        else process.env['LYNOX_BILLING_TIER'] = value;
+        const body = await config();
+        expect([body.managed, body.billing_tier_set]).toEqual([managed, set]);
+        expect(eraseRefusal().includes('support@lynox.ai')).toBe(set);
+      }
+      // The legacy alias alone counts the same, also behind an empty canonical name.
+      process.env['LYNOX_BILLING_TIER'] = '';
+      process.env['LYNOX_MANAGED_MODE'] = 'eu';
+      expect((await config()).billing_tier_set).toBe(true);
+      expect(eraseRefusal()).toContain('support@lynox.ai');
+      delete process.env['LYNOX_MANAGED_MODE'];
+      delete process.env['LYNOX_BILLING_TIER'];
     });
 
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {

@@ -18,8 +18,8 @@
 		getTargetUrl,
 	} from '../stores/migration.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
-	import { migrationWorkspaceNotice, visibleSkippedPath } from '../backup-coverage.js';
-	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import { migrationWorkspaceNotice, skippedNextKey, visibleSkippedPath } from '../backup-coverage.js';
+	import { managedWayOut, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 
 	const step = $derived(getStep());
 	const preview = $derived(getPreview());
@@ -27,17 +27,14 @@
 	const error = $derived(getError());
 	const progress = $derived(getProgress());
 	const verification = $derived(getVerification());
-	const workspaceNotice = $derived(migrationWorkspaceNotice({ workspace: getDoneWorkspace() }, isManaged()));
+	const workspaceNotice = $derived(migrationWorkspaceNotice({ workspace: getDoneWorkspace() }, managedWayOut()));
 	// Files the export could not carry (row 1033, ux U-056): the count, the paths on request, and
 	// the same next step as for a workspace left out. At most this many paths are listed.
 	const SKIPPED_SHOWN = 50;
 	const skipped = $derived(getDoneSkipped());
-	const skippedNextKey = $derived(
-		isManaged()
-			? (skipped.length === 1 ? 'migration.skipped_next_managed_one' : 'migration.skipped_next_managed_many')
-			: (skipped.length === 1 ? 'migration.skipped_next_self_one' : 'migration.skipped_next_self_many'),
-	);
-	// The tier picks the way out the workspace notice names; a failed read leaves the self-hosted one.
+	const skippedNext = $derived(skippedNextKey(skipped.length, managedWayOut()));
+	// The engine's tier switch picks the way out the notices name (U-302): none while it loads,
+	// a reload hint after a failed read.
 	$effect(() => { void loadManagedStatus(); });
 	const targetUrl = $derived(getTargetUrl());
 
@@ -279,7 +276,7 @@
 						{/if}
 					</details>
 					{#if !workspaceNotice}
-						<p data-testid="migration-skipped-next" class="mt-1 text-xs text-warning">{t(skippedNextKey)}</p>
+						{#if skippedNext !== null}<p data-testid="migration-skipped-next" class="mt-1 text-xs text-warning">{t(skippedNext)}</p>{/if}
 					{/if}
 				{/if}
 			</div>
