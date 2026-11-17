@@ -125,6 +125,8 @@
 			let ok = body !== null;
 			// While the engine works, the page takes the run's counts from each ask: the working line
 			// and the head move with the run. Its targets stay as loaded; no input is offered then.
+			// A load since this ask was sent owns the page: its run is newer than this answer.
+			if (mine !== following) return;
 			if (body !== null && bulkEngineWorking(body) && body.id === runId) run = body;
 			if (body !== null && !bulkEngineWorking(body)) {
 				lastRetryAfter = null;

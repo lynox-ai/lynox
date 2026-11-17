@@ -801,10 +801,11 @@ export function bulkWorkingStep(run: Pick<BulkRunDetailData, 'phase' | 'haltKey'
 /** The working line of a step: its key and the run's numbers it names. Judging counts the
  *  verdicts out of the targets the judge reads (an engine that does not count them gets the
  *  line without numbers); writing and taking back count the targets done out of those the run
- *  writes, as far as its approval reaches. Reading the list or the targets names no number: the engine does not count it. */
+ *  plans to write. A target the read turns invalid leaves the judge's count: the targets it
+ *  judges can shrink while it reads them. Reading the list or the targets names no number: the engine does not count it. */
 export function bulkWorkingLine(
 	step: BulkWorkingStep,
-	run: Pick<BulkRun, 'judge' | 'applied' | 'changes' | 'maxTargets'>,
+	run: Pick<BulkRun, 'judge' | 'applied' | 'changes'>,
 ): { key: string; params: Record<string, string> } {
 	if (step === 'judge') {
 		const judged = run.judge?.judged;
@@ -812,9 +813,10 @@ export function bulkWorkingLine(
 		return { key: 'bulk.working.judge', params: { k: String(judged), n: String(judged + (run.judge?.unjudged ?? 0)) } };
 	}
 	if (step === 'write' || step === 'undo') {
-		// The approval may let the write reach fewer targets than the run plans.
-		const n = run.maxTargets === null ? bulkWriting(run) : Math.min(bulkWriting(run), run.maxTargets);
-		return { key: `bulk.working.${step}`, params: { a: String(run.applied), n: String(n) } };
+		// Out of every target the run plans to write: `applied` counts each once, one found as
+		// planned too, so it never passes them. An approval or a probe that ends the write earlier
+		// halts the run, and the halt's sentence says why; the line is gone then.
+		return { key: `bulk.working.${step}`, params: { a: String(run.applied), n: String(bulkWriting(run)) } };
 	}
 	return { key: `bulk.working.${step}`, params: {} };
 }

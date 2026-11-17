@@ -143,13 +143,14 @@ describe('the step the engine works on', () => {
 		expect(bulkWorkingStep({ ...base, phase: 'done' })).toBeNull();
 	});
 
-	it('counts the verdicts out of what the judge reads, and the written targets out of what the approval reaches', () => {
-		const r = { applied: 2, changes: UPDATES(5), maxTargets: null, judge: { tier: 'fast', unjudged: 3, judged: 4 } };
+	it('counts the verdicts out of what the judge reads, and the written targets out of every target the run plans to write', () => {
+		const r = { applied: 2, changes: { ...UPDATES(3), create: 1, delete: 1, unchanged: 4, invalid: 2 }, judge: { tier: 'fast', unjudged: 3, judged: 4 } };
 		expect(bulkWorkingLine('judge', r)).toEqual({ key: 'bulk.working.judge', params: { k: '4', n: '7' } });
 		expect(bulkWorkingLine('judge', { ...r, judge: { tier: 'fast', unjudged: 3 } })).toEqual({ key: 'bulk.working.judge_open', params: {} });
 		expect(bulkWorkingLine('write', r)).toEqual({ key: 'bulk.working.write', params: { a: '2', n: '5' } });
-		expect(bulkWorkingLine('write', { ...r, maxTargets: 3 })).toEqual({ key: 'bulk.working.write', params: { a: '2', n: '3' } });
-		expect(bulkWorkingLine('write', { ...r, maxTargets: 9 })).toEqual({ key: 'bulk.working.write', params: { a: '2', n: '5' } });
+		// Targets found as planned count as applied without taking from an approval's maximum: the
+		// count stays within the targets the run plans, never above them.
+		expect(bulkWorkingLine('write', { ...r, applied: 5 })).toEqual({ key: 'bulk.working.write', params: { a: '5', n: '5' } });
 		expect(bulkWorkingLine('undo', r)).toEqual({ key: 'bulk.working.undo', params: { a: '2', n: '5' } });
 		expect(bulkWorkingLine('list', r)).toEqual({ key: 'bulk.working.list', params: {} });
 		expect(bulkWorkingLine('read', r)).toEqual({ key: 'bulk.working.read', params: {} });

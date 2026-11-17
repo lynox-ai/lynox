@@ -301,7 +301,8 @@ export interface BulkRunStatus {
   costCapUsd: number | null;
   /** A run whose after-states a model decides (`bulk_judge`, PRD bulk-loop §3.1): its tier and
    *  how many targets have no verdict yet, and how many have one (refused by the judge included,
-   *  so `judged + unjudged` is what the judge reads). Null on every other run. Counts only — the
+   *  so `judged + unjudged` is what the judge has read or still reads; a target its read step
+   *  turns invalid leaves both). Null on every other run. Counts only — the
    *  rule's text is the owner's, shown by the owner's route, never in a status. */
   judge: { tier: ModelTier; unjudged: number; judged: number } | null;
   /** The link domains the owner allowed at the start of a judged run, besides the store's own
