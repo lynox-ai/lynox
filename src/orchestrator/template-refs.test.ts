@@ -112,7 +112,7 @@ describe('removing a step another step\'s reference reads is refused', () => {
       .toContain('Error: remove: the step this edit adds ("late") reads the output of a step this edit removes');
     // A step this edit renames is named by the id it has in that list.
     expect(applyModifications(steps(), [{ action: 'rename_step', step_id: 'sum', value: 'total' }, { action: 'remove', step_id: 'fetch' }]))
-      .toContain('Error: remove: step "sum" reads the output of a step this edit removes');
+      .toBe('Error: remove: step "sum" reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step "sum" too. This edit renames that step: put that action before the rename.');
   });
 
   it('one edit that removes a step and what reads it, in either order, is taken', () => {

@@ -255,7 +255,9 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       const fix = field === 'task'
         ? `Change that reference in the same edit (update_task), or remove ${which} too.`
         : `Remove ${which} too: its input template cannot be edited.`;
-      return `Error: remove: ${which} reads the output of a step this edit removes, in its ${field}. ${fix}`;
+      // A step this edit renames is not found by its old id after the rename, so its action goes first.
+      const renamed = was !== undefined && was.id !== s.id ? ' This edit renames that step: put that action before the rename.' : '';
+      return `Error: remove: ${which} reads the output of a step this edit removes, in its ${field}. ${fix}${renamed}`;
     }
   }
   return null; // no error
