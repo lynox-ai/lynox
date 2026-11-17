@@ -238,9 +238,11 @@ describe('a failed scheduled workflow records whether its escalation reached any
     expect(h.title).toBe(WORKER_NOTICES.en.helperPlanFailedTitle({ address: 'helper@example.com', changed: false }));
     // The ids stay, so the agent can read the run with the owner.
     expect(h.body).toContain('run run-1');
-    // Control: the owner's own plan names its title and its step's error.
+    // Control: the owner's own plan names its title and its failed step; the step's error stays in
+    // the run's record for the owner's plan too (U-201).
     expect(owner.seen[0]!.title).toContain('Nightly export');
-    expect(owner.seen[0]!.body).toContain('boom');
+    expect(owner.seen[0]!.body).toContain(WORKER_NOTICES.en.stepFailedItem('s1'));
+    expect(owner.seen[0]!.body).not.toContain('boom');
   });
 
   it('a helper\'s change to the owner\'s plan counts the same, even after the owner\'s stamp', async () => {

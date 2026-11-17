@@ -61,6 +61,7 @@ import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
+import { failedRunBody } from './escalation-failure.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { WEBHOOK_AWAITS_STAMP_REASON, workflowAwaitsStampResult, workflowStampStateOf } from './workflow-stamp.js';
@@ -3705,18 +3706,11 @@ export class WorkerLoop {
     // its error can carry a third party's text, which a thread would hand the owner's next
     // turn as the assistant's own.
     if (event !== undefined) return;
-    // A reported failure's reason (`fail_step`) is the model's text, often written after reading
-    // untrusted content; the thread hands its body to the owner's next turn in the assistant's
-    // voice. So the body names the step in lynox's own words, and the reason stays in the run's
-    // record, readable through diagnose_workflow_run.
+    // Neither a step's error (it can carry a third party's text) nor a reported reason (model text)
+    // goes into the thread, which hands its body to the owner's next turn in the assistant's voice:
+    // the body names the failed steps in lynox's own words, and the errors stay in the run's record,
+    // readable through diagnose_workflow_run (U-192, U-201).
     const notices = this.#notices();
-    const failedSteps = (result.stepErrors ?? []).filter(s => s.error);
-    const stepDetail = failedSteps
-      .map(s => (s.reported === true ? notices.stepReportedItem(s.stepId) : `• ${s.stepId}: ${s.error}`))
-      .join('\n');
-    const runError = result.errorReportedBy !== undefined ? notices.stepReported(result.errorReportedBy) : result.error;
-    // Said once, after the steps, when a step reported: the owner learns the reason is there to ask for (U-192).
-    const reported = result.errorReportedBy !== undefined || failedSteps.some(s => s.reported === true);
     // The run + workflow ids ride in the seeded body so the agent, when the user
     // replies, can diagnose the run (diagnose_workflow_run), edit the workflow
     // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
@@ -3732,12 +3726,7 @@ export class WorkerLoop {
       opener: notices.reportOpener,
       body: othersPlan
         ? `${notices.helperWorkflowIncomplete(result.status)}\n\n${notices.workflowReply(ref)}`
-        : `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
-        (runError ? `${notices.errorLabel} ${runError}\n\n` : '') +
-        (stepDetail ? `${notices.failedStepsLabel}\n${stepDetail}\n\n` : '') +
-        (reported ? `${notices.reportedReasonWhere}\n\n` : '') +
-        (grantLines.length > 0 ? `${notices.writesLabel}\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
-        notices.workflowReply(ref),
+        : failedRunBody(notices, { title: task.title, status: result.status, run: result, grantLines, ref }),
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
       onReported: this.#recordEscalation(task.id),
     });
