@@ -118,7 +118,7 @@ function inboxReadSubject(input: Record<string, unknown> | undefined, t: Transla
   return key ? t(key) : '';
 }
 
-/** What a bulk run changes: the API host, the collection, or the source file. */
+/** Where a bulk run works: the API host, the collection, or the file it reads its list from. */
 function bulkPlanSubject(input: Record<string, unknown> | undefined): string {
   switch (input?.['target_system']) {
     case 'http':       return firstOf(input, 'target_host');
@@ -229,7 +229,8 @@ export function toolCallLabel(
     case 'subjects_merge':    return { action: t('tool.merge'),                subject: subjectsMergeSubject(inp) };
     case 'set_thread_context':
       if (inp === undefined) return { action: t('tool.project'), subject: '' };
-      if (inp['clear'] === true) return { action: t('tool.project_cleared'), subject: '' };
+      // As the tool reads it: any truthy `clear` clears.
+      if (inp['clear']) return { action: t('tool.project_cleared'), subject: '' };
       return { action: t('tool.project_set'), subject: firstOf(inp, 'project', 'customer') };
 
     // Artifacts, data, files.

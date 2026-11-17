@@ -304,6 +304,7 @@ describe('toolCallLabel', () => {
       expect(toolCallLabel('set_thread_context', { project: 'Relaunch' }, tk)).toEqual({ action: 'tool.project_set', subject: 'Relaunch' });
       expect(toolCallLabel('set_thread_context', { clear: true, project: 'Relaunch' }, tk)).toEqual({ action: 'tool.project_cleared', subject: '' });
       expect(toolCallLabel('set_thread_context', undefined, tk)).toEqual({ action: 'tool.project', subject: '' });
+      expect(toolCallLabel('set_thread_context', { clear: 'true', project: 'Relaunch' }, tk)?.action).toBe('tool.project_cleared');
     });
   });
 });
