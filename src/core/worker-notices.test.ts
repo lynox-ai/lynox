@@ -48,7 +48,7 @@ function workerSamples(n: WorkerNotices): Record<string, string> {
     containedResult: n.containedResult, containedQuestion: n.containedQuestion, containedQuestionInquiry: n.containedQuestionInquiry,
     workflowIncomplete: n.workflowIncomplete('Wochenbericht', 'failed'), errorLabel: n.errorLabel,
     failedStepsLabel: n.failedStepsLabel, writesLabel: n.writesLabel, workflowRef: n.workflowRef('r-1', 'w-1'),
-    stepReported: n.stepReported('fetch'), stepReportedItem: n.stepReportedItem('fetch'), reportedReasonWhere: n.reportedReasonWhere,
+    stepReported: n.stepReported('fetch'), stepReportedItem: n.stepReportedItem('fetch'), reportedReasonWhere: n.reportedReasonWhere, unnamedStep: n.unnamedStep(2), unnamedStepNoPosition: n.unnamedStep(undefined), stepReportedUnnamed: n.stepReportedUnnamed(2), stepReportedUnnamedNoPosition: n.stepReportedUnnamed(undefined),
     workflowReply: n.workflowReply('(x)'), reminderTitle: n.reminderTitle, interrupted: n.interrupted,
     confirmationSkipped: n.confirmationSkipped, workflowCompleted: n.workflowCompleted('r-1'),
     workflowGone: n.workflowGone(undefined), workflowGoneId: n.workflowGone('w-1'), eventRunFailed: n.eventRunFailed,

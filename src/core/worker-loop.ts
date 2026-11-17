@@ -61,6 +61,7 @@ import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
+import { isStepIdShape, storedStepOrder } from '../orchestrator/step-id.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { WEBHOOK_AWAITS_STAMP_REASON, workflowAwaitsStampResult, workflowStampStateOf } from './workflow-stamp.js';
@@ -3710,11 +3711,21 @@ export class WorkerLoop {
     // voice. So the body names the step in lynox's own words, and the reason stays in the run's
     // record, readable through diagnose_workflow_run.
     const notices = this.#notices();
+    // A step id stored before ids had a shape (`step-id.ts`) is not shown: this body reads as the
+    // assistant's own words. It is named by its position in the stored workflow, as the model sees it
+    // (`#2`); the run and workflow ids below still lead to it (diagnose_workflow_run). The position is
+    // read from the workflow as stored now: an edit between the run and this thread can shift it, and
+    // an id no longer there is named without one.
+    const order = task.pipeline_id ? storedStepOrder(this.engine.getRunHistory()?.getPlannedPipeline(task.pipeline_id)) : undefined;
+    const positionOf = (id: string): number | undefined => { const at = order?.indexOf(id) ?? -1; return at === -1 ? undefined : at + 1; };
+    const shownId = (id: string): string => (isStepIdShape(id) ? id : notices.unnamedStep(positionOf(id)));
     const failedSteps = (result.stepErrors ?? []).filter(s => s.error);
     const stepDetail = failedSteps
-      .map(s => (s.reported === true ? notices.stepReportedItem(s.stepId) : `• ${s.stepId}: ${s.error}`))
+      .map(s => (s.reported === true ? notices.stepReportedItem(shownId(s.stepId)) : `• ${shownId(s.stepId)}: ${s.error}`))
       .join('\n');
-    const runError = result.errorReportedBy !== undefined ? notices.stepReported(result.errorReportedBy) : result.error;
+    const by = result.errorReportedBy;
+    const runError = by === undefined ? result.error
+      : isStepIdShape(by) ? notices.stepReported(by) : notices.stepReportedUnnamed(positionOf(by));
     // Said once, after the steps, when a step reported: the owner learns the reason is there to ask for (U-192).
     const reported = result.errorReportedBy !== undefined || failedSteps.some(s => s.reported === true);
     // The run + workflow ids ride in the seeded body so the agent, when the user

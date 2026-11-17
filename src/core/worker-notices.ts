@@ -183,6 +183,13 @@ export interface WorkerNotices {
   stepReported(stepId: string): string;
   stepReportedItem(stepId: string): string;
   readonly reportedReasonWhere: string;
+  /** What stands in for a step id outside the allowed shape (`step-id.ts`): an id stored before the
+   *  limit is not shown in the thread, where it would read as the assistant's own words (U-314). The
+   *  step is named by its position in the workflow, counted from 1 as `#2` is; `undefined` where no
+   *  position is known. */
+  unnamedStep(position: number | undefined): string;
+  /** `stepReported` for a step named by `unnamedStep`, which is a name and not quoted. */
+  stepReportedUnnamed(position: number | undefined): string;
   /**
    * A run that stopped at its cost ceiling (`value` like `$0.50`) or turn limit (`value` the
    * count) with work still pending: the sentence the push leads with.
@@ -298,6 +305,8 @@ const EN: WorkerNotices = Object.freeze({
   stepReported: (stepId: string) => `Step "${stepId}" reported that it could not complete its task.`,
   stepReportedItem: (stepId: string) => `• ${stepId}: reported that it could not complete its task.`,
   reportedReasonWhere: 'You can ask here for the reason the step gave; it is kept in the run\'s record.',
+  unnamedStep: (position: number | undefined) => (position === undefined ? 'A step' : `Step ${String(position)}`),
+  stepReportedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} reported that it could not complete its task.`,
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(run ${runId}${workflowId ? ` · workflow ${workflowId}` : ''})`
     : (workflowId ? `(workflow ${workflowId})` : ''),
@@ -420,6 +429,8 @@ const DE: WorkerNotices = Object.freeze({
   stepReported: (stepId: string) => `Schritt „${stepId}“ hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
   stepReportedItem: (stepId: string) => `• ${stepId}: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
   reportedReasonWhere: 'Den Grund, den der Schritt angegeben hat, kannst du hier erfragen; er steht im Protokoll des Laufs.',
+  unnamedStep: (position: number | undefined) => (position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`),
+  stepReportedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(Lauf ${runId}${workflowId ? ` · Workflow ${workflowId}` : ''})`
     : (workflowId ? `(Workflow ${workflowId})` : ''),
