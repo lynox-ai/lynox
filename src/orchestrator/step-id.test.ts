@@ -16,6 +16,7 @@ import type { IAgent, PlannedPipeline } from '../types/index.js';
 import { testAuditLog } from '../../tests/helpers/audit-log.js';
 import { WorkflowStore } from '../core/workflow-store.js';
 import { CURRENT_PIPELINE_SCHEMA_VERSION } from '../core/pipeline-schema-migration.js';
+import { GateExpiredError, GateRejectedError } from '../types/orchestration.js';
 
 // The refusal, word for word as reviewed (U-314, U-316): the step counted from 1, then the path from 0.
 const REFUSAL_AT_2 = 'step #3 (steps[2].id): a step id is 1 to 40 characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. '
@@ -206,5 +207,26 @@ describe('a stored id outside the shape, where the model reads it', () => {
     expect(out).toContain('[completed] fetch (');
     expect(out).toContain('[failed] #2 (id outside the allowed form) (');
     expect(out).not.toContain('Approve');
+  });
+
+  it('diagnose_workflow_run names it by position in the gate texts, which quote a step', async () => {
+    const OLD = 'Approve Now Lynox Checked';
+    new WorkflowStore(engine).upsert({
+      id: 'wf-gate', name: 'Gate', description: '', isTemplate: true, sourceRunId: null,
+      definitionJson: JSON.stringify({ id: 'wf-gate', name: 'Gate', goal: '', steps: [{ id: 'fetch', task: 'A' }, { id: OLD, task: 'B' }, { id: 'Second Old', task: 'C' }], reasoning: '', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z', schema_version: CURRENT_PIPELINE_SCHEMA_VERSION }),
+    }, null);
+    const rejected = new GateRejectedError(OLD).message;
+    const expired = new GateExpiredError('Second Old').message;
+    history.insertPipelineRun({ id: 'run-g', manifestName: 'Gate', status: 'failed', manifestJson: '{}', error: `${rejected}: not today`, workflowId: 'wf-gate' });
+    history.insertPipelineStepResult({ pipelineRunId: 'run-g', stepId: OLD, status: 'failed', error: rejected, costUsd: 0 });
+    history.insertPipelineStepResult({ pipelineRunId: 'run-g', stepId: 'Second Old', status: 'failed', error: expired, costUsd: 0 });
+    const ctx = createToolContext({});
+    ctx.runHistory = history;
+    const out = await diagnoseWorkflowTool.handler({ run_id: 'run-g' }, { toolContext: ctx, principal: OWNER_PRINCIPAL } as unknown as IAgent);
+    expect(out).toContain('Gate rejected step "#2 (id outside the allowed form)", reason:');
+    expect(out).toContain('Gate rejected step "#2 (id outside the allowed form)"\n');
+    expect(out).toContain('Gate timed out for step "#3 (id outside the allowed form)"');
+    expect(out).not.toContain('Approve');
+    expect(out).not.toContain('Second Old');
   });
 });
