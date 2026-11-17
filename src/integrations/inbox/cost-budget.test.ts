@@ -86,3 +86,30 @@ describe('InboxCostBudget — daily roll', () => {
     expect(b.snapshot().spentUSD).toBe(0);
   });
 });
+
+describe('InboxCostBudget — recordCost (a call priced by its caller)', () => {
+  it('adds the cost to the same daily cap the classifier spends from', () => {
+    const b = new InboxCostBudget({ maxBudgetUSD: 1 });
+    b.recordUsage(100_000, 0); // $0.10 at Haiku reference input pricing
+    b.recordCost(0.85);
+    expect(b.snapshot().spentUSD).toBeCloseTo(0.95, 9);
+    expect(b.isExceeded()).toBe(false);
+    b.recordCost(0.05);
+    expect(b.isExceeded()).toBe(true);
+  });
+
+  it('ignores a cost that is not a positive finite number', () => {
+    const b = new InboxCostBudget({ maxBudgetUSD: 1 });
+    for (const bad of [-5, 0, Number.NaN, Number.POSITIVE_INFINITY]) b.recordCost(bad);
+    expect(b.snapshot().spentUSD).toBe(0);
+  });
+
+  it('starts a new day at zero', () => {
+    let now = new Date('2026-11-04T10:00:00Z');
+    const b = new InboxCostBudget({ maxBudgetUSD: 1, clock: () => now });
+    b.recordCost(0.9);
+    now = new Date('2026-11-05T10:00:00Z');
+    b.recordCost(0.2);
+    expect(b.snapshot().spentUSD).toBeCloseTo(0.2, 9);
+  });
+});

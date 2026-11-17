@@ -32,7 +32,7 @@ import { checkMarkup, htmlFieldsOfListForm, plainTextMarkupOf } from './bulk-htm
 import type { BulkListSourceForm } from './bulk-list.js';
 import { checkSeoAfter } from './seo-text.js';
 import { hiddenCharIndexes } from './hidden-chars.js';
-import { parseHtmlFragment, walkHtml } from './html-tree.js';
+import { parseHtmlFragment, walkHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_MAX_TARGET_BYTES, mapToColumns, type dataStoreColumns } from './bulk-plan.js';
 import { judgeCallSchema, judgeFields, judgeMaxOutputTokens, judgedTargets, type JudgeRule } from './bulk-judge-rule.js';
 import {
@@ -102,10 +102,14 @@ export interface BulkJudgeDeps {
  * The model that judges, per provider that serves the call — decided, not the provider's tier
  * model. The tier models are chosen for chat; measured as a judge, Mistral's `fast` model did not
  * hold the rule or resist an injection in a target. A provider not listed here gets no judge.
+ * On Anthropic and Vertex the judge is Sonnet, not Haiku: measured on a real rule, Haiku repeated
+ * the context into the verdict on part of the targets, Sonnet held the rule on the same sample.
+ * Sonnet is also the `balanced` chat model, so two operator settings now reach the judge: an
+ * instance capped at `fast` gets no judge there, and a blocklist entry for Sonnet blocks it too.
  */
 export const JUDGE_MODELS = {
-  anthropic: 'claude-haiku-4-5-20251001',
-  vertex: 'claude-haiku-4-5',
+  anthropic: 'claude-sonnet-4-6',
+  vertex: 'claude-sonnet-4-6',
   mistral: 'mistral-medium-2604',
   fireworks: 'accounts/fireworks/models/gpt-oss-120b',
 } as const;
@@ -363,6 +367,8 @@ export function judgeContext(
   // And with every entity decoded where it stands: the parser leaves one raw in a comment or in
   // `<xmp>`, which the model reads as easily as one it decodes.
   const textHolds = (text: string): boolean => {
+    // A text with markup beyond the reading bounds is not parsed: unread, it is held back as if it held one.
+    if ((text.includes('<') || text.includes('&')) && !withinReadingBounds(text)) return true;
     const readings = [text, htmlTextOf(text), entitiesDecoded(text)].filter((t): t is string => t !== null);
     return readings
       .some((t) => holdsSecret(t) || holdsSecret(withoutHidden(t, { inPlace: false })));

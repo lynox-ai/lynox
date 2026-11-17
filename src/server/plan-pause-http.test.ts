@@ -207,6 +207,22 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect((await ask('DELETE', `/api/tasks/${pausedPlan()}`, ownerCookie)).status).toBe(200);
   });
 
+  it('a stamp leaves what the plan\'s creator had taken in as it was: a helper\'s edit and the owner\'s confirm keep it', async () => {
+    const id = `tainted-${String(++n)}`;
+    engine.getRunHistory()!.insertTrigger({
+      id, title: 'Weekly', source: 'cron', effect: 'run_agent', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+      createdBy: 'mandate:ida@example.invalid', createdMandateId: 'TEST-MANDATE-PAUSE', createdUntrusted: 'external-tool',
+    });
+    const taint = (): unknown => (db().prepare('SELECT created_untrusted FROM triggers WHERE id = ?').get(id) as { created_untrusted: unknown }).created_untrusted;
+    expect((await ask('PATCH', `/api/tasks/${id}`, mandateCookie, { title: 'Weekly, again' })).status).toBe(200);
+    expect(taint()).toBe('external-tool');
+    const shown = await ask('GET', `/api/tasks/${id}/stamp-preview`, ownerCookie);
+    expect(shown.status).toBe(200);
+    const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, { expect: shown.json['expect'] });
+    expect([stamp.status, typeof stamp.json['confirmed_at']]).toEqual([200, 'string']);
+    expect(taint()).toBe('external-tool');
+  });
+
   it('the list shows a plan as paused, and filters on it', async () => {
     const id = pausedPlan();
     const all = await ask('GET', '/api/triggers', ownerCookie);
@@ -246,6 +262,44 @@ describe('the pause is held to its takeover (real engine)', () => {
     const sw = await ask('PATCH', `/api/tasks/${id}`, ownerCookie, { enabled: true });
     expect(sw.json).not.toHaveProperty('paused_for');
     expect(sw.json['paused_who']).toEqual(['ida@example.invalid']);
+  });
+
+  it('the list tells the owner whether a wakeup reached them, and a helper nothing of it, with the pause on and off', async () => {
+    const id = pausedPlan();
+    db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered' WHERE id = ?").run(id);
+    const rowOf = async (cookie: string): Promise<Record<string, unknown> | undefined> =>
+      ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((t) => t['id'] === id);
+    for (const on of [true, false]) {
+      restore();
+      restore = setPlanPauseForTests(on);
+      const owner = await rowOf(ownerCookie);
+      expect([on, owner?.['last_escalation_at'], owner?.['last_escalation_outcome']]).toEqual([on, '2026-10-27T08:00:00.000Z', 'not_delivered']);
+      const helper = await rowOf(mandateCookie);
+      expect(helper?.['id']).toBe(id);
+      expect(helper).not.toHaveProperty('last_escalation_at');
+      expect(helper).not.toHaveProperty('last_escalation_outcome');
+    }
+  });
+
+  it('a change or completion of a plan that is not paused answers the escalation fields to the owner only', async () => {
+    const escalatedPlan = (): string => {
+      const id = `escalated-${String(++n)}`;
+      engine.getRunHistory()!.insertTrigger({
+        id, title: 'Weekly', source: 'cron', effect: 'notify', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+        confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'mandate:ida@example.invalid', createdMandateId: 'TEST-MANDATE-PAUSE',
+      });
+      db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered' WHERE id = ?").run(id);
+      return id;
+    };
+    const owner = await ask('PATCH', `/api/tasks/${escalatedPlan()}`, ownerCookie, { title: 'Renamed' });
+    expect([owner.status, owner.json['last_escalation_at'], owner.json['last_escalation_outcome']]).toEqual([200, '2026-10-27T08:00:00.000Z', 'not_delivered']);
+    for (const [method, path, body] of [['PATCH', '', { title: 'Renamed' }], ['POST', '/complete', undefined]] as const) {
+      const id = escalatedPlan();
+      const helper = await ask(method, `/api/tasks/${id}${path}`, mandateCookie, body);
+      expect([method, path, helper.status, helper.json['id']]).toEqual([method, path, 200, id]);
+      expect(helper.json).not.toHaveProperty('last_escalation_at');
+      expect(helper.json).not.toHaveProperty('last_escalation_outcome');
+    }
   });
 
   it('the list says who reads it, the owner or a helper', async () => {
@@ -326,7 +380,8 @@ describe('the pause is held to its takeover (real engine)', () => {
       // Every answer that sends the row back leaves the stored columns out, a helper's edit as well.
       const stored = ['paused_at', 'paused_due_at', 'paused_for'];
       const helperEdit = await ask('PATCH', `/api/tasks/${id}`, mandateCookie, { title: 'Again' });
-      const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, {});
+      const shown = await ask('GET', `/api/tasks/${id}/stamp-preview`, ownerCookie);
+      const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, { expect: shown.json['expect'] });
       const done = await ask('POST', `/api/tasks/${id}/complete`, mandateCookie);
       for (const [what, r] of [['owner edit', edit], ['helper edit', helperEdit], ['confirm', stamp], ['complete', done]] as const) {
         expect([what, r.status, r.json['id']]).toEqual([what, 200, id]);

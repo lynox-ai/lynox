@@ -60,6 +60,8 @@ export function controlPlaneFromEnv(env: NodeJS.ProcessEnv = process.env): Exact
 export class ExactClearance {
   private cleared = false;
   private backoffUntil = 0;
+  /** Why the last ask was refused, while that refusal holds: the reason a refused request names. */
+  private refusedFor: ExactClearanceRefusal | null = null;
   private asking: Promise<ExactClearanceResult> | null = null;
   /** The next re-assert may ask from here on, whatever the last one got back. */
   private reassertNotBefore = 0;
@@ -90,6 +92,14 @@ export class ExactClearance {
     return !this.cleared && this.now() < this.backoffUntil;
   }
 
+  /**
+   * The cause of the refusal that still holds, or `null` when none does: what a request refused
+   * by {@link blockedNow}, or by an `ensure` that answers `backoff`, names as its reason.
+   */
+  heldRefusal(): ExactClearanceRefusal | null {
+    return this.blockedNow() ? this.refusedFor : null;
+  }
+
   /** Whether this boot is cleared. Asks the control plane once, then holds the answer (B6). */
   async ensure(): Promise<ExactClearanceResult> {
     if (this.cleared) return { ok: true };
@@ -104,6 +114,7 @@ export class ExactClearance {
     const answer = await this.ask();
     if (!answer.ok) {
       this.backoffUntil = this.now() + EXACT_ATTACH_BACKOFF_MS;
+      this.refusedFor = answer.reason;
       return answer;
     }
     try {
@@ -111,6 +122,7 @@ export class ExactClearance {
     } catch {
       // No marker, no pass (B7): the control plane holds the bit, the engine does not know it does.
       this.backoffUntil = this.now() + EXACT_ATTACH_BACKOFF_MS;
+      this.refusedFor = 'marker_unwritable';
       return { ok: false, reason: 'marker_unwritable' };
     }
     try {
@@ -168,6 +180,9 @@ export class ExactClearance {
     // which would block this boot's attaches.
     this.reassertNotBefore = this.now() + EXACT_ATTACH_BACKOFF_MS;
     const answer = await this.ask();
-    if (!answer.ok) this.backoffUntil = this.now() + EXACT_ATTACH_BACKOFF_MS;
+    if (!answer.ok) {
+      this.backoffUntil = this.now() + EXACT_ATTACH_BACKOFF_MS;
+      this.refusedFor = answer.reason;
+    }
   }
 }

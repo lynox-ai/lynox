@@ -208,7 +208,10 @@
 		{#if shown.length === 0}
 			<p class="text-sm text-text-muted" data-state="empty-filtered">{t('access_trail.empty_filtered')}</p>
 		{:else}
-			<p class="text-xs text-text-muted" data-legend="interface-polls">{t('access_trail.polls_legend')}</p>
+			<!-- The legend explains a group, so it stands only where the list shows one. -->
+			{#if items.some((i) => i.kind === 'polls')}
+				<p class="text-xs text-text-muted" data-legend="interface-polls">{t('access_trail.polls_legend')}</p>
+			{/if}
 			<ul class="divide-y divide-border border-y border-border" aria-label={t('settings.account.access_trail')}>
 				{#each items as item (item.kind === 'polls' ? item.id : item.entry.id)}
 					{#if item.kind === 'polls'}
@@ -240,7 +243,7 @@
 								{#if e.trigger}<span class="font-mono text-xs break-all">{e.trigger}</span>{/if}
 								{#if e.startedBy}<span class="text-xs text-text-muted">{t(`access_trail.started_${e.startedBy}`)}</span>{/if}
 								<span class="text-xs" data-status>{statusText(e.status)}</span>
-								<span class="text-xs text-text-muted" data-targets>{e.writeSteps === null ? t('access_trail.targets_none') : tf('access_trail.write_steps', { n: String(e.writeSteps) })}</span>
+								<span class="text-xs text-text-muted" data-targets>{e.writeSteps === null ? t('access_trail.targets_none') : e.writeSteps === 1 ? t('access_trail.write_steps_one') : tf('access_trail.write_steps', { n: String(e.writeSteps) })}</span>
 							</div>
 							{#if e.key !== null && e.entries.length > 0}
 								<details class="pl-4">
@@ -256,7 +259,7 @@
 								<span class="text-text-muted">{kindText(e)}</span>
 								<span class="font-mono text-xs break-all">{e.action}{#if e.host} · {e.host}{:else if e.store} · {t(e.store === 'files' ? 'bulk.system.workspace' : 'bulk.system.data_store')}{/if}</span>
 								<span class="text-xs" data-status>{statusText(e.status)}</span>
-								<span class="text-xs text-text-muted">{tf('access_trail.windows', { n: String(e.windows) })}</span>
+								<span class="text-xs text-text-muted">{e.windows === 1 ? t('access_trail.windows_one') : tf('access_trail.windows', { n: String(e.windows) })}</span>
 								<span class="text-xs text-text-muted" data-targets>{targetsText(e.targets)}</span>
 								{#if e.planned}<span class="text-xs text-text-muted" data-note>{t('access_trail.planned')}</span>{/if}
 							</div>

@@ -166,8 +166,9 @@ interface Store {
   productAnswer?: (id: string) => unknown;
   /** Answer a product write with this instead of applying it. */
   writeAnswer?: (id: string) => unknown;
-  /** Product number → its product type and vendor, for a filtered list; a product not here has neither. */
-  groups?: Map<number, { product_type?: string; vendor?: string }>;
+  /** Product number → its product type, vendor and status (`ACTIVE`, as the store answers it), for a
+   *  filtered list; a product not here has none of them. */
+  groups?: Map<number, { product_type?: string; vendor?: string; status?: string }>;
 }
 
 /** A write's variables applied to a product the way Shopify applies `productUpdate`. */
@@ -200,11 +201,11 @@ function serve(s: Store): () => void {
     if (typeof variables['q'] === 'string') {
       // The search as the store reads it, strictly: a `$q` of another shape fails the test.
       // A term is one quoted value, or a list of them joined by OR in parentheses, all of one key.
-      const m = /^id:>(\d+)((?: AND (?:(?:product_type|vendor):"[^"]*"|\((?:product_type|vendor):"[^"]*"(?: OR (?:product_type|vendor):"[^"]*")+\)))*)$/.exec(variables['q'])!;
+      const m = /^id:>(\d+)((?: AND (?:(?:product_type|vendor|status):"[^"]*"|\((?:product_type|vendor|status):"[^"]*"(?: OR (?:product_type|vendor|status):"[^"]*")+\)))*)$/.exec(variables['q'])!;
       const afterId = Number(m[1]);
-      const terms = [...m[2]!.matchAll(/ AND (?:\(([^)]*)\)|((?:product_type|vendor):"[^"]*"))/g)].map((t) => {
-        const parts = [...(t[1] ?? t[2]!).matchAll(/(product_type|vendor):"([^"]*)"/g)];
-        const key = parts[0]![1] as 'product_type' | 'vendor';
+      const terms = [...m[2]!.matchAll(/ AND (?:\(([^)]*)\)|((?:product_type|vendor|status):"[^"]*"))/g)].map((t) => {
+        const parts = [...(t[1] ?? t[2]!).matchAll(/(product_type|vendor|status):"([^"]*)"/g)];
+        const key = parts[0]![1] as 'product_type' | 'vendor' | 'status';
         if (parts.some((x) => x[1] !== key)) throw new Error(`an OR group mixes keys: ${variables['q'] as string}`);
         return [key, parts.map((x) => x[2]!)] as const;
       });
@@ -227,7 +228,7 @@ function serve(s: Store): () => void {
     const p = s.products.get(n);
     // A product of a group answers its product type and vendor as the store holds them.
     const g = s.groups?.get(n);
-    const group = { ...(g?.product_type !== undefined ? { productType: g.product_type } : {}), ...(g?.vendor !== undefined ? { vendor: g.vendor } : {}) };
+    const group = { ...(g?.product_type !== undefined ? { productType: g.product_type } : {}), ...(g?.vendor !== undefined ? { vendor: g.vendor } : {}), ...(g?.status !== undefined ? { status: g.status } : {}) };
     return new Response(JSON.stringify({ data: { product: p === undefined ? null : { id, ...p, ...group } } }), { status: 200 });
   });
 }
@@ -405,6 +406,72 @@ describe('reading a store\'s product list narrowed by a filter', () => {
     const preview = ledger.getPreview(id);
     // Kaffée is listed by the store's fold, and left out by the check, which does not fold.
     expect(preview.filter((t) => t.error === 'not_in_filter').map((t) => t.key)).toEqual([gid(folded)]);
+  });
+
+  // A run meant for the products the shop shows names status active: without it the search lists
+  // drafts, archived products and gift cards too, and the targets name none of them as such.
+  describe('a status', () => {
+    /** Products 10..60: 20 a draft tee, 30 archived, 40 an active tee, 50 an active mug, 60 a gift card (active); 10 has no status. */
+    function statuses(): void {
+      fill(6);
+      s.groups = new Map([[20, { product_type: 'Tee', status: 'DRAFT' }], [30, { status: 'ARCHIVED' }], [40, { product_type: 'Tee', status: 'ACTIVE' }], [50, { product_type: 'Mug', status: 'ACTIVE' }], [60, { product_type: 'Gift Card', status: 'ACTIVE' }]]);
+    }
+
+    it('is sent as a status term after the group, and lists only products of that status', async () => {
+      statuses();
+      const src = filtered({ status: 'active', product_type: 'Tee' });
+      expect(src).toMatchObject({ form: SHOPIFY_FILTERED_LIST_FORM, filters: { status: 'active', product_type: 'Tee' } });
+      const id = startedList(src);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(s.requests.map((r) => r.variables['q'])).toEqual(['id:>0 AND product_type:"Tee" AND status:"active"']);
+      expect(minted).toEqual([{ phase: 'list', afterId: 0, filters: { status: 'active', product_type: 'Tee' } }]);
+      expect(ledger.externalTargetKeys(id)).toEqual([gid(40)]);
+    });
+
+    it('takes a list of statuses as one search, any one of which matches', async () => {
+      statuses();
+      const id = startedList(filtered({ status: ['draft', 'archived'] }));
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(s.requests.map((r) => r.variables['q'])).toEqual(['id:>0 AND (status:"draft" OR status:"archived")']);
+      expect(ledger.externalTargetKeys(id)).toEqual([gid(20), gid(30)]);
+    });
+
+    it('leaves out a listed product whose read status is not the filter\'s, as not_in_filter', async () => {
+      statuses();
+      // A search that dropped the status term: the store lists every tee, the check after the read keeps the active one.
+      s.listAnswer = (a) => (a === 0 ? { data: { products: { nodes: [{ id: gid(20) }, { id: gid(40) }] } } } : { data: { products: { nodes: [] } } });
+      const id = startedList(filtered({ status: 'active' }));
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      vi.stubEnv(FLAG, '1');
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(ledger.getPreview(id).filter((t) => t.error === 'not_in_filter').map((t) => t.key)).toEqual([gid(20)]);
+    });
+
+    const STATUS_NO_MATCH: [string, Record<string, string | string[]>, string][] = [
+      ['en', { status: 'archived', product_type: 'Mug' }, 'List read: no product matches both the group and the status in the filter. Check them in the store, then ask lynox in a chat to plan the list again.'],
+      ['de', { status: 'archived', product_type: 'Mug' }, 'Liste gelesen: Kein Produkt passt zugleich zur Gruppe und zum Status aus dem Filter. Prüf beides im Shop und bitte lynox im Chat, die Liste neu zu planen.'],
+    ];
+    it.each(STATUS_NO_MATCH)('says in %s that no product of the group matched %j among that status', async (lang, filters, text) => {
+      statuses();
+      const out = await runBulkPreview(startedList(filtered(filters)), deps({ notices: BULK_NOTICES[lang as 'en' | 'de'] }));
+      expect(out.status).toBe('done');
+      expect(out.summary.startsWith(`${text} `), out.summary).toBe(true);
+      expect(out.summary.length).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+    });
+
+    it('names the status alone when only a status filters, in both languages, one or several', () => {
+      expect(shopifyNoMatchSentence({ status: 'draft' }, BULK_NOTICES.en)).toBe('List read: no product has the status in the filter. Check the products\' status in the store, then ask lynox in a chat to plan the list again.');
+      expect(shopifyNoMatchSentence({ status: ['draft', 'archived'] }, BULK_NOTICES.de)).toBe('Liste gelesen: Kein Produkt hat einen der Status aus dem Filter. Prüf den Status der Produkte im Shop und bitte lynox im Chat, die Liste neu zu planen.');
+      const all = { total: 2, invalidReasons: { not_in_filter: 2 } };
+      expect(shopifyNoneLeftSentence({ status: 'active' }, all, BULK_NOTICES.en)).toBe('Preview: products found, but none with the status in the filter. Ask lynox in a chat to plan the list again.');
+      expect(shopifyNoneLeftSentence({ status: 'active' }, all, BULK_NOTICES.de)).toBe('Vorschau: Produkte gefunden, aber keines hat den Status aus dem Filter. Bitte lynox im Chat, die Liste neu zu planen.');
+      // A group with a status closes its first sentence with the clause; without one it reads as before.
+      // A group read among one status names neither as the one to blame; without a status it reads as before.
+      expect(shopifyNoneLeftSentence({ vendor: 'A', status: 'active' }, all, BULK_NOTICES.en)).toBe('Preview: products found, but none with both group and status as in the filter. Ask lynox in a chat to plan again with the spellings the store shows.');
+      expect(shopifyNoneLeftSentence({ vendor: 'A', status: 'active' }, all, BULK_NOTICES.de)).toBe('Vorschau: Produkte gefunden, aber bei keinem stimmen Gruppe und Status beide mit dem Filter überein. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.');
+      expect(shopifyNoneLeftSentence({ vendor: 'A' }, all, BULK_NOTICES.en)).toBe(BULK_NOTICES.en.listNoneLeft('vendor'));
+    });
   });
 
   it('pages on from the last id with the same filter', async () => {
@@ -591,6 +658,11 @@ describe('reading a store\'s product list narrowed by a filter', () => {
       expect(shopifyNoneLeftSentence({ product_type: 'Tee', vendor: 'A' }, all, say)).toBe(say.listNoneLeft('both'));
       expect(shopifyNoMatchSentence({ vendor: ['A', 'B'] }, say)).toBe(say.listNoMatch('vendor', true));
       expect(shopifyNoMatchSentence({ vendor: 'A' }, say)).toBe(say.listNoMatch('vendor'));
+      // A list of statuses is counted for a status alone, never for a group: one type beside it is one type.
+      expect(shopifyNoMatchSentence({ status: ['draft', 'archived'] }, say)).toBe(say.listNoMatch('status', true));
+      expect(shopifyNoMatchSentence({ status: 'draft' }, say)).toBe(say.listNoMatch('status'));
+      expect(shopifyNoneLeftSentence({ product_type: 'Tee', status: ['draft', 'archived'] }, all, say)).toBe(say.listNoneLeft('group_status'));
+      expect(shopifyNoMatchSentence({ product_type: 'Tee', status: ['draft', 'archived'] }, say)).toBe(say.listNoMatch('group_status'));
     });
 
     it('says nothing of a run without targets, or of one where another reason left a target out', () => {
@@ -604,11 +676,13 @@ describe('reading a store\'s product list narrowed by a filter', () => {
     });
 
     it('fits web push\'s cut with the largest counts a run can have, in both languages and for every filter', () => {
-      for (const say of [BULK_NOTICES.en, BULK_NOTICES.de]) for (const kind of ['product_type', 'vendor', 'both'] as const) {
+      for (const say of [BULK_NOTICES.en, BULK_NOTICES.de]) for (const kind of ['product_type', 'vendor', 'both', 'status', 'group_status'] as const) {
         // The sentence comes only when every target is out as not_in_filter: its counts are 0 read
         // or judged and N invalid of N, at most BULK_MAX_TARGETS.
         const counts = [say.previewCounts(0, BULK_MAX_TARGETS, 0, BULK_MAX_TARGETS), say.judgeCounts(0, BULK_MAX_TARGETS, 0, BULK_MAX_TARGETS)];
         for (const c of counts) for (const many of [false, true]) expect(`${say.listNoneLeft(kind, many)} ${c}`.length, `${kind} ${String(many)} ${c}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+        // A list that matched nothing has read nothing: its counts are all 0.
+        for (const many of [false, true]) expect(`${say.listNoMatch(kind, many)} ${say.previewCounts(0, 0, 0, 0)}`.length, `${kind} ${String(many)}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
       }
     });
 
@@ -683,9 +757,11 @@ describe('reading a store\'s product list narrowed by a filter', () => {
     expect(ledger.resumePreview(all, Date.now(), { listChecksum: shownAll })).toEqual({ ok: false, reason: 'checksum' });
   });
 
-  it('shows the owner the filters of a filtered list only', () => {
+  it('shows the owner the filters of a store\'s product list, none as {} so the page names every status, and nothing for its images', () => {
     expect(shopifyListFiltersOf({ source: filtered({ product_type: 'Tee', vendor: 'Acme' }) })).toEqual({ product_type: 'Tee', vendor: 'Acme' });
-    expect(shopifyListFiltersOf({ source: source() })).toBeNull();
+    expect(shopifyListFiltersOf({ source: filtered({ status: 'active' }) })).toEqual({ status: 'active' });
+    expect(shopifyListFiltersOf({ source: source() })).toEqual({});
+    expect(shopifyListFiltersOf({ source: parseListSource(HOST, { form: 'shopify_media', after: { alt: 'x' } }, 'PATCH', scan) })).toBeNull();
     expect(shopifyListFiltersOf(null)).toBeNull();
   });
 });
@@ -1347,6 +1423,64 @@ describe('applying a Shopify run', () => {
     expect(ledger.shopifyApplyOf(undo.status.id)!.writes).toEqual([]);
   });
 
+  /** An applied run on product 10 and its planned undo, whose description is the source's before-image `held`. */
+  const undoOf = async (held: string): Promise<{ id: string; undo: string }> => {
+    fill(1);
+    const id = await previewed();
+    ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(id);
+    const undo = ledger.planUndo(id);
+    if (!undo.ok) throw new Error(undo.reason);
+    const db = engineDb.getDb();
+    const src = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = 0').get(id) as { before: string };
+    const image = JSON.parse(engineDb.dec(src.before)) as { absent: false; value: Record<string, unknown> };
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = 0')
+      .run(engineDb.enc(JSON.stringify({ absent: false, value: { ...image.value, descriptionHtml: held } })), id);
+    plant(undo.status.id, gid(10), { descriptionHtml: held });
+    expect(ledger.shopifyApplyOf(undo.status.id)!.writes.map((w) => w.gid)).toEqual([gid(10)]);
+    return { id, undo: undo.status.id };
+  };
+
+  it('mints no undo whose description a write up the chain kept marked, when the ledger changed after planning', async () => {
+    const held = '<p>1</p><script>theirs()</script>';
+    const { id, undo } = await undoOf(held);
+    // The ledger after planning: the source now comes from a run whose write the store kept with
+    // that very value, marked. The before-image check alone passes it.
+    const db = engineDb.getDb();
+    db.prepare(`INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total, targets_applied)
+      VALUES ('marked-src', 'r', ?, 'restorable', 'done', 1, 1)`).run(`http:${HOST}`);
+    db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, applied_at, result, after_actual, shop_added_markup)
+      VALUES ('marked-src', 0, ?, 'update', '2026-11-01T00:00:00.000Z', ?, ?, 1)`)
+      .run(engineDb.enc(gid(10)), engineDb.enc('written'), engineDb.enc(JSON.stringify({ value: { descriptionHtml: held }, estimated: false })));
+    db.prepare(`UPDATE bulk_runs SET source_run_id = 'marked-src' WHERE id = ?`).run(id);
+    db.prepare('UPDATE bulk_targets SET source_seq = 0 WHERE run_id = ? AND seq = 0').run(id);
+    expect(ledger.shopifyApplyOf(undo)!.writes).toEqual([]);
+    // Its read stays granted: the apply reads it and halts on the refused request.
+    expect(ledger.shopifyApplyOf(undo)!.reads).toEqual([gid(10)]);
+  });
+
+  it('leaves out, without throwing, a write whose stored before-image or after-state does not parse', async () => {
+    const held = '<p>1</p>';
+    const { id, undo } = await undoOf(held);
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = 0').run(engineDb.enc('{broken'), id);
+    expect(() => ledger.shopifyApplyOf(undo)).not.toThrow();
+    expect(ledger.shopifyApplyOf(undo)!).toMatchObject({ writes: [], reads: [gid(10)] });
+  });
+
+  it('leaves out, without throwing, an apply\'s write whose before-image or after-state does not parse, and keeps the others', async () => {
+    fill(3);
+    const id = await previewed();
+    plant(id, gid(20), { descriptionHtml: '<p>y</p>' });
+    const seq = Object.fromEntries(ledger.getPreview(id).map((t) => [t.key, t.seq]));
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = ?').run(engineDb.enc('{broken'), id, seq[gid(20)]);
+    db.prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND seq = ?').run(engineDb.enc('[1'), id, seq[gid(10)]);
+    expect(() => ledger.shopifyApplyOf(id)).not.toThrow();
+    expect(ledger.shopifyApplyOf(id)!.writes.map((w) => w.gid)).toEqual([gid(30)]);
+    expect(ledger.shopifyApplyOf(id)!.reads).toEqual([gid(10), gid(20), gid(30)]);
+  });
+
   it('finds a description the store reformatted as planned when resuming, and sends nothing to it (§21.2 item 5)', async () => {
     fill(1);
     const id = await previewed();
@@ -1370,8 +1504,8 @@ describe('applying a Shopify run', () => {
     };
     await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => reader });
     expect(sent).toEqual([]);
-    // Found in the store's own form: counted like a read-back stored otherwise than sent.
-    expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0, hostRewrote: 1 });
+    // Found in the store's own form, which the comparison explains: no rewrite.
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0, hostRewrote: 0 });
   });
 
   it('resumes a description the store holds with a stretch the parser drops as a conflict, not as planned', async () => {
@@ -1822,9 +1956,9 @@ describe('the context C of a judged Shopify run (PRD shopify-preset §20.2 item 
   const F = { seo_title: { type: 'string', maxLength: 70 }, seo_description: { type: 'string', maxLength: 160 } };
   const C = ['title', 'descriptionHtml', 'productType', 'vendor', 'tags'];
 
-  it('reads the product with a fixed document that also asks for type, vendor and tags, and grants it byte for byte', () => {
+  it('reads the product with a fixed document that also asks for type, vendor, status and tags, and grants it byte for byte', () => {
     expect(SHOPIFY_READ_DOCUMENTS.shopify_product_read)
-      .toBe('query($id: ID!) { product(id: $id) { id title descriptionHtml productType vendor tags seo { title description } } }');
+      .toBe('query($id: ID!) { product(id: $id) { id title descriptionHtml productType vendor status tags seo { title description } } }');
     expect(JSON.parse(shopifyProductReadBody(gid(7))!))
       .toEqual({ query: SHOPIFY_READ_DOCUMENTS.shopify_product_read, variables: { id: gid(7) } });
   });
@@ -2010,6 +2144,15 @@ describe('whether a read product lies in a list\'s filters', () => {
     ['a key no field answers', { productType: 'Tee' }, { tag: 'Tee' }, false],
     ['the filter key as a field name', { product_type: 'Tee' }, { product_type: 'Tee' }, false],
     ['no filter', {}, {}, true],
+    // Searched in small letters, answered in capitals: ASCII case folds them.
+    ['a status', { status: 'ACTIVE' }, { status: 'active' }, true],
+    ['another status', { status: 'DRAFT' }, { status: 'active' }, false],
+    ['one of several statuses', { status: 'ARCHIVED' }, { status: ['draft', 'archived'] }, true],
+    ['a status with a group', { productType: 'Tee', status: 'DRAFT' }, { product_type: 'Tee', status: 'active' }, false],
+    ['no status in the answer', { productType: 'Tee' }, { status: 'active' }, false],
+    // A stored value no parse built: refused, so it holds no product even where the read would match.
+    ['a status the rule does not take', { status: 'ACTIVE' }, { status: 'Active' }, false],
+    ['a status as free text', { status: 'PUBLISHED' }, { status: 'published' }, false],
   ])('%s', (_name, product, filters, inside) => {
     expect(shopifyInFilter(answer(product), filters)).toBe(inside);
   });

@@ -73,6 +73,8 @@ const SAMPLE_PROFILE: ApiProfile = {
   avoid: ['No GET for mutations'],
 };
 
+const EMPTY_VAULT = { listNames: (): string[] => [], resolve: (): null => null };
+
 function createMockAgent(
   apiStore?: ApiStore | null,
   secretStore?: unknown,
@@ -863,7 +865,8 @@ describe('api_setup tool', () => {
       auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, ...oauth } },
     });
     const save = (store: ApiStore, profile: ApiProfile): Promise<string> =>
-      apiSetupTool.handler({ action: 'create', profile }, createMockAgent(store, undefined, async () => 'Allow')) as Promise<string>;
+      // An empty vault the slot check can read: a step without one is refused a built-in provider's profile.
+      apiSetupTool.handler({ action: 'create', profile }, createMockAgent(store, EMPTY_VAULT, async () => 'Allow')) as Promise<string>;
 
     it.each([
       ['client_secret_key', 'MY_SECRET'],
@@ -904,7 +907,7 @@ describe('api_setup tool', () => {
     it('stores it in lower case on an update too', async () => {
       const store = new ApiStore();
       expect(await save(store, shopify())).toContain('Created API profile');
-      const result = await apiSetupTool.handler({ action: 'update', profile: shopify({ preset_params: { shop: 'ACME' } }) }, createMockAgent(store, undefined, async () => 'Allow')) as string;
+      const result = await apiSetupTool.handler({ action: 'update', profile: shopify({ preset_params: { shop: 'ACME' } }) }, createMockAgent(store, EMPTY_VAULT, async () => 'Allow')) as string;
       expect(result).not.toContain('Error');
       expect(store.get('shop-admin')?.auth?.oauth?.preset_params).toEqual({ shop: 'acme' });
     });
@@ -1247,6 +1250,100 @@ describe('api_setup tool', () => {
         );
         expect(result).toContain('unsupported spec version (openapi: "<unprintable>")');
         expect(result).not.toContain('Ignore the user');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // A server that honours a method override runs `GET …?_method=DELETE` as a DELETE. A spec
+    // read is never a write: the address is refused before it is requested.
+    it('does not request a spec address that carries a method override', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json?x=1;_method=DELETE' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the address carries a method override');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('does not request a spec address that carries a GraphQL mutation', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://api.example.com/graphql?query=mutation%7BdeleteAll%7D' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the address is a GraphQL endpoint whose query names a mutation');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('CONTROL: names an address without a scheme as unparsable, not as a GraphQL mutation', async () => {
+      const result = await apiSetupTool.handler(
+        { action: 'bootstrap', openapi_url: 'api.example.com/openapi.json' },
+        createMockAgent(new ApiStore()),
+      );
+      expect(result).not.toContain('GraphQL');
+      expect(result).toContain('the request failed');
+    });
+
+    it('does not request a docs address that carries a method override', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com/api?_method=DELETE' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the address carries a method override');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('does not follow a redirect whose target carries a method override, and says the first request was sent', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://example.com/items/5?_method=DELETE' } }),
+      );
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the server answered with a redirect to an address that carries a method override');
+        expect(result).toContain('the first request was sent and answered; ask the user for the spec as a file or for another address of it');
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // The guard's sentences are matched whole: a host that holds the word of another refusal
+    // (`enforce_https.…`) is not read as that refusal, and a hop's refusal does not say that
+    // nothing was sent.
+    it.each([
+      ['enforce_https.example.com', 'plain HTTP'],
+      ['network_policy=deny-all.example.com', 'network access is denied'],
+    ])('does not read a refused hop to %s as another refusal', async (host, wrong) => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: `https://${host}/graphql?query=mutation%7Bx%7D` } }),
+      );
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered; ask the user for the spec as a file or for another address of it');
+        expect(result).not.toContain(wrong);
+        expect(result).not.toContain('refused before it was sent');
+        expect(result).not.toContain(host);
       } finally {
         fetchSpy.mockRestore();
       }
@@ -2884,6 +2981,26 @@ describe('api_setup tool', () => {
         const phases = events.filter(e => e.type === 'tool_progress').map(e => e.phase);
         // fetching_docs is emitted before the fetch; extracting + finalizing never fire on a 404.
         expect(phases).toEqual(['fetching_docs']);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // The docs page chooses its links: one that carries a method override is not requested.
+    it('does not request a linked section whose address carries a method override', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === 'https://docs.example.com/api') {
+          return new Response('<html><body><a href="/v3/rate-limits?_method=DELETE">Rate limits</a><a href="/v3/pricing">Pricing details</a></body></html>', { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } });
+        }
+        return new Response('SECTION', { status: 200, statusText: 'OK' });
+      });
+      stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+      try {
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/api' }, createMockAgent(new ApiStore()));
+        const fetchedUrls = fetchSpy.mock.calls.map(c => String(c[0]));
+        expect(fetchedUrls).toContain('https://docs.example.com/v3/pricing');
+        expect(fetchedUrls.some(u => u.includes('_method'))).toBe(false);
       } finally {
         fetchSpy.mockRestore();
       }

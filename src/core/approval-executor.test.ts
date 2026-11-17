@@ -445,6 +445,21 @@ describe('attempts, the retry delay and the send deadline', () => {
 });
 
 describe('the send limit', () => {
+  it('without the history database holds approved mails, and sends them once a restart opens it', async () => {
+    // The boot without history.db: the limits are set, nothing counts against them.
+    configureMailRateLimits({ provider: null });
+    const id = approved(send());
+    expect(await executor().tick()).toBeNull();
+    expect(store.get(id)!.status).toBe('approved');
+    expect(store.get(id)!.heldReason).toBe('send_limit');
+    expect(provider.send).not.toHaveBeenCalled();
+    // The restart that opens it: the same limits, now counted.
+    configureMailRateLimits({ provider: { getToolCallCountSince: () => 0 } });
+    advance(APPROVAL_RETRY_DELAY_MS);
+    expect(await executor().tick()).toEqual({ id, status: 'done' });
+    expect(provider.send).toHaveBeenCalledOnce();
+  });
+
   it('holds an entry while the limit is reached and sends it once there is room', async () => {
     let calls = 1;
     configureMailRateLimits({ provider: { getToolCallCountSince: () => calls }, hourlyLimit: 2, dailyLimit: 100 });

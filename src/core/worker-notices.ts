@@ -60,6 +60,22 @@ function firstRunUnconfirmedId(stored: string): string | undefined {
   return stored.slice(FIRST_RUN_HEAD.length, stored.length - FIRST_RUN_TAIL.length);
 }
 /**
+ * A webhook trigger switched off because its workflow waits for the owner to review its steps
+ * (`workflow-stamp.ts`): the event's stored reason, with the workflow's id in it. Writer and
+ * reader share the parts, as above.
+ */
+const AWAITS_STAMP_HEAD = 'Workflow "';
+const AWAITS_STAMP_TAIL = '" waits for its owner to review its steps, so this trigger was switched off and refuses deliveries. Review its steps under Automation → Workflows and stamp them, then switch the trigger on again.';
+export function webhookAwaitsStampReason(workflowId: string): string {
+  return `${AWAITS_STAMP_HEAD}${workflowId}${AWAITS_STAMP_TAIL}`;
+}
+/** The workflow id of a stored {@link webhookAwaitsStampReason}, or undefined for any other text. */
+function webhookAwaitsStampId(stored: string): string | undefined {
+  if (stored.length <= AWAITS_STAMP_HEAD.length + AWAITS_STAMP_TAIL.length) return undefined;
+  if (!stored.startsWith(AWAITS_STAMP_HEAD) || !stored.endsWith(AWAITS_STAMP_TAIL)) return undefined;
+  return stored.slice(AWAITS_STAMP_HEAD.length, stored.length - AWAITS_STAMP_TAIL.length);
+}
+/**
  * An event run by a workflow whose mode lets it ask for more than an answer: the event's stored
  * reason, with the workflow's id and mode in it. Writer and reader share the parts, as above; the
  * mode is one of the planner's words and never holds `MODE_MID`, so the reader splits at its last
@@ -92,6 +108,9 @@ function saidWorkflowId(id: string): string {
   return `${kept}…`;
 }
 
+/** A mandate's address an escalation title may name, and whether it set the plan up or changed it. */
+export interface ShownMandate { readonly address: string; readonly changed: boolean }
+
 export interface WorkerNotices {
   /** The summary of more than a few triggers waiting for confirmation. */
   consentManyTitle(count: number): string;
@@ -121,9 +140,49 @@ export interface WorkerNotices {
   readonly containedQuestionInquiry: string;
   /** The first sentence of a scheduled workflow that did not complete. */
   workflowIncomplete(title: string, status: string | undefined): string;
+  /**
+   * The escalation of a plan someone the owner let in set up or changed (PRD
+   * customer-granted-operator-access B6): its title, errors, address and analysis are that
+   * person's or a page's text, and the thread they land in reads as lynox's own words to the owner.
+   * So lynox says what happened in its own words and leaves them out; the ids stay, so the agent
+   * can read the run with the owner (`diagnose_workflow_run`, an external-content read).
+   */
+  /** `by` names the mandate when its address may be shown: who set the plan up, or who changed it. */
+  helperPlanFailedTitle(by: ShownMandate | undefined): string;
+  helperWorkflowIncomplete(status: string | undefined): string;
+  helperWatchTitle(by: ShownMandate | undefined): string;
+  /** The thread's seed (model context, English) and the push (the owner's, localized). */
+  readonly helperWatchChanged: string;
+  readonly helperWatchChangedPush: string;
+  /**
+   * The `user` turn that opens an escalation thread and a workflow's question thread. The model
+   * reads it as the owner's own words, so it names no title: a title may have been written by
+   * someone else, and goes into the assistant's turn, quoted.
+   */
+  readonly reportOpener: string;
+  readonly questionOpener: string;
+  /** The line above a scheduled workflow's question in its thread, the title quoted. */
+  questionFrom(title: string): string;
+  /**
+   * A question from a plan someone the owner let in set up or changed (PRD B6): the thread's and
+   * the push's title, and the line above the question, in lynox's words. The plan's title stays
+   * out, as on the failure path: it is that person's text, and here it would be called the owner's.
+   */
+  helperQuestionTitle(by: ShownMandate | undefined): string;
+  readonly helperQuestionFrom: string;
   readonly errorLabel: string;
   readonly failedStepsLabel: string;
   readonly writesLabel: string;
+  /**
+   * A step that reported it could not complete its task (`fail_step`), in lynox's own words: its
+   * reason is model text and stays out of the thread (U-192). `stepReported` is the run's error
+   * line, `stepReportedItem` its line under the failed steps, and `reportedReasonWhere` follows once
+   * when a step reported. The id goes in as the thread shows any id (`escalateToUser` strips what
+   * renders as nothing from the whole body).
+   */
+  stepReported(stepId: string): string;
+  stepReportedItem(stepId: string): string;
+  readonly reportedReasonWhere: string;
   /**
    * A run that stopped at its cost ceiling (`value` like `$0.50`) or turn limit (`value` the
    * count) with work still pending: the sentence the push leads with.
@@ -177,6 +236,17 @@ export interface WorkerNotices {
   watchChanged(url: string, analysis: string): string;
 }
 
+/**
+ * A title as it goes between quotes in a turn the model reads: without the characters that close
+ * a quote or start a line, so a title cannot end its quote and go on as the turn's own words.
+ * A line is started by every character Unicode counts as a line break: CR, LF, VT, FF, NEL,
+ * U+2028 and U+2029.
+ * A title is set by the model or a delegated session and may carry text someone else wrote.
+ */
+export function inQuotes(title: string): string {
+  return title.replace(/["\u201C\u201D\u201E\u201F\u00AB\u00BB\u2033\uFF02]/g, "'").replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, ' ');
+}
+
 /** The workflow statuses a notice names; any other, `unknown` included, is left out rather than quoted raw. */
 const NAMED_WORKFLOW_STATUS: ReadonlySet<string> = new Set(['failed', 'rejected']);
 const DE_WORKFLOW_STATUS: Readonly<Record<string, string>> = Object.freeze({
@@ -201,13 +271,33 @@ const EN: WorkerNotices = Object.freeze({
   containedQuestion: 'A question is waiting in the chat. This run may have read data from your connected shop, so this notification leaves out the question and its options. Open the chat to answer it.',
   containedQuestionInquiry: 'A question is waiting in the chat.',
   workflowIncomplete: (title: string, status: string | undefined) =>
-    `Your scheduled workflow "${title}" didn't complete${status !== undefined && NAMED_WORKFLOW_STATUS.has(status) ? ` (status: ${status})` : ''}.`,
+    `Your scheduled workflow "${inQuotes(title)}" didn't complete${status !== undefined && NAMED_WORKFLOW_STATUS.has(status) ? ` (status: ${status})` : ''}.`,
+  helperPlanFailedTitle: (by: ShownMandate | undefined) => by === undefined
+    ? '✗ A plan someone you let in set up did not complete'
+    : by.changed ? `✗ A plan changed by ${by.address} did not complete` : `✗ A plan set up by ${by.address} did not complete`,
+  helperWorkflowIncomplete: (status: string | undefined) =>
+    `A scheduled workflow that someone you let in set up or changed didn't complete${status !== undefined && NAMED_WORKFLOW_STATUS.has(status) ? ` (status: ${status})` : ''}. Its name and its errors are left out here, because they can contain text from that person or from outside.`,
+  helperWatchTitle: (by: ShownMandate | undefined) => by === undefined
+    ? '🔍 A page someone you let in set a watch on has changed'
+    : by.changed ? `🔍 A watch changed by ${by.address} reports a changed page` : `🔍 A page ${by.address} set a watch on has changed`,
+  helperWatchChanged: 'A page that someone you let in set a watch on has changed. Its address and the summary are left out here, because that person chose the page. The watch is under Automation → Triggers.',
+  helperWatchChangedPush: 'A page that someone you let in set a watch on has changed. Its address and the summary are left out here, because that person chose the page. The watch is under Automation → Triggers.',
+  reportOpener: 'What happened with my automation?',
+  questionOpener: 'My scheduled workflow has a question.',
+  questionFrom: (title: string) => `From your scheduled workflow "${inQuotes(title)}":`,
+  helperQuestionTitle: (by: ShownMandate | undefined) => by === undefined
+    ? 'A plan someone you let in set up has a question'
+    : by.changed ? `A plan changed by ${by.address} has a question` : `A plan set up by ${by.address} has a question`,
+  helperQuestionFrom: 'From a scheduled workflow that someone you let in set up or changed. Its name is left out here, because it can contain text from that person:',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
   budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
   errorLabel: 'Error:',
   failedStepsLabel: 'Failed steps:',
   writesLabel: 'Writes:',
+  stepReported: (stepId: string) => `Step "${stepId}" reported that it could not complete its task.`,
+  stepReportedItem: (stepId: string) => `• ${stepId}: reported that it could not complete its task.`,
+  reportedReasonWhere: 'You can ask here for the reason the step gave; it is kept in the run\'s record.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(run ${runId}${workflowId ? ` · workflow ${workflowId}` : ''})`
     : (workflowId ? `(workflow ${workflowId})` : ''),
@@ -266,6 +356,10 @@ function deEventReason(stored: string): string {
   if (workflowId !== undefined) {
     return `Workflow „${saidWorkflowId(workflowId)}“ ist vor dem ersten Lauf noch nicht bestätigt; der Auslöser ist darum aus. Plane den Workflow in der Bibliothek ein und schalte den Auslöser wieder ein.`;
   }
+  const stampId = webhookAwaitsStampId(stored);
+  if (stampId !== undefined) {
+    return `Workflow „${saidWorkflowId(stampId)}“ wartet darauf, dass du seine Schritte prüfst; der Auslöser ist darum aus. Prüf die Schritte unter Automation → Workflows, bestätige sie und schalte den Auslöser wieder ein.`;
+  }
   const modeId = eventModeRefusedId(stored);
   if (modeId !== undefined) {
     return `Workflow „${saidWorkflowId(modeId)}“ kann mehr als eine Antwort brauchen, und bei einem Lauf durch ein Ereignis gibt sie niemand. Bitte lynox im Chat, ihn ohne Rückfragen umzubauen.`;
@@ -296,14 +390,36 @@ const DE: WorkerNotices = Object.freeze({
   containedQuestionInquiry: 'Im Chat wartet eine Frage.',
   workflowIncomplete: (title: string, status: string | undefined) => {
     const named = status !== undefined ? DE_WORKFLOW_STATUS[status] : undefined;
-    return `Dein geplanter Workflow „${title}“ ist nicht fertig geworden${named !== undefined ? ` (Status: ${named})` : ''}.`;
+    return `Dein geplanter Workflow „${inQuotes(title)}“ ist nicht fertig geworden${named !== undefined ? ` (Status: ${named})` : ''}.`;
   },
+  helperPlanFailedTitle: (by: ShownMandate | undefined) => by === undefined
+    ? '✗ Ein Plan von jemandem, dem du Zugang gegeben hast, ist nicht fertig geworden'
+    : by.changed ? `✗ Ein Plan, den ${by.address} geändert hat, ist nicht fertig geworden` : `✗ Ein Plan von ${by.address} ist nicht fertig geworden`,
+  helperWorkflowIncomplete: (status: string | undefined) => {
+    const named = status !== undefined ? DE_WORKFLOW_STATUS[status] : undefined;
+    return `Ein geplanter Workflow, den jemand, dem du Zugang gegeben hast, eingerichtet oder geändert hat, ist nicht fertig geworden${named !== undefined ? ` (Status: ${named})` : ''}. Name und Fehler stehen hier nicht, weil sie Text dieser Person oder von aussen enthalten können.`;
+  },
+  helperWatchTitle: (by: ShownMandate | undefined) => by === undefined
+    ? '🔍 Eine Seite, die jemand beobachten lässt, dem du Zugang gegeben hast, hat sich geändert'
+    : by.changed ? `🔍 Eine Beobachtung, die ${by.address} geändert hat, meldet eine Änderung` : `🔍 Eine Seite, die ${by.address} beobachten lässt, hat sich geändert`,
+  helperWatchChanged: 'Eine Seite, die jemand beobachten lässt, dem du Zugang gegeben hast, hat sich geändert. Adresse und Zusammenfassung stehen hier nicht, weil diese Person die Seite gewählt hat. Die Beobachtung findest du unter Automation → Trigger.',
+  helperWatchChangedPush: 'Eine Seite, die jemand beobachten lässt, dem du Zugang gegeben hast, hat sich geändert. Adresse und Zusammenfassung stehen hier nicht, weil diese Person die Seite gewählt hat. Die Beobachtung findest du unter Automation → Trigger.',
+  reportOpener: 'Was ist mit meiner Automation passiert?',
+  questionOpener: 'Mein geplanter Workflow hat eine Frage.',
+  questionFrom: (title: string) => `Aus deinem geplanten Workflow „${inQuotes(title)}“:`,
+  helperQuestionTitle: (by: ShownMandate | undefined) => by === undefined
+    ? 'Ein Plan von jemandem, dem du Zugang gegeben hast, hat eine Frage'
+    : by.changed ? `Ein Plan, den ${by.address} geändert hat, hat eine Frage` : `Ein Plan von ${by.address} hat eine Frage`,
+  helperQuestionFrom: 'Aus einem geplanten Workflow, den jemand, dem du Zugang gegeben hast, eingerichtet oder geändert hat. Der Name des Workflows steht hier nicht, weil er Text dieser Person enthalten kann:',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `${kind === 'cost' ? `Gestoppt an der Kostengrenze (${value})` : `Gestoppt am Rundenlimit (${value})`}, obwohl noch Arbeit offen war.`,
   budgetCutWayOut: 'Ein Neustart kann wieder an derselben Stelle stoppen. Bitte lynox im Chat, die Aufgabe in kleinere Pläne aufzuteilen.',
   errorLabel: 'Fehler:',
   failedStepsLabel: 'Fehlgeschlagene Schritte:',
   writesLabel: 'Schreibvorgänge:',
+  stepReported: (stepId: string) => `Schritt „${stepId}“ hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  stepReportedItem: (stepId: string) => `• ${stepId}: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  reportedReasonWhere: 'Den Grund, den der Schritt angegeben hat, kannst du hier erfragen; er steht im Protokoll des Laufs.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(Lauf ${runId}${workflowId ? ` · Workflow ${workflowId}` : ''})`
     : (workflowId ? `(Workflow ${workflowId})` : ''),

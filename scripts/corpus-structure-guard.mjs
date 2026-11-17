@@ -298,5 +298,5 @@ export function run(argv, { cwd = process.cwd(), env = process.env, log = consol
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  process.exit(run(process.argv.slice(2)));
+  process.exitCode = run(process.argv.slice(2));
 }

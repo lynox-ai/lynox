@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from '../../../../../src/core/engine-db.js';
 import { TriggerStore, type TriggerRow } from '../../../../../src/core/trigger-store.js';
 import {
-	awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf,
+	awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf,
 } from './trigger-consent.js';
 
 describe('awaitsConfirmation', () => {
@@ -437,3 +437,17 @@ describe('display and fetch name the same target', () => {
 		);
 	});
 });
+
+describe('showsWatchAddress — a confirmed watch names its page', () => {
+	const cfg = JSON.stringify({ url: 'https://example.com/preise', interval_minutes: 60 });
+	it('a confirmed watch: yes; the same watch waiting: no (its consent block shows it)', () => {
+		expect(showsWatchAddress({ source: 'watch', effect: 'run_agent', confirmed_at: '2026-01-01T00:00:00Z', watch_config: cfg })).toBe(true);
+		expect(showsWatchAddress({ source: 'watch', effect: 'run_agent', watch_config: cfg })).toBe(false);
+		expect(showsWatchTarget({ source: 'watch', effect: 'run_agent', watch_config: cfg })).toBe(true);
+	});
+	it('not for another trigger, nor for a config it cannot read', () => {
+		expect(showsWatchAddress({ source: 'cron', effect: 'run_agent', confirmed_at: '2026-01-01T00:00:00Z', watch_config: cfg })).toBe(false);
+		expect(showsWatchAddress({ source: 'watch', effect: 'run_agent', confirmed_at: '2026-01-01T00:00:00Z', watch_config: '{not json' })).toBe(false);
+	});
+});
+

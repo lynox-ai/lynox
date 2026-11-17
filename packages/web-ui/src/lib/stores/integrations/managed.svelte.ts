@@ -42,13 +42,42 @@ export function cpSuppliesLLMKeyForInstance(): boolean {
 	return tierCpSuppliesLLMKey(managedTier);
 }
 
+/** Which way out a notice names (U-302). */
+export type WayOut = 'loading' | 'failed' | 'managed' | 'self';
+
+let wayOut = $state<WayOut>('loading');
+
+/**
+ * Which way out a notice names. `managed` and `self` come from the engine's own switch (`billing_tier_set`
+ * from `GET /api/config`: any tier value, canonical or not), so a notice here and a refusal from
+ * the engine name the same way out; not `isManaged()`, which only counts a tier that normalizes.
+ * `loading` until the answer is in (the notice states the fact alone), `failed` after a read that
+ * did not give one (the notice says to reload): naming no way out, or a neutral one, beats naming
+ * the wrong one.
+ */
+export function managedWayOut(): WayOut {
+	return wayOut;
+}
+
+/** Tests only: back to the state before the first read. */
+export function _resetManagedStatus(): void {
+	managedTier = undefined;
+	wayOut = 'loading';
+}
+
 export async function loadManagedStatus(): Promise<void> {
 	try {
 		const res = await fetch(`${getApiBase()}/config`);
-		if (!res.ok) return;
+		if (!res.ok) {
+			if (wayOut === 'loading') wayOut = 'failed';
+			return;
+		}
 		const data = (await res.json()) as Record<string, unknown>;
 		if (typeof data['managed'] === 'string') managedTier = data['managed'];
+		if (typeof data['billing_tier_set'] === 'boolean') wayOut = data['billing_tier_set'] ? 'managed' : 'self';
+		else if (wayOut === 'loading') wayOut = 'failed';
 	} catch {
-		/* ignore — original behaviour */
+		// Keep an answer an earlier read gave; without one, the notices say to reload.
+		if (wayOut === 'loading') wayOut = 'failed';
 	}
 }
