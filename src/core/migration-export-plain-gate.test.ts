@@ -274,6 +274,31 @@ describe('a store is judged by its raw size before its plaintext form is built',
     expect(r.plain?.stores.find((s) => s.store === 'engine.db')).toMatchObject({ path: 'raw', reason: 'source-memory' });
   });
 
+  it('against this instance\'s own memory, a store judged later counts the stores let through before it', () => {
+    source();
+    const at = engineInput();
+    // history.db's raw size, from one export with room for everything.
+    new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT }).export(key(), undefined, { plain: { ceiling: { import_limit_mb: 1e12, baseline_mb: 0, k: 1, rest_factor: 0 } } });
+    const history = calls.judged.find((j) => j.store === 'other');
+    expect(history).toBeDefined();
+    const historyRaw = history!.input.rawBytes;
+    calls.judged.length = 0; calls.rewritten.length = 0;
+    const vast = { import_limit_mb: 1e12, baseline_mb: 0, k: 1, rest_factor: 0 };
+    const both = 100 + MIGRATION_MEMORY.kSourceBaseMb + (MIGRATION_MEMORY.kSource * (at.rawBytes + historyRaw)) / MIB;
+    // Room for both together: both are rewritten. The resident memory is read once, before the
+    // first rewrite; a later reading (here vast) does not count.
+    let reads = 0;
+    const once = { limitMb: () => both, rssMb: () => (reads++ === 0 ? 100 : 1e9) };
+    new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: once }).export(key(), undefined, { plain: { ceiling: vast } });
+    expect(reads).toBe(1);
+    expect(calls.rewritten).toEqual(['engine.db', 'history.db']);
+    calls.rewritten.length = 0;
+    // A thousandth of a MiB less: engine.db still fits alone, history.db not next to it.
+    const r = new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT, ownMemory: { limitMb: () => both - 0.001, rssMb: () => 100 } }).export(key(), undefined, { plain: { ceiling: vast } });
+    expect(calls.rewritten).toEqual(['engine.db']);
+    expect(r.plain?.stores.find((s) => s.store === 'history.db')).toMatchObject({ path: 'raw', reason: 'source-memory' });
+  });
+
   it('a store refused before its rewrite is reported with the reason', () => {
     source();
     const r = new MigrationExporter({ lynoxDir: dir, vaultKey: VAULT }).export(key(), undefined, { plain: { ceiling: { import_limit_mb: 0.001, baseline_mb: 0, k: 1, rest_factor: 0 } } });

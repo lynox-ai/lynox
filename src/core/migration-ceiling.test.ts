@@ -29,11 +29,14 @@ const files = (map: Record<string, string>) => (path: string): string => {
 };
 
 describe('the source\'s memory line on the plaintext path', () => {
-  // Peak over the resident memory at the check, in MiB, per store size in MiB: the readings the
+  // Peak over the resident memory before the first rewrite, in MiB, per store size in MiB: the readings the
   // constants' comment cites (engine image, tenant limit, two runs each).
+  // The store size is engine.db and history.db together.
   const readings: Array<[number, number]> = [
     [12.7, 102.2], [12.7, 102.7], [36.7, 238.3], [36.7, 237.9], [84.7, 448.4], [84.7, 440.8],
     [156.7, 757.2], [156.7, 759.4], [216.7, 977.4], [216.7, 965.8],
+    [157.1, 746.3], [157.1, 761.7], [205.1, 971.1], [205.1, 985.9], [217.1, 1031.1], [217.1, 1014.8],
+    [205.1, 964.6], [205.1, 977.6], [169.1, 845.8], [169.1, 827.5],
   ];
 
   it('lies above every reading, with at least 10 % to spare', () => {

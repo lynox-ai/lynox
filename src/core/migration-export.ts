@@ -408,6 +408,11 @@ export class MigrationExporter {
   ): void {
     const bytes = (cs: PlaintextChunk[]): number => cs.reduce((n, c) => n + c.data.length, 0);
     const restBytes = bytes(chunks) + (sweeps ? bytes(sweeps.raw) : 0);
+    // This instance's memory is read once, before the first rewrite: a store judged later is
+    // judged together with the stores already let through, whose forms are then in memory.
+    const limitMb = this.ownMemory.limitMb();
+    const rssMb = this.ownMemory.rssMb();
+    let formedBytes = 0;
     for (const d of databases) {
       const image = d.image;
       if (!image || !isPlainStore(d.name)) continue;
@@ -415,10 +420,14 @@ export class MigrationExporter {
       const othersBytes = restBytes + databases.reduce((n, o) => n + (o === d ? 0 : bytes(o.raw)), 0);
       const refused = plainFormRefusal({
         ceiling, rawBytes: image.length, othersBytes, restBytes, maxTotalBytes: this.bounds.maxTotalBytes,
-        source: { limitMb: this.ownMemory.limitMb(), rssMb: this.ownMemory.rssMb(), baseMb: MIGRATION_MEMORY.kSourceBaseMb, k: MIGRATION_MEMORY.kSource },
+        source: { limitMb, rssMb, baseMb: MIGRATION_MEMORY.kSourceBaseMb, k: MIGRATION_MEMORY.kSource, formedBytes },
       });
       if (refused) d.refused = refused;
-      else d.plain = this.plainForm(image, d.name);
+      else {
+        // Counted even when the rewrite then fails: its copies were held all the same.
+        formedBytes += image.length;
+        d.plain = this.plainForm(image, d.name);
+      }
     }
     // The ledgers' plaintext form only when engine.db has one and their raw form is within the
     // sweeps cap: above it the choice sends engine.db raw anyway, so the form is not built.

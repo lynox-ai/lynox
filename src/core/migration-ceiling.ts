@@ -54,22 +54,24 @@ export const MIGRATION_MEMORY = {
    */
   k: 7.1,
   /**
-   * The SOURCE's peak on the plaintext path, over its resident memory at the moment it judges a
-   * store (the raw snapshots are held by then): `kSourceBaseMb + kSource` MiB per MiB of the store.
-   * It is a line above every reading, not a fit; the peak is not proportional to the store (a fixed
-   * part plus a falling slope), so a factor alone would undercount small stores.
+   * The SOURCE's peak on the plaintext path, over its resident memory before the first rewrite
+   * (the raw snapshots are held by then): `kSourceBaseMb + kSource` MiB per MiB of the stores on
+   * that path together. It is a line above every reading, not a fit; the peak is not proportional
+   * to the stores (a fixed part plus a falling slope), so a factor alone would undercount small ones.
    * Measured 2026-11-17 in the engine image (sha256:3fe4b651b272b3e7dba17e6b5e9e5c42d9af1dc2dbf491c6692af06a85dc8c8d,
    * core 9d9c96b4), one container per run with `--memory=1536m --memory-swap=1536m` (the tenant
-   * container's limit), node 22.23; engine.db with 4 KiB encrypted memories, both stores on the
-   * plaintext path, the own-memory check let through to read the peak; VmHWM reset after the
-   * fixture, the resident memory read when the check reads it. Peak over it, two runs each:
-   * 12.7 MiB → 102.2 / 102.7; 36.7 → 238.3 / 237.9; 84.7 → 448.4 / 440.8; 156.7 → 757.2 / 759.4;
-   * 216.7 → 977.4 / 965.8. `80 + 5.0 · S` is above each, by 10.6 % at the closest (36.7 MiB).
-   * Not covered: other row shapes (many small rows, large blobs), the host's swap and load. The
-   * merge ledgers' plaintext form is not counted in it (it is built only for ledgers within the
-   * 64 MiB cap).
+   * container's limit), node 22.23; engine.db with 4 KiB encrypted memories and history.db with
+   * 4 KiB encrypted run answers, both on the plaintext path, the own-memory check let through to
+   * read the peak; VmHWM reset after the fixture. Peak over that resident memory, two runs each,
+   * by engine.db + history.db in MiB: 12.7 + 0 → 102.2 / 102.7; 36.7 + 0 → 238.3 / 237.9;
+   * 84.7 + 0 → 448.4 / 440.8; 156.7 + 0 → 757.2 / 759.4; 216.7 + 0 → 977.4 / 965.8;
+   * 156.7 + 0.4 → 746.3 / 761.7; 156.7 + 48.4 → 971.1 / 985.9; 108.7 + 108.4 → 1031.1 / 1014.8;
+   * 48.7 + 156.4 → 964.6 / 977.6; 12.7 + 156.4 → 845.8 / 827.5. `90 + 5.0 · S` is above each,
+   * by 10.6 % at the closest (12.7 + 156.4). Not covered: other row shapes (many small rows,
+   * large blobs), the host's swap and load. The merge ledgers' plaintext form is not counted in
+   * it (it is built only for ledgers within the 64 MiB cap).
    */
-  kSourceBaseMb: 80,
+  kSourceBaseMb: 90,
   kSource: 5.0,
 } as const;
 
