@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { MANDATE_REVOKED_ACTION, type AuditLog } from '../core/audit-log.js';
+import { AMBIENT_CROSS_SITE_REFUSAL } from './cross-site-write.js';
 import type { MandateEnds } from '../core/mandate-ends.js';
 
 /**
@@ -179,8 +180,10 @@ describe('a mandate\'s refused attempts and its revoke in the actor trail (real 
   it('an admin route asked from another site: refused, and no row the person never made', async () => {
     inner().rateCounts.clear();
     const res = await fetch(`${base}/api/security/events/aggregate`, { headers: { cookie: `lynox_session=${mandateCookie}`, 'sec-fetch-site': 'cross-site' } });
-    await res.arrayBuffer();
+    const body = await res.text();
+    // Refused as the cross-site request it is, not as the admin route.
     expect(res.status).toBe(403);
+    expect(body).toContain(AMBIENT_CROSS_SITE_REFUSAL);
     expect(newRows()).toEqual([]);
   });
 
