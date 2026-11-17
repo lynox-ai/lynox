@@ -6,8 +6,9 @@
 	// around it (`mx-0.5`), and none on its left where it starts the line, so it stays flush with
 	// the lines below. An empty value also gets inner space (`px-1`), or it would draw nothing where
 	// a value stands. A 1 px edge in `text-subtle` draws the box on every ground: measured on the
-	// rendered page, at least 4.4:1 against the card, the dialog and the warning notice, light and
-	// dark, where the grey grounds differ from each other by less than 1.2:1. `mono` sets the value
+	// rendered page, at least 4:1 against the card, the dialog, the warning notice and the warning
+	// badge, light and dark (lowest: the badge in light, 4.09:1), where the grey grounds differ from
+	// each other by less than 1.2:1. `mono` sets the value
 	// in the code font, for a value inside a sentence; a title keeps its own font and width
 	// (`mono={false}`), and the box alone sets it apart.
 	let { text, mono = true }: { text: string; mono?: boolean } = $props();
