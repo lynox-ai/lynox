@@ -146,7 +146,7 @@ export function stepRunNames(steps: readonly RunnableStep[]): Map<string, string
   // plus one of them reads as `step-2` (and an edit finds it by that), so it holds that name too, and a
   // run that strips a task first sees the same heads as one that does not.
   const taken = new Set<string>(['params']);
-  const take = (name: string): void => { const shown = stripHiddenInName(name); if (isStepIdShape(shown)) taken.add(shown); };
+  const take = (name: unknown): void => { if (typeof name !== 'string') return; const shown = stripHiddenInName(name); if (isStepIdShape(shown)) taken.add(shown); };
   for (const s of steps) {
     take(s.id);
     for (const r of s.input_from ?? []) take(r);

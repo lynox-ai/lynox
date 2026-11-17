@@ -298,6 +298,10 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
     expect(stepRunNames(stored).get(OLD)).toBe('step-2a');
   });
 
+  it('names a hand-damaged row whose id is no text without failing', () => {
+    expect(() => stepRunNames([{ id: undefined as unknown as string, task: 'a' }, { id: OLD, task: 'b' }])).not.toThrow();
+  });
+
   it('never touches a {{params.…}} placeholder, also where a stored id starts with params.', () => {
     const out = runStepIds([{ id: 'params.month x', task: 'a' }, { id: 'send', task: 'for {{params.month x}} and {{params.month}}' }]);
     expect(out[0]!.id).toBe('step-1');
