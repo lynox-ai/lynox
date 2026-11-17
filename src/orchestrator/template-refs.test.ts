@@ -72,12 +72,13 @@ describe('a step reference no run resolves is refused before the run', () => {
       .toThrow('Invalid manifest: step #2 (steps[1].input_template.body[1]): it refers to the output of step "fetch", which is not in this step\'s input_from, so the reference would stay unresolved. Add "fetch" to this step\'s input_from (in a saved workflow: set_input_from).');
   });
 
-  it('in an input template, a reference no input_from can fix says that only removing the step does', () => {
-    expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{fetsh.result}}' }, input_from: ['fetch'] }])))
-      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to the result of step "fetsh", and this workflow has no such step. Its input template cannot be edited. To resolve it, rename the step it should read to "fetsh" (rename_step) and add it with set_input_from, or remove step #2.');
-    // No step can be renamed to an id outside the shape: removing is the only way, with the user's word.
-    expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{Fetch It.result}}' }, input_from: ['fetch'] }])))
-      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to the result of a step id outside the allowed form, and this workflow has no such step. Its input template cannot be edited. Remove step #2 only if the user wants that step gone; otherwise tell the user this step cannot run as written.');
+  it('in an input template, a result placeholder that names no step passes on as text, as a run hands it on', () => {
+    // A tool's argument may carry a placeholder for the system it writes to (a mail merge): no step
+    // is meant, and the run leaves it as it stands.
+    expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: 'Hi {{customer.result}}', list: ['{{Fetch It.result}}'] }, input_from: ['fetch'] }]))).not.toThrow();
+  });
+
+  it('in an input template, a reference to the step\'s own output says that only removing the step resolves it', () => {
     expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{mail.result}}' } }])))
       .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to this step\'s own output, which no run has yet. Its input template cannot be edited. Remove step #2 only if the user wants that step gone; otherwise tell the user this step cannot run as written.');
   });
@@ -150,6 +151,19 @@ describe('removing a step another step\'s reference reads is refused', () => {
     const out2 = applyModifications(renamed, [{ action: 'rename_step', step_id: '#2', value: 'total' }, { action: 'remove', step_id: '#1' }]) ?? '';
     expect(out2).toContain('step #2 (its position before this edit) reads the output of a step this edit removes');
     expect(out2).not.toContain('renames');
+  });
+
+  it('removing the template reader too, by its new id after a rename, is taken', () => {
+    // Remove the reader too, by its new id after the rename.
+    const s = steps();
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: 'mail', value: 'send' }, { action: 'remove', step_id: 'sum' }, { action: 'remove', step_id: 'send' }])).toBeNull();
+    expect(s.map(x => x.id)).toEqual(['fetch']);
+  });
+
+  it('a template reader whose id is a stored text is named by its position', () => {
+    const s: InlinePipelineStep[] = [{ id: 'fetch', task: 'Fetch' }, { id: 'Old Mail', task: 'Mail', input_template: { body: '{{fetch.result}}' }, input_from: ['fetch'] }];
+    const out = applyModifications(s, [{ action: 'remove', step_id: 'fetch' }]) ?? '';
+    expect(out).toBe('Error: remove: step #2 (its position before this edit) reads the output of a step this edit removes, in its input_template.body, and its input template cannot be edited. Keep the step it reads, or remove step #2 (its position before this edit) too only if the user wants it gone.');
   });
 
   it('a step only listed in input_from, with no reference to it, is still removed', () => {

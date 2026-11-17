@@ -61,8 +61,10 @@ function shownStep(name: string): string {
  * - A reference whose first part is another step's id must have that step in its own `input_from`:
  *   the context holds only those steps' outputs.
  * - A reference to the step's own output never resolves: a step cannot read itself.
- * - A reference `{{<name>.result…}}` whose name is no step, not `params` and no key of `context` names
- *   a step that is not there (a typo, a step renamed by hand, one removed).
+ * - A reference `{{<name>.result…}}` in a task whose name is no step, not `params` and no key of
+ *   `context` names a step that is not there (a typo, a step renamed by hand, one removed). In an input
+ *   template it passes: those are a tool's arguments, which may hand such a placeholder on as text to
+ *   the system the tool writes to (a mail merge), as a run does when the name is no step.
  *
  * Any other name may be a context key a run supplies (`{{customer}}` in an inline run), so it is left
  * to the run. `context` is the run's context where it is known; at a save it is not, and such a name
@@ -98,13 +100,9 @@ export function templateRefIssue(
             + `Add ${isStepIdShape(name) ? `"${name}"` : `step #${String(steps.findIndex(s => s.id === name) + 1)}`} to this step's input_from (in a saved workflow: set_input_from)`
             + (inTemplate ? '.' : ', or leave the reference out.');
         }
-        if (second === 'result') {
-          const missing = `${where}: it refers to the result of ${isStepIdShape(name) ? `step "${name}"` : 'a step id outside the allowed form'}, and this workflow has no such step. `;
-          if (!inTemplate) return missing + "Refer to the step it should read by that step's id, and list it in input_from.";
-          // No step can be renamed to an id outside the shape, so removing is the only way there.
-          return missing + (isStepIdShape(name)
-            ? `Its input template cannot be edited. To resolve it, rename the step it should read to "${name}" (rename_step) and add it with set_input_from, or remove step #${String(i + 1)}.`
-            : removeOnly);
+        if (second === 'result' && !inTemplate) {
+          return `${where}: it refers to the result of ${isStepIdShape(name) ? `step "${name}"` : 'a step id outside the allowed form'}, and this workflow has no such step. `
+            + "Refer to the step it should read by that step's id, and list it in input_from.";
         }
       }
     }
