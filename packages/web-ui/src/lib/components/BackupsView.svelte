@@ -5,7 +5,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { pickBackupConfig, fetchBackupConfig, requestRestore, restoreSkippedLines, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
 	import { backupCoverageNotice, type BackupCoverageFields } from '../backup-coverage.js';
-	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import { managedWayOut, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
@@ -210,7 +210,7 @@
 	{:else}
 		<div class="space-y-2 mb-8">
 			{#each backups as backup}
-				{@const coverage = backupCoverageNotice(backup, isManaged())}
+				{@const coverage = backupCoverageNotice(backup, managedWayOut())}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
 					<div class="flex items-center justify-between">
 						<span class="text-sm font-mono">{new Date(backup.created_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
