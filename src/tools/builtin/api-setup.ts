@@ -1876,42 +1876,25 @@ const shownUrl = (value: string): string => {
 };
 
 /**
- * Which secret each part of a request is sent from, as the attach in http.ts reads it: the key of a
- * bearer, header or query profile is `vault_keys[0]`; basic split sends `username_key ?? vault_keys[0]`
- * and `password_key ?? vault_keys[1]`, the other basic forms `vault_keys[0]`; an OAuth sign-in reads
- * its client id and secret, and its refresh token from `refresh_token_key` or else its own slot.
- * Compared by what is sent rather than by field, so a name moved between fields that sends the same
- * credential is no change, and a reorder that sends another one is.
+ * Which secret name each place of a profile reads, by place rather than as a set: a name moved to
+ * another place, or `vault_keys` put in another order, sends another credential. For basic auth the
+ * pair actually sent is a place of its own, because each half falls back to `vault_keys` (http.ts).
  */
-const sentSecretsOf = (p: ApiProfile): Map<string, string> => {
-  const sent = new Map<string, string>();
-  const put = (part: string, name: string | undefined): void => { if (typeof name === 'string' && name !== '') sent.set(part, name); };
+const secretPlacesOf = (p: ApiProfile): Map<string, string> => {
+  const places = new Map<string, string>();
+  const put = (place: string, name: string | undefined): void => { if (typeof name === 'string' && name !== '') places.set(place, name); };
   const a = p.auth;
-  if (a === undefined) return sent;
-  if (a.type === 'basic' && a.basic_format === 'user_pass_split') {
-    put('the user name', a.username_key ?? a.vault_keys?.[0]);
-    put('the password', a.password_key ?? a.vault_keys?.[1]);
-  } else if (a.type === 'oauth2') {
-    put('the OAuth client id', a.oauth?.client_id_key);
-    put('the OAuth client secret', a.oauth?.client_secret_key);
-    put('the refresh token', a.oauth?.refresh_token_key ?? "(this profile's own)");
-  } else {
-    put('the key', a.vault_keys?.[0]);
+  (a?.vault_keys ?? []).forEach((name, i) => { put(`vault_keys[${i}]`, name); });
+  put('username_key', a?.username_key);
+  put('password_key', a?.password_key);
+  if (a?.type === 'basic') {
+    put('the user name sent', a.username_key ?? a.vault_keys?.[0]);
+    put('the password sent', a.password_key ?? a.vault_keys?.[1]);
   }
-  return sent;
-};
-
-/** How a secret is attached, with the defaults http.ts applies, so writing a default out is no change. */
-const attachFormOf = (p: ApiProfile): Map<string, string> => {
-  const form = new Map<string, string>();
-  const a = p.auth;
-  if (a === undefined) return form;
-  form.set('how the secret is attached (auth.type)', a.type);
-  if (a.type === 'header' || a.type === 'oauth2') form.set('header it is sent in', a.header_name ?? 'X-Api-Key');
-  if (a.type === 'query') form.set('query parameter it is sent in', a.query_param ?? 'key');
-  if (a.type === 'basic') form.set('basic auth form', a.basic_format ?? 'pre_encoded_b64');
-  if (a.type === 'oauth2' && a.oauth?.body_format !== undefined) form.set('token request body', a.oauth.body_format);
-  return form;
+  put('oauth.client_id_key', a?.oauth?.client_id_key);
+  put('oauth.client_secret_key', a?.oauth?.client_secret_key);
+  put('oauth.refresh_token_key', a?.oauth?.refresh_token_key);
+  return places;
 };
 
 /**
@@ -1922,7 +1905,7 @@ const attachFormOf = (p: ApiProfile): Map<string, string> => {
  * new profile or a save that changes none of these.
  * `widens` is false only for a line that takes something away without anything taking its place:
  * a scope removed while others remain (with none left, a provider may grant its default), or a
- * part of a request that no longer sends a secret. That narrows what the profile may do.
+ * place that no longer reads a secret. That narrows what the profile may do.
  */
 export interface SecurityChange { readonly text: PromptText; readonly widens: boolean }
 
@@ -1956,13 +1939,16 @@ export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile)
   field('token address (token_url)', prior.auth?.oauth?.token_url, next.auth?.oauth?.token_url, shownUrl);
   field('grant type', prior.auth?.oauth?.grant_type, next.auth?.oauth?.grant_type);
   field('audience', prior.auth?.oauth?.audience, next.auth?.oauth?.audience);
-  const [fWas, fNow] = [attachFormOf(prior), attachFormOf(next)];
-  for (const part of [...new Set([...fWas.keys(), ...fNow.keys()])]) field(part, fWas.get(part), fNow.get(part));
-  const [sWas, sNow] = [sentSecretsOf(prior), sentSecretsOf(next)];
-  for (const part of [...new Set([...sWas.keys(), ...sNow.keys()])]) {
-    const [a, b] = [sWas.get(part), sNow.get(part)];
+  field('how the secret is attached (auth.type)', prior.auth?.type, next.auth?.type);
+  field('header it is sent in (auth.header_name)', prior.auth?.header_name, next.auth?.header_name);
+  field('query parameter it is sent in (auth.query_param)', prior.auth?.query_param, next.auth?.query_param);
+  field('basic auth form (auth.basic_format)', prior.auth?.basic_format, next.auth?.basic_format);
+  field('token request body (auth.oauth.body_format)', prior.auth?.oauth?.body_format, next.auth?.oauth?.body_format);
+  const [sWas, sNow] = [secretPlacesOf(prior), secretPlacesOf(next)];
+  for (const place of [...new Set([...sWas.keys(), ...sNow.keys()])]) {
+    const [a, b] = [sWas.get(place), sNow.get(place)];
     if (a === b) continue;
-    add(pv`secret sent as ${part}: ${a === undefined ? '(none)' : shownValue(a)} → ${b === undefined ? '(none)' : shownValue(b)}`, b !== undefined);
+    add(pv`secret read for ${place}: ${a === undefined ? '(none)' : shownValue(a)} → ${b === undefined ? '(none)' : shownValue(b)}`, b !== undefined);
   }
   return out;
 }
