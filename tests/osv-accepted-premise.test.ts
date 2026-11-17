@@ -67,15 +67,16 @@ export function docsShipped(docsPackage: string, rootPackage: string, dockerfile
 }
 
 /**
- * Where shipped source loads code that carries picomatch: the glob packages themselves (picomatch,
+ * Where shipped source names a package that carries picomatch: the glob packages themselves (picomatch,
  * tinyglobby, fdir, micromatch, anymatch, vite), whose import from web-ui code would get them bundled
  * into the server build; rollup and the Sentry CLI package `sentry`, which each inline their own copy
  * that no lockfile scan sees; and the bundler plugin entries that load them (`@sentry/bundler-plugins`,
  * `@sentry/node/<bundler>`). Quoted and backtick specifiers count; a computed one cannot be read here.
+ * Any such quoted name counts, not only an import, so a plain string of that name fails closed.
  */
 export function globCodeUse(tree: Array<[string, string]>): string[] {
   const re = /['"`](rollup|sentry|@sentry\/bundler-plugins|@sentry\/node\/(rollup|vite|webpack|esbuild)|picomatch|tinyglobby|fdir|micromatch|anymatch|vite)(\/[^'"`]*)?['"`]/;
-  return tree.filter(([, text]) => re.test(text)).map(([path]) => `${path}: loads code that carries picomatch`);
+  return tree.filter(([, text]) => re.test(text)).map(([path]) => `${path}: names a package that carries picomatch`);
 }
 
 /** What the picomatch premise reads: the root lockfile, the docs and image files, and the source. */
@@ -188,8 +189,8 @@ describe('the premise of each accepted OSV finding holds in this tree', () => {
     const reached: LockDoc = { ...real.lock, importers: { ...real.lock.importers, '.': { dependencies: { picomatch: { version: '4.0.7' } } } } };
     expect(picomatchCheck({ lock: reached })).toEqual(['. > picomatch']);
     expect(picomatchCheck({ dockerfile: `${real.dockerfile}\nCOPY docs/ /app/docs/\n` })).toEqual(['the Dockerfile copies docs']);
-    expect(picomatchCheck({ source: [...real.source, ['src/core/x.ts', "await import('@sentry/node/rollup');"]] })).toEqual(['src/core/x.ts: loads code that carries picomatch']);
-    expect(picomatchCheck({ source: [...real.source, ['packages/web-ui/src/lib/vite.config.ts', "import cli from 'sentry';"]] })).toEqual(['packages/web-ui/src/lib/vite.config.ts: loads code that carries picomatch']);
+    expect(picomatchCheck({ source: [...real.source, ['src/core/x.ts', "await import('@sentry/node/rollup');"]] })).toEqual(['src/core/x.ts: names a package that carries picomatch']);
+    expect(picomatchCheck({ source: [...real.source, ['packages/web-ui/src/lib/vite.config.ts', "import cli from 'sentry';"]] })).toEqual(['packages/web-ui/src/lib/vite.config.ts: names a package that carries picomatch']);
     // Only shipped source counts: a file outside src/ is not read.
     expect(picomatchCheck({ source: [...real.source, ['scripts/x.mjs', "import pm from 'picomatch';"]] })).toEqual([]);
   });
