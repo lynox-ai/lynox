@@ -68,6 +68,7 @@ export async function askTarget(
   timeoutMs: number,
 ): Promise<Response> {
   const ctl = new AbortController();
+  // run-group-starter: cleared in this call's `finally`, or fired once; it only aborts this request and reports no spend.
   const timer = setTimeout(() => ctl.abort(new TargetDidNotAnswer(timeoutMs)), timeoutMs);
   try {
     return await fetchFn(url, { ...init, signal: ctl.signal });
@@ -122,6 +123,7 @@ export async function readTargetBody(r: Response, cap: number, timeoutMs: number
   const parts: Uint8Array[] = [];
   let size = 0;
   let timedOut = false;
+  // run-group-starter: cleared in this call's `finally`, or fired once; it only cancels this body's read and reports no spend.
   const timer = setTimeout(() => { timedOut = true; void reader.cancel().catch(() => undefined); }, timeoutMs);
   try {
     // run-group-starter: reads one bounded body within this call; it starts nothing that outlives it.
