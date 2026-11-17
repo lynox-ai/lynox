@@ -107,9 +107,9 @@ function f2Line(p: TakeoverPreview): { line: TakeoverLine; by: TakeoverMember; r
  * Only a change of whom a plan runs for is said (N3); a plan that will not run again by itself is
  * left out of what is shown (N7) — the digest still holds it.
  */
-function memberChangeLines(p: TakeoverPreview): TakeoverLine[] {
+export function memberChangeLines(changes: readonly TakeoverMemberChange[]): TakeoverLine[] {
 	const groups = new Map<string, { before: string; after: string | null; titles: string[] }>();
-	for (const c of p.memberChanges) {
+	for (const c of changes) {
 		if (c.runsNoMore || c.before === null || c.before === c.after) continue;
 		const key = `${c.before}\u0000${c.after ?? ''}`;
 		const g = groups.get(key) ?? { before: c.before, after: c.after, titles: [] };
@@ -181,7 +181,7 @@ export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => s
 		}
 	}
 	if (f2 !== null) lines.push(f2.line);
-	lines.push(...memberChangeLines(p));
+	lines.push(...memberChangeLines(p.memberChanges));
 	lines.push(...connectionLines(p));
 	lines.push(runsAsLine(p));
 	lines.push(...scheduleLines(p, formatDate));

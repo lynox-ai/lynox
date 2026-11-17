@@ -79,7 +79,7 @@ afterEach(() => {
 });
 
 const EVA = 'eva@kanzlei.example';
-const ENDED_A = `${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Darum lässt er sich nicht mehr ausführen, auch nicht als Kopie. Beschreib lynox im Chat in deinen eigenen Worten, was er tun soll, und bitte lynox, dafür einen neuen Workflow zu schreiben, statt diesen zu kopieren oder zu ändern. Ein neu geschriebener Workflow gehört dir und läuft unter dir.`;
+const ENDED_A = `${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Er läuft erst wieder, wenn du ihn übernimmst.`;
 
 describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)', () => {
 	it('marks it, turns off Run, Schedule and Edit, keeps Rename and Delete, and says why under the buttons', async () => {
@@ -122,7 +122,7 @@ describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)
 		await open('owner', [{ ...base('wf-u', 'Nameless'), runs_as: { person: '', ended: true, covered_by_takeover: 0 } }]);
 		const c = card('Nameless');
 		expect(c.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Zugang beendet');
-		expect(note(c)?.startsWith('Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Darum')).toBe(true);
+		expect(note(c)).toBe('Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst.');
 	});
 
 	it('in English', async () => {
