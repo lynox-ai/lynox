@@ -977,9 +977,9 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
   // between letters is escaped, while the same character in the step's result stays.
   it('changes one run\'s steps by removal and task only: a rename or an added step goes to the stored workflow', async () => {
     const pipelineId = seedStoredPipeline([{ id: 'analyze', task: 'Analyze code' }]);
-    for (const action of ['rename_step', 'add_step']) {
+    for (const action of ['rename_step', 'add_step', 'set_input_from']) {
       const result = await runWorkflowTool.handler({ workflow_id: pipelineId, modifications: [{ action, step_id: 'analyze', value: 'x' }] } as never, makePipelineAgent());
-      expect(result, action).toBe('Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.');
+      expect(result, action).toBe('Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, or change what a step reads (set_input_from), edit the workflow with update_workflow_steps.');
     }
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
@@ -1456,6 +1456,8 @@ describe('runSavedWorkflow', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain('step #2 (steps[1].task): it refers to the output of step "fetch", which is not in this step\'s input_from');
     expect(result.error).toContain('(in a saved workflow: set_input_from)');
+    // A contained instance's push says it in fixed words, without the referenced name.
+    expect(result.fixedError).toBe('Step #2 of this workflow refers to the output of a step its run cannot read, so the workflow did not run. Open it in a chat and ask to repair that reference (update_workflow_steps).');
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 

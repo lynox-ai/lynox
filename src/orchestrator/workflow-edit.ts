@@ -128,6 +128,10 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
   // The steps this edit removes: a reference to one that is still read once every action has run is
   // refused below, so an edit that removes a step and changes what read it is one edit.
   const removed = new Set<string>();
+  // Each step's position in the list the edit starts from, the list the caller sees: a refusal after
+  // the edit names a step by it (steps keep their object through update_task, rename_step and
+  // set_input_from; a step this edit adds has none).
+  const storedAt = new Map(steps.map((s, i) => [s, i + 1] as const));
   for (const mod of modifications) {
     if (mod.action === 'add_step') {
       // The shape first, so no refusal quotes an id outside it back to the model.
@@ -238,13 +242,16 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
   // An id the same edit gave to another step (add_step, rename_step) is not removed any more.
   for (const removedId of removed) {
     if (steps.some(s => s.id === removedId)) continue;
-    for (const [i, s] of steps.entries()) {
+    for (const s of steps) {
       const field = fieldReferencing(s, removedId);
       if (!field) continue;
+      const at = storedAt.get(s);
+      // A step this edit adds has an id in the shape (`newIdProblem`), so it is named by that id.
+      const which = at !== undefined ? `step #${String(at)}` : `the step this edit adds, "${s.id}"`;
       const fix = field === 'task'
-        ? `Change that reference in the same edit (update_task), or remove step #${String(i + 1)} too.`
-        : `Only removing step #${String(i + 1)} too resolves it: its input template cannot be edited.`;
-      return `Error: remove: step #${String(i + 1)} reads the output of a step this edit removes, in its ${field}. ${fix}`;
+        ? `Change that reference in the same edit (update_task), or remove ${which} too.`
+        : `Remove ${which} too: its input template cannot be edited.`;
+      return `Error: remove: ${which} reads the output of a step this edit removes, in its ${field}. ${fix}`;
     }
   }
   return null; // no error

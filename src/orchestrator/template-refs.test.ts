@@ -51,7 +51,7 @@ describe('a step reference no run resolves is refused before the run', () => {
     let message = '';
     try { validateManifest(manifest([{ id: 'Old Fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum {{Old Fetch.result}}' }])); } catch (e) { message = (e as Error).message; }
     expect(message).toContain("step #2 (steps[1].task): it refers to the output of a step whose id is outside the allowed form, which is not in this step's input_from");
-    expect(message).toContain("Add that step's id to this step's input_from (in a saved workflow: set_input_from)");
+    expect(message).toContain("Add step #1 to this step's input_from (in a saved workflow: set_input_from)");
     expect(message).not.toContain('Old Fetch');
   });
 
@@ -74,9 +74,9 @@ describe('a step reference no run resolves is refused before the run', () => {
 
   it('in an input template, a reference no input_from can fix says that only removing the step does', () => {
     expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{fetsh.result}}' }, input_from: ['fetch'] }])))
-      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to the result of step "fetsh", and this workflow has no such step. Only removing step #2 resolves it: its input template cannot be edited.');
+      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to the result of step "fetsh", and this workflow has no such step. Remove step #2 to resolve it: its input template cannot be edited.');
     expect(() => validateManifest(manifest([fetch, { id: 'mail', task: 'Mail it', input_template: { body: '{{mail.result}}' } }])))
-      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to this step\'s own output, which no run has yet. Only removing step #2 resolves it: its input template cannot be edited.');
+      .toThrow('Invalid manifest: step #2 (steps[1].input_template.body): it refers to this step\'s own output, which no run has yet. Remove step #2 to resolve it: its input template cannot be edited.');
   });
 
   it('params, a context key of this run, and a name a run may supply pass', () => {
@@ -99,11 +99,14 @@ describe('removing a step another step\'s reference reads is refused', () => {
     { id: 'mail', task: 'Mail', input_template: { body: '{{sum.result}}' }, input_from: ['sum'] },
   ];
 
-  it('names the step that reads it, by position, and the field', () => {
+  it('names the step that reads it by its position in the list the edit starts from, and the field', () => {
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'fetch' }]))
-      .toBe('Error: remove: step #1 reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step #1 too.');
+      .toBe('Error: remove: step #2 reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step #2 too.');
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'sum' }]))
-      .toBe('Error: remove: step #2 reads the output of a step this edit removes, in its input_template.body. Only removing step #2 too resolves it: its input template cannot be edited.');
+      .toBe('Error: remove: step #3 reads the output of a step this edit removes, in its input_template.body. Remove step #3 too: its input template cannot be edited.');
+    // A step added in the same edit has no stored position: it is named by its id.
+    expect(applyModifications([{ id: 'fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum it' }], [{ action: 'add_step', step_id: 'late', value: 'Use {{fetch.result}}', input_from: ['fetch'] }, { action: 'remove', step_id: 'fetch' }]))
+      .toContain('Error: remove: the step this edit adds, "late" reads the output of a step this edit removes');
   });
 
   it('one edit that removes a step and what reads it, in either order, is taken', () => {
@@ -115,16 +118,21 @@ describe('removing a step another step\'s reference reads is refused', () => {
     expect(b.map(x => x.id)).toEqual(['sum', 'mail']);
   });
 
-  it('a removed id that the same edit gives to a new step is read from the new step', () => {
+  it('a removed id that the same edit gives to a new step is not counted as removed', () => {
     const s = steps();
-    expect(applyModifications(s, [{ action: 'remove', step_id: 'fetch' }, { action: 'add_step', step_id: 'fetch', value: 'Fetch again' }])).toBeNull();
+    expect(applyModifications(s, [
+      { action: 'remove', step_id: 'fetch' }, { action: 'add_step', step_id: 'fetch', value: 'Fetch again' },
+      { action: 'set_input_from', step_id: 'sum', input_from: ['fetch'] },
+    ])).toBeNull();
     expect(s.map(x => x.id)).toEqual(['sum', 'mail', 'fetch']);
+    expect(s[0]!.input_from).toEqual(['fetch']);
+    expect(() => validateManifest(manifest(s.map(x => ({ ...x, task: x.task }))))).not.toThrow();
   });
 
   it('names a step whose id is a stored text by position only', () => {
     const s: InlinePipelineStep[] = [{ id: 'Old Fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum {{Old Fetch.result}}', input_from: ['Old Fetch'] }];
     const out = applyModifications(s, [{ action: 'remove', step_id: '#1' }]) ?? '';
-    expect(out).toContain('step #1 reads the output of a step this edit removes');
+    expect(out).toContain('step #2 reads the output of a step this edit removes');
     expect(out).not.toContain('Old Fetch');
   });
 
@@ -148,6 +156,12 @@ describe('set_input_from: the way to make a stored reference resolve', () => {
     expect(applyModifications(s, [{ action: 'set_input_from', step_id: '#3', input_from: ['fetch', 'other', 'fetch'] }])).toBeNull();
     expect(s[2]!.input_from).toEqual(['fetch', 'other']);
     expect(() => validateManifest(manifest(s.map(x => ({ ...x, task: x.task }))))).not.toThrow();
+  });
+
+  it('a cycle it makes is refused at the check of the whole list', () => {
+    const s = broken();
+    expect(applyModifications(s, [{ action: 'set_input_from', step_id: 'sum', input_from: ['fetch', 'other'] }, { action: 'set_input_from', step_id: 'fetch', input_from: ['sum'] }])).toBeNull();
+    expect(() => validateManifest(manifest(s.map(x => ({ ...x, task: x.task }))))).toThrow();
   });
 
   it('an empty list clears it', () => {

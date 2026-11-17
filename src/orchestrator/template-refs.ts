@@ -84,7 +84,7 @@ export function templateRefIssue(
         if (name === 'params' || (context !== undefined && Object.hasOwn(context, name))) continue;
         const where = `step #${String(i + 1)} (${path}[${String(i)}].${field})`;
         // An input template cannot be edited in a saved workflow; a task can (update_task).
-        const removeOnly = `Only removing step #${String(i + 1)} resolves it: its input template cannot be edited.`;
+        const removeOnly = `Remove step #${String(i + 1)} to resolve it: its input template cannot be edited.`;
         const inTemplate = field !== 'task';
         if (name === step.id) {
           return `${where}: it refers to this step's own output, which no run has yet. `
@@ -93,7 +93,7 @@ export function templateRefIssue(
         if (ids.has(name)) {
           if ((step.input_from ?? []).includes(name)) continue;
           return `${where}: it refers to the output of ${shownStep(name)}, which is not in this step's input_from, so the reference would stay unresolved. `
-            + `Add ${isStepIdShape(name) ? `"${name}"` : 'that step\'s id'} to this step's input_from (in a saved workflow: set_input_from)`
+            + `Add ${isStepIdShape(name) ? `"${name}"` : `step #${String(steps.findIndex(s => s.id === name) + 1)}`} to this step's input_from (in a saved workflow: set_input_from)`
             + (inTemplate ? '.' : ', or leave the reference out.');
         }
         if (second === 'result') {
@@ -104,4 +104,12 @@ export function templateRefIssue(
     }
   }
   return null;
+}
+
+/** The words a reduced sink (a contained instance's push) may say for a refusal of `templateRefIssue`:
+ *  the step's position and the repair, without any referenced name. */
+export function templateRefFixedText(issue: string): string {
+  const at = /^step #(\d+) /.exec(issue)?.[1];
+  return `Step #${at ?? '?'} of this workflow refers to the output of a step its run cannot read, so the workflow did not run. `
+    + 'Open it in a chat and ask to repair that reference (update_workflow_steps).';
 }
