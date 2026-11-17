@@ -359,12 +359,12 @@ export const SPAWN_DIALOG: Readonly<Record<DialogLanguage, SpawnDialog>> = {
     sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} on ${tier}. Estimated cost ~$${costUsd} against this session. Provider: ${providers}. ${tail}`,
   },
   de: {
-    children: (count) => count === 1 ? 'Eine Teilaufgabe würde laufen' : `${count} Teilaufgaben würden laufen`,
+    children: (count) => count === 1 ? 'Eine Teilaufgabe würde' : `${count} Teilaufgaben würden`,
     tierUnknownBand: 'einem Modell der Stufe DEEP (oder einem nicht registrierten eigenen Modell, dessen Kostenrahmen lynox nicht belegen kann)',
     tierDeep: 'der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer)',
     tailDowngrade: 'Erlaube das nur, wenn die Arbeit wirklich DEEP braucht; sonst wähle „Auf balanced ausführen“.',
     tailPinned: 'Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.',
-    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} auf ${tier}. Geschätzte Kosten ~$${costUsd} für diese Sitzung. Anbieter: ${providers}. ${tail}`,
+    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} auf ${tier} laufen. Geschätzte Kosten ~$${costUsd} für diese Sitzung. Anbieter: ${providers}. ${tail}`,
   },
 };
 
@@ -380,8 +380,8 @@ export const SECRET_DIALOG: Readonly<Record<DialogLanguage, SecretDialog>> = {
     plain: (tool, names) => pv`${tool} wants to use secret(s): ${names}. Allow?`,
   },
   de: {
-    inInput: (tool, names, shown) => pv`${tool}: möchte diese Geheimnisse verwenden: ${names}, in: ${shown} — Erlauben?`,
-    plain: (tool, names) => pv`${tool}: möchte diese Geheimnisse verwenden: ${names}. Erlauben?`,
+    inInput: (tool, names, shown) => pv`${tool} möchte diese Geheimnisse verwenden: ${names}, in: ${shown} — Erlauben?`,
+    plain: (tool, names) => pv`${tool} möchte diese Geheimnisse verwenden: ${names}. Erlauben?`,
   },
 };
 

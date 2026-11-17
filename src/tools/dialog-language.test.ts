@@ -81,6 +81,14 @@ describe('a confirmation question in the instance\'s language', () => {
   });
 });
 
+describe('the German delegation sentence puts its verb last', () => {
+  it('for one child on a model of unknown band', () => {
+    const d = SPAWN_DIALOG.de;
+    expect(d.sentence('Delegation', d.children(1), d.tierUnknownBand, '0.40', 'Anthropic', d.tailDowngrade))
+      .toBe(`⚠ Delegation: Eine Teilaufgabe würde auf ${d.tierUnknownBand} laufen. Geschätzte Kosten ~$0.40 für diese Sitzung. Anbieter: Anthropic. ${d.tailDowngrade}`);
+  });
+});
+
 describe('a tool from outside the engine', () => {
   it('is not told the language, so it cannot show one thing and have another decided', () => {
     const seen: unknown[] = [];
@@ -139,7 +147,9 @@ describe('the German texts are complete', () => {
 
   it('asks about a secret naming the tool by its word, an external one as a value', () => {
     const q = flattenPrompt(SECRET_DIALOG.de.plain(dialogToolHead('bash', 'de'), 'TOKEN'));
-    expect(q).toBe('Befehl: möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
+    expect(q).toBe('Befehl möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
+    expect(flattenPrompt(SECRET_DIALOG.de.plain(dialogToolHead('Merge', 'de'), 'TOKEN'))).toBe('Externes Werkzeug "Merge" möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
+    expect(flattenPrompt(SECRET_DIALOG.de.inInput(dialogToolHead('bash', 'de'), 'TOKEN', 'curl'))).toBe('Befehl möchte diese Geheimnisse verwenden: TOKEN, in: curl — Erlauben?');
     const ext = SECRET_DIALOG.en.plain(dialogToolHead('Merge', 'en'), 'TOKEN');
     expect(ext.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual(['Merge', 'TOKEN']);
   });
@@ -180,6 +190,6 @@ describe('every place a question is posed hands it the language', () => {
     expect(warnings.length).toBeGreaterThanOrEqual(2);
     for (const w of warnings) expect(exfilWarning(w, 'de'), w).not.toBe(w);
     expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(2), SPAWN_DIALOG.de.tierDeep, '1.20', 'Anthropic', SPAWN_DIALOG.de.tailPinned))
-      .toBe('⚠ Delegation: 2 Teilaufgaben würden laufen auf der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer). Geschätzte Kosten ~$1.20 für diese Sitzung. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
+      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer) laufen. Geschätzte Kosten ~$1.20 für diese Sitzung. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
   });
 });
