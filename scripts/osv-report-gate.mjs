@@ -91,11 +91,11 @@ export const ACCEPTED = [
     reason:
       'ReDoS in glob patterns with repeated single-branch extglobs; it needs an attacker-chosen ' +
       'pattern. The picomatch package is only in build and test tooling (vite, vitest, tinyglobby, ' +
-      'fdir) and in the docs site, which is private and not shipped; no runtime dependency of either ' +
-      'published package reaches it. rollup, which ships as an optional dependency of the error ' +
-      "reporter's bundler plugins, carries its own inlined copy that this scan cannot see; the engine " +
-      "loads only the reporter's main entry, which does not load those plugins. No patched release " +
-      'exists yet; bump when one does.',
+      'fdir) and in the docs site, which is deployed only as a static build; no runtime dependency of ' +
+      "either published package reaches it. The error reporter's bundler plugins ship as a runtime " +
+      'dependency and bring two packages that inline their own copy, which this scan cannot see: ' +
+      'rollup and the Sentry CLI package. The engine loads only the reporter\'s main entry, which ' +
+      'loads neither. No patched release exists yet; bump when one does.',
   },
 ];
 

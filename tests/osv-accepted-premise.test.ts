@@ -43,7 +43,7 @@ export function remoteFunctionUse(tree: Array<[string, string]>): string[] {
 function tree(): Array<[string, string]> {
   // Tests are left out: they hold the planted forms below as strings, and a test is not served.
   return files(ROOT)
-    .filter((p) => /\.(ts|js|mjs|svelte)$/.test(p) && !/\.test\.(ts|js)$/.test(p) && !p.startsWith('tests/'))
+    .filter((p) => /\.(ts|mts|cts|js|mjs|cjs|svelte)$/.test(p) && !/\.test\.(ts|js)$/.test(p) && !p.startsWith('tests/'))
     .map((p) => [p, readFileSync(join(ROOT, p), 'utf8')] as [string, string]);
 }
 
@@ -67,13 +67,15 @@ export function docsShipped(docsPackage: string, rootPackage: string, dockerfile
 }
 
 /**
- * Where code outside tests loads a bundler plugin entry: rollup, `@sentry/bundler-plugins`, or a
- * `@sentry/node/<bundler>` subpath. rollup ships as an optional dependency of those plugins and
- * inlines its own picomatch, which no lockfile scan sees; the premise is that nothing loads it.
+ * Where shipped source loads code that carries picomatch: the glob packages themselves (picomatch,
+ * tinyglobby, fdir, micromatch, anymatch, vite), whose import from web-ui code would get them bundled
+ * into the server build; rollup and the Sentry CLI package `sentry`, which each inline their own copy
+ * that no lockfile scan sees; and the bundler plugin entries that load them (`@sentry/bundler-plugins`,
+ * `@sentry/node/<bundler>`). Quoted and backtick specifiers count; a computed one cannot be read here.
  */
-export function bundlerPluginUse(tree: Array<[string, string]>): string[] {
-  const re = /['"](rollup|@sentry\/bundler-plugins|@sentry\/node\/(rollup|vite|webpack|esbuild))(\/[^'"]*)?['"]/;
-  return tree.filter(([path, text]) => !/(^|\/)(vite|vitest|svelte|rollup)\.config\.(js|ts|mjs)$/.test(path) && re.test(text)).map(([path]) => `${path}: loads a bundler plugin entry`);
+export function globCodeUse(tree: Array<[string, string]>): string[] {
+  const re = /['"`](rollup|sentry|@sentry\/bundler-plugins|@sentry\/node\/(rollup|vite|webpack|esbuild)|picomatch|tinyglobby|fdir|micromatch|anymatch|vite)(\/[^'"`]*)?['"`]/;
+  return tree.filter(([, text]) => re.test(text)).map(([path]) => `${path}: loads code that carries picomatch`);
 }
 
 /** What the picomatch premise reads: the root lockfile, the docs and image files, and the source. */
@@ -91,7 +93,7 @@ export function picomatchPremise(i: PicomatchInputs): string[] {
   return [
     ...runtimeReach(i.lock, 'picomatch', SHIPPED),
     ...docsShipped(i.docsPackage, i.rootPackage, i.dockerfile, i.dockerignore),
-    ...bundlerPluginUse(i.source.filter(([p]) => p.startsWith('src/') || p.startsWith('packages/web-ui/src/'))),
+    ...globCodeUse(i.source.filter(([p]) => p.startsWith('src/') || p.startsWith('packages/web-ui/src/'))),
   ];
 }
 
@@ -112,8 +114,8 @@ const PREMISES: Record<string, () => string[]> = {
   // Advisory scope: only apps that enable the experimental remote functions and use form, query or command.
   'GHSA-3r8g-jcqq-3p5j': () => remoteFunctionUse(tree()),
   // Advisory scope: an attacker-chosen glob pattern. picomatch must not be a runtime dependency of
-  // what ships, the docs that also carry it must stay unshipped, and nothing may load the bundler
-  // plugins whose rollup inlines its own copy.
+  // what ships, the docs that also carry it must stay out of what ships, and shipped source may not
+  // load a glob package or the code (rollup, the Sentry CLI) that inlines its own copy.
   'GHSA-fc5q-39xc-vjpf': picomatchCheck,
 };
 
@@ -165,12 +167,18 @@ describe('the premise of each accepted OSV finding holds in this tree', () => {
     expect(docsShipped(ok[0], ok[1], ok[2], 'node_modules\n')).toHaveLength(1);
   });
 
-  it('the bundler plugin check finds each entry form (positive controls)', () => {
-    for (const text of ["import x from 'rollup';", "await import('@sentry/node/rollup')", "require('@sentry/bundler-plugins/vite')", 'import "@sentry/node/esbuild";']) {
-      expect(bundlerPluginUse([['src/core/x.ts', text]])).toHaveLength(1);
+  it('the glob code check finds each package and specifier form (positive controls)', () => {
+    for (const text of [
+      "import x from 'rollup';", "await import('@sentry/node/rollup')", "require('@sentry/bundler-plugins/vite')", 'import "@sentry/node/esbuild";',
+      "import cli from 'sentry';", "import pm from 'picomatch';", "import { glob } from 'tinyglobby';", "import { fdir } from 'fdir';",
+      "import mm from 'micromatch';", "import am from 'anymatch';", "import { createServer } from 'vite';", 'await import(`rollup`)', "require('rollup/dist/rollup.js')",
+    ]) {
+      expect(globCodeUse([['src/core/x.ts', text]])).toHaveLength(1);
     }
-    expect(bundlerPluginUse([['src/core/x.ts', "await import('@sentry/node');"]])).toEqual([]);
-    expect(bundlerPluginUse([['packages/web-ui/vite.config.ts', "import x from 'rollup';"]])).toEqual([]);
+    expect(globCodeUse([['src/core/x.ts', "await import('@sentry/node');"]])).toEqual([]);
+    expect(globCodeUse([['src/core/x.ts', "import Database from 'better-sqlite3';"]])).toEqual([]);
+    // A config-named file is not exempt: inside src/ it is compiled and shipped like any other.
+    expect(globCodeUse([['src/core/vite.config.ts', "import { rollup } from 'rollup';"]])).toHaveLength(1);
   });
 
   it('the picomatch premise reports each of its three conditions (wiring controls)', () => {
@@ -180,12 +188,17 @@ describe('the premise of each accepted OSV finding holds in this tree', () => {
     const reached: LockDoc = { ...real.lock, importers: { ...real.lock.importers, '.': { dependencies: { picomatch: { version: '4.0.7' } } } } };
     expect(picomatchCheck({ lock: reached })).toEqual(['. > picomatch']);
     expect(picomatchCheck({ dockerfile: `${real.dockerfile}\nCOPY docs/ /app/docs/\n` })).toEqual(['the Dockerfile copies docs']);
-    expect(picomatchCheck({ source: [...real.source, ['src/core/x.ts', "await import('@sentry/node/rollup');"]] })).toEqual(['src/core/x.ts: loads a bundler plugin entry']);
+    expect(picomatchCheck({ source: [...real.source, ['src/core/x.ts', "await import('@sentry/node/rollup');"]] })).toEqual(['src/core/x.ts: loads code that carries picomatch']);
+    expect(picomatchCheck({ source: [...real.source, ['packages/web-ui/src/lib/vite.config.ts', "import cli from 'sentry';"]] })).toEqual(['packages/web-ui/src/lib/vite.config.ts: loads code that carries picomatch']);
+    // Only shipped source counts: a file outside src/ is not read.
+    expect(picomatchCheck({ source: [...real.source, ['scripts/x.mjs', "import pm from 'picomatch';"]] })).toEqual([]);
   });
 
   it('the walk reaches the web-ui source and its svelte config', () => {
     const paths = tree().map(([p]) => p);
     expect(paths).toContain('packages/web-ui/svelte.config.js');
+    // .cjs modules are read too (the package's postinstall is one).
+    expect(paths).toContain('scripts/postinstall.cjs');
     expect(paths.some((p) => p.startsWith('packages/web-ui/src/') && p.endsWith('.svelte'))).toBe(true);
   });
 });
