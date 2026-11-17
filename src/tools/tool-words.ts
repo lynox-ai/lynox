@@ -8,8 +8,10 @@
  * stands after the call and names some tools by a participle ("File read"); those
  * tools get a noun of their own here, listed in `DIALOG_ONLY_WORDS`.
  *
- * Only tools that can reach a dialog are listed. A tool missing here falls back to
- * its name, and the test fails for every tool that can reach a dialog without a word.
+ * Only tools that can reach a dialog are listed; the test fails for every built-in tool
+ * that can reach a dialog without a word. Any other tool (a plugin's, an MCP server's) is
+ * named `Tool "<name>"`: a tool name holds no space or quote, so it can never read as one
+ * of these words, whatever it is called.
  */
 
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
@@ -49,13 +51,13 @@ export const DIALOG_ONLY_WORDS = {
 /** A tool this table has a word for. */
 export type DialogTool = keyof typeof TOOL_LINE_WORDS | keyof typeof DIALOG_ONLY_WORDS;
 
-/** The dialog's word for `toolName`, or the name itself for a tool without one. */
+/** The dialog's word for `toolName`; a tool without one is named, marked as a name. */
 export function dialogToolWord(toolName: string): string {
   const dialogOnly: Readonly<Record<string, string>> = DIALOG_ONLY_WORDS;
   const lineWords: Readonly<Record<string, string>> = TOOL_LINE_WORDS;
   if (Object.hasOwn(dialogOnly, toolName)) return dialogOnly[toolName]!;
   if (Object.hasOwn(lineWords, toolName)) return lineWords[toolName]!;
-  return toolName;
+  return `Tool "${toolName}"`;
 }
 
 /**

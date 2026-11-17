@@ -81,15 +81,26 @@ describe('the word a confirmation dialog names a tool by', () => {
     for (const name of Object.keys(DIALOG_ONLY_WORDS)) expect(Object.hasOwn(TOOL_LINE_WORDS, name), name).toBe(false);
   });
 
-  it('is the dialog-only noun first, then the tool line\'s word, else the name', () => {
+  it('is the dialog-only noun first, then the tool line\'s word, else the marked name', () => {
     expect(dialogToolWord('read_file')).toBe('File access');
     expect(dialogToolWord('batch_files')).toBe('Bulk file change');
     expect(dialogToolWord('bash')).toBe('Command');
     expect(dialogToolWord('http_request')).toBe('API request');
-    expect(dialogToolWord('some_new_tool')).toBe('some_new_tool');
+    expect(dialogToolWord('some_new_tool')).toBe('Tool "some_new_tool"');
     // An inherited property is not a word.
-    expect(dialogToolWord('constructor')).toBe('constructor');
-    expect(dialogToolWord('toString')).toBe('toString');
+    expect(dialogToolWord('constructor')).toBe('Tool "constructor"');
+    expect(dialogToolWord('toString')).toBe('Tool "toString"');
+  });
+
+  it('cannot be imitated by a tool named like one of the words', () => {
+    const words = new Set<string>([...Object.values(TOOL_LINE_WORDS), ...Object.values(DIALOG_ONLY_WORDS)]);
+    // A tool name has no space (`^[a-zA-Z0-9_-]{1,64}$`), so the closest a plugin gets is
+    // the word itself or its words run together.
+    for (const word of words) {
+      for (const name of [word, word.replaceAll(' ', ''), word.replaceAll(' ', '_')]) {
+        expect(words.has(dialogToolWord(name)), name).toBe(false);
+      }
+    }
   });
 
   it('opens every ⚠ dialog of the guard, api_setup, http_request and spawn_agent', () => {

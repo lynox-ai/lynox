@@ -3393,7 +3393,7 @@ describe('isDangerous — WarningPayload check (spawn-style consent)', () => {
         return typeof a === 'string' && a === 'upload' ? a : null;
       } },
     };
-    expect(isDangerous('gd', { action: 'upload' }, undefined, entry)).toBe('⚠ gd: upload — modifies external data');
+    expect(isDangerous('gd', { action: 'upload' }, undefined, entry)).toBe('⚠ Tool "gd": upload — modifies external data');
     expect(isDangerous('gd', { action: 'search' }, undefined, entry)).toBeNull();
   });
 });
