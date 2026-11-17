@@ -43,6 +43,20 @@ else
   KEY_SOURCE=none
 fi
 
+# On an instance the lynox platform hosts, the vault key is the one the platform delivers in the
+# environment, and nothing else: a key from the volume's .env or one generated here is not a key
+# the platform holds. Stop before reading or writing either (the engine applies the same rule,
+# `ensureVaultKey`). A self-hosted start has neither variable set and goes on as before.
+if [ -n "${LYNOX_BILLING_TIER:-}${LYNOX_MANAGED_MODE:-}" ] && [ -z "${LYNOX_VAULT_KEY:-}" ]; then
+  echo "" >&2
+  echo "  ERROR: this instance is hosted by the lynox platform, and the platform did not hand it" >&2
+  echo "  a vault key (LYNOX_VAULT_KEY in the container environment). lynox does not start: without" >&2
+  echo "  it, data would be stored unencrypted or under a key the platform does not hold." >&2
+  echo "  Redeliver the key from the control plane and restart." >&2
+  echo "" >&2
+  exit 1
+fi
+
 # Load vault key from .env if it exists
 ENV_FILE="$HOME/.lynox/.env"
 if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; then

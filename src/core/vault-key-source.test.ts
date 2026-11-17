@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ensureVaultKey, loadVaultKeyFromDotEnv } from './engine-init.js';
+import { MANAGED_VAULT_KEY_REFUSAL, ensureVaultKey, loadVaultKeyFromDotEnv } from './engine-init.js';
 import { reloadConfig } from './config.js';
 import { createManagedHook } from './managed-hook.js';
 import {
@@ -83,6 +83,9 @@ describe('the source as a start settles the key', () => {
     const dir = join(tmp, 'data');
     mkdirSync(dir, { recursive: true });
     vi.stubEnv('LYNOX_DATA_DIR', dir);
+    // A self-hosted start: neither the billing tier nor its legacy name.
+    vi.stubEnv('LYNOX_BILLING_TIER', '');
+    vi.stubEnv('LYNOX_MANAGED_MODE', '');
     reloadConfig();
     return dir;
   };
@@ -146,6 +149,76 @@ describe('the source as a start settles the key', () => {
     expect(process.env['LYNOX_VAULT_KEY']).toBe(KEY64);
     ensureVaultKey();
     expect(vaultKeySource()).toBe('volume-env');
+  });
+});
+
+describe('a start on an instance the platform hosts', () => {
+  const managedDir = (tier: [string, string] = ['LYNOX_BILLING_TIER', 'managed']): string => {
+    const dir = join(tmp, 'data');
+    mkdirSync(dir, { recursive: true });
+    vi.stubEnv('LYNOX_DATA_DIR', dir);
+    vi.stubEnv('LYNOX_BILLING_TIER', '');
+    vi.stubEnv('LYNOX_MANAGED_MODE', '');
+    vi.stubEnv(tier[0], tier[1]);
+    vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', undefined);
+    reloadConfig();
+    return dir;
+  };
+
+  it('starts on a well-formed key the environment delivered, and records it as env', () => {
+    managedDir();
+    vi.stubEnv('LYNOX_VAULT_KEY', KEY64);
+    vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', 'env');
+    expect(() => ensureVaultKey()).not.toThrow();
+    expect(vaultKeySource()).toBe('env');
+    expect(process.env['LYNOX_VAULT_KEY']).toBe(KEY64);
+  });
+
+  it('refuses without a key, and neither reads vault.key nor generates one', () => {
+    const dir = managedDir();
+    vi.stubEnv('LYNOX_VAULT_KEY', '');
+    writeFileSync(join(dir, 'vault.key'), KEY64 + '\n');
+    expect(() => ensureVaultKey()).toThrow(MANAGED_VAULT_KEY_REFUSAL);
+    expect(process.env['LYNOX_VAULT_KEY']).toBe('');
+    // And on a first start, no key is written next to the data.
+    rmSync(join(dir, 'vault.key'));
+    expect(() => ensureVaultKey()).toThrow(MANAGED_VAULT_KEY_REFUSAL);
+    expect(existsSync(join(dir, 'vault.key'))).toBe(false);
+    expect(process.env['LYNOX_VAULT_KEY']).toBe('');
+  });
+
+  it('refuses a key of another form', () => {
+    managedDir();
+    vi.stubEnv('LYNOX_VAULT_KEY', 'short');
+    expect(() => ensureVaultKey()).toThrow(MANAGED_VAULT_KEY_REFUSAL);
+  });
+
+  it('refuses a key the entrypoint read from the volume or generated, or one it cannot explain', () => {
+    managedDir();
+    vi.stubEnv('LYNOX_VAULT_KEY', KEY64);
+    for (const said of ['volume-env', 'minted', 'none', 'something']) {
+      _resetVaultKeySource();
+      vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', said);
+      expect(() => ensureVaultKey(), said).toThrow(MANAGED_VAULT_KEY_REFUSAL);
+    }
+  });
+
+  it('refuses a key loaded from ~/.lynox/.env before the start settled it', () => {
+    const home = join(tmp, 'home');
+    mkdirSync(join(home, '.lynox'), { recursive: true });
+    writeFileSync(join(home, '.lynox', '.env'), `LYNOX_VAULT_KEY=${KEY64}\n`, { mode: 0o600 });
+    vi.stubEnv('HOME', home);
+    managedDir();
+    vi.stubEnv('LYNOX_VAULT_KEY', '');
+    loadVaultKeyFromDotEnv();
+    expect(process.env['LYNOX_VAULT_KEY']).toBe(KEY64);
+    expect(() => ensureVaultKey()).toThrow(MANAGED_VAULT_KEY_REFUSAL);
+  });
+
+  it('applies the same rule under the legacy name of the billing tier', () => {
+    managedDir(['LYNOX_MANAGED_MODE', 'managed']);
+    vi.stubEnv('LYNOX_VAULT_KEY', '');
+    expect(() => ensureVaultKey()).toThrow(MANAGED_VAULT_KEY_REFUSAL);
   });
 });
 
