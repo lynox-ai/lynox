@@ -125,16 +125,20 @@ it('reports from a timer a request started before reporting was turned off and o
   onRejection = process.listeners('unhandledRejection').find((l) => !before.r.includes(l)) as typeof onRejection;
   const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
   const liveFlush = vi.spyOn(liveClient!, 'flush');
-  release();
-  await done;
-  // The uncaught handler waits for the live client's flush before it exits, not the old one's;
-  // read before the flush below, which calls the live client too.
-  expect(liveFlush).toHaveBeenCalledWith(2000);
-  liveFlush.mockRestore();
-  await Sentry.flush(2000);
-  await vi.waitFor(() => expect(exit).toHaveBeenCalled());
-  exit.mockRestore();
-  uninstallGlobalHandlers();
+  // Undone even when an assert below fails, so no stubbed exit or real handler outlives the test.
+  try {
+    release();
+    await done;
+    // The uncaught handler waits for the live client's flush before it exits, not the old one's;
+    // read before the flush below, which calls the live client too.
+    expect(liveFlush).toHaveBeenCalledWith(2000);
+    await Sentry.flush(2000);
+    await vi.waitFor(() => expect(exit).toHaveBeenCalled());
+  } finally {
+    liveFlush.mockRestore();
+    exit.mockRestore();
+    uninstallGlobalHandlers();
+  }
   // Control: the timer still runs in the scope forked before the re-init, which names the old,
   // disabled client; without that the cases below would pass without the routing.
   expect(timerClient).toBeDefined();

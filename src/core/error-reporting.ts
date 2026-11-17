@@ -461,7 +461,8 @@ export function installGlobalHandlers(): void {
   if (_uncaughtHandler !== null) return;  // idempotent — re-init in same process keeps single handler
   const Sentry = _sentry;
 
-  // Both can fire inside a scope forked before a later init, so they route like the captures do.
+  // Should one run inside a scope forked before a later init, it reaches the live client like the
+  // captures do.
   _uncaughtHandler = (error) => {
     process.stderr.write(`[lynox] uncaught exception: ${processErrorText(error, true)}\n`);
     withCurrentClient(Sentry, () => Sentry.captureException(error));
