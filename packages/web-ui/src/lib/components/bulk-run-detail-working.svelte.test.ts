@@ -10,9 +10,9 @@ import { formatCost } from '../format.js';
 // numbers where the engine counts them, and the head takes the counts of each ask. Before, nothing
 // showed that anything was happening: a walk saw „0 Ziele“ standing while lynox was already
 // writing, a running undo looked like a finished one, and after ten minutes the page stopped
-// asking without a word. While the list is read, the title and the head show a dash; while the
-// targets are read, only their number, not a written count that reads as done. A sentence says
-// when the page has stopped asking.
+// asking without a word. While the list is read, the title and the head show a dash; until the
+// run writes, the head names only the number of targets, not a written count that reads as done.
+// A sentence says when the page has stopped asking.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -189,14 +189,14 @@ describe('a run the engine works on', () => {
 		expect(shown()).not.toContain('geschrieben 0');
 	});
 
-	it('says lynox judges, with the verdicts so far out of the targets it reads, and moves with each ask', async () => {
+	it('says lynox judges, with the verdicts so far out of the targets it reads, moves with each ask, and the head names only the targets', async () => {
 		run = makeRun({ total: 5, judge: { tier: 'standard', unjudged: 4, judged: 1 } });
 		await render();
 		expect(line()).toBe('lynox urteilt … 1 von 5');
 		run = { ...run, judge: { tier: 'standard', unjudged: 1, judged: 4 } };
 		await pass(BULK_FOLLOW_MS);
 		expect(line()).toBe('lynox urteilt … 4 von 5');
-		expect(counts()).toBe(tf('bulk.head.counts', { n: '5', a: '0', c: '0', f: '0' }));
+		expect(counts()).toBe('5');
 		expect(title()).toMatch(/^5 Ziele · /);
 	});
 
@@ -245,7 +245,7 @@ describe('a run the engine works on', () => {
 		run = { ...run, listFirstPage: null, total: 4, changes: UPDATES(4), judge: { tier: 'standard', unjudged: 3, judged: 1 } };
 		await pass(BULK_FOLLOW_MS);
 		expect(line()).toBe('lynox urteilt … 1 von 4');
-		expect(counts()).toBe(tf('bulk.head.counts', { n: '4', a: '0', c: '0', f: '0' }));
+		expect(counts()).toBe('4');
 		// Loaded anew, its targets with it.
 		expect(targetAsks).toBeGreaterThan(asks);
 	});
@@ -330,7 +330,7 @@ describe('a run the engine works on', () => {
 		expect(shown()).toContain('Unterbrochen. lynox setzt den Lauf ab');
 	});
 
-	it('shows no line and its counts on a run that waits for the owner, has halted, or is done', async () => {
+	it('shows no line on a run that waits for the owner, has halted, or is done, and its counts once it has written', async () => {
 		for (const o of [
 			{ haltKey: 'awaitingStart', haltReason: 'awaitingStart' },
 			{ phase: 'writing' as const, haltKey: 'unavailable', haltReason: 'unavailable' },
@@ -344,9 +344,23 @@ describe('a run the engine works on', () => {
 			await render();
 			expect(line(), JSON.stringify(o)).toBeNull();
 			expect(stopped(), JSON.stringify(o)).toBeNull();
-			expect(counts(), JSON.stringify(o)).toBe(tf('kind' in o ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(n), a: '0', c: '0', f: '0' }));
+			// Before the run writes (waiting to start, previewed), only the number of targets stands.
+			const wrote = 'phase' in o && o.phase !== 'previewed';
+			expect(counts(), JSON.stringify(o)).toBe(wrote ? tf('kind' in o ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(n), a: '0', c: '0', f: '0' }) : String(n));
 			if (component) unmount(component);
 			component = undefined;
 		}
+	});
+
+	it('names only the targets in the head until the run writes, at the approval too, and the counts once one failed before', async () => {
+		run = makeRun({ phase: 'approved', total: 3, changes: UPDATES(3), haltKey: 'awaitingStart', haltReason: 'awaitingStart' });
+		await render();
+		expect(counts()).toBe('3');
+		if (component) unmount(component);
+		component = undefined;
+		// A target failed while the run was still approved: the counts stand, it has begun to write.
+		run = makeRun({ phase: 'approved', total: 3, changes: UPDATES(3), failed: 1, haltKey: 'unavailable', haltReason: 'unavailable' });
+		await render();
+		expect(counts()).toBe(tf('bulk.head.counts', { n: '3', a: '0', c: '0', f: '1' }));
 	});
 });

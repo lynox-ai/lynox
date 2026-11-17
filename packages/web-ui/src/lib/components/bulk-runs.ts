@@ -845,16 +845,21 @@ export function bulkCountsPending(step: BulkWorkingStep | null): boolean {
 	return step === 'list';
 }
 
-/** The head's counts. While the list is read there is nothing to count yet. While the targets are
- *  read their number is known, but nothing is written yet: a „geschrieben 0“ would read as a finished
- *  run, so only the number stands. An undo counts what it took back. */
+/** Phases before the run writes: planned (reading, judging), previewed, approved. */
+const BULK_BEFORE_WRITE: ReadonlySet<BulkPhase> = new Set(['planned', 'previewed', 'approved']);
+
+/** The head's counts. While the list is read there is nothing to count yet. Until the run has
+ *  begun to write (the probe or the run), only the number of targets stands: a „geschrieben 0 ·
+ *  Konflikte 0 · fehlgeschlagen 0“ before any write reads as a finished run. Once a target is
+ *  written, in conflict or failed, the counts stand whatever the phase. An undo counts what it
+ *  took back. */
 export function bulkHeadCounts(
 	step: BulkWorkingStep | null,
-	run: Pick<BulkRun, 'kind' | 'total' | 'applied' | 'conflicts' | 'failed'>,
+	run: Pick<BulkRun, 'kind' | 'phase' | 'total' | 'applied' | 'conflicts' | 'failed'>,
 	i18n: BulkI18n,
 ): string {
 	if (step === 'list') return i18n.t('bulk.head.counts_pending');
-	if (step === 'read') return String(run.total);
+	if (BULK_BEFORE_WRITE.has(run.phase) && run.applied === 0 && run.conflicts === 0 && run.failed === 0) return String(run.total);
 	return i18n.tf(run.kind === 'undo' ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) });
 }
 
