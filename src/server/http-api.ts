@@ -15341,8 +15341,8 @@ export class LynoxHTTPApi {
       // stop before that ends the session (the target holds it 30 minutes otherwise).
       let targetSession: string | null = null;
       let manifestAccepted = false;
-      // The target refused the manifest itself: its words say what to change, and the same attempt
-      // fails again, so a freed session is not an invitation to try again as it is.
+      // The target refused the manifest itself (4xx): its words say what to change, and the same
+      // attempt fails again, so a freed session is not an invitation to try again as it is.
       let manifestRefused = false;
       try {
         const crypto = await import('../core/migration-crypto.js');
@@ -15509,7 +15509,8 @@ export class LynoxHTTPApi {
           body: JSON.stringify(manifest),
         }, TARGET_REQUEST_TIMEOUTS_MS.manifest, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.manifest)}.` : 'lynox could not reach the target instance.'} lynox stopped before sending your data. ${AGAIN}`);
         if (!mRes.ok) {
-          manifestRefused = true;
+          // A refusal of the manifest itself (4xx), not the target failing or busy (5xx, 429).
+          manifestRefused = mRes.status >= 400 && mRes.status < 500 && mRes.status !== 429;
           throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
         }
         manifestAccepted = true;

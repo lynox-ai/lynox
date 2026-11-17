@@ -32,6 +32,8 @@ const target: {
   failCompletion?: boolean;
   /** Refuse the manifest with this `error` (any JSON value). */
   manifestError?: unknown;
+  /** The status of that refusal (default 422). */
+  manifestStatus?: number | undefined;
   /** Refuse the manifest with this raw body. */
   manifestRaw?: string | undefined;
   /** Refuse the chunk at this index with this `error`. */
@@ -158,7 +160,7 @@ vi.mock('../core/network-guard.js', async (original) => {
           imp.completeHandshake((body as { clientPubKey: string }).clientPubKey); return json({ ready: true });
         }
         if (path === '/api/migration/manifest' && target.manifestRaw !== undefined) return new Response(target.manifestRaw, { status: 422 });
-        if (path === '/api/migration/manifest' && target.manifestError !== undefined) return json({ error: target.manifestError }, 422);
+        if (path === '/api/migration/manifest' && target.manifestError !== undefined) return json({ error: target.manifestError }, target.manifestStatus ?? 422);
         if (path === '/api/migration/manifest') { target.manifest = body as MigrationManifest; imp.setManifest(target.manifest); const r = json({ accepted: true }); target.okBodies.push(r); return r; }
         if (path === '/api/migration/chunk' && target.chunkError && (body as { seq: number }).seq === target.chunkError.at) return json({ error: target.chunkError.error }, 422);
         if (path === '/api/migration/restore' && target.restoreError !== undefined) return json({ error: target.restoreError }, 500);
@@ -258,6 +260,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.guardText = undefined;
     target.abort = undefined;
     target.abortCalls = [];
+    target.manifestStatus = undefined;
     target.noSessionId = false;
     derivedKeys.length = 0;
   });
@@ -460,6 +463,12 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.abort = { status: 200, body: { aborted: false } };
     expect(await message()).toBe('The target instance refused the migration. It says: The bundle names a store this instance does not know You can start the migration again in 30 minutes at the latest.');
     expect(target.abortCalls).toHaveLength(2);
+    // The target failing or busy is no refusal of the manifest: once the session ended, start again now.
+    target.abort = 'real';
+    for (const status of [503, 429]) {
+      target.manifestStatus = status;
+      expect(await message()).toBe('The target instance refused the migration. It says: The bundle names a store this instance does not know You can start the migration again now.');
+    }
   });
 
   it('keeps the 30 minutes where the target did not confirm that it ended the session', async () => {
