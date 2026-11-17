@@ -58,8 +58,7 @@ describe('a run name of a step stored outside the shape, in a call\'s changes', 
   it('is refused when two steps are stored with the same id and so share it, and changes neither', () => {
     const steps = [{ id: OLD, task: 'First' }, { id: 'write', task: 'Write' }, { id: OLD, task: 'Second' }];
     const out = applyModifications(steps, [{ action: 'update_task', step_id: 'step-1', value: 'Changed' }]);
-    expect(out).toMatch(/^Error: /);
-    expect(out).not.toContain(OLD);
+    expect(out).toBe('Error: Steps #1, #3 were stored with the same id, which runs as "step-1", so task update cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#3".');
     expect(steps.map(s => s.task)).toEqual(['First', 'Write', 'Second']);
   });
 });
