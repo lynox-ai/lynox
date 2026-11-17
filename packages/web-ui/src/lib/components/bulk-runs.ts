@@ -823,10 +823,23 @@ export function bulkWorkingLine(
 	return { key: `bulk.working.${step}`, params: {} };
 }
 
-/** Whether the run's counts stand for nothing yet: while the list or the targets are read, a
- *  „0 geschrieben“ would read as a finished run, so the head shows a dash there. */
+/** Whether the run's size is not known yet: while the list is read, the targets are still being
+ *  found, so the title and the head show a dash instead of a number. */
 export function bulkCountsPending(step: BulkWorkingStep | null): boolean {
-	return step === 'list' || step === 'read';
+	return step === 'list';
+}
+
+/** The head's counts. While the list is read there is nothing to count yet. While the targets are
+ *  read their number is known, but nothing is written yet: a „geschrieben 0“ would read as a finished
+ *  run, so only the number stands. An undo counts what it took back. */
+export function bulkHeadCounts(
+	step: BulkWorkingStep | null,
+	run: Pick<BulkRun, 'kind' | 'total' | 'applied' | 'conflicts' | 'failed'>,
+	i18n: BulkI18n,
+): string {
+	if (step === 'list') return i18n.t('bulk.head.counts_pending');
+	if (step === 'read') return String(run.total);
+	return i18n.tf(run.kind === 'undo' ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) });
 }
 
 /** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`

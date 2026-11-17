@@ -384,6 +384,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.working.judge_open': { de: 'lynox urteilt …', en: 'lynox is judging …' },
 	'bulk.working.write': { de: 'lynox schreibt … {a} von {n}', en: 'lynox is writing … {a} of {n}' },
 	'bulk.working.undo': { de: 'lynox nimmt zurück … {a} von {n}', en: 'lynox is undoing … {a} of {n}' },
+	'bulk.head.counts_undo': { de: '{n} · zurückgenommen {a} · Konflikte {c} · fehlgeschlagen {f}', en: '{n} · undone {a} · conflicts {c} · failed {f}' },
 	'bulk.head.counts_pending': { de: '–', en: '–' },
 	'bulk.follow.stopped': { de: 'Die Seite fragt nicht mehr nach; lade sie neu, um den Stand zu sehen.', en: 'This page stopped checking; reload it to see where the run is.' },
 	'bulk.resumes_at': { de: 'Unterbrochen. lynox setzt den Lauf ab {time} fort.', en: 'Interrupted. lynox resumes the run from {time}.' },

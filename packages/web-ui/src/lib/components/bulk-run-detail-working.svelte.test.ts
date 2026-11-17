@@ -170,12 +170,12 @@ describe('a run the engine works on', () => {
 		expect(stopped()).toBe('Die Seite fragt nicht mehr nach; lade sie neu, um den Stand zu sehen.');
 	});
 
-	it('says lynox reads the targets, with a dash for the counts and the title, not a number that reads as done', async () => {
+	it('says lynox reads the targets, with their number in the head and the title but no written count that reads as done', async () => {
 		run = makeRun({ total: 4, changes: UPDATES(4) });
 		await render();
 		expect(line()).toBe(`lynox liest die Ziele bei ${HOST} …`);
-		expect(counts()).toBe('–');
-		expect(title()).toMatch(/^– Ziele · /);
+		expect(counts()).toBe('4');
+		expect(title()).toMatch(/^4 Ziele · /);
 		expect(shown()).not.toContain('geschrieben 0');
 	});
 
@@ -206,13 +206,15 @@ describe('a run the engine works on', () => {
 		expect(counts()).toBe(tf('bulk.head.counts', { n: '4', a: '2', c: '0', f: '0' }));
 	});
 
-	it('says lynox takes back an undo with its numbers, so a running undo does not look finished', async () => {
+	it('says lynox takes back an undo with its numbers, so a running undo does not look finished, and the head counts what it took back', async () => {
 		run = makeRun({ kind: 'undo', sourceRunId: 'r0', phase: 'writing', total: 3, changes: UPDATES(3), applied: 1 });
 		await render();
 		expect(line()).toBe('lynox nimmt zurück … 1 von 3');
+		expect(counts()).toBe('3 · zurückgenommen 1 · Konflikte 0 · fehlgeschlagen 0');
 		run = { ...run, applied: 2 };
 		await pass(BULK_FOLLOW_MS);
 		expect(line()).toBe('lynox nimmt zurück … 2 von 3');
+		expect(counts()).toBe('3 · zurückgenommen 2 · Konflikte 0 · fehlgeschlagen 0');
 	});
 
 	it('takes the whole run once it is done, and shows no line then', async () => {
@@ -312,7 +314,7 @@ describe('a run the engine works on', () => {
 			await render();
 			expect(line(), JSON.stringify(o)).toBeNull();
 			expect(stopped(), JSON.stringify(o)).toBeNull();
-			expect(counts(), JSON.stringify(o)).toBe(tf('bulk.head.counts', { n: String(n), a: '0', c: '0', f: '0' }));
+			expect(counts(), JSON.stringify(o)).toBe(tf('kind' in o ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(n), a: '0', c: '0', f: '0' }));
 			if (component) unmount(component);
 			component = undefined;
 		}
