@@ -25,7 +25,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
-import { isStepIdShape, runStepIds, shownStepId, stepIdIssue } from '../../orchestrator/step-id.js';
+import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepRunNames } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
@@ -327,8 +327,8 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
   const nonce = randomUUID();
   const names: string[] = [];
   const asName = (value: string): string => `__lynox_name_${names.push(value) - 1}_${nonce}__`;
-  // A step id stored before ids had a shape (`step-id.ts`) goes in by its position in the workflow
-  // (`stepOrder`, the stored order), never as its text.
+  // A step id outside the shape (`step-id.ts`) goes in by its position in `stepOrder`, never as its
+  // text. A stored workflow's run already carries its steps under their run names (`runStepIds`).
   const asStepId = (id: string): string => {
     if (isStepIdShape(id)) return asName(id);
     const at = stepOrder?.indexOf(id) ?? -1;
@@ -894,8 +894,9 @@ export async function runSavedWorkflow(
     };
   }
 
-  // Asked of the workflow as read here, so no edit can fall between the check and the run.
-  const refused = runtime?.checkWorkflow?.(planned) ?? null;
+  // Asked of the workflow as read here, so no edit can fall between the check and the run, with its
+  // steps under the names the run uses: a refusal quotes no step id stored before ids had a shape.
+  const refused = runtime?.checkWorkflow?.({ ...planned, steps: runStepIds(planned.steps) }) ?? null;
   if (refused !== null) return { ok: false, error: refused };
 
   // Whether this run passes the workflow's contract on — decided before binding, because a
@@ -1413,8 +1414,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   // Each step's task without the characters that render as nothing, after the modifications too.
   for (const s of steps) s.task = stripHidden(s.task);
   // A step id stored before ids had a shape runs as `step-<n>`, after the modifications (which
-  // address steps by their stored id), so nothing the run writes quotes it.
-  const runSteps = runStepIds(steps);
+  // address steps by their stored id), so nothing the run writes quotes it. The names come from the
+  // stored plan, so a removed step does not shift them.
+  const runSteps = runStepIds(steps, stepRunNames(planned.steps));
 
   if (runSteps.length === 0) {
     return 'Error: All steps were removed. Nothing to execute.';

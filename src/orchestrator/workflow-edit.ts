@@ -1,6 +1,6 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
-import { isStepIdShape, stepIdRefusal } from './step-id.js';
+import { isStepIdShape, stepIdRefusal, stepRunPositions } from './step-id.js';
 
 /**
  * A single step-level edit to a workflow's step list. The vocabulary is shared
@@ -62,7 +62,9 @@ function resolveStep(steps: readonly InlinePipelineStep[], id: string): number |
     return at < steps.length ? at : 'missing';
   }
   const alike = alikeIndexes(steps, id);
-  if (alike.length <= 1) return alike[0] ?? 'missing';
+  // A run names a step stored outside the shape `step-<n>` (`stepRunNames`): that name reaches it too.
+  if (alike.length === 0) return stepRunPositions(steps).get(id) ?? 'missing';
+  if (alike.length === 1) return alike[0]!;
   const exact = steps.findIndex(s => s.id === id);
   return exact !== -1 && id !== stripHiddenInName(id) ? exact : 'ambiguous';
 }

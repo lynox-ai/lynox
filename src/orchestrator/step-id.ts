@@ -63,10 +63,40 @@ export const OUTSIDE_SHAPE = '(id outside the allowed form)';
 /**
  * A stored step id as the model reads it: the id itself when it has the shape, otherwise its position
  * (`#2`, as `update_workflow_steps` takes it) with a note, or the note alone where no position is known.
+ * `runName`, where known, is the name its runs use (`stepRunNames`), so a run's message leads to the
+ * step: `#2 (id outside the allowed form; runs as "step-2")` (U-325).
  */
-export function shownStepId(id: string, index?: number): string {
+export function shownStepId(id: string, index?: number, runName?: string): string {
   if (isStepIdShape(id)) return id;
-  return index === undefined ? OUTSIDE_SHAPE : `#${String(index + 1)} ${OUTSIDE_SHAPE}`;
+  if (index === undefined) return OUTSIDE_SHAPE;
+  const note = runName === undefined ? OUTSIDE_SHAPE : `${OUTSIDE_SHAPE.slice(0, -1)}; runs as "${runName}")`;
+  return `#${String(index + 1)} ${note}`;
+}
+
+/**
+ * A step id a run recorded, as a diagnosis or a preamble shows it: an id in the shape as it is, unless
+ * it is the run name of a stored step outside the shape, which is then named by its stored position
+ * with the bridge; an id outside the shape (a run from before run names) by its stored position.
+ */
+export function shownRunStepId(id: string, stored: readonly RunnableStep[] | undefined): string {
+  const steps = stored ?? [];
+  const names = stepRunNames(steps);
+  const at = stepRunPositions(steps).get(id);
+  if (at !== undefined) return shownStepId(steps[at]!.id, at, id);
+  if (isStepIdShape(id)) return id;
+  const index = steps.findIndex(s => s.id === id);
+  return index === -1 ? OUTSIDE_SHAPE : shownStepId(id, index, names.get(id));
+}
+
+/** The steps of a stored workflow row, or undefined when there is no row or its definition does not parse. */
+export function storedSteps(row: { manifest_json: string } | undefined): RunnableStep[] | undefined {
+  if (!row) return undefined;
+  try {
+    const steps = (JSON.parse(row.manifest_json) as { steps?: unknown }).steps;
+    return Array.isArray(steps) ? steps.filter((s): s is RunnableStep => typeof (s as RunnableStep | null)?.id === 'string' && typeof (s as RunnableStep).task === 'string') : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The step ids of a stored workflow row in their stored order, or undefined when there is no row or
@@ -81,36 +111,97 @@ export function storedStepOrder(row: { manifest_json: string } | undefined): str
   }
 }
 
-/**
- * A run's copy of a stored plan's steps, where every id outside the allowed shape is replaced by
- * `step-<n>`, its position counted from 1 (`step-<n>-<k>` if that is taken). A plan stored before
- * ids had a shape still runs, and what a run writes on the way (a timeout, a refused replay, a graph
- * or manifest error) names its steps by id; with this, none of it carries the stored text.
- *
- * Each reference moves with its step: an `input_from` entry and a `{{<id>…}}` placeholder in a task
- * or an input template. An `input_from` entry outside the shape that names no step becomes
- * `unknown-step-<j>`, so the graph check refuses it without quoting it. Steps already in the shape,
- * and plans with none outside it, come back unchanged.
- */
-export function runStepIds<T extends { id: string; task: string; input_from?: string[] | undefined; input_template?: Record<string, unknown> | undefined }>(steps: readonly T[]): T[] {
-  const taken = new Set(steps.map(s => s.id).filter(isStepIdShape));
-  const renamed = new Map<string, string>();
-  steps.forEach((s, i) => {
-    if (isStepIdShape(s.id) || renamed.has(s.id)) return;
-    let name = `step-${String(i + 1)}`;
-    for (let k = 2; taken.has(name); k++) name = `step-${String(i + 1)}-${String(k)}`;
-    taken.add(name);
-    renamed.set(s.id, name);
-  });
-  const dangling = steps.some(s => (s.input_from ?? []).some(r => !isStepIdShape(r) && !renamed.has(r)));
-  if (renamed.size === 0 && !dangling) return [...steps];
+/** What a run takes of a step: its id, and what refers to other steps. */
+export type RunnableStep = { id: string; task: string; input_from?: string[] | undefined; input_template?: Record<string, unknown> | undefined };
 
+/** The first segment of each `{{…}}` placeholder in a text. */
+function placeholderHeads(text: string): string[] {
+  return [...text.matchAll(/\{\{([^}]+)\}\}/g)].map(m => m[1]!.trim().split('.')[0]!);
+}
+
+function templateStrings(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(templateStrings);
+  if (value !== null && typeof value === 'object') return Object.values(value as Record<string, unknown>).flatMap(templateStrings);
+  return [];
+}
+
+/**
+ * The names a stored plan's steps run under: for each id outside the allowed shape, `step-<n>`, its
+ * position in the STORED plan counted from 1 (`step-<n>a`, `step-<n>b`, … if that is taken); for each
+ * `input_from` entry outside the shape that names no step, `unknown-step-<j>`. A name counts as taken
+ * if a step has it as its id, or a reference or placeholder in the shape uses it, so a renamed step
+ * never answers a reference its author wired to something else. Computed from the stored plan, never
+ * from one run's changed copy, so the same step has the same name in every run.
+ */
+export function stepRunNames(steps: readonly RunnableStep[]): Map<string, string> {
+  const taken = new Set<string>(['params']);
+  for (const s of steps) {
+    if (isStepIdShape(s.id)) taken.add(s.id);
+    for (const r of s.input_from ?? []) if (isStepIdShape(r)) taken.add(r);
+    for (const text of [s.task, ...templateStrings(s.input_template)]) {
+      for (const head of placeholderHeads(text)) if (isStepIdShape(head)) taken.add(head);
+    }
+  }
+  const names = new Map<string, string>();
+  const free = (base: string): string => {
+    if (!taken.has(base)) return base;
+    for (let k = 0; k < 26; k++) {
+      const name = `${base}${String.fromCharCode(97 + k)}`;
+      if (!taken.has(name)) return name;
+    }
+    for (let k = 2; ; k++) if (!taken.has(`${base}_${String(k)}`)) return `${base}_${String(k)}`;
+  };
+  steps.forEach((s, i) => {
+    if (isStepIdShape(s.id) || names.has(s.id)) return;
+    const name = free(`step-${String(i + 1)}`);
+    taken.add(name);
+    names.set(s.id, name);
+  });
+  let unknown = 0;
+  for (const s of steps) {
+    for (const r of s.input_from ?? []) {
+      if (isStepIdShape(r) || names.has(r)) continue;
+      let name: string;
+      do name = `unknown-step-${String(++unknown)}`; while (taken.has(name));
+      taken.add(name);
+      names.set(r, name);
+    }
+  }
+  return names;
+}
+
+/**
+ * The stored position (from 0) of each step a run names by its run name (`stepRunNames`): how a
+ * name a run wrote leads back to the step in the stored plan, for an edit or a diagnosis.
+ */
+export function stepRunPositions(steps: readonly RunnableStep[]): Map<string, number> {
+  const names = stepRunNames(steps);
+  const at = new Map<string, number>();
+  steps.forEach((s, i) => {
+    const name = names.get(s.id);
+    if (name !== undefined && !at.has(name)) at.set(name, i);
+  });
+  return at;
+}
+
+/**
+ * A run's copy of a plan's steps, where every id outside the allowed shape runs under its name from
+ * {@link stepRunNames}, so nothing the run writes on the way (a timeout, a refused replay, a graph or
+ * manifest error) quotes the stored text. Each reference moves with its step: an `input_from` entry
+ * and a `{{<id>…}}` placeholder in a task or an input template; a `{{params.…}}` placeholder is never
+ * touched. `names` defaults to those of `steps`; a run that changed its copy (a removed step) passes
+ * the names of the stored plan. Steps in the shape, and plans with none outside it, come back as they were.
+ */
+export function runStepIds<T extends RunnableStep>(steps: readonly T[], names: ReadonlyMap<string, string> = stepRunNames(steps)): T[] {
+  if (names.size === 0) return [...steps];
   // Longest first, so an id that begins with another one is matched whole.
-  const olds = [...renamed.keys()].sort((a, b) => b.length - a.length);
+  const olds = [...names.keys()].sort((a, b) => b.length - a.length);
   const inText = (text: string): string => text.replace(/\{\{([^}]+)\}\}/g, (match: string, raw: string) => {
     const path = raw.trim();
+    if (path === 'params' || path.startsWith('params.')) return match;
     const old = olds.find(o => path === o || path.startsWith(`${o}.`));
-    return old === undefined ? match : `{{${renamed.get(old)!}${path.slice(old.length)}}}`;
+    return old === undefined ? match : `{{${names.get(old)!}${path.slice(old.length)}}}`;
   });
   const inValue = (value: unknown): unknown => {
     if (typeof value === 'string') return inText(value);
@@ -120,24 +211,11 @@ export function runStepIds<T extends { id: string; task: string; input_from?: st
     }
     return value;
   };
-  let unknown = 0;
-  const unknownName = new Map<string, string>();
-  const ref = (r: string): string => {
-    if (isStepIdShape(r)) return r;
-    const now = renamed.get(r);
-    if (now !== undefined) return now;
-    let name = unknownName.get(r);
-    if (name === undefined) {
-      do name = `unknown-step-${String(++unknown)}`; while (taken.has(name));
-      unknownName.set(r, name);
-    }
-    return name;
-  };
   return steps.map(s => ({
     ...s,
-    id: renamed.get(s.id) ?? s.id,
+    id: names.get(s.id) ?? s.id,
     task: inText(s.task),
-    ...(s.input_from !== undefined ? { input_from: s.input_from.map(ref) } : {}),
+    ...(s.input_from !== undefined ? { input_from: s.input_from.map(r => names.get(r) ?? r) } : {}),
     ...(s.input_template !== undefined ? { input_template: inValue(s.input_template) as Record<string, unknown> } : {}),
   }));
 }
