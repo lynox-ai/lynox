@@ -570,6 +570,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.start.judge_own_key': { de: 'Läufe mit Urteil lassen sich auf einer Instanz mit eigenem KI-Schlüssel nicht starten. Läufe ohne Urteil gehen hier wie gewohnt.', en: 'Runs with a judge cannot be started on an instance with its own AI key. Runs without a judge work here as usual.' },
 	'bulk.start.judge_explain': { de: 'Ein KI-Modell ({provider} · {model}) entscheidet für jedes Ziel die neuen Werte nach dieser Regel. Geschrieben wird nichts, bevor du die Vorschau freigibst.', en: 'An AI model ({provider} · {model}) decides each target\'s new values by this rule. Nothing is written before you approve the preview.' },
 	'bulk.start.rule': { de: 'Regel', en: 'Rule' },
+	// lynox wrote the rule, whatever it drew on: said under it where the owner starts and approves (U-335).
+	'bulk.start.rule_drafted': { de: 'Diese Regel hat lynox formuliert. Prüf, ob sie sagt, was du willst, bevor du die Beurteilung startest.', en: 'lynox wrote this rule. Check that it says what you want before you start judging.' },
+	'bulk.approve.rule_drafted': { de: 'Diese Regel hat lynox formuliert. Prüf, ob sie sagt, was du willst, bevor du freigibst.', en: 'lynox wrote this rule. Check that it says what you want before you approve.' },
 	'bulk.start.fields': { de: 'Felder, die das Modell setzt', en: 'Fields the model sets' },
 	'bulk.start.context_fields': { de: 'Felder, die das Modell nur liest', en: 'Fields the model only reads' },
 	'bulk.start.context_explain': { de: 'Ihre Werte gehen zusammen mit den Feldern oben an {provider}, damit das Modell besser urteilen kann. lynox schreibt sie nie.', en: 'Their values go to {provider} together with the fields above, so the model can judge better. lynox never writes them.' },
