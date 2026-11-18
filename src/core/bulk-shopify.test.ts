@@ -2040,7 +2040,7 @@ describe('applying a Shopify run', () => {
       // The owner changed the text since: the product is no longer what the store added to.
       s.products.get(10)!['descriptionHtml'] = `<p>Neu, vom Inhaber</p>${SCRIPT}`;
       const owned = await previewedWith({ descriptionHtml: '<p>Neuer</p>' });
-      expect(row(owned).error).not.toBe('before_has_shop_markup');
+      expect(row(owned)).toEqual({ change: 'update', error: null });
     });
 
     it('stores a planner\'s description in its canonical form, and the write sends exactly those bytes (#19)', async () => {
