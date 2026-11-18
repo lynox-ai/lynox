@@ -8,6 +8,7 @@ import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolCallImitationError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
 import { copyToolContext } from '../../core/tool-context.js';
+import type { ToolContext } from '../../core/tool-context.js';
 import { loopGuardStopReason } from '../../core/loop-guard-stop.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
@@ -23,7 +24,7 @@ import { resolveTools } from '../resolve-tools.js';
 
 import { adjustSessionCost, checkSessionBudget } from '../../core/session-budget.js';
 import { compose, engineText, escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
-import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
+import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, SUBAGENT_NO_WEB_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
 import { childFilingContext } from '../../core/approval-filing.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
@@ -685,6 +686,27 @@ function floorRefusal(opts: {
 
 /** The live limit; only tests shorten it (`setSpawnTimeoutMsForTests`). */
 let spawnTimeoutMs = SPAWN_TIMEOUT;
+
+/** Tools that reach the web: through `network_policy` (`network-guard.ts`), or, for `bash`
+ *  outside sidecar mode, past it. */
+const WEB_REACHING_TOOLS = new Set(['web_research', 'http_request', 'api_setup', 'google_docs', 'google_drive', 'google_sheets', 'google_calendar', 'bash']);
+
+/**
+ * Whether a child with `tools` under the parent's context can reach no web page at all, for the
+ * reason the network settings give: under `deny-all` every surface the policy governs is blocked
+ * (and the provider's own search is withheld, `providerSearchAdmitted`), so only `bash`, which
+ * outside sidecar mode runs past the policy, leaves a way out; under `allow-list` the allowed
+ * hosts stay reachable, so only a child with no web-reaching tool at all is cut off. Under any
+ * other policy, or an unread one, the child is not told about settings it may not be under.
+ */
+export function subAgentLacksWebSearch(tools: readonly ToolEntry[], ctx: ToolContext | undefined): boolean {
+  const names = tools.map((t) => t.definition.name);
+  switch (ctx?.networkPolicy) {
+    case 'deny-all': return !names.includes('bash');
+    case 'allow-list': return !names.some((n) => WEB_REACHING_TOOLS.has(n));
+    default: return false;
+  }
+}
 
 /** Shorten the per-child time limit (for testing). `null` restores the default. */
 export function setSpawnTimeoutMsForTests(ms: number | null): void {
@@ -1624,7 +1646,7 @@ async function executeThinker(
   // A2: every sub-agent carries the grounding block. Prepend it to the
   // caller-supplied prompt, OR use it standalone when none was given — otherwise
   // the child falls through to agent.ts's bare default, which has NO grounding.
-  const systemPrompt = spec.system_prompt
+  const basePrompt = spec.system_prompt
     ? `${GROUNDING_PROMPT_BLOCK}\n\n${spec.system_prompt}`
     : GROUNDING_PROMPT_BLOCK;
   // OpenAI providers don't support thinking or effort
@@ -1642,6 +1664,11 @@ async function executeThinker(
   // parent could re-introduce tools the user explicitly disabled — the
   // exact surface the Tool-Toggle PR was meant to close.
   const tools = resolveTools(spec.tools, roleProfile, parentAgent.getAvailableTools(), SPAWN_EXCLUDED);
+  // A child the network policy keeps off the web is told so, and not to pass on an address it
+  // never opened (`SUBAGENT_NO_WEB_PROMPT_BLOCK`).
+  const systemPrompt = subAgentLacksWebSearch(tools, parentAgent.toolContext)
+    ? `${basePrompt}\n\n${SUBAGENT_NO_WEB_PROMPT_BLOCK}`
+    : basePrompt;
 
   // Context injection (XML-escaped to prevent tag injection)
   const task = spec.context
