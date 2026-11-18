@@ -179,5 +179,18 @@ describe('a Shopify run\'s page', () => {
 		expect(target.querySelector('[data-testid="bulk-target-admin"]')).toBeNull();
 		expect(target.textContent).toContain('gid://shopify/Product/1');
 		expect(target.querySelector('[data-testid="bulk-field-name"]')?.textContent?.trim()).toBe('seo_title:');
+		// The name the planner set stands in a value box, so it does not read as a word of lynox's (U-333).
+		const box = target.querySelector('[data-testid="bulk-field-name"] [data-testid="bulk-field-own-name"]');
+		expect(box?.textContent).toBe('seo_title');
+		// A name to check is not paler than the row it stands in: the box sets its own text colour.
+		expect(box?.classList.contains('text-text')).toBe(true);
+	});
+
+	it('a Shopify field\'s readable name stands as lynox\'s own word, without the value box (U-333)', async () => {
+		run = makeRun({ phase: 'done', undone: 0, undoneBy: null });
+		targets = [written(1, false)];
+		await render();
+		expect(target.querySelector('[data-testid="bulk-field-name"]')?.textContent?.trim()).toBe(`${t('bulk.field.shopify.seo_title')}:`);
+		expect(target.querySelector('[data-testid="bulk-field-own-name"]')).toBeNull();
 	});
 });

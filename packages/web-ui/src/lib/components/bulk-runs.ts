@@ -807,6 +807,59 @@ export function bulkFieldNamesText(host: string | null, fields: readonly string[
 	return fields.map((f) => { const key = bulkFieldLabelKey(host, f); return key === null ? bulkVisibleText(f) : label(key); }).join(', ');
 }
 
+/** A field's shape in a judged rule, in words (U-333): the four shapes the engine's rule takes
+ *  (text with a length, a choice, a number or whole number with bounds, yes/no). A choice says only
+ *  "one of:" here: its values are the planner's text and are shown one by one by
+ *  {@link bulkFieldChoices}, each in its own box, so a quote inside a value cannot end it. A shape
+ *  the page does not know says nothing rather than showing the schema as JSON. */
+export function bulkFieldShapeText(shape: unknown, i18n: BulkI18n): string | null {
+	if (typeof shape !== 'object' || shape === null) return null;
+	const s = shape as Record<string, unknown>;
+	const num = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? String(v) : null);
+	switch (s['type']) {
+		case 'string': {
+			if (bulkFieldChoices(s) !== null) return i18n.t('bulk.shape.choice');
+			const max = num(s['maxLength']);
+			if (max === null) return i18n.t('bulk.shape.text');
+			const min = num(s['minLength']);
+			return min === null || min === '0' ? i18n.tf('bulk.shape.text_max', { max }) : i18n.tf('bulk.shape.text_range', { min, max });
+		}
+		case 'number':
+		case 'integer': {
+			const kind = s['type'] === 'integer' ? 'integer' : 'number';
+			const min = num(s['minimum']);
+			const max = num(s['maximum']);
+			if (min !== null && max !== null) return i18n.tf(`bulk.shape.${kind}_range`, { min, max });
+			if (min !== null) return i18n.tf(`bulk.shape.${kind}_min`, { min });
+			if (max !== null) return i18n.tf(`bulk.shape.${kind}_max`, { max });
+			return i18n.t(`bulk.shape.${kind}`);
+		}
+		case 'boolean':
+			return i18n.t('bulk.shape.boolean');
+		default:
+			return null;
+	}
+}
+
+/** The values of a choice field in a judged rule, as the planner wrote them, or null for a field
+ *  that is no choice. Shown through {@link bulkVisibleText} by the caller. */
+export function bulkFieldChoices(shape: unknown): string[] | null {
+	if (typeof shape !== 'object' || shape === null) return null;
+	const choices = (shape as Record<string, unknown>)['enum'];
+	return (shape as Record<string, unknown>)['type'] === 'string' && Array.isArray(choices) && choices.length > 0 && choices.every((c) => typeof c === 'string')
+		? (choices as string[]) : null;
+}
+
+/** Why the judged run's start button is disabled, as the line under it (U-333), or null. The cost
+ *  limit is named only while its field is empty: an entered, invalid amount has its own line. */
+export function bulkStartHintKey(capInput: string, startDomainsValid: boolean): string | null {
+	const cap = capInput === '';
+	if (cap && !startDomainsValid) return 'bulk.start.hint_both';
+	if (cap) return 'bulk.start.hint_cap';
+	if (!startDomainsValid) return 'bulk.start.hint_domains';
+	return null;
+}
+
 /** The target system as the owner reads it: the host of an external run, a name otherwise. */
 export function bulkSystemName(targetSystem: string, i18n: BulkI18n): string {
 	const host = bulkHostOf(targetSystem);
