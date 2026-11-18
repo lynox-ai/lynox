@@ -15413,10 +15413,12 @@ export class LynoxHTTPApi {
       // The target refused the manifest itself (4xx): its words say what to change, and the same
       // attempt fails again, so a freed session is not an invitation to try again as it is.
       let manifestRefused = false;
+      // One deadline for the whole transfer, set once the bundle's size is known.
+      let transferTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         const crypto = await import('../core/migration-crypto.js');
         const { MigrationExporter } = await import('../core/migration-export.js');
-        const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, askTarget, capText, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } = await import('../core/migration-target-reply.js');
+        const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, TransferOutOfTime, askTarget, capText, transferDeadlineMs, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } = await import('../core/migration-target-reply.js');
         // Why an answer of the target could not be used, in the user's words.
         type Why = 'large' | 'format' | 'slow' | 'broken' | 'silent' | 'unreachable';
         const why = (w: Why, cap: number, unread: string, waited: number = TARGET_BODY_TIMEOUT_MS): string =>
@@ -15440,10 +15442,14 @@ export class LynoxHTTPApi {
          * A request to the target with its deadline for the answer to start. Past it, or when the
          * connection fails, the step's own words (`words`); the transport's text never reaches the user.
          */
+        // The whole transfer's deadline (from the manifest on) and the stop it says.
+        let transfer: AbortSignal | undefined;
+        let outOfTime = (): string => '';
         const ask = async (path: string, init: RequestInit, ms: number, words: (w: 'silent' | 'unreachable') => string): Promise<Response> => {
           try {
-            return await askTarget(fetchPinned, `${targetUrl}${path}`, init, ms);
+            return await askTarget(fetchPinned, `${targetUrl}${path}`, init, ms, transfer);
           } catch (err: unknown) {
+            if (err instanceof TransferOutOfTime) throw new Error(outOfTime());
             if (err instanceof TargetDidNotAnswer) throw new Error(words('silent'));
             if (isConnectionFailure(err)) throw new Error(words('unreachable'));
             throw err;
@@ -15554,6 +15560,14 @@ export class LynoxHTTPApi {
           crypto.zeroize(transferKey);
         }
         const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace, plain: exportPlain } = exported;
+        // From here one deadline holds for the whole transfer, from the bundle's size, on top of each
+        // request's own: it ends a request still waiting, and no request starts once it has passed.
+        const transferMs = transferDeadlineMs(chunks.reduce((n, c) => n + c.data.length, 0));
+        const transferCtl = new AbortController();
+        transfer = transferCtl.signal;
+        // run-group-starter: cleared in the route's `finally`, or fired once; it only aborts this export's requests and reports no spend.
+        transferTimer = setTimeout(() => transferCtl.abort(), transferMs);
+        outOfTime = () => `The target instance took longer than ${durationText(transferMs)} for the whole migration, so lynox stopped it. ${AGAIN}`;
         // A refusal from the destination is shown as its own text, which is written for the
         // person migrating; the raw response only when it carries none.
         // `told` says in lynox's words which step failed, followed by the target's own words (its
@@ -15620,8 +15634,11 @@ export class LynoxHTTPApi {
           `The target instance's report on restoring the data could not be read: ${why(w, TARGET_BODY_CAPS.restore, '', TARGET_REQUEST_TIMEOUTS_MS.restore)}. Check on the target instance whether your data arrived before you migrate again.`;
         let rRes: Response;
         try {
-          rRes = await askTarget(fetchPinned, `${targetUrl}/api/migration/restore`, { method: 'POST', headers: migrationHeaders }, TARGET_REQUEST_TIMEOUTS_MS.restore);
+          rRes = await askTarget(fetchPinned, `${targetUrl}/api/migration/restore`, { method: 'POST', headers: migrationHeaders }, TARGET_REQUEST_TIMEOUTS_MS.restore, transfer);
         } catch (err: unknown) {
+          // Not sent: nothing restored, try again later. Sent: the restore may have run.
+          if (err instanceof TransferOutOfTime && !err.asked) throw new Error(outOfTime());
+          if (err instanceof TransferOutOfTime) throw new Error(`The target instance took longer than ${durationText(transferMs)} for the whole migration, so lynox stopped waiting for it to restore the data. Check on the target instance whether your data arrived before you migrate again.`);
           if (err instanceof TargetDidNotAnswer) throw new Error(restoreUnknown('silent'));
           if (isConnectionFailure(err)) throw new Error(restoreUnknown('broken'));
           // The network guard refusing the address (it follows no redirects): nothing was sent, so a
@@ -15704,6 +15721,7 @@ export class LynoxHTTPApi {
         const retry = final.endsWith(CHECK_TEXT) ? 'check' : sessionMayBeHeld && !freed ? 'later' : 'now';
         sendEvent('error', { message: final, retry });
       } finally {
+        clearTimeout(transferTimer);
         res.end();
       }
     });
