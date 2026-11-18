@@ -31,7 +31,7 @@ import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
-import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes, relayMemberNotes, runCollectingMemberNotes } from '../../core/member-connection-notes.js';
+import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes, runCollectingMemberNotes } from '../../core/member-connection-notes.js';
 import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '../../core/audit-log.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import type { WorkflowAuthorship } from '../../core/workflow-store.js';
@@ -1193,11 +1193,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     const asPlan = (): Promise<T> => runAsPlanOf(runAs, () => underWorkflowRun(trail, runAs, fn), null, trail?.key, /* the owner started it */ true);
     // The run gets a collector of its own, so a line it repeats from an earlier run in the same
     // collecting run (the worker's) still counts, and a line of a call beside it does not. Its
-    // lines then go on to that outer collector, which ends that run with them.
-    const collected = runCollectingMemberNotes(asPlan);
+    // lines go on to that outer collector as they are noted, which ends that run with them, also
+    // when that run stops waiting for this one.
+    const collected = runCollectingMemberNotes(asPlan, undefined, { forward: true });
     try { return await collected.done; } finally {
       memberRefused = collected.notes.size > 0;
-      relayMemberNotes(collected);
     }
   };
 

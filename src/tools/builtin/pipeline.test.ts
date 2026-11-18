@@ -3302,6 +3302,34 @@ describe('a stored workflow run from a chat follows its author: retry, log, ways
     expect(outer.notes.has(line)).toBe(true);
   });
 
+  it('a run\'s line reaches the session\'s collector as it is noted, before the run ends', async () => {
+    const { noteMemberConnection, runCollectingMemberNotes, MEMBER_CONNECTION_PREFIX } = await import('../../core/member-connection-notes.js');
+    const line = `${MEMBER_CONNECTION_PREFIX} a@example.invalid set up this connection`;
+    const id = seed();
+    const run = agentAs(OWNER_PRINCIPAL, () => madeBy(A));
+    let release: () => void = () => undefined;
+    let noted: () => void = () => undefined;
+    const wasNoted = new Promise<void>((r) => { noted = r; });
+    let seenMidRun: boolean | undefined;
+    const outer = runCollectingMemberNotes(async () => {
+      // The run notes its refusal and then keeps going, as one does that the session stopped waiting for.
+      mockRunManifest.mockImplementationOnce(async () => {
+        noteMemberConnection(line);
+        noted();
+        await new Promise<void>((r) => { release = r; });
+        return makeRunState();
+      });
+      const pending = runWorkflowTool.handler({ workflow_id: id }, run.agent);
+      await wasNoted;
+      seenMidRun = outer.notes.has(line);
+      release();
+      await pending;
+    });
+    await outer.done;
+    expect(seenMidRun).toBe(true);
+    expect(outer.notes.has(line)).toBe(true);
+  });
+
   it('authorship is read once: a read that throws and then succeeds is unreadable for both decisions', async () => {
     const id = seed();
     let reads = 0;
