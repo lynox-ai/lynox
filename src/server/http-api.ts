@@ -10055,6 +10055,18 @@ export class LynoxHTTPApi {
       }
       return null;
     };
+    /** Who set up the store connection a Shopify run writes through, where a mandate did (`shopifyConnectedBy`). */
+    const bulkConnectedBy = async (targetSystem: string): Promise<{ provider: 'Shopify'; by: string | null } | null> => {
+      if (!targetSystem.startsWith('http:')) return null;
+      const host = targetSystem.slice('http:'.length);
+      const { shopifyConnectedBy } = await import('../core/bulk-shopify.js');
+      const log = engine.getAuditLog();
+      const displayNameOf = (id: string): string | null => {
+        try { return log?.displayNameOf(id) ?? null; } catch { return null; }
+      };
+      const found = shopifyConnectedBy(engine.getApiStore()?.getByHostname(host), host, displayNameOf);
+      return found === null ? null : { provider: 'Shopify', by: found.by };
+    };
     const refuse = (res: import('node:http').ServerResponse, reason: string): void => {
       const [code, msg] = BULK_REFUSALS[reason] ?? [400, 'Refused.'];
       errorResponse(res, code, msg);
@@ -10159,6 +10171,12 @@ export class LynoxHTTPApi {
         // What an undo would take back now; for an external run that includes a failed write,
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
+        // A run that writes through a Shopify store connection a mandate set up: the owner who
+        // approves it reads whose connection it is. Owner only, like the approval; null for the
+        // owner's own connection and for any host that is not that connection's store.
+        connectedBy: actionable && isOwnerPrincipal(this._principalOf(req))
+          ? await bulkConnectedBy(status.targetSystem)
+          : null,
         // An undone run names the undo that took it back and when, so its page says it is no longer live.
         undoneBy: ledger.undoneBy(status.id),
       });

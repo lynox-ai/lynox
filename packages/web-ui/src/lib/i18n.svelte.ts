@@ -516,6 +516,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.approve.approve': { de: 'Freigeben', en: 'Approve' },
 	// One sentence for every run, without a list of fields: a run may write descriptions too (U-101).
 	'bulk.approve.shopify_visible': { de: 'Bei veröffentlichten Produkten ist alles, was dieser Lauf schreibt, sofort live in deinem Shop.', en: 'For published products, everything this run writes is live in your shop right away.' },
+	// U-301: over whose connection a Shopify run writes, where a mandate set it up; above the approve button.
+	'bulk.approve.connected_by': { de: 'lynox schreibt über die {provider}-Verbindung, die {person} eingerichtet hat.', en: 'lynox writes through the {provider} connection that {person} set up.' },
 	'bulk.approve.confirm_first': { de: 'Setz zuerst das Häkchen oben, dann kannst du freigeben.', en: 'Tick the box above first, then you can approve.' },
 	'bulk.field.shopify.title': { de: 'Titel', en: 'Title' },
 	'bulk.field.shopify.descriptionHtml': { de: 'Beschreibung', en: 'Description' },

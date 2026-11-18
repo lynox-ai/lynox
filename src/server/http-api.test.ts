@@ -12614,6 +12614,52 @@ describe('LynoxHTTPApi', () => {
       expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
     });
 
+    // Over whose store connection a previewed Shopify run writes, where a mandate set it up: the
+    // owner who approves it reads it; a mandate's view and the owner's own connection carry none.
+    it('names the mandate that set up a Shopify run\'s store connection to the owner before the approval', async () => {
+      const host = 'acme.myshopify.com';
+      const gid = 'gid://shopify/Product/7';
+      const source = parseListSource(host, { form: 'shopify', after: { title: 'Neu' } }, 'PATCH', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      const shown = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as Record<string, unknown>)['connectedBy'];
+      let grant: Record<string, unknown> = { connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: 'grant-e' };
+      const profileOf = (): unknown => ({
+        id: 'shop', base_url: `https://${host}`,
+        auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, scope: 'read_products write_products' } },
+        oauth_grant: grant,
+      });
+      mockGetApiStore.mockReturnValue({ getByHostname: (h: string) => (h === host ? profileOf() : undefined) });
+      try {
+        api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+        // Nothing to approve yet: a list still to be read names no connection.
+        expect(await shown()).toBeNull();
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+      }
+      expect(bulkLedger.resumePreview(id, Date.now(), { listChecksum: bulkLedger.listStartChecksum(id)! }).ok).toBe(true);
+      bulkLedger.recordListPage(id, { page: 1, items: [{ key: gid, id: gid }], bytes: 10, lastId: 7 });
+      expect(bulkLedger.finishList(id, () => listReadContract(host, source))).toBe('listed');
+      expect(bulkLedger.resumePreview(id).ok).toBe(true);
+      bulkLedger.recordRead(id, 0, { before: { title: 'Alt' } });
+      expect(bulkLedger.finishPreview(id)).toBe(true);
+      try {
+        api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+        // The audit log of this engine names no grant: the address stands in.
+        expect(await shown()).toEqual({ provider: 'Shopify', by: 'eva@kanzlei.example' });
+        api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'grant-e' }));
+        expect(await shown()).toBeNull();
+        api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+        grant = { connected_by: 'owner' };
+        expect(await shown()).toBeNull();
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
     // A write the mint leaves out (PRD shopify-preset §21.7, #4c) leaves the run a Shopify run: the
     // approve and resume routes check its reach at the store's endpoint, as for any Shopify run.
     it('checks the reach of a Shopify run whose description write the mint leaves out at its store\'s endpoint, on approve and on resume', async () => {

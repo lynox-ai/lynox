@@ -120,6 +120,10 @@ export interface BulkRunDetailData extends BulkRun {
 	probeOwn?: boolean;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
+	/** A Shopify run that writes through a connection a mandate set up, shown to the owner before the
+	 *  approval: the provider and who set it up (`by`, a name or an address; null when unknown).
+	 *  Null or absent for the owner's own connection. */
+	connectedBy?: { provider: string; by: string | null } | null;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
 	listFirstPage: string | null;
 	/** A Shopify list narrowed to a product type and/or vendor: the values as the planner gave them (supplied text). */
