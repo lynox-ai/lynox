@@ -1,4 +1,5 @@
 import { getApiBase } from '../config.svelte.js';
+import { maskText } from '../utils/mask-text.js';
 import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t, tf } from '../i18n.svelte.js';
@@ -466,6 +467,9 @@ let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
 // Deferred-follow-ups tray for the current thread (rehydrated on resume/switch).
 let isStreaming = $state(false);
+/** The reply of the run this view started, by object; read only while `isStreaming`. A reattached
+ *  run has none: its reply is made on its first event, so a typed answer has no place yet. */
+let liveAnswer: ChatMessage | null = null;
 let streamingActivity = $state<'thinking' | 'tool' | 'writing' | 'idle'>('idle');
 let streamingToolName = $state<string | null>(null);
 // Sub-phase emitted by the running tool itself (currently only `api_setup`
@@ -1502,6 +1506,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	const assistantIdx = messages.length;
 	messages.push({ role: 'assistant', content: '', toolCalls: [] });
 	turn.assistantMsg = messages[assistantIdx] ?? null;
+	liveAnswer = turn.assistantMsg;
 
 	// Claim ownership of the shared streaming state so an in-flight re-attach
 	// that ends mid-send can't switch off this run's activity indicators.
@@ -1711,7 +1716,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			// The message read as carrying a key in a chat that takes none (a mandate's): the server
 			// kept nothing of it, and this page drops it too, so it is neither stored here nor sent
 			// again by a retry. The message field was emptied when it was sent.
-			if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+			if (messages[assistantIdx] && !messages[assistantIdx]!.content && !holdsTypedAnswer(messages[assistantIdx]!)) messages.splice(assistantIdx, 1);
 			if (messages[userMsgIdx] === turn.userMsg) messages.splice(userMsgIdx, 1);
 			// This browser's saved copy of the refused message's thread can hold it: a queued message
 			// is saved with its text, and its thread is saved again as it leaves the queue. The copy of
@@ -1727,7 +1732,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		}
 		chatError = noLlmKeyText(res.status, chatErrorDetail ?? '') ?? mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
-		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
+		if (messages[assistantIdx] && !messages[assistantIdx]!.content && !holdsTypedAnswer(messages[assistantIdx]!)) messages.splice(assistantIdx, 1);
 		if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
 		return;
 	}
@@ -2108,7 +2113,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				chatErrorDetail = text;
 				const statusMatch = text.trim().match(/^(\d{3})/);
 				chatError = mapApiError(statusMatch ? parseInt(statusMatch[1]!, 10) : 0, text);
-				if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
+				if (messages[idx] && !messages[idx]!.content && !holdsTypedAnswer(messages[idx]!)) messages.splice(idx, 1);
 				break;
 			}
 			// Insert newline between text segments separated by tool calls
@@ -2590,7 +2595,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const result = typeof data['result'] === 'string' ? data['result'] : '';
 			if (!msg.content && !streamedText && result.trim()) {
 				msg.content = result;
-				msg.blocks = [{ type: 'text', text: result }];
+				// After any line already there (a typed answer to a confirmation), not over it.
+				msg.blocks = [...(msg.blocks ?? []), { type: 'text', text: result }];
 			}
 			// Budget threshold check — usage dashboard Phase 4. Dynamic import
 			// keeps the alerts code out of the initial chat-store bundle for
@@ -2661,7 +2667,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// here is what offered "tap to retry" on a run that was still executing
 			// and being billed. `_executeRun` defers this and asks the server.
 			if (!opts?.deferErrorDisposition) {
-				if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
+				if (messages[idx] && !messages[idx]!.content && !holdsTypedAnswer(messages[idx]!)) messages.splice(idx, 1);
 				if (messages[userIdx]) messages[userIdx]!.failed = true;
 			}
 			break;
@@ -2713,15 +2719,26 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 	}
 }
 
-export async function replyPermission(answer: string): Promise<void> {
+export async function replyPermission(answer: string, opts: { typed?: boolean } = {}): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
+	const consent = isConsentCard(pendingPermission?.consent);
 	// A consent card's answer is a click; as text in the message field it would approve nothing.
-	const draftable = isConsentCard(pendingPermission?.consent) ? null : answer;
+	const draftable = consent ? null : answer;
+	// Where a typed answer to one of the engine's confirmations is kept: the reply of the run that
+	// asked, taken now — later messages (a queued one) must not move it.
+	const keepIn = consent && opts.typed === true && isStreaming ? liveAnswer : null;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
-	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
+	const outcome = await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId });
+	// Kept only once the engine took this answer: one it refused (a key typed into the field), never
+	// got, or did not judge (a question already answered, unknown or not this chat's) is not shown as
+	// given. Masked, like everything else the chat shows of what was typed.
+	if (keepIn !== null && sessionId === sid && (outcome === 'taken' || outcome === 'consent_unrecognised') && messages.includes(keepIn)) {
+		keepIn.blocks = [...(keepIn.blocks ?? []), { type: 'answer', text: maskText(answer) }];
+	}
+	await reportReply(sid, outcome, draftable);
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to
@@ -2761,13 +2778,13 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		chatErrorDetail = null;
 		return;
 	}
-	if (outcome === 'consent_unrecognised') {
+	if (outcome === 'consent_unrecognised' || outcome === 'consent_unrecognised_before') {
 		if (sessionId !== sid) return;
 		chatError = t('chat.consent_unrecognised');
 		chatErrorDetail = null;
 		return;
 	}
-	if (outcome === 'settled' || sessionId !== sid) return;
+	if (outcome === 'settled' || outcome === 'taken' || sessionId !== sid) return;
 	if (chatError !== null && chatError !== closedReplySentence) return;
 	// Who reads it decides the way out where only the owner can act. Unknown reads as the owner,
 	// as on the settings pages; the server is the boundary either way.
@@ -2813,9 +2830,12 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 
 /** How a reply ended: `lost` when the server could not be reached or failed twice, `closed` when
  *  it answered 410 (a closed question, with the reason the server gave, or null), `key_refused`
- *  when it refused the answer as carrying a key (422 `mandate_key_input`), and `settled` for
- *  every other final word. */
-type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | 'consent_unrecognised' | { readonly closed: ClosedCode | null };
+ *  when it refused the answer as carrying a key (422 `mandate_key_input`), `taken` when the
+ *  server recorded this answer now, and `settled` for every other final word: a question already
+ *  answered (a retry, another tab), unknown or refused (404, 409, 403, 400), and a 2xx that is not
+ *  the server's own reply (a redirect, a body without `ok: true`). The two `consent_unrecognised`
+ *  outcomes say the same to the person; only the first is this answer's. */
+type ReplyOutcome = 'taken' | 'settled' | 'lost' | 'key_refused' | 'consent_unrecognised' | 'consent_unrecognised_before' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -2846,12 +2866,17 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				}
 				return 'lost';
 			}
-			// An answer to one of the engine's confirmations that is none of its keys: recorded as a
-			// refusal, and said to the person, never a silent "no".
+			// Every 200 of `/reply` is JSON with `ok: true`. A redirect followed to a page answering
+			// 2xx (a login page), or a proxy's own 2xx, is not the server's reply: nothing was recorded.
 			if (res.ok) {
-				let refused: unknown;
-				try { refused = ((await res.json()) as { refused?: unknown } | null)?.refused; } catch { /* no body */ }
-				if (refused === CONSENT_UNRECOGNISED) return 'consent_unrecognised';
+				let reply: { ok?: unknown; refused?: unknown; idempotent?: unknown } | null = null;
+				try { reply = (await res.json()) as { ok?: unknown; refused?: unknown; idempotent?: unknown } | null; } catch { /* no body */ }
+				if (res.redirected || reply === null || typeof reply !== 'object' || reply.ok !== true) return 'settled';
+				// An answer to one of the engine's confirmations that is none of its keys: recorded as a
+				// refusal, and said to the person, never a silent "no".
+				const before = reply.idempotent === true;
+				if (reply.refused === CONSENT_UNRECOGNISED) return before ? 'consent_unrecognised_before' : 'consent_unrecognised';
+				return before ? 'settled' : 'taken';
 			}
 			// 2xx and the other final answers (404 stale, 409 refused, 400) are all "done".
 			return 'settled';
@@ -3391,6 +3416,10 @@ export async function reviewKnowledge(
 
 export function getMessages() {
 	return messages;
+}
+/** A reply that holds a typed answer is kept when it ends empty: the answer was given. */
+function holdsTypedAnswer(msg: ChatMessage): boolean {
+	return msg.blocks?.some((b) => b.type === 'answer') ?? false;
 }
 /** Add a temporary placeholder message (e.g. voice transcription bubble). Returns its index. */
 export function pushPlaceholder(content: string): number {
@@ -3943,6 +3972,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 
 	const myEpoch = ++streamEpoch;
 	isStreaming = true;
+	liveAnswer = null;
 	containedAtRunStart = threadContained;
 	isReattached = true;
 	lastAppliedSeq = since;

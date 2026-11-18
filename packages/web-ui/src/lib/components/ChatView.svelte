@@ -533,7 +533,8 @@
 		| { type: 'thinking'; text: string }
 		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status']; unsuccessful: boolean }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
-		| { type: 'spawn'; spawnId: string };
+		| { type: 'spawn'; spawnId: string }
+		| { type: 'answer'; text: string };
 
 	/** Wrap artifact content in a fenced code block whose delimiter is long
 	 *  enough to survive any backtick run inside the content. CommonMark closes
@@ -596,6 +597,8 @@
 				if (block.text) result.push({ type: 'thinking', text: block.text });
 			} else if (block.type === 'text' && block.text) {
 				result.push({ type: 'text', text: block.text });
+			} else if (block.type === 'answer') {
+				result.push({ type: 'answer', text: block.text });
 			} else if (block.type === 'spawn') {
 				// Never folded into a neighbouring group: a delegation is its own
 				// panel, and two batches in a row must stay two panels.
@@ -1259,7 +1262,7 @@
 		setupSaving = false;
 	}
 
-	function answerPrompt(answer: string, display?: string) {
+	function answerPrompt(answer: string, display?: string, typed = false) {
 		// Batch mode handles both v1 (sequential) and v2 (tabs). The v2 path
 		// has no pendingPermission — it has pendingTabsPrompt instead — so we
 		// must NOT early-return on !pendingPermission in batch mode.
@@ -1311,7 +1314,7 @@
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
 		}
 		selectedOptions = [];
-		void replyPermission(answer); /* never rejects; a reply that does not arrive is reported */
+		void replyPermission(answer, { typed }); /* never rejects; a reply that does not arrive is reported */
 	}
 
 	/** Toggle an option in/out of the multi-select working set. */
@@ -1902,7 +1905,7 @@
 		if (pendingPermission && task) {
 			inputText = '';
 			if (textareaEl) textareaEl.style.height = 'auto';
-			answerPrompt(task);
+			answerPrompt(task, undefined, true);
 			return;
 		}
 
@@ -2957,6 +2960,8 @@
 								</div>
 							{:else if gBlock.type === 'spawn'}
 								{@render subAgentPanel(msg, gBlock.spawnId)}
+							{:else if gBlock.type === 'answer'}
+								<p class="text-xs text-text-subtle pl-3" data-typed-answer data-ai-generated="false">{t('chat.typed_answer')} <span class="font-mono">"{gBlock.text}"</span></p>
 							{:else if gBlock.type === 'thinking' && gBlock.text}
 								<!-- Mask once: the preview must be redacted too, not just
 								     the body — a secret in the first chars would otherwise

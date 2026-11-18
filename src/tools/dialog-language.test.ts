@@ -193,3 +193,22 @@ describe('every place a question is posed hands it the language', () => {
       .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer) laufen. Geschätzte Kosten ~$1.20 für diese Sitzung. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
   });
 });
+
+describe('the refused flagged request', () => {
+  it('has words for every reason the content check can flag, in both languages', async () => {
+    const { FLAGGED_LABELS } = await import('../core/input-guard.js');
+    const { CONTENT_FLAG_TEXT } = await import('./dialog-text.js');
+    expect(FLAGGED_LABELS.length).toBeGreaterThan(0);
+    for (const language of ['en', 'de'] as const) {
+      for (const label of FLAGGED_LABELS) expect(CONTENT_FLAG_TEXT[language].found[label], `${language} ${label}`).toBeTruthy();
+      // No phrase left for a reason that is gone.
+      expect(Object.keys(CONTENT_FLAG_TEXT[language].found).sort()).toEqual([...FLAGGED_LABELS].sort());
+    }
+  });
+
+  it('never puts an English reason into the German sentence', async () => {
+    const { contentFlagRefusal } = await import('./dialog-text.js');
+    expect(contentFlagRefusal('de', 'declined', 'some new reason')).toBe('Nicht an das KI-Modell geschickt: Du hast abgelehnt. lynox hatte in deiner Nachricht verdächtigen Inhalt gefunden.');
+    expect(contentFlagRefusal('en', 'declined', undefined)).toBe('Not sent to the AI model: you declined. lynox had found suspicious content in your message.');
+  });
+});
