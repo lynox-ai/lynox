@@ -137,18 +137,61 @@ export function ungrantedWriteNote(method: string, url: string, afterUntrusted: 
   const tail = `.${why}${header}`;
   // Masked before it is cut: a stored value cut in part is one no mask knows any more. `mask` is
   // the caller's mask of stored values (the URL may carry them resolved), then credential shapes.
-  const shown = maskSecretPatterns(mask(hideHost ? urlWithoutHost(url) : urlForNote(url)));
+  const shown = maskSecretPatterns(mask(urlWithHidden(url, hideHost, mask)));
   return `${head}${urlWithin(shown, NOTE_LINE_MAX_CHARS - head.length - tail.length)}${tail}`;
 }
 
-/** `urlForNote` without the host, for a host that holds a stored secret (`hideHost`). */
-function urlWithoutHost(raw: string): string {
+const HOST_HIDDEN = '(host not shown: its address holds a stored secret)';
+const PATH_HIDDEN = '/(path not shown: it holds a stored secret)';
+
+/**
+ * `urlForNote`, with the host or the path left out where it holds a stored value the mask would
+ * miss in the parsed URL. The parser rewrites what it reads — it lower-cases the host and
+ * percent-encodes a space or a quote in the path — and a value rewritten that way no longer
+ * matches its stored form. So the host and the path are also read as the request wrote them, and
+ * a part that holds a value there and reads differently once parsed is left out, never rewritten:
+ * what is shown is always the parser's own reading, so the note names the host the request goes to
+ * and never shows the query. `hideHost`: the caller already knows the host holds a stored secret.
+ */
+function urlWithHidden(raw: string, hideHost: boolean, mask: (text: string) => string): string {
+  let u: URL;
   try {
-    const u = new URL(raw);
-    return `${u.protocol}//(host not shown: its address holds a stored secret)${u.pathname}`;
+    u = new URL(raw);
   } catch {
     return '(unparsable URL)';
   }
+  const written = writtenHostAndPath(raw);
+  const holds = (text: string): boolean => mask(text) !== text;
+  const rewritten = (as: string, parsed: string): boolean => holds(as) && as !== parsed;
+  let host = hideHost;
+  let path = false;
+  if (written === undefined) {
+    // Not split as the parser splits it (a scheme other than http or https): a stored value the
+    // mask finds in the URL as written leaves both parts out.
+    if (holds(raw)) host = path = true;
+  } else {
+    if (rewritten(written.host, u.host)) host = true;
+    if (rewritten(written.path, u.pathname)) path = true;
+    // A value that runs from the host into the path is in neither part alone.
+    if (!host && !path && rewritten(written.host + written.path, u.host + u.pathname)) host = path = true;
+  }
+  return `${u.protocol}//${host ? HOST_HIDDEN : u.host}${path ? PATH_HIDDEN : u.pathname}`;
+}
+
+/**
+ * The host (with port, without userinfo) and the path of an http or https URL as written, cut
+ * where the URL parser cuts them: it first drops control characters and spaces around the URL and
+ * every tab and line break in it, skips any run of `/` and `\` after the scheme (`https:host`,
+ * `https:\\host` read as `https://host`), ends the authority at the first `/`, `\`, `?` or `#`,
+ * takes the host after its last `@`, and ends the path at `?` or `#`. Any other scheme: undefined.
+ */
+function writtenHostAndPath(raw: string): { host: string; path: string } | undefined {
+  // The parser's own clean-up: C0 controls and space around the URL, tabs and line breaks in it.
+  const cleaned = raw.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/[\t\n\r]/g, '');
+  const m = /^https?:[/\\]*([^/\\?#]*)([^?#]*)/i.exec(cleaned);
+  if (m === null) return undefined;
+  const authority = m[1] ?? '';
+  return { host: authority.slice(authority.lastIndexOf('@') + 1), path: m[2] ?? '' };
 }
 
 /** What a run report keeps of one such line (`collectWriteNotes`). */
