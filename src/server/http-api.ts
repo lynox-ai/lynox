@@ -15696,7 +15696,12 @@ export class LynoxHTTPApi {
           const bare = before.trim();
           return `${bare}${/[.!?…]$/.test(bare) ? '' : '.'}`;
         };
-        sendEvent('error', { message: freed ? unheld() : shown });
+        const final = freed ? unheld() : shown;
+        // What the user can do next, for the UI to follow the sentence rather than parse it: start
+        // again now, wait for the target to release its session, or check the target first.
+        const CHECK_TEXT = 'Check on the target instance whether your data arrived before you migrate again.';
+        const retry = final.endsWith(AGAIN_TEXT) ? 'later' : final.endsWith(CHECK_TEXT) ? 'check' : 'now';
+        sendEvent('error', { message: final, retry });
       } finally {
         res.end();
       }

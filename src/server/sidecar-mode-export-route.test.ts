@@ -653,6 +653,27 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect((events.get('done') as { verification: unknown }).verification).toEqual({ databasesRestored: ['engine.db'], portableDirSkipped: ['workspace/ab c'], secretsImported: 2 });
   });
 
+  it('names what the user can do next with the error: start again now, later, or check the target first', async () => {
+    setShellIsolationForTest(sidecar);
+    const retry = async (): Promise<unknown> => ((await exportTo()).get('error') as { retry?: unknown } | undefined)?.retry;
+    // Refused before the target holds a session: nothing to wait for.
+    target.handshakeRefusal = { error: 'Invalid migration token' };
+    expect(await retry()).toBe('now');
+    target.handshakeRefusal = undefined;
+    // A session may still be held and the target did not end it: wait.
+    target.manifestError = 'no';
+    expect(await retry()).toBe('later');
+    // The target ended it: start again now.
+    target.abort = 'real';
+    expect(await retry()).toBe('now');
+    target.manifestError = undefined;
+    target.abort = undefined;
+    // The restore may have run in part: check the target first.
+    target.restoreError = 'restore refused';
+    expect(await retry()).toBe('check');
+    target.restoreError = undefined;
+  });
+
   it('keeps the target\'s words in quotes, so they cannot pose as lynox\'s own sentence', async () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
