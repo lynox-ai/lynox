@@ -9,6 +9,7 @@
  * stylesheet below, by its SHA-256 in `style-src`. Not `'unsafe-inline'`: a hash admits these
  * bytes and nothing else, so markup injected into a page could not bring a style of its own.
  */
+import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
 import { createHash } from 'node:crypto';
 
 /**
@@ -180,6 +181,28 @@ export const OAUTH_RESULT_TEXTS = {
     en: 'The authorization could not be completed with the provider. Nothing was stored. You can start the connection again.',
     de: 'Die Anmeldung beim Anbieter liess sich nicht abschliessen. Es wurde nichts gespeichert. Du kannst die Verbindung neu starten.',
   },
+  // A store's exchange that got no pass (`storeExchangePassFor`), one text per cause. Only the
+  // one the control plane did not answer says to try again: for the others, it changes nothing.
+  shopifySwitchedOff: {
+    en: 'Shopify connections are switched off on this instance. Nothing was stored. Trying again does not change that; only lynox can switch them on.',
+    de: 'Shopify-Verbindungen sind auf dieser Instanz ausgeschaltet. Es wurde nichts gespeichert. Ein neuer Versuch ändert daran nichts; einschalten kann sie nur lynox.',
+  },
+  shopifySelfHosted: {
+    en: 'lynox reaches Shopify stores only on an instance run by lynox. You run this instance yourself. Nothing was stored.',
+    de: 'Shopify-Shops erreicht lynox nur auf einer Instanz, die lynox betreibt. Diese Instanz betreibst du selbst. Es wurde nichts gespeichert.',
+  },
+  shopifyNotSetUp: {
+    en: 'Shopify is not set up on this instance. Nothing was stored. lynox has to fix this, not you; until then, trying again changes nothing.',
+    de: 'Shopify ist auf dieser Instanz nicht eingerichtet. Es wurde nichts gespeichert. Das behebt lynox, nicht du; bis dahin ändert ein neuer Versuch nichts.',
+  },
+  shopifyUnconfirmed: {
+    en: 'lynox could not confirm just now that this instance may reach Shopify. Nothing was stored. Try again in a few minutes.',
+    de: 'lynox konnte gerade nicht bestätigen, dass diese Instanz Shopify erreichen darf. Es wurde nichts gespeichert. Versuch es in ein paar Minuten noch einmal.',
+  },
+  shopifyNotCleared: {
+    en: 'Shopify is not cleared for this instance right now. Nothing was stored. Trying again does not change that; only lynox can clear it.',
+    de: 'Shopify ist für diese Instanz zurzeit nicht freigegeben. Es wurde nichts gespeichert. Ein neuer Versuch ändert daran nichts; freigeben kann nur lynox.',
+  },
   unreadableAnswer: {
     en: 'The provider answered with something lynox could not read. Nothing was stored.',
     de: 'Der Anbieter hat mit etwas geantwortet, das lynox nicht lesen konnte. Es wurde nichts gespeichert.',
@@ -221,6 +244,23 @@ export const OAUTH_RESULT_TEXTS = {
     de: 'Der Hinweis zu dieser Verbindung hat sich geändert, seit du die Seite bestätigt hast. Öffne den Link noch einmal und lies die Seite. An den Anbieter wurde nichts gesendet.',
   },
 } as const satisfies Record<string, OAuthText>;
+
+/**
+ * The page's text for an exchange that was not sent: the cause a store's exchange got no pass for,
+ * else (no store, or the callback, token URL and profile are not one store) the plain failure,
+ * where starting again is right.
+ */
+export function exchangeRefusedText(refused: StoreExchangeRefusal | undefined): OAuthText {
+  switch (refused) {
+    case 'switched_off': return OAUTH_RESULT_TEXTS.shopifySwitchedOff;
+    case 'self_hosted': return OAUTH_RESULT_TEXTS.shopifySelfHosted;
+    case 'not_set_up': return OAUTH_RESULT_TEXTS.shopifyNotSetUp;
+    case 'unconfirmed': return OAUTH_RESULT_TEXTS.shopifyUnconfirmed;
+    case 'not_cleared': return OAUTH_RESULT_TEXTS.shopifyNotCleared;
+    case 'not_this_store':
+    case undefined: return OAUTH_RESULT_TEXTS.exchangeFailed;
+  }
+}
 
 /** The 200 page's text: which provider is now connected. */
 export function connectedText(provider: string): OAuthText {

@@ -20319,13 +20319,19 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     const { cookie } = await arrange();
     mockExchangeToken.mockResolvedValue({ ok: false, message: `token exchange to ${tokenUrl} failed: ${refusal}.` });
     mockSecretSet.mockClear();
-    const res = await call(signed(good()), cookie);
-    expect(res.status).toBe(502);
-    const page = await res.text();
-    expect(page).toContain('Nothing was stored.');
-    expect(page).toContain('You can start the connection again.');
-    expect(page).not.toMatch(/possibly landed|Do not repeat|same write again/);
-    expect(mockSecretSet).not.toHaveBeenCalled();
+    // The exchange went out under its pass and was refused on the way.
+    exchangePassFor.standIn = async () => ({ stand: 'in' });
+    try {
+      const res = await call(signed(good()), cookie);
+      expect(res.status).toBe(502);
+      const page = await res.text();
+      expect(page).toContain('Nothing was stored.');
+      expect(page).toContain('You can start the connection again.');
+      expect(page).not.toMatch(/possibly landed|Do not repeat|same write again/);
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    } finally {
+      exchangePassFor.standIn = null;
+    }
   });
 
   it('shows the result page in the instance\'s language, in the frame, under the policy that admits only its stylesheet', async () => {
@@ -20335,6 +20341,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     // The language is the instance's configured one (`config.language`), read at the page.
     const config = loadConfig as unknown as { mockReturnValue: (v: unknown) => void };
     config.mockReturnValue({ default_tier: 'deep', language: 'de' });
+    exchangePassFor.standIn = async () => ({ stand: 'in' });
     try {
       const res = await call(signed(good()), cookie);
       expect(res.status).toBe(502);
@@ -20347,7 +20354,94 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
         + '<a class="go" href="/app/settings/apis">Zu lynox</a>'));
     } finally {
       config.mockReturnValue({ default_tier: 'deep' });
+      exchangePassFor.standIn = null;
     }
+  });
+
+  // A store's exchange that got no pass is not sent (`exchangeToken` refuses it), and starting the
+  // connection again changes nothing for most causes: the page names the cause instead.
+  describe('when the store\'s exchange got no pass, the page names why', () => {
+    // What `exchangeToken` answers a store's exchange without a pass (oauth-token-exchange.ts).
+    const refusedExchange = { ok: false, message: 'token exchange refused: no pass', unsentForPass: true };
+    it.each([
+      ['switched_off', 'Shopify connections are switched off on this instance. Nothing was stored. Trying again does not change that; only lynox can switch them on.'],
+      ['self_hosted', 'lynox reaches Shopify stores only on an instance run by lynox. You run this instance yourself. Nothing was stored.'],
+      ['not_set_up', 'Shopify is not set up on this instance. Nothing was stored. lynox has to fix this, not you; until then, trying again changes nothing.'],
+      ['unconfirmed', 'lynox could not confirm just now that this instance may reach Shopify. Nothing was stored. Try again in a few minutes.'],
+      ['not_cleared', 'Shopify is not cleared for this instance right now. Nothing was stored. Trying again does not change that; only lynox can clear it.'],
+      ['not_this_store', 'The authorization could not be completed with the provider. Nothing was stored. You can start the connection again.'],
+    ])('%s', async (why, text) => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie } = await arrange();
+      mockExchangeToken.mockResolvedValue(refusedExchange);
+      mockSecretSet.mockClear();
+      exchangePassFor.standIn = async () => why;
+      try {
+        const res = await call(signed(good()), cookie);
+        expect(res.status).toBe(502);
+        const page = await res.text();
+        expect(page).toContain(`<p>${text}</p>`);
+        // Exactly one cause: no other cause's text, and the plain failure only where it is the cause.
+        for (const other of ['switched off', 'run by lynox', 'not set up', 'could not confirm', 'not cleared']) {
+          if (!text.includes(other)) expect(page).not.toContain(other);
+        }
+        if (why !== 'not_this_store') expect(page).not.toContain('start the connection again');
+        expect((mockExchangeToken.mock.calls[0]! as unknown[])[3]).toBeUndefined();
+        expect(mockSecretSet).not.toHaveBeenCalled();
+      } finally {
+        exchangePassFor.standIn = null;
+      }
+    });
+
+    it('an exchange that failed on the way (no answer) keeps the plain failure, whatever the cause would say', async () => {
+      // Only the refusal for want of a pass is the pass's; a timeout or a refused redirect is not.
+      repayRateWindow();
+      const { cookie } = await arrange();
+      mockExchangeToken.mockResolvedValue({ ok: false, message: 'token exchange to https://api.openai.com/token failed: timeout.' });
+      exchangePassFor.standIn = async () => 'switched_off';
+      try {
+        const page = await (await call(signed(good()), cookie)).text();
+        expect(page).toContain('You can start the connection again.');
+        expect(page).not.toContain('switched off');
+      } finally {
+        exchangePassFor.standIn = null;
+      }
+    });
+
+    it('an exchange that was sent and failed keeps the plain failure, whatever the cause would say', async () => {
+      // `exchanged.ok` means the request went out: its failure is the provider's, not the pass's.
+      repayRateWindow();
+      const { cookie } = await arrange();
+      mockExchangeToken.mockResolvedValue({ ok: true, status: 400, responseOk: false, text: '{"error":"invalid_request"}' });
+      exchangePassFor.standIn = async () => 'switched_off';
+      try {
+        const res = await call(signed(good()), cookie);
+        expect(res.status).toBe(502);
+        const page = await res.text();
+        expect(page).toContain('You can start the connection again.');
+        expect(page).not.toContain('switched off');
+      } finally {
+        exchangePassFor.standIn = null;
+      }
+    });
+
+    it('in German, through the real check: the switch off names itself', async () => {
+      repayRateWindow();
+      const before = process.env['LYNOX_SHOPIFY_EXCHANGE'];
+      delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+      const config = loadConfig as unknown as { mockReturnValue: (v: unknown) => void };
+      config.mockReturnValue({ default_tier: 'deep', language: 'de' });
+      try {
+        const { cookie } = await arrange();
+        mockExchangeToken.mockResolvedValue(refusedExchange);
+        const page = await (await call(signed(good()), cookie)).text();
+        expect(page).toContain('<p>Shopify-Verbindungen sind auf dieser Instanz ausgeschaltet. Es wurde nichts gespeichert. Ein neuer Versuch ändert daran nichts; einschalten kann sie nur lynox.</p>');
+        expect(page).not.toContain('neu starten');
+      } finally {
+        config.mockReturnValue({ default_tier: 'deep' });
+        if (before !== undefined) process.env['LYNOX_SHOPIFY_EXCHANGE'] = before;
+      }
+    });
   });
 
   it('when no exchange pass is minted (here: the switch is off), the callback hands the exchange none', async () => {

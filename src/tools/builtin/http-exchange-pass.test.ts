@@ -86,12 +86,18 @@ const endpoint = (url = TOKEN_URL) => {
   if (isTokenEndpointRefused(v)) throw new Error('vetting refused the test endpoint');
   return v;
 };
+/** The pass for a context where every condition holds; a cause instead fails the test with it. */
+const passOf = async (c: ToolContext): Promise<StorePass> => {
+  const got = await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, c);
+  if (typeof got === 'string') throw new Error(`no pass: ${got}`);
+  return got;
+};
 const exchange = (pass: StorePass | undefined, params: Record<string, string> = PARAMS) =>
   exchangeToken({ endpoint: endpoint(), params, bodyFormat: 'json' }, undefined, undefined, pass);
 
 describe('an exchange that meets every condition', () => {
   it('gets a pass, asks the control plane once, and reaches the store once with its body', async () => {
-    const pass = await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, ctx());
+    const pass = await passOf(ctx());
     expect(isStorePass(pass)).toBe(true);
     expect(pass!.kind).toBe('exchange');
     expect(cpCalls).toBe(1);
@@ -110,47 +116,51 @@ describe('an exchange that meets every condition', () => {
 describe('with the switch off, the exchange is refused as before', () => {
   it.each([['unset', ''], ['yes', 'yes'], ['TRUE', 'TRUE'], ['0', '0'], [' 1', ' 1']])('%s: no pass, no control-plane call, today\'s refusal', async (_l, value) => {
     vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', value);
-    const pass = await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, ctx());
-    expect(pass).toBeUndefined();
+    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, ctx())).toBe('switched_off');
     expect(cpCalls).toBe(0);
     expect(markerSets).toBe(0);
-    const r = await exchange(pass);
-    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
+    const r = await exchange(undefined);
+    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}`, unsentForPass: true });
     expect(sent).toHaveLength(0);
   });
 });
 
-describe('each condition refuses alone', () => {
-  const refuses = async (c: ToolContext, callback = CALLBACK, url = TOKEN_URL): Promise<void> => {
-    expect(await storeExchangePassFor(callback, url, BODY, c)).toBeUndefined();
+describe('each condition refuses alone, and names its cause', () => {
+  const refuses = async (why: string, c: ToolContext, callback = CALLBACK, url = TOKEN_URL): Promise<void> => {
+    expect(await storeExchangePassFor(callback, url, BODY, c)).toBe(why);
     expect(cpCalls).toBe(0);
   };
 
   it.each([
     ['no control-plane env', 'LYNOX_MANAGED_INSTANCE_ID'],
-  ])('%s', async (_l, unset) => {
+  ])('%s: self-hosted', async (_l, unset) => {
     vi.stubEnv(unset, '');
-    await refuses(ctx());
+    await refuses('self_hosted', ctx());
+  });
+
+  it('no control-plane env and no clearance: self-hosted, not a part missing', async () => {
+    vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+    await refuses('self_hosted', ctx({ clearance: null, digest: false }));
   });
 
   it('a process not in sidecar mode, even with a socket in its env', async () => {
     // The mode is the object built at boot; the env is not asked again here.
     vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', '/run/lynox/shell.sock');
-    await refuses(ctx({ local: true }));
+    await refuses('not_set_up', ctx({ local: true }));
   });
 
-  it('no clearance in the tool context', async () => { await refuses(ctx({ clearance: null })); });
-  it('no store binding in the tool context', async () => { await refuses(ctx({ digest: false })); });
+  it('no clearance in the tool context', async () => { await refuses('not_set_up', ctx({ clearance: null })); });
+  it('no store binding in the tool context', async () => { await refuses('not_set_up', ctx({ digest: false })); });
 
   it('the profile on the host is another one than the callback\'s', async () => {
-    await refuses(ctx(), { profileId: 'shop-other', origin: ORIGIN });
+    await refuses('not_this_store', ctx(), { profileId: 'shop-other', origin: ORIGIN });
   });
-  it('no profile on the host', async () => { await refuses(ctx({ profiles: [] })); });
-  it('the profile is not the store preset\'s', async () => { await refuses(ctx({ profiles: [shopProfile({ preset: 'github' })] })); });
-  it('the profile\'s own parameter derives another store', async () => { await refuses(ctx({ profiles: [shopProfile({ shop: 'other' })] })); });
+  it('no profile on the host', async () => { await refuses('not_this_store', ctx({ profiles: [] })); });
+  it('the profile is not the store preset\'s', async () => { await refuses('not_this_store', ctx({ profiles: [shopProfile({ preset: 'github' })] })); });
+  it('the profile\'s own parameter derives another store', async () => { await refuses('not_this_store', ctx({ profiles: [shopProfile({ shop: 'other' })] })); });
 
   it('the callback signed for another store', async () => {
-    await refuses(ctx(), { profileId: 'shop-acme', origin: 'https://other.myshopify.com' });
+    await refuses('not_this_store', ctx(), { profileId: 'shop-acme', origin: 'https://other.myshopify.com' });
   });
 
   it.each([
@@ -160,22 +170,39 @@ describe('each condition refuses alone', () => {
     `${ORIGIN}/admin/api/2025-10/shop.json`,
     'http://acme.myshopify.com/admin/oauth/access_token',
   ])('the token URL is not the store\'s token endpoint: %s', async (url) => {
-    await refuses(ctx(), CALLBACK, url);
+    await refuses('not_this_store', ctx(), CALLBACK, url);
   });
 
-  it('a refusal of the control plane that still holds (6a): no new call', async () => {
+  it('a refusal of the control plane that still holds (6a): no new call, still a refusal', async () => {
     cpAnswer = () => new Response('{"ok":false,"reason":"below_floor"}', { status: 200 });
     const c = ctx();
-    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, c)).toBeUndefined();
+    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, c)).toBe('not_cleared');
     expect(cpCalls).toBe(1);
-    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, c)).toBeUndefined();
+    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, c)).toBe('not_cleared');
     expect(cpCalls).toBe(1);
   });
 
   it('the control plane refuses (6b): no pass and no marker', async () => {
     cpAnswer = () => new Response('{"ok":false,"reason":"below_floor"}', { status: 200 });
-    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, ctx())).toBeUndefined();
+    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, ctx())).toBe('not_cleared');
     expect(cpCalls).toBe(1);
+    expect(markerSets).toBe(0);
+  });
+
+  // The reason decides, never the time: an unanswered ask backs off for as long as a refusal.
+  it('the control plane fails (6b, 5xx): unconfirmed, and still so while its backoff holds (6a)', async () => {
+    cpAnswer = () => new Response('', { status: 503 });
+    const c = ctx();
+    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, c)).toBe('unconfirmed');
+    expect(cpCalls).toBe(1);
+    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, c)).toBe('unconfirmed');
+    expect(cpCalls).toBe(1);
+    expect(markerSets).toBe(0);
+  });
+
+  it('the control plane cannot be reached (6b): unconfirmed', async () => {
+    cpAnswer = () => { throw new TypeError('fetch failed'); };
+    expect(await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, ctx())).toBe('unconfirmed');
     expect(markerSets).toBe(0);
   });
 });
@@ -184,12 +211,12 @@ describe('exchangeToken under the pass', () => {
   it('a credential pass does not open the exchange', async () => {
     const { mintStorePass } = await import('../../core/store-pass.js');
     const r = await exchange(mintStorePass(ORIGIN, 'X-Shopify-Access-Token', 'shpat_x'));
-    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
+    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}`, unsentForPass: true });
     expect(sent).toHaveLength(0);
   });
 
   it('a pass minted over one body does not carry another', async () => {
-    const pass = await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, ctx());
+    const pass = await passOf(ctx());
     const r = await exchange(pass, { ...PARAMS, code: 'another' });
     expect(r.ok).toBe(false);
     expect(sent).toHaveLength(0);
@@ -201,7 +228,7 @@ describe('exchangeToken under the pass', () => {
       sent.push({ url: req.url, body: req.body?.toString('utf8') });
       return new Response('{"error":"invalid_request"}', { status: 400 });
     });
-    const pass = await storeExchangePassFor(CALLBACK, TOKEN_URL, BODY, ctx());
+    const pass = await passOf(ctx());
     const r = await exchange(pass);
     expect(r.ok && r.responseOk).toBe(false);
     expect(sent).toHaveLength(1);
