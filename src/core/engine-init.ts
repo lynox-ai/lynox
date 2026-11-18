@@ -26,7 +26,7 @@ import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
 import { resolveProviderApiKey, migrateLegacyEndpointKey, poolSuppliesLLMKeys } from './llm/provider-keys.js';
 import { SecretVault } from './secret-vault.js';
-import { SecretStore } from './secret-store.js';
+import { SecretStore, maskEngineEnvSecrets } from './secret-store.js';
 import { setVaultApiKeyExists, anthropicKeyMayHoldApiKey } from './config.js';
 import { channels, type MemoryStoreMessage } from './observability.js';
 import type { AuditLog } from './audit-log.js';
@@ -812,9 +812,10 @@ export async function initMemoryInstance(
 ): Promise<Memory | null> {
   if (config.memory === false) return null;
 
+  // Without a store, the engine's own env secrets: the flat file and its recall mirror are kept.
   const maskFn = secretStore
     ? (text: string) => secretStore.maskSecrets(text)
-    : undefined;
+    : maskEngineEnvSecrets;
   const { isFeatureEnabled } = await import('./features.js');
   // Provider-aware key resolution — mirror Engine._recreateClient (engine.ts).
   // The pre-fix code passed userConfig.api_key unconditionally; that is the

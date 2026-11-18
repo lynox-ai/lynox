@@ -1998,7 +1998,7 @@ function writeRenewalFailure(
 ): void {
   let masked = detail;
   try {
-    masked = agent.secretStore?.maskAll?.(detail) ?? detail;
+    masked = agent.secretStore?.maskAll?.(detail) ?? maskEngineEnvSecrets(detail);
   } catch {
     // A masker that throws must not turn a log line into a failed request; the
     // unmasked string is then NOT written, because the whole point of this step
