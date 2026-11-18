@@ -31,6 +31,17 @@ describe('engine env secrets: the masked value set', () => {
     },
   );
 
+  it('leaves the placeholder of a local server that needs no key unmasked', () => {
+    vi.stubEnv('LMSTUDIO_API_KEY', 'lm-studio');
+    expect(maskEngineEnvSecrets('I run lm-studio at home')).toBe('I run lm-studio at home');
+  });
+
+  it('an array at the top level is a list of names too, and decides nothing', () => {
+    const model = 'example-model-name-2026';
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify([{ tokens: { model_id: model } }]));
+    expect(maskEngineEnvSecrets(`m ${model}`)).toContain(model);
+  });
+
   it('the provider slots include the keys the catalog names', () => {
     expect(PROVIDER_KEY_SLOTS.has('OPENAI_API_KEY')).toBe(true);
     expect(PROVIDER_KEY_SLOTS.has('GROQ_API_KEY')).toBe(true);

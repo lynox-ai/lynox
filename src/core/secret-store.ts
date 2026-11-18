@@ -4,6 +4,7 @@ import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/ind
 import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
+import { LLM_CATALOG } from './llm/catalog.js';
 import { isPresetClientSecretName } from './oauth-presets.js';
 import { ENV_REGISTRY } from '../contract/env-registry.js';
 
@@ -807,10 +808,21 @@ function engineEnvSecretValues(): string[] {
   }
   // Provider keys a self-hosted engine reads from its environment by slot name, which the
   // registry does not list (they are the owner's, not the platform's).
-  for (const name of [...PROVIDER_KEY_SLOTS, ...ENV_PROVIDER_KEYS_OUTSIDE_SLOTS]) add(process.env[name]);
+  for (const name of [...PROVIDER_KEY_SLOTS, ...ENV_PROVIDER_KEYS_OUTSIDE_SLOTS]) {
+    if (!OPTIONAL_CREDENTIAL_SLOTS.has(name)) add(process.env[name]);
+  }
   for (const value of processSecrets) add(value);
   return values;
 }
+
+/**
+ * Slots of local servers that take a key without needing one (`credential_optional`): operators
+ * set a placeholder there (`lm-studio`, `not-needed`), and masking it would hide the word, and
+ * refuse every text holding it, wherever it appears.
+ */
+const OPTIONAL_CREDENTIAL_SLOTS: ReadonlySet<string> = new Set(
+  LLM_CATALOG.filter((e) => e.credential_optional === true && typeof e.vault_slot === 'string').map((e) => e.vault_slot as string),
+);
 
 /** Environment keys an engine reads as provider credentials beside {@link PROVIDER_KEY_SLOTS}. */
 const ENV_PROVIDER_KEYS_OUTSIDE_SLOTS: readonly string[] = Object.freeze(['LYNOX_INBOX_MISTRAL_API_KEY']);
@@ -833,7 +845,7 @@ function credentialLeavesOfJson(json: string): string[] {
   // objects and arrays included.
   const walk = (v: unknown, underCredential: boolean, topLevel: boolean): void => {
     if (typeof v === 'string') { if (underCredential) out.push(v); return; }
-    if (Array.isArray(v)) { for (const x of v) walk(x, underCredential, false); return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, underCredential, topLevel); return; }
     if (v !== null && typeof v === 'object') {
       for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
         walk(x, underCredential || (!topLevel && CREDENTIAL_PROPERTY.test(k)), false);
