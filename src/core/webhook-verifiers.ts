@@ -18,6 +18,7 @@ import { connectionRowToProfile } from './api-store.js';
 import type { ConnectionRow } from './connection-store.js';
 import { presetStoreHost } from './oauth-presets.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
+import { isStepIdShape, shownStepId, stepRunNames } from '../orchestrator/step-id.js';
 
 export type WebhookVerifierKind = 'shopify-hmac' | 'shared-token';
 
@@ -253,9 +254,19 @@ export function connectionShopHost(row: ConnectionRow | undefined): string | nul
  * reference that is not to `params` at all — an earlier step's output (`{{s1.result}}`), which an
  * event's text can steer. An unmapped param is the owner's own value.
  */
+/** A placeholder as a refusal may quote it: a step id in the allowed form (or `params[n]`) with `.result` or `.costUsd`, else described. */
+function shownPlaceholder(inner: string): string {
+  const m = /^([^.[\]]+)(\[\d{1,3}\])?(?:\.(result|costUsd))?$/.exec(inner);
+  return m && (isStepIdShape(m[1]) || m[1] === 'params') ? `"{{${inner}}}"` : 'a reference to an earlier step\'s output';
+}
+
 export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[], mappedNames: readonly string[]): string | null {
   const mapped = new Set(mappedNames);
-  for (const step of steps) {
+  // The refusal reaches the model: a stored id or placeholder outside the allowed form is named by
+  // its position or described, never quoted (an id stored before ids had a shape can hold any text).
+  const runNames = stepRunNames(steps);
+  const stepLabel = (id: string, at: number): string => (isStepIdShape(id) ? `"${id}"` : shownStepId(id, at, runNames.get(id)));
+  for (const [at, step] of steps.entries()) {
     const { task: _task, ...rest } = step;
     const text = JSON.stringify(rest);
     for (const m of text.matchAll(/\{\{([^}]+)\}\}/g)) {
@@ -263,11 +274,11 @@ export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[],
       // context key `params[0]`, not `params`.
       const segments = m[1]!.trim().split('.').map((x) => x.trim());
       if (segments[0] !== 'params') {
-        return `Step "${step.id}" uses "{{${m[1]!.trim()}}}" outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;
+        return `Step ${stepLabel(step.id, at)} uses ${shownPlaceholder(m[1]!.trim())} outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;
       }
       const name = segments[1];
       if (name === undefined || mapped.has(name)) {
-        return `Step "${step.id}" uses the event value ${name === undefined ? 'params' : `"${name}"`} outside its task text, where a sender of events would choose what the step executes with. A mapped value may only be used in a step's task text.`;
+        return `Step ${stepLabel(step.id, at)} uses the event value ${name === undefined ? 'params' : `"${name}"`} outside its task text, where a sender of events would choose what the step executes with. A mapped value may only be used in a step's task text.`;
       }
     }
   }
