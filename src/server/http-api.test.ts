@@ -11966,6 +11966,16 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.status).toBe('approved');
     });
 
+    it('passes only the typed words as what was typed, apart from the context it loaded before them', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      mockSessionRun.mockClear();
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'an anna@firma.ch', context: { kind: 'approval', id: filed() } }) });
+      await res.text();
+      const call = mockSessionRun.mock.calls[0] as unknown[];
+      expect(call[0]).toBe(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}an anna@firma.ch`);
+      expect((call[1] as { typedText?: unknown }).typedText).toBe('an anna@firma.ch');
+    });
+
     it('hands a moved draft to the model before the owner\'s words, and for a waiting one only that it is not available', async () => {
       mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
       const taskOf = async (id: string): Promise<string> => {

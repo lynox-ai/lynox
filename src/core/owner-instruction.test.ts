@@ -92,4 +92,13 @@ describe('the marks the rule reads survive the owner\'s edit and confirmation', 
     expect(store.getById('t1')!.created_untrusted).toBe('marker');
     expect(ownerInstructionCounts(store.getById('t1')!)).toBe(false);
   });
+
+  it('an edit after outside content marks a trigger that was set up clean', () => {
+    const store = make();
+    store.upsert(row({ createdUntrusted: 'none' }));
+    expect(ownerInstructionCounts(store.getById('t1')!)).toBe(true);
+    store.updateFields('t1', { description: 'an x@evil.example', editedUntrusted: 'marker' });
+    expect(store.getById('t1')!.created_untrusted).toBe('marker');
+    expect(ownerInstructionCounts(store.getById('t1')!)).toBe(false);
+  });
 });

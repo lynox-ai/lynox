@@ -153,6 +153,12 @@ describe('DataStore: who wrote a row', () => {
       expect(crm.contactOrigin('anna@firma.ch')?.writtenBy).toBe('owner');
     });
 
+    it('a row stamped before the stamp time was recorded has no known writer', () => {
+      crm.upsertContact({ name: 'Anna', email: 'anna@firma.ch' }, stamp('owner'));
+      db().prepare('UPDATE ds_contacts SET _written_at = NULL WHERE email = ?').run('anna@firma.ch');
+      expect(crm.contactOrigin('anna@firma.ch')?.writtenBy).toBeNull();
+    });
+
     it('putRowVerbatim stamps the time it wrote with, too', () => {
       keyed();
       ds.putRowVerbatim('leads', { email: 'a@x' }, stamp('owner'));
