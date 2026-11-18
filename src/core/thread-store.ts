@@ -344,11 +344,17 @@ export class ThreadStore {
     message_count?: number | undefined;
     total_tokens?: number | undefined;
     total_cost_usd?: number | undefined;
-  }, author?: string | undefined): void {
+  }, author?: string | undefined, typedText?: string | undefined): void {
     const insert = this.db.prepare(`
       INSERT INTO thread_messages (thread_id, seq, role, content_json, author)
       VALUES (?, ?, ?, ?, ?)
     `);
+    // The words the person typed into the first message of this call, apart from what the route
+    // put around them (v74). In the same transaction as the message, so neither is ever there
+    // without the other.
+    const insertTyped = typedText !== undefined
+      ? this.db.prepare('INSERT OR REPLACE INTO thread_typed_text (thread_id, seq, text) VALUES (?, ?, ?)')
+      : undefined;
 
     // Share one transaction (and one fsync under WAL) between the insert
     // batch and the rollup updateThread — better-sqlite3 includes any
@@ -365,10 +371,36 @@ export class ThreadStore {
           author ?? null,
         );
       }
+      if (insertTyped !== undefined && msgs.length > 0) insertTyped.run(threadId, start, typedText ?? '');
       if (threadUpdates) this.updateThread(threadId, threadUpdates);
     });
 
     batch(messages, startSeq);
+  }
+
+  /**
+   * What the owner typed in this thread: the typed words (v74) of every message whose author is
+   * the owner. A message with no typed words recorded, and every message of anyone else, gives
+   * nothing. Only the words: what the route loaded around them, and every upload, is not in here.
+   */
+  ownerTypedTexts(threadId: string): string[] {
+    const rows = this.db.prepare(
+      `SELECT t.text AS text FROM thread_typed_text t
+       JOIN thread_messages m ON m.thread_id = t.thread_id AND m.seq = t.seq
+       WHERE t.thread_id = ? AND m.author = 'owner'
+       ORDER BY t.seq`,
+    ).all(threadId) as Array<{ text: string }>;
+    return rows.map(r => r.text);
+  }
+
+  /** Record that this thread's conversation took in content from outside (v74). Only ever set. */
+  markReadOutside(threadId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO thread_read_outside (thread_id) VALUES (?)').run(threadId);
+  }
+
+  /** Whether {@link markReadOutside} was recorded for this thread. */
+  readOutside(threadId: string): boolean {
+    return this.db.prepare('SELECT 1 FROM thread_read_outside WHERE thread_id = ?').get(threadId) !== undefined;
   }
 
   /**

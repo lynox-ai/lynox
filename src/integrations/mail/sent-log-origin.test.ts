@@ -89,6 +89,28 @@ describe('isOwnerKnownRecipient', () => {
     expect(db.isOwnerKnownRecipient('firma.ch')).toBe(false);
   });
 
+  it('answers from the recipient table with one probe, not from the log rows', () => {
+    send({ to: [{ address: 'anna@firma.ch' }] }, true);
+    const conn = (db as unknown as { db: BetterSqlite3.Database }).db;
+    expect(conn.prepare('SELECT tenant_id, address FROM mail_sent_owner_known').all()).toEqual([{ tenant_id: 'default', address: 'anna@firma.ch' }]);
+    // The log row alone does not answer: without its recipient row the address is not known.
+    conn.exec('DELETE FROM mail_sent_owner_known');
+    expect(db.isOwnerKnownRecipient('anna@firma.ch')).toBe(false);
+    // And the plan names the index, so the probe does not scan.
+    const plan = conn.prepare(`EXPLAIN QUERY PLAN SELECT 1 FROM mail_sent_owner_known r JOIN mail_sent_log l ON l.id = r.sent_id
+      WHERE r.tenant_id = ? AND r.address = ? AND l.origin_owner_known = 1 LIMIT 1`).all('default', 'anna@firma.ch') as Array<{ detail: string }>;
+    expect(plan.map((r) => r.detail).join(' | ')).toMatch(/idx_mail_sent_owner_known_address/);
+  });
+
+  it('writes no recipient row for a send that is not flagged, and needs the log row flagged', () => {
+    send({ to: [{ address: 'anna@firma.ch' }] }, false);
+    const conn = (db as unknown as { db: BetterSqlite3.Database }).db;
+    expect(conn.prepare('SELECT COUNT(*) AS n FROM mail_sent_owner_known').get()).toEqual({ n: 0 });
+    send({ to: [{ address: 'bob@firma.ch' }] }, true);
+    conn.exec('UPDATE mail_sent_log SET origin_owner_known = 0');
+    expect(db.isOwnerKnownRecipient('bob@firma.ch')).toBe(false);
+  });
+
   it('is scoped to the tenant', () => {
     send({ to: [{ address: 'anna@firma.ch' }] }, true);
     expect(db.isOwnerKnownRecipient('anna@firma.ch', { tenantId: 'other' })).toBe(false);
@@ -107,13 +129,13 @@ describe('migration v22', () => {
     fresh.recordSentMail({ accountId: 'acct', messageId: '<old@x>', to: [{ address: 'anna@firma.ch' }], subject: 's', bodyChars: 1, originOwnerKnown: true });
     fresh.close();
     const raw = new BetterSqlite3(path);
-    raw.exec('ALTER TABLE mail_sent_log DROP COLUMN origin_owner_known; DELETE FROM schema_version WHERE version = 22;');
+    raw.exec('DROP TABLE mail_sent_owner_known; DELETE FROM schema_version WHERE version = 23; ALTER TABLE mail_sent_log DROP COLUMN origin_owner_known; DELETE FROM schema_version WHERE version = 22;');
     raw.close();
 
     const migrated = new MailStateDb({ path });
     try {
       const conn = (migrated as unknown as { db: BetterSqlite3.Database }).db;
-      expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(22);
+      expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(23);
       expect(conn.prepare('SELECT origin_owner_known AS f FROM mail_sent_log').all()).toEqual([{ f: 0 }]);
       expect(migrated.isOwnerKnownRecipient('anna@firma.ch')).toBe(false);
     } finally {

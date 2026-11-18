@@ -60,10 +60,13 @@ const VISIBLE_META_COLUMNS = ['_id', '_created_at', '_updated_at'] as const;
  * `_written_untrusted`, `'1'` once any write to the row came from a turn that had read
  * content from outside, and never cleared by a later write. NULL is a row from before the
  * columns existed, and a NULL `_written_by` is unknown, never the owner. The store writes
- * all of them itself; no user column may take their names. No read method but the export
+ * all of them itself; no user column may take their names. `_written_at` is the `_updated_at` of
+ * the write that set `_written_by`: a writer that does not know these columns (an older binary
+ * after a downgrade) moves `_updated_at` and leaves the rest, and a reader then sees the two
+ * differ and does not trust `_written_by` ({@link DataStore.sourceOfRow}). No read method but the export
  * and {@link DataStore.sourceOfRow} returns them, and no filter may name them.
  */
-export const SOURCE_COLUMNS = ['_source_grants', '_source_run_id', '_written_by', '_written_untrusted'] as const;
+export const SOURCE_COLUMNS = ['_source_grants', '_source_run_id', '_written_by', '_written_untrusted', '_written_at'] as const;
 /** Every column the store writes itself. No user column may take one of these names. */
 export const SYSTEM_COLUMNS: ReadonlySet<string> = new Set<string>([...VISIBLE_META_COLUMNS, ...SOURCE_COLUMNS]);
 
@@ -98,7 +101,8 @@ export function rowStampOf(agent: Pick<IAgent, 'conversationGrants' | 'currentRu
   };
 }
 
-/** The bound values of a stamp, in {@link SOURCE_COLUMNS} order. Read before any write starts, so a missing stamp throws. */
+/** The bound values of a stamp, in {@link SOURCE_COLUMNS} order up to `_written_at`, which the
+ *  writer binds as its `_updated_at`. Read before any write starts, so a missing stamp throws. */
 function stampValues(stamp: RowStamp): [string, string | null, string | null, string | null] {
   const grants = stamp.grants === null ? [UNKNOWN_GRANT] : [...new Set(stamp.grants)].sort();
   return [JSON.stringify(grants), stamp.runId, stamp.writtenBy ?? null, stamp.untrusted === true ? '1' : null];
@@ -111,7 +115,7 @@ function stampValues(stamp: RowStamp): [string, string | null, string | null, st
  */
 function writtenBySet(tableName: string): string {
   return `"_written_by" = excluded."_written_by", "_written_untrusted" = CASE WHEN "${tableName}"."_written_untrusted" = '1' `
-    + `OR excluded."_written_untrusted" = '1' THEN '1' ELSE NULL END`;
+    + `OR excluded."_written_untrusted" = '1' THEN '1' ELSE NULL END, "_written_at" = excluded."_written_at"`;
 }
 
 /** Where a row came from, as {@link DataStore.sourceOfRow} reads it. */
@@ -698,7 +702,7 @@ export class DataStore {
         const record = records[i]!;
         try {
           // Validate and coerce values
-          const values: unknown[] = [now, now, ...stampCells];
+          const values: unknown[] = [now, now, ...stampCells, now];
           for (const col of userCols) {
             const val = record[col];
             if (val === undefined || val === null) {
@@ -795,7 +799,7 @@ export class DataStore {
         }
         outcome = 'inserted';
       }
-      this.db.prepare(sql).run(now, now, ...stampCells, ...values);
+      this.db.prepare(sql).run(now, now, ...stampCells, now, ...values);
       // One row in or none: the count moves by the probe's answer, no table scan per write.
       // Unlike insertRecords this does not re-derive the count, so drift left by another
       // path stays until the next insertRecords/deleteRecords recount.
@@ -929,8 +933,11 @@ export class DataStore {
     if (!columns.some(c => c.name === keyColumn) || !VALID_COLUMN_NAME_RE.test(keyColumn)) return null;
     this._assertSourceColumns(collection);
     const rows = this.db.prepare(
-      `SELECT "_written_by" AS w, "_written_untrusted" AS u, "_source_grants" AS g FROM "ds_${collection}" WHERE "${keyColumn}" = ?`,
-    ).all(value) as Array<{ w: string | null; u: string | null; g: string | null }>;
+      `SELECT "_written_by" AS w, "_written_untrusted" AS u, "_source_grants" AS g, "_written_at" AS wa, "_updated_at" AS ua FROM "ds_${collection}" WHERE "${keyColumn}" = ?`,
+    ).all(value) as Array<{ w: string | null; u: string | null; g: string | null; wa: string | null; ua: string | null }>;
+    // A writer is named only by the write that also set `_written_at`: when the row's last write
+    // left them apart (a binary that does not know these columns), who wrote it last is unknown.
+    for (const row of rows) if (row.wa === null || row.wa !== row.ua) row.w = null;
     if (rows.length === 0) return null;
     const grants = new Set<string>();
     for (const row of rows) {
