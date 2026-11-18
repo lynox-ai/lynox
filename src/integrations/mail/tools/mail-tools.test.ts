@@ -2272,7 +2272,7 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
     const { agent, asked } = replyAgent('Yes');
     expect(await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent)).toContain('Reply sent');
     expect(asked).toHaveLength(1);
-    expect(asked[0]!.q).toContain('Goes to the sender of the mail lynox read (alice@example.com).');
+    expect(asked[0]!.q).toContain('Reply to email: the reply goes to "alice@example.com", the sender of the mail lynox read. You did not name this address. Send anyway?');
     expect(asked[0]!.meta?.blocked).toBe(true);
   });
 
@@ -2294,7 +2294,7 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
   it('CONTROL: a sender the owner named gets the confirmation as before, with no origin line', async () => {
     const { agent, asked } = replyAgent('Yes', { ownerKnown: { known: () => 'known' as const } });
     await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);
-    expect(asked[0]!.q).not.toContain('Goes to the sender');
+    expect(asked[0]!.q).not.toContain('the reply goes to');
     expect(asked[0]!.meta).toBeUndefined();
   });
 
@@ -2311,6 +2311,48 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
       createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent));
     expect(provider.send).toHaveBeenCalledTimes(1);
     expect(stateDb.isOwnerKnownRecipient('alice@example.com')).toBe(false);
+  });
+
+  it('the question names where the reply really goes: the Reply-To, not the From', async () => {
+    provider.fetch.mockResolvedValue({
+      envelope: { ...envelope(12, { messageId: '<o12@x>', from: 'alice@example.com', subject: 'Angebot' }), replyTo: [{ address: 'billing@evil.example' }] },
+      text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    const { agent, asked } = replyAgent('No');
+    await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);
+    expect(asked[0]!.q).toContain('Reply to email: the reply goes to "billing@evil.example", the sender of the mail lynox read.');
+    expect(asked[0]!.q).not.toContain('the reply goes to "alice@example.com"');
+  });
+
+  it('reply_all names every recipient the owner did not name, each in quotes, joined with "and"', async () => {
+    provider.fetch.mockResolvedValue({
+      envelope: { ...envelope(12, { messageId: '<o12@x>', from: 'alice@example.com', subject: 'Angebot' }), cc: [{ address: 'carl@example.com' }, { address: 'dora@example.com' }] },
+      text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    const { agent, asked } = replyAgent('No');
+    await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.', reply_all: true }, agent);
+    expect(asked[0]!.q).toContain('Reply to email: you did not name the recipients "alice@example.com", "me@example.com", "carl@example.com" and "dora@example.com". They come from a mail from "alice@example.com" that lynox read. Send anyway?');
+  });
+
+  it('a reply with a named override and unseen reply_all recipients is not logged as owner-named', async () => {
+    provider.fetch.mockResolvedValue({
+      envelope: { ...envelope(12, { messageId: '<o12@x>', from: 'alice@example.com', subject: 'Angebot' }), cc: [{ address: 'dora@example.com' }] },
+      text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    // Every recipient owner-known now, but the dispatcher checked only the override.
+    const { agent } = replyAgent('Yes', { ownerKnown: { known: () => 'known' as const } });
+    await runInCallSlot(slotWith({ known: ['carl@example.com'], allKnown: true }), () =>
+      createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.', to: 'carl@example.com', reply_all: true }, agent));
+    expect(provider.send).toHaveBeenCalledTimes(1);
+    expect(provider.send.mock.calls[0]![0].cc?.map((a: { address: string }) => a.address)).toContain('dora@example.com');
+    expect(stateDb.isOwnerKnownRecipient('carl@example.com')).toBe(false);
+  });
+
+  it('a refusal in mail_reply is reported to the run', async () => {
+    const refused: unknown[] = [];
+    const { agent } = replyAgent(UNATTENDED_BLOCK_ANSWER, { onOriginRefused: (r: unknown) => refused.push(r) });
+    await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);
+    expect(refused).toEqual([{ targets: { values: ['alice@example.com'], unreadable: false }, noun: 'mail', origin: { kind: 'readMail', sender: 'alice@example.com' } }]);
   });
 
   it('a mail sent after a yes to the origin question is not logged as owner-named; one with every recipient named is', async () => {

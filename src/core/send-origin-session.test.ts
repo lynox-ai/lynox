@@ -140,6 +140,11 @@ describe('only the owner\'s typed words count', { timeout: 60_000 }, () => {
     expect(knownIn(session, 'x@evil.example')).toBe('foreign');
     // And where the target comes from is the helper's thread.
     expect(session.getAgent()!.sendOrigin).toEqual({ kind: 'helperThread', helper: 'helper@example.invalid' });
+    // An agent rebuilt for the same run (a model switch) keeps it.
+    const before = session.getAgent();
+    session.setModel('fast');
+    expect(session.getAgent(), 'positive control: the agent was rebuilt').not.toBe(before);
+    expect(session.getAgent()!.sendOrigin).toEqual({ kind: 'helperThread', helper: 'helper@example.invalid' });
   });
 
   it('a trigger\'s turn continuing in the owner\'s thread does not count, and the owner\'s earlier one still does', async () => {

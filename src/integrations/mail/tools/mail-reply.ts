@@ -32,7 +32,7 @@ import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 import { currentCallFiling, currentCallOwnerKnownFor, currentCallTargetOrigin } from '../../../core/call-connection.js';
 import { UNATTENDED_BLOCK_ANSWER } from '../../../core/prompt-store.js';
 import { noticeLanguage } from '../../../core/notice-language.js';
-import { originRefusedMandate, originRefusedUnattended, originReplyPreview } from '../../../core/origin-notices.js';
+import { originAsk, originRefusedMandate, originRefusedUnattended, originReplyAsk, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
 import { normalizeMailTarget } from '../../../core/send-target.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import type { MailReplyPayload, StoredAddress } from '../../../core/approval-store.js';
@@ -120,15 +120,25 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // session of someone else the owner let in does not send to it at all.
         const recipients = [...prepared.commit.to, ...prepared.commit.cc].map((a) => a.address);
         const unnamed = replyRecipientsNotOwnerKnown(agent, recipients);
-        const sender = prepared.filing.original.from;
-        const origin = { kind: 'readMail' as const, sender };
+        const origin: SendOrigin = { kind: 'readMail', sender: prepared.filing.original.from };
+        const targets: OriginTargets = { values: unnamed, unreadable: false };
+        const refused = (text: string): string => {
+          try { agent.onOriginRefused?.({ targets, noun: 'mail', origin }); } catch { /* the refusal stands */ }
+          return text;
+        };
         if (unnamed.length > 0 && agent.principal.kind !== 'owner') {
-          return originRefusedMandate(unnamed.join(', '), origin, 'mail');
+          return refused(originRefusedMandate(targets, origin, 'mail'));
         }
         const lang = agent.noticeLanguage ?? noticeLanguage(undefined);
-        const question = unnamed.length > 0 ? pv`${prepared.preview}\n\n${originReplyPreview(sender, lang)}` : prepared.preview;
+        // A reply that goes only to the one the mail came from (its Reply-To, else its From) says so
+        // in its own words; any other recipient the owner did not name is listed with the mail.
+        const defaultTo = input.to ? undefined : normalizeMailTarget(prepared.commit.to[0]?.address ?? '')?.value;
+        const ask = unnamed.length === 1 && defaultTo !== undefined && unnamed[0] === defaultTo
+          ? originReplyAsk(defaultTo, lang)
+          : originAsk('mail_reply', input, 'mail', targets, origin, lang);
+        const question = unnamed.length > 0 ? pv`${prepared.preview}\n\n${ask}` : prepared.preview;
         const answer = await agent.promptUser(question, ['Yes', 'No'], unnamed.length > 0 ? { blocked: true } : undefined);
-        if (answer === UNATTENDED_BLOCK_ANSWER) return originRefusedUnattended(unnamed.join(', '), origin);
+        if (answer === UNATTENDED_BLOCK_ANSWER) return refused(originRefusedUnattended(targets, origin));
         if (!isApproval(answer)) {
           return 'mail_reply cancelled by user.';
         }

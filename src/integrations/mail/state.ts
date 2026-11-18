@@ -1427,43 +1427,47 @@ export class MailStateDb {
    */
   recordSentMail(input: SentMailLogInput): string {
     const id = randomUUID().slice(0, 12);
-    this.db
-      .prepare<[
-        string, string, string, string, string | null,
-        string, string | null, string | null,
-        string, number, number, string | null, number,
-      ], unknown>(
-        `INSERT INTO mail_sent_log (
-           id, tenant_id, account_id, message_id, in_reply_to,
-           to_json, cc_json, bcc_json,
-           subject, body_chars, sent_at, followup_id, origin_owner_known
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        input.tenantId ?? 'default',
-        input.accountId,
-        input.messageId,
-        input.inReplyTo ?? null,
-        JSON.stringify(input.to),
-        input.cc && input.cc.length > 0 ? JSON.stringify(input.cc) : null,
-        input.bcc && input.bcc.length > 0 ? JSON.stringify(input.bcc) : null,
-        input.subject,
-        input.bodyChars,
-        (input.sentAt ?? new Date()).getTime(),
-        input.followupId ?? null,
-        input.originOwnerKnown === true ? 1 : 0,
-      );
-    if (input.originOwnerKnown === true) {
-      const tenantId = input.tenantId ?? 'default';
-      const insert = this.db.prepare<[string, string, string], unknown>(
-        'INSERT OR IGNORE INTO mail_sent_owner_known (sent_id, tenant_id, address) VALUES (?, ?, ?)',
-      );
-      for (const entry of [...input.to, ...(input.cc ?? []), ...(input.bcc ?? [])]) {
-        const address = normalizeMailTarget(entry.address)?.value;
-        if (address !== undefined) insert.run(id, tenantId, address);
+    // The log row and its owner-known recipients in one transaction: a recipient is never
+    // counted for a send the log does not hold.
+    this.db.transaction(() => {
+      this.db
+        .prepare<[
+          string, string, string, string, string | null,
+          string, string | null, string | null,
+          string, number, number, string | null, number,
+        ], unknown>(
+          `INSERT INTO mail_sent_log (
+             id, tenant_id, account_id, message_id, in_reply_to,
+             to_json, cc_json, bcc_json,
+             subject, body_chars, sent_at, followup_id, origin_owner_known
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.tenantId ?? 'default',
+          input.accountId,
+          input.messageId,
+          input.inReplyTo ?? null,
+          JSON.stringify(input.to),
+          input.cc && input.cc.length > 0 ? JSON.stringify(input.cc) : null,
+          input.bcc && input.bcc.length > 0 ? JSON.stringify(input.bcc) : null,
+          input.subject,
+          input.bodyChars,
+          (input.sentAt ?? new Date()).getTime(),
+          input.followupId ?? null,
+          input.originOwnerKnown === true ? 1 : 0,
+        );
+      if (input.originOwnerKnown === true) {
+        const tenantId = input.tenantId ?? 'default';
+        const insert = this.db.prepare<[string, string, string], unknown>(
+          'INSERT OR IGNORE INTO mail_sent_owner_known (sent_id, tenant_id, address) VALUES (?, ?, ?)',
+        );
+        for (const entry of [...input.to, ...(input.cc ?? []), ...(input.bcc ?? [])]) {
+          const address = normalizeMailTarget(entry.address)?.value;
+          if (address !== undefined) insert.run(id, tenantId, address);
+        }
       }
-    }
+    })();
     return id;
   }
 

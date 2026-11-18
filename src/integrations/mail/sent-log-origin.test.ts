@@ -143,3 +143,18 @@ describe('migration v22', () => {
     }
   });
 });
+
+describe('the log row and its owner-known recipients are written together', () => {
+  const raw = (): BetterSqlite3.Database => (db as unknown as { db: BetterSqlite3.Database }).db;
+  it('a recipient row that cannot be written takes the log row with it', () => {
+    raw().exec("CREATE TRIGGER fail_recipient BEFORE INSERT ON mail_sent_owner_known BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+    expect(() => send({ to: [{ address: 'a@firma.ch' }] }, true)).toThrow('disk full');
+    expect(raw().prepare('SELECT COUNT(*) AS n FROM mail_sent_log').get()).toEqual({ n: 0 });
+  });
+
+  it('CONTROL: a send that is not flagged writes no recipient row, so the same failure does not touch it', () => {
+    raw().exec("CREATE TRIGGER fail_recipient BEFORE INSERT ON mail_sent_owner_known BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+    send({ to: [{ address: 'a@firma.ch' }] }, false);
+    expect(raw().prepare('SELECT COUNT(*) AS n FROM mail_sent_log').get()).toEqual({ n: 1 });
+  });
+});

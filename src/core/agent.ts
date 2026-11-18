@@ -84,7 +84,7 @@ import { noticeLanguage } from './notice-language.js';
 import { normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
 import {
   originAsk, originBashAfterForeign, originDenied, originLookupFailedHead, originLookupFailedMandate, originLookupFailedUnattended,
-  originRefusedMandate, originRefusedUnattended, type OriginRefusal, type SendOrigin, type TargetNoun,
+  originRefusedMandate, originRefusedUnattended, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
 } from './origin-notices.js';
 import type { CallTargetOrigin } from './call-connection.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -5120,7 +5120,7 @@ export class Agent implements IAgent {
    *   asked with a blocked question, which a run nobody watches refuses before it is stored. A
    *   yes holds for this call only: nothing is added, and the slot is not `allKnown`.
    */
-  private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
+  private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean, guardRefuses = false): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
     if (tool.sendTargets === undefined) return {};
     let targets: readonly SendTarget[] | null;
     let targetsUnread = false;
@@ -5139,10 +5139,16 @@ export class Agent implements IAgent {
 
     const lookupFailed = targetsUnread || foreign.some((v) => v.verdict === 'unreadable');
     const shownTargets = foreign.map((v) => v.target.value);
-    const shown = targetsUnread && shownTargets.length === 0 ? '?' : shownTargets.join(', ');
+    const shown: OriginTargets = { values: shownTargets, unreadable: targetsUnread };
     const noun: TargetNoun = foreign[0]?.target.kind === 'host' || (foreign.length === 0 && tc.name === 'http_request') ? 'host' : 'mail';
     const origin = this.originOfTargets();
     const passed: CallTargetOrigin = { known, allKnown: false, unnamed: { targets: shownTargets, origin } };
+    // The guard refuses this call without asking anyone, with its own text; the run's owner still
+    // learns that a target came from elsewhere.
+    if (guardRefuses) {
+      try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
+      return {};
+    }
     if (filingCall) return { origin: passed };
 
     const refuse = async (text: string): Promise<{ refusal: BetaToolResultBlockParam }> => {
@@ -5153,7 +5159,7 @@ export class Agent implements IAgent {
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     };
     const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
-      try { this.onOriginRefused?.({ target: shown, noun, origin }); } catch { /* the refusal stands */ }
+      try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
       return refuse(lookupFailed ? originLookupFailedUnattended(shown) : originRefusedUnattended(shown, origin));
     };
     // Someone the owner let in answers this session's questions themselves: asking them would
@@ -5165,7 +5171,7 @@ export class Agent implements IAgent {
     const lang = this._noticeLanguage();
     // Blocked: a reader who does not watch this run refuses it before anything is stored or parked
     // (`PromptStore.insertQuestion`), and the call is refused here.
-    const answer = await this.promptUser(originAsk(tc.name, noun, shown, lookupFailed ? { kind: 'unknown' } : origin, lang), ['Allow', 'Deny', '\x00'], { blocked: true });
+    const answer = await this.promptUser(originAsk(tc.name, tc.input, noun, shown, lookupFailed ? { kind: 'unknown' } : origin, lang), ['Allow', 'Deny', '\x00'], { blocked: true });
     if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
       const denied = lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown)}` : originDenied(shown);
@@ -5320,7 +5326,7 @@ export class Agent implements IAgent {
     // A call the guard refuses below without asking anyone (a run with no prompt) keeps the guard's
     // refusal, which names the write; it is refused either way.
     const guardRefusesUnasked = effectiveSignal !== null && !filingCall && !this.promptUser;
-    const originCheck = guardRefusesUnasked ? {} : await this._checkSendOrigin(tc, tool, filingCall);
+    const originCheck = await this._checkSendOrigin(tc, tool, filingCall, guardRefusesUnasked);
     if ('refusal' in originCheck) return originCheck.refusal;
     if (effectiveSignal && !filingCall) {
       if (this.promptUser) {

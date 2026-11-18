@@ -2,7 +2,7 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 import type { PromptMeta, PromptText, PromptUserFn } from '../types/index.js';
 import type { AbortScope } from '../types/config.js';
 import type { PromptStore } from './prompt-store.js';
-import { promptOriginOf } from './prompt-store.js';
+import { promptOriginOf, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
@@ -144,6 +144,9 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
         handRun: deps.handRun,
       });
     } catch (err: unknown) {
+      // A blocked question (where a send target comes from) is refused before it is stored: the
+      // caller reads the refusal and says it to the model in its own words.
+      if (err instanceof UnattendedBlockError) return UNATTENDED_BLOCK_ANSWER;
       // A database the engine already closed is the teardown, as after the wait.
       if (!store.isOpen()) return neverSettles();
       // Otherwise the question could not be put to the owner — e.g. a question of the owner's

@@ -347,7 +347,18 @@ function isTargetOrigin(v: unknown): boolean {
   if (typeof origin !== 'object' || origin === null) return false;
   const o = origin as Record<string, unknown>;
   if (!ORIGIN_KINDS.has(o['kind'])) return false;
-  return ['helper', 'name', 'author', 'sender', 'host'].every((k) => isOptionalString(o[k]));
+  if (o['predatesRecord'] !== undefined && typeof o['predatesRecord'] !== 'boolean') return false;
+  if (o['setUpBy'] !== undefined && !isSetUpBy(o['setUpBy'])) return false;
+  if (o['kind'] === 'triggerRun' && o['setUpBy'] === undefined) return false;
+  return ['helper', 'name', 'sender', 'host'].every((k) => isOptionalString(o[k]));
+}
+
+/** A stored `setUpBy` of a trigger origin. */
+function isSetUpBy(v: unknown): boolean {
+  if (typeof v !== 'object' || v === null) return false;
+  const s = v as Record<string, unknown>;
+  if (s['kind'] === 'owner' || s['kind'] === 'unknown') return true;
+  return s['kind'] === 'other' && typeof s['who'] === 'string';
 }
 
 /** The stored origin, or null when it is not one this engine knows. */

@@ -118,6 +118,9 @@ export interface RunTaint {
   latch?: import('../core/conversation-latch.js').ConversationLatch | undefined;
   /** The language of the steps' own questions: the calling conversation's. */
   noticeLanguage?: import('../core/notice-language.js').NoticeLanguage | undefined;
+  /** Told of every send a step refused because the owner did not name its target: the calling
+   *  run's, so its result says so. */
+  onOriginRefused?: ((refusal: import('../core/origin-notices.js').OriginRefusal) => void) | undefined;
 }
 
 /** A live step agent the run can arm mid-flight — the one capability the
@@ -132,12 +135,14 @@ export function newRunTaint(caller?: (UntrustedSignals & {
   readonly ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
   readonly conversationLatch?: import('../core/conversation-latch.js').ConversationLatch | undefined;
   readonly noticeLanguage?: import('../core/notice-language.js').NoticeLanguage | undefined;
+  readonly onOriginRefused?: ((refusal: import('../core/origin-notices.js').OriginRefusal) => void) | undefined;
 }) | undefined): RunTaint {
   const taint: RunTaint = { seeded: caller ? describeTurnUntrusted(caller) : 'none', earned: 'none' };
   if (caller?.conversationGrants !== undefined) taint.grants = caller.conversationGrants;
   if (caller?.ownerKnown !== undefined) taint.ownerKnown = caller.ownerKnown;
   if (caller?.conversationLatch !== undefined) taint.latch = caller.conversationLatch;
   if (caller?.noticeLanguage !== undefined) taint.noticeLanguage = caller.noticeLanguage;
+  if (caller?.onOriginRefused !== undefined) taint.onOriginRefused = caller.onOriginRefused;
   return taint;
 }
 
@@ -154,12 +159,14 @@ function stepOriginConfig(runTaint: RunTaint | undefined, parentPrompt: SubAgent
   conversationLatch?: import('../core/conversation-latch.js').ConversationLatch;
   noticeLanguage?: import('../core/notice-language.js').NoticeLanguage;
   sendOrigin?: import('../core/origin-notices.js').SendOrigin;
+  onOriginRefused?: (refusal: import('../core/origin-notices.js').OriginRefusal) => void;
 } {
   const name = parentPrompt?.workflowName;
   return {
     ...(runTaint?.ownerKnown !== undefined ? { ownerKnown: runTaint.ownerKnown } : {}),
     ...(runTaint?.latch !== undefined ? { conversationLatch: runTaint.latch } : {}),
     ...(runTaint?.noticeLanguage !== undefined ? { noticeLanguage: runTaint.noticeLanguage } : {}),
+    ...(runTaint?.onOriginRefused !== undefined ? { onOriginRefused: runTaint.onOriginRefused } : {}),
     ...(name !== undefined && name !== '' ? { sendOrigin: { kind: 'workflowRun' as const, name } } : {}),
   };
 }

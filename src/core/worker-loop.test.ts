@@ -306,7 +306,7 @@ describe('WorkerLoop', () => {
     );
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), author: 'unknown' } },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' } } },
     );
   });
 
@@ -349,7 +349,7 @@ describe('WorkerLoop', () => {
 
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), author: 'unknown' } },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' } } },
     );
   });
 
@@ -2124,14 +2124,14 @@ describe('WorkerLoop', () => {
     await vi.advanceTimersByTimeAsync(0);
     const opts = vi.mocked(session.run).mock.calls[0]![1] as Record<string, unknown>;
     expect(opts['ownerInstruction']).toBeUndefined();
-    expect(opts['sendOrigin']).toEqual({ kind: 'triggerRun', name: task.title, author: 'you' });
+    expect(opts['sendOrigin']).toEqual({ kind: 'triggerRun', name: task.title, setUpBy: { kind: 'owner' } });
   });
 
   it('a send the run refused is said in the recorded result, with the target, its origin and the way through the chat', async () => {
     const task = makeTask();
     const tm = makeTaskManager([task]);
     const session = makeSession('Bericht erstellt.');
-    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ target: 'x@evil.example', noun: 'mail', origin: { kind: 'readContent' } }];
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
     const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
@@ -2775,7 +2775,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), author: 'unknown' } });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' } } });
   });
 
   it('does not duplicate the title when description equals title', async () => {
@@ -2792,7 +2792,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), author: 'unknown' } });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' } } });
   });
 
   // ---- 13. resolveTaskInput resolves pending input ----

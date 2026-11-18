@@ -1407,7 +1407,12 @@ export class Session {
       this.agent.restoreConversationTaint();
       // A target the owner did not name here may come from the helper's turns.
       const helper = helperOfThread(threadStore, this.sessionId);
-      if (this._runSendOrigin === undefined && helper !== undefined) this.agent.sendOrigin = { kind: 'helperThread', helper };
+      // Kept on the session for the run, so an agent rebuilt mid-run (a model switch, a compaction)
+      // gets it too (`_createAgent`).
+      if (this._runSendOrigin === undefined && helper !== undefined) {
+        this._runSendOrigin = { kind: 'helperThread', helper };
+        this.agent.sendOrigin = this._runSendOrigin;
+      }
     }
 
     // ⛔ CAPTURED BEFORE THE SEND, and the stop is read off THIS object rather than
