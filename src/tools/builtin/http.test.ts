@@ -9269,6 +9269,23 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(await visible({ url: 'https://harmless-value.h.example/a', method: 'POST', body: '{}' }, headless(MANDATE))).toContain('to harmless-value.h.example requires user consent');
     });
 
+    // A value the host holds only in part — it starts in the userinfo, or the host starts with
+    // `https:` and no `//` — or holds tab-split is in no host the checks above read whole.
+    it('the refusal for want of a person to ask does not name a host that holds a stored value in part or in another form', async () => {
+      const cases = [
+        ['https://tok@Acme-Tenant7.h.example/a', 'tok@Acme-Tenant7'],
+        ['https:tok@Acme-Tenant7.h.example/a', 'tok@Acme-Tenant7'],
+        ['https://Acme\tTenant7.h.example/a', 'Acme\tTenant7'],
+      ] as const;
+      for (const [url, value] of cases) {
+        const mask = (t: string) => t.replaceAll(value, `***${value.slice(-4)}`);
+        const { agent } = agent270({ principal: MANDATE, mask, values: [value] });
+        const out = await visible({ url, method: 'POST', body: '{}' }, { ...(agent as object), promptUser: undefined } as never);
+        expect(out).toContain('to this service requires user consent but no interactive prompt is available');
+        expect(out.toLowerCase()).not.toContain('acme');
+      }
+    });
+
     // A host is sent lower-cased, so a stored secret with capitals is no longer one the mask knows
     // once parsed; it is read as the request wrote it.
     it('a stored secret with capitals in the host is refused in a mandate session; the same host without it is asked', async () => {
