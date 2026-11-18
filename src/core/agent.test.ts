@@ -122,6 +122,7 @@ import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tool
 import { createInboxReadTool } from '../integrations/mail/tools/inbox-read.js';
 import { currentCallTwins, noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 import { readRunStop, withRunStop } from './run-stop.js';
+import { ownerNamed } from '../../tests/helpers/owner-named.js';
 
 function endTurnResponse(text: string) {
   return {
@@ -7034,7 +7035,7 @@ describe('write approvals in a tool batch', () => {
         .mockResolvedValueOnce(toolUseResponse([write('tu_1'), write('tu_2')]))
         .mockResolvedValueOnce(toolUseResponse([write('tu_3')]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();
@@ -7068,7 +7069,7 @@ describe('write approvals in a tool batch', () => {
           write('tu_3', 'https://93.184.216.37:443/contacts'),
         ]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();
@@ -7091,7 +7092,7 @@ describe('write approvals in a tool batch', () => {
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([write('tu_dup', 'contacts'), write('tu_dup', 'contacts'), write('tu_dup', 'notes')]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();
@@ -7117,7 +7118,7 @@ describe('write approvals in a tool batch', () => {
           write('tu_cut_off'),
         ]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool, noop], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool, noop], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();
@@ -7139,7 +7140,7 @@ describe('write approvals in a tool batch', () => {
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([write('tu_1', '/contacts'), write('tu_2', '/orders/7/cancel')]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();

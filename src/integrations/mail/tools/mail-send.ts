@@ -22,7 +22,7 @@ import type { MailRegistry } from './registry.js';
 import type { MailAddress } from '../provider.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { mailTargets } from '../../../core/send-target.js';
-import { currentCallFiling } from '../../../core/call-connection.js';
+import { currentCallOwnerKnownFor, currentCallFiling } from '../../../core/call-connection.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import { approvalFollowup, type StoredAddress } from '../../../core/approval-store.js';
 
@@ -147,6 +147,9 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
         },
       };
       if (input.track_followup) opts.trackFollowup = input.track_followup;
+      // Logged as sent to owner-named recipients only when the dispatcher found every one of them
+      // owner-known before any question (`currentCallOwnerKnownFor`); a yes to its question is not that.
+      opts.originOwnerKnown = currentCallOwnerKnownFor([...to, ...cc, ...bcc].map((a) => a.address));
 
       const result = await sendMail(registry, coreInput, opts, ctx);
 

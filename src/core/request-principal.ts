@@ -321,3 +321,26 @@ export function principalFromTag(tag: string | null | undefined): RequestPrincip
   if (tag === CP_ADMIN_TAG) return CP_ADMIN_PRINCIPAL;
   return isMandateTag(tag) ? { kind: 'mandate', email: tag!.slice(MANDATE_TAG_PREFIX.length) } : OWNER_PRINCIPAL;
 }
+
+/**
+ * Whether a trigger's instruction (its title and description) counts as words the owner wrote,
+ * so the send targets it names are owner-known in that trigger's own run. Only when the owner set
+ * it up (`created_by`), no turn that had read outside content created or rewrote it
+ * (`created_untrusted`, which an edit only adds to), no mandate ever changed it
+ * (`mandate_editor`, which only a mandate's change writes and nothing clears: neither the owner's
+ * later edit nor a confirmation takes it back, since confirming agrees to the run, not to its
+ * targets), and the last party that changed it is the owner. A trigger from before these columns
+ * names no creator and does not count. What its run reads or produces never counts.
+ */
+export function ownerInstructionCounts(t: {
+  readonly created_by?: string | null | undefined;
+  readonly created_untrusted?: string | null | undefined;
+  readonly edited_by?: string | null | undefined;
+  readonly mandate_editor?: string | null | undefined;
+}): boolean {
+  const untrusted = t.created_untrusted;
+  return t.created_by === principalTag(OWNER_PRINCIPAL)
+    && (untrusted === undefined || untrusted === null || untrusted === '' || untrusted === 'none')
+    && (t.mandate_editor === undefined || t.mandate_editor === null)
+    && (t.edited_by === undefined || t.edited_by === null || t.edited_by === principalTag(OWNER_PRINCIPAL));
+}

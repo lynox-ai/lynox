@@ -29,7 +29,11 @@ import {
 } from './rate-limit.js';
 import { isInputRequired } from '../../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
-import { currentCallFiling } from '../../../core/call-connection.js';
+import { currentCallFiling, currentCallOwnerKnownFor, currentCallTargetOrigin } from '../../../core/call-connection.js';
+import { UNATTENDED_BLOCK_ANSWER } from '../../../core/prompt-store.js';
+import { noticeLanguage } from '../../../core/notice-language.js';
+import { originRefusedMandate, originRefusedUnattended, originReplyPreview } from '../../../core/origin-notices.js';
+import { normalizeMailTarget } from '../../../core/send-target.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import type { MailReplyPayload, StoredAddress } from '../../../core/approval-store.js';
 
@@ -102,6 +106,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         if (!prepared.ok) return prepared.message;
 
         if (filing) {
+          // The card names where a recipient the owner did not name comes from (`Agent.fileApproval`).
           if (!agent.fileApproval) return NOT_MARKED_MESSAGE;
           return agent.fileApproval({ kind: 'mail_reply', payload: prepared.filing }).message;
         }
@@ -109,12 +114,28 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           return 'mail_reply error: sending requires interactive user confirmation, which is not available in this mode.';
         }
 
-        const answer = await agent.promptUser(prepared.preview, ['Yes', 'No']);
+        // The recipients the dispatcher did not check: a reply's default recipients come from the
+        // mail it answers, which the input does not name. One the owner did not name is said in the
+        // confirmation, which is then a blocked question: a run nobody watches refuses it, and a
+        // session of someone else the owner let in does not send to it at all.
+        const recipients = [...prepared.commit.to, ...prepared.commit.cc].map((a) => a.address);
+        const unnamed = replyRecipientsNotOwnerKnown(agent, recipients);
+        const sender = prepared.filing.original.from;
+        const origin = { kind: 'readMail' as const, sender };
+        if (unnamed.length > 0 && agent.principal.kind !== 'owner') {
+          return originRefusedMandate(unnamed.join(', '), origin, 'mail');
+        }
+        const lang = agent.noticeLanguage ?? noticeLanguage(undefined);
+        const question = unnamed.length > 0 ? pv`${prepared.preview}\n\n${originReplyPreview(sender, lang)}` : prepared.preview;
+        const answer = await agent.promptUser(question, ['Yes', 'No'], unnamed.length > 0 ? { blocked: true } : undefined);
+        if (answer === UNATTENDED_BLOCK_ANSWER) return originRefusedUnattended(unnamed.join(', '), origin);
         if (!isApproval(answer)) {
           return 'mail_reply cancelled by user.';
         }
 
-        return await commitReply(prepared.sendProvider, prepared.commit, ctx);
+        // Owner-named in the log only when the dispatcher checked every recipient and found it
+        // named before any question; a reply's default recipients never are.
+        return await commitReply(prepared.sendProvider, prepared.commit, ctx, { originOwnerKnown: currentCallOwnerKnownFor(recipients) });
       } catch (err: unknown) {
         // A confirmation nobody can answer ends the run; as text, the model would work around it.
         if (isInputRequired(err)) throw err;
@@ -123,6 +144,24 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
       }
     },
   };
+}
+
+/**
+ * The recipients of a reply that are neither among the targets the dispatcher checked for this
+ * call (the `to`/`cc` overrides, asked about there when foreign) nor owner-known now. A recipient
+ * that does not read as an address counts as not named.
+ */
+function replyRecipientsNotOwnerKnown(agent: IAgent, recipients: readonly string[]): string[] {
+  const checked = currentCallTargetOrigin();
+  const seen = new Set<string>([...(checked?.known ?? []), ...(checked?.foreign?.targets ?? [])]);
+  const unnamed: string[] = [];
+  for (const r of recipients) {
+    const target = normalizeMailTarget(r);
+    if (target === null) { unnamed.push(r); continue; }
+    if (seen.has(target.value)) continue;
+    if ((agent.ownerKnown?.known(target) ?? 'foreign') !== 'known') unnamed.push(target.value);
+  }
+  return unnamed;
 }
 
 /**

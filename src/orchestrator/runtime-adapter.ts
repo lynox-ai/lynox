@@ -110,6 +110,14 @@ export interface RunTaint {
    * Optional and filled lazily for the same reason as {@link live}. Read through {@link runGrantSet}.
    */
   grants?: ConversationGrants;
+  /** The calling conversation's owner-known targets, read-only and by reference: a step adds
+   *  nothing, and its task and what it reads never count. Absent for a run with no calling
+   *  conversation: then only a reviewed contract's hosts are owner-known, for its own run. */
+  ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
+  /** The calling conversation's record that it read outside content, by reference. */
+  latch?: import('../core/conversation-latch.js').ConversationLatch | undefined;
+  /** The language of the steps' own questions: the calling conversation's. */
+  noticeLanguage?: import('../core/notice-language.js').NoticeLanguage | undefined;
 }
 
 /** A live step agent the run can arm mid-flight — the one capability the
@@ -119,9 +127,17 @@ export interface TaintPeer {
 }
 
 /** Build a run's taint accumulator, seeded from the calling agent (or clean when headless). */
-export function newRunTaint(caller?: (UntrustedSignals & { readonly conversationGrants?: ConversationGrants | undefined }) | undefined): RunTaint {
+export function newRunTaint(caller?: (UntrustedSignals & {
+  readonly conversationGrants?: ConversationGrants | undefined;
+  readonly ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
+  readonly conversationLatch?: import('../core/conversation-latch.js').ConversationLatch | undefined;
+  readonly noticeLanguage?: import('../core/notice-language.js').NoticeLanguage | undefined;
+}) | undefined): RunTaint {
   const taint: RunTaint = { seeded: caller ? describeTurnUntrusted(caller) : 'none', earned: 'none' };
   if (caller?.conversationGrants !== undefined) taint.grants = caller.conversationGrants;
+  if (caller?.ownerKnown !== undefined) taint.ownerKnown = caller.ownerKnown;
+  if (caller?.conversationLatch !== undefined) taint.latch = caller.conversationLatch;
+  if (caller?.noticeLanguage !== undefined) taint.noticeLanguage = caller.noticeLanguage;
   return taint;
 }
 
@@ -129,6 +145,23 @@ export function newRunTaint(caller?: (UntrustedSignals & { readonly conversation
 export function runGrantSet(taint: RunTaint | undefined): ConversationGrants | undefined {
   if (taint === undefined) return undefined;
   return taint.grants ??= ConversationGrants.detached();
+}
+
+/** What a step agent gets for the check before a send: the calling conversation's sources, and
+ *  where a target it was not given comes from (the workflow, when its name is known). */
+function stepOriginConfig(runTaint: RunTaint | undefined, parentPrompt: SubAgentPromptHandles | undefined): {
+  ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader;
+  conversationLatch?: import('../core/conversation-latch.js').ConversationLatch;
+  noticeLanguage?: import('../core/notice-language.js').NoticeLanguage;
+  sendOrigin?: import('../core/origin-notices.js').SendOrigin;
+} {
+  const name = parentPrompt?.workflowName;
+  return {
+    ...(runTaint?.ownerKnown !== undefined ? { ownerKnown: runTaint.ownerKnown } : {}),
+    ...(runTaint?.latch !== undefined ? { conversationLatch: runTaint.latch } : {}),
+    ...(runTaint?.noticeLanguage !== undefined ? { noticeLanguage: runTaint.noticeLanguage } : {}),
+    ...(name !== undefined && name !== '' ? { sendOrigin: { kind: 'workflowRun' as const, name } } : {}),
+  };
 }
 
 /** Whether any signal — seed or step-earned — puts this run on the untrusted side. */
@@ -989,6 +1022,9 @@ export async function spawnViaAgent(
   const agent = new Agent({
     // By reference: what this step fetches is in the run's set before a later step writes.
     conversationGrants: runGrantSet(runTaint),
+    // The calling conversation's owner-known targets and its record of outside reads, by
+    // reference and read-only; a step's own task adds nothing.
+    ...stepOriginConfig(runTaint, parentPrompt),
     name: step.agent,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,
@@ -1502,6 +1538,9 @@ export async function spawnInline(
   const agent = new Agent({
     // By reference: what this step fetches is in the run's set before a later step writes.
     conversationGrants: runGrantSet(runTaint),
+    // The calling conversation's owner-known targets and its record of outside reads, by
+    // reference and read-only; a step's own task adds nothing.
+    ...stepOriginConfig(runTaint, parentPrompt),
     name: step.id,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,

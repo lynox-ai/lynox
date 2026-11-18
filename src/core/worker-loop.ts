@@ -20,13 +20,14 @@ import {
 import { BULK_NOTICES, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
+import { originRunNotice, type OriginRefusal, type SendOrigin } from './origin-notices.js';
 import { isFeatureEnabled } from './features.js';
 import { InboundEventStore, type EventOutcome, type InboundEventRecord } from './inbound-events.js';
 import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, ownerInstructionCounts, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
@@ -710,6 +711,27 @@ export class WorkerLoop {
     /** The run lease's timing; only tests shorten it. */
     private readonly lease: { heartbeatMs: number; ttlMs: number } = { heartbeatMs: LEASE_HEARTBEAT_MS, ttlMs: LEASE_TTL_MS },
   ) {}
+
+  /** Where a target this trigger's run sends to comes from, when its instruction does not count. */
+  #triggerSendOrigin(task: TriggerRecord, instructionCounts: boolean): SendOrigin | undefined {
+    if (instructionCounts) return undefined;
+    const lang = noticeLanguage(this.engine.config?.language);
+    const mandate = shownMandate(task);
+    // wording pending review: who set up a trigger when it is not a helper.
+    const author = mandate !== undefined ? mandate.address
+      : task.created_by === principalTag(OWNER_PRINCIPAL) ? (lang === 'de' ? 'dir' : 'you')
+        : (lang === 'de' ? 'unbekannt' : 'unknown');
+    return { kind: 'triggerRun', name: task.title, author };
+  }
+
+  /** The result lines for the sends this run refused, or null when it refused none. */
+  #originRefusedNotice(task: TriggerRecord, refusals: readonly OriginRefusal[]): string | null {
+    if (refusals.length === 0) return null;
+    const lang = noticeLanguage(this.engine.config?.language);
+    // wording pending review: how the trigger is named at the start of the sentence.
+    const trigger = lang === 'de' ? `Der Trigger "${task.title}"` : `The trigger "${task.title}"`;
+    return refusals.map((r) => originRunNotice(trigger, r.target, r.noun, r.origin, lang)).join('\n');
+  }
 
   /** The worker's own sentences in the instance's notice language, read per notice (`notice-language.ts`). */
   #notices(): WorkerNotices {
@@ -3256,7 +3278,20 @@ export class WorkerLoop {
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     this.#stopIfStarterEnded(active, starter, task.id);
-    const result = await session.run(prompt, { triggerOrigin: task.source, triggerId: task.id, principal: runAs });
+    // The trigger's own instruction, from its stored title and description, not from the prompt
+    // built above (which carries answers and fences): the targets it names are owner-known in this
+    // run only when the owner wrote it and nobody else changed it. Otherwise a target the run was
+    // not given comes from this trigger, by whom it was set up.
+    const instructionCounts = ownerInstructionCounts(task);
+    const runOrigin = this.#triggerSendOrigin(task, instructionCounts);
+    const result = await session.run(prompt, {
+      triggerOrigin: task.source, triggerId: task.id, principal: runAs,
+      ...(instructionCounts ? { ownerInstruction: `${task.title}\n${task.description}` } : {}),
+      ...(runOrigin !== undefined ? { sendOrigin: runOrigin } : {}),
+    });
+    // A send this run refused because the owner did not name its target is said in the result,
+    // with where the target came from and the way through the chat.
+    const originRefused = this.#originRefusedNotice(task, session.getOriginRefusals?.() ?? []);
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
     // knowing it ever happened: `costGuard` makes the agent stop and RETURN its text — it
@@ -3298,7 +3333,8 @@ export class WorkerLoop {
     const truncate = (text: string): string => text.length > MAX_TASK_RESULT_CHARS
       ? text.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : text;
-    const truncatedResult = truncate(budgetCut === null ? result : `${budgetCut}\n\n${result}`);
+    const withRefusals = originRefused === null ? result : `${originRefused}\n\n${result}`;
+    const truncatedResult = truncate(budgetCut === null ? withRefusals : `${budgetCut}\n\n${withRefusals}`);
 
     // Who ended the run, when an unanswered question is how it ended (see below).
     const endedByOwner = questionWentUnanswered && active?.stopRequested === true;

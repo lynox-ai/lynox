@@ -70,6 +70,10 @@ export interface ApprovalOrigin {
    *  run itself had read some. Absent on a record from before: it reads as the run's own. */
   instructionUntrusted?: boolean | undefined;
   runUntrusted?: boolean | undefined;
+  /** The recipients the owner had not named when the run filed, and where they come from: the
+   *  card says so. Approving the card does not make them owner-known. Absent when every recipient
+   *  was owner-known, and on a record from before. */
+  targetOrigin?: { foreign: string[]; origin: import('./origin-notices.js').SendOrigin } | undefined;
 }
 
 export interface StoredAddress {
@@ -332,6 +336,20 @@ function originIsComplete(o: ApprovalOrigin): boolean {
     && o.eventId !== '';
 }
 
+const ORIGIN_KINDS: ReadonlySet<unknown> = new Set(['helperThread', 'triggerRun', 'workflowRun', 'readMail', 'readPage', 'readContent', 'childAgent', 'unknown']);
+
+/** A stored `targetOrigin`: a list of recipients and an origin of a kind this engine knows. */
+function isTargetOrigin(v: unknown): boolean {
+  if (typeof v !== 'object' || v === null) return false;
+  const t = v as Record<string, unknown>;
+  if (!isStringList(t['foreign'])) return false;
+  const origin = t['origin'];
+  if (typeof origin !== 'object' || origin === null) return false;
+  const o = origin as Record<string, unknown>;
+  if (!ORIGIN_KINDS.has(o['kind'])) return false;
+  return ['helper', 'name', 'author', 'sender', 'host'].every((k) => isOptionalString(o[k]));
+}
+
 /** The stored origin, or null when it is not one this engine knows. */
 function readOrigin(json: string): ApprovalOrigin | null {
   let v: unknown;
@@ -343,6 +361,7 @@ function readOrigin(json: string): ApprovalOrigin | null {
   for (const k of ['afterUntrusted', 'instructionUntrusted', 'runUntrusted']) {
     if (o[k] !== undefined && typeof o[k] !== 'boolean') return null;
   }
+  if (o['targetOrigin'] !== undefined && !isTargetOrigin(o['targetOrigin'])) return null;
   const origin = o as unknown as ApprovalOrigin;
   return originIsComplete(origin) ? origin : null;
 }

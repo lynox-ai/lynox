@@ -170,7 +170,11 @@ describe('the danger check lets a queueable call of a filing run through, marked
     const agent = agentWith([mailTool(seen)], { approvalFiling: ctx({ rootRunId: 'root-9', threadId: 'th-1' }) });
     const result = await call(agent, 'mail_send', {});
     const id = /entry ([0-9a-f-]{36})/.exec(String(result.content))![1]!;
-    expect(store.get(id)!.origin).toEqual({ source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'root-9', threadId: 'th-1', afterUntrusted: false });
+    // The recipient is one the owner did not name (this agent knows none): the card says so.
+    expect(store.get(id)!.origin).toEqual({
+      source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'root-9', threadId: 'th-1', afterUntrusted: false,
+      targetOrigin: { foreign: ['bob@example.com'], origin: { kind: 'unknown' } },
+    });
   });
 
   it('without a filing context the call is refused as today, and the handler does not run', async () => {

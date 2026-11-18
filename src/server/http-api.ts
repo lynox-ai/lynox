@@ -5022,6 +5022,10 @@ export class LynoxHTTPApi {
         principal: this._principalOf(req),
         // Said by the client that will show the review (the web UI), for this run only.
         showsChangesetReview: b?.['shows_changeset_review'] === true,
+        // Only what the person typed, kept apart from the loaded context and the files above:
+        // the boundary is this string, not a sentinel in the composed message, which loaded
+        // content could carry itself.
+        typedText: safeTaskText,
       };
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on

@@ -306,7 +306,7 @@ describe('WorkerLoop', () => {
     );
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), author: 'unknown' } },
     );
   });
 
@@ -349,7 +349,7 @@ describe('WorkerLoop', () => {
 
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), author: 'unknown' } },
     );
   });
 
@@ -2103,6 +2103,42 @@ describe('WorkerLoop', () => {
 
   // ---- 4. successful task → recordTaskRun('success') + notify ----
 
+  it('the owner\'s own trigger passes its instruction as owner-known, and no origin', async () => {
+    const task = makeTask({ created_by: 'owner', created_untrusted: 'none' });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('ok');
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.run).toHaveBeenCalledWith(expect.any(String), {
+      triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, ownerInstruction: `${task.title}\n${task.description}`,
+    });
+  });
+
+  it('the owner\'s trigger rewritten after outside content passes no instruction, and names the trigger as the origin', async () => {
+    const task = makeTask({ created_by: 'owner', created_untrusted: 'marker' });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('ok');
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const opts = vi.mocked(session.run).mock.calls[0]![1] as Record<string, unknown>;
+    expect(opts['ownerInstruction']).toBeUndefined();
+    expect(opts['sendOrigin']).toEqual({ kind: 'triggerRun', name: task.title, author: 'you' });
+  });
+
+  it('a send the run refused is said in the recorded result, with the target, its origin and the way through the chat', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Bericht erstellt.');
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ target: 'x@evil.example', noun: 'mail', origin: { kind: 'readContent' } }];
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const recorded = vi.mocked(tm.recordTaskRun).mock.calls[0]![1];
+    expect(recorded).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": you did not name this recipient; it comes from content lynox read\. A run without you cannot ask\. If it should go out anyway, ask lynox in the chat, and lynox will ask you\.\n\nBericht erstellt\.$/);
+  });
+
   it('records success and sends notification on successful task', async () => {
     const task = makeTask();
     const tm = makeTaskManager([task]);
@@ -2739,7 +2775,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), author: 'unknown' } });
   });
 
   it('does not duplicate the title when description equals title', async () => {
@@ -2756,7 +2792,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), author: 'unknown' } });
   });
 
   // ---- 13. resolveTaskInput resolves pending input ----

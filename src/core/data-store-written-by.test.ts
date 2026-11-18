@@ -132,6 +132,66 @@ describe('DataStore: who wrote a row', () => {
     });
   });
 
+  describe('a write that does not stamp (an older binary) leaves the writer unknown', () => {
+    // An older binary's upsert sets the user columns and `_updated_at`, and leaves the columns it
+    // does not know as they were. The writer it leaves standing is not the one that wrote last.
+    const oldBinaryUpsert = (email: string, name: string): void => {
+      db().prepare('UPDATE ds_contacts SET name = ?, _updated_at = ? WHERE email = ?').run(name, new Date(Date.now() + 1000).toISOString(), email);
+    };
+
+    it('the owner\'s contact, rewritten by a write that does not stamp, has no known writer', () => {
+      crm.upsertContact({ name: 'Anna', email: 'anna@firma.ch' }, stamp('owner'));
+      expect(crm.contactOrigin('anna@firma.ch')?.writtenBy).toBe('owner');
+      oldBinaryUpsert('anna@firma.ch', 'Anna (changed)');
+      expect(crm.contactOrigin('anna@firma.ch')?.writtenBy).toBeNull();
+    });
+
+    it('CONTROL: a stamped write after it names its writer again', () => {
+      crm.upsertContact({ name: 'Anna', email: 'anna@firma.ch' }, stamp('owner'));
+      oldBinaryUpsert('anna@firma.ch', 'Anna (changed)');
+      crm.upsertContact({ name: 'Anna', email: 'anna@firma.ch' }, stamp('owner'));
+      expect(crm.contactOrigin('anna@firma.ch')?.writtenBy).toBe('owner');
+    });
+
+    it('putRowVerbatim stamps the time it wrote with, too', () => {
+      keyed();
+      ds.putRowVerbatim('leads', { email: 'a@x' }, stamp('owner'));
+      expect(ds.sourceOfRow('leads', 'email', 'a@x')?.writtenBy).toBe('owner');
+      db().prepare('UPDATE ds_leads SET _updated_at = ? WHERE email = ?').run('2099-01-01T00:00:00.000Z', 'a@x');
+      expect(ds.sourceOfRow('leads', 'email', 'a@x')?.writtenBy).toBeNull();
+    });
+  });
+
+  describe('contactOrigin in the normal form of a send target', () => {
+    it('finds a contact stored with an international domain by its ASCII address, and the other way round', () => {
+      crm.upsertContact({ name: 'Anna', email: 'anna@müller.ch' }, stamp('owner'));
+      crm.upsertContact({ name: 'Bob', email: 'bob@xn--mller-kva.ch' }, stamp('owner'));
+      expect(crm.contactOrigin('anna@xn--mller-kva.ch')?.writtenBy).toBe('owner');
+      expect(crm.contactOrigin('bob@müller.ch')?.writtenBy).toBe('owner');
+    });
+
+    it('two spellings of one address answer with the least trusting', () => {
+      crm.upsertContact({ name: 'Anna', email: 'anna@müller.ch' }, stamp('owner'));
+      crm.upsertContact({ name: 'Anna 2', email: 'anna@xn--mller-kva.ch' }, stamp('mandate:h@x', true));
+      expect(crm.contactOrigin('anna@xn--mller-kva.ch')).toMatchObject({ writtenBy: null, untrusted: true });
+    });
+  });
+
+  describe('a contacts table that was not migrated', () => {
+    it('sourceOfRow throws, and the check before a send reads it as unreadable, never as known', async () => {
+      crm.upsertContact({ name: 'Anna', email: 'anna@firma.ch' }, stamp('owner'));
+      db().exec('ALTER TABLE ds_contacts DROP COLUMN _written_at;');
+      const path = ds['db'].name as string;
+      ds.close();
+      ds = new DataStore(path);
+      crm = new CRM(ds);
+      expect(() => crm.contactOrigin('anna@firma.ch')).toThrow(/has not been migrated/);
+      const { OwnerKnownTargets } = await import('./owner-known-targets.js');
+      const reader = OwnerKnownTargets.of({ contactOrigin: (a) => crm.contactOrigin(a) });
+      expect(reader.known({ kind: 'mail', value: 'anna@firma.ch' })).toBe('unreadable');
+    });
+  });
+
   describe('the writers stamp who the agent writes as', () => {
     const agentWith = (fields: Partial<Pick<IAgent, 'writeAuthor' | 'sawUntrustedData' | 'sawExternalContentTool' | 'conversationSawUntrusted'>>): IAgent => {
       const toolContext = createToolContext({});

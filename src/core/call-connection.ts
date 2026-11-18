@@ -30,6 +30,7 @@
  * the resolver in `http.ts`, fed by the profile store. No tool input reaches it,
  * so a value the model supplies cannot become the stamp.
  */
+import { normalizeMailTarget } from './send-target.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { AuditLog } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
@@ -109,6 +110,9 @@ export interface CallSlot {
    *  agent built for this call carries it: a call made from inside the handler runs in a slot
    *  of its own. */
   filing?: boolean | undefined;
+  /** What the agent's check on where the call's send targets come from found, set with the slot
+   *  (`Agent._checkSendOrigin`). Absent for a call whose tool declares no targets. */
+  targetOrigin?: CallTargetOrigin | undefined;
   /** Set by {@link noteCallFiled} when this call's filing settled, either way. */
   filed?: CallFiled | undefined;
   /** Who makes this call, for the rows a write inside the instance leaves (`instance-trail.ts`):
@@ -239,6 +243,39 @@ export function currentCallTwins(): number {
 /** Whether the current call was let through to be filed for approval; false outside a slot. */
 export function currentCallFiling(): boolean {
   return slotStorage.getStore()?.filing === true;
+}
+
+/**
+ * What the check before a send found about one call's targets. `known` lists the normalized
+ * targets the check found the owner had named; `allKnown` is true only when the call named at
+ * least one target and every one of them was owner-known without a question. A yes to the
+ * question never sets it. `foreign` is set when a target was not owner-known and the call went on
+ * anyway (a filing, or a yes): the targets, and where they come from.
+ */
+export interface CallTargetOrigin {
+  readonly known: readonly string[];
+  readonly allKnown: boolean;
+  readonly foreign?: { readonly targets: readonly string[]; readonly origin: import('./origin-notices.js').SendOrigin } | undefined;
+}
+
+/** The current call's {@link CallTargetOrigin}; `undefined` outside a slot or without a check. */
+export function currentCallTargetOrigin(): CallTargetOrigin | undefined {
+  return slotStorage.getStore()?.targetOrigin;
+}
+
+/**
+ * Whether every one of `recipients` was checked as owner-known for the current call, with no
+ * question asked. False for an empty list, outside a slot, and for any recipient the check did not
+ * see (a reply's default recipients). Compared in the targets' normal form.
+ */
+export function currentCallOwnerKnownFor(recipients: readonly string[]): boolean {
+  const origin = slotStorage.getStore()?.targetOrigin;
+  if (origin === undefined || !origin.allKnown || recipients.length === 0) return false;
+  const known = new Set(origin.known);
+  return recipients.every((r) => {
+    const value = normalizeMailTarget(r)?.value;
+    return value !== undefined && known.has(value);
+  });
 }
 
 /** The current call's abort signal; `undefined` outside a slot or for a slot without one. */
