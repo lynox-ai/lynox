@@ -1,6 +1,7 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
 import { isStepIdShape, stepIdRefusal, stepRunIds } from './step-id.js';
+import { fieldReferencing } from './template-refs.js';
 
 /**
  * A single step-level edit to a workflow's step list. The vocabulary is shared
@@ -9,15 +10,16 @@ import { isStepIdShape, stepIdRefusal, stepRunIds } from './step-id.js';
  *  - the run-volatile `run_workflow` tool (modifies steps for ONE run, never
  *    persisted) — emits only `remove` / `update_task`;
  *  - the persistent `update_workflow_steps` tool (Slice C — edits + saves a
- *    stored workflow) — additionally emits `add_step` and `rename_step`.
+ *    stored workflow) — additionally emits `add_step`, `rename_step` and `set_input_from`.
  */
 export interface StepModification {
-  action: 'remove' | 'update_task' | 'add_step' | 'rename_step';
-  /** Target step id for `remove`/`update_task`/`rename_step` (or its position, `#<n>`); the NEW step's id for `add_step`. */
+  action: 'remove' | 'update_task' | 'add_step' | 'rename_step' | 'set_input_from';
+  /** Target step id for `remove`/`update_task`/`rename_step`/`set_input_from` (or its position, `#<n>`); the NEW step's id for `add_step`. */
   step_id: string;
   /** New task text for `update_task`; the new step's task for `add_step`; the new id for `rename_step`. */
   value?: string | undefined;
-  /** `add_step` only — data-dependency step ids the new step reads from. */
+  /** `add_step`: the step ids the new step reads from; `set_input_from`: the step ids the target step
+   *  reads from from now on, replacing its list (empty clears it). */
   input_from?: string[] | undefined;
   /** `add_step` only — insert immediately AFTER this step id (default: append). */
   after?: string | undefined;
@@ -150,6 +152,20 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
     }
     return at;
   };
+  // The steps this edit removes: a reference to one that is still read once every action has run is
+  // refused below, so an edit that removes a step and changes what read it is one edit.
+  const removed = new Set<string>();
+  // Each step's id and position in the list the edit starts from: a refused edit is discarded, so the
+  // caller's next edit starts from that list, and a refusal after the edit names a step as it reads
+  // there (steps keep their object through update_task, rename_step and set_input_from).
+  const stored = new Map(steps.map((s, i) => [s, { id: s.id, at: i + 1 }] as const));
+  // A step as a refusal during the edit names it: by its position in that list (a refused edit is
+  // discarded, so the next one starts from there), or, added by this edit and so not in it, by its
+  // new id, which has the id shape (`newIdProblem`).
+  const shownStepNow = (s: InlinePipelineStep): string => {
+    const was = stored.get(s);
+    return was !== undefined ? `step #${String(was.at)}` : `the step this edit adds ("${s.id}")`;
+  };
   for (const mod of modifications) {
     if (mod.action === 'add_step') {
       // The shape first, so no refusal quotes an id outside it back to the model.
@@ -188,6 +204,26 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       continue;
     }
 
+    if (mod.action === 'set_input_from') {
+      // The way to make a `{{<id>.result}}` reference resolve in a stored step: the steps it reads
+      // (`template-refs.ts`). Each entry is resolved as add_step resolves its inputs.
+      const at = stepIndex(steps, mod.step_id);
+      if (at === 'ambiguous') return ambiguousText(steps, mod.step_id, 'set_input_from', runNames);
+      if (at === 'missing') return `Error: Step ${quotedId(mod.step_id)} not found for set_input_from.`;
+      const inputFrom: string[] = [];
+      const missing: string[] = [];
+      for (const dep of mod.input_from ?? []) {
+        const d = stepIndex(steps, dep);
+        if (d === 'ambiguous') return ambiguousText(steps, dep, `the input of ${shownStepNow(steps[at]!)} (set_input_from)`, runNames);
+        if (d === 'missing') { missing.push(quotedId(dep)); continue; }
+        if (d === at) return `Error: set_input_from: ${shownStepNow(steps[at]!)} cannot read its own output.`;
+        if (!inputFrom.includes(steps[d]!.id)) inputFrom.push(steps[d]!.id);
+      }
+      if (missing.length > 0) return `Error: set_input_from for ${shownStepNow(steps[at]!)} names unknown step(s): ${missing.join(', ')}.`;
+      steps[at]!.input_from = inputFrom.length > 0 ? inputFrom : undefined;
+      continue;
+    }
+
     const what = mod.action === 'remove' ? 'removal' : mod.action === 'update_task' ? 'task update' : 'renaming';
     const idx = stepIndex(steps, mod.step_id);
     if (idx === 'ambiguous') return ambiguousText(steps, mod.step_id, what, runNames);
@@ -205,9 +241,32 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       if (problem) return problem;
       const from = steps[idx]!.id;
       if (to !== from && steps.some(s => s.id === to)) return `Error: Step ${quotedId(to)} already exists — cannot rename step #${idx + 1} to it.`;
+      // A step that reads this one and already holds `{{<to>.…}}` as text (a placeholder for the
+      // system a tool writes to) would read this step's output there once its input_from names `to`;
+      // in the step itself, that text would become a reference to itself.
+      if (to !== from) {
+        for (const [i, s] of steps.entries()) {
+          if (i !== idx && !(s.input_from ?? []).includes(from)) continue;
+          const field = fieldReferencing(s, to);
+          if (!field) continue;
+          if (i === idx) {
+            return `Error: rename_step: ${shownStepNow(s)} holds text starting with "{{${to}" in its ${field}, `
+              + 'which the new id would turn into a reference to the step itself. Choose another id.';
+          }
+          const reader = isStepIdShape(s.id) ? `step "${s.id}"` : shownStepNow(s);
+          const renamed = shownStepNow(steps[idx]!);
+          return `Error: rename_step: ${reader} reads ${renamed} and holds text starting with "{{${to}" in its ${field}, `
+            + `which the new id would turn into a reference to ${renamed}. Choose another id.`;
+        }
+      }
       steps[idx]!.id = to;
       for (const s of steps) {
+        // A `{{<from>.…}}` is a reference only in a step that lists `from` in its input_from: the
+        // run builds a step's context from those steps alone (`context.ts`). Anywhere else it is
+        // text, such as a placeholder a tool hands on to the system it writes to, and stays as written.
+        const reads = s.input_from?.includes(from) === true;
         if (s.input_from) s.input_from = s.input_from.map(dep => (dep === from ? to : dep));
+        if (!reads) continue;
         s.task = renamedRefs(s.task, from, to);
         if (s.input_template) s.input_template = renamedInTemplate(s.input_template, from, to) as Record<string, unknown>;
       }
@@ -216,6 +275,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
 
     if (mod.action === 'remove') {
       const removedId = steps[idx]!.id;
+      removed.add(removedId);
       steps.splice(idx, 1);
       // Drop the removed step from every other step's data dependencies so the
       // edited list never references a step that no longer exists.
@@ -232,6 +292,38 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
         return 'Error: "value" is required for update_task modification.';
       }
       steps[idx]!.task = mod.value;
+    }
+  }
+  // A `{{<id>.…}}` reference to a removed step would stay as raw text in the step that reads it (its
+  // `input_from` entry was dropped with the step), so the edit is refused, naming that step as the list
+  // the edit started from has it. An id the same edit gave to another step (add_step, rename_step) is
+  // not removed any more.
+  for (const removedId of removed) {
+    if (steps.some(s => s.id === removedId)) continue;
+    for (const s of steps) {
+      const field = fieldReferencing(s, removedId);
+      if (!field) continue;
+      // By its stored id when that has the shape: a `#n` in the next edit counts in the list as that
+      // edit has changed it so far, an id does not. A step this edit adds is not in that list; its id
+      // has the shape (`newIdProblem`).
+      const was = stored.get(s);
+      const which = was === undefined ? `the step this edit adds ("${s.id}")`
+        : isStepIdShape(was.id) ? `step "${was.id}"` : `step #${String(was.at)} (its position before this edit)`;
+      // An input template cannot be edited, so keeping the step it reads is the way that loses nothing;
+      // removing the reader too is named last, and only with the user's word.
+      if (field !== 'task') {
+        const renamedToo = was !== undefined && was.id !== s.id && isStepIdShape(was.id)
+          ? ` This edit also renames ${which}: if you remove it, name it by its new id.` : '';
+        return `Error: remove: ${which} reads the output of a step this edit removes, in its ${field}, and its input template cannot be edited. `
+          + `Keep the step it reads, or remove ${which} too only if the user wants it gone.${renamedToo}`;
+      }
+      const fix = `Change that reference in the same edit (update_task), or remove ${which} too.`;
+      // A step this edit renames is named by its old id, which no longer finds it after the rename: an
+      // update_task goes before the rename, a removal names the new id (or the rename is dropped). A
+      // step named by its position is found by it before and after a rename.
+      const renamed = was === undefined || was.id === s.id || !isStepIdShape(was.id) ? ''
+        : ' This edit renames that step: put the update_task before the rename, or remove it by its new id.';
+      return `Error: remove: ${which} reads the output of a step this edit removes, in its ${field}. ${fix}${renamed}`;
     }
   }
   return null; // no error

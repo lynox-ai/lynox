@@ -806,7 +806,7 @@ export class WorkerLoop {
     result: string,
     status: RunEndStatus,
     run?: RunStarterSlot | null,
-    opts?: { readonly keepSchedule: true },
+    opts?: { readonly keepSchedule?: true; readonly noRetry?: true },
   ): boolean {
     // A request of this run that would have carried someone else's own login was refused: its
     // line goes under the result, and what ends as a success halts (`withMemberNotes`).
@@ -834,7 +834,7 @@ export class WorkerLoop {
     // A webhook run's event takes the end where nothing more specific was set: lynox's own
     // sentence, or the masked error of a run that threw.
     endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
-    const record = { ...(startedByOther(slot) ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
+    const record = { ...(startedByOther(slot) || opts?.noRetry === true ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
     return tm?.recordTaskRun(id, result, status, ...(Object.keys(record).length > 0 ? [record] : [])) ?? false;
   }
 
@@ -3645,6 +3645,16 @@ export class WorkerLoop {
       return;
     }
 
+    // A step refers to the output of a step it does not read: a retry meets the same refusal, so it is
+    // recorded as a failure without one and told in the owner's words (a webhook run's by its event).
+    // The record keeps the full refusal, which says how to repair it (`template-refs.ts`).
+    if (!result.ok && result.unresolvedRefStep !== undefined) {
+      const told = this.#notices().workflowRefUnresolved(result.unresolvedRefStep);
+      endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: told, runId: result.runId });
+      this.recordAndNotify(task, result.error ?? told, false, told, { noRetry: true });
+      return;
+    }
+
     if (!result.ok) {
       endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: result.error ?? 'The workflow run was refused.', runId: result.runId });
       // Surface conversion / validation / not-found / not-template errors as
@@ -3850,11 +3860,11 @@ export class WorkerLoop {
    * it halted, which its body no longer says (U-324). Read from the ledger, not from how the
    * pass returned: a pass that found its run dropped or moved on has not halted it.
    */
-  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string): void {
+  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      this.#recordRun(taskManager, task.id, resultSummary, look.status);
+      this.#recordRun(taskManager, task.id, resultSummary, look.status, undefined, opts);
     }
 
     // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that

@@ -179,7 +179,8 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
       { id: old, task: 'Fetch the data' },
       { id: 'b', task: `Summarize {{${old}.result}} and {{ ${old} }}`, input_from: [old] },
       { id: 'ab', task: 'Count it' },
-      { id: 'c', task: 'Mail it', tool: 'mail_send', input_template: { body: `{{${old}.result}}`, list: [`{{${old}.result}}`], other: '{{b.result}}', near: '{{ab.result}}' }, input_from: ['b'] },
+      // A step lists every step its references read (they are checked against input_from).
+      { id: 'c', task: 'Mail it', tool: 'mail_send', input_template: { body: `{{${old}.result}}`, list: [`{{${old}.result}}`], other: '{{b.result}}', near: '{{ab.result}}' }, input_from: [old, 'b', 'ab'] },
     ] }));
     const out = await updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id: 'a', value: 'fetch' }] },
@@ -192,7 +193,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(steps[1]!.input_from).toEqual(['fetch']);
     expect(steps[1]!.task).toBe('Summarize {{fetch.result}} and {{ fetch }}');
     expect(steps[3]!.input_template).toEqual({ body: '{{fetch.result}}', list: ['{{fetch.result}}'], other: '{{b.result}}', near: '{{ab.result}}' });
-    expect(steps[3]!.input_from).toEqual(['b']);
+    expect(steps[3]!.input_from).toEqual(['fetch', 'b', 'ab']);
   });
 
   it('refuses a rename it cannot place: two steps that read alike, a new id with a hidden character or outside the shape, a taken id', async () => {
@@ -412,6 +413,50 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     );
     const reread = getPipeline('wf-1', history)!;
     expect(reread.steps.map(s => s.id)).toEqual(['step-0', 'step-mid', 'step-1']);
+  });
+
+  it('the save refuses a step reference no run can resolve, and stores nothing', () => {
+    expect(() => history.insertPlannedPipeline(makePlanned({ steps: [
+      { id: 'step-0', task: 'Fetch the data' },
+      { id: 'step-1', task: 'Write {{step-0.result}} and {{step-9.result}}', input_from: ['step-0'] },
+    ] }), null)).toThrow('step #2 (steps[1].task): it refers to the result of step "step-9", and this workflow has no such step.');
+    expect(getPipeline('wf-1', history)).toBeUndefined();
+  });
+
+  it('a stored workflow whose reference misses input_from is repaired by set_input_from, and only an edit that repairs it is saved', async () => {
+    // Saved before references were checked: step-1 reads step-0 without listing it.
+    storePipeline('wf-1', makePlanned({ steps: [
+      { id: 'step-0', task: 'Fetch the data' },
+      { id: 'step-1', task: 'Write {{step-0.result}}' },
+    ] }));
+    const agent = makeAgent(history);
+    const unrelated = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-0', value: 'Fetch it all' }] }, agent);
+    expect(unrelated).toContain('Add "step-0" to this step\'s input_from (in a saved workflow: set_input_from)');
+    // One edit that starts from the broken list and repairs it is checked after all of its actions.
+    const repaired = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-0', value: 'Fetch it all' }, { action: 'set_input_from', step_id: 'step-1', input_from: ['step-0'] }] }, agent);
+    expect(repaired).not.toMatch(/^Error/);
+    const reread = getPipeline('wf-1', history)!;
+    expect(reread.steps[1]!.input_from).toEqual(['step-0']);
+    expect(reread.steps[0]!.task).toBe('Fetch it all');
+  });
+
+  it('a mail-merge placeholder that matches a step id: the edit is refused with the way out, the rename saves, and the placeholder stays as written', async () => {
+    storePipeline('wf-1', makePlanned({ steps: [
+      { id: 'order', task: 'Fetch the order' },
+      { id: 'mail', task: 'Mail it', tool: 'mail_send', input_template: { body: 'Your {{order.result}}' } },
+    ] }));
+    const agent = makeAgent(history);
+    const refused = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'mail', value: 'Mail the customer' }] }, agent);
+    expect(refused).toContain('If "{{order.result}}" is text for the system the tool writes to (for example a mail-merge field), not this workflow\'s step, rename step "order" (rename_step) so its id no longer matches; the text then stays as written. If you cannot tell which is meant, ask the user.');
+    const saved = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id: 'order', value: 'fetch_order' }] }, agent);
+    expect(saved).not.toMatch(/^Error/);
+    const reread = getPipeline('wf-1', history)!;
+    expect(reread.steps.map(x => x.id)).toEqual(['fetch_order', 'mail']);
+    expect(reread.steps[1]!.input_template).toEqual({ body: 'Your {{order.result}}' });
   });
 
   it('removes a step and drops it from dependents input_from', async () => {

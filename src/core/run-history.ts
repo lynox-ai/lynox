@@ -27,6 +27,7 @@ import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
 import { stepIdIssue } from '../orchestrator/step-id.js';
+import { templateRefIssue } from '../orchestrator/template-refs.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -3464,6 +3465,9 @@ export class RunHistory {
     // is shown by its position, and `update_workflow_steps` names the rename it needs first.
     const shapeIssue = stepIdIssue(planned.steps);
     if (shapeIssue) throw new Error(shapeIssue);
+    // A `{{<id>.result}}` no run could resolve is refused at the save, not met as raw text in a run.
+    const refIssue = templateRefIssue(planned.steps);
+    if (refIssue) throw new Error(refIssue);
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The

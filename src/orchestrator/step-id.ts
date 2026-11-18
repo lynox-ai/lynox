@@ -22,9 +22,10 @@ export function isStepIdShape(id: unknown): id is string {
  * Why a step id outside the shape is refused, naming where it is (`step #3 (steps[2].id)`) and never the id
  * itself: the model reads this text, so it carries no stored or typed text back (U-314). Where the
  * model writes the whole step list (a save, an inline run), the last sentence asks it to carry the new
- * id into the steps that read this one: their `input_from` is checked against the ids, so a missed one
- * is refused, while a `{{<id>.result}}` in a task is not. An edit's `rename_step` carries the
- * references itself, and an `add_step` has none, so `refs: false` leaves the sentence out there.
+ * id into the steps that read this one: their `input_from` and their `{{<id>.result}}` references are
+ * checked against the ids (`template-refs.ts`), so a missed one is refused. An edit's `rename_step`
+ * carries the references itself, and an `add_step` has none, so `refs: false` leaves the sentence out
+ * there.
  */
 export function stepIdRefusal(where: string, { refs = true }: { refs?: boolean } = {}): string {
   return `${where}: a step id is 1 to ${String(STEP_ID_MAX)} characters, lowercase a-z, digits 0-9, _ or -, for example fetch_orders. `

@@ -3189,6 +3189,60 @@ describe('WorkerLoop', () => {
     expect((thrown as Error).message).toMatch(/parameter "who"/);
   });
 
+  it('executePipeline records a step reference no run resolves as a failure without a retry and tells the owner which step, in their words', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'pipe-task-ref', pipeline_id: 'pipeline-ref', effect: 'run_workflow' });
+    // Saved before references were checked: s2 reads s1 without listing it.
+    const planned = JSON.stringify({
+      id: 'pipeline-ref', name: 'Weekly report', goal: 'report',
+      steps: [{ id: 's1', task: 'fetch' }, { id: 's2', task: 'sum {{s1.result}}' }],
+      reasoning: 'plan', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z', parameters: [],
+    });
+    const tm = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => tm),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getSecretStore: vi.fn(() => null),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })),
+      getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-ref', manifest_json: planned })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+      config: { language: 'de' },
+    } as unknown as Engine;
+    const router = makeNotificationRouter(true);
+    const loop = new WorkerLoop(engine, router, 60_000);
+    const { _resetPipelineStore } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+
+    await expect((loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP())).resolves.toBeUndefined();
+    // The record keeps the full refusal with its repair; no retry, which would meet the same refusal.
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('pipe-task-ref', expect.stringContaining('step #2 (steps[1].task): it refers to the output of step "s1"'), 'failed', { noRetry: true });
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ body: WORKER_NOTICES.de.workflowRefUnresolved(2) }));
+    expect(WORKER_NOTICES.de.workflowRefUnresolved(2)).toBe('Schritt 2 dieses Workflows nutzt das Ergebnis eines Schritts, den er nicht liest. Darum lief der Workflow nicht. Bitte lynox im Chat, diesen Schritt zu reparieren.');
+    expect(WORKER_NOTICES.en.workflowRefUnresolved(2)).toBe('Step 2 of this workflow uses the result of a step it does not read, so the workflow did not run. Ask lynox in a chat to fix that step.');
+
+    // A webhook run's event ends with the same words, not the full refusal, and it is not pushed here
+    // (the drain tells an event's end).
+    const event: { outcome?: { state: string; reason?: string } } = {};
+    (loop as unknown as { activeTasks: Map<string, unknown> }).activeTasks.set('pipe-task-ref', { event, pauseDeadline: () => undefined, resumeDeadline: () => undefined });
+    (router.notify as ReturnType<typeof vi.fn>).mockClear();
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> }).executePipeline(task, ...NO_STOP());
+    expect(event.outcome).toMatchObject({ state: 'failed', reason: WORKER_NOTICES.de.workflowRefUnresolved(2) });
+    expect(router.notify).not.toHaveBeenCalled();
+  });
+
   it('executePipeline refuses a parameter name with a hidden character with the name\'s own fixed text', async () => {
     vi.useRealTimers();
     // The save takes a ZWNJ between letters in a parameter; a run reads names strictly.
