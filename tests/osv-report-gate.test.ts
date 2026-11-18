@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
 import { evaluate, resolveSeverity, bandForScore, ACCEPTED } from '../scripts/osv-report-gate.mjs';
 
@@ -22,27 +22,18 @@ const MALICIOUS_REPORT = JSON.parse(
   readFileSync(fileURLToPath(new URL('./fixtures/osv-report-malicious.json', import.meta.url)), 'utf8'),
 );
 
-/**
- * One HIGH finding for every shipped acceptance, at its first listed version: what a run in which
- * each acceptance is still needed looks like. A run without them fails on the stale entries, so a
- * test that wants "nothing blocks" adds these, and a test that wants a failure for its own reason
- * adds them too, or the stale entries would fail it for the wrong one.
- */
-function acceptedFindings(): Array<Record<string, unknown>> {
-  return ACCEPTED.map((a: { id: string; package: string; versions: string[] }) => ({
-    source: { path: 'pnpm-lock.yaml', type: 'lockfile' },
-    packages: [{
-      package: { name: a.package, version: a.versions[0], ecosystem: 'npm' },
-      vulnerabilities: [{ id: a.id, database_specific: { severity: 'HIGH' } }],
-      groups: [{ ids: [a.id], max_severity: '7.5' }],
-    }],
-  }));
-}
+const GATE = fileURLToPath(new URL('../scripts/osv-report-gate.mjs', import.meta.url));
 
-/** `doc` plus the accepted findings, and the exit code the scanner gives for the result. */
-function withAccepted(doc: { results: unknown[] }): [{ results: unknown[] }, string] {
-  const results = [...doc.results, ...acceptedFindings()];
-  return [{ results }, results.length > 0 ? '1' : '0'];
+/**
+ * The gate's `main()` in a process of its own, with a given acceptance list and day. The exit status
+ * is still the interface under test; only the shipped list and the calendar are replaced, so these
+ * tests neither break when an acceptance is added, removed or runs out, nor pass because of one.
+ */
+function gateWith(opts: { accepted: unknown[]; today?: string }, args: string[]) {
+  const dir = mkdtempSync(join(tmpdir(), 'osv-gate-main-'));
+  const entry = join(dir, 'gate.mjs');
+  writeFileSync(entry, `import { main } from ${JSON.stringify(pathToFileURL(GATE).href)};\nprocess.exitCode = main(process.argv.slice(2), ${JSON.stringify(opts)});\n`);
+  return spawnSync(process.execPath, [entry, ...args], { encoding: 'utf8' });
 }
 
 /** One finding, shaped like real scanner output, with everything overridable. */
@@ -255,50 +246,26 @@ describe('the shape the gate refuses to guess at', () => {
 describe('the contract CI actually depends on', () => {
   const SCRIPT = fileURLToPath(new URL('../scripts/osv-report-gate.mjs', import.meta.url));
 
-  function run(doc: unknown, rc: string, extraArgs: string[] = []) {
+  function run(doc: unknown, rc: string, extraArgs: string[] = [], opts: { accepted: unknown[]; today?: string } = { accepted: [] }) {
     const dir = mkdtempSync(join(tmpdir(), 'osv-gate-'));
     const file = join(dir, 'osv.json');
     writeFileSync(file, JSON.stringify(doc));
-    return spawnSync(process.execPath, [SCRIPT, '--report', file, '--rc', rc, ...extraArgs], { encoding: 'utf8' });
+    return gateWith(opts, ['--report', file, '--rc', rc, ...extraArgs]);
   }
+
+  it('the shipped entry point exits with the verdict of main()', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'osv-gate-'));
+    const file = join(dir, 'osv.json');
+    writeFileSync(file, JSON.stringify(MALICIOUS_REPORT));
+    expect(spawnSync(process.execPath, [SCRIPT, '--report', file, '--rc', '1'], { encoding: 'utf8' }).status).toBe(1);
+  });
 
   it('exits non-zero on a blocking finding and zero on a clean report', () => {
     // Driven as a PROCESS, because the exit status is the whole interface
     // between this script and the workflow. Calling evaluate() directly cannot
     // see `return ok ? 0 : 1` become `return 0`.
-    expect(run(...withAccepted(MALICIOUS_REPORT)).status).toBe(1);
-    expect(run(...withAccepted({ results: [] })).status).toBe(0);
-  });
-
-  it('fails on an acceptance that no finding matched, and names it', () => {
-    // A withdrawn advisory disappears from the scan; its acceptance must not wait silently for
-    // the next finding that happens to fit it.
-    const r = run({ results: [] }, '0');
-    expect(r.status).toBe(1);
-    for (const a of ACCEPTED) expect(r.stderr).toContain(`::error::osv-report-gate: accepted entry ${a.package} ${a.id} matched no finding`);
-    expect(r.stdout).toContain(`${ACCEPTED.length} stale acceptance(s)`);
-    // Control: the same run with every acceptance matched passes and names none.
-    const ok = run(...withAccepted({ results: [] }));
-    expect(ok.status).toBe(0);
-    expect(ok.stderr).not.toContain('matched no finding');
-    expect(ok.stdout).toContain('0 stale acceptance(s)');
-  });
-
-  it('counts an acceptance whose finding dropped below the floor as stale', () => {
-    const [doc, rc] = withAccepted({ results: [] });
-    const first = (doc.results[0] as { packages: Array<{ vulnerabilities: Array<Record<string, unknown>>; groups: Array<Record<string, unknown>> }> }).packages[0]!;
-    first.vulnerabilities[0]!['database_specific'] = { severity: 'LOW' };
-    first.groups[0]!['max_severity'] = '2.0';
-    const r = run(doc, rc);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain(`accepted entry ${ACCEPTED[0]!.package} ${ACCEPTED[0]!.id} matched no finding`);
-  });
-
-  it('puts stale acceptances in the json verdict apart from errors, which the daily watch reads as no verdict', () => {
-    const v = JSON.parse(run({ results: [] }, '0', ['--format=json']).stdout);
-    expect(v.ok).toBe(false);
-    expect(v.errors).toEqual([]);
-    expect(v.unused).toEqual(ACCEPTED.map((a: { id: string; package: string }) => `${a.package} ${a.id}`));
+    expect(run(MALICIOUS_REPORT, '1').status).toBe(1);
+    expect(run({ results: [] }, '0').status).toBe(0);
   });
 
   it('exits non-zero and says so when the report cannot be read at all', () => {
@@ -327,7 +294,7 @@ describe('the contract CI actually depends on', () => {
         }],
       }],
     };
-    const r = run(...withAccepted(doc));
+    const r = run(doc, '1');
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('::warning::');
     expect(r.stdout).toContain('below the floor: left-pad@1.0.0 GHSA-a-b-c (LOW)');
@@ -376,6 +343,87 @@ describe('the contract CI actually depends on', () => {
   });
 });
 
+describe('an acceptance no finding names any more is stale and blocks', () => {
+  const ENTRY = { id: 'GHSA-sta-leen-try1', package: 'kit-like', versions: ['2.0.1'], expires: '2026-12-15', reason: 'path not reachable here' };
+  const OPTS = { accepted: [ENTRY], today: '2026-11-18' };
+  function finding(severity: string, score: string, version = '2.0.1') {
+    return {
+      source: { path: 'pnpm-lock.yaml' },
+      packages: [{
+        package: { name: 'kit-like', version },
+        vulnerabilities: [{ id: ENTRY.id, ...(severity === '' ? {} : { database_specific: { severity } }) }],
+        groups: [{ ids: [ENTRY.id], max_severity: score }],
+      }],
+    };
+  }
+  function run(results: unknown[], rc: string, opts: { accepted: unknown[]; today?: string } = OPTS, extraArgs: string[] = []) {
+    const dir = mkdtempSync(join(tmpdir(), 'osv-gate-stale-'));
+    const file = join(dir, 'osv.json');
+    writeFileSync(file, JSON.stringify({ results }));
+    return gateWith(opts, ['--report', file, '--rc', rc, ...extraArgs]);
+  }
+  const STALE_LINE = `::error::osv-report-gate: accepted entry kit-like ${ENTRY.id} matched no HIGH or CRITICAL finding`;
+
+  it('fails and names the entry when the scan no longer reports its advisory (a withdrawal)', () => {
+    const r = run([], '0');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(STALE_LINE);
+    expect(r.stdout).toContain('1 stale acceptance(s)');
+  });
+
+  it('passes when the finding is still there (control)', () => {
+    const r = run([finding('HIGH', '7.5')], '1');
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain('matched no');
+    expect(r.stdout).toContain('1 accepted, 0 stale acceptance(s)');
+  });
+
+  it('counts an entry whose finding is now another version, or below the floor, as stale', () => {
+    for (const results of [[finding('HIGH', '7.5', '2.0.2')], [finding('LOW', '2.0')]]) {
+      const r = run(results, '1');
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(STALE_LINE);
+    }
+  });
+
+  it('does not call an expired entry stale while its finding is there: it blocks as expired', () => {
+    const r = run([finding('HIGH', '7.5')], '1', { accepted: [ENTRY], today: '2026-12-16' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('acceptance expired 2026-12-15');
+    expect(r.stderr).not.toContain('matched no');
+  });
+
+  it('does not call an entry stale whose finding has a severity that cannot be resolved: it blocks as unresolved', () => {
+    const r = run([finding('', '')], '1');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('UNRESOLVED');
+    expect(r.stderr).not.toContain('matched no');
+  });
+
+  it('does not judge staleness when a report cannot be read, so it never advises removing a needed entry', () => {
+    const r = gateWith(OPTS, ['--report', '/nonexistent/osv.json', '--rc', '128']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('cannot read');
+    expect(r.stderr).not.toContain('matched no');
+  });
+
+  it('counts an entry named in either report as in use', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'osv-gate-stale-'));
+    const a = join(dir, 'a.json');
+    const b = join(dir, 'b.json');
+    writeFileSync(a, JSON.stringify({ results: [] }));
+    writeFileSync(b, JSON.stringify({ results: [finding('HIGH', '7.5')] }));
+    expect(gateWith(OPTS, ['--report', a, '--rc', '0', '--report', b, '--rc', '1']).status).toBe(0);
+  });
+
+  it('puts stale entries in the json verdict apart from errors, which the daily watch reads as no verdict', () => {
+    const v = JSON.parse(run([], '0', OPTS, ['--format=json']).stdout);
+    expect(v.ok).toBe(false);
+    expect(v.errors).toEqual([]);
+    expect(v.unused).toEqual([`kit-like ${ENTRY.id}`]);
+  });
+});
+
 describe('one scan per lockfile: several --report/--rc pairs', () => {
   const SCRIPT = fileURLToPath(new URL('../scripts/osv-report-gate.mjs', import.meta.url));
   const CLEAN = { results: [] };
@@ -388,11 +436,11 @@ describe('one scan per lockfile: several --report/--rc pairs', () => {
       writeFileSync(file, JSON.stringify(doc));
       return ['--report', file, '--rc', rc];
     });
-    return spawnSync(process.execPath, [SCRIPT, ...args, ...extraArgs], { encoding: 'utf8' });
+    return gateWith({ accepted: [] }, [...args, ...extraArgs]);
   }
 
   it('passes when every scan completed and nothing blocks', () => {
-    expect(runPairs([withAccepted(CLEAN), [CLEAN, '0']]).status).toBe(0);
+    expect(runPairs([[CLEAN, '0'], [CLEAN, '0']]).status).toBe(0);
   });
 
   it('FAILS when the SECOND lockfile yielded no packages, though the first is clean — the gap it closes', () => {
@@ -418,10 +466,8 @@ describe('one scan per lockfile: several --report/--rc pairs', () => {
   });
 
   it('FAILS on a blocking finding in any report, and counts across all of them', () => {
-    // The acceptances are matched in the other report, so only the blocking finding can fail these.
-    const blocked = (r: { status: number | null; stderr: string }) => r.status === 1 && r.stderr.includes('MAL-2023-8697') && !r.stderr.includes('matched no finding');
-    expect(blocked(runPairs([withAccepted(CLEAN), [MALICIOUS_REPORT, '1']]))).toBe(true);
-    expect(blocked(runPairs([[MALICIOUS_REPORT, '1'], withAccepted(CLEAN)]))).toBe(true);
+    expect(runPairs([[CLEAN, '0'], [MALICIOUS_REPORT, '1']]).status).toBe(1);
+    expect(runPairs([[MALICIOUS_REPORT, '1'], [CLEAN, '0']]).status).toBe(1);
     const v = JSON.parse(runPairs([[MALICIOUS_REPORT, '1'], [MALICIOUS_REPORT, '1']], ['--format=json']).stdout);
     expect(v.blocking).toHaveLength(2);
   });
@@ -518,10 +564,12 @@ describe('an accepted finding: one id, one package, exact versions, until a date
     const a = ACCEPTED[0]!;
     const dir = mkdtempSync(join(tmpdir(), 'osv-gate-acc-'));
     const file = join(dir, 'osv.json');
-    writeFileSync(file, JSON.stringify(withAccepted({ results: [] })[0]));
+    // One finding per shipped entry: with only one, any other entry would be stale and fail the run.
+    const results = ACCEPTED.flatMap((e: { id: string; package: string; versions: string[] }) => highOn(e.package, e.versions[0]!, e.id).results);
+    writeFileSync(file, JSON.stringify({ results }));
     const r = spawnSync(process.execPath, [SCRIPT, '--report', file, '--rc', '1'], { encoding: 'utf8' });
     // Valid only until the entry's date; past it this test would see the block, which is the point.
-    if (new Date().toISOString().slice(0, 10) <= a.expires) {
+    if (ACCEPTED.every((e: { expires: string }) => new Date().toISOString().slice(0, 10) <= e.expires)) {
       expect(r.status).toBe(0);
       expect(r.stdout).toContain(`accepted until ${a.expires}`);
       expect(r.stdout).toContain(`${ACCEPTED.length} finding(s), 0 blocking, ${ACCEPTED.length} accepted, 0 stale acceptance(s)`);
