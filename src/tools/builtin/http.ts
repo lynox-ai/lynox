@@ -45,7 +45,7 @@ import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_SET_UP, storeClearanceHeld, storeSetupRefusal } from '../../core/shopify-host.js';
+import { clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_CLEARED, SHOPIFY_NOT_SET_UP, SHOPIFY_SELF_HOSTED, SHOPIFY_UNCONFIRMED, storeClearanceHeld, storeSetupRefusal, type StoreAttachRefusal } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
 import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
@@ -2149,6 +2149,24 @@ async function mintStorePassFor(
 }
 
 const CONTAINMENT_UNWRITABLE = 'this engine could not record that this chat or run reads the store, so nothing was sent to the store. Try again later.';
+
+/** The store refusals a bulk run halts on by name, keyed by their text (each one constant). */
+const STORE_ATTACH_REFUSALS: ReadonlyMap<string, StoreAttachRefusal> = new Map<string, StoreAttachRefusal>([
+  [SHOPIFY_SELF_HOSTED, 'shopifySelfHosted'],
+  [SHOPIFY_NOT_SET_UP, 'shopifyNotSetUp'],
+  [SHOPIFY_UNCONFIRMED, 'shopifyUnconfirmed'],
+  [SHOPIFY_NOT_CLEARED, 'shopifyNotCleared'],
+  [CONTAINMENT_UNWRITABLE, 'containmentUnwritable'],
+]);
+
+/**
+ * The cause behind a refusal of {@link attachEngineManagedAuth}, when it is one of the store's
+ * own: compared to the whole text, with or without the `Error: ` the refusal carries. Null for
+ * any other refusal (no connection, a credential of the request's own, a profile's).
+ */
+export function storeAttachRefusal(refusal: string): StoreAttachRefusal | null {
+  return STORE_ATTACH_REFUSALS.get(refusal.startsWith('Error: ') ? refusal.slice('Error: '.length) : refusal) ?? null;
+}
 
 /**
  * Whether the switch of {@link storeExchangePassFor}'s step 0 is on, read at each call. The one
@@ -4477,7 +4495,9 @@ async function describeConnectedWrite(
  * Only an attached credential counts. A `refusal`, a `hint` and no profile at all
  * are one answer here — the bulk path has no model header to fall back on, so any
  * of them would send the request without the credential the run was planned with.
- * No text is returned: the caller reports a fixed reason, never a profile's wording.
+ * No text is returned: the caller reports a fixed reason, never a profile's wording. For a
+ * refusal of a store's own (self-hosted, a part missing, the control plane), `out.refusal` names
+ * its cause, so the run halts on it rather than on a missing credential.
  *
  * Returns the profile whose credential was attached, or null for every other answer. Null and
  * not an object with a flag, so every refusal stays falsy: a caller that tests the result as
@@ -4512,8 +4532,9 @@ export async function attachStoredCredential(
   /** The bulk run this request is for. The agent below is built by hand and has no thread, so
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
   container: { bulkRunId: string },
-  /** Receives the store pass minted for this request, which the caller hands to its send. */
-  out?: { pass?: StorePass | undefined } | undefined,
+  /** Receives the store pass minted for this request, which the caller hands to its send, or the
+   *  cause a store refused it for ({@link storeAttachRefusal}). */
+  out?: { pass?: StorePass | undefined; refusal?: StoreAttachRefusal | undefined } | undefined,
 ): Promise<ApiProfile | null> {
   const auth = await attachEngineManagedAuth(
     url,
@@ -4532,5 +4553,6 @@ export async function attachStoredCredential(
     { bulkRunId: container.bulkRunId },
   );
   if (out !== undefined && auth.refusal === undefined) out.pass = auth.pass;
+  if (out !== undefined && auth.refusal !== undefined) out.refusal = storeAttachRefusal(auth.refusal) ?? undefined;
   return auth.slot !== undefined && auth.refusal === undefined ? auth.profile ?? null : null;
 }

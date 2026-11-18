@@ -9948,6 +9948,14 @@ export class LynoxHTTPApi {
       const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
       return { key: written.key, fields, found: ledger.probeFound(status.id) };
     };
+    /** The start check's sentence for a store's own cause: the run page's (`bulk.halt.<cause>`, U-232). */
+    const BULK_STORE_REACH_REFUSALS: Readonly<Record<import('../core/shopify-host.js').StoreAttachRefusal, string>> = {
+      shopifySelfHosted: 'lynox reaches Shopify stores only on an instance run by lynox. You run this instance yourself.',
+      shopifyNotSetUp: 'Shopify is not set up on your instance. lynox has to fix this, not you; resuming helps only after that.',
+      shopifyUnconfirmed: 'lynox could not confirm that your instance may reach Shopify. You can resume the run in a few minutes.',
+      shopifyNotCleared: 'Shopify is not cleared for your instance right now. Only lynox can clear it; resuming helps only after that.',
+      containmentUnwritable: 'lynox could not record that this run reads the store, so nothing was sent. You can resume the run later.',
+    };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
     const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
       const status = ledger.getStatus(runId);
@@ -9969,7 +9977,10 @@ export class LynoxHTTPApi {
       }
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
-      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings }, { bulkRunId: runId }))) {
+      const refused: { refusal?: import('../core/shopify-host.js').StoreAttachRefusal | undefined } = {};
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings }, { bulkRunId: runId }, refused))) {
+        // A store's own cause is said as the run page says it; connecting again would not help.
+        if (refused.refusal !== undefined) return BULK_STORE_REACH_REFUSALS[refused.refusal];
         return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
       }
       return null;

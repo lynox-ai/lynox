@@ -6,6 +6,7 @@ import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
+	bulkRestartNoneNote,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -400,6 +401,16 @@ describe('going on from a run that halted', () => {
 	const DE = from({ ...de, 'bulk.system.data_store': 'Datenspeicher' });
 	const EN = from(en);
 
+	// A run no restart moves on is to be planned again, except where that does not help either
+	// (U-232): a self-hosted instance gets its own note, a missing setting none at all.
+	it('notes beside a run no restart moves on what does help, by its halt', () => {
+		expect(bulkRestartNoneNote('shopifySelfHosted')).toBe('bulk.restart.none_self_hosted');
+		expect(bulkRestartNoneNote('shopifyNoApiVersion')).toBeNull();
+		for (const k of ['contract', 'listOrder', 'formCost', 'shopifyReadOff', null]) expect(bulkRestartNoneNote(k), String(k)).toBe('bulk.restart.none');
+		expect([DE.t('bulk.restart.none_self_hosted'), EN.t('bulk.restart.none_self_hosted')])
+			.toEqual(['Weder neu starten noch neu planen hilft hier.', 'Neither restarting nor planning the run again helps here.']);
+	});
+
 	// Over the engine's own set, not a list: every halt an atomic run ends in has its sentence.
 	const ATOMIC = Object.keys(BULK_HALT_REASONS).filter((k) => k.startsWith('atomic'));
 
@@ -744,7 +755,10 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('places every halt the engine names for a write run', () => {
-		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
+		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel',
+			// Neither clears by going on, so a write run halted on one is offered no resume: an
+			// instance that lost its control plane after approval is not set up again by resuming.
+			'shopifySelfHosted', 'shopifyNoApiVersion'];
 		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete'];
 		const left = [...PLANNING_ONLY, ...NO_WRITE_ON];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {

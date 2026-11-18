@@ -28,6 +28,7 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants, isMintedShopifyWrite } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
 import type { StorePass } from './store-pass.js';
+import type { StoreAttachRefusal } from './shopify-host.js';
 import { urlScanForms } from './url-scan-forms.js';
 import { BulkRedirectError, BulkSecretError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
 import { isMailProviderTarget } from './bulk-mail-targets.js';
@@ -62,6 +63,9 @@ export type ExternalRead =
    * (`gateReading`); nothing was sent.
    */
   | { kind: 'no_credential' }
+  /** A store refused the request a pass for a cause of its own (self-hosted, a part missing, the
+   *  control plane, the run's record); nothing was sent. */
+  | { kind: 'store_refused'; reason: StoreAttachRefusal }
   /** The network policy or the address check refused the host; nothing was sent. */
   | { kind: 'blocked' }
   /** The run's contract does not grant this call; nothing was sent. */
@@ -315,7 +319,7 @@ export interface ExternalClientDeps {
   /** Attaches the host's stored credential into `headers`: the connection it came from when it
    *  did, null when it did not. */
   /** `out.pass` receives the store pass of a request to a Shopify store, which the send then carries. */
-  attach: (url: string, headers: Record<string, string>, method: string, out?: { pass?: StorePass | undefined }) => Promise<AttachedConnection | null>;
+  attach: (url: string, headers: Record<string, string>, method: string, out?: { pass?: StorePass | undefined; refusal?: StoreAttachRefusal | undefined }) => Promise<AttachedConnection | null>;
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
   /**
@@ -457,11 +461,11 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     const readBeforeAttach = gateReading(method, headers, url, payload);
     // The method a server acts on, as the contract was checked: a GET that names a write method
     // in its query is a write to the attach as well.
-    const attached: { pass?: StorePass | undefined } = {};
+    const attached: { pass?: StorePass | undefined; refusal?: StoreAttachRefusal | undefined } = {};
     // A GraphQL read is a read to the attach as well, whatever its verb: the body it sends is
     // one the contract admitted only because it cannot write.
     const connection = await deps.attach(url, headers, graphql !== undefined && graphql.writes !== true ? 'GET' : gated, attached);
-    if (!connection) return { kind: 'no_credential' };
+    if (!connection) return attached.refusal !== undefined ? { kind: 'store_refused', reason: attached.refusal } : { kind: 'no_credential' };
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     // Last before it leaves, so the row stands for a request that is sent.
@@ -585,7 +589,7 @@ export function graphqlWriteAnswer(answer: ExternalRead): ExternalRead {
  */
 export function refusedAnswer(answer: ExternalRead): boolean {
   switch (answer.kind) {
-    case 'unauthorized': case 'not_found': case 'retry_after': case 'refused': case 'blocked':
+    case 'unauthorized': case 'not_found': case 'retry_after': case 'refused': case 'blocked': case 'store_refused':
       return true;
     default:
       return false;
@@ -693,6 +697,7 @@ export function externalWriter(client: ExternalClient, opts: {
     }
     switch (got.kind) {
       case 'no_credential': throw new BulkWriterHalt(BULK_HALT_REASONS.credential);
+      case 'store_refused': throw new BulkWriterHalt(BULK_HALT_REASONS[got.reason]);
       case 'unauthorized': throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized);
       case 'blocked': throw new BulkWriterHalt(BULK_HALT_REASONS.blocked);
       case 'not_granted': throw new BulkWriterHalt(BULK_HALT_REASONS.contract);

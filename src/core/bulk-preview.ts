@@ -35,7 +35,7 @@ import { shownLinkDomain, verdictTextRefusalOf } from './bulk-judge.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { shopifyBulkReadEnabled, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { productTitleOf } from './shopify-saved-form.js';
-import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
+import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, isShopifyStoreHostName, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, externalHostOf,
   type BulkHaltReason, type BulkInvalidReason, type BulkLedger, type BulkListRun, type BulkRunForPreview,
@@ -136,6 +136,7 @@ function invalidFor(read: ExternalRead): BulkInvalidReason | null {
 function haltFor(read: ExternalRead): BulkHaltReason | null {
   switch (read.kind) {
     case 'no_credential': return BULK_HALT_REASONS.credential;
+    case 'store_refused': return BULK_HALT_REASONS[read.reason];
     case 'unauthorized': return BULK_HALT_REASONS.unauthorized;
     case 'blocked': return BULK_HALT_REASONS.blocked;
     case 'not_granted': return BULK_HALT_REASONS.contract;
@@ -193,7 +194,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // was on sends nothing once it is off.
   if (shopify && !(deps.shopifyEnabled ?? shopifyBulkReadEnabled)()) return halt(BULK_HALT_REASONS.shopifyReadOff);
   const endpoint = shopify ? shopifyGraphqlEndpoint(host) : null;
-  if (shopify && endpoint === null) return halt(BULK_HALT_REASONS.unavailable);
+  // No endpoint: for a store's host the preset pins no API version, a setting of lynox's which
+  // resuming does not change; for any other host the store cannot be reached as one.
+  if (shopify && endpoint === null) return halt(isShopifyStoreHostName(host) ? BULK_HALT_REASONS.shopifyNoApiVersion : BULK_HALT_REASONS.unavailable);
   if (shopify && list.state === 'pending') return await readShopifyList(list);
   client = shopify
     ? deps.clientFor(run, undefined, { phase: 'read', targets: ledger.externalTargetKeys(runId) })

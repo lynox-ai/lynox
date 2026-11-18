@@ -37,7 +37,8 @@ import type { ContainmentMirror } from '../../core/history-markers.js';
 import { createToolContext, type ToolContext } from '../../core/tool-context.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
-import { attachStoredCredential, httpRequestTool } from './http.js';
+import { attachStoredCredential, httpRequestTool, storeAttachRefusal } from './http.js';
+import { SHOPIFY_NOT_CLEARED, SHOPIFY_NOT_SET_UP, SHOPIFY_SELF_HOSTED, SHOPIFY_UNCONFIRMED } from '../../core/shopify-host.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 const ORIGIN = 'https://acme.myshopify.com';
@@ -310,6 +311,81 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
     expect(containedRows()).toEqual([]);
     // Both write nothing, so neither reaches the control plane, whose clearance records the instance.
     expect(cpAsked).toBe(0);
+  });
+});
+
+describe('a bulk run\'s request a store refuses names the cause it halts on', () => {
+  // The run halts on the cause (`BULK_HALT_REASONS[cause]`), not on `credential`: the connection
+  // is there, and connecting it again would not help.
+  const attach = async (runId = 'run-1', over: Partial<{ containment: Containment | null }> = {}): Promise<{ attached: Awaited<ReturnType<typeof attachStoredCredential>>; refusal: unknown }> => {
+    const out: { pass?: unknown; refusal?: unknown } = {};
+    const attached = await attachStoredCredential(URL_OK, {}, false, {
+      apiStore: ctx.apiStore!,
+      secretStore: { resolve: (n: string) => (n === accessTokenKey('shop-acme') ? TOKEN : null) } as never,
+      principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
+      exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest,
+      containment: over.containment === undefined ? containment : over.containment,
+      vaultNameBindings: ctx.vaultNameBindings,
+      shellIsolation: ctx.shellIsolation,
+    }, { bulkRunId: runId }, out as never);
+    return { attached, refusal: out.refusal };
+  };
+
+  it('a request it attaches names none', async () => {
+    expect(await attach()).toEqual({ attached: expect.objectContaining({ id: 'shop-acme' }), refusal: undefined });
+  });
+
+  it('self-hosted: no control plane', async () => {
+    vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifySelfHosted' });
+  });
+
+  it('not set up: no sidecar', async () => {
+    ctx.shellIsolation = { kind: 'local' } as never;
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyNotSetUp' });
+    expect(cpAsked).toBe(0);
+  });
+
+  it('the control plane does not answer: unconfirmed, also while its backoff holds', async () => {
+    cpAnswer = () => new Response('', { status: 503 });
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyUnconfirmed' });
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyUnconfirmed' });
+    expect(cpAsked).toBe(1);
+  });
+
+  it('the control plane refuses: not cleared, also while its backoff holds', async () => {
+    cpAnswer = () => new Response('{"ok":false,"reason":"below_floor"}', { status: 200 });
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyNotCleared' });
+    expect(await attach()).toEqual({ attached: null, refusal: 'shopifyNotCleared' });
+    expect(cpAsked).toBe(1);
+  });
+
+  it('the run cannot be recorded as one that reads the store', async () => {
+    expect(await attach('run-1', { containment: null })).toEqual({ attached: null, refusal: 'containmentUnwritable' });
+  });
+
+  it('no connection to the store, or no run to contain: no cause of the store\'s, so the halt stays credential', async () => {
+    expect(await attach('')).toEqual({ attached: null, refusal: undefined });
+    ctx.apiStore!.remove('shop-acme');
+    expect(await attach()).toEqual({ attached: null, refusal: undefined });
+  });
+});
+
+describe('storeAttachRefusal', () => {
+  it.each([
+    [SHOPIFY_SELF_HOSTED, 'shopifySelfHosted'],
+    [SHOPIFY_NOT_SET_UP, 'shopifyNotSetUp'],
+    [SHOPIFY_UNCONFIRMED, 'shopifyUnconfirmed'],
+    [SHOPIFY_NOT_CLEARED, 'shopifyNotCleared'],
+  ])('reads %s with and without its Error: prefix', (text, cause) => {
+    expect(storeAttachRefusal(text)).toBe(cause);
+    expect(storeAttachRefusal(`Error: ${text}`)).toBe(cause);
+  });
+
+  it('reads no other text, not even one that holds a cause\'s', () => {
+    expect(storeAttachRefusal(`${SHOPIFY_NOT_CLEARED} And more.`)).toBeNull();
+    expect(storeAttachRefusal('Error: no credential')).toBeNull();
+    expect(storeAttachRefusal('')).toBeNull();
   });
 });
 

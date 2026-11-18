@@ -248,6 +248,13 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.formCost]: 'Der Shop hat eine Abfrage als zu aufwendig abgelehnt.',
     [BULK_HALT_REASONS.shopifyReadOff]: 'Lesen von Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.',
     [BULK_HALT_REASONS.shopifyWriteOff]: 'Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen.',
+    // Why a request to a store got no pass, one sentence per cause (U-232).
+    [BULK_HALT_REASONS.shopifySelfHosted]: 'Shopify-Shops erreicht lynox nur auf einer Instanz, die lynox betreibt.',
+    [BULK_HALT_REASONS.shopifyNotSetUp]: 'Shopify ist auf dieser Instanz nicht eingerichtet. Das behebt lynox; fortsetzen hilft erst danach.',
+    [BULK_HALT_REASONS.shopifyUnconfirmed]: 'lynox konnte nicht bestätigen, dass diese Instanz Shopify erreichen darf. Der Lauf lässt sich in ein paar Minuten fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNotCleared]: 'Shopify ist für diese Instanz zurzeit nicht freigegeben; freigeben kann nur lynox.',
+    [BULK_HALT_REASONS.containmentUnwritable]: 'lynox konnte nicht festhalten, dass dieser Lauf den Shop liest; gesendet wurde nichts. Der Lauf lässt sich später fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNoApiVersion]: 'Für Shopify fehlt in lynox eine Einstellung. Fortsetzen hilft nicht; das behebt lynox.',
     // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
     [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
