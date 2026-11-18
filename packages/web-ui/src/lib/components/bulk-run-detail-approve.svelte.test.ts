@@ -1746,7 +1746,7 @@ describe('the start of a judged run, in words', () => {
 		expect(t('bulk.start.judge')).toBe('Beurteilung starten');
 		expect(t('bulk.restart.judge')).toBe('Beurteilung fortsetzen');
 		setLocale('en');
-		for (const key of keys) expect(t(key), key).not.toMatch(/the judging|\ba judge\b/);
+		for (const key of keys) expect(t(key), key).not.toMatch(/the judging|\b(a|the) judge\b/i);
 		expect(t('bulk.start.judge')).toBe('Start judging');
 		expect(t('bulk.restart.judge')).toBe('Continue judging');
 		setLocale('de');
