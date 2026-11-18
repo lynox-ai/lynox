@@ -38,7 +38,7 @@ function runWith(verdict: unknown): { status: number | null; stdout: string } {
   const dir = mkdtempSync(join(tmpdir(), 'osv-watch-'));
   const file = join(dir, 'verdict.json');
   writeFileSync(file, JSON.stringify(verdict));
-  const script = `set -e\n${staleLines(scanStep()).split('/tmp/osv-verdict.json').join(file)}\n`;
+  const script = `set -euo pipefail\n${staleLines(scanStep()).split('/tmp/osv-verdict.json').join(file)}\n`;
   const r = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 10_000 });
   return { status: r.status, stdout: r.stdout };
 }
@@ -58,8 +58,15 @@ describe('the daily watch reports a stale acceptance instead of closing quietly'
     expect(runWith(BASE).status).toBe(0);
   });
 
-  it('decides at the end of the step, after the tracking issue is synced', () => {
+  it('decides at the end of the step, after the tracking issue is synced, at the step\'s top level', () => {
     const run = scanStep();
     expect(run.lastIndexOf('if [ "${STALE}" -gt 0 ]; then')).toBeGreaterThan(run.lastIndexOf('gh issue'));
+    // Not inside a branch of the issue sync: the block and the count sit at the step's own indent,
+    // the indent of its first line, so it runs whether or not HIGH/CRITICAL findings were found.
+    const lines = run.split('\n');
+    const indent = (l: string) => /^ */.exec(l)![0].length;
+    const top = indent(lines.find((l) => l.trim() !== '')!);
+    expect(indent(lines.find((l) => /^\s*if \[ "\$\{STALE\}" -gt 0 \]; then/.test(l))!)).toBe(top);
+    expect(indent(lines.find((l) => /^\s*STALE=\$\(/.test(l))!)).toBe(top);
   });
 });
