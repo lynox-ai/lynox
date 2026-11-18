@@ -2732,10 +2732,9 @@ export async function replyPermission(answer: string, opts: { typed?: boolean } 
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
 	const outcome = await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId });
-	// Kept only once the engine took this answer: one it refused (a key typed into the field), never
-	// got, or did not judge (a question already answered, unknown or not this chat's) is not shown as
-	// given. Masked, like everything else the chat shows of what was typed.
-	if (keepIn !== null && sessionId === sid && (outcome === 'taken' || outcome === 'consent_unrecognised') && messages.includes(keepIn)) {
+	// Kept only once the engine took the answer: one it refused (a key typed into the field) or never
+	// got is not shown as given. Masked, like everything else the chat shows of what was typed.
+	if (keepIn !== null && sessionId === sid && (outcome === 'settled' || outcome === 'consent_unrecognised') && messages.includes(keepIn)) {
 		keepIn.blocks = [...(keepIn.blocks ?? []), { type: 'answer', text: maskText(answer) }];
 	}
 	await reportReply(sid, outcome, draftable);
@@ -2778,13 +2777,13 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		chatErrorDetail = null;
 		return;
 	}
-	if (outcome === 'consent_unrecognised' || outcome === 'consent_unrecognised_before') {
+	if (outcome === 'consent_unrecognised') {
 		if (sessionId !== sid) return;
 		chatError = t('chat.consent_unrecognised');
 		chatErrorDetail = null;
 		return;
 	}
-	if (outcome === 'settled' || outcome === 'taken' || sessionId !== sid) return;
+	if (outcome === 'settled' || sessionId !== sid) return;
 	if (chatError !== null && chatError !== closedReplySentence) return;
 	// Who reads it decides the way out where only the owner can act. Unknown reads as the owner,
 	// as on the settings pages; the server is the boundary either way.
@@ -2832,10 +2831,7 @@ export async function postTabProgress(promptId: string, partial: (string | null)
  *  it answered 410 (a closed question, with the reason the server gave, or null), `key_refused`
  *  when it refused the answer as carrying a key (422 `mandate_key_input`), and `settled` for
  *  every other final word. */
-/** `taken`: this answer was recorded now. `settled`: the reply is done without that — a question
- *  already answered (a retry, another tab), unknown, or refused (404, 409, 400). The two
- *  `consent_unrecognised` outcomes say the same to the person; only the first is this answer's. */
-type ReplyOutcome = 'taken' | 'settled' | 'lost' | 'key_refused' | 'consent_unrecognised' | 'consent_unrecognised_before' | { readonly closed: ClosedCode | null };
+type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | 'consent_unrecognised' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -2869,11 +2865,9 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 			// An answer to one of the engine's confirmations that is none of its keys: recorded as a
 			// refusal, and said to the person, never a silent "no".
 			if (res.ok) {
-				let reply: { refused?: unknown; idempotent?: unknown } | null = null;
-				try { reply = (await res.json()) as { refused?: unknown; idempotent?: unknown } | null; } catch { /* no body */ }
-				const before = reply?.idempotent === true;
-				if (reply?.refused === CONSENT_UNRECOGNISED) return before ? 'consent_unrecognised_before' : 'consent_unrecognised';
-				return before ? 'settled' : 'taken';
+				let refused: unknown;
+				try { refused = ((await res.json()) as { refused?: unknown } | null)?.refused; } catch { /* no body */ }
+				if (refused === CONSENT_UNRECOGNISED) return 'consent_unrecognised';
 			}
 			// 2xx and the other final answers (404 stale, 409 refused, 400) are all "done".
 			return 'settled';
