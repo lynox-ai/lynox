@@ -201,13 +201,13 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       // The way to make a `{{<id>.result}}` reference resolve in a stored step: the steps it reads
       // (`template-refs.ts`). Each entry is resolved as add_step resolves its inputs.
       const at = stepIndex(steps, mod.step_id);
-      if (at === 'ambiguous') return ambiguousText(steps, mod.step_id, 'set_input_from');
+      if (at === 'ambiguous') return ambiguousText(steps, mod.step_id, 'set_input_from', runNames);
       if (at === 'missing') return `Error: Step ${quotedId(mod.step_id)} not found for set_input_from.`;
       const inputFrom: string[] = [];
       const missing: string[] = [];
       for (const dep of mod.input_from ?? []) {
         const d = stepIndex(steps, dep);
-        if (d === 'ambiguous') return ambiguousText(steps, dep, `the input of step #${String(at + 1)} (set_input_from)`);
+        if (d === 'ambiguous') return ambiguousText(steps, dep, `the input of step #${String(at + 1)} (set_input_from)`, runNames);
         if (d === 'missing') { missing.push(quotedId(dep)); continue; }
         if (d === at) return `Error: set_input_from: step #${String(at + 1)} cannot read its own output.`;
         if (!inputFrom.includes(steps[d]!.id)) inputFrom.push(steps[d]!.id);
@@ -238,17 +238,21 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       // system a tool writes to) would read this step's output there once its input_from names `to`;
       // in the step itself, that text would become a reference to itself.
       if (to !== from) {
+        // Positions as in the list this edit started from: a refused edit is discarded, so the next
+        // one starts from there (a step this edit added has none there, and is named where it stands).
+        const shownAt = (s: InlinePipelineStep, i: number): string => String(stored.get(s)?.at ?? i + 1);
         for (const [i, s] of steps.entries()) {
           if (i !== idx && !(s.input_from ?? []).includes(from)) continue;
           const field = fieldReferencing(s, to);
           if (!field) continue;
           if (i === idx) {
-            return `Error: rename_step: step #${String(idx + 1)} holds text starting with "{{${to}" in its ${field}, `
+            return `Error: rename_step: step #${shownAt(s, i)} holds text starting with "{{${to}" in its ${field}, `
               + 'which the new id would turn into a reference to the step itself. Choose another id.';
           }
-          const reader = isStepIdShape(s.id) ? `step "${s.id}"` : `step #${String(i + 1)}`;
-          return `Error: rename_step: ${reader} reads step #${String(idx + 1)} and holds text starting with "{{${to}" in its ${field}, `
-            + `which the new id would turn into a reference to step #${String(idx + 1)}. Choose another id.`;
+          const reader = isStepIdShape(s.id) ? `step "${s.id}"` : `step #${shownAt(s, i)}`;
+          const renamed = shownAt(steps[idx]!, idx);
+          return `Error: rename_step: ${reader} reads step #${renamed} and holds text starting with "{{${to}" in its ${field}, `
+            + `which the new id would turn into a reference to step #${renamed}. Choose another id.`;
         }
       }
       steps[idx]!.id = to;

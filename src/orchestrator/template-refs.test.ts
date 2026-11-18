@@ -227,6 +227,33 @@ describe('the placeholder in the way out is quoted only in the step id shape', (
 });
 
 describe('rename_step rewrites a reference only where it is one', () => {
+  it('set_input_from naming a run name two stored steps share is refused with both positions', () => {
+    const s: InlinePipelineStep[] = [{ id: 'a', task: 'A' }, { id: 'b', task: 'B' }, { id: 'Fetch Orders', task: 'F1' }, { id: 'Fetch Orders', task: 'F2' }];
+    const out = applyModifications(s, [{ action: 'set_input_from', step_id: 'step-3', input_from: ['a'] }]) ?? '';
+    expect(out).toContain('#3');
+    expect(out).toContain('#4');
+    expect(out).not.toContain('"#1"');
+    const dep = applyModifications(s, [{ action: 'set_input_from', step_id: 'b', input_from: ['step-3'] }]) ?? '';
+    expect(dep).toContain('#3');
+    expect(dep).toContain('#4');
+    expect(dep).not.toContain('"#1"');
+  });
+
+  it('the rename refusal names steps by their position before this edit, not after an add_step moved them', () => {
+    const s: InlinePipelineStep[] = [{ id: 'a', task: 'A' }, { id: 'Fetch Orders', task: 'Fetch' }, { id: 'r', task: 'Read', input_template: { body: '{{x.y}}' }, input_from: ['Fetch Orders'] }];
+    expect(applyModifications(s, [{ action: 'add_step', step_id: 'n', value: 'New', after: 'a' }, { action: 'rename_step', step_id: 'step-2', value: 'x' }]))
+      .toBe('Error: rename_step: step "r" reads step #2 and holds text starting with "{{x" in its input_template.body, which the new id would turn into a reference to step #2. Choose another id.');
+  });
+
+  it('a self-reference refusal and a reader outside the shape use the positions before this edit too', () => {
+    const own: InlinePipelineStep[] = [{ id: 'a', task: 'A' }, { id: 'mail', task: 'Mail', input_template: { body: '{{send.result}}' } }];
+    expect(applyModifications(own, [{ action: 'add_step', step_id: 'n', value: 'New', after: 'a' }, { action: 'rename_step', step_id: 'mail', value: 'send' }]))
+      .toBe('Error: rename_step: step #2 holds text starting with "{{send" in its input_template.body, which the new id would turn into a reference to the step itself. Choose another id.');
+    const reader: InlinePipelineStep[] = [{ id: 'y', task: 'Y' }, { id: 'Mail It', task: 'Mail', input_template: { body: '{{a.result}}' }, input_from: ['y'] }];
+    expect(applyModifications(reader, [{ action: 'add_step', step_id: 'n', value: 'New', after: 'y' }, { action: 'rename_step', step_id: 'y', value: 'a' }]))
+      .toBe('Error: rename_step: step #2 reads step #1 and holds text starting with "{{a" in its input_template.body, which the new id would turn into a reference to step #1. Choose another id.');
+  });
+
   it('a step stored outside the id shape, renamed by its run name, takes its readers and their references along', () => {
     const s: InlinePipelineStep[] = [{ id: 'Old Fetch', task: 'Fetch' }, { id: 'mail', task: 'Mail it', input_template: { body: 'Your {{Old Fetch.result}}' }, input_from: ['Old Fetch'] }];
     expect(applyModifications(s, [{ action: 'rename_step', step_id: 'step-1', value: 'fetch' }])).toBeNull();
