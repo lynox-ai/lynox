@@ -121,6 +121,17 @@ describe('save_workflow — session source', () => {
     expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
   });
 
+  it('says the workflow is saved when only its lineage record fails after the save', async () => {
+    mockHistory.insertProcess.mockImplementationOnce(() => { throw new Error('history.db is locked'); });
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, agent);
+    expect(result).not.toContain('No workflow was saved');
+    const parsed = JSON.parse(result) as { workflow_id: string; next: string };
+    expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
+    expect(getPipeline(parsed.workflow_id)).toBeDefined();
+    expect(parsed.next).toContain('It is saved and reusable.');
+  });
+
   it('saves under the principal of the turn (engine.db v45 authorship)', async () => {
     const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
     await saveWorkflowTool.handler({ name: 'Test' }, makeAgent({ currentThreadId: 'thread-1', principal: eva }, mockHistory));
