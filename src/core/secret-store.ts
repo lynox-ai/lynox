@@ -700,7 +700,8 @@ export function maskSecretsAndPatterns(
     }
   }
 
-  spans.push(...valueSpans(text, values));
+  // A loop, not a spread: a long text can hold more matches than a call takes arguments.
+  for (const span of valueSpans(text, values)) spans.push(span);
   return maskSpans(text, spans);
 }
 
@@ -826,16 +827,20 @@ function credentialLeavesOfJson(json: string): string[] {
   let parsed: unknown;
   try { parsed = JSON.parse(json); } catch { return []; }
   const out: string[] = [];
-  // Only the nearest property name decides, and an array takes its property's: a profile named
-  // `monkey` or `token-saver` must not make its model id and base URL credentials.
-  const walk = (v: unknown, underCredential: boolean): void => {
+  // The top level's property names are names the operator chose (a profile, a tier) and decide
+  // nothing: a profile named `monkey` or `token-saver` must not make its model id and base URL
+  // credentials. Below it, a credential-named property makes everything under it one, nested
+  // objects and arrays included.
+  const walk = (v: unknown, underCredential: boolean, topLevel: boolean): void => {
     if (typeof v === 'string') { if (underCredential) out.push(v); return; }
-    if (Array.isArray(v)) { for (const x of v) walk(x, underCredential); return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, underCredential, false); return; }
     if (v !== null && typeof v === 'object') {
-      for (const [k, x] of Object.entries(v as Record<string, unknown>)) walk(x, CREDENTIAL_PROPERTY.test(k));
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+        walk(x, underCredential || (!topLevel && CREDENTIAL_PROPERTY.test(k)), false);
+      }
     }
   };
-  walk(parsed, false);
+  walk(parsed, false, true);
   return out;
 }
 

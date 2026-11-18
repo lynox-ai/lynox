@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { maskEngineEnvSecrets, registerProcessSecret } from './secret-store.js';
+import { maskEngineEnvSecrets, maskSecretsAndPatterns, registerProcessSecret } from './secret-store.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { WebPushNotificationChannel } from '../integrations/push/web-push-channel.js';
 
@@ -58,12 +58,22 @@ describe('engine env secrets: the masked value set', () => {
     expect(out).toContain(base);
   });
 
+  it('masks every value nested under a credential-named property', () => {
+    const nested = 'zQ7nestedleafPq9Lm2Xv4';
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({ fast: { model_id: 'example-model-name-2026', credentials: { primary: nested } } }));
+    expect(maskEngineEnvSecrets(`n ${nested}`)).not.toContain(nested);
+  });
+
   it('masks a value that overlaps itself in every occurrence', () => {
     // The value starts as it ends (`XYZ`), so its second occurrence begins inside the first.
     const value = 'XYZXYZQXYZ';
     vi.stubEnv('LYNOX_VAULT_KEY', value);
     const out = maskEngineEnvSecrets(`a ${'XYZXYZQXYZXYZQXYZ'} b`);
     expect(out).toBe('a *** b');
+  });
+
+  it('masks a text with more occurrences than a call takes arguments', () => {
+    expect(maskSecretsAndPatterns('a'.repeat(400_000), ['aaaaaaaa'])).toBe('***');
   });
 
   it('masks two values that overlap without one inside the other, leaving no part of either', () => {
