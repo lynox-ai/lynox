@@ -1149,6 +1149,11 @@ function underWorkflowRun<T>(trail: WorkflowRunTrail | null, principal: RequestP
 export const RETRY_OTHER_PRINCIPAL_REFUSAL = 'The last run of this workflow was for someone else, so it cannot be retried here: a retry would continue from what that run read. '
   + 'Start a new run instead. A new run does every step again from the start, so first tell the user that steps of the last run may already have changed something, '
   + 'such as sending mail or writing data, and start it only if they want that done again.';
+// The same refusal for a workflow that runs only once and has run: a new run of it is refused too
+// ("already been executed"), so it may not be offered as the way out (U-278).
+export const RETRY_OTHER_PRINCIPAL_ONE_SHOT_REFUSAL = 'This workflow runs only once and has already run, so it cannot be retried and cannot be run again from the start either; do not offer either. '
+  + '(The last run was for someone else, and a retry would continue from what that run read.) If the user wants it done again, offer to plan it anew as a new workflow. '
+  + 'That new workflow does every step from the start, so first tell the user that steps of the last run may already have changed something, such as sending mail or writing data.';
 
 /** Whom a run was for, as one string: the person's tag and, for a mandate, its grant. */
 function principalKey(p: RequestPrincipal): string {
@@ -1271,7 +1276,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     // steps: under anyone but whom that run was for, it would carry one person's results into
     // another's run, or re-run a mandate's steps without its lock (1100).
     if (prev.ranAs !== principalKey(runAs)) {
-      return `Error: ${RETRY_OTHER_PRINCIPAL_REFUSAL}`;
+      return `Error: ${planned.template !== true && planned.executed ? RETRY_OTHER_PRINCIPAL_ONE_SHOT_REFUSAL : RETRY_OTHER_PRINCIPAL_REFUSAL}`;
     }
     // A retry runs the previous run's steps, not the stored ones: unattended, only when those were
     // exactly the steps the owner's stamp holds over now.

@@ -3213,6 +3213,60 @@ describe('a stored workflow run from a chat follows its author: retry, log, ways
     mockValidateManifest.mockImplementation((m: unknown) => m);
   });
 
+  it('at a workflow that runs once and has run, the refusal offers no new run, which would be refused too', async () => {
+    const { RETRY_OTHER_PRINCIPAL_REFUSAL, RETRY_OTHER_PRINCIPAL_ONE_SHOT_REFUSAL } = await import('./pipeline.js');
+    storePipeline(WF, {
+      id: WF, name: 'wf', goal: 'g', steps: [{ id: 'one', task: 'do one thing' }], reasoning: 'r', estimatedCost: 0.01,
+      createdAt: new Date().toISOString(), executed: false, executionMode: 'orchestrated', mode: 'autonomous',
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: WF }, agentAs(OWNER_PRINCIPAL, () => OWNER_AUTHORSHIP).agent);
+    expect(await runWorkflowTool.handler({ workflow_id: WF, retry: true }, agentAs(A, () => OWNER_AUTHORSHIP).agent)).toBe(`Error: ${RETRY_OTHER_PRINCIPAL_ONE_SHOT_REFUSAL}`);
+    // What the sentence says: a new run is refused as well.
+    expect(await runWorkflowTool.handler({ workflow_id: WF }, agentAs(A, () => OWNER_AUTHORSHIP).agent)).toMatch(/already been executed/);
+    expect(RETRY_OTHER_PRINCIPAL_ONE_SHOT_REFUSAL).not.toMatch(/start a new run/i);
+    expect(mockRetryManifest).not.toHaveBeenCalled();
+    // A run-once workflow whose flag was reset after its run (a failure after the run was recorded)
+    // may be started again, so there the refusal keeps "start a new run" — and a new run is not refused.
+    _resetPipelineStore();
+    const reset = {
+      id: WF, name: 'wf', goal: 'g', steps: [{ id: 'one', task: 'do one thing' }], reasoning: 'r', estimatedCost: 0.01,
+      createdAt: new Date().toISOString(), executed: false, executionMode: 'orchestrated' as const, mode: 'autonomous' as const,
+    };
+    storePipeline(WF, reset);
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: WF }, agentAs(OWNER_PRINCIPAL, () => OWNER_AUTHORSHIP).agent);
+    reset.executed = false;
+    expect(await runWorkflowTool.handler({ workflow_id: WF, retry: true }, agentAs(A, () => OWNER_AUTHORSHIP).agent)).toBe(`Error: ${RETRY_OTHER_PRINCIPAL_REFUSAL}`);
+    mockRunManifest.mockClear();
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    expect(await runWorkflowTool.handler({ workflow_id: WF }, agentAs(A, () => OWNER_AUTHORSHIP).agent)).not.toMatch(/^Error/);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    // CONTROL: a saved workflow, which runs again, keeps "start a new run".
+    _resetPipelineStore();
+    seed();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: WF }, agentAs(OWNER_PRINCIPAL, () => OWNER_AUTHORSHIP).agent);
+    expect(await runWorkflowTool.handler({ workflow_id: WF, retry: true }, agentAs(A, () => OWNER_AUTHORSHIP).agent)).toBe(`Error: ${RETRY_OTHER_PRINCIPAL_REFUSAL}`);
+    expect(RETRY_OTHER_PRINCIPAL_REFUSAL).toMatch(/Start a new run instead/);
+    // A saved workflow runs again even if its record said it ran (no write sets that today; the refusal
+    // keys on the saved kind, not on the flag): the old refusal holds.
+    _resetPipelineStore();
+    const ran = {
+      id: WF, name: 'wf', goal: 'g', steps: [{ id: 'one', task: 'do one thing' }], reasoning: 'r', estimatedCost: 0.01,
+      createdAt: new Date().toISOString(), executed: false, executionMode: 'orchestrated' as const, template: true, mode: 'autonomous' as const,
+    };
+    storePipeline(WF, ran);
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: WF }, agentAs(OWNER_PRINCIPAL, () => OWNER_AUTHORSHIP).agent);
+    ran.executed = true;
+    expect(await runWorkflowTool.handler({ workflow_id: WF, retry: true }, agentAs(A, () => OWNER_AUTHORSHIP).agent)).toBe(`Error: ${RETRY_OTHER_PRINCIPAL_REFUSAL}`);
+    mockRunManifest.mockClear();
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    expect(await runWorkflowTool.handler({ workflow_id: WF }, agentAs(A, () => OWNER_AUTHORSHIP).agent)).not.toMatch(/^Error/);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
   it('a retry is refused under anyone but whom the earlier run was for, before any step', async () => {
     const id = seed();
     // The owner ran the owner's workflow; A, which may run it as itself, may not retry that run.
