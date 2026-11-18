@@ -139,6 +139,8 @@ const DE_HALT_REST: Readonly<Partial<Record<keyof typeof BULK_HALT_REASONS, stri
   shopifyReadOff: 'Lesen von Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.',
   shopifyWriteOff: 'Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen.',
   superseded: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
+  // To the owner, on whose device the push lands (U-324).
+  discarded: 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.',
   judgeModel: 'Der KI-Anbieter dieses Laufs hat kein Modell zum Beurteilen, oder der Betreiber erlaubt es nicht.',
 };
 /** The German of each bulk lead, as ux wrote it (Rest-P), compared whole. */

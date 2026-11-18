@@ -439,6 +439,27 @@ describe('the preview effect', () => {
     }
   });
 
+  it('tells the discard, not its own halt, when the owner discarded the run while it was reading', async () => {
+    const s = shop();
+    for (const i of [0, 1, 2]) s.special.set(`/products/${String(i)}`, { status: 503 });
+    const restore = serve(s);
+    const real = ledger.halt.bind(ledger);
+    // The owner discards between the pass's last read and its halt.
+    const halted = vi.spyOn(ledger, 'halt').mockImplementation((id, reason) => { ledger.discardRun(id); real(id, reason); });
+    try {
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+      const runId = planRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '1' } })));
+      const out = await runBulkPreview(runId, previewDeps(client()));
+      expect(halted).toHaveBeenCalledWith(runId, BULK_HALT_REASONS.consecutiveFailures);
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.discarded);
+      expect(out.summary).toContain(BULK_HALT_REASONS.discarded);
+      expect(out.summary).not.toContain(BULK_HALT_REASONS.consecutiveFailures);
+    } finally {
+      halted.mockRestore();
+      restore();
+    }
+  });
+
   it('waits out one 429 and ends the tick on a second, due again when the host said', async () => {
     const s = shop();
     let hits = 0;

@@ -247,6 +247,7 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   shopifyWriteOff: 'Writing to Shopify stores in a bulk run is switched off on this instance. Once it is on again, the run can be continued.',
   consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.',
   superseded: 'Another run with judging was started in its place. This one wrote nothing.',
+  discarded: 'You discarded this run. lynox wrote nothing.',
   judgeModel: 'The AI provider of this run has no model for judging, or the operator does not allow it.',
 });
 let enHaltByText: ReadonlyMap<string, string> | undefined;
@@ -313,6 +314,9 @@ function deHaltReason(reason: string): string | undefined {
     // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
     [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
+    // U-324: the run page's words, neutral as to person.
+    // Said to the owner, on whose device a push lands (U-324).
+    [BULK_HALT_REASONS.discarded]: 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.',
     [BULK_HALT_REASONS.judgeModel]: 'Der KI-Anbieter dieses Laufs hat kein Modell zum Beurteilen, oder der Betreiber erlaubt es nicht.',
   });
   return deHaltReasons[reason];

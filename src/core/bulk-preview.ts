@@ -178,13 +178,16 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // its list nor, once listed, its targets. Halted rather than skipped, so it frees its slot
   // and says why. Before the client is built: building it reads the list's form, and a form
   // that is no longer offered has no spec to read.
+  // The reason the run holds after a halt: a run that ended before its approval while this pass
+  // was reading (the owner discarded it) keeps its end, and the pass tells that end, not its own.
+  const storedHalt = (reason: BulkHaltReason): string => ledger.getStatus(runId)?.haltReason ?? reason;
   if (list !== null && !isOfferedListSource(list.source)) {
     // A filtered Shopify list fails on its filters (a key or value the rule no longer takes), not on a
     // path; so does any other list whose form and path are still offered.
     const onFilters = list.source.form === SHOPIFY_FILTERED_LIST_FORM || isOfferedListPath(list.source);
     const withdrawn = onFilters ? BULK_HALT_REASONS.listFilterWithdrawn : BULK_HALT_REASONS.listFormWithdrawn;
     ledger.halt(runId, withdrawn);
-    return { status: 'halted', summary: summarize(ledger, runId, say.halted('preview', withdrawn), say) };
+    return { status: 'halted', summary: summarize(ledger, runId, say.halted('preview', storedHalt(withdrawn)), say) };
   }
   const shopify = list !== null && isShopifyListSource(list.source);
   // The form the run's targets are read and written with: a product's, or an image's.
@@ -519,7 +522,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
 
   function halt(reason: BulkHaltReason): BulkPreviewOutcome {
     ledger.halt(runId, reason);
-    return { status: 'halted', summary: costed(summarize(ledger, runId, say.halted('preview', reason), say)) };
+    return { status: 'halted', summary: costed(summarize(ledger, runId, say.halted('preview', storedHalt(reason)), say)) };
   }
   // A pending outcome is recorded, never pushed, and its lead is English: so is its cost.
   function pending(retryAt: number, lead: string): BulkPreviewOutcome {
