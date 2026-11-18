@@ -221,7 +221,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
           }
           const reader = isStepIdShape(s.id) ? `step "${s.id}"` : `step #${String(i + 1)}`;
           return `Error: rename_step: ${reader} reads step #${String(idx + 1)} and holds text starting with "{{${to}" in its ${field}, `
-            + 'which the new id would turn into a reference to this step. Choose another id.';
+            + `which the new id would turn into a reference to step #${String(idx + 1)}. Choose another id.`;
         }
       }
       steps[idx]!.id = to;
