@@ -128,8 +128,26 @@
 	function statusText(s: Status | null): string {
 		return t(`access_trail.status.${s ?? 'unknown'}`);
 	}
+	/** The engine's action of the row a revoked grant leaves (`MANDATE_REVOKED_ACTION`, audit-log.ts). */
+	const REVOKED_ACTION = 'mandate:revoke';
+	/** A refused reveal of a secret whose route answers a mandate a plain status: said as such. */
+	const REFUSED_REVEALS: Readonly<Record<string, string>> = {
+		'GET /api/vault/key': 'access_trail.refused_reveal_vault_key',
+		'GET /api/auth/token': 'access_trail.refused_reveal_token',
+	};
+	function isRevoke(e: Step | Event): boolean {
+		return e.kind === 'event' && e.action === REVOKED_ACTION;
+	}
+	function refusedText(e: Event): string {
+		const reveal = REFUSED_REVEALS[e.action];
+		return t(reveal !== undefined && e.target?.endsWith('?reveal=true') === true ? reveal : 'access_trail.refused');
+	}
 	function kindText(e: Entry): string {
-		if (e.kind === 'event') return t(e.phase === 'read' ? 'access_trail.kind_read' : 'access_trail.kind_event');
+		if (e.kind === 'event') {
+			if (e.action === REVOKED_ACTION) return t('access_trail.revoked');
+			if (e.phase === 'refused') return refusedText(e);
+			return t(e.phase === 'read' ? 'access_trail.kind_read' : 'access_trail.kind_event');
+		}
 		// A workflow run started in a chat (660b) is a run like a plan's, without a trigger.
 		if (e.kind === 'plan' && e.run === 'workflow') return t('access_trail.kind_workflow');
 		return t(`access_trail.kind_${e.kind}`);
@@ -157,7 +175,7 @@
 	<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm" data-entry-kind={e.kind}>
 		<span class="text-xs text-text-subtle tabular-nums">{when(e.at)}</span>
 		<span class="text-text-muted">{kindText(e)}</span>
-		<span class="font-mono text-xs break-all">{e.action}{#if e.target} · {e.target}{/if}</span>
+		{#if !isRevoke(e)}<span class="font-mono text-xs break-all">{e.action}{#if e.target} · {e.target}{/if}</span>{/if}
 		{#if e.kind === 'step'}
 			<span class="text-xs" data-status>{statusText(e.status)}</span>
 			{#if e.note !== undefined}<span class="text-xs text-text-muted" data-note>{noteText(e)}</span>{/if}
