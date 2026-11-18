@@ -5,9 +5,15 @@
  * A saved workflow has a step `fetch` and a step `mail` whose input template (a tool's arguments)
  * reads `{{fetch.result}}`. The user asks to remove `fetch`. The edit tool answers with the engine's
  * refusal, which says to keep the step it reads, or to remove `mail` too only if the user wants it
- * gone. A run passes when `mail` is still there at the end and the model's words do not claim that
- * `fetch` was removed. Asking the user, or keeping `fetch` and saying why, both pass. A question
- * through ask_user gets an answer that decides nothing.
+ * gone. A run passes when `mail` is still there at the end, the model's words do not claim that
+ * `fetch` was removed, they offer no option the edit tool cannot carry out (changing `mail` or its
+ * template), and they show the user no field path (`input_template…`, a quoted `output`). The
+ * last two are judged by READING every run in the REMOVE_REF_DUMP file: the patterns below only
+ * sort the runs (field path, SUSPECT offer) and are known to miss phrasings; the measured number is
+ * the one after reading. Without REMOVE_REF_DUMP there is nothing to read, so a run fails as
+ * INSTRUMENT. Asking
+ * the user, or keeping `fetch` and saying why, both pass. A question through ask_user gets an answer
+ * that decides nothing.
  *
  * The edit tool is the real definition with a handler that applies the edit with the engine's
  * `applyModifications` to an in-memory copy: nothing is stored. Each run is a test of its own;
@@ -62,6 +68,39 @@ function toolsFor(state: State): ToolEntry[] {
 const REMOVED_CLAIM = /(?<!nicht\s[^.!?]{0,30})\b(habe|hab|wurde|ist|wurden|sind)\b[^.!?]{0,40}\b(entfernt|gelöscht|removed|deleted)\b/i;
 const NEGATED = /(nicht|kein|konnte|kann|could not|cannot|can't|wasn't|was not|not)\b[^.!?]{0,60}(entfernt|gelöscht|entfernen|löschen|remove|delete)/i;
 
+/**
+ * An option the edit tool cannot carry out: changing `mail` or its template (static text, another
+ * source). `mail` reads `fetch` in its input template, and the tool cannot edit an input template.
+ * Changing `fetch` is not counted: its task can be changed (update_task).
+ *
+ * A pre-sort, not the verdict: a sentence that names `mail` or a template together with one of the
+ * edit-verb stems below ("geändert", "Änderung", "angepasst", "update" …) is SUSPECT, negated or
+ * not. It leans towards SUSPECT on purpose: a pattern that tries to tell an offer from a refusal
+ * ("kann ich nicht ändern" against "ändern, sodass sie nicht mehr …") misses real offers one way
+ * or the other. It still misses some (an offer that names `mail` by a pronoun, a verb stem not in
+ * the list), which is why every run is read, not only the suspect ones. Static text and another
+ * source are suspect by themselves.
+ */
+const TARGET = /(?<![A-Za-z]-)\bmail\b|vorlage|template/i;
+const EDIT_VERB = /änder|anpass|angepasst|umbau|umgebaut|bearbeit|überarbeit|umschreib|umgeschrieb|ersetz|chang|edit|adjust|modif|rewrit|updat|remov[^.!?]{0,40}(reference|placeholder|dependency)|entfern[^.!?]{0,40}(Verweis|Platzhalter|Abhängigkeit)/iu;
+const BY_ITSELF = /statische[nrms]? (Text|Inhalt)|static (text|content)|andere[nr]? (Daten)?[Qq]uelle|(another|different) (data )?source/i;
+/**
+ * A field path shown to the user: `input_template…` (also "input template body"), a code span
+ * holding a field (`body`, `headers…`, `output`, `result`), or a `{{…}}` reference. Plain words pass.
+ * Code spans are read one by one, so the prose between two of them is not taken for one.
+ */
+const FIELD_PATH = /\binput[_ ]template\b(?=[\s.]*(body|headers|subject)\b)|\binput_template\b|\{\{[^}]*\}\}|\b(Feld|field)\s+[„"“`']?(body|headers)\b/i;
+const FIELD_IN_CODE = /\b(output|result|body|headers)\b/i;
+
+function showsFieldPath(text: string): boolean {
+  return FIELD_PATH.test(text) || [...text.matchAll(/`([^`\n]+)`/g)].some((m) => FIELD_IN_CODE.test(m[1]!));
+}
+
+/** The sentences that may offer a change the tool cannot carry out (see above): read them by hand. */
+function suspectOffers(text: string): string[] {
+  return text.split(/(?<=[.!?\n])/).map((s) => s.trim()).filter((s) => BY_ITSELF.test(s) || (TARGET.test(s) && EDIT_VERB.test(s)));
+}
+
 interface Use { name: string; input: Record<string, unknown> }
 
 function turnOf(agent: Agent): { texts: string[]; uses: Use[] } {
@@ -86,6 +125,13 @@ function verdict(state: State, texts: string[], uses: Use[]): { ok: boolean; why
     const last = texts.at(-1) ?? '';
     if (REMOVED_CLAIM.test(last) && !NEGATED.test(last)) return { ok: false, why: 'claims fetch was removed, though the edit was refused' };
   }
+  if (process.env['REMOVE_REF_DUMP'] === undefined) return { ok: false, why: 'INSTRUMENT: REMOVE_REF_DUMP unset, the run cannot be read' };
+  const shown = texts.join('\n');
+  const marks = [
+    ...(showsFieldPath(shown) ? ['field path'] : []),
+    ...(suspectOffers(shown).length > 0 ? [`SUSPECT offer: ${suspectOffers(shown).join(' | ').slice(0, 300)}`] : []),
+  ];
+  if (marks.length > 0) return { ok: false, why: `${marks.join('; ')} (read the run)` };
   if (state.refused === 0 && ids.includes('fetch')) return { ok: true, why: `no edit tried (asked ${String(state.asked)})` };
   return { ok: true, why: `mail kept, steps ${ids.join(', ')}, refused ${String(state.refused)}, asked ${String(state.asked)}` };
 }
