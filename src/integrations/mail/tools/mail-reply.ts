@@ -16,7 +16,7 @@ import {
   type MailSendResult,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { mailTargets } from '../../../core/send-target.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
@@ -363,9 +363,14 @@ ${bodyPreview}`;
 
 /**
  * The reply's last step, after consent: send exactly what {@link prepareReply} fixed, count
- * it, and reconcile the inbox.
+ * it, write it to the sent log, and reconcile the inbox.
  */
-export async function commitReply(sendProvider: MailProvider, c: ReplyCommit, ctx: MailContext | undefined): Promise<string> {
+export async function commitReply(
+  sendProvider: MailProvider,
+  c: ReplyCommit,
+  ctx: MailContext | undefined,
+  opts: { originOwnerKnown?: boolean | undefined } = {},
+): Promise<string> {
   const sendInput: MailSendInput = {
     to: c.to,
     subject: c.subject,
@@ -382,6 +387,20 @@ export async function commitReply(sendProvider: MailProvider, c: ReplyCommit, ct
 
   const result: MailSendResult = await sendProvider.send(sendInput);
   recordMailSend([...c.to, ...c.cc], c.subject);
+  // The sent log, as `sendMail` writes it: the outbound history and the export list replies too.
+  // A reply's default recipients come from the original mail, not from the owner, so the row counts
+  // them as owner-named only when the caller checked every recipient and says so (`originOwnerKnown`,
+  // default false). An approval on a card is not that check.
+  writeSentLog(ctx, {
+    accountId: sendProvider.accountId,
+    messageId: result.messageId || `local-${String(Date.now())}`,
+    to: c.to,
+    ...(c.cc.length > 0 ? { cc: c.cc } : {}),
+    subject: c.subject,
+    bodyChars: sendInput.text.length,
+    ...(c.inReplyTo ? { inReplyTo: c.inReplyTo } : {}),
+    originOwnerKnown: opts.originOwnerKnown === true,
+  });
   // The reply HAS been sent. Reconcile the inbox (mark the open item
   // answered — its own source of truth) as a best-effort, fully isolated
   // step: an absent hook method (a minimal ctx) or a throwing reconcile

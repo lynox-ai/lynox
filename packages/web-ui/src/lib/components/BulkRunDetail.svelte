@@ -33,6 +33,8 @@
 	let error = $state('');
 	let actionError = $state('');
 	let busy = $state(false);
+	// The owner asked to discard the run and is shown the confirmation (U-324).
+	let confirmingDiscard = $state(false);
 	let unmeasuredOk = $state(false);
 	// Unchanged targets fold away: the owner checks what is written and what lynox leaves out.
 	let showUnchanged = $state(false);
@@ -274,6 +276,16 @@
 			const code = r.body.code;
 			if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) return t(`bulk.deselect.refused.${code}`);
 			return refusalOf(r);
+		});
+	}
+
+	/** Discard a run before approving it: the owner's act alone (the route refuses a mandate), after
+	 *  the confirmation; the page reloads and shows the run as discarded. */
+	function discard(): Promise<void> {
+		return act(async (id) => {
+			const refusal = refusalOf(await post(`/bulk/runs/${encodeURIComponent(id)}/discard`));
+			if (refusal === null) confirmingDiscard = false;
+			return refusal;
 		});
 	}
 
@@ -1016,6 +1028,24 @@
 				{@render undoOffer()}
 			{/if}
 
+			<!-- Discarding a run before its approval: the owner's alone, never red, since lynox
+			     writes nothing by it (U-324). A mandate asks the owner. -->
+			{#if ownerActs && (run.phase === 'planned' || run.phase === 'previewed')}
+				<div class="mt-3" data-testid="bulk-discard">
+					{#if confirmingDiscard}
+						<div role="group" aria-labelledby="bulk-discard-title" class="space-y-2 rounded border border-border p-3">
+							<h3 id="bulk-discard-title" class="text-sm font-medium">{t('bulk.discard.confirm_title')}</h3>
+							<p class="text-sm">{t('bulk.discard.confirm_text')}</p>
+							<div class="flex flex-wrap gap-2">
+								<button type="button" class={btnPlain} disabled={busy} onclick={discard} data-testid="bulk-discard-confirm">{t('bulk.discard.button')}</button>
+								<button type="button" class={btnPlain} onclick={() => { confirmingDiscard = false; }}>{t('bulk.discard.cancel')}</button>
+							</div>
+						</div>
+					{:else}
+						<button type="button" class={btnPlain} disabled={busy} onclick={() => { confirmingDiscard = true; }} data-testid="bulk-discard-open">{t('bulk.discard.button')}</button>
+					{/if}
+				</div>
+			{/if}
 			{#if actionError}
 				<p class="text-sm text-danger">{actionError}</p>
 			{/if}

@@ -439,6 +439,29 @@ describe('the preview effect', () => {
     }
   });
 
+  it('tells the discard, not its own halt, when the owner discarded the run while it was reading', async () => {
+    const s = shop();
+    for (const i of [0, 1, 2]) s.special.set(`/products/${String(i)}`, { status: 503 });
+    const restore = serve(s);
+    const real = ledger.halt.bind(ledger);
+    // The owner discards between the pass's last read and its halt.
+    const halted = vi.spyOn(ledger, 'halt').mockImplementation((id, reason) => { ledger.discardRun(id); real(id, reason); });
+    try {
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+      const runId = planRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '1' } })));
+      const out = await runBulkPreview(runId, previewDeps(client()));
+      expect(halted).toHaveBeenCalledWith(runId, BULK_HALT_REASONS.consecutiveFailures);
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.discarded);
+      expect(out.summary).toContain('You discarded this run. lynox wrote nothing.');
+      expect(out.summary).not.toContain('Three targets in a row failed.');
+      // Not its own halt: the worker tells it from the ledger.
+      expect(out.gone).toBe(true);
+    } finally {
+      halted.mockRestore();
+      restore();
+    }
+  });
+
   it('waits out one 429 and ends the tick on a second, due again when the host said', async () => {
     const s = shop();
     let hits = 0;
@@ -1030,6 +1053,112 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       expect((w.notify.mock.calls[0] as unknown as [{ title: string }])[0].title).toBe(`\u2717 Preview failed · ${HOST}`);
     } finally {
       restore();
+    }
+  });
+
+  it('records a read whose run moved on while it ran and pushes nothing: the pass that took it on reports for itself', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+      // Moved on during the first read, without a halt.
+      const push = s.requests.push.bind(s.requests);
+      let pending = true;
+      s.requests.push = (...items) => {
+        if (pending) engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'previewed' WHERE id = ?`).run(runId);
+        pending = false;
+        return push(...items);
+      };
+      const w = workerFor();
+      await w.tick();
+      expect(ledger.getStatus(runId)!.haltReason).toBeNull();
+      expect(w.recordTaskRun.mock.calls[0]![1]).toMatch(/^Bulk preview stopped: the run was dropped, halted or moved on\./);
+      expect(w.recordTaskRun.mock.calls[0]![2]).toBe('failed');
+      expect(w.notify).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  // What the ledger cannot say is told as before: a read of it that fails, a run still planned and
+  // unhalted. A run moved past this stage and halted there is the later pass's to tell.
+  it('tells a stopped read as failed where the ledger says nothing, and leaves a later stage\'s halt to that stage', async () => {
+    const STOPPED = /^Bulk preview stopped: the run was dropped, halted or moved on\./;
+    const cases: readonly (readonly [string, (id: string) => () => void, string | null])[] = [
+      ['unreadable', (id) => {
+        engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'previewed' WHERE id = ?`).run(id);
+        const read = vi.spyOn(ledger, 'getRunForApply').mockImplementation(() => { throw new Error('SQLITE_BUSY'); });
+        return () => read.mockRestore();
+      }, '\u2717 Preview failed'],
+      ['planned', () => {
+        const real = ledger.getRunForPreview.bind(ledger);
+        const seen = vi.spyOn(ledger, 'getRunForPreview').mockImplementation((id) => {
+          const r = real(id);
+          return r === null ? r : { ...r, phase: 'previewed' };
+        });
+        return () => seen.mockRestore();
+      }, `\u2717 Preview failed · ${HOST}`],
+      ['later stage', (id) => {
+        engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'approved', halt_reason = ? WHERE id = ?`).run(BULK_HALT_REASONS.failureRate, id);
+        return () => {};
+      }, null],
+    ];
+    for (const [name, end, title] of cases) {
+      const s = shop();
+      const restore = serve(s);
+      let undo = (): void => {};
+      try {
+        const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+        const push = s.requests.push.bind(s.requests);
+        let pending = true;
+        s.requests.push = (...items) => { if (pending) undo = end(runId); pending = false; return push(...items); };
+        const w = workerFor();
+        await w.tick();
+        expect([name, w.recordTaskRun.mock.calls[0]![1]]).toEqual([name, expect.stringMatching(STOPPED)]);
+        if (title === null) {
+          expect([name, w.notify.mock.calls.length]).toEqual([name, 0]);
+        } else {
+          expect(w.notify).toHaveBeenCalledTimes(1);
+          expect([name, (w.notify.mock.calls[0] as unknown as [{ title: string; body: string }])[0]])
+            .toEqual([name, { title, body: expect.stringMatching(STOPPED), taskId: expect.any(String), priority: 'high' }]);
+        }
+      } finally {
+        undo();
+        restore();
+      }
+    }
+  });
+
+  // The pass knows only that its run is no longer its own; the ledger knows why, and the record
+  // and the push say it in title and body alike (U-324). lynox wrote nothing in any of them.
+  it('says what became of a run that was discarded, replaced or halted while its read ran', async () => {
+    const cases: readonly (readonly [string | undefined, (id: string) => void, string, string, string])[] = [
+      ['de', (id) => { ledger.discardRun(id); }, `\u23F9 Vorschau verworfen · ${HOST}`, 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.', 'stopped'],
+      [undefined, (id) => { ledger.discardRun(id); }, `\u23F9 Preview discarded · ${HOST}`, 'You discarded this run. lynox wrote nothing.', 'stopped'],
+      [undefined, (id) => {
+        engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted', halt_reason = ? WHERE id = ?`).run(BULK_HALT_REASONS.superseded, id);
+      }, `\u23F9 Preview stopped · ${HOST}`, 'Another run with judging was started in its place. This one wrote nothing.', 'stopped'],
+      [undefined, (id) => { ledger.halt(id, BULK_HALT_REASONS.consecutiveFailures); }, `\u2717 Preview halted · ${HOST}`, 'Three targets in a row failed.', 'failed'],
+    ];
+    for (const [language, end, title, sentence, status] of cases) {
+      const s = shop();
+      const restore = serve(s);
+      try {
+        const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+        // Ended on the first read, as an owner's click or another pass would while it is under way.
+        const push = s.requests.push.bind(s.requests);
+        let pending: ((id: string) => void) | null = end;
+        s.requests.push = (...items) => { const f = pending; pending = null; f?.(runId); return push(...items); };
+        const w = workerFor(language !== undefined ? { language } : {});
+        await w.tick();
+        expect(w.recordTaskRun.mock.calls[0]![1]).toBe(sentence);
+        expect(w.recordTaskRun.mock.calls[0]![2]).toBe(status);
+        expect(w.notify).toHaveBeenCalledTimes(1);
+        const note = (w.notify.mock.calls[0] as unknown as [{ title: string; body: string }])[0];
+        expect(note).toMatchObject({ title, body: sentence });
+      } finally {
+        restore();
+      }
     }
   });
 
