@@ -22,6 +22,12 @@ let viewer = $state<SettingsViewer | null>(null);
 let known = false;
 /** Whether `GET /api/config` named a `locks.provider`; null until a body was read. */
 let providerLocked = $state<boolean | null>(null);
+/**
+ * The provider the engine moved the pick away from, while the line about it stands
+ * (`provider_reset`): the chat and the LLM settings show it
+ * until the owner dismisses it or picks a provider.
+ */
+let providerResetFrom = $state<string | null>(null);
 let pending: Promise<void> | null = null;
 
 /**
@@ -34,6 +40,11 @@ let retries = 0;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 /** Bumped by a reset, so an answer asked for before it is not taken after it. */
 let generation = 0;
+/**
+ * Counts the times the line changed on the server while this page knew it: "Got it" and a provider
+ * save. An answer asked for before such a change may still name the old provider, so it is not read.
+ */
+let changes = 0;
 /** Every try went unanswered: the pages say so once, instead of standing there without the owner's actions. */
 let unavailable = $state(false);
 
@@ -79,15 +90,72 @@ export function canChooseModel(): boolean {
  */
 export function viewerNote(): (body: unknown) => boolean {
 	const asked = generation;
+	const askedAt = changes;
 	return (body) => {
 		if (asked !== generation) return false;
-		noteSettingsViewer(body);
+		noteSettingsViewer(body, askedAt === changes);
 		return true;
 	};
 }
 
-/** Takes `viewer` and whether the provider is locked from a `GET /api/config` body a page has read anyway. */
-export function noteSettingsViewer(body: unknown): void {
+/** The provider the engine moved the pick away from, or null when there is no line to show. */
+export function providerResetNotice(): string | null {
+	return providerResetFrom;
+}
+
+let refreshing: { promise: Promise<void>; changes: number } | null = null;
+
+/**
+ * Reads `GET /api/config` again for the line. `loadSettingsViewer` asks once per page load, but the
+ * engine changes the provider at its start, which an open page does not see: the line asks again
+ * when it mounts, when the tab comes back into view and after a save on the LLM page. Two lines on
+ * one page share a request; `afterChange` (the provider save) asks anew, since a request already
+ * out may have been answered before the save. No answer leaves what was read before.
+ */
+export function refreshProviderReset(afterChange = false): Promise<void> {
+	if (afterChange) changes++;
+	if (refreshing && refreshing.changes === changes) return refreshing.promise;
+	const asked = generation;
+	const askedAt = changes;
+	const mine: { promise: Promise<void>; changes: number } = { promise: Promise.resolve(), changes: askedAt };
+	refreshing = mine;
+	mine.promise = (async () => {
+		try {
+			const res = await fetch(`${getApiBase()}/config`);
+			if (!res.ok) return;
+			const body: unknown = await res.json();
+			if (asked === generation && askedAt === changes) noteSettingsViewer(body);
+		} catch {
+			// No answer: the line stays as it was.
+		} finally {
+			if (refreshing === mine) refreshing = null;
+		}
+	})();
+	return mine.promise;
+}
+
+/**
+ * "Got it": the server ends the line for every page of the instance. It returns whether it did;
+ * the line stays when the server refused or gave no answer, so it is never gone only here.
+ */
+export async function dismissProviderReset(): Promise<boolean> {
+	try {
+		const res = await fetch(`${getApiBase()}/config/provider-reset/dismiss`, { method: 'POST' });
+		if (!res.ok) return false;
+	} catch {
+		return false;
+	}
+	changes++;
+	providerResetFrom = null;
+	return true;
+}
+
+/**
+ * Takes `viewer` and whether the provider is locked from a `GET /api/config` body a page has read
+ * anyway. `readReset` is false for a body asked for before the line changed ("Got it", a provider
+ * save): it may still name the old provider, so the line is left as it is.
+ */
+export function noteSettingsViewer(body: unknown, readReset = true): void {
 	if (body === null || typeof body !== 'object' || !('viewer' in body)) return;
 	const v = (body as { viewer: unknown }).viewer;
 	if (v === 'owner' || v === 'mandate' || v === 'none') { viewer = v; known = true; unavailable = false; }
@@ -95,12 +163,17 @@ export function noteSettingsViewer(body: unknown): void {
 	// the line that needs it stays hidden rather than assuming there is none.
 	const locks = (body as { locks?: unknown }).locks;
 	providerLocked = locks !== null && typeof locks === 'object' ? ((locks as { provider?: unknown }).provider ?? null) !== null : null;
+	if (!readReset) return;
+	const reset = (body as { provider_reset?: unknown }).provider_reset;
+	const from = reset !== null && typeof reset === 'object' ? (reset as { from?: unknown }).from : undefined;
+	providerResetFrom = typeof from === 'string' && from !== '' ? from : null;
 }
 
 /** Reads `viewer` once per page load; later calls share the first. */
 export function loadSettingsViewer(): Promise<void> {
 	if (known) return Promise.resolve();
 	const asked = generation;
+	const askedAt = changes;
 	pending ??= (async () => {
 		let answered = false;
 		try {
@@ -111,7 +184,7 @@ export function loadSettingsViewer(): Promise<void> {
 				answered = true;
 				// An answer, even one without `viewer` (an older engine), means the page did load.
 				unavailable = false;
-				noteSettingsViewer(body);
+				noteSettingsViewer(body, askedAt === changes);
 			}
 		} catch {
 			// No answer: the owner's fields stay, and the server refuses what it must.
@@ -137,6 +210,9 @@ export function resetSettingsViewer(): void {
 	generation++;
 	// `providerLocked` needs no reset: every body that sets `viewer` also sets it.
 	viewer = null;
+	providerResetFrom = null;
+	// A request still out belongs to the session before; the next refresh asks anew.
+	refreshing = null;
 	known = false;
 	unavailable = false;
 	pending = null;
