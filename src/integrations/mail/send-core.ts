@@ -394,8 +394,8 @@ export async function commitSend(
 /**
  * Persist a sent mail to the sent log (`mail_sent_log`): the outbound history of the inbox sidebar
  * and the export, and, where `originOwnerKnown` is set, the record of recipients the owner named.
- * Every send path that delivers a mail writes it — `sendMail` and the reply's commit. Observational
- * data: a write failure must never roll back the user-visible send. Logged so persistent
+ * Written by `sendMail` when its context carries the state database, and by the reply's commit.
+ * Observational data: a write failure must never roll back the user-visible send. Logged so persistent
  * schema/permission breakage stays diagnosable (a silent swallow once cost a week of missing
  * sidebar history). Without a state database (a minimal context) nothing is written.
  */

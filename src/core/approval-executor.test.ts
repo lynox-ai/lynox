@@ -195,6 +195,8 @@ describe('the executor sends an approved mail once, as it was filed', () => {
       const logged = stateDb.listOutboundForAddress('alice@example.com');
       expect(logged).toHaveLength(1);
       expect(logged[0]).toMatchObject({ accountId: 'acc-1', messageId: '<sent@x>', inReplyTo: '<1@x>', subject: 'Re: Angebot' });
+      // An approval on a card is not the owner naming the address.
+      expect(stateDb.isOwnerKnownRecipient('alice@example.com')).toBe(false);
     } finally {
       stateDb.close();
     }

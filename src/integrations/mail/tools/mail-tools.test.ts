@@ -778,17 +778,37 @@ describe('mail_reply tool', () => {
 
     it('a sent reply is written to the sent log, and the outbound history reads it back', async () => {
       provider.send.mockResolvedValue({ messageId: '<r11@x>', accepted: ['alice@example.com'], rejected: [] });
-      expect(await createMailReplyTool(registry, ctx).handler({ uid: 11, body: 'Gerne.' }, yesAgent)).toContain('Reply sent');
+      expect(await createMailReplyTool(registry, ctx).handler({ uid: 11, body: 'Gerne.', cc: 'carl@example.com' }, yesAgent)).toContain('Reply sent');
+      const sent = provider.send.mock.calls[0]![0];
       const logged = stateDb.listOutboundForAddress('alice@example.com');
       expect(logged).toHaveLength(1);
       expect(logged[0]).toMatchObject({
         accountId: provider.accountId, messageId: '<r11@x>', inReplyTo: '<o11@x>',
         to: [{ address: 'alice@example.com' }],
-        bodyChars: provider.send.mock.calls[0]![0].text.length,
+        cc: [{ address: 'carl@example.com' }],
+        subject: sent.subject,
+        bodyChars: sent.text.length,
       });
-      expect(logged[0]!.subject).toContain('Angebot');
+      // The cc'd recipient's history lists the reply too.
+      expect(stateDb.listOutboundForAddress('carl@example.com').map(e => e.messageId)).toEqual(['<r11@x>']);
       // The reply goes to the original's sender, an address the owner did not name.
       expect(stateDb.isOwnerKnownRecipient('alice@example.com')).toBe(false);
+    });
+
+    it('a reply sent without a provider message id is logged under a local id', async () => {
+      provider.send.mockResolvedValue({ messageId: '', accepted: ['alice@example.com'], rejected: [] });
+      await createMailReplyTool(registry, ctx).handler({ uid: 11, body: 'Gerne.' }, yesAgent);
+      expect(stateDb.listOutboundForAddress('alice@example.com')[0]!.messageId).toMatch(/^local-\d+$/);
+    });
+
+    it('the commit marks the recipients owner-named only when its caller says every one was', async () => {
+      provider.send.mockResolvedValue({ messageId: '<r12@x>', accepted: [], rejected: [] });
+      const commit = { to: [{ address: 'bob@example.com' }], cc: [], subject: 'Re: Hallo', body: 'Gerne.', originalThreadKey: '<o12@x>' };
+      await commitReply(provider, commit, ctx);
+      expect(stateDb.isOwnerKnownRecipient('bob@example.com')).toBe(false);
+      await commitReply(provider, { ...commit, to: [{ address: 'dora@example.com' }] }, ctx, { originOwnerKnown: true });
+      expect(stateDb.isOwnerKnownRecipient('dora@example.com')).toBe(true);
+      expect(stateDb.isOwnerKnownRecipient('bob@example.com')).toBe(false);
     });
 
     it('control: a reply the provider fails to send writes nothing to the sent log', async () => {
