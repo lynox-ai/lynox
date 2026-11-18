@@ -238,8 +238,7 @@ describe('a field name inside a sentence (U-333)', () => {
 		const sentence = target.querySelector('[data-testid="bulk-probe-explain"]');
 		expect(boxes(sentence)).toEqual(['custom_note']);
 		// The whole sentence, so the target and the provider around the name are filled in too.
-		const probeName = (target.querySelector('[data-testid="bulk-probe-admin"]')?.textContent ?? '').replace('↗', '').trim();
-		expect(sentence?.textContent).toBe(tf('bulk.probe.explain', { target: probeName, provider: 'demo.myshopify.com', field: `${t('bulk.field.shopify.seo_title')}, custom_note` }));
+		expect(sentence?.textContent).toBe(tf('bulk.probe.explain', { target: tf('bulk.target.product', { n: '77' }), provider: 'demo.myshopify.com', field: `${t('bulk.field.shopify.seo_title')}, custom_note` }));
 		// The box isolates its text, so a name written right to left cannot move the quotes around it.
 		expect(sentence?.querySelector('[data-testid="bulk-field-own-name"]')?.tagName).toBe('BDI');
 	});
