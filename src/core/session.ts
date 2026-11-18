@@ -1532,7 +1532,11 @@ export class Session {
           }
           // An internal run (a summary in a session of its own) has no user words to title, and
           // its prompt is another thread's history: it would go to a second model call.
-          if (startApiMessageCount === 0 && !agent.isInternalRun) {
+          // After a refused or failed first turn the thread is already listed, and the person may
+          // have named it; that name stays. A thread with no rows before this run is titled as before.
+          const namedAfterDisplayRows = startMessageCount > startApiMessageCount
+            && (threadStore.getThread(this.sessionId)?.title ?? '') !== '';
+          if (startApiMessageCount === 0 && !agent.isInternalRun && !namedAfterDisplayRows) {
             // Derive the title from the user's OWN words, not the engine framing:
             // a context-opened chat (💬 mail-reply / fix / workflow-edit) carries a
             // `[Loaded …]\n[/loaded-context]\n\n` preamble on its first message that

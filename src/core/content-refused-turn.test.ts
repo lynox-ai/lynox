@@ -186,6 +186,19 @@ describe('a message the content check refused is kept for the person, not for th
     expect(title.toLowerCase()).not.toContain('brute');
   });
 
+  it('a name the person gave the thread after a refused first message is kept', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.promptUser = vi.fn().mockResolvedValue('deny');
+    await session.run(FLAGGED);
+    const store = engine.getThreadStore()!;
+    store.updateThread(session.sessionId, { title: 'My own name' });
+
+    mockProcess.mockResolvedValue(endTurn('Paris.'));
+    await session.run('what is the capital of France');
+    expect(store.getThread(session.sessionId)?.title).toBe('My own name');
+  });
+
   it('an internal run the check refuses keeps nothing in the thread', async () => {
     const engine = await boot();
     const session = engine.createSession();
