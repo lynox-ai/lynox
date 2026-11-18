@@ -321,7 +321,7 @@ export function bulkResumeKind(
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
 export function bulkResumeText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'> & Partial<Pick<BulkRunDetailData, 'consentFields'>>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'> & Partial<Pick<BulkRunDetailData, 'consentFields' | 'kind'>>,
 	managed: boolean | null,
 	i18n: BulkI18n,
 ): { cause: string; before: string | null; check: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
@@ -365,31 +365,47 @@ export function bulkResumeText(
 	// nothing is said to stay: a write sent and failed may still have reached its target, which the
 	// next try reads first and counts as written.
 	const capped = kind === 'max' || run.resumeTries < open;
-	const kept = i18n.t(run.applied === 0
-		? (capped ? 'bulk.resume.kept_write_none_capped' : 'bulk.resume.kept_write_none')
-		: (capped ? 'bulk.resume.kept_write_capped' : 'bulk.resume.kept_write'));
+	// An undo takes its targets back: its own words, the same cases (U-335).
+	const verb = run.kind === 'undo' ? 'undo' : 'write';
+	const kept = i18n.t(`bulk.resume.kept_${verb}${run.applied === 0 ? '_none' : ''}${capped ? '_capped' : ''}`);
 	if (!failures) return { cause, before, check: null, kept, soFar: null, allows: null };
 	const f = run.failed;
 	const soFar = run.failedOnce === null
 		? (f === 1 ? i18n.t('bulk.resume.failed_so_far_at_least_one') : i18n.tf('bulk.resume.failed_so_far_at_least', { n: String(f) }))
 		: (run.failedOnce === 1 ? i18n.t('bulk.resume.failed_so_far_one') : i18n.tf('bulk.resume.failed_so_far', { n: String(run.failedOnce) }));
-	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n) };
+	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n, run.kind === 'undo') };
 }
 
 /** What writing on lets fail before the run stops again. The next pass's failures are bounded
  *  by the open targets, not by the approved maximum: a target can fail before it is sent to.
  *  Null with nothing open: writing on then only ends the run. */
-function bulkResumeAllows(limit: number, open: number, i18n: BulkI18n): string | null {
+function bulkResumeAllows(limit: number, open: number, i18n: BulkI18n, undo: boolean): string | null {
 	if (open === 0) return null;
+	// An undo's sentence says "continuing", not "writing on" (U-335).
+	const k = (key: string): string => `bulk.resume.${key}${undo ? '_undo' : ''}`;
 	if (limit < open) {
-		if (limit === 0) return i18n.t('bulk.resume.allows_again_zero');
-		if (limit === 1) return i18n.t('bulk.resume.allows_again_one');
+		if (limit === 0) return i18n.t(k('allows_again_zero'));
+		if (limit === 1) return i18n.t(k('allows_again_one'));
 		// Up to two, three in a row cannot come first: the third failure passes the limit too.
-		if (limit === 2) return i18n.tf('bulk.resume.allows_again_few', { limit: String(limit) });
-		return i18n.tf('bulk.resume.allows_again', { limit: String(limit) });
+		if (limit === 2) return i18n.tf(k('allows_again_few'), { limit: String(limit) });
+		return i18n.tf(k('allows_again'), { limit: String(limit) });
 	}
-	if (open >= 3) return i18n.t('bulk.resume.allows_only_consecutive');
-	return open === 1 ? i18n.t('bulk.resume.allows_no_failure_stop_one') : i18n.tf('bulk.resume.allows_no_failure_stop', { open: String(open) });
+	if (open >= 3) return i18n.t(k('allows_only_consecutive'));
+	return open === 1 ? i18n.t(k('allows_no_failure_stop_one')) : i18n.tf(k('allows_no_failure_stop'), { open: String(open) });
+}
+
+/** The words of a halted run's resume that do not depend on why it halted: its button, the
+ *  sentence that continuing approves it again, and the sentence where continuing does not help,
+ *  split around the link to the run an undo takes back. An undo has its own (U-335): it takes
+ *  targets back, and it is started again only from the page of the run it undoes. */
+export function bulkResumeWords(run: Pick<BulkRun, 'kind'>, i18n: Pick<BulkI18n, 't'>): {
+	button: string; window: string; none: { before: string; link: string | null; after: string };
+} {
+	if (run.kind !== 'undo') {
+		return { button: i18n.t('bulk.resume.write'), window: i18n.t('bulk.resume.window'), none: { before: i18n.t('bulk.resume.none'), link: null, after: '' } };
+	}
+	const [before = '', after = ''] = i18n.t('bulk.resume.none_undo').split('{link}');
+	return { button: i18n.t('bulk.resume.write_undo'), window: i18n.t('bulk.resume.window_undo'), none: { before, link: i18n.t('bulk.resume.none_undo_link'), after } };
 }
 
 /** The maximum a run halted at its maximum writes on with, or null: a whole number above the
