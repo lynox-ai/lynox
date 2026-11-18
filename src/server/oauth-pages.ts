@@ -222,6 +222,33 @@ export const OAUTH_RESULT_TEXTS = {
   },
 } as const satisfies Record<string, OAuthText>;
 
+/**
+ * The version a session under a mandate reads instead, for the texts above whose way on is
+ * storing a value. In a mandate's session nothing stores one: the client pair is the owner's,
+ * and a key asked for in a mandate's turn is not stored. So the helper is told who can, as on
+ * the engine-less page ({@link ENGINE_LESS_PAGE_CLOSE}).
+ */
+export const OAUTH_HELPER_TEXTS = {
+  clientIdBesideCredential: {
+    en: 'The client id of this profile is stored in a way that lynox may not put into the link. Only the owner of this instance can change that. Let the owner know, then ask for a new link. Nothing was sent to the provider.',
+    de: 'Die Client-ID dieses Profils ist so gespeichert, dass lynox sie nicht in den Link setzen darf. Ändern kann das nur der Inhaber dieser Instanz. Sag dem Inhaber Bescheid und fordere danach einen neuen Link an. An den Anbieter wurde nichts gesendet.',
+  },
+  clientIdMissing: {
+    en: 'The client id for this profile is no longer in the vault. Only the owner of this instance can store it again. Let the owner know, then ask for a new link.',
+    de: 'Die Client-ID für dieses Profil liegt nicht mehr im Tresor. Erneut speichern kann sie nur der Inhaber dieser Instanz. Sag dem Inhaber Bescheid und fordere danach einen neuen Link an.',
+  },
+  credentialsMissing: {
+    en: 'The credentials for this connection are no longer in the vault. Only the owner of this instance can store them again. Let the owner know, then ask for a new link.',
+    de: 'Die Zugangsdaten für diese Verbindung liegen nicht mehr im Tresor. Erneut speichern kann sie nur der Inhaber dieser Instanz. Sag dem Inhaber Bescheid und fordere danach einen neuen Link an.',
+  },
+} as const satisfies Partial<Record<keyof typeof OAUTH_RESULT_TEXTS, OAuthText>>;
+
+/** A result text in the version for this session: the helper's where it has one, else the one text. */
+export function oauthResultText(key: keyof typeof OAUTH_RESULT_TEXTS, owner: boolean): OAuthText {
+  if (!owner && Object.hasOwn(OAUTH_HELPER_TEXTS, key)) return OAUTH_HELPER_TEXTS[key as keyof typeof OAUTH_HELPER_TEXTS];
+  return OAUTH_RESULT_TEXTS[key];
+}
+
 /** The 200 page's text: which provider is now connected. */
 export function connectedText(provider: string): OAuthText {
   return { en: `${provider} is connected to lynox.`, de: `${provider} ist mit lynox verbunden.` };

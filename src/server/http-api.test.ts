@@ -5980,7 +5980,7 @@ describe('LynoxHTTPApi', () => {
 
     async function connect(
       author: string | undefined, asMandate: boolean, id = 'books',
-      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string } = {},
+      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; noClientId?: boolean; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string } = {},
     ): Promise<{ status: number; text: string; state: string | null; location: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
@@ -5994,7 +5994,7 @@ describe('LynoxHTTPApi', () => {
       // still stored, and the checks read stored profiles.
       for (const other of opts.others ?? []) expect(store.register(other)).toBe(false);
       mockGetApiStore.mockReturnValue(store);
-      mockSecretResolve.mockImplementation((n: string) => (n === 'BOOKS_CLIENT_ID' ? 'client-id-stored' : n === 'BOOKS_CLIENT_SECRET' ? 'client-secret-stored' : null));
+      mockSecretResolve.mockImplementation((n: string) => (n === 'BOOKS_CLIENT_ID' && !opts.noClientId ? 'client-id-stored' : n === 'BOOKS_CLIENT_SECRET' ? 'client-secret-stored' : null));
       const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
       mockDerivePresetEndpoints.mockImplementation((pid: string, params: Record<string, unknown> | undefined) => presets.derivePresetEndpoints(pid, params));
       const priorSecret = process.env['LYNOX_HTTP_SECRET'];
@@ -6206,14 +6206,32 @@ describe('LynoxHTTPApi', () => {
       expect(r.status).toBe(302);
     });
 
+    // The way on is storing the client id under another name, which a mandate's session cannot:
+    // it is told who can.
+    const OWNER_STORES_IT = 'Only the owner of this instance can change that. Let the owner know, then ask for a new link.';
+    const STORE_IT = 'Store the client id under its own name, then ask for a new link.';
     it.each([
-      ['a mandate\'s session', TAG, true],
-      ['the owner\'s session', undefined, false],
-    ])('does not put a client secret into the link for %s', async (_label, author, asMandate) => {
+      ['a mandate\'s session', TAG, true, OWNER_STORES_IT, STORE_IT],
+      ['the owner\'s session', undefined, false, STORE_IT, OWNER_STORES_IT],
+    ])('does not put a client secret into the link for %s', async (_label, author, asMandate, says, saysNot) => {
       const r = await connect(author, asMandate, 'books', { clientIdKey: 'BOOKS_CLIENT_SECRET' });
       expect(r.status).toBe(409);
       expect(r.location).not.toContain('client-secret-stored');
-      expect(r.text).toContain('also holds a credential');
+      expect(r.text).toContain(says);
+      expect(r.text).not.toContain(saysNot);
+      expect(r.state).toBeNull();
+    });
+
+    // Missing is not withheld: the owner's session stores it again, a mandate's is told who can.
+    it.each([
+      ['a mandate\'s session', TAG, true, 'Only the owner of this instance can store it again. Let the owner know, then ask for a new link.', 'Set it again'],
+      ['the owner\'s session', undefined, false, 'Set it again, then ask for a new link.', 'Only the owner'],
+    ])('starts nothing for %s when the client id has left the vault', async (_label, author, asMandate, says, saysNot) => {
+      const r = await connect(author, asMandate, 'books', { noClientId: true });
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('The client id for this profile is no longer in the vault.');
+      expect(r.text).toContain(says);
+      expect(r.text).not.toContain(saysNot);
       expect(r.state).toBeNull();
     });
   });
@@ -21319,6 +21337,23 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       const res = await complete(cookie);
       expect(res.status).toBe(409);
       expect(await res.text()).toContain('has not released the credentials');
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
+
+    // Missing is not withheld: the owner's session stores the pair again, a mandate's is told who can.
+    it.each([
+      ['a mandate\'s session', { tag: TAG, mandateId: MID }, 'Only the owner of this instance can store them again. Let the owner know, then ask for a new link.', 'Set them again'],
+      ['the owner\'s session', undefined, 'Set them again, then ask for a new link.', 'Only the owner'],
+    ])('stores nothing for %s when the client pair has left the vault', async (_label, by, says, saysNot) => {
+      const { cookie, store } = await arrange(by === undefined ? {} : { by });
+      if (by !== undefined) store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      mockSecretResolve.mockImplementation(() => null);
+      const res = await complete(cookie);
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(text).toContain('The credentials for this connection are no longer in the vault.');
+      expect(text).toContain(says);
+      expect(text).not.toContain(saysNot);
       expect(mockSecretSet).not.toHaveBeenCalled();
     });
 
