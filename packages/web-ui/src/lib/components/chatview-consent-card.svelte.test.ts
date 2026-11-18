@@ -62,6 +62,7 @@ let run: ReturnType<typeof sseStream>;
 let replies: Array<{ answer?: unknown; promptId?: unknown }>;
 let refuse: boolean;
 let keyRefused: boolean;
+let replyStatus: 'fresh' | 'answered_before' | 'unknown' | 'conflict' | 'forbidden' | 'bad' | 'network' | 'redirected' | 'not_json' | 'no_ok' | 'empty' | 'closed' | 'server_error';
 let i18n: typeof import('../i18n.svelte.js');
 
 beforeEach(async () => {
@@ -73,6 +74,7 @@ beforeEach(async () => {
 	replies = [];
 	refuse = false;
 	keyRefused = false;
+	replyStatus = 'fresh';
 	target = document.createElement('div');
 	document.body.appendChild(target);
 });
@@ -96,6 +98,24 @@ async function renderPrompt(options: string[], consent?: 'guard' | 'deep', befor
 		if (url.endsWith('/sessions/t1/reply')) {
 			replies.push(JSON.parse(String(init?.body ?? '{}')) as { answer?: unknown });
 			if (keyRefused) return json({ error: 'No key here.', code: 'mandate_key_input' }, 422);
+			if (replyStatus === 'unknown') return json({ error: 'No pending prompt' }, 404);
+			if (replyStatus === 'conflict') return json({ error: 'Prompt belongs to a different session' }, 409);
+			if (replyStatus === 'forbidden') return json({ error: 'Not yours' }, 403);
+			if (replyStatus === 'bad') return json({ error: 'Bad request' }, 400);
+			if (replyStatus === 'network') throw new TypeError('Failed to fetch');
+			if (replyStatus === 'closed') return json({ error: 'Prompt closed: its time ran out.', code: 'timed_out' }, 410);
+			if (replyStatus === 'server_error') return json({ error: 'Internal' }, 502);
+			// 2xx answers that are not the server's own reply: a login page reached by a redirect, a
+			// proxy's page, a JSON body without `ok: true`, no body at all.
+			if (replyStatus === 'redirected') {
+				const res = json(refuse ? { ok: true, refused: 'unrecognised_answer' } : { ok: true });
+				Object.defineProperty(res, 'redirected', { value: true });
+				return res;
+			}
+			if (replyStatus === 'not_json') return new Response('<html>Sign in</html>', { status: 200, headers: { 'Content-Type': 'text/html' } });
+			if (replyStatus === 'no_ok') return json(refuse ? { refused: 'unrecognised_answer' } : { status: 'fine' });
+			if (replyStatus === 'empty') return new Response(null, { status: 204 });
+			if (replyStatus === 'answered_before') return json({ ok: true, idempotent: true, ...(refuse ? { refused: 'unrecognised_answer' } : {}) });
 			return json(refuse ? { ok: true, refused: 'unrecognised_answer' } : { ok: true });
 		}
 		if (url.endsWith('/threads/t1')) return json({ thread: null });
@@ -259,6 +279,33 @@ describe('text typed as the answer', () => {
 		expect(replies.map((r) => r.answer)).toEqual(['password: Hunter2!x']);
 		expect(lines()).toEqual([]);
 		expect(JSON.stringify(store.getMessages())).not.toContain('Hunter2');
+	});
+
+	const stored = (): string => { try { return localStorage.getItem('lynox-chat') ?? ''; } catch { return ''; } };
+	for (const status of ['answered_before', 'unknown', 'conflict', 'forbidden', 'bad', 'network', 'redirected', 'not_json', 'no_ok', 'empty', 'closed', 'server_error'] as const) {
+		for (const unrecognised of [false, true]) {
+			it(`one the engine did not take as this answer (${status}${unrecognised ? ', read as no key' : ''}) is neither shown nor stored`, async () => {
+				i18n.setLocale('de');
+				await renderPrompt(['allow', 'deny'], 'guard');
+				replyStatus = status;
+				refuse = unrecognised;
+				await type('password: Hunter2!x');
+				await new Promise((r) => setTimeout(r, 1200)); // the one retry after a failed send
+				await settle();
+				expect(replies.length).toBeGreaterThanOrEqual(1);
+				expect(lines()).toEqual([]);
+				expect(JSON.stringify(store.getMessages())).not.toContain('Hunter2');
+				expect(stored()).not.toContain('Hunter2');
+			});
+		}
+	}
+
+	it('control: one the engine took now is shown, and kept with the chat', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['allow', 'deny'], 'guard');
+		await type('ja');
+		expect(lines()).toEqual([`${i18n.t('chat.typed_answer')} "ja"`]);
+		expect(JSON.stringify(store.getMessages())).toContain('"type":"answer"');
 	});
 
 	it('goes into the reply of the run that asked, also when a message waits behind it', async () => {
