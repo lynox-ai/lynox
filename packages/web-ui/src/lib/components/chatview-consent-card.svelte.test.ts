@@ -144,6 +144,22 @@ describe('the engine\'s own confirmation', () => {
 		});
 	}
 
+	it('a click on allow is acknowledged while the run goes on; on deny it says denied', async () => {
+		i18n.setLocale('de');
+		let bar = await renderPrompt(['allow', 'deny'], 'guard');
+		await click(bar, i18n.t('chat.allow'));
+		expect(target.textContent).toContain(i18n.t('chat.permission_running'));
+		run.close();
+		if (component) svelte.unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		store.newChat();
+		replies = [];
+		bar = await renderPrompt(['allow', 'deny'], 'guard');
+		await click(bar, i18n.t('chat.deny'));
+		expect(target.textContent).toContain(i18n.t('chat.permission_denied_running'));
+	});
+
 	it('an answer the engine reads as none of the keys is said, not a silent no', async () => {
 		i18n.setLocale('de');
 		await renderPrompt(['allow', 'deny'], 'guard');
