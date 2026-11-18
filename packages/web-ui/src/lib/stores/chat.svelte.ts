@@ -2779,8 +2779,12 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		return;
 	}
 	if (outcome === 'consent_unrecognised' || outcome === 'consent_unrecognised_before') {
+		// Never over another error, as for a closed question: a key refused or a question closed
+		// says why, and this sentence would hide that.
 		if (sessionId !== sid) return;
-		chatError = t('chat.consent_unrecognised');
+		const sentence = t('chat.consent_unrecognised');
+		if (chatError !== null && chatError !== sentence) return;
+		chatError = sentence;
 		chatErrorDetail = null;
 		return;
 	}

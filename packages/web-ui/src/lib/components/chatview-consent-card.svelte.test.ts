@@ -281,6 +281,32 @@ describe('text typed as the answer', () => {
 		expect(JSON.stringify(store.getMessages())).not.toContain('Hunter2');
 	});
 
+	it('an answer read as none of the keys does not hide a sentence already standing (a refused key)', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['allow', 'deny'], 'guard');
+		keyRefused = true;
+		await type('password: Hunter2!x');
+		const standing = store.getChatError();
+		expect([i18n.t('chat.mandate_key_input'), i18n.t('chat.mandate_key_input_returned')]).toContain(standing);
+		// The question comes back, and the next typed answer is none of its keys.
+		keyRefused = false;
+		refuse = true;
+		run.send('prompt', { question: '⚠ Command: x', options: ['allow', 'deny'], promptId: 'p2', agent: 'lynox', consent: 'guard' });
+		await settle();
+		svelte.flushSync();
+		await type('vielleicht');
+		expect(replies.map((r) => r.answer)).toEqual(['password: Hunter2!x', 'vielleicht']);
+		expect(store.getChatError()).toBe(standing);
+	});
+
+	it('control: with nothing standing, an answer read as none of the keys says so', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['allow', 'deny'], 'guard');
+		refuse = true;
+		await type('vielleicht');
+		expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
+	});
+
 	const stored = (): string => { try { return localStorage.getItem('lynox-chat') ?? ''; } catch { return ''; } };
 	for (const status of ['answered_before', 'unknown', 'conflict', 'forbidden', 'bad', 'network', 'redirected', 'not_json', 'no_ok', 'empty', 'closed', 'server_error'] as const) {
 		for (const unrecognised of [false, true]) {
