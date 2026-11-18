@@ -606,6 +606,9 @@
 								{#if pausedOpen(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
+								{#if pausedDone(trigger)}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-trigger-paused-done>{t('triggers.paused_done')}</span>
+								{/if}
 							</div>
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
@@ -629,6 +632,11 @@
 									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
+							<!-- A completed plan that keeps its pause has no way back at the plan: nothing takes it
+							     over or reopens it. The line names the way there is (U-275). -->
+							{#if pausedDone(trigger)}
+								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-done-hint>{t('triggers.paused_done_hint')}</p>
+							{/if}
 							<!-- A confirmed watch names its page too: its escalation leaves the address out when
 							     someone the owner let in set it up, and points here (PRD B6). -->
 							{#if showsWatchAddress(trigger) && !held(trigger)}

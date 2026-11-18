@@ -22,7 +22,7 @@ const both = (key: string): void => {
 
 describe('a paused plan in the Triggers view', () => {
   it('Run now: the engine sends `paused`, the view switches on it, and both languages have the line', () => {
-    expect(ROUTE).toMatch(/errorResponse\(res, 409, PAUSED_REFUSAL, 'paused'\)/);
+    expect(ROUTE).toMatch(/errorResponse\(res, 409, pausedRefusal\([^)]*\)\)?, 'paused'\)/);
     expect(VIEW).toMatch(/code === 'paused'\s*\?\s*\(who !== '' \? tf\('triggers\.run_paused', \{ who \}\) : t\('triggers\.run_paused_anon'\)\)/);
     both('triggers.run_paused_anon');
   });

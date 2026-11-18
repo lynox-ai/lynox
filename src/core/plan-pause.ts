@@ -292,6 +292,21 @@ export function writePause(db: Database.Database, id: string, entries: readonly 
  */
 export const PAUSED_MODEL_TEXT = "paused until the owner takes it over (the helper's access ended or was not renewed in time)";
 
+/**
+ * The same for a completed plan that keeps its pause. Nothing takes it over (`planOf` answers
+ * `nothing_to_take_over`) and nothing reopens it, so it does not send anyone to a takeover; a new
+ * plan is the way to run it again, which the model offers rather than sets up unasked (U-275).
+ */
+export const PAUSED_DONE_MODEL_TEXT = "completed, and paused because the helper's access ended. It cannot be taken over or run again; if it should run again, offer to set up a new plan.";
+
+/** `task_update`'s refusal at a completed plan that keeps its pause (U-275). */
+export const PAUSED_DONE_UPDATE_REFUSAL = "Error: this plan is completed, and paused because the helper's access ended. It cannot be changed, taken over or run again; if it should run again, offer to set up a new plan.";
+
+/** What the model reads for this paused plan: its own sentence once it is completed. */
+export function pausedModelText(t: { readonly status?: string | undefined }): string {
+  return t.status === 'completed' ? PAUSED_DONE_MODEL_TEXT : PAUSED_MODEL_TEXT;
+}
+
 /** Whether a plan is paused now: the switch is on and the row says so. */
 export function isPaused(t: { readonly paused_at?: number | null | undefined }): boolean {
   return planPauseOn() && t.paused_at !== undefined && t.paused_at !== null;

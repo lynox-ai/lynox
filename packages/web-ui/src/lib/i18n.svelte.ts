@@ -2421,6 +2421,8 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: 'Paused: the access of the person who set it up has ended. The plan runs again only once you take it over.',
 	},
 	'triggers.paused_takeover': { de: 'Pausiert · Übernahme nötig', en: 'Paused · needs takeover' },
+	'triggers.paused_done': { de: 'Abgeschlossen · pausiert', en: 'Completed · paused' },
+	'triggers.paused_done_hint': { de: 'Ein Zugang endete. Soll der Plan wieder laufen, leg einen neuen an.', en: 'An access ended. To run this plan again, set up a new one.' },
 	// 641c-2: the owner's takeover of a paused plan (`utils/plan-takeover.ts`); wording ux U-037/U-039, PRD 641c "Texte".
 	'takeover.button': { de: 'Übernehmen', en: 'Take over' },
 	'takeover.title': { de: 'Plan übernehmen?', en: 'Take over this plan?' },

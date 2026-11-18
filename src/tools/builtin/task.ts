@@ -6,7 +6,7 @@ import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidde
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
-import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PAUSED_DONE_UPDATE_REFUSAL, isPaused, pausedModelText } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
@@ -118,7 +118,7 @@ export function triggerDetailLine(t: {
   const parts: string[] = [];
   // A paused plan says so first; it has no next run until it is taken over (`plan-pause.ts`).
   const paused = isPaused(t);
-  if (paused) parts.push(`PAUSED — ${PAUSED_MODEL_TEXT}`);
+  if (paused) parts.push(`PAUSED — ${pausedModelText(t)}`);
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
   // 1, so `=== 0` is the test, not falsiness. A todo has no such field at all.
   if (t.enabled === 0) parts.push('SCHEDULE OFF — it will not fire');
@@ -153,7 +153,14 @@ export function triggerDetailLine(t: {
     // as another field — two workflow attributions on one line, at the moment
     // the reader is deciding which workflow a repair must preserve. It costs a
     // middle dot in a provider's prose and removes the ambiguity entirely.
-    const raw = clean(t.last_run_result ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
+    // A stop that paused the plan stored "paused until the owner takes it over". That half holds only
+    // while the plan is paused and open: taken over or with the switch off it is not paused, and
+    // completed it has no takeover (`pausedModelText`). Otherwise the stored sentence is read without
+    // it; the stored value stays, the takeover reads it (`plan-takeover.ts`).
+    const stored = (!paused || t.status === 'completed') && t.last_run_result === ACCESS_ENDED_PAUSED_RESULT
+      ? ACCESS_ENDED_RESULT
+      : t.last_run_result;
+    const raw = clean(stored ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
     const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
     parts.push(`last run ${ENDED_LABEL.get(t.last_run_status ?? '') ?? 'FAILED'}${when}: ${reason}`);
     // …and whether that failure was the last word. `last run FAILED` alone does
@@ -663,7 +670,9 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       const pausedTarget = managerRef.getTrigger(input.task_id, scopeFilter);
       if (pausedTarget !== undefined && isPaused(pausedTarget)
         && !(isOwnerPrincipal(agent.principal) && input.status === 'completed')) {
-        return `Error: this plan is ${PAUSED_MODEL_TEXT}. It cannot be changed until then.`;
+        return pausedTarget.status === 'completed'
+          ? PAUSED_DONE_UPDATE_REFUSAL
+          : `Error: this plan is ${pausedModelText(pausedTarget)}. It cannot be changed until then.`;
       }
       return withInstanceWrite(agent, {
         site: 'task_update#change', kind: 'change', store: 'tasks',

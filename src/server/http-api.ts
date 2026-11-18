@@ -1894,6 +1894,11 @@ const ERASURE_IN_PROGRESS = 'All data is being erased; start the run again once 
 const ERASED_DURING_REQUEST = 'All data was erased while this message was being prepared; start a new conversation';
 /** A paused plan's refusal (`plan-pause.ts`); `code: 'paused'` is what the view switches on. */
 const PAUSED_REFUSAL = 'paused because an access ended; it needs to be taken over';
+/** The same for a completed plan that keeps its pause: nothing takes it over or reopens it. */
+const PAUSED_DONE_REFUSAL = 'completed and paused because an access ended; it cannot be taken over or run again. Create a new plan to run it again.';
+/** The refusal for this paused plan: its own sentence once it is completed. */
+const pausedRefusal = (t: { readonly status?: string | undefined } | undefined): string =>
+  t?.status === 'completed' ? PAUSED_DONE_REFUSAL : PAUSED_REFUSAL;
 /**
  * How long `DELETE /api/data` waits for the chat runs it stopped to release their
  * slots. Stopping is the same `takeover` the stale-run reclaim uses: a run parked on
@@ -3127,7 +3132,7 @@ export class LynoxHTTPApi {
     if (trigger === undefined || !isPaused(trigger)) return false;
     const ownerMay = action === 'enable' || action === 'complete' || action === 'delete';
     if (isOwnerPrincipal(this._principalOf(req)) && ownerMay) return false;
-    errorResponse(res, 409, PAUSED_REFUSAL, 'paused');
+    errorResponse(res, 409, pausedRefusal(trigger), 'paused');
     return true;
   }
 
@@ -9560,7 +9565,7 @@ export class LynoxHTTPApi {
         // would always miss, dropping the response to the {id, enabled} stub.
         const updated = engine.getRunHistory()?.getTrigger(params['id']!);
         // Switching a paused plan on starts nothing until it is taken over, and the answer says so.
-        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: PAUSED_REFUSAL } : {};
+        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: pausedRefusal(updated) } : {};
         jsonResponse(res, 200, { ...(updated !== undefined ? triggerForRoute(updated, this._principalOf(_req)) : { id: params['id'], enabled: b['enabled'] ? 1 : 0 }), ...pausedNote });
         return;
       }
@@ -9926,7 +9931,7 @@ export class LynoxHTTPApi {
           return;
         }
         if (outcome.reason === 'paused') {
-          errorResponse(res, 409, PAUSED_REFUSAL, 'paused');
+          errorResponse(res, 409, pausedRefusal(engine.getRunHistory()?.getTrigger(params['id']!)), 'paused');
           return;
         }
         errorResponse(res, 404, 'Trigger not found'); return;
