@@ -3564,6 +3564,51 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('an answer to one of the engine\'s confirmations that is none of its keys is recorded and said back; an ordinary question\'s is not', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-consent-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const store = new PromptStore(history.getDb());
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const original = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => store;
+      const guard = (sid: string): string => store.insertAskUser(sid, '⚠ Command: x', ['allow', 'deny'], false, undefined, undefined, undefined, undefined, 'guard');
+      try {
+        for (const [answer, refused] of [['allow', false], ['deny', false], ['y', true], ['yes', true], ['Erlauben', true], ['Allow', true], ['allow deep', true]] as const) {
+          const sid = `s-consent-${answer.replace(/\W/g, '_')}`;
+          const id = guard(sid);
+          const res = await jsonFetch(`/api/sessions/${sid}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer }) });
+          expect(res.status, answer).toBe(200);
+          const body = await res.json() as { ok: boolean; refused?: string };
+          expect(body.refused, answer).toBe(refused ? 'unrecognised_answer' : undefined);
+          // Recorded either way: the gate reads it, and refuses what is no key.
+          expect(store.getById(id)?.answer, answer).toBe(answer);
+        }
+        // An older client answers without a promptId: the same.
+        guard('s-consent-legacy');
+        const legacy = await jsonFetch('/api/sessions/s-consent-legacy/reply', { method: 'POST', body: JSON.stringify({ answer: 'y' }) });
+        expect((await legacy.json() as { refused?: string }).refused).toBe('unrecognised_answer');
+        // A question the model wrote, with the same words: an ordinary answer.
+        const plain = store.insertAskUser('s-plain', 'Allow?', ['Allow', 'Deny', '\x00']);
+        const ordinary = await jsonFetch('/api/sessions/s-plain/reply', { method: 'POST', body: JSON.stringify({ promptId: plain, answer: 'y' }) });
+        expect(await ordinary.json()).toEqual({ ok: true });
+        // A reconnect restores the marker from the store; a question stored without it has none.
+        guard('s-open');
+        const open = await jsonFetch('/api/sessions/s-open/pending-prompt');
+        const openBody = await open.json() as { consent?: string; options?: string[]; mailConnect?: unknown };
+        expect(openBody.consent).toBe('guard');
+        expect(openBody.options).toEqual(['allow', 'deny']);
+        expect(openBody.mailConnect).toBeUndefined();
+        store.insertAskUser('s-before', '⚠ Command: x', ['Allow', 'Deny', '\x00']);
+        const before = await jsonFetch('/api/sessions/s-before/pending-prompt');
+        expect((await before.json() as { consent?: string }).consent).toBeUndefined();
+      } finally {
+        engineRef.getPromptStore = original;
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('reply returns 404 for no pending prompt', async () => {
       const res = await jsonFetch('/api/sessions/test/reply', {
         method: 'POST',

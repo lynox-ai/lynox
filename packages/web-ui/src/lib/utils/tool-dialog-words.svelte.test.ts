@@ -87,3 +87,24 @@ describe('the delegation consent names its button as the button reads', () => {
     expect(text).toContain(`otherwise choose "${t('chat.consent_run_balanced')}".`);
   });
 });
+
+describe('the engine names a consent key as the chat\'s button does', () => {
+	// A notification lists an engine consent's options in the owner's words (`CONSENT_LABELS`);
+	// the chat shows the same keys from its own table. Both must say the same.
+	const KEY_TO_I18N = { allow: 'chat.allow', deny: 'chat.deny', deep: 'chat.consent_allow_deep', balanced: 'chat.consent_run_balanced', cancel: 'chat.consent_cancel' } as const;
+	it('in both languages, for every key', () => {
+		let root = process.cwd();
+		while (!existsSync(join(root, 'src/tools/dialog-text.ts')) && dirname(root) !== root) root = dirname(root);
+		const text = readFileSync(join(root, 'src/tools/dialog-text.ts'), 'utf8');
+		const block = /export const CONSENT_LABELS[^=]*= \{([\s\S]*?)\n\};/.exec(text);
+		expect(block).not.toBeNull();
+		for (const locale of ['en', 'de'] as const) {
+			const line = new RegExp(`\\n  ${locale}: \\{([^}]*)\\}`).exec(block![1]!);
+			expect(line, locale).not.toBeNull();
+			const engine = Object.fromEntries([...line![1]!.matchAll(/(\w+): '([^']*)'/g)].map((m) => [m[1]!, m[2]!]));
+			setLocale(locale);
+			expect(Object.keys(engine).sort(), locale).toEqual(Object.keys(KEY_TO_I18N).sort());
+			for (const [key, i18nKey] of Object.entries(KEY_TO_I18N)) expect(engine[key], `${locale} ${key}`).toBe(t(i18nKey));
+		}
+	});
+});
