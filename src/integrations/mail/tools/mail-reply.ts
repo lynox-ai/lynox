@@ -16,7 +16,7 @@ import {
   type MailSendResult,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { mailTargets } from '../../../core/send-target.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
@@ -382,6 +382,19 @@ export async function commitReply(sendProvider: MailProvider, c: ReplyCommit, ct
 
   const result: MailSendResult = await sendProvider.send(sendInput);
   recordMailSend([...c.to, ...c.cc], c.subject);
+  // The sent log, like every other send: the outbound history and the export list replies too. A
+  // reply's recipients are the original's sender and its other recipients, not addresses the owner
+  // named, so the reply never makes them count as known (`originOwnerKnown` false).
+  writeSentLog(ctx, {
+    accountId: sendProvider.accountId,
+    messageId: result.messageId || `local-${String(Date.now())}`,
+    to: c.to,
+    ...(c.cc.length > 0 ? { cc: c.cc } : {}),
+    subject: c.subject,
+    bodyChars: sendInput.text.length,
+    ...(c.inReplyTo ? { inReplyTo: c.inReplyTo } : {}),
+    originOwnerKnown: false,
+  });
   // The reply HAS been sent. Reconcile the inbox (mark the open item
   // answered — its own source of truth) as a best-effort, fully isolated
   // step: an absent hook method (a minimal ctx) or a throwing reconcile

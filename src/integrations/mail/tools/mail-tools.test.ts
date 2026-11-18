@@ -17,6 +17,7 @@ import type {
 } from '../provider.js';
 import type { IAgent } from '../../../types/index.js';
 import { InMemoryMailRegistry } from './registry.js';
+import { MailStateDb } from '../state.js';
 import { leftOutRefusal } from '../../inbox/disabled-accounts.js';
 import { createMailSearchTool } from './mail-search.js';
 import { createMailReadTool } from './mail-read.js';
@@ -755,6 +756,47 @@ describe('mail_reply tool', () => {
     const out = await tool.handler({ uid: 7, body: 'answer' }, yesAgent);
     expect(out).toContain('Reply sent');
     expect(out).not.toContain('error');
+  });
+
+  describe('the sent log', () => {
+    let stateDb: MailStateDb;
+    let ctx: MailContext;
+    beforeEach(() => {
+      stateDb = new MailStateDb({ path: ':memory:' });
+      stateDb.upsertAccount(businessAccount(provider.accountId, provider.address));
+      ctx = {
+        findAccountByAddress: () => null,
+        getAccountConfig: () => businessAccount(provider.accountId, provider.address),
+        stateDb,
+      } as unknown as MailContext;
+      provider.fetch.mockResolvedValue({
+        envelope: envelope(11, { messageId: '<o11@x>', from: 'alice@example.com', subject: 'Angebot' }),
+        text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+      });
+    });
+    afterEach(() => { stateDb.close(); });
+
+    it('a sent reply is written to the sent log, and the outbound history reads it back', async () => {
+      provider.send.mockResolvedValue({ messageId: '<r11@x>', accepted: ['alice@example.com'], rejected: [] });
+      expect(await createMailReplyTool(registry, ctx).handler({ uid: 11, body: 'Gerne.' }, yesAgent)).toContain('Reply sent');
+      const logged = stateDb.listOutboundForAddress('alice@example.com');
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toMatchObject({
+        accountId: provider.accountId, messageId: '<r11@x>', inReplyTo: '<o11@x>',
+        to: [{ address: 'alice@example.com' }],
+        bodyChars: provider.send.mock.calls[0]![0].text.length,
+      });
+      expect(logged[0]!.subject).toContain('Angebot');
+      // The reply goes to the original's sender, an address the owner did not name.
+      expect(stateDb.isOwnerKnownRecipient('alice@example.com')).toBe(false);
+    });
+
+    it('control: a reply the provider fails to send writes nothing to the sent log', async () => {
+      provider.send.mockRejectedValue(new Error('smtp 554'));
+      await createMailReplyTool(registry, ctx).handler({ uid: 11, body: 'Gerne.' }, yesAgent);
+      expect(provider.send).toHaveBeenCalledTimes(1);
+      expect(stateDb.listOutboundForAddress('alice@example.com')).toEqual([]);
+    });
   });
 
   it('blocks a reply from an account the context has no configuration for, before anything is sent', async () => {
