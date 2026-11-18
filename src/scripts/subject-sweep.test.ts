@@ -850,4 +850,21 @@ describe('subject-sweep — main() and the vault key on a hosted instance', () =
     } finally { process.argv = argv; }
     expect(existsSync(join(dir, 'engine.db'))).toBe(false);
   });
+
+  it('opens engine.db with the delivered key (the refusal above is not refusing everything)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-sweep-hosted-ok-')); dirs.push(dir);
+    vi.stubEnv('HOME', dir);
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    vi.stubEnv('LYNOX_VAULT_KEY', 'A'.repeat(64));
+    vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', 'env');
+    _resetVaultKeySource();
+    const hdb = new Database(join(dir, 'history.db'));
+    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT, updated_at TEXT)');
+    hdb.close();
+    const argv = process.argv;
+    process.argv = ['node', 'subject-sweep', `--data-dir=${dir}`];
+    try { main(); } finally { process.argv = argv; }
+    expect(existsSync(join(dir, 'engine.db'))).toBe(true);
+    expect(process.exitCode).toBeUndefined();
+  });
 });
