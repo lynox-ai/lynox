@@ -60,6 +60,19 @@ const mkTmp = (): string => {
 };
 
 describe('redactWireUserMessage', () => {
+  it('masks an env secret the user message carries, which has no credential shape', () => {
+    const canary = 'zQ7wirecanaryPq9Lm2Xv4';
+    const saved = process.env['LYNOX_VAULT_KEY'];
+    process.env['LYNOX_VAULT_KEY'] = canary;
+    try {
+      const out = redactWireUserMessage(`please debug ${canary}`);
+      expect(out).toContain('please debug');
+      expect(out).not.toContain(canary);
+    } finally {
+      if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+    }
+  });
+
   it('reduces a single-secret catalog to a count, dropping name + last-4', () => {
     const out = redactWireUserMessage(`task\n${secretsBlock(['ANTHROPIC_API_KEY', 'FgAA'])}`);
     expect(out).toContain('<secrets>1 secret available (names+last4 redacted)</secrets>');

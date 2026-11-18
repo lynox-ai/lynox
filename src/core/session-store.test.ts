@@ -154,6 +154,22 @@ describe('SessionStore', () => {
       expect(summaryArg).not.toContain('sk-LEAK42');
     });
 
+    it('masks an env secret the summarizer echoed when the engine holds no store', async () => {
+      const canary = 'zQ7summarycanaryPq9Lm2Xv4';
+      vi.stubEnv('LYNOX_VAULT_KEY', canary);
+      try {
+        const { engine, updateThread } = longThreadEngine(async () => `recap: the key is ${canary} and we shipped`);
+        (engine as unknown as { getSecretStore: ReturnType<typeof vi.fn> }).getSecretStore.mockReturnValue(null);
+        new SessionStore().getOrCreate('long', engine);
+        await vi.waitFor(() => expect(updateThread).toHaveBeenCalled());
+        const summaryArg = (updateThread.mock.calls.at(-1)?.[1] as { summary?: string })?.summary ?? '';
+        expect(summaryArg).toContain('we shipped');
+        expect(summaryArg).not.toContain(canary);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('F5: does NOT persist an empty/blocked summary (guard-block string never becomes the authoritative summary)', async () => {
       // An internal-run budget block THROWS (mirrored here as a rejection); the
       // outer try/catch swallows it → nothing persisted, retried next resume.

@@ -5561,7 +5561,7 @@ export class Agent implements IAgent {
       const duration = timer.end();
       const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawInput = JSON.stringify(auditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
-      const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : rawInput;
+      const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : maskEngineEnvSecrets(rawInput);
       // Persist through the injected sink, which knows the run because WE tell
       // it: `currentRunId` is this agent's own run, so a spawned child books
       // onto its own row instead of its parent's. The channel below stays for
@@ -5653,7 +5653,7 @@ export class Agent implements IAgent {
       this._noteConversationGrant(tc.name, callSlot, false);
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
-      const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
+      const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : maskEngineEnvSecrets(rawErrInput);
       // A failed call is recorded like a successful one — it consumed the same
       // budget and counts against the same rate limits.
       this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true, callSlot.connection, tc.id, this._factsOfCall(tc, callSlot));

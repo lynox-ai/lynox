@@ -3148,6 +3148,35 @@ describe('Agent', () => {
   });
 
   describe('toolEnd publish includes input', () => {
+    // Made up and without a credential shape: only the env value set can mask it.
+    const envCanary = 'zQ7inputcanaryPq9Lm2Xv4';
+    for (const [label, impl, success] of [
+      ['success', () => vi.fn().mockResolvedValue('ok'), true],
+      ['failure', () => vi.fn().mockRejectedValue(new Error('oops')), false],
+    ] as const) {
+      it(`masks an env secret in the input without a store, on tool ${label}`, async () => {
+        const { channels } = await import('./observability.js');
+        vi.mocked(channels.toolEnd.publish).mockClear();
+        const saved = process.env['LYNOX_VAULT_KEY'];
+        process.env['LYNOX_VAULT_KEY'] = envCanary;
+        try {
+          const tool = makeTool('env_tool', impl());
+          mockProcess
+            .mockResolvedValueOnce(toolUseResponse([{ id: `tu-env-${label}`, name: 'env_tool', input: { cmd: `echo ${envCanary}` } }]))
+            .mockResolvedValueOnce(endTurnResponse('done'));
+          const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+          await agent.send('go');
+          const call = vi.mocked(channels.toolEnd.publish).mock.calls.find(c => (c[0] as { success: boolean }).success === success);
+          expect(call).toBeDefined();
+          const input = (call![0] as { input?: string }).input ?? '';
+          expect(input).toContain('echo');
+          expect(input).not.toContain(envCanary);
+        } finally {
+          if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+        }
+      });
+    }
+
     it('publishes truncated input on tool success', async () => {
       const { channels } = await import('./observability.js');
       const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));

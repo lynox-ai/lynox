@@ -50,7 +50,7 @@ import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEff
 import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL } from './task-manager.js';
 import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
-import { maskSecretPatterns } from './secret-store.js';
+import { maskSecretPatterns, maskEngineEnvSecrets } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget } from './session-budget.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
@@ -2599,7 +2599,7 @@ export class WorkerLoop {
         settleSpend: (row, entry) => history?.settleBulkJudgeCost(row, entry),
         budgetAllows: () => checkPersistentBudget().allowed,
         scanSecret: detectSecretInContent,
-        maskVault: (text) => secretStore ? secretStore.maskSecrets(text) : text,
+        maskVault: (text) => secretStore ? secretStore.maskSecrets(text) : maskEngineEnvSecrets(text),
         columns: (collection) => {
           if (!dataStore) return null;
           try {
@@ -3001,7 +3001,7 @@ export class WorkerLoop {
       // `onBoxBlock`): the stored row keeps them for the owner's own UI, the copy that leaves
       // the box carries the field names the question lists, never the values.
       const offBoxText = flattenPrompt(offBoxPrompt(rawQuestion));
-      const offBoxQuestion = secretStore ? secretStore.maskAll(offBoxText) : offBoxText;
+      const offBoxQuestion = secretStore ? secretStore.maskAll(offBoxText) : maskEngineEnvSecrets(offBoxText);
       // A contained run's question leaves as a fixed sentence and without its options: it may
       // quote what a connected store returned, which no vault mask knows (`error-egress.ts`).
       const questionReduced = errorTextReduced(this.engine.getToolContext().containment, {
@@ -3024,7 +3024,7 @@ export class WorkerLoop {
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: questionReduced
           ? { question: notices.containedQuestionInquiry }
-          : { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+          : { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : maskEngineEnvSecrets(o))) },
       }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });
@@ -3774,7 +3774,7 @@ export class WorkerLoop {
       threadStore: () => this.engine.getThreadStore(),
       // The vault's mask only, as on the task path: the generic pattern fallback mangles text a
       // human has to read and answer.
-      maskOffBox: (text) => this.engine.getSecretStore()?.maskAll(text) ?? text,
+      maskOffBox: (text) => this.engine.getSecretStore()?.maskAll(text) ?? maskEngineEnvSecrets(text),
       notify: (msg) => this.notificationRouter.notify(msg),
       // Through the engine, as an escalation's is, so the hooks hear of a question that reached nobody.
       recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id)),

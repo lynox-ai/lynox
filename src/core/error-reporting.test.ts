@@ -118,6 +118,22 @@ describe('error-reporting (Bugsink)', () => {
     });
   });
 
+  describe('the engine\'s env secrets', () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it('beforeSend masks an env secret in the exception value and the message', async () => {
+      // Made up and without a credential shape: only the env value set can mask it.
+      const canary = 'zQ7reportcanaryPq9Lm2Xv4';
+      vi.stubEnv('LYNOX_VAULT_KEY', canary);
+      await initErrorReporting('https://key@bugsink.example.com/123');
+      const config = mockInit.mock.calls[0]![0] as { beforeSend: (e: Record<string, unknown>) => unknown };
+      const event = { message: `boom ${canary}`, exception: { values: [{ type: 'Error', value: `failed with ${canary}` }] } };
+      const out = JSON.stringify(config.beforeSend(event));
+      expect(out).toContain('failed with');
+      expect(out).not.toContain(canary);
+    });
+  });
+
   describe('breadcrumbs (no-op when disabled)', () => {
     it('addToolBreadcrumb is safe no-op', () => {
       addToolBreadcrumb('bash', true, 150);
