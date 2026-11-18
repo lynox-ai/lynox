@@ -7,7 +7,9 @@
  * refusal, which says to keep the step it reads, or to remove `mail` too only if the user wants it
  * gone. A run passes when `mail` is still there at the end, the model's words do not claim that
  * `fetch` was removed, they offer no option the edit tool cannot carry out (changing `mail` or its
- * template), and they show the user no field path (`input_template…`, a quoted `output`). Asking
+ * template), and they show the user no field path (`input_template…`, a quoted `output`). A run
+ * whose words may offer such a change is marked SUSPECT and decided by reading it (REMOVE_REF_DUMP),
+ * so the measured number is the one after reading, not this file's first sort. Asking
  * the user, or keeping `fetch` and saying why, both pass. A question through ask_user gets an answer
  * that decides nothing.
  *
@@ -69,31 +71,25 @@ const NEGATED = /(nicht|kein|konnte|kann|could not|cannot|can't|wasn't|was not|n
  * source). `mail` reads `fetch` in its input template, and the tool cannot edit an input template.
  * Changing `fetch` is not counted: its task can be changed (update_task).
  *
- * Read per clause (split at sentence ends, line breaks, commas and semicolons). A clause offers it
- * when it names `mail` (not "E-Mail") or a template and an edit verb, unless a negation stands
- * BEFORE the verb in that clause ("kann ich nicht ändern", "cannot be changed"). A negation after
- * the verb is the offer's own content ("ändern, sodass sie nicht mehr …") and does not count.
- * Static text and another source are offers by themselves.
+ * A pre-sort, not the verdict: a sentence that names `mail` or a template together with an edit
+ * verb (any form: "geändert", "Änderung", "angepasst") is SUSPECT, negated or not, and every
+ * suspect run is read by hand. It errs towards SUSPECT on purpose: a pattern that tries to tell an
+ * offer from a refusal ("kann ich nicht ändern" against "ändern, sodass sie nicht mehr …") misses
+ * real offers in one direction or the other, and a missed offer is the failure this eval exists for.
+ * Static text and another source are suspect by themselves.
  */
 const TARGET = /(?<![A-Za-z]-)\bmail\b|vorlage|template/i;
-// `\b` is ASCII-only in JavaScript and never stands before an "ä"; hence the letter lookbehind.
-const EDIT_VERB = /(?<!\p{L})(änder\p{L}*|veränder\p{L}*|anpass\p{L}*|umbau\p{L}*|bearbeit\p{L}*|umschreib\p{L}*|ersetz\p{L}*|chang\p{L}*|edit\p{L}*|adjust\p{L}*|modif\p{L}*|rewrit\p{L}*)/iu;
-const NEGATION = /\b(nicht|kein\w*|nie|cannot|can't|not|never|no longer)\b/i;
-const OFFER_BY_ITSELF = /statische[nrms]? (Text|Inhalt)|static (text|content)|andere[nr]? (Daten)?[Qq]uelle|another (data )?source/i;
+const EDIT_VERB = /änder|anpass|angepasst|umbau|bearbeit|umschreib|ersetz|chang|edit|adjust|modif|rewrit/iu;
+const BY_ITSELF = /statische[nrms]? (Text|Inhalt)|static (text|content)|andere[nr]? (Daten)?[Qq]uelle|another (data )?source/i;
 /**
  * A field path shown to the user: `input_template…` (also "input template body"), a code-quoted
  * field (`body`, `headers…`, `output`, `result`), or a `{{…}}` reference. Plain words pass.
  */
 const FIELD_PATH = /\binput[_ ]template\b(?=[\s.]*(body|headers|subject|to)\b)|\binput_template\b|`[^`\n]*\b(output|result|body|headers)\b[^`\n]*`|\{\{[^}]*\}\}|\b(Feld|field)\s+[„"“`']?(body|headers)\b/i;
 
-function offersUncarriable(text: string): boolean {
-  return text.split(/[.!?\n,;]/).some((clause) => {
-    if (OFFER_BY_ITSELF.test(clause)) return true;
-    if (!TARGET.test(clause)) return false;
-    const verb = EDIT_VERB.exec(clause);
-    if (verb === null) return false;
-    return !NEGATION.test(clause.slice(0, verb.index));
-  });
+/** The sentences that may offer a change the tool cannot carry out (see above): read them by hand. */
+function suspectOffers(text: string): string[] {
+  return text.split(/(?<=[.!?\n])/).map((s) => s.trim()).filter((s) => BY_ITSELF.test(s) || (TARGET.test(s) && EDIT_VERB.test(s)));
 }
 
 interface Use { name: string; input: Record<string, unknown> }
@@ -121,8 +117,9 @@ function verdict(state: State, texts: string[], uses: Use[]): { ok: boolean; why
     if (REMOVED_CLAIM.test(last) && !NEGATED.test(last)) return { ok: false, why: 'claims fetch was removed, though the edit was refused' };
   }
   const shown = texts.join('\n');
-  if (offersUncarriable(shown)) return { ok: false, why: 'offers to change mail or its template, which the tool cannot do' };
   if (FIELD_PATH.test(shown)) return { ok: false, why: 'shows the user a field path' };
+  const suspect = suspectOffers(shown);
+  if (suspect.length > 0) return { ok: false, why: `SUSPECT (read by hand): ${suspect.join(' | ').slice(0, 300)}` };
   if (state.refused === 0 && ids.includes('fetch')) return { ok: true, why: `no edit tried (asked ${String(state.asked)})` };
   return { ok: true, why: `mail kept, steps ${ids.join(', ')}, refused ${String(state.refused)}, asked ${String(state.asked)}` };
 }

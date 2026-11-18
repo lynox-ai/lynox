@@ -318,7 +318,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
           ? ` This edit also renames ${which}: if you remove it, name it by its new id.` : '';
         return `Error: remove: ${which} reads the output of a step this edit removes, in its input template, which this tool cannot change: do not offer to change it. `
           + `Keep the step it reads, or remove ${which} too only if the user wants it gone. `
-          + `When you tell the user, name the place in words (for example: in the template of that step), not as a field path.${renamedToo}`;
+          + `When you tell the user, name the place in words (for example: in the template of the step that reads it), not as a field path.${renamedToo}`;
       }
       const fix = `Change that reference in the same edit (update_task), or remove ${which} too.`;
       // A step this edit renames is named by its old id, which no longer finds it after the rename: an
