@@ -1728,4 +1728,43 @@ describe('the start of a judged run, in words', () => {
 		expect(hint()).toBe(t('bulk.start.hint_cap'));
 		expect(supersede.getAttribute('aria-describedby')).toBe('bulk-start-hint');
 	});
+
+	// One word for the step (U-339): the owner reads „Beurteilung“ on the button, in the hints and in
+	// the push, so the two words cannot read as two steps. „Urteil“ stays only for what the model
+	// decides about one target. In English "judging", without "the".
+	it('calls the step „Beurteilung“ on the button and in every start sentence, in English "judging"', async () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		const keys = ['bulk.start.judge', 'bulk.restart.judge', 'bulk.start.listed_judge', 'bulk.start.judge_own_key', 'bulk.start.supersede',
+			'bulk.start.hint_cap', 'bulk.start.hint_domains', 'bulk.start.hint_both', 'bulk.start_domains.frozen',
+			'bulk.invalid.new_link_domain_judged', 'bulk.invalid.new_link_domain_judged_named'];
+		setLocale('de');
+		for (const key of keys) {
+			expect(t(key), key).not.toMatch(/Urteil|Beurteilens/);
+			expect(t(key), key).toMatch(/Beurteilung/);
+		}
+		expect(t('bulk.start.judge')).toBe('Beurteilung starten');
+		expect(t('bulk.restart.judge')).toBe('Beurteilung fortsetzen');
+		setLocale('en');
+		for (const key of keys) expect(t(key), key).not.toMatch(/the judging/);
+		expect(t('bulk.start.judge')).toBe('Start judging');
+		expect(t('bulk.restart.judge')).toBe('Continue judging');
+		setLocale('de');
+		run = judged();
+		await render();
+		expect(startButton().textContent?.trim()).toBe('Beurteilung starten');
+	});
+
+	// Amounts on the run page read as the cost field does: the number, then „USD“ (U-339).
+	it('shows the cost so far and the limit as amounts in USD, and the cost of the run a start ends too', async () => {
+		run = judged({ costUsd: 0.5, costCapUsd: 5 });
+		refuseResume = 'supersede_required';
+		await render();
+		expect(target.querySelector('[data-testid="bulk-head-cost"]')?.textContent).toBe('0.50 USD / 5.00 USD');
+		type(capField(), '5');
+		startButton().click();
+		await settle();
+		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50 USD' }));
+		expect(target.textContent).not.toContain('$0.50');
+	});
 });
