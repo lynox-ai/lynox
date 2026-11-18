@@ -8,8 +8,11 @@
  * text a model or an import wrote, and every scan runs on the event loop. Here the next `}` from a
  * position is looked up once and only moves forward.
  *
- * Every site that reads placeholders (resolving, checking, renaming, the webhook check) goes through
- * this module, so all of them see the same placeholders.
+ * The sites that resolve, check or rename step references (`context.ts`, `template-refs.ts`,
+ * `step-id.ts`, `workflow-edit.ts`) and the webhook check (`webhook-verifiers.ts`) go through this
+ * module, so they see the same placeholders. Two other readers keep their own patterns on purpose:
+ * `contract-validation.ts` (a `{{params.` prefix, no closing braces needed) and the captured-call
+ * rewrite in `tools/builtin/process.ts` (one named placeholder at a time).
  */
 
 /** One placeholder: `start` is the index of its `{{`, `end` the index after its `}}`, `inner` the text between. */

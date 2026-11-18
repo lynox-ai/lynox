@@ -82,12 +82,13 @@ describe('placeholders — the same matches as the regexes it replaces', () => {
 });
 
 // Two shapes of stored text: `{{` over and over with no `}` (the per-match regex reads to the end
-// from every `{{`), and one `{{` before a run of spaces (the anchored regex splits the spaces
-// between its two `\s*` and the path every way there is). The old regexes take seconds on these;
-// a linear scan takes well under a millisecond. The sizes keep the old ones finishing, so a
-// reverted site fails the bound instead of hanging the run.
+// from every `{{`; about 1.5 s at this size), and one `{{` before a run of spaces (the anchored
+// regex splits the spaces between its two `\s*` and the path every way there is; about 1.5 s
+// here, growing with the cube). A linear scan takes well under a millisecond on both. The sizes
+// keep the old regexes finishing, so a reverted site fails the bound instead of hanging the run:
+// a synchronous regex is not interrupted by the test timeout.
 const REPEATED = '{{'.repeat(20_000);
-const SPACES = `{{${' '.repeat(2_500)}`;
+const SPACES = `{{${' '.repeat(1_500)}`;
 const BOUND_MS = 100;
 
 function timed<T>(run: () => T): { value: T; ms: number } {
@@ -96,8 +97,24 @@ function timed<T>(run: () => T): { value: T; ms: number } {
   return { value, ms: performance.now() - t0 };
 }
 
-describe('every placeholder site stays linear on long stored text', () => {
-  for (const [shape, text] of [['repeated {{', REPEATED], ['{{ before spaces', SPACES]] as const) {
+describe('every placeholder site stays fast on long stored text', () => {
+  it('placeholders reads each `}` once, with a single `}` at the end', () => {
+    // Each `{{` here fails on the same `}`; looking it up again for every one is quadratic. Native
+    // `indexOf` is fast enough that only a text this long shows it (about 1.5 s without the cache).
+    const { value, ms } = timed(() => placeholders(`${'{{'.repeat(200_000)}}`));
+    expect(value).toEqual([]);
+    expect(ms).toBeLessThan(BOUND_MS);
+  });
+
+  it('resolveInputTemplate on a whole-string {{ before spaces (the anchored form)', () => {
+    const { value, ms } = timed(() => resolveInputTemplate({ q: SPACES }, {}));
+    expect(value).toEqual({ q: SPACES });
+    expect(ms).toBeLessThan(BOUND_MS);
+  });
+
+  // Only this shape tells the per-match regex from the scanner; on a single `{{` before spaces it
+  // was linear already.
+  for (const [shape, text] of [['repeated {{', REPEATED]] as const) {
     it(`resolveTaskTemplate (${shape})`, () => {
       const { value, ms } = timed(() => resolveTaskTemplate(text, {}));
       expect(value).toBe(text);
