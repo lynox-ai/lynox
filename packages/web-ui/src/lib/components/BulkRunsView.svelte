@@ -17,7 +17,7 @@
 	import BulkRunDetail from './BulkRunDetail.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
-	import { bulkHaltSuffixKey, bulkLabel, bulkReadsList, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
+	import { bulkHaltSuffixKey, bulkListLabel, bulkReadsList, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
 	let merges = $state<BulkMerge[]>([]);
@@ -138,10 +138,10 @@
 							{#each runs as run (run.id)}
 								<tr class="border-b border-border hover:bg-bg-muted cursor-pointer" onclick={() => openRun(run.id)}>
 									<td class="py-2 pr-3">
-										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkLabel(run, i18n, bulkReadsList(run))}</button>
-										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden">{` · ${bulkSystemName(run.targetSystem, i18n)}`}</span></div>
+										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkListLabel(run, i18n, bulkReadsList(run))}</button>
+										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden" data-testid="bulk-run-host-narrow">{` · ${bulkSystemName(run.targetSystem, i18n)}`}</span></div>
 									</td>
-									<td class="py-2 pr-3 hidden sm:table-cell">{bulkSystemName(run.targetSystem, i18n)}</td>
+									<td class="py-2 pr-3 hidden sm:table-cell" data-testid="bulk-run-host">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">
 										<span class="{chipClass} whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && !bulkWaitsForStart(run) ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">
 											{t(`bulk.phase.${run.phase}`)}{run.haltReason && !bulkWaitsForStart(run) ? ` ${t(bulkHaltSuffixKey(run))}` : ''}
@@ -151,7 +151,8 @@
 										{/if}
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{bulkReadsList(run) ? t('bulk.head.counts_pending') : `${run.applied}/${run.total}`}</td>
-									<td class="py-2 hidden sm:table-cell font-mono text-xs">{formatCost(run.costUsd)}</td>
+									<!-- Nothing spent reads as a dash, the same as an empty cell elsewhere in the list (U-338). -->
+									<td class="py-2 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-cost">{run.costUsd > 0 ? formatCost(run.costUsd) : '–'}</td>
 								</tr>
 							{/each}
 						</tbody>

@@ -92,11 +92,55 @@ describe('the runs list while a run reads its list', () => {
 			makeRun({ id: 'old', total: 1, list: undefined }),
 		];
 		expect(await rows()).toEqual([
-			{ title: '– Ziele · demo.myshopify.com', count: '–' },
-			{ title: '12 Ziele · demo.myshopify.com', count: '0/12' },
-			{ title: '3 Ziele · demo.myshopify.com', count: '0/3' },
-			{ title: '0 Ziele · demo.myshopify.com', count: '0/0' },
-			{ title: '1 Ziel · demo.myshopify.com', count: '0/1' },
+			{ title: '– Ziele', count: '–' },
+			{ title: '12 Ziele', count: '0/12' },
+			{ title: '3 Ziele', count: '0/3' },
+			{ title: '0 Ziele', count: '0/0' },
+			{ title: '1 Ziel', count: '0/1' },
 		]);
+	});
+});
+
+// The row names its host once (U-338): below sm in the date line, from sm in the target column. The
+// title is the size alone, an undo says so in front, and a run that spent nothing shows „–“.
+describe('the runs list names a run\'s host once', () => {
+	async function mountList(): Promise<HTMLTableRowElement[]> {
+		const { default: BulkRunsView } = await import('./BulkRunsView.svelte');
+		component = mount(BulkRunsView, { target });
+		await settle();
+		return [...target.querySelectorAll<HTMLTableRowElement>('tbody tr')].filter((tr) => tr.querySelector('[data-testid="bulk-run-count"]'));
+	}
+
+	it('keeps the host out of the title and puts it once in each width\'s place, in DE and EN', async () => {
+		runs = [
+			makeRun({ id: 'two', total: 2 }),
+			makeRun({ id: 'one', total: 1 }),
+			makeRun({ id: 'undo2', total: 2, kind: 'undo', sourceRunId: 'two' }),
+			makeRun({ id: 'undo1', total: 1, kind: 'undo', sourceRunId: 'one' }),
+		];
+		const titleOf = (tr: HTMLTableRowElement): string => tr.querySelector('td button')!.textContent!.trim();
+		const de = await mountList();
+		expect(de.map(titleOf)).toEqual(['2 Ziele', '1 Ziel', 'Rücknahme · 2 Ziele', 'Rücknahme · 1 Ziel']);
+		for (const tr of de) {
+			// Each place carries the host once, and the two places never show at the same width.
+			expect(tr.textContent!.split('demo.myshopify.com').length - 1).toBe(2);
+			const narrow = tr.querySelector('[data-testid="bulk-run-host-narrow"]')!;
+			const wide = tr.querySelector('[data-testid="bulk-run-host"]')!;
+			expect(narrow.textContent).toBe(' · demo.myshopify.com');
+			expect(narrow.classList.contains('sm:hidden')).toBe(true);
+			expect(wide.textContent).toBe('demo.myshopify.com');
+			expect(wide.classList.contains('hidden') && wide.classList.contains('sm:table-cell')).toBe(true);
+		}
+		unmount(component!);
+		component = undefined;
+		setLocale('en');
+		expect((await mountList()).map(titleOf)).toEqual(['2 targets', '1 target', 'Undo · 2 targets', 'Undo · 1 target']);
+	});
+
+	it('shows „–“ in the cost column for a run that spent nothing or sent no cost, and the amount for one that did', async () => {
+		// An older engine may send no cost at all.
+		runs = [makeRun({ id: 'none', costUsd: 0 }), makeRun({ id: 'unknown', costUsd: null as unknown as number }), makeRun({ id: 'spent', costUsd: 0.25 })];
+		const costs = (await mountList()).map((tr) => tr.querySelector('[data-testid="bulk-run-cost"]')!.textContent);
+		expect(costs).toEqual(['–', '–', '$0.25']);
 	});
 });
