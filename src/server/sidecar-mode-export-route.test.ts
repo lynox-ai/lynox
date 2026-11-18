@@ -12,7 +12,7 @@ import { TARGET_BODY_CAPS } from '../core/migration-target-reply.js';
 vi.mock('../core/migration-target-reply.js', async (original) => ({
   ...(await original<typeof import('../core/migration-target-reply.js')>()),
   TARGET_BODY_TIMEOUT_MS: 1500,
-  TARGET_REQUEST_TIMEOUTS_MS: { handshake: 300, manifest: 400, chunk: 500, restore: 600 },
+  TARGET_REQUEST_TIMEOUTS_MS: { handshake: 300, manifest: 400, chunk: 500, restore: 3000 },
   // The whole transfer's deadline (from the bundle's size in production), set per test here.
   transferDeadlineMs: () => transferDeadline.ms,
 }));
@@ -556,7 +556,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.silent = 'chunk';
     expect(await message()).toBe('The target instance did not answer within 0.5 seconds while receiving part 1 of the data. lynox stopped; the target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
     target.silent = 'restore';
-    expect(await message()).toBe('The target instance\'s report on restoring the data could not be read: it did not answer within 0.6 seconds. Check on the target instance whether your data arrived before you migrate again.');
+    expect(await message()).toBe('The target instance\'s report on restoring the data could not be read: it did not answer within 3 seconds. Check on the target instance whether your data arrived before you migrate again.');
   });
 
   it('reads the target\'s answers to the manifest and every chunk to their end', async () => {
@@ -663,20 +663,22 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     // Each part answered after 300 ms, inside its 500 ms; the whole transfer may take 700 ms.
     target.lagMs = 300;
     transferDeadline.ms = 700;
-    expect(await message()).toBe('The target instance took longer than 0.7 seconds for the whole migration, so lynox stopped it. You can start the migration again in 30 minutes at the latest.');
+    expect(await message()).toBe('The migration took longer than 0.7 seconds, so lynox stopped it. The target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
     // Stopped while a part was still waiting, not after all of them: at most two of the six answered.
+    expect(target.manifest?.chunks.length).toBe(6);
     expect(target.partsAnswered).toBeLessThanOrEqual(2);
     // Out of time while the restore was asked for: the data has gone out, so check the target.
-    // (The restore does not answer; the whole transfer's 300 ms end before its own 600 ms.)
+    // (The restore does not answer; the whole transfer's 1.5 s end before its own 3 s.)
     target.lagMs = undefined;
     target.silent = 'restore';
-    transferDeadline.ms = 300;
-    expect(await message()).toBe('The target instance took longer than 0.3 seconds for the whole migration, so lynox stopped waiting for it to restore the data. Check on the target instance whether your data arrived before you migrate again.');
+    transferDeadline.ms = 1500;
+    expect(await message()).toBe('The migration took longer than 1.5 seconds, so lynox stopped waiting for the target instance to restore the data. Check on the target instance whether your data arrived before you migrate again.');
     target.silent = undefined;
     // Out of time before the restore was asked for (the last part's answer took the rest): nothing
     // was restored, so the user can try again.
+    transferDeadline.ms = 300;
     target.lastPartBodyLagMs = 600;
-    expect(await message()).toBe('The target instance took longer than 0.3 seconds for the whole migration, so lynox stopped it. You can start the migration again in 30 minutes at the latest.');
+    expect(await message()).toBe('The migration took longer than 0.3 seconds, so lynox stopped it. The target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
     target.lastPartBodyLagMs = undefined;
     // Control: the same lag with time enough completes.
     target.lagMs = 300;

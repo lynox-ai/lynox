@@ -83,8 +83,9 @@ describe('the source reads a target answer up to its cap and its deadline', () =
     await expect(askTarget(async () => { throw new Error('refused'); }, 'https://t.example/x', {}, 50)).rejects.toThrow('refused');
   });
 
-  it('cuts a request at its deadline also while the transport has not taken the signal yet (a name lookup that does not answer)', async () => {
-    // A fetch that ignores the signal, as the guard's name lookup does before it hands the request on.
+  it('cuts a request at its deadline also while the transport has not taken the signal yet', async () => {
+    // A fetch that ignores the signal, as the guard's name lookup does before it hands the request on
+    // (the guard ends that lookup itself after 5 s; here the request's deadline comes first).
     const deaf = (): Promise<Response> => new Promise<Response>(() => { /* never answers, never listens */ });
     const t0 = Date.now();
     await expect(askTarget(deaf, 'https://t.example/x', {}, 50)).rejects.toBeInstanceOf(TargetDidNotAnswer);

@@ -15567,7 +15567,7 @@ export class LynoxHTTPApi {
         transfer = transferCtl.signal;
         // run-group-starter: cleared in the route's `finally`, or fired once; it only aborts this export's requests and reports no spend.
         transferTimer = setTimeout(() => transferCtl.abort(), transferMs);
-        outOfTime = () => `The target instance took longer than ${durationText(transferMs)} for the whole migration, so lynox stopped it. ${AGAIN}`;
+        outOfTime = () => `The migration took longer than ${durationText(transferMs)}, so lynox stopped it. The target instance has not restored anything. ${AGAIN}`;
         // A refusal from the destination is shown as its own text, which is written for the
         // person migrating; the raw response only when it carries none.
         // `told` says in lynox's words which step failed, followed by the target's own words (its
@@ -15638,7 +15638,7 @@ export class LynoxHTTPApi {
         } catch (err: unknown) {
           // Not sent: nothing restored, try again later. Sent: the restore may have run.
           if (err instanceof TransferOutOfTime && !err.asked) throw new Error(outOfTime());
-          if (err instanceof TransferOutOfTime) throw new Error(`The target instance took longer than ${durationText(transferMs)} for the whole migration, so lynox stopped waiting for it to restore the data. Check on the target instance whether your data arrived before you migrate again.`);
+          if (err instanceof TransferOutOfTime) throw new Error(`The migration took longer than ${durationText(transferMs)}, so lynox stopped waiting for the target instance to restore the data. Check on the target instance whether your data arrived before you migrate again.`);
           if (err instanceof TargetDidNotAnswer) throw new Error(restoreUnknown('silent'));
           if (isConnectionFailure(err)) throw new Error(restoreUnknown('broken'));
           // The network guard refusing the address (it follows no redirects): nothing was sent, so a

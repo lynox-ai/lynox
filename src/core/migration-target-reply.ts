@@ -71,9 +71,10 @@ export class TransferOutOfTime extends Error {
 /**
  * How long the whole transfer (manifest, every part, the restore) may take, from the bundle's
  * size: a fixed allowance for the target's own steps (the restore alone may take 15 minutes) and
- * the time the bundle takes at a slow link, rounded up to whole minutes. A large migration over a
- * slow link is not cut; a target that answers each step just inside its own deadline cannot hold
- * the export, and the bundle in this instance's memory, for hours.
+ * the time the bundle takes at 128 KiB/s (about 1 Mbit/s), rounded up to whole minutes. A
+ * migration over a link at least that fast is not cut; a slower one can be, although each part
+ * alone would pass its own deadline. A target that answers each step just inside its own deadline
+ * cannot hold the export, and the bundle in this instance's memory, for hours.
  */
 export const TRANSFER_DEADLINE = { allowanceMs: 20 * 60_000, bytesPerSecond: 128 * 1024 } as const;
 export function transferDeadlineMs(bundleBytes: number): number {
@@ -86,9 +87,9 @@ export function transferDeadlineMs(bundleBytes: number): number {
  * `TargetDidNotAnswer` thrown. The deadline ends once the headers are in, so it does not cut a
  * body that `readTargetBody` is still reading under its own. `overall`, when given, ends the
  * request too, with `TransferOutOfTime`.
- * The request is raced against both, so they also hold while the transport has not taken the
- * signal yet: the network guard resolves and checks the target's name before it hands the request
- * on, and a name server that does not answer is cut at the request's deadline, not the system's.
+ * The request is raced against both, so they hold also while the transport has not taken the
+ * signal yet, as during the network guard's name lookup (which the guard itself ends after 5 s),
+ * and for a `fetchFn` that ignores the signal.
  */
 export async function askTarget(
   fetchFn: (url: string, init: RequestInit) => Promise<Response>,
