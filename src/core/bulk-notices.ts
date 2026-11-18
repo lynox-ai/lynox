@@ -11,7 +11,8 @@
  * so has every sentence a bulk outcome is pushed with, refusals and atomic runs included.
  */
 import type { NoticeLanguage } from './notice-language.js';
-import { BULK_HALT_REASONS } from './bulk-ledger.js';
+import type { BulkTriggerEffect } from '../types/pipeline.js';
+import { BULK_HALT_REASONS, externalHostOf } from './bulk-ledger.js';
 
 export interface BulkApplyCounts {
   applied: number; foundAsPlanned: number; failed: number; conflicts: number;
@@ -167,8 +168,9 @@ const EN: BulkNotices = Object.freeze({
     `Judged ${String(judged)}, invalid ${String(invalid)}, without a verdict ${String(unjudged)} of ${String(total)} targets.`,
   costs: (calls: number, eachUsd: number) =>
     `${String(calls)} API calls this pass, estimated $${(calls * eachUsd).toFixed(4)} ($${String(eachUsd)} each from the profile rate).`,
+  // The sentence alone: the push title names the stage and that it halted (U-324).
   halted: (phase: BulkPhase, reason: string) =>
-    `${phase === 'apply' ? 'Bulk run' : phase === 'preview' ? 'Bulk preview' : 'Bulk judge'} halted: ${reason}.`,
+    (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? EN_JUDGE_UNAVAILABLE : enHaltReason(reason)) ?? `${reason}.`,
   previewStopped: 'Bulk preview stopped: the run was dropped, halted or moved on.',
   listStopped: 'Bulk list read stopped: the run was dropped, halted or moved on.',
   judgeStopped: 'Bulk judge stopped: the run was halted, superseded or moved on.',
@@ -195,6 +197,66 @@ const EN: BulkNotices = Object.freeze({
   judgeEnded: 'Bulk judge stopped.',
   writeError: 'The bulk write stopped on an error inside lynox.',
 });
+
+/**
+ * The English sentence for each stored reason a bulk run halts on: the counterpart of the German
+ * one below, in the words of the run page where the page has the same sentence (U-324). Keyed
+ * by the reason's name, so a new reason without an English sentence does not compile; looked up
+ * by the stored text, built on first use for the same import cycle as the German table.
+ */
+const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> = Object.freeze({
+  timeBudget: 'Time budget used up.',
+  failureRate: 'More than 5% of the targets failed.',
+  consecutiveFailures: 'Three targets in a row failed.',
+  stoppedByOwner: 'Stopped manually.',
+  maxTargets: 'Reached the approved maximum.',
+  awaitingStart: 'Waiting for you to start reading.',
+  expired: 'Approval expired.',
+  unavailable: 'Target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, the target system is not reachable yet.',
+  credential: 'lynox finds no stored access to the target system. Reconnect it under Settings → APIs, or ask lynox in the chat to do so.',
+  unauthorized: 'The target system refused the stored access. Once it is reconnected under Settings → APIs, the run can be continued.',
+  blocked: 'This instance is not allowed to reach this target system.',
+  contract: 'A target is outside what the run may write.',
+  costCap: 'The run reached its AI spend limit.',
+  spendLimit: 'The daily or monthly AI budget has been reached.',
+  creditRefused: 'AI call refused: no credit, or the connection to lynox was interrupted.',
+  probeRequired: 'lynox writes further targets only once the probe is confirmed.',
+  mandateEnded: 'The access the run was planned through ended before it was approved. Nothing was written.',
+  markupAddedByShop: 'A written product contains markup lynox did not send; it was added in the store. The product and what you can do next are under Bulk runs.',
+  checksum: 'The run has changed since it was approved.',
+  atomicRolledBack: 'A target could not be written; every target written before it is undone. Nothing has changed.',
+  atomicRollbackIncomplete: 'A target could not be written, and undoing did not fully succeed. Check the marked targets under Bulk runs yourself.',
+  atomicStoppedRolledBack: 'Stopped manually; every target written before is undone. Nothing has changed.',
+  atomicStoppedRollbackIncomplete: 'Stopped manually, and undoing did not fully succeed. Check the marked targets under Bulk runs yourself.',
+  atomicTimeRolledBack: 'Time budget used up; every target written before is undone. Nothing has changed.',
+  atomicTimeRollbackIncomplete: 'Time budget used up, and undoing did not fully succeed. Check the marked targets under Bulk runs yourself.',
+  unrecorded: 'A read could not be recorded in the instance\'s log and was therefore not sent.',
+  runUnrecorded: 'The run could not be recorded in the instance\'s log; nothing read, nothing written.',
+  listed: 'List read. Waiting for the targets to be reviewed and reading to be started.',
+  listNotAList: 'A page of the list is not a list.',
+  listUnreadable: 'A page of the list could not be read.',
+  listTooLarge: 'The list is longer or larger than a bulk run can hold; nothing changed. Plan again with part of the list, if the source allows it.',
+  listNoProgress: 'A full page of the list held no new target.',
+  listFormWithdrawn: 'A bulk run is no longer allowed to read this list\'s address.',
+  listFilterWithdrawn: 'A bulk run is no longer allowed to read the list with this filter. lynox changed nothing.',
+  listOrder: 'A page of the list did not continue in ID order.',
+  listReadFailed: 'The store answered a page of the list with an error.',
+  shopInactive: 'The store is closed or frozen.',
+  formCost: 'The store refused a read as too costly.',
+  shopifyReadOff: 'Reading Shopify stores in a bulk run is switched off on this instance.',
+  shopifyWriteOff: 'Writing to Shopify stores in a bulk run is switched off on this instance. Once it is on again, the run can be continued.',
+  consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.',
+  superseded: 'Another run with judging was started in its place. This one wrote nothing.',
+  judgeModel: 'The AI provider of this run has no model for judging, or the operator does not allow it.',
+});
+let enHaltByText: ReadonlyMap<string, string> | undefined;
+function enHaltReason(reason: string): string | undefined {
+  enHaltByText ??= new Map(Object.entries(BULK_HALT_REASONS).map(([k, v]) => [v, EN_HALT_REASONS[k as keyof typeof BULK_HALT_REASONS]]));
+  return enHaltByText.get(reason);
+}
+
+/** A judging run halts as `unavailable` when its model call fails too, so its sentence names the model. */
+const EN_JUDGE_UNAVAILABLE = 'AI model or target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, try again later.';
 
 /**
  * The German sentence for each stored reason a bulk run halts on. Built on first
@@ -300,9 +362,9 @@ const DE: BulkNotices = Object.freeze({
     `Beurteilt ${String(judged)}, ungültig ${String(invalid)}, ohne Urteil ${String(unjudged)} von ${String(total)} Zielen.`,
   costs: (calls: number, eachUsd: number) =>
     `${String(calls)} API-Abrufe in diesem Durchgang, geschätzt $${(calls * eachUsd).toFixed(4)} (je $${String(eachUsd)} laut Profil).`,
+  // The sentence alone: the push title names the stage and that it halted (U-324).
   halted: (phase: BulkPhase, reason: string) =>
-    `${phase === 'apply' ? 'Massenlauf' : phase === 'preview' ? 'Vorschau' : 'Beurteilung'} angehalten: ${
-      (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? DE_JUDGE_UNAVAILABLE : deHaltReason(reason)) ?? `${reason}.`}`,
+    (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? DE_JUDGE_UNAVAILABLE : deHaltReason(reason)) ?? `${reason}.`,
   previewStopped: 'Vorschau beendet: Der Lauf wurde verworfen, angehalten oder ist weitergegangen.',
   listStopped: 'Lesen der Liste beendet: Der Lauf wurde verworfen, angehalten oder ist weitergegangen.',
   judgeStopped: 'Beurteilung beendet: Der Lauf wurde angehalten, ersetzt oder ist weitergegangen.',
@@ -332,3 +394,26 @@ const DE: BulkNotices = Object.freeze({
 });
 
 export const BULK_NOTICES: Readonly<Record<NoticeLanguage, BulkNotices>> = Object.freeze({ en: EN, de: DE });
+
+/** How a run ended, as its push title says it (`RUN_END_LOOK` in the worker). */
+export type BulkPushEnd = 'success' | 'failed' | 'halted' | 'interrupted' | 'stopped';
+
+const PUSH_STAGE: Readonly<Record<NoticeLanguage, Readonly<Record<BulkTriggerEffect, string>>>> = Object.freeze({
+  de: Object.freeze({ bulk_preview: 'Vorschau', bulk_judge: 'Beurteilung', bulk_apply: 'Massenlauf', bulk_undo: 'Rücknahme' }),
+  en: Object.freeze({ bulk_preview: 'Preview', bulk_judge: 'Judging', bulk_apply: 'Bulk run', bulk_undo: 'Undo' }),
+});
+const PUSH_END: Readonly<Record<NoticeLanguage, Readonly<Record<BulkPushEnd, string>>>> = Object.freeze({
+  de: Object.freeze({ success: 'fertig', failed: 'fehlgeschlagen', halted: 'angehalten', interrupted: 'unterbrochen', stopped: 'gestoppt' }),
+  en: Object.freeze({ success: 'done', failed: 'failed', halted: 'halted', interrupted: 'interrupted', stopped: 'stopped' }),
+});
+
+/**
+ * A bulk run's push title after its end mark: the stage and how it ended, and the host it works
+ * on where it has one (a store, a shop system's API), so the lock screen says which run halted
+ * where; never the run's id (U-324). A run on the data store or workspace files has no host, nor
+ * one whose run is gone (`targetSystem` null).
+ */
+export function bulkPushTitle(effect: BulkTriggerEffect, end: BulkPushEnd, targetSystem: string | null, lang: NoticeLanguage): string {
+  const host = targetSystem === null ? null : externalHostOf(targetSystem);
+  return `${PUSH_STAGE[lang][effect]} ${PUSH_END[lang][end]}${host === null || host === '' ? '' : ` · ${host}`}`;
+}

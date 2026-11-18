@@ -17,7 +17,7 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
   WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
+import { BULK_NOTICES, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isFeatureEnabled } from './features.js';
@@ -2341,7 +2341,7 @@ export class WorkerLoop {
         const pushedMsg = reduce && !isTimeout ? errorText(err, true) : errorMsg;
         const notices = this.#notices();
         await this.notificationRouter.notify({
-          title: `${stopped ? '\u23f9' : '\u2717'} ${task.title}`,
+          title: `${stopped ? '\u23f9' : '\u2717'} ${this.#pushTitleOf(task, stopped ? 'stopped' : this.#bulkRunHalted(task) ? 'halted' : 'failed')}`,
           body: stopped ? notices.stoppedWith(pushedMsg) : notices.failed(pushedMsg),
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
@@ -3842,6 +3842,12 @@ export class WorkerLoop {
    *   · `'interrupted'` — the engine lost the run mid-way and did not start it again. It did
    *     not finish, so it stays high priority, but it is not a tool's or provider's failure.
    */
+  /**
+   * A bulk run that failed and is left halted (a reason in its ledger, not ended) stays recorded
+   * and marked as failed (✗, high priority: told apart from a planned halt); its push title says
+   * it halted, which its body no longer says (U-324). Read from the ledger, not from how the
+   * pass returned: a pass that found its run dropped or moved on has not halted it.
+   */
   private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     const taskManager = this.engine.getTaskManager();
@@ -3861,13 +3867,46 @@ export class WorkerLoop {
     // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
+      const shownEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted' : told.status;
       void this.notificationRouter.notify({
-        title: `${toldLook.mark} ${task.title}`,
+        title: `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`,
         body: told.result,
         taskId: task.id,
         priority: toldLook.priority,
       });
     }
+  }
+
+  /** Whether a bulk run's trigger leads to a run its ledger holds halted and not ended. */
+  #bulkRunHalted(task: TriggerRecord): boolean {
+    if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return false;
+    try {
+      const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
+      // A plain row read: `getStatus` frees dead reads as it reads, and a title must not write.
+      const st = ledger?.getRunForApply(task.bulk_run_id);
+      return st !== null && st !== undefined && typeof st.haltReason === 'string' && st.phase !== 'aborted' && st.phase !== 'done' && st.phase !== 'undone';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The words after a push's end mark. A bulk run's trigger is titled with its run id, for the
+   * model that lists it; its push names the stage, how it ended and the host instead (U-324),
+   * in the owner's language. Every other trigger's push carries its title as it is.
+   */
+  #pushTitleOf(task: TriggerRecord, end: keyof typeof RUN_END_LOOK): string {
+    const effect = task.effect;
+    if (effect !== 'bulk_preview' && effect !== 'bulk_judge' && effect !== 'bulk_apply' && effect !== 'bulk_undo') return task.title;
+    // The host is a read of the ledger: a read that fails costs the title its host, never the push.
+    let system: string | undefined;
+    try {
+      const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
+      system = task.bulk_run_id === undefined ? undefined : ledger?.getRunForApply(task.bulk_run_id)?.targetSystem;
+    } catch {
+      system = undefined;
+    }
+    return bulkPushTitle(effect, end, system ?? null, noticeLanguage(this.engine.config?.language));
   }
 
   /**
