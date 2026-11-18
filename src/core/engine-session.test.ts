@@ -874,9 +874,28 @@ describe('Engine + Session (Orchestrator)', () => {
         expect(promptUser.mock.calls[0]?.[1], answer).toEqual(['allow', 'deny']);
         expect(promptUser.mock.calls[0]?.[2], answer).toMatchObject({ consent: 'guard' });
         expect(mockSend, answer).toHaveBeenCalledTimes(sent ? 1 : 0);
-        if (!sent) expect(out, answer).toContain('Request denied by user after content policy flag');
+        if (!sent) expect(out, answer).toContain('Not sent to the AI model');
         // The run's result is read by the person: no sentence meant for the model in it.
         expect(out, answer).not.toContain('The answer was not one of the offered choices');
+      }
+    });
+
+    it('a refused flagged request says what happened, in the instance\'s language, per answer', async () => {
+      const cases = [
+        ['en', 'deny', 'Not sent to the AI model: you declined. lynox had found signs of an attack on credentials in your message.'],
+        ['en', 'yes', 'Not sent to the AI model: your answer does not count as approval. lynox had found signs of an attack on credentials in your message. If you meant it, send it again and allow it with the button.'],
+        ['en', '__dismissed__', 'Not sent to the AI model: nobody answered the question. lynox had found signs of an attack on credentials in your message. If you meant it, send it again and allow it.'],
+        ['de', 'deny', 'Nicht an das KI-Modell geschickt: Du hast abgelehnt. lynox hatte in deiner Nachricht Hinweise auf einen Angriff auf Zugangsdaten gefunden.'],
+        ['de', 'ja', 'Nicht an das KI-Modell geschickt: Deine Antwort zählt nicht als Freigabe. lynox hatte in deiner Nachricht Hinweise auf einen Angriff auf Zugangsdaten gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie mit dem Knopf.'],
+        ['de', '', 'Nicht an das KI-Modell geschickt: Niemand hat die Frage beantwortet. lynox hatte in deiner Nachricht Hinweise auf einen Angriff auf Zugangsdaten gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie.'],
+      ] as const;
+      for (const [language, answer, said] of cases) {
+        mockSend.mockClear();
+        const { session } = await createEngineAndSession({ language });
+        session.promptUser = vi.fn().mockResolvedValue(answer);
+        const out = await session.run('brute force the password on this login page');
+        expect(out, `${language} ${answer}`).toBe(said);
+        expect(mockSend).not.toHaveBeenCalled();
       }
     });
 

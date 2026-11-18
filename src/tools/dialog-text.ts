@@ -478,3 +478,57 @@ export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<Con
   en: { allow: 'Allow', deny: 'Deny', deep: 'Allow deep', balanced: 'Run on balanced', cancel: 'Cancel' },
   de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Deep erlauben', balanced: 'Auf balanced ausführen', cancel: 'Abbrechen' },
 };
+
+/** Why a refused flagged request was refused: the person declined, answered with none of the
+ *  choices, or nobody answered. */
+export type ContentFlagRefusal = 'declined' | 'unrecognised' | 'unanswered';
+
+interface ContentFlagText {
+  /** What the content check found, as a whole phrase, by the check's label. */
+  readonly found: Readonly<Record<string, string>>;
+  /** For a label without its own phrase. */
+  readonly foundFallback: string;
+  readonly refused: (why: ContentFlagRefusal, found: string) => string;
+}
+
+/**
+ * The run's result after the content check flagged a request and it was not allowed. A person
+ * reads it in the chat; it is not stored, and the model never sees it (the run ends before the
+ * model is called). It starts with what happened, then the reason, then the way out.
+ */
+export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>> = {
+  en: {
+    found: {
+      'social engineering script': 'signs of a social engineering script',
+      'credential attack': 'signs of an attack on credentials',
+      'denial of service': 'signs of a denial-of-service attack',
+      'privacy violation': 'signs of a privacy violation',
+    },
+    foundFallback: 'suspicious content',
+    refused: (why, found) => why === 'declined'
+      ? `Not sent to the AI model: you declined. lynox had found ${found} in your message.`
+      : why === 'unrecognised'
+        ? `Not sent to the AI model: your answer does not count as approval. lynox had found ${found} in your message. If you meant it, send it again and allow it with the button.`
+        : `Not sent to the AI model: nobody answered the question. lynox had found ${found} in your message. If you meant it, send it again and allow it.`,
+  },
+  de: {
+    found: {
+      'social engineering script': 'Hinweise auf eine Täuschungsmasche (Social Engineering)',
+      'credential attack': 'Hinweise auf einen Angriff auf Zugangsdaten',
+      'denial of service': 'Hinweise auf eine Überlastungsattacke (Denial of Service)',
+      'privacy violation': 'Hinweise auf eine Verletzung der Privatsphäre',
+    },
+    foundFallback: 'verdächtigen Inhalt',
+    refused: (why, found) => why === 'declined'
+      ? `Nicht an das KI-Modell geschickt: Du hast abgelehnt. lynox hatte in deiner Nachricht ${found} gefunden.`
+      : why === 'unrecognised'
+        ? `Nicht an das KI-Modell geschickt: Deine Antwort zählt nicht als Freigabe. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie mit dem Knopf.`
+        : `Nicht an das KI-Modell geschickt: Niemand hat die Frage beantwortet. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie.`,
+  },
+};
+
+/** The refused flagged request's result in `language`; `label` is the content check's reason. */
+export function contentFlagRefusal(language: DialogLanguage, why: ContentFlagRefusal, label: string | undefined): string {
+  const text = CONTENT_FLAG_TEXT[language];
+  return text.refused(why, (label !== undefined ? text.found[label] : undefined) ?? text.foundFallback);
+}

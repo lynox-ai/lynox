@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
+import { contentFlagRefusal } from '../tools/dialog-text.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -1025,9 +1026,10 @@ export class Session {
         }
         const outcome = decideConsent('guard', answer);
         if (outcome !== 'allow') {
-          // The run's result, read by the person, not by the model: no sentence for the model here
-          // (the reply route already tells the person an unrecognised answer allowed nothing).
-          const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
+          // The run's result, read by the person in the instance's language: the run ends here,
+          // before the model is called and before anything is stored, so the model never reads it.
+          const why = outcome === 'unrecognised' ? 'unrecognised' : outcome === 'dismissed' ? 'unanswered' : 'declined';
+          const msg = contentFlagRefusal(noticeLanguage(this.engine.config.language), why, inputCheck.reason);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }
