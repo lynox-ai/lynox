@@ -163,6 +163,22 @@ describe('a judged run that judges again shows its rule as at the start', () => 
 		expect(drafted()).toEqual([]);
 	});
 
+	it('control: a judged run that reads on in its list shows no rule yet, as at its first start', async () => {
+		await render({ ...halted('unavailable'), listFirstPage: 'p2' });
+		expect(target.textContent).toContain(t('bulk.restart.list'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
+		expect(drafted()).toEqual([]);
+	});
+
+	it('shows a mandate neither the rule nor the sentence where the run would judge again', async () => {
+		viewer = 'mandate';
+		await render(halted('unavailable'));
+		// The page reached the mandate's view, not an empty one.
+		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
+		expect(drafted()).toEqual([]);
+	});
+
 	it('control: a judged run whose rule did not reach the page shows no empty box', async () => {
 		await render({ ...halted('unavailable'), judgeRule: null });
 		expect(target.textContent).toContain(t('bulk.restart.judge'));
