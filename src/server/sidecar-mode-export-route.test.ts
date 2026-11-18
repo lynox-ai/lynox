@@ -672,6 +672,10 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.restoreError = 'restore refused';
     expect(await retry()).toBe('check');
     target.restoreError = undefined;
+    // A sentence that sends the user to support still leaves the target's session held: wait.
+    target.badSignature = true;
+    expect(await retry()).toBe('later');
+    target.badSignature = undefined;
   });
 
   it('keeps the target\'s words in quotes, so they cannot pose as lynox\'s own sentence', async () => {

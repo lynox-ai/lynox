@@ -86,7 +86,7 @@ describe('the migration wizard after an error', () => {
 				expect(text('migration-error-detail')).toBe(SENTENCE);
 				expect(q('migration-error-detail')?.getAttribute('lang')).toBe('en');
 				// The card is the one place: no toast on top of it.
-				expect(getToasts().filter((x) => x.message === SENTENCE)).toHaveLength(0);
+				expect(getToasts()).toHaveLength(0);
 			} finally {
 				setLocale(before);
 			}
