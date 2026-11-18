@@ -107,7 +107,7 @@ describe('removing a step another step\'s reference reads is refused', () => {
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'fetch' }]))
       .toBe('Error: remove: step "sum" reads the output of a step this edit removes, in its task. Change that reference in the same edit (update_task), or remove step "sum" too.');
     expect(applyModifications(steps(), [{ action: 'remove', step_id: 'sum' }]))
-      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input template, which this tool cannot change: do not offer to change it. Keep the step it reads, or remove step "mail" too only if the user wants it gone. When you tell the user, name the place in words (for example "in the template of step "mail""), not as a field path.');
+      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input template, which this tool cannot change: do not offer to change it. Keep the step it reads, or remove step "mail" too only if the user wants it gone. When you tell the user, name the place in words (for example: in the template of that step), not as a field path.');
     // A step added in the same edit is not in the list the next edit starts from.
     expect(applyModifications([{ id: 'fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum it' }], [{ action: 'add_step', step_id: 'late', value: 'Use {{fetch.result}}', input_from: ['fetch'] }, { action: 'remove', step_id: 'fetch' }]))
       .toContain('Error: remove: the step this edit adds ("late") reads the output of a step this edit removes');
@@ -118,7 +118,7 @@ describe('removing a step another step\'s reference reads is refused', () => {
     const repaired = steps();
     expect(applyModifications(repaired, [{ action: 'update_task', step_id: 'sum', value: 'Sum what you have' }, { action: 'rename_step', step_id: 'sum', value: 'total' }, { action: 'remove', step_id: 'fetch' }])).toBeNull();
     expect(applyModifications(steps(), [{ action: 'rename_step', step_id: 'mail', value: 'send' }, { action: 'remove', step_id: 'sum' }]))
-      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input template, which this tool cannot change: do not offer to change it. Keep the step it reads, or remove step "mail" too only if the user wants it gone. When you tell the user, name the place in words (for example "in the template of step "mail""), not as a field path. This edit also renames step "mail": if you remove it, name it by its new id.');
+      .toBe('Error: remove: step "mail" reads the output of a step this edit removes, in its input template, which this tool cannot change: do not offer to change it. Keep the step it reads, or remove step "mail" too only if the user wants it gone. When you tell the user, name the place in words (for example: in the template of that step), not as a field path. This edit also renames step "mail": if you remove it, name it by its new id.');
   });
 
   it('a reader in a nested template field is named by its template, not by the field path', () => {
@@ -174,7 +174,7 @@ describe('removing a step another step\'s reference reads is refused', () => {
   it('a template reader whose id is a stored text is named by its position', () => {
     const s: InlinePipelineStep[] = [{ id: 'fetch', task: 'Fetch' }, { id: 'Old Mail', task: 'Mail', input_template: { body: '{{fetch.result}}' }, input_from: ['fetch'] }];
     const out = applyModifications(s, [{ action: 'remove', step_id: 'fetch' }]) ?? '';
-    expect(out).toBe('Error: remove: step #2 (its position before this edit) reads the output of a step this edit removes, in its input template, which this tool cannot change: do not offer to change it. Keep the step it reads, or remove step #2 (its position before this edit) too only if the user wants it gone. When you tell the user, name the place in words (for example "in the template of step #2 (its position before this edit)"), not as a field path.');
+    expect(out).toBe('Error: remove: step #2 (its position before this edit) reads the output of a step this edit removes, in its input template, which this tool cannot change: do not offer to change it. Keep the step it reads, or remove step #2 (its position before this edit) too only if the user wants it gone. When you tell the user, name the place in words (for example: in the template of that step), not as a field path.');
   });
 
   it('a step only listed in input_from, with no reference to it, is still removed', () => {

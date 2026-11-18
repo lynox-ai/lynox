@@ -67,16 +67,33 @@ const NEGATED = /(nicht|kein|konnte|kann|could not|cannot|can't|wasn't|was not|n
 /**
  * An option the edit tool cannot carry out: changing `mail` or its template (static text, another
  * source). `mail` reads `fetch` in its input template, and the tool cannot edit an input template.
- * Changing `fetch` is not counted: its task can be changed (update_task). Read per sentence, and a
- * sentence that says the template cannot be changed does not count.
+ * Changing `fetch` is not counted: its task can be changed (update_task).
+ *
+ * Read per clause (split at sentence ends, line breaks, commas and semicolons). A clause offers it
+ * when it names `mail` (not "E-Mail") or a template and an edit verb, unless a negation stands
+ * BEFORE the verb in that clause ("kann ich nicht ändern", "cannot be changed"). A negation after
+ * the verb is the offer's own content ("ändern, sodass sie nicht mehr …") and does not count.
+ * Static text and another source are offers by themselves.
  */
-const UNCARRIABLE = /(\bmail\b["*\s]*(anpassen|ändern|umbauen|bearbeiten|change|edit|adjust|modify))|((Vorlage|Template)[^.!?\n]{0,60}\b(ändern|anpassen|umschreiben|ersetzen|change|edit|adjust|modify|rewrite))|(statische[nrms]? (Text|Inhalt))|(static (text|content))|(andere[nr]? (Daten)?[Qq]uelle)|(another (data )?source)/i;
-const SAYS_CANNOT = /(nicht|kein|cannot|can't|can not|not)\b/i;
-/** A field path shown to the user: `input_template…`, or a code-quoted `output`/`result`. */
-const FIELD_PATH = /\binput_template\b|`[^`\n]*\b(output|result)\b[^`\n]*`/i;
+const TARGET = /(?<![A-Za-z]-)\bmail\b|vorlage|template/i;
+// `\b` is ASCII-only in JavaScript and never stands before an "ä"; hence the letter lookbehind.
+const EDIT_VERB = /(?<!\p{L})(änder\p{L}*|veränder\p{L}*|anpass\p{L}*|umbau\p{L}*|bearbeit\p{L}*|umschreib\p{L}*|ersetz\p{L}*|chang\p{L}*|edit\p{L}*|adjust\p{L}*|modif\p{L}*|rewrit\p{L}*)/iu;
+const NEGATION = /\b(nicht|kein\w*|nie|cannot|can't|not|never|no longer)\b/i;
+const OFFER_BY_ITSELF = /statische[nrms]? (Text|Inhalt)|static (text|content)|andere[nr]? (Daten)?[Qq]uelle|another (data )?source/i;
+/**
+ * A field path shown to the user: `input_template…` (also "input template body"), a code-quoted
+ * field (`body`, `headers…`, `output`, `result`), or a `{{…}}` reference. Plain words pass.
+ */
+const FIELD_PATH = /\binput[_ ]template\b(?=[\s.]*(body|headers|subject|to)\b)|\binput_template\b|`[^`\n]*\b(output|result|body|headers)\b[^`\n]*`|\{\{[^}]*\}\}|\b(Feld|field)\s+[„"“`']?(body|headers)\b/i;
 
 function offersUncarriable(text: string): boolean {
-  return text.split(/(?<=[.!?\n])/).some(s => UNCARRIABLE.test(s) && !SAYS_CANNOT.test(s));
+  return text.split(/[.!?\n,;]/).some((clause) => {
+    if (OFFER_BY_ITSELF.test(clause)) return true;
+    if (!TARGET.test(clause)) return false;
+    const verb = EDIT_VERB.exec(clause);
+    if (verb === null) return false;
+    return !NEGATION.test(clause.slice(0, verb.index));
+  });
 }
 
 interface Use { name: string; input: Record<string, unknown> }
