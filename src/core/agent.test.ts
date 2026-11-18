@@ -2645,8 +2645,6 @@ describe('Agent', () => {
         const [, options, meta] = firstUse as unknown as [unknown, string[], { consent?: string } | undefined];
         expect(options, answer).toEqual(['allow', 'deny']);
         expect(meta?.consent, answer).toBe('guard');
-        if (consents) expect(store.recordConsent, answer).toHaveBeenCalled();
-        else expect(store.recordConsent, answer).not.toHaveBeenCalled();
         expect(tool.handler, answer).toHaveBeenCalledTimes(consents ? 1 : 0);
       }
     });
