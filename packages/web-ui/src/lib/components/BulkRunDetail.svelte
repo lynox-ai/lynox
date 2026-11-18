@@ -15,7 +15,7 @@
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -477,7 +477,8 @@
 	// The start button's label, from the same source as the button itself: the halt sentence names it.
 	const startButton = $derived(run ? bulkStartButtonKey(run, startKind, supersedable !== null) : null);
 	// Why the judged start is disabled, as a line under its buttons (U-333); the button points to it.
-	const startHint = $derived(bulkStartHintKey(capInput, startDomainsValid));
+	// Not while a start is under way: it empties the cost field before the page shows the started run.
+	const startHint = $derived(busy ? null : bulkStartHintKey(capInput, startDomainsValid));
 	const supportMail = $derived(run ? bulkSupportMailto(run, managed, i18n) : null);
 	// Every act on this page is the owner's (the routes refuse a mandate), so its buttons show only
 	// once the server said the session is the owner's: a mandate does not see them even while the
@@ -778,7 +779,7 @@
 						<ul class="text-sm space-y-0.5">
 							{#each Object.entries(run.judgeRule.schema.properties) as [field, shape] (field)}
 								{@const shapeText = bulkFieldShapeText(shape, i18n)}
-								<li data-testid="bulk-start-field">{@render fieldName(field)}{#if shapeText !== null}: <span class="text-text-subtle [overflow-wrap:anywhere]">{shapeText}</span>{/if}</li>
+								<li data-testid="bulk-start-field">{@render fieldName(field)}{#if shapeText !== null}: <span class="text-text-subtle [overflow-wrap:anywhere]">{shapeText}{#each bulkFieldChoices(shape) ?? [] as choice, i (i)}{i === 0 ? ' ' : ', '}<bdi class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono text-text" data-testid="bulk-field-choice">"{bulkVisibleText(choice)}"</bdi>{/each}</span>{/if}</li>
 							{/each}
 						</ul>
 					</div>

@@ -1614,7 +1614,7 @@ describe('the start of a judged run, in words', () => {
 		expect(fieldLines()).toEqual([
 			`${t('bulk.field.shopify.seo_title')}: ${tf('bulk.shape.text_max', { max: '70' })}`,
 			`${t('bulk.field.shopify.seo_description')}: ${tf('bulk.shape.text_range', { min: '10', max: '160' })}`,
-			`tone: ${tf('bulk.shape.choice', { values: '"kurz", "lang"' })}`,
+			`tone: ${t('bulk.shape.choice')} "kurz", "lang"`,
 			`price: ${tf('bulk.shape.number_range', { min: '0', max: '100' })}`,
 			`stock: ${tf('bulk.shape.integer_min', { min: '1' })}`,
 			`rank: ${tf('bulk.shape.integer_max', { max: '9' })}`,
@@ -1626,6 +1626,16 @@ describe('the start of a judged run, in words', () => {
 		// The planner's names stand in a value box; the store's readable names do not.
 		expect([...block.querySelectorAll('[data-testid="bulk-field-own-name"]')].map((e) => e.textContent))
 			.toEqual(['tone', 'price', 'stock', 'rank', 'weight', 'active']);
+		// Each choice stands in its own box, direction-isolated.
+		expect([...block.querySelectorAll('[data-testid="bulk-field-choice"]')].map((e) => [e.tagName, e.textContent]))
+			.toEqual([['BDI', '"kurz"'], ['BDI', '"lang"']]);
+	});
+
+	it('keeps a choice whose text holds quotes in one box, so it cannot read as more choices', async () => {
+		run = judged({ judgeRule: { rule: 'r', tier: 'standard', schema: { properties: { tone: { type: 'string', enum: ['ja": lynox prüft jeden Wert – "nein'] } } } } });
+		await render();
+		const choices = [...target.querySelectorAll('[data-testid="bulk-field-choice"]')].map((e) => e.textContent);
+		expect(choices).toEqual(['"ja": lynox prüft jeden Wert – "nein"']);
 	});
 
 	it('words the shapes in English too', async () => {
@@ -1664,6 +1674,32 @@ describe('the start of a judged run, in words', () => {
 		expect(startButton().disabled).toBe(false);
 		expect(hint()).toBeNull();
 		expect(startButton().hasAttribute('aria-describedby')).toBe(false);
+	});
+
+	it('names the domain list, not a marked line, when it holds too many domains', async () => {
+		run = judged();
+		await render();
+		type(capField(), '5');
+		type(domainField(), Array.from({ length: 21 }, (_, i) => `d${String(i)}.example`).join('\n'));
+		expect(startButton().disabled).toBe(true);
+		expect(hint()).toBe(t('bulk.start.hint_domains'));
+		expect(hint()).not.toMatch(/markiert|marked/);
+	});
+
+	it('says nothing under the start while it is under way, though it empties the cost field', async () => {
+		run = judged();
+		let release!: () => void;
+		await render();
+		holds['r1'] = new Promise<void>((r) => { release = r; });
+		type(capField(), '5');
+		startButton().click();
+		for (let i = 0; i < 20 && capField().value !== ''; i++) { await tick(); await Promise.resolve(); }
+		flushSync();
+		expect(capField().value).toBe('');
+		expect(startButton().disabled).toBe(true);
+		expect(hint()).toBeNull();
+		release();
+		await settle();
 	});
 
 	it('leaves the cost limit out of the hint while its own line says the amount is wrong', async () => {

@@ -808,8 +808,9 @@ export function bulkFieldNamesText(host: string | null, fields: readonly string[
 }
 
 /** A field's shape in a judged rule, in words (U-333): the four shapes the engine's rule takes
- *  (text with a length, a choice, a number or whole number with bounds, yes/no). A choice's values
- *  are the planner's text, so they are quoted and shown through {@link bulkVisibleText}. A shape
+ *  (text with a length, a choice, a number or whole number with bounds, yes/no). A choice says only
+ *  "one of:" here: its values are the planner's text and are shown one by one by
+ *  {@link bulkFieldChoices}, each in its own box, so a quote inside a value cannot end it. A shape
  *  the page does not know says nothing rather than showing the schema as JSON. */
 export function bulkFieldShapeText(shape: unknown, i18n: BulkI18n): string | null {
 	if (typeof shape !== 'object' || shape === null) return null;
@@ -817,10 +818,7 @@ export function bulkFieldShapeText(shape: unknown, i18n: BulkI18n): string | nul
 	const num = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? String(v) : null);
 	switch (s['type']) {
 		case 'string': {
-			const choices = s['enum'];
-			if (Array.isArray(choices) && choices.length > 0 && choices.every((c) => typeof c === 'string')) {
-				return i18n.tf('bulk.shape.choice', { values: (choices as string[]).map((c) => `"${bulkVisibleText(c)}"`).join(', ') });
-			}
+			if (bulkFieldChoices(s) !== null) return i18n.t('bulk.shape.choice');
 			const max = num(s['maxLength']);
 			if (max === null) return i18n.t('bulk.shape.text');
 			const min = num(s['minLength']);
@@ -841,6 +839,15 @@ export function bulkFieldShapeText(shape: unknown, i18n: BulkI18n): string | nul
 		default:
 			return null;
 	}
+}
+
+/** The values of a choice field in a judged rule, as the planner wrote them, or null for a field
+ *  that is no choice. Shown through {@link bulkVisibleText} by the caller. */
+export function bulkFieldChoices(shape: unknown): string[] | null {
+	if (typeof shape !== 'object' || shape === null) return null;
+	const choices = (shape as Record<string, unknown>)['enum'];
+	return (shape as Record<string, unknown>)['type'] === 'string' && Array.isArray(choices) && choices.length > 0 && choices.every((c) => typeof c === 'string')
+		? (choices as string[]) : null;
 }
 
 /** Why the judged run's start button is disabled, as the line under it (U-333), or null. The cost
