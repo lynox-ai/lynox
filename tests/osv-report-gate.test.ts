@@ -549,8 +549,8 @@ describe('an accepted finding: one id, one package, exact versions, until a date
     expect(r.blocking[0].severity).toBe('UNRESOLVED');
   });
 
-  // The two tests below read the shipped list; with no acceptance left there is nothing to read.
-  it.skipIf(ACCEPTED.length === 0)('every shipped entry names exact versions, an ISO date and a reason', () => {
+  // The two tests below read the shipped list and hold for any length of it, an empty one included.
+  it('every shipped entry names exact versions, an ISO date and a reason', () => {
     for (const a of ACCEPTED) {
       expect(a.versions.length).toBeGreaterThan(0);
       for (const v of a.versions) expect(v).toMatch(/^\d+\.\d+\.\d+$/);
@@ -559,19 +559,18 @@ describe('an accepted finding: one id, one package, exact versions, until a date
     }
   });
 
-  it.skipIf(ACCEPTED.length === 0)('through the CLI: an accepted finding exits 0, prints it as accepted and counts it', () => {
+  it('through the CLI: the shipped acceptances, each with its finding, exit 0 and are counted', () => {
     const SCRIPT = fileURLToPath(new URL('../scripts/osv-report-gate.mjs', import.meta.url));
-    const a = ACCEPTED[0]!;
     const dir = mkdtempSync(join(tmpdir(), 'osv-gate-acc-'));
     const file = join(dir, 'osv.json');
     // One finding per shipped entry: with only one, any other entry would be stale and fail the run.
     const results = ACCEPTED.flatMap((e: { id: string; package: string; versions: string[] }) => highOn(e.package, e.versions[0]!, e.id).results);
     writeFileSync(file, JSON.stringify({ results }));
-    const r = spawnSync(process.execPath, [SCRIPT, '--report', file, '--rc', '1'], { encoding: 'utf8' });
+    const r = spawnSync(process.execPath, [SCRIPT, '--report', file, '--rc', results.length > 0 ? '1' : '0'], { encoding: 'utf8' });
     // Valid only until the entry's date; past it this test would see the block, which is the point.
     if (ACCEPTED.every((e: { expires: string }) => new Date().toISOString().slice(0, 10) <= e.expires)) {
       expect(r.status).toBe(0);
-      expect(r.stdout).toContain(`accepted until ${a.expires}`);
+      for (const e of ACCEPTED) expect(r.stdout).toContain(`${e.package}@${e.versions[0]} ${e.id} (HIGH) accepted until ${e.expires}`);
       expect(r.stdout).toContain(`${ACCEPTED.length} finding(s), 0 blocking, ${ACCEPTED.length} accepted, 0 stale acceptance(s)`);
     } else {
       expect(r.status).toBe(1);
