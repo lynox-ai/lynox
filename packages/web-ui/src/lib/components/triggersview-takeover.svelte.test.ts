@@ -141,6 +141,42 @@ describe('a completed plan that keeps its pause', () => {
 	});
 });
 
+describe('the line above a waiting row names the way the row offers (U-276)', () => {
+	const hint = (): string | undefined => target.querySelector('[data-trigger-awaits]')?.textContent?.trim();
+	it('a waiting paused plan names the takeover, which the row offers, and neither offers nor marks a confirmation', async () => {
+		rows = [{ ...PAUSED, confirmed_at: null }];
+		await render();
+		expect(hint()).toBe('Pausiert, weil ein Zugang endete. Übernimm den Plan, dann läuft er wieder.');
+		expect(button()).not.toBeNull();
+		expect(target.querySelector('[data-stamp-confirm]')).toBeNull();
+		// Its mark is the takeover's; "waiting for confirmation" would promise a step it does not have.
+		expect(target.querySelector('[data-trigger-paused]')).not.toBeNull();
+		expect(target.querySelector('[data-trigger-held]')).toBeNull();
+	});
+	it('a waiting bulk run\'s trigger names the run\'s preview, and offers neither a confirmation nor a takeover, nor marks one', async () => {
+		rows = [{ id: 'bulk-r1', title: 'Preise anpassen', status: 'open', effect: 'bulk_apply', source: 'manual', confirmed_at: null, created_by: 'mandate:ida@treuhand-mueller-partner.ch' }];
+		await render();
+		expect(hint()).toBe('Gehört zu einem Bulk-Lauf. Freigeben kannst du ihn in der Vorschau des Laufs.');
+		expect(button()).toBeNull();
+		expect(target.querySelector('[data-stamp-confirm]')).toBeNull();
+		expect(target.querySelector('[data-trigger-held]')).toBeNull();
+	});
+	it('control: a waiting plan the owner can stamp keeps "confirm it" and its waiting mark, next to the confirmation', async () => {
+		rows = [{ ...PAUSED, paused: false, paused_who: undefined, paused_ended: undefined, confirmed_at: null }];
+		await render();
+		expect(hint()).toBe('Läuft erst, wenn du ihn bestätigst.');
+		expect(button()).toBeNull();
+		expect(target.querySelector('[data-trigger-held]')?.textContent).toBe('Wartet auf Bestätigung');
+		expect(target.querySelector('[data-stamp-confirm="held"]')).not.toBeNull();
+	});
+	it('a helper is told the owner confirms, at a paused plan too', async () => {
+		viewer = 'mandate';
+		rows = [{ ...PAUSED, confirmed_at: null }];
+		await render();
+		expect(hint()).toBe('Läuft erst, wenn der Inhaber diesen Plan bestätigt.');
+	});
+});
+
 describe('Run now at a paused plan (ux U-179)', () => {
 	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
 	it('is not offered at a completed plan that keeps its pause', async () => {

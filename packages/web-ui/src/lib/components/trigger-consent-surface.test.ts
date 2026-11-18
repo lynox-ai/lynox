@@ -91,7 +91,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 
 	it('a waiting trigger carries its own badge, whole', () => {
 		const { cond, body } = ifBlockAround("t('triggers.awaiting_confirmation')");
-		expect(cond).toBe('held(trigger)');
+		expect(cond).toBe('held(trigger) && stampable(trigger)');
 		expect(body.trim()).toBe(
 			'<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-held>'
 			+ "{t('triggers.awaiting_confirmation')}</span>",
@@ -123,7 +123,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const shape = body.split('\n').map((l) => l.trim()).filter((l) => l !== '').join('\n');
 		expect(shape).toBe([
 			'<div class="mt-2 space-y-1.5" data-trigger-consent>',
-			`<p class="text-xs text-warning" data-trigger-awaits>{t(ownerActs ? 'triggers.awaiting_hint' : 'triggers.confirm_owner_only_notice')}</p>`,
+			`<p class="text-xs text-warning" data-trigger-awaits>{t(awaitingHintKey(trigger))}</p>`,
 			'{#if ownerStamps(trigger)}',
 			'<StampConfirm id={trigger.id} mode="held" cronText={cronToHuman} onstamped={() => void stamped(trigger)} />',
 			'{:else if showsInstruction(trigger)}',

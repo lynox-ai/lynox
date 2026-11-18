@@ -81,7 +81,7 @@ describe('the consent block speaks both languages, and says only what it may', (
 		// which is a property of the thing being confirmed, not a promise about when
 		// the first run happens. Its own test above pins its slot.
 		const consent = Object.keys({
-			'triggers.awaiting_confirmation': 0, 'triggers.awaiting_hint': 0, 'triggers.instruction': 0,
+			'triggers.awaiting_confirmation': 0, 'triggers.awaiting_hint': 0, 'triggers.awaiting_hint_paused': 0, 'triggers.awaiting_hint_bulk': 0, 'triggers.instruction': 0,
 			'triggers.confirm': 0, 'triggers.confirm_label': 0, 'triggers.confirmed': 0, 'triggers.confirm_failed': 0,
 			'triggers.watch_url': 0,
 		}).map((key) => row(key)).join('\n');
