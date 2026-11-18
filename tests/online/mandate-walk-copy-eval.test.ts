@@ -14,7 +14,7 @@
  *    Each tool call is dumped with the result the model received (600 characters).
  * O: control for M, the same message from the owner. Pass: a trigger was created, the answer tells
  *    the user they confirm it, names Triggers, and says no owner confirms it.
- * T: the title path as the session runs it: `LLM_TITLE_PROMPT` + the first message, one direct
+ * T: the title path as the session runs it: `llmTitlePrompt(message)` + the first message, one direct
  *    messages call (max_tokens 64) through the provider's client, then `sanitizeLLMTitle`. Five
  *    German first messages (T-de, gating) and two English ones (T-en, control, no pass bar).
  *
@@ -40,7 +40,7 @@ import { SYSTEM_PROMPT, WEB_UI_SYSTEM_PROMPT_SUFFIX, currentDateContext } from '
 import { RunHistory } from '../../src/core/run-history.js';
 import { EngineDb } from '../../src/core/engine-db.js';
 import { TaskManager } from '../../src/core/task-manager.js';
-import { LLM_TITLE_PROMPT, sanitizeLLMTitle } from '../../src/core/session.js';
+import { llmTitlePrompt, sanitizeLLMTitle } from '../../src/core/session.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../src/core/request-principal.js';
 import { askUserTool, taskCreateTool, taskListTool } from '../../src/tools/builtin/index.js';
 import type { ToolEntry } from '../../src/types/index.js';
@@ -215,7 +215,7 @@ async function runTitle(model: string, tc: TitleClient, c: 'T-de' | 'T-en', i: n
     const stream = tc.client.beta.messages.stream({
       model: tc.model,
       max_tokens: 64,
-      messages: [{ role: 'user', content: LLM_TITLE_PROMPT + message.slice(0, 2000) }],
+      messages: [{ role: 'user', content: llmTitlePrompt(message) + message.slice(0, 2000) }],
     });
     const response = await stream.finalMessage();
     const block = response.content.find((b) => b.type === 'text');

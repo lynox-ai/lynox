@@ -1,4 +1,5 @@
 import { connectCallText } from './oauth-presets.js';
+import type { MessageLanguage } from './message-language.js';
 
 /** Worker system prompt suffix — appended for headless background task sessions */
 export const WORKER_PROMPT_SUFFIX = `
@@ -483,16 +484,25 @@ function formatLocalTime(d: Date, tz: string): string | null {
   }
 }
 
+/**
+ * The marker's note on the language the user wrote the message in, when the engine could tell
+ * ({@link messageLanguage}). A chat model left to read the language itself answered English
+ * questions in German, and its follow-up chips with it; named here, it follows the message.
+ */
+const WRITTEN_IN: Record<MessageLanguage, string> = { de: 'German', en: 'English' };
+
 export function withCurrentTimePrefix(
   userMessage: string | unknown[],
   userTimezone?: string | undefined,
+  writtenIn?: MessageLanguage | null | undefined,
 ): string | unknown[] {
   const now = new Date();
   const isoNow = now.toISOString();
   const local = userTimezone ? formatLocalTime(now, userTimezone) : null;
+  const language = writtenIn ? `; message written in ${WRITTEN_IN[writtenIn]}` : '';
   const marker = local
-    ? `${NOW_MARKER_PREFIX} ${isoNow}; user local ${local} ${userTimezone}]`
-    : `${NOW_MARKER_PREFIX} ${isoNow}]`;
+    ? `${NOW_MARKER_PREFIX} ${isoNow}; user local ${local} ${userTimezone}${language}]`
+    : `${NOW_MARKER_PREFIX} ${isoNow}${language}]`;
   if (typeof userMessage === 'string') {
     if (userMessage.startsWith(NOW_MARKER_PREFIX)) return userMessage;
     return `${marker}\n\n${userMessage}`;

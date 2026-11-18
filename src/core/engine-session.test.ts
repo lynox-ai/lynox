@@ -494,6 +494,8 @@ import { InputRequiredError } from './input-required.js';
 import { reportMeteredCost } from './metered-request.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from './chat-context.js';
 import { approvalChatTitle } from './approval-chat-title.js';
+import { compose, engineText, renderFence } from './data-boundary.js';
+import { runTaskPrompt, RUN_TASK_ANSWERED, RUN_TASK_ANSWER_PREAMBLE } from './run-task-turn.js';
 import { ChangesetManager } from './changeset.js';
 import { setTenantWorkspace } from './workspace.js';
 import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace } from 'node:fs';
@@ -784,6 +786,52 @@ describe('Engine + Session (Orchestrator)', () => {
         // succeeded so the identity-based eager-persist won't duplicate the row.
         expect.objectContaining({ suppressTools: false }),
       );
+    });
+
+    it('names the language the user wrote in, in the marker of that turn', async () => {
+      const { session } = await createEngineAndSession();
+      mockSend.mockResolvedValue('ok');
+      await session.run('What should I check before raising my prices by 5 %?');
+      expect(mockSend).toHaveBeenLastCalledWith(
+        expect.stringMatching(/^\[Now: [^\]\n]*; message written in English\]\n\nWhat should I check/),
+        expect.anything(),
+      );
+      await session.run('Was sollte ich prüfen, bevor ich meine Preise um 5 % erhöhe?');
+      expect(mockSend).toHaveBeenLastCalledWith(
+        expect.stringMatching(/^\[Now: [^\]\n]*; message written in German\]\n\nWas sollte ich/),
+        expect.anything(),
+      );
+      // The engine's own English around the user's words does not count: a loaded-context preamble.
+      await session.run(`${closeLoadedContext('[Loaded the mail "Invoice reminder" from the inbox so that the owner can answer it]')}Bitte antworte ihm kurz, dass wir die Rechnung diese Woche bezahlen.`);
+      expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*; message written in German\]/), expect.anything());
+      // A scheduled run: the task's own words, the engine's English lead left out.
+      await session.run(compose(runTaskPrompt('Wochenbericht', 'Fasse bitte die Umsätze der letzten Woche für mich zusammen und schicke sie an das Team.'), '\n'));
+      expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*; message written in German\]/), expect.anything());
+      // A scheduled run resumed after an answered question: the question and the answer are not the
+      // task's words, and the engine's English around them does not count either.
+      // Composed as the worker composes it (worker-loop.ts, the answered path).
+      await session.run(compose([
+        ...runTaskPrompt('Wochenbericht', 'Fasse bitte die Umsätze der letzten Woche für mich zusammen und schicke sie an das Team.'),
+        engineText(`\n${RUN_TASK_ANSWERED}`),
+        renderFence('asked', 'Should the report include the returns as well, or only the sales for this week?'),
+        renderFence('answer', 'Only the sales, please, the returns are in another report that is sent on Mondays.', { preamble: RUN_TASK_ANSWER_PREAMBLE }),
+      ], '\n'));
+      expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*; message written in German\]/), expect.anything());
+      // An internal run (compaction, a summary) names none: its prompt asks for the thread's language.
+      await session.run('Summarize the conversation above for the next part of the thread, in its language.', { internal: true });
+      expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*Z\]\n\nSummarize/), expect.anything());
+      // Control: where the words do not decide, the marker names no language.
+      await session.run('ok, mach');
+      expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*Z\]\n\nok, mach$/), expect.anything());
+    });
+
+    it('names no language in the marker where the instance has one set: that preference stays the only one', async () => {
+      const engine = new Engine({ language: 'fr' } as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession();
+      mockSend.mockResolvedValue('ok');
+      await session.run('What should I check before raising my prices by 5 %?');
+      expect(mockSend).toHaveBeenLastCalledWith(expect.stringMatching(/^\[Now: [^\]\n]*Z\]\n\nWhat should/), expect.anything());
     });
 
     it('extended debug capture: wires onWireSnapshot → insertWireSnapshot when debug_wire_capture is ON', async () => {

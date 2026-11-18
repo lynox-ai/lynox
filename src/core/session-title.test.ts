@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeLLMTitle, generateThreadTitle, LLM_TITLE_PROMPT, llmTitleSource } from './session.js';
+import { sanitizeLLMTitle, generateThreadTitle, LLM_TITLE_PROMPT, llmTitlePrompt, llmTitleSource } from './session.js';
 import { closeLoadedContext } from './chat-context.js';
 import { compose } from './data-boundary.js';
 import { runTaskPrompt, RUN_TASK_LEAD } from './run-task-turn.js';
@@ -12,6 +12,25 @@ describe('LLM_TITLE_PROMPT', () => {
       'Write it in the language of that message; use Title Case only for an English title. ' +
       'No quotes, no trailing punctuation. Reply with ONLY the title.\n\n',
     );
+  });
+});
+
+describe('llmTitlePrompt', () => {
+  it('names English for an English message, the instance being German or not', () => {
+    const prompt = llmTitlePrompt('Please draft a short quote for Nordglas GmbH for 20 hours of consulting.');
+    expect(prompt).toContain('Write it in English, in Title Case. ');
+    expect(prompt).not.toContain('language of that message');
+  });
+
+  it('names German for a German message, without Title Case', () => {
+    const prompt = llmTitlePrompt('Schreib mir bitte eine kurze Offerte für die Keller AG über 20 Stunden Beratung.');
+    expect(prompt).toContain('Write it in German, as a German speaker would; do not use Title Case. ');
+    expect(prompt).not.toContain('English');
+  });
+
+  it('keeps the general sentence where the words do not decide (another language, a two-word reply)', () => {
+    expect(llmTitlePrompt('Bonjour, pouvez-vous préparer une offre pour la société Dupont ?')).toBe(LLM_TITLE_PROMPT);
+    expect(llmTitlePrompt('ok, mach')).toBe(LLM_TITLE_PROMPT);
   });
 });
 
