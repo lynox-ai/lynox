@@ -2504,8 +2504,16 @@ export class WorkerLoop {
       // left to read it — and holding the one-external-run slot. Halted, the owner can
       // resume it. The error is still reported: it is a defect, not a host's answer.
       void import('./error-reporting.js').then(({ captureError }) => captureError(err)).catch(() => {});
-      ledger.haltPreview(task.bulk_run_id, BULK_HALT_REASONS.unavailable);
-      const reason = ledger.getStatus(task.bulk_run_id)?.haltReason;
+      // The halt is one UPDATE and can itself throw (SQLITE_BUSY). The owner still hears the
+      // handler's fixed sentence, never the raw error the dispatch would report; the run is then
+      // halted by its next status read.
+      let reason: string | null | undefined;
+      try {
+        ledger.haltPreview(task.bulk_run_id, BULK_HALT_REASONS.unavailable);
+        reason = ledger.getStatus(task.bulk_run_id)?.haltReason;
+      } catch (haltErr: unknown) {
+        void import('./error-reporting.js').then(({ captureError }) => captureError(haltErr)).catch(() => {});
+      }
       const say = this.#bulkNotices();
       this.recordAndNotify(task, reason ? say.halted('preview', reason) : say.previewEnded, false);
       return;
@@ -2616,8 +2624,16 @@ export class WorkerLoop {
       // error may carry a target's text (PRD bulk-loop §3.1, error classes).
       // The report is started first, so a halt that throws does not take it along.
       void import('./bulk-judge.js').then(({ judgeErrorForTracker }) => capture(judgeErrorForTracker(err))).catch(() => {});
-      ledger.haltPreview(runId, BULK_HALT_REASONS.unavailable);
-      const reason = ledger.getStatus(runId)?.haltReason;
+      // A halt that throws (SQLITE_BUSY) leaves the fixed sentence, never the raw error; its class
+      // reaches the tracker like the judge's own. The next status read halts an external run
+      // (`freeDeadReads` reads `http:` runs only); an internal one stays planned and unhalted.
+      let reason: string | null | undefined;
+      try {
+        ledger.haltPreview(runId, BULK_HALT_REASONS.unavailable);
+        reason = ledger.getStatus(runId)?.haltReason;
+      } catch (haltErr: unknown) {
+        void import('./bulk-judge.js').then(({ judgeErrorForTracker }) => capture(judgeErrorForTracker(haltErr))).catch(() => {});
+      }
       const say = this.#bulkNotices();
       this.recordAndNotify(task, reason ? say.halted('judge', reason) : say.judgeEnded, false);
       return;

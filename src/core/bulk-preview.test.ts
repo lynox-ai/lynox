@@ -1256,6 +1256,31 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
     }
   });
 
+  // The halt in the catch is one UPDATE and can throw itself: the owner still hears the handler's
+  // fixed sentence, never the raw error the dispatch would report.
+  it('a halt that throws in the catch still records the handler\'s fixed sentence', async () => {
+    const s = shop();
+    const restore = serve(s);
+    const read = vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error('boom'); });
+    const halt = vi.spyOn(ledger, 'haltPreview').mockImplementation(() => { throw new Error('SQLITE_BUSY'); });
+    try {
+      const runId = planRun([{ target: url(0), after: { price: '1' } }]);
+      const w = workerFor();
+      await w.tick();
+      expect(w.recordTaskRun.mock.calls.map((c) => c[1])).toEqual(['Bulk preview stopped.']);
+      await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
+      expect((w.notify.mock.calls[0] as unknown as [{ body: string }])[0].body).toBe('Bulk preview stopped.');
+      // Unhalted as the catch left it; the next status read halts it, so the owner can resume it.
+      expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId)).toEqual({ halt_reason: null });
+      halt.mockRestore();
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+    } finally {
+      halt.mockRestore();
+      read.mockRestore();
+      restore();
+    }
+  });
+
   it('a throw before the read begins, told to a German owner: the halt in German, the stored reason as it is (ux Rest-P E11)', async () => {
     const s = shop();
     const restore = serve(s);
