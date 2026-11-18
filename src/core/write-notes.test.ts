@@ -119,6 +119,14 @@ describe('the line a run report keeps of a refused write', () => {
       expect(note('https://%41CME-Tenant7.example.com/v1', maskOf('ACME-Tenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/v1.`);
       // A stray byte that is no UTF-8 does not keep the rest of its run encoded.
       expect(note('https://api.example.com/v1/Lm4kZr%51%37%FF/run', maskOf('Lm4kZrQ7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com${PATH}.`);
+      // Nor one before a character of several bytes.
+      expect(note('https://h.example.com/%E2%C3%A9SECRET1234', maskOf('éSECRET1234'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://h.example.com${PATH}.`);
+      // A value that holds a tab and is written percent-encoded in part.
+      expect(note('https://h.example.com/A%42\tCDEFGHIJ', maskOf('AB\tCDEFGHIJ'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://h.example.com${PATH}.`);
+      expect(note('https://A%42\tCDEFGHIJ.example.com/v1', maskOf('AB\tCDEFGHIJ'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/v1.`);
+      // Split by a tab and percent-encoded: found only decoded, with the tab dropped.
+      expect(note('https://api.example.com/v1/%51%37x\t9Lm4kZr/run', maskOf('Q7x9Lm4kZr'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com${PATH}.`);
+      expect(note('https://%41C\tME-Tenant7.example.com/v1', maskOf('ACME-Tenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/v1.`);
     });
 
     it('CONTROL: a percent escape beside a value written plainly leaves the path named, the value masked', () => {
@@ -143,6 +151,11 @@ describe('the line a run report keeps of a refused write', () => {
       expect(note('https://tok@AC\tME-Tenant7.example.com/x', maskOf('tok@ACME-Tenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/x.`);
       // With a percent sign of its own the value is not found decoded either: only once the tab is dropped.
       expect(note('https://hooks.example/hook%2Fpa\trt?sig=ABCDEFGHIJKLMNOP', maskOf('hook%2Fpart?sig=ABCDEFGHIJKLMNOP'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
+      // Each other form the parser undoes, alone: with its tab and a percent sign of its own (as
+      // written), split by a tab and encoded (decoded), with a tab and encoded (both).
+      expect(note('https://hooks.example/h%2Fx\tyz?sig=ABCDEFGH', maskOf('h%2Fx\tyz?sig=ABCDEFGH'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
+      expect(note('https://hooks.example/hook%70a\trt?sig=ABCDEFGHIJKLMNOP', maskOf('hookpart?sig=ABCDEFGHIJKLMNOP'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
+      expect(note('https://hooks.example/A%42\tC?q=ABCDEFGH', maskOf('AB\tC?q=ABCDEFGH'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
       expect(note('https://tok@ACME\tTenant7.example.com/x', maskOf('tok@ACME\tTenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/x.`);
       expect(note('https://hooks.example/hook%70art?sig=ABCDEFGHIJKLMNOP', maskOf('hookpart?sig=ABCDEFGHIJKLMNOP'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
     });
@@ -228,6 +241,9 @@ describe('the line a run report keeps of a refused write', () => {
       expect(note('wss://api.example.com/%51%37x9Lm', maskOf('Q7x9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
       // A value holding a percent sign of its own, split by a tab: found only without the tab, not decoded.
       expect(note('wss://api.example.com/Q7%20x\t9Lm', maskOf('Q7%20x9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+      expect(note('wss://h.example.com/A%42\tCDEFGHIJ', maskOf('AB\tCDEFGHIJ'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+      expect(note('wss://h.example.com/%51%37x\t9Lm', maskOf('Q7x9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+      expect(note('wss://h.example.com/A%42\tCD', maskOf('A%42\tCD'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
     });
 
     // `http_request` asks this of an http or https host only; another scheme's host its own checks read.

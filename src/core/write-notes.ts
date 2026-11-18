@@ -196,7 +196,7 @@ function partsHidden(raw: string, u: URL, hideHost: boolean, mask: (text: string
   if (written === undefined) {
     // Not split as the parser splits it (a scheme other than http or https): a stored value the
     // mask finds in the URL in any of its forms leaves both parts out.
-    if ([raw, cleaned.text, percentDecoded(cleaned.text)].some(holds)) host = path = true;
+    if ([raw, cleaned.text, percentDecoded(cleaned.text), percentDecoded(raw)].some(holds)) host = path = true;
   } else {
     const { text, hostStart, hostEnd, pathEnd } = written;
     const writtenHost = text.slice(hostStart, hostEnd);
@@ -208,7 +208,10 @@ function partsHidden(raw: string, u: URL, hideHost: boolean, mask: (text: string
     // Read in each form the parser undoes, the value is whole in a part, or runs over its edge.
     const asRaw = rawCut(raw, cleaned.kept, written);
     const decoded = decodedCut(written);
-    for (const form of [written, asRaw, decoded]) {
+    // Both at once: a value that holds a tab and is written percent-encoded in part.
+    const rawDecoded = decodedCut(asRaw);
+    const forms = [asRaw, decoded, rawDecoded];
+    for (const form of [written, ...forms]) {
       if (crossesAt(form.text, form.hostStart, mask)) host = true;
       if (crossesAt(form.text, form.pathEnd, mask)) {
         if (form.pathEnd > form.hostEnd) path = true;
@@ -224,13 +227,15 @@ function partsHidden(raw: string, u: URL, hideHost: boolean, mask: (text: string
     // A value written percent-encoded: the masked part, decoded, still holds it.
     if (holds(percentDecoded(mask(writtenHost)))) host = true;
     if (holds(percentDecoded(mask(writtenPath)))) path = true;
+    if (holds(percentDecoded(mask(rawHost)))) host = true;
+    if (holds(percentDecoded(mask(rawPath)))) path = true;
     // A value that runs from the host into the path is in neither part alone. Shown whole and as
     // written it is masked whole; with either part left out or rewritten, or written in another
     // form, the other part shows a piece of it.
     const shownWhole = !host && !path && writtenHost === u.host && writtenPath === u.pathname;
     if (pathEnd > hostEnd && (
       (!shownWhole && crossesAt(text, hostEnd, mask))
-      || [asRaw, decoded].some((form) => form.text !== text && crossesAt(form.text, form.hostEnd, mask))
+      || forms.some((form) => form.text !== text && crossesAt(form.text, form.hostEnd, mask))
     )) host = path = true;
   }
   return { host, path };
@@ -296,7 +301,7 @@ function rawCut(raw: string, kept: readonly number[], cut: CutUrl): CutUrl {
   return { text: raw, hostStart: at(cut.hostStart), hostEnd: at(cut.hostEnd), pathEnd: at(cut.pathEnd) };
 }
 
-/** The cleaned URL percent-decoded, each part apart so the cuts stay where they were. */
+/** A URL percent-decoded, each part apart so the cuts stay where they were. */
 function decodedCut(cut: CutUrl): CutUrl {
   const before = percentDecoded(cut.text.slice(0, cut.hostStart));
   const host = percentDecoded(cut.text.slice(cut.hostStart, cut.hostEnd));
@@ -306,18 +311,14 @@ function decodedCut(cut: CutUrl): CutUrl {
 }
 
 /**
- * Every run of percent escapes decoded: as UTF-8 where the run is valid UTF-8, else each escape
- * below 0x80 alone, so one stray byte does not keep the rest of the run encoded.
+ * Every run of percent escapes decoded as UTF-8, a byte that is no UTF-8 read as U+FFFD: one stray
+ * byte does not keep the characters around it encoded.
  */
 function percentDecoded(text: string): string {
-  return text.replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
-    try {
-      return decodeURIComponent(run);
-    } catch {
-      return run.replace(/%([0-7][0-9a-f])/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
-    }
-  });
+  return text.replace(/(?:%[0-9a-f]{2})+/gi, (run) =>
+    UTF8.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
 }
+const UTF8 = new TextDecoder('utf-8', { fatal: false });
 
 /** What a run report keeps of one such line (`collectWriteNotes`). */
 const NOTE_LINE_MAX_CHARS = 300;
