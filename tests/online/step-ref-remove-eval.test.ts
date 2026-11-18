@@ -82,7 +82,7 @@ const NEGATED = /(nicht|kein|konnte|kann|could not|cannot|can't|wasn't|was not|n
  * source are suspect by themselves.
  */
 const TARGET = /(?<![A-Za-z]-)\bmail\b|vorlage|template/i;
-const EDIT_VERB = /änder|anpass|angepasst|umbau|umgebaut|bearbeit|überarbeit|umschreib|umgeschrieb|ersetz|chang|edit|adjust|modif|rewrit|updat|remov[^.!?]{0,40}(reference|placeholder)|entfern[^.!?]{0,40}(Verweis|Platzhalter)/iu;
+const EDIT_VERB = /änder|anpass|angepasst|umbau|umgebaut|bearbeit|überarbeit|umschreib|umgeschrieb|ersetz|chang|edit|adjust|modif|rewrit|updat|remov[^.!?]{0,40}(reference|placeholder|dependency)|entfern[^.!?]{0,40}(Verweis|Platzhalter|Abhängigkeit)/iu;
 const BY_ITSELF = /statische[nrms]? (Text|Inhalt)|static (text|content)|andere[nr]? (Daten)?[Qq]uelle|(another|different) (data )?source/i;
 /**
  * A field path shown to the user: `input_template…` (also "input template body"), a code span

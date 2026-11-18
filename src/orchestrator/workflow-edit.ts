@@ -317,7 +317,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
         const renamedToo = was !== undefined && was.id !== s.id && isStepIdShape(was.id)
           ? ` This edit also renames ${which}: if you remove it, name it by its new id.` : '';
         return `Error: remove: ${which} reads the output of a step this edit removes, in its input template. `
-          + `Two ways are open: keep the step it reads, or remove ${which} too, only if the user wants it gone. `
+          + `Two ways fit this request: keep the step it reads, or remove ${which} too, only if the user wants it gone. `
           + `No edit this tool can make lets ${which} stop reading it: do not offer to change ${which} or its template, not even as an option. `
           + `When you tell the user, name the place in words (for example: in the template of the step that reads it), not as a field path.${renamedToo}`;
       }
