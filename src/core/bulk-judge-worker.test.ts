@@ -183,6 +183,31 @@ describe('bulk_judge through the worker: a halt that did not take', () => {
   });
 });
 
+describe('bulk_judge through the worker: an engine without a store', () => {
+  it('holds back a target that carries an env secret, so the judge model never reads it', async () => {
+    const sent: string[] = [];
+    model.create = async (...a: unknown[]) => {
+      sent.push(JSON.stringify(a));
+      return {
+        id: 'm', type: 'message', role: 'assistant', model: 'claude-haiku-4-5', stop_reason: 'tool_use', stop_sequence: null,
+        content: [{ type: 'tool_use', id: 't', name: 'extract', input: { title: 'Short' } }],
+        usage: { input_tokens: 100, output_tokens: 20 },
+      };
+    };
+    const saved = process.env['LYNOX_VAULT_KEY'];
+    // The target's text holds MARK; as the engine's own env secret it must not reach the judge.
+    process.env['LYNOX_VAULT_KEY'] = MARK;
+    try {
+      const id = startedRun();
+      await tick(id);
+      expect(sent.join('\n')).not.toContain(MARK);
+      expect(ledger.getStatus(id)!.invalidReasons).not.toEqual({});
+    } finally {
+      if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+    }
+  });
+});
+
 describe('bulk_judge through the worker: what leaves as an error', () => {
   it('a schema refusal carrying the target\'s text: the target is invalid, and the text is nowhere', async () => {
     model.create = async () => ({

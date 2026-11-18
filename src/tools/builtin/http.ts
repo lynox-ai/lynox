@@ -27,7 +27,7 @@ import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js'
 import { contractGrants } from '../permission-guard.js';
 import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote, writeForShortNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
-import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
+import { isProtectedSecretWrite, maskEngineEnvSecrets, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import {
@@ -3264,7 +3264,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const hostHoldsSecret = (): boolean => {
       if (isOwnerPrincipal(agent.principal)) return false;
       const parsed = new URL(input.url);
-      const maskOf = (text: string): string => agent.secretStore?.maskSecrets(text) ?? text;
+      const maskOf = (text: string): string => agent.secretStore?.maskSecrets(text) ?? maskEngineEnvSecrets(text);
       const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
       const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
       return [parsed.hostname, rawHost, decodedHost].some((h) => maskOf(h) !== h)
@@ -3725,7 +3725,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // The service the question names and the approval is for: the host, and its scheme and port
     // where they are not https on the default port (`approvalOrigin`).
     const hostname = approvalOrigin(new URL(input.url));
-    const mask = (text: string) => agent.secretStore?.maskSecrets(text) ?? text;
+    const mask = (text: string) => agent.secretStore?.maskSecrets(text) ?? maskEngineEnvSecrets(text);
     // The headers the question shows, read from the set that goes out: the model's, after the
     // engine attached the credential (`headers`). What it leaves out: `headerShowing`.
     const headersShown = (sent: Readonly<Record<string, string>>) =>
