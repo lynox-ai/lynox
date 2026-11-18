@@ -75,7 +75,7 @@ import { approvalChatTitle } from './approval-chat-title.js';
 import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
-import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, persistRefusedTurn, capStopNote } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
 import { buildCompactionSummaryPrompt } from './compaction-prompt.js';
@@ -1003,6 +1003,7 @@ export class Session {
       if (inputCheck.action === 'block') {
         const msg = `⚠ Request blocked by content policy: ${inputCheck.reason ?? 'prohibited content'}. This request was not sent to the AI model.`;
         if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+        persistRefusedTurn(threadStore, this.sessionId, task, msg);
         return msg;
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
@@ -1022,15 +1023,18 @@ export class Session {
           if (!isInputRequired(err)) throw err;
           const msg = `⚠ Request flagged by content policy: ${inputCheck.reason ?? 'suspicious content'}. There is no one to allow it, so it was not sent to the AI model.`;
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+          persistRefusedTurn(threadStore, this.sessionId, task, msg);
           return msg;
         }
         const outcome = decideConsent('guard', answer);
         if (outcome !== 'allow') {
           // The run's result, read by the person in the instance's language: the run ends here,
-          // before the model is called and before anything is stored, so the model never reads it.
+          // before the model is called. The message and this sentence are kept as display-only
+          // rows, so a reload shows both and the model never reads either.
           const why = outcome === 'unrecognised' ? 'unrecognised' : outcome === 'dismissed' ? 'unanswered' : 'declined';
           const msg = contentFlagRefusal(language, why, inputCheck.reason);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+          persistRefusedTurn(threadStore, this.sessionId, task, msg);
           return msg;
         }
       }
@@ -1143,6 +1147,10 @@ export class Session {
     // (without this, eager checkpoints during the run inflate existingCount
     // and the first-run title generation never fires).
     const startMessageCount = this.engine.getThreadStore()?.getMessageCount(this.sessionId) ?? 0;
+    // "First run" for the title counts only the rows the model reads. A refused message or a
+    // failed turn leaves display-only rows behind; counted, they made the next accepted turn
+    // look like a later one, and the thread kept no title.
+    const startApiMessageCount = this.engine.getThreadStore()?.getApiMessageCount(this.sessionId) ?? 0;
 
     // Compute prompt hash from the system prompt the agent uses
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
@@ -1478,7 +1486,7 @@ export class Session {
       // still ALWAYS write the cost / token rollup (eager-persist doesn't
       // know token counts; those are only computed here at run-end) plus
       // the first-run title — both gated on the START count, not the now
-      // (`startMessageCount === 0` = "thread was empty when this run began").
+      // (`startApiMessageCount === 0` = "the model had read nothing in this thread when this run began").
       if (threadStore && this.agent) {
         try {
           const agent = this.agent;
@@ -1524,7 +1532,11 @@ export class Session {
           }
           // An internal run (a summary in a session of its own) has no user words to title, and
           // its prompt is another thread's history: it would go to a second model call.
-          if (startMessageCount === 0 && !agent.isInternalRun) {
+          // After a refused or failed first turn the thread is already listed, and the person may
+          // have named it; that name stays. A thread with no rows before this run is titled as before.
+          const namedAfterDisplayRows = startMessageCount > startApiMessageCount
+            && (threadStore.getThread(this.sessionId)?.title ?? '') !== '';
+          if (startApiMessageCount === 0 && !agent.isInternalRun && !namedAfterDisplayRows) {
             // Derive the title from the user's OWN words, not the engine framing:
             // a context-opened chat (💬 mail-reply / fix / workflow-edit) carries a
             // `[Loaded …]\n[/loaded-context]\n\n` preamble on its first message that
