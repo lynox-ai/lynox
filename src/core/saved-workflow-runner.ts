@@ -1,6 +1,7 @@
 import type { RunHooks } from '../types/orchestration.js';
 import type { AbortScope } from '../types/config.js';
 import { randomUUID } from 'node:crypto';
+import { lockedTierSlots, LockedSlotError } from './config.js';
 import type { UntrustedCause } from './untrusted-signals.js';
 
 import type { Engine, RunContext } from './engine.js';
@@ -111,6 +112,11 @@ export async function runGuardedSavedWorkflow(
     checkWorkflow?: ((planned: PlannedPipeline) => string | null) | undefined;
   },
 ): Promise<RunSavedWorkflowResult> {
+  // 0. Nothing runs while a saved tier holds a model this engine does not know: its steps would
+  // carry that tier's work to a provider not chosen for it (`assertNoLockedSlot`). The worker gates
+  // before it gets here; a run started over HTTP has no session that would.
+  const locked = lockedTierSlots();
+  if (locked.length > 0) return { ok: false, error: new LockedSlotError(locked).message };
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
   const budgetCheck = checkPersistentBudget();
   if (!budgetCheck.allowed) {

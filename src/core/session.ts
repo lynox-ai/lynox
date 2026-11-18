@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { assertNoLockedSlot } from './config.js';
 import { runTaskTitle } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
@@ -579,6 +580,10 @@ export class Session {
   };
 
   constructor(engine: Engine, opts?: SessionOptions) {
+    // Nothing runs while a saved tier holds a model this engine does not know: its band has
+    // nowhere safe to go, and a session would carry its content to the other bands. The settings
+    // that change the slot load without a session; the next session after that change starts.
+    assertNoLockedSlot(opts?.principal?.kind === 'mandate');
     this.engine = engine;
     this.sessionId = opts?.sessionId ?? randomUUID();
     // Copy config from engine — session mutates its own copy, not the shared config.

@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { lockedTierSlots } from './config.js';
 import type {
   IKnowledgeLayer,
   MemoryNamespace,
@@ -625,7 +626,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       let costUsd: number | undefined;
       if (extractionAllowed) {
         const legacy = this.useV2Extractor
-          && this.anthropicClient
+          && this._modelClient()
           && shouldExtractV2(trimmedText, namespace)
           ? await this._extractAndPersistV2(trimmedText, scope, memoryId, created, options?.cancelled)
           : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId, created, options?.cancelled);
@@ -687,8 +688,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * them is read by the free regex step only, so there is no spend to admit.
    * `v2Possible` is false where the caller only ever runs the V1 extractor.
    */
+  /**
+   * The client extraction calls a model with, or none for the regex path. None while a saved tier
+   * holds a model this engine does not know (`assertNoLockedSlot`): extraction runs on the fast
+   * tier, and nothing calls a model then. The memory route writes the text either way.
+   */
+  private _modelClient(): Anthropic | undefined {
+    // A config that cannot be read counts as locked: no model call on a question nobody answered.
+    try {
+      return lockedTierSlots().length > 0 ? undefined : this.anthropicClient;
+    } catch {
+      return undefined;
+    }
+  }
+
   private _extractionCallsModel(text: string, namespace: MemoryNamespace, v2Possible = true): boolean {
-    if (!this.anthropicClient) return false;
+    if (!this._modelClient()) return false;
     if (v2Possible && this.useV2Extractor && shouldExtractV2(text, namespace)) return true;
     return shouldUseLLMExtraction(text, namespace, []);
   }
@@ -703,7 +718,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     created: KnowledgeCreatedCounts,
     cancelled?: (() => boolean) | undefined,
   ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined; cancelled?: true }> {
-    const extraction = await extractEntities(trimmedText, namespace, this.anthropicClient);
+    const extraction = await extractEntities(trimmedText, namespace, this._modelClient());
     if (cancelled?.()) return { resolvedEntities: [], resolvedRelations: [], costUsd: extraction.costUsd, cancelled: true };
 
     const made = noneCreated();
@@ -772,7 +787,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     created: KnowledgeCreatedCounts,
     cancelled?: (() => boolean) | undefined,
   ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined; cancelled?: true }> {
-    const extraction = await extractEntitiesV2(trimmedText, this.anthropicClient!);
+    const extraction = await extractEntitiesV2(trimmedText, this._modelClient()!);
     if (cancelled?.()) return { resolvedEntities: [], resolvedRelations: [], costUsd: extraction.costUsd, cancelled: true };
 
     const made = noneCreated();
@@ -1148,13 +1163,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     let relations: Array<{ from: string; to: string; kind: string; description: string; confidence: number }> = [];
     let costUsd: number | undefined;
     if (extractionAllowed) {
-      if (this.useV2Extractor && this.anthropicClient && shouldExtractV2(trimmedText, namespace)) {
-        const ex = await extractEntitiesV2(trimmedText, this.anthropicClient);
+      const client = this._modelClient();
+      if (this.useV2Extractor && client && shouldExtractV2(trimmedText, namespace)) {
+        const ex = await extractEntitiesV2(trimmedText, client);
         entities = ex.entities.map(e => ({ name: e.canonicalName, type: e.type, aliases: [e.canonicalName, ...e.aliases] }));
         relations = ex.relations.map(r => ({ from: r.subject, to: r.object, kind: r.predicate, description: '', confidence: r.confidence }));
         costUsd = ex.costUsd;
       } else {
-        const ex = await extractEntities(trimmedText, namespace, this.anthropicClient);
+        const ex = await extractEntities(trimmedText, namespace, client);
         entities = ex.entities.map(e => ({ name: e.name, type: e.type, aliases: [e.name] }));
         relations = ex.relations.map(r => ({ from: r.from, to: r.to, kind: r.relationType, description: r.description, confidence: 1.0 }));
         costUsd = ex.costUsd;
@@ -1970,7 +1986,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         reportMeteredCost(this.meteredHost, extractGate.runId, extracted.costUsd, 'fast');
       }
     } else if (extractionAllowed) {
-      const extraction = await extractEntities(newText, namespace, this.anthropicClient);
+      const extraction = await extractEntities(newText, namespace, this._modelClient());
       if (extractGate && this.meteredHost && extraction.costUsd) {
         reportMeteredCost(this.meteredHost, extractGate.runId, extraction.costUsd, 'fast');
       }

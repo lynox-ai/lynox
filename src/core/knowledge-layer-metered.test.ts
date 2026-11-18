@@ -23,6 +23,13 @@ vi.mock('./entity-extractor.js', async (importActual) => ({
   extractEntities: mockExtractV1,
 }));
 
+// The locked-slot gate reads the loader; here it reads what a case sets.
+const mockLockedTierSlots = vi.hoisted(() => vi.fn((): Array<{ tier: string; model_id: string }> => []));
+vi.mock('./config.js', async (importActual) => ({
+  ...(await importActual<typeof import('./config.js')>()),
+  lockedTierSlots: mockLockedTierSlots,
+}));
+
 import { KnowledgeLayer } from './knowledge-layer.js';
 import { LocalProvider } from './embedding.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
@@ -56,6 +63,34 @@ describe('KnowledgeLayer — managed KG-extraction gate + debit', () => {
     resetPersistentBudget();
     await layer.close();
     await rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('a locked saved tier: the memory is written, and extraction calls no model', async () => {
+    mockLockedTierSlots.mockReturnValue([{ tier: 'fast', model_id: 'my-local-model' }]);
+    try {
+      const onBeforeRun = vi.fn();
+      layer.setMeteredHost({ getHooks: () => [{ onBeforeRun, onAfterRun: vi.fn() }], getContext: () => undefined });
+      const res = await layer.store(text, 'knowledge', scope);
+      expect(res.stored).toBe(true);
+      expect(mockExtractV2).not.toHaveBeenCalled();
+      expect(onBeforeRun).not.toHaveBeenCalled();
+      for (const call of mockExtractV1.mock.calls) expect(call[2]).toBeUndefined();
+    } finally {
+      mockLockedTierSlots.mockReturnValue([]);
+    }
+  });
+
+  it('a config that cannot be read counts as locked: no model call', async () => {
+    mockLockedTierSlots.mockImplementation(() => { throw new Error('config unreadable'); });
+    try {
+      const res = await layer.store(text, 'knowledge', scope);
+      expect(res.stored).toBe(true);
+      expect(mockExtractV2).not.toHaveBeenCalled();
+      for (const call of mockExtractV1.mock.calls) expect(call[2]).toBeUndefined();
+    } finally {
+      mockLockedTierSlots.mockReset();
+      mockLockedTierSlots.mockReturnValue([]);
+    }
   });
 
   it('gates before extraction and debits the reported cost, keyed on the gate run id', async () => {

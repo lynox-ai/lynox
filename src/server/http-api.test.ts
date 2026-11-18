@@ -476,6 +476,7 @@ vi.mock('../core/config.js', async (importOriginal) => ({
   // The REAL pre-write check: it is the loader run on the candidate, and the route under test refuses by it.
   checkCandidateConfig: vi.fn((await importOriginal<typeof import('../core/config.js')>()).checkCandidateConfig),
   replacedTierSlots: vi.fn().mockReturnValue([]),
+  lockedTierSlots: vi.fn().mockReturnValue([]),
   POOL_MISTRAL_ENDPOINTS: (await importOriginal<typeof import('../core/config.js')>()).POOL_MISTRAL_ENDPOINTS,
   POOL_ANTHROPIC_ENDPOINT: (await importOriginal<typeof import('../core/config.js')>()).POOL_ANTHROPIC_ENDPOINT,
   // Not a stub: the REAL escaper, so this suite tests the same rendering the
@@ -1823,6 +1824,34 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('sessions', () => {
+    it('a locked saved tier answers 409 with its own way out, not a bare 500', async () => {
+      repayRateWindow();
+      const { LockedSlotError } = await vi.importActual<typeof import('../core/config.js')>('../core/config.js');
+      const locked = new LockedSlotError([{ tier: 'deep', model_id: 'x' }]);
+      mockGetOrCreate.mockImplementationOnce(() => { throw locked; });
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const res = await jsonFetch('/api/sessions', { method: 'POST', body: '{}' });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { error: string }).error).toBe(locked.message);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('any other failure there stays a bare 500', async () => {
+      repayRateWindow();
+      mockGetOrCreate.mockImplementationOnce(() => { throw new Error('boom'); });
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const res = await jsonFetch('/api/sessions', { method: 'POST', body: '{}' });
+        expect(res.status).toBe(500);
+        expect(((await res.json()) as { error: string }).error).toBe('Internal server error');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('creates a session', async () => {
       const res = await jsonFetch('/api/sessions', { method: 'POST', body: '{}' });
       expect(res.status).toBe(201);
@@ -6989,6 +7018,27 @@ describe('LynoxHTTPApi', () => {
         const { saveUserConfig } = await import('../core/config.js');
         const last = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1)![0];
         expect(last['tier_set']).toEqual({});
+      });
+
+      it('GET reports the slots that hold the instance back, and none without one', async () => {
+        repayRateWindow();
+        const { lockedTierSlots } = await import('../core/config.js');
+        (lockedTierSlots as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce([{ tier: 'deep', model_id: 'my-local-model' }]);
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as Record<string, unknown>)['locked_tier_slots']).toEqual([{ tier: 'deep', model_id: 'my-local-model' }]);
+        const plain = await jsonFetch('/api/config');
+        expect(((await plain.json()) as Record<string, unknown>)['locked_tier_slots']).toBeUndefined();
+      });
+
+      it('a stored file that locks the instance: a PUT of another field keeps the slot and is refused', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'balanced', tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } } });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ thinking_mode: 'disabled' }) });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toContain("'my-local-model'");
+        expect(await saves()).toBe(before);
       });
 
       it('GET reports a slot whose model the load replaced', async () => {

@@ -111,6 +111,10 @@ function saidWorkflowId(id: string): string {
 
 export type { ShownMandate };
 
+/** The tiers as the settings page names them (web-ui `llm.tier.*`). */
+const TIER_EN: Readonly<Record<string, string>> = { fast: 'Fast', balanced: 'Balanced', deep: 'Deep' };
+const TIER_DE: Readonly<Record<string, string>> = { fast: 'Schnell', balanced: 'Ausgewogen', deep: 'Tief' };
+
 export interface WorkerNotices {
   /** The summary of more than a few triggers waiting for confirmation. */
   consentManyTitle(count: number): string;
@@ -269,6 +273,10 @@ export interface WorkerNotices {
   readonly planRunUnrecorded: string;
   /** A trigger effect the engine does not know, quoted (E9). */
   unknownEffect(effect: string): string;
+  /** A run that would call a model while a saved tier holds a model this engine does not know. */
+  slotLocked(tier: string): string;
+  /** Said after {@link slotLocked} for a one-shot, which is switched off with its time kept. */
+  readonly slotLockedSwitchedOff: string;
   /** A resumed run whose new chat could not be contained (W14). */
   resumedRunNotContained(provisioned: boolean): string;
   /** A watched page that changed, with the analysis (E15): the push only, the thread's seed stays English. */
@@ -374,6 +382,8 @@ const EN: WorkerNotices = Object.freeze({
   planOfAnother: PLAN_OF_ANOTHER_RESULT,
   planRunUnrecorded: PLAN_RUN_UNRECORDED_RESULT,
   unknownEffect: (effect: string) => `Unknown trigger effect '${effect}' — skipped`,
+  slotLockedSwitchedOff: 'This trigger was switched off. Switch it on again under Automation → Triggers once that tier has a model.',
+  slotLocked: (tier: string) => `Not run: the ${TIER_EN[tier] ?? tier} tier has a saved model that this version of lynox does not know. Nothing runs until you choose "Custom" under Settings → LLM Provider → Model per tier and pick a model for that tier.`,
   resumedRunNotContained: (provisioned: boolean) => provisioned
     ? `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`
     : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`,
@@ -513,6 +523,8 @@ const DE: WorkerNotices = Object.freeze({
   planOfAnother: 'Nicht ausgeführt: Dieser Plan handelt für eine andere Person mit Zugang. Von Hand starten darf ihn nur der Inhaber.',
   planRunUnrecorded: 'Nicht ausgeführt: Dieser Plan handelt für jemanden, dem du Zugang gegeben hast, und sein Start lässt sich gerade nicht im Protokoll der Instanz festhalten.',
   unknownEffect: (effect: string) => `Unbekannte Wirkung „${effect}“ im Auslöser; übersprungen.`,
+  slotLockedSwitchedOff: 'Dieser Auslöser wurde ausgeschaltet. Schalte ihn unter Automation → Trigger wieder ein, sobald die Stufe ein Modell hat.',
+  slotLocked: (tier: string) => `Nicht ausgeführt: Für die Stufe „${TIER_DE[tier] ?? tier}“ ist ein Modell gespeichert, das diese Version von lynox nicht kennt. Bis du unter Einstellungen → LLM-Provider → Modell pro Stufe „Eigene“ und ein Modell für diese Stufe wählst, läuft nichts.`,
   resumedRunNotContained: (provisioned: boolean) => provisioned
     ? `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, schreib an support@lynox.ai.`
     : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das Instanz-Protokoll den Grund.`,

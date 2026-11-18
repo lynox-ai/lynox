@@ -59,6 +59,7 @@ import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBud
 // is precedented rather than novel.
 import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
+import { lockedTierSlots } from './config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
 import { storedStepOrder } from '../orchestrator/step-id.js';
@@ -690,6 +691,8 @@ export class WorkerLoop {
   private readonly activeTasks = new Map<string, ActiveTask>();
   /** Per schedule, the steps' digest it last told the owner it waits on (`#tellAwaitsStampOnce`). */
   readonly #awaitsStampTold = new Map<string, string>();
+  /** The tier each held-back trigger was last told about (`#holdForLockedSlot`). */
+  readonly #slotLockedTold = new Map<string, string>();
   /** The one-time door for a mandate's hand run. Private: its minter goes out once. */
   readonly #handRunDoor = new HandRunDoor();
   /**
@@ -852,6 +855,33 @@ export class WorkerLoop {
    * its context, so a shutdown that cleared the map does not turn a mandate's run into the
    * owner's. Outside a run (the tick's sweeps) the map, which is all there is.
    */
+  /**
+   * A run held back by a locked tier (`assertNoLockedSlot`). The lock lasts until the owner picks a
+   * model in Settings, so the run waits instead of failing: a schedule stays on and is recorded
+   * halted (no retry; it is skipped until its next occurrence); a one-shot — a webhook trigger too —
+   * is switched off with its time kept, as one recorded halted would be written done. The owner is told once per tier, not at every run.
+   * A run started by hand is answered like any refusal before dispatch.
+   */
+  async #holdForLockedSlot(task: TriggerRecord, entry: ActiveTask, tier: string): Promise<void> {
+    const notice = this.#notices().slotLocked(tier);
+    if (isStartedByHand(task.id)) {
+      await this.#refuseBeforeDispatch(task, entry, notice);
+      return;
+    }
+    const tm = this.engine.getTaskManager();
+    if (!task.schedule_cron && !task.watch_config) {
+      tm?.setEnabled?.(task.id, false);
+      this.#recordRun(tm, task.id, `${notice} ${this.#notices().slotLockedSwitchedOff}`, 'halted', undefined, { keepSchedule: true });
+    } else {
+      this.#recordRun(tm, task.id, notice, 'halted');
+    }
+    if (this.#slotLockedTold.get(task.id) === tier) return;
+    if (this.#slotLockedTold.size >= 1024) this.#slotLockedTold.clear();
+    this.#slotLockedTold.set(task.id, tier);
+    if (!this.notificationRouter.hasChannels()) return;
+    void this.notificationRouter.notify({ title: `${RUN_END_LOOK.halted.mark} ${task.title}`, body: notice, taskId: task.id, priority: RUN_END_LOOK.halted.priority });
+  }
+
   /**
    * Tell the owner once that a schedule waits for its workflow's stamp: again only when the
    * steps changed since (a new digest), so a schedule that meets the same wait at every run is
@@ -2105,6 +2135,18 @@ export class WorkerLoop {
           && principalTag(entry.starter) !== principalTag(entry.planOf)) {
           await this.#refuseBeforeDispatch(task, entry, this.#notices().planOfAnother);
           return;
+        }
+        // Nothing that calls a model runs while a saved tier holds a model this engine does not
+        // know (`assertNoLockedSlot`): its band has nowhere safe to go, and the run's session would
+        // carry its content to the other bands. The deterministic effects (backup, reminder, the
+        // bulk reads and writes) call no model and go on. Checked before a mandate's trail opens,
+        // so a run that does not start leaves no start there.
+        if (effect === 'run_agent' || effect === 'run_workflow' || effect === 'bulk_judge') {
+          const locked = lockedTierSlots()[0];
+          if (locked !== undefined) {
+            await this.#holdForLockedSlot(task, entry, locked.tier);
+            return;
+          }
         }
         // A run that acts for a mandate is on that mandate's trail from start to end, and it does
         // not start when its start cannot be written there.

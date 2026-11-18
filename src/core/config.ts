@@ -270,13 +270,56 @@ export function loadConfig(): LynoxUserConfig {
   if (_cachedConfig) return _cachedConfig;
   const userConfig = readConfigFile(join(getUserConfigDir(), CONFIG_FILENAME));
   const projectConfig = readConfigFile(join(getProjectConfigDir(), CONFIG_FILENAME));
-  const notes: BuildNotes = { warn: (line) => console.warn(line), replacedSlots: [] };
+  const notes: BuildNotes = { warn: (line) => console.warn(line), replacedSlots: [], lockedSlots: [] };
   _cachedConfig = buildConfig(userConfig, projectConfig, notes);
   _replacedSlots = notes.replacedSlots;
+  _lockedSlots = notes.lockedSlots;
   return _cachedConfig;
 }
 
 let _replacedSlots: readonly ReplacedSlot[] = [];
+let _lockedSlots: readonly LockedSlot[] = [];
+
+/**
+ * The config.json `tier_set` slots that hold this lynox back from running anything (see the
+ * preset guard), for GET /api/config to report and for {@link assertNoLockedSlot}.
+ */
+export function lockedTierSlots(): readonly LockedSlot[] {
+  loadConfig();
+  return _lockedSlots;
+}
+
+/**
+ * Thrown where a run would start while a config.json slot names a model this engine does not know
+ * on a provider or endpoint other than its strategy's. Nothing runs then, on any band: the band has
+ * nowhere safe to go, and the other bands would still carry the conversation's content.
+ */
+export class LockedSlotError extends Error {
+  constructor(readonly slots: readonly LockedSlot[], forMandate = false) {
+    const first = slots[0]!;
+    const tier = TIER_LABEL_EN[first.tier];
+    // A person with delegated access cannot open the owner's settings: told whose move it is.
+    super(forMandate
+      ? `This version of lynox does not know the model ${first.model_id}. The “${tier}” tier is locked for that reason, and nothing runs until the owner picks another model.`
+      : `Nothing runs right now: the ${tier} tier has a saved model, "${first.model_id}", that this version of lynox does not know. ` +
+      `lynox will not send that tier's work to a provider you did not choose for it. Under Settings → LLM Provider → Model per tier, ` +
+      `choose "Custom" and a model for the ${tier} tier, and everything runs again.`,
+    );
+    this.name = 'LockedSlotError';
+  }
+}
+
+/** The tiers as the settings page names them (web-ui `llm.tier.*`). */
+const TIER_LABEL_EN: Readonly<Record<ModelTier, string>> = { fast: 'Fast', balanced: 'Balanced', deep: 'Deep' };
+
+/**
+ * Refuses with {@link LockedSlotError} while the saved config holds a locked slot; `forMandate`
+ * words it for a person with delegated access, who cannot change the settings.
+ */
+export function assertNoLockedSlot(forMandate = false): void {
+  const locked = lockedTierSlots();
+  if (locked.length > 0) throw new LockedSlotError(locked, forMandate);
+}
 
 /** The slots whose model the current load replaced, for GET /api/config to report. */
 export function replacedTierSlots(): readonly ReplacedSlot[] {
@@ -296,6 +339,14 @@ export class UnregisteredSlotModelError extends Error {
   }
 }
 
+/** The loader's refusal of an unregistered `tier_set` model under a preset. */
+function unregisteredSlotError(preset: string, modelId: string): UnregisteredSlotModelError {
+  return new UnregisteredSlotModelError(
+    modelId,
+    `tier_preset "${preset}" resolves to an unregistered model "${modelId}" — refusing to load (it would misbill at the Opus fallback rate and mis-disclose). Register the model in MODEL_CAPABILITIES first.`,
+  );
+}
+
 /** Whether two slot endpoints are the same: unset, empty and a trailing slash do not differ. */
 function sameEndpoint(a: string | undefined, b: string | undefined): boolean {
   return (a ?? '').replace(/\/+$/, '') === (b ?? '').replace(/\/+$/, '');
@@ -310,12 +361,28 @@ export interface ReplacedSlot {
   readonly runs: string;
 }
 
+/**
+ * A config.json `tier_set` slot whose model this engine does not know, on a provider or endpoint
+ * other than the strategy's: its band has nowhere safe to run, so nothing runs (see the preset guard).
+ */
+export interface LockedSlot {
+  readonly tier: ModelTier;
+  /** The model the slot names, shortened for display; it comes from the user's own config.json. */
+  readonly model_id: string;
+}
+
 /** What one build of the config noticed beside its result. */
 interface BuildNotes {
   /** Where the loader's warnings go: the log for the real load, nowhere for a candidate. */
   readonly warn: (line: string) => void;
   /** The config.json `tier_set` slots whose unregistered model the build replaced (see the preset guard). */
   readonly replacedSlots: ReplacedSlot[];
+  /**
+   * The config.json `tier_set` slots that lock the instance, read off the file's own slots before
+   * the managed constraints or anything later can drop them (a dropped slot would run on the base
+   * provider: the one the user chose against for that band).
+   */
+  readonly lockedSlots: LockedSlot[];
 }
 
 /**
@@ -326,13 +393,20 @@ interface BuildNotes {
  * reads them.
  */
 export function checkCandidateConfig(candidate: LynoxUserConfig): { replacedSlots: ReplacedSlot[]; error?: string; unknownModel?: string } {
-  const notes: BuildNotes = { warn: () => undefined, replacedSlots: [] };
+  const notes: BuildNotes = { warn: () => undefined, replacedSlots: [], lockedSlots: [] };
+  let built: LynoxUserConfig;
   try {
-    buildConfig(candidate, readConfigFile(join(getProjectConfigDir(), CONFIG_FILENAME)), notes);
+    built = buildConfig(candidate, readConfigFile(join(getProjectConfigDir(), CONFIG_FILENAME)), notes);
   } catch (err: unknown) {
     return err instanceof UnregisteredSlotModelError
       ? { replacedSlots: notes.replacedSlots, error: err.message, unknownModel: err.modelId }
       : { replacedSlots: notes.replacedSlots, error: getErrorMessage(err) };
+  }
+  // A slot the loader would lock is not stored: the loader runs with one, a writer does not make one.
+  const locked = notes.lockedSlots[0];
+  if (locked !== undefined) {
+    const err = unregisteredSlotError(built.tier_preset ?? '', candidate.tier_set?.[locked.tier]?.model_id ?? locked.model_id);
+    return { replacedSlots: notes.replacedSlots, error: err.message, unknownModel: err.modelId };
   }
   return { replacedSlots: notes.replacedSlots };
 }
@@ -953,16 +1027,24 @@ function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUse
       if (slot !== undefined) merged.tier_set[band] = slot;
     }
     merged.routing_mode = expanded.routing_mode;
-    // FAIL-CLOSED over what is left: a preset's own unregistered slot (an engine defect), and a
-    // config.json slot on another provider or endpoint (see above), whose band has nowhere safe
-    // to go. That one still costs the boot; PUT /api/config refuses to store it.
-    for (const slot of Object.values(merged.tier_set)) {
-      if (slot && !modelCapability(slot.model_id)) {
-        throw new UnregisteredSlotModelError(
-          slot.model_id,
-          `tier_preset "${merged.tier_preset}" resolves to an unregistered model "${slot.model_id}" — refusing to load (it would misbill at the Opus fallback rate and mis-disclose). Register the model in MODEL_CAPABILITIES first.`,
+    // FAIL-CLOSED over what is left. A config.json slot on another provider or endpoint (see
+    // above) has nowhere safe to go: it LOCKS the instance — it loads, so the settings that can
+    // change the slot stay reachable, and nothing runs until they do (`assertNoLockedSlot`, at the
+    // start of every session and worker run). The lock is read here, off the file's own slot,
+    // before the managed constraints below can drop the slot and send its band to the base
+    // provider. PUT /api/config refuses to store such a slot. A preset's own unregistered slot is
+    // an engine defect and still refuses to load.
+    for (const [band, slot] of Object.entries(merged.tier_set) as [ModelTier, TierSlot | undefined][]) {
+      if (!slot || modelCapability(slot.model_id)) continue;
+      if (ownSlots[band] === slot) {
+        notes.lockedSlots.push({ tier: band, model_id: describePinForDisplay(slot.model_id) });
+        notes.warn(
+          `[lynox] tier_set slot "${band}" from config.json names model "${describePinForDisplay(slot.model_id)}", which this engine does not know, ` +
+          `on a provider or endpoint other than the "${describePinForDisplay(merged.tier_preset)}" strategy's. Nothing runs until it is changed in Settings.`,
         );
+        continue;
       }
+      throw unregisteredSlotError(merged.tier_preset, slot.model_id);
     }
   }
   // Hybrid Tier-Set delivered as JSON by the CP / op-provisioning
