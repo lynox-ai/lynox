@@ -572,6 +572,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.start.rule': { de: 'Regel', en: 'Rule' },
 	// lynox wrote the rule, whatever it drew on: said under it where the owner starts and approves (U-335).
 	'bulk.start.rule_drafted': { de: 'Diese Regel hat lynox formuliert. Prüf, ob sie sagt, was du willst, bevor du die Beurteilung startest.', en: 'lynox wrote this rule. Check that it says what you want before you start judging.' },
+	'bulk.restart.rule_drafted': { de: 'Diese Regel hat lynox formuliert. Prüf, ob sie sagt, was du willst, bevor du die Beurteilung fortsetzt.', en: 'lynox wrote this rule. Check that it says what you want before you continue judging.' },
 	'bulk.approve.rule_drafted': { de: 'Diese Regel hat lynox formuliert. Prüf, ob sie sagt, was du willst, bevor du freigibst.', en: 'lynox wrote this rule. Check that it says what you want before you approve.' },
 	'bulk.start.fields': { de: 'Felder, die das Modell setzt', en: 'Fields the model sets' },
 	'bulk.start.context_fields': { de: 'Felder, die das Modell nur liest', en: 'Fields the model only reads' },
