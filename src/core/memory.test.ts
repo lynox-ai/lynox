@@ -516,6 +516,16 @@ describe('Memory', () => {
       const content = await mem.loadScoped('knowledge', { type: 'global', id: 'global' });
       expect(content).toBe('my *** data');
     });
+
+    it('updateScoped applies maskFn to the replacement', async () => {
+      const maskFn = (text: string) => text.replace(/secret/g, '***');
+      const mem = new Memory(dir, undefined, undefined, 'proj1', maskFn);
+      await mem.appendScoped('knowledge', 'old line', { type: 'global', id: 'global' });
+      const ok = await mem.updateScoped('knowledge', 'old line', 'new secret line', { type: 'global', id: 'global' });
+      expect(ok, 'the update did not apply, so this proves nothing').toBe(true);
+      const content = await mem.loadScoped('knowledge', { type: 'global', id: 'global' });
+      expect(content).toBe('new *** line');
+    });
   });
 
   describe('auto-classification (Phase 3)', () => {

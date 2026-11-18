@@ -198,7 +198,7 @@ describe('initMemoryInstance — provider-resolved key', () => {
     }
   });
 
-  it('without a store, the memory masks the engine\'s env secrets in what it writes', async () => {
+  it('without a store, wires a masker for the engine\'s env secrets into the memory', async () => {
     const canary = 'zQ7memfilecanaryPq9Lm2Xv4';
     const prev = process.env['LYNOX_VAULT_KEY'];
     process.env['LYNOX_VAULT_KEY'] = canary;
