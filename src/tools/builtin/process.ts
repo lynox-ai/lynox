@@ -10,6 +10,7 @@ import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 import { INLINE_NAMED_ONLY_TOOLS } from '../../orchestrator/runtime-adapter.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
+import { runStepIds } from '../../orchestrator/step-id.js';
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
@@ -189,6 +190,10 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
     // A plan_task pipeline carries no capture parameters; preserve any the
     // source already had (legacy rows backfill to []).
     parameters: existing.parameters ?? [],
+    // A step id stored before ids had a shape (an old plan_task cut a phase name only to 60
+    // characters) is saved as `step-<n>`, its references with it: the save takes no other id, and
+    // the model cannot choose ids here.
+    steps: runStepIds(existing.steps),
   };
 
   // Save-time gate — same as plan_task.
