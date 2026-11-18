@@ -347,7 +347,7 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
     const agentFor = (principal: typeof owner | typeof mandate): never => ({
       principal,
       sessionCounters: { httpRequests: 0 },
-      promptUser: async () => 'Allow',
+      promptUser: async () => 'allow',
       toolContext: { auditLog: testAuditLog().log, apiStore: store, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, connectionErasureSweep: null, secretReleases: null },
     }) as never;
     const save = (createdBy?: string): void => {

@@ -211,7 +211,7 @@ const ACK = { accepted: true as const, hosts: ['api.crm.example'], accepted_at: 
 
 /** The person's "Allow" on a delete: these tests are about what a delete removes once agreed. */
 function withDeleteConsent(agent: never): never {
-  return { ...(agent as object), promptUser: async () => 'Allow' } as never;
+  return { ...(agent as object), promptUser: async () => 'allow' } as never;
 }
 
 function crmProfile(over: Partial<ApiProfile> = {}, grantType: 'refresh_token' | 'client_credentials' = 'refresh_token'): ApiProfile {
@@ -1059,7 +1059,7 @@ describe('api_setup update on a profile the boot held back', () => {
     expect(store.storedProfile('crm-api')?.oauth_grant?.origin).toBe('callback');
     const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_MINTED: 'minted', [ACCESS]: 'user-token' });
     const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'app-token', expires_in: 86399 }));
-    return { store, vault, spy, agent: makeAgent(store, vault, async () => 'Allow') };
+    return { store, vault, spy, agent: makeAgent(store, vault, async () => 'allow') };
   };
 
   it('is refused for dropping the preset, keeps the stored record, and a following fetch_token sends nothing', async () => {
@@ -2059,7 +2059,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     const store = new ApiStore();
     store.register(connected());
     const vault = vaultOf();
-    const ask = vi.fn(async () => 'Deny');
+    const ask = vi.fn(async () => 'deny');
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vault, ask)) as string;
     expect(ask).toHaveBeenCalledTimes(1);
     expect(result).toBe('Blocked: API profile "crm-api" not deleted — user declined.');
@@ -2071,7 +2071,7 @@ describe('(285) delete asks the person before it removes anything', () => {
   it('the question is the engine\'s: it names the profile, its host and the tokens the vault loses, as values', async () => {
     const store = new ApiStore();
     store.register(connected());
-    const ask = vi.fn(async (_q: unknown) => 'Deny');
+    const ask = vi.fn(async (_q: unknown) => 'deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
     const q = ask.mock.calls[0]![0];
     expect(flattenPrompt(q as never)).toBe('⚠ API profiles: delete the API profile CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again. Delete it?');
@@ -2082,7 +2082,7 @@ describe('(285) delete asks the person before it removes anything', () => {
   it('a profile name cannot add a line to the question', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ name: 'CRM\n\nRoutine cleanup, safe to allow.' }));
-    const ask = vi.fn(async (_q: unknown) => 'Deny');
+    const ask = vi.fn(async (_q: unknown) => 'deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
     expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API profile CRM Routine cleanup, safe to allow. (id crm-api');
   });
@@ -2091,7 +2091,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     const store = new ApiStore();
     store.register(connected());
     const stop = new AbortController();
-    const ask = vi.fn(async () => { stop.abort(); return 'Deny'; });
+    const ask = vi.fn(async () => { stop.abort(); return 'deny'; });
     const agent = { ...(makeAgent(store, vaultOf(), ask) as object), runSignal: stop.signal } as never;
     const slots: [CallSlot, CallSlot] = [{}, {}];
     const [first, second] = await Promise.all([
@@ -2112,7 +2112,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     store.register(connected());
     const stop = new AbortController();
     let current: AbortSignal | undefined = stop.signal;
-    const ask = vi.fn(async () => { stop.abort(); current = undefined; return 'Deny'; });
+    const ask = vi.fn(async () => { stop.abort(); current = undefined; return 'deny'; });
     const agent = Object.defineProperty({ ...(makeAgent(store, vaultOf(), ask) as object) }, 'runSignal', { get: () => current }) as never;
     const [, second] = await Promise.all([
       apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
@@ -2125,7 +2125,7 @@ describe('(285) delete asks the person before it removes anything', () => {
   it('a stored name that is not a string is still asked about, not a crash', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ name: 42 as never }));
-    const ask = vi.fn(async (_q: unknown) => 'Deny');
+    const ask = vi.fn(async (_q: unknown) => 'deny');
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
     expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API profile 42 (id crm-api');
     expect(result).toContain('user declined');
@@ -2134,7 +2134,7 @@ describe('(285) delete asks the person before it removes anything', () => {
   it('a profile without stored tokens is asked about too, and the question says what goes', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
-    const ask = vi.fn(async (_q: unknown) => 'Allow');
+    const ask = vi.fn(async (_q: unknown) => 'allow');
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never)) as string;
     expect(ask).toHaveBeenCalledTimes(1);
     expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('Its settings (endpoints, guidelines, sign-in method) are removed.');
@@ -2156,7 +2156,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     const store = new ApiStore();
     const mandate: RequestPrincipal = { kind: 'mandate', email: 'helper@example.test' };
     store.register(crmProfile({ created_by: 'mandate:helper@example.test' }));
-    const ask = vi.fn(async () => 'Deny');
+    const ask = vi.fn(async () => 'deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask, undefined, mandate));
     expect(ask).toHaveBeenCalledTimes(1);
     expect(store.get('crm-api')).toBeDefined();
@@ -2168,7 +2168,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     store.register(crmProfile({ id: 'crm-two', name: 'CRM two' }));
     let open = 0;
     let maxOpen = 0;
-    const ask = vi.fn(async () => { open++; maxOpen = Math.max(maxOpen, open); await new Promise((r) => setTimeout(r, 5)); open--; return 'Deny'; });
+    const ask = vi.fn(async () => { open++; maxOpen = Math.max(maxOpen, open); await new Promise((r) => setTimeout(r, 5)); open--; return 'deny'; });
     const agent = makeAgent(store, vaultOf(), ask);
     await Promise.all([
       apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
@@ -2277,7 +2277,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const store = new ApiStore();
     const vault = makeVault({ GITHUB_ACCESS_TOKEN: 'the-users-github-token' });
     // A host on the private LAN needs no acceptance; the one question left is where X_KEY may go.
-    const agent = makeAgent(store, vault, async () => 'Allow');
+    const agent = makeAgent(store, vault, async () => 'allow');
     await apiSetupTool.handler({ action: 'create', profile: {
       id: 'github', name: 'x', base_url: 'https://x.local/api', description: 'x',
       auth: { type: 'bearer', vault_keys: ['X_KEY'] },
@@ -4403,7 +4403,7 @@ describe('mandates and stored credentials', () => {
       }
       return new Response('{"ok":true}', { status, headers: { 'content-type': 'application/json' } });
     });
-    const agent = makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal, releases) as unknown as { toolContext: Record<string, unknown> };
+    const agent = makeAgent(apiStore, v as never, async () => 'allow', undefined, principal, releases) as unknown as { toolContext: Record<string, unknown> };
     // A mandate's renewal is recorded before it runs (H2h); this block is about the credential,
     // so the log only has to accept the rows. Without one the renewal is skipped by design.
     agent.toolContext['auditLog'] = { record: (): void => {} };

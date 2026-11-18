@@ -73,7 +73,7 @@ async function save(store: ApiStore, action: 'create' | 'update', profile: ApiPr
   const asked: string[] = [];
   const result = await apiSetupTool.handler({ action, profile }, agentFor(store, async (q) => {
     asked.push(flattenPrompt(q));
-    return 'Allow';
+    return 'allow';
   })) as string;
   return { result, asked };
 }
@@ -178,7 +178,7 @@ describe('api_setup: a store profile is saved on the API version its provider pi
     store.register(storeProfile('https://acme.myshopify.com/admin/api/2026-04'));
     const result = await apiSetupTool.handler(
       { action: 'refine', id: 'shop', refine: { addNotes: ['Read products only.'] } },
-      agentFor(store, async () => 'Allow'),
+      agentFor(store, async () => 'allow'),
     ) as string;
     expect(result).toContain('Refined profile "shop"');
     expect(store.get('shop')?.notes).toContain('Read products only.');

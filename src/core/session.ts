@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
@@ -1009,7 +1010,8 @@ export class Session {
         try {
           answer = await this.agent.promptUser(
             pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
-            ['Allow', 'Deny', '\x00'],
+            consentOptions('guard'),
+            consentMeta('guard'),
           );
         } catch (err: unknown) {
           // A prompt path that cannot reach anyone (an HTTP engine without its prompt store)
@@ -1021,8 +1023,9 @@ export class Session {
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          const msg = consentRefusal(outcome, `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }

@@ -337,7 +337,7 @@ describe('a contained chat reads the store and writes nowhere', () => {
     const a = agent({ current: thread }) as unknown as Record<string, unknown>;
     return {
       ...a,
-      promptUser: async () => { asked++; return 'Allow'; },
+      promptUser: async () => { asked++; return 'allow'; },
       secretStore: {
         ...(a['secretStore'] as object),
         resolve: (n: string) => (n === accessTokenKey('shop-acme') ? TOKEN : n === accessTokenKey('shop-beta') ? TOKEN_B : null),

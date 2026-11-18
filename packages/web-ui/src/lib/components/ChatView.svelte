@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { consentAnswer } from '../contract/prompt.js';
 	import {
 		sendMessage,
 		retryFailedTurn,
@@ -1302,8 +1303,10 @@
 		// the prompt card to the streaming spinner with no acknowledgment
 		// that the click landed. Hold a transient confirmation in the same
 		// slot until the next assistant token streams or a short timeout.
-		if (answer === 'y' || answer === 'n') {
-			approvalInflight = { question: pendingPermission.question, answer };
+		// A click on one of the engine's confirmations, by its key; typed text is no key.
+		const decided = pendingPermission.consent !== undefined ? consentAnswer(pendingPermission.consent, answer) : undefined;
+		if (decided !== undefined) {
+			approvalInflight = { question: pendingPermission.question, answer: decided === 'deny' || decided === 'cancel' ? 'n' : 'y' };
 			if (approvalInflightTimer) clearTimeout(approvalInflightTimer);
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
 		}
@@ -3486,8 +3489,10 @@
 	<!-- Permission / Ask User prompt (hidden in batch mode) -->
 	{#if pendingPermission && !inBatchMode}
 		{@const opts = pendingPermission.options ?? []}
-		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
-		{@const isDeepConsent = opts.includes('Run on balanced')}
+		<!-- The engine's own confirmation is known by its marker alone, never by its option texts:
+		     a question the model writes may offer "Allow" and "Deny" and stays an ordinary one. -->
+		{@const isPermissionGuard = pendingPermission.consent === 'guard'}
+		{@const isDeepConsent = pendingPermission.consent === 'deep'}
 		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
 		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
@@ -3526,14 +3531,14 @@
 
 				{#if isDeepConsent}
 					<div class="flex flex-wrap gap-2">
-						<button onclick={() => answerPrompt('allow deep')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.consent_allow_deep')}</button>
-						<button onclick={() => answerPrompt('run on balanced')} class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/25 transition-opacity">{t('chat.consent_run_balanced')}</button>
-						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.consent_cancel')}</button>
+						<button onclick={() => answerPrompt('deep', t('chat.consent_allow_deep'))} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.consent_allow_deep')}</button>
+						<button onclick={() => answerPrompt('balanced', t('chat.consent_run_balanced'))} class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/25 transition-opacity">{t('chat.consent_run_balanced')}</button>
+						<button onclick={() => answerPrompt('cancel', t('chat.consent_cancel'))} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.consent_cancel')}</button>
 					</div>
 				{:else if isPermissionGuard}
 					<div class="flex flex-wrap gap-2">
-						<button onclick={() => answerPrompt('y')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
-						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
+						<button onclick={() => answerPrompt('allow', t('chat.allow'))} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
+						<button onclick={() => answerPrompt('deny', t('chat.deny'))} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
 					</div>
 				{:else if pendingPermission.multiSelect && visibleOptions.length > 0}
 					<!-- Multi-select: toggle several, then Send. -->

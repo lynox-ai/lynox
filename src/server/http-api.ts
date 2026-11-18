@@ -87,7 +87,8 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
+import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, consentOfPayload, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
+import { CONSENT_UNRECOGNISED, consentAnswer } from '../contract/prompt.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ApprovalStore } from '../core/approval-store.js';
@@ -1307,6 +1308,17 @@ function maskForClient(text: string, opts?: { includeGeneric?: boolean }): strin
 function refuseClosedPrompt(res: ServerResponse, row: Pick<PendingPromptRow, 'closed_reason'>): void {
   if (row.closed_reason === null) { errorResponse(res, 410, 'Prompt expired'); return; }
   errorResponse(res, 410, CLOSED_PROMPT_MESSAGE[row.closed_reason], row.closed_reason);
+}
+
+/**
+ * The reply to an answer. An answer to one of the engine's own confirmations that is none of
+ * its keys is recorded — the gate reads it as a refusal — and said back, so the person learns
+ * that nothing was allowed and why, instead of a silent "no" (`src/contract/prompt.ts`).
+ */
+function consentReply(row: PendingPromptRow, answer: string): { ok: true; refused?: typeof CONSENT_UNRECOGNISED } {
+  const kind = consentOfPayload(row.payload_json);
+  if (kind === undefined || answer === '' || consentAnswer(kind, answer) !== undefined) return { ok: true };
+  return { ok: true, refused: CONSENT_UNRECOGNISED };
 }
 
 const CLOSED_PROMPT_MESSAGE: Readonly<Record<PromptClosedReason, string>> = {
@@ -5325,7 +5337,7 @@ export class LynoxHTTPApi {
         // Read in the run's own chat: live over this stream, or on reconnect through
         // /pending-prompt, which shows this session's question with the run above it. Neither
         // sends it anywhere else (no notification on this path), so a hard block may be asked here.
-        const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp);
+        const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp, meta?.consent);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
@@ -5343,6 +5355,9 @@ export class LynoxHTTPApi {
             // the ask_user tool parses it. A reconnect mid-prompt (which loads
             // /pending-prompt without this flag) degrades to single-select.
             multi_select: meta?.multiSelect === true ? true : undefined,
+            // The engine's own confirmation: the client draws its consent card from this
+            // marker alone (`src/contract/prompt.ts`), never from the option texts.
+            consent: meta?.consent,
           });
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
@@ -5931,7 +5946,11 @@ export class LynoxHTTPApi {
         secretName: row.secret_name,
         secretKeyType: row.secret_key_type,
         // The staged mail-account fields for a connect_mail prompt (no password).
-        mailConnect: row.payload_json ? JSON.parse(row.payload_json) as unknown : undefined,
+        mailConnect: row.payload_json && consentOfPayload(row.payload_json) === undefined ? JSON.parse(row.payload_json) as unknown : undefined,
+        // The engine's own confirmation, from its engine-only marker: the card is drawn from
+        // this alone. A question stored before the marker existed has none and is an ordinary
+        // question, whose answer no consent gate reads.
+        consent: consentOfPayload(row.payload_json),
         // Who asked (v52). A workflow's prompt can sit here for minutes, which
         // is exactly the window in which a page gets reloaded — restoring the
         // dialog without its provenance would put the user back in front of the
@@ -5976,7 +5995,7 @@ export class LynoxHTTPApi {
         let answered: boolean;
         try { answered = ps.answerUser(promptId, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
         if (!answered) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
-        jsonResponse(res, 200, { ok: true });
+        jsonResponse(res, 200, consentReply(existing, answer));
         return;
       }
 
@@ -5986,7 +6005,7 @@ export class LynoxHTTPApi {
         if (!this._answerRecorded(_req, res, by, pending.id)) return;
         let answered: boolean;
         try { answered = ps.answerUser(pending.id, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
-        if (answered) { jsonResponse(res, 200, { ok: true }); return; }
+        if (answered) { jsonResponse(res, 200, consentReply(pending, answer)); return; }
       }
 
       errorResponse(res, 404, 'No pending prompt');

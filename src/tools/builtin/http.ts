@@ -1,4 +1,5 @@
 import type { ToolEntry } from '../../types/index.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
 import { HTTP_DIALOG, exfilWarning as exfilWarningText } from '../dialog-text.js';
 import { DEFAULT_MAX_TOOL_RESULT_CHARS } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
@@ -3494,10 +3495,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const language = agent.dialogLanguage ?? 'en';
         const answer = await agent.promptUser(
           HTTP_DIALOG[language].exfil(toolWordFrame('http_request', language), exfilWarningText(exfilWarning, language)),
-          ['Allow', 'Deny', '\x00'],
+          consentOptions('guard'),
+          consentMeta('guard'),
         );
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          blockedVerbatim(`Blocked: ${exfilWarning} — denied by user.`);
+        const outcome = decideConsent('guard', answer);
+        if (outcome !== 'allow') {
+          blockedVerbatim(consentRefusal(outcome, `Blocked: ${exfilWarning} — denied by user.`));
         }
       }
     }
@@ -3873,6 +3876,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const shareKey = remembers && batch !== undefined ? key : undefined;
         let pendingMap = batch === undefined ? undefined : pendingInBatch.get(batch);
         if (batch !== undefined && !pendingMap) { pendingMap = new Map(); pendingInBatch.set(batch, pendingMap); }
+        // Set when this call's own question got an answer that is none of its keys (said to the model).
+        let unrecognisedAnswer = false;
         let pending = shareKey === undefined ? undefined : pendingMap?.get(shareKey);
         if (!pending) {
           pending = inSessionPromptChain(counters, async () => {
@@ -3908,9 +3913,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               : said.sentNote(sentMethod, alsoNamed.join(', '));
             const answer = await promptUser(
               HTTP_DIALOG[agent.dialogLanguage ?? 'en'].outbound(toolWordFrame('http_request', agent.dialogLanguage ?? 'en'), gatedMethod, hostname, path, fields, pv`${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`),
-              ['Allow', 'Deny', '\x00'],
+              consentOptions('guard'),
+              consentMeta('guard'),
             );
-            const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
+            const outcome = decideConsent('guard', answer);
+            const allowed = outcome === 'allow';
+            if (outcome === 'unrecognised') unrecognisedAnswer = true;
             if (remembers && allowed && batch !== undefined) {
               let tickets = approvedInBatch.get(batch);
               if (!tickets) { tickets = new Map(); approvedInBatch.set(batch, tickets); }
@@ -3931,7 +3939,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
         const allowed = await pending;
         if (!allowed) {
-          blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} denied by user.`);
+          blockedVerbatim(consentRefusal(unrecognisedAnswer ? 'unrecognised' : 'deny', `Blocked: outbound ${refusedAs} to ${service()} denied by user.`));
         }
         // Outside a batch, and for a write asked every time, the answer covers this call alone.
         if (!remembers || batch === undefined) break;

@@ -99,23 +99,23 @@ const ask = (p: ApiProfile, name = 'CRM_KEY', mandateId = 'M-1'): void => {
 describe('a mandate\'s save asks the owner', () => {
   it('records what the profile reads of the owner\'s, and tells the mandate it was asked', async () => {
     const apiStore = apis([]);
-    const out = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apiStore, vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const out = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apiStore, vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(out).toContain('"CRM_KEY"');
     expect(out).toContain('The owner sees what the profile asks for');
     expect(releases.pendingReleases().map((r) => [r.profileId, r.profileAuthor, r.name, r.mandateId])).toEqual([['crm-api', M, 'CRM_KEY', 'M-1']]);
   });
 
   it('asks the same whether the vault holds the name or not', async () => {
-    const out = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({}), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const out = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({}), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(out).toContain('The owner sees what the profile asks for');
     expect(releases.pendingReleases()).toHaveLength(1);
   });
 
   it('tells the mandate the same whether or not the name can be asked for: a value from the environment', async () => {
-    const asked = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const asked = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'allow' }));
     releases.forgetProfile('crm-api');
     rmSync(join(dir, 'apis'), { recursive: true, force: true });
-    const env = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }, ['CRM_KEY']), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const env = await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }, ['CRM_KEY']), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(env).toContain('"CRM_KEY"');
     expect(env).toBe(asked);
     // Only what can be released is put before the owner.
@@ -124,13 +124,13 @@ describe('a mandate\'s save asks the owner', () => {
 
   it('asks nothing for a mandate without a grant id: there is no grant a release could be for', async () => {
     const noId: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
-    await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: noId, promptUser: async () => 'Allow' }));
+    await apiSetupTool.handler({ action: 'create', profile: bearer() } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: noId, promptUser: async () => 'allow' }));
     expect(releases.pendingReleases()).toEqual([]);
   });
 
   it('asks nothing for a profile on plain http, and tells the mandate the same as on https', async () => {
     const plain = bearer({ base_url: 'http://api.crm.example/v1' });
-    const out = await apiSetupTool.handler({ action: 'create', profile: plain } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    const out = await apiSetupTool.handler({ action: 'create', profile: plain } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(out).toContain('"CRM_KEY"');
     expect(out).toContain('The owner sees what the profile asks for');
     expect(releases.pendingReleases()).toEqual([]);
@@ -138,7 +138,7 @@ describe('a mandate\'s save asks the owner', () => {
 
   it('asks nothing for a name that cannot be released: a query parameter', async () => {
     const q = bearer({ auth: { type: 'query', query_param: 'key', vault_keys: ['CRM_KEY'] } });
-    await apiSetupTool.handler({ action: 'create', profile: q } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    await apiSetupTool.handler({ action: 'create', profile: q } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'allow' }));
     expect(releases.pendingReleases()).toEqual([]);
   });
 
@@ -166,7 +166,7 @@ describe('release_secret: the owner answers in person', () => {
     const apiStore = apis([p]);
     ask(p);
     let question = '';
-    const out = await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'allow'; } });
     expect(out).toContain('Released "CRM_KEY"');
     for (const part of ['"CRM_KEY"', 'crm-api', M, 'api.crm.example']) expect(question).toContain(part);
     expect(releases.releaseOf('crm-api', M, 'CRM_KEY')).toEqual({ binding: releaseBinding(p, 'CRM_KEY'), mandateId: 'M-1' });
@@ -177,7 +177,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    expect(await release(apiStore, { promptUser: async () => 'Deny' })).toContain('user declined');
+    expect(await release(apiStore, { promptUser: async () => 'deny' })).toContain('user declined');
     expect(releases.activeReleases()).toEqual([]);
   });
 
@@ -185,7 +185,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     expect(await release(apiStore, { promptUser, autonomy: 'autonomous' })).toContain('Blocked');
     expect(promptUser).not.toHaveBeenCalled();
     expect(releases.activeReleases()).toEqual([]);
@@ -203,7 +203,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    expect(await release(apiStore, { principal: MANDATE, promptUser: async () => 'Allow' })).toContain('only the owner');
+    expect(await release(apiStore, { principal: MANDATE, promptUser: async () => 'allow' })).toContain('only the owner');
     expect(releases.activeReleases()).toEqual([]);
   });
 
@@ -211,7 +211,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ base_url: 'https://elsewhere.example/v1' }), 'load'); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ base_url: 'https://elsewhere.example/v1' }), 'load'); return 'allow'; } });
     expect(out).toContain('changed while the question was open');
     expect(releases.activeReleases()).toEqual([]);
   });
@@ -220,7 +220,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ oauth_grant: { state: 'connected' } }), 'load'); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ oauth_grant: { state: 'connected' } }), 'load'); return 'allow'; } });
     expect(out).toContain('Released');
   });
 
@@ -229,7 +229,7 @@ describe('release_secret: the owner answers in person', () => {
     const apiStore = apis([p]);
     ask(p);
     live.clear();
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     expect(await release(apiStore, { promptUser })).toContain('no longer active');
     expect(promptUser).not.toHaveBeenCalled();
   });
@@ -238,7 +238,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     ask(p);
     const apiStore = apis([bearer({ base_url: 'https://elsewhere.example/v1' })]);
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     expect(await release(apiStore, { promptUser })).toContain('changed since it asked');
     expect(promptUser).not.toHaveBeenCalled();
     expect(releases.activeReleases()).toEqual([]);
@@ -249,7 +249,7 @@ describe('release_secret: the owner answers in person', () => {
     ask(p);
     const other = bearer({ id: 'erp-api', base_url: 'https://api.erp.example', created_by: 'mandate:other@example.org' });
     const apiStore = apis([p, other]);
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     expect(await release(apiStore, { promptUser })).toContain('cannot be released');
     expect(promptUser).not.toHaveBeenCalled();
   });
@@ -258,7 +258,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ created_by: 'mandate:other@example.org' }), 'load'); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async () => { apiStore.register(bearer({ created_by: 'mandate:other@example.org' }), 'load'); return 'allow'; } });
     expect(out).toContain('changed while the question was open');
     expect(releases.activeReleases()).toEqual([]);
   });
@@ -267,7 +267,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    const out = await release(apiStore, { promptUser: async () => { live.clear(); return 'Allow'; } });
+    const out = await release(apiStore, { promptUser: async () => { live.clear(); return 'allow'; } });
     expect(out).toContain('ended while the question was open');
     expect(releases.activeReleases()).toEqual([]);
   });
@@ -277,7 +277,7 @@ describe('release_secret: the owner answers in person', () => {
     const apiStore = apis([p]);
     ask(p);
     let question = '';
-    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'deny'; } });
     expect(question).toContain('auth.type "header"');
     expect(question).toContain('auth.header_name "X-Api-Key"');
     expect(question).toContain('the user\'s own and bulk runs included, until that mandate ends or the user withdraws it');
@@ -289,7 +289,7 @@ describe('release_secret: the owner answers in person', () => {
     const apiStore = apis([p]);
     ask(p);
     let question = '';
-    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'deny'; } });
     expect(question).toContain('auth.crm.example"/oauth/token?tenant=t1"');
     expect(question).toContain('…(50 more)');
   });
@@ -299,7 +299,7 @@ describe('release_secret: the owner answers in person', () => {
     const apiStore = apis([p]);
     ask(p);
     let question = '';
-    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'deny'; } });
     expect(question).toContain('preset_params {"region":"rrr');
     expect(question).toContain('…(63 more)');
   });
@@ -309,7 +309,7 @@ describe('release_secret: the owner answers in person', () => {
     const apiStore = apis([p]);
     ask(p);
     let question = '';
-    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'deny'; } });
     expect(question).toContain('api.crm.example:8443');
   });
 
@@ -320,7 +320,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer({ base_url });
     const apiStore = apis([p]);
     ask(p);
-    const promptUser = vi.fn(async () => 'Allow');
+    const promptUser = vi.fn(async () => 'allow');
     const out = await release(apiStore, { promptUser });
     expect(out).toContain('cannot be released');
     expect(out).toContain('not https');
@@ -335,7 +335,7 @@ describe('release_secret: the owner answers in person', () => {
 
   it('is refused for a name the profile never asked for', async () => {
     const apiStore = apis([bearer()]);
-    expect(await release(apiStore, { promptUser: async () => 'Allow' })).toContain('has not asked for');
+    expect(await release(apiStore, { promptUser: async () => 'allow' })).toContain('has not asked for');
   });
 
   it('withdraw_release takes it back without asking', async () => {
@@ -351,7 +351,7 @@ describe('release_secret: the owner answers in person', () => {
     const p = bearer();
     const apiStore = apis([p]);
     ask(p);
-    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' } as never, agentOf(apiStore, vault({}), { promptUser: async () => 'Allow' }));
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' } as never, agentOf(apiStore, vault({}), { promptUser: async () => 'allow' }));
     expect(releases.pendingReleases()).toEqual([]);
   });
 });

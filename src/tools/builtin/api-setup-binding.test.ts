@@ -464,7 +464,7 @@ describe('W-Question: the owner is asked with what is stored, and only then does
     const asked: string[] = [];
     const crm2 = { ...bearerOn('crm2', 'crm2.example', 'REPORT_KEY'), ...extra };
     delete (crm2 as Partial<ApiProfile>).custom_endpoint_ack;
-    const out = String(await apiSetupTool.handler({ action: 'create', profile: crm2 } as never, agentOf(store, { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'Allow'; } })));
+    const out = String(await apiSetupTool.handler({ action: 'create', profile: crm2 } as never, agentOf(store, { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'allow'; } })));
     expect(out).toContain('Created');
     const question = asked.find((q) => q.includes('REPORT_KEY'));
     expect(question).toBeDefined();
@@ -481,7 +481,7 @@ describe('W-Question: the owner is asked with what is stored, and only then does
     const asked: string[] = [];
     const p = { ...bearerOn('zw', 'new.example', 'ZW_KEY'), ...extra };
     delete (p as Partial<ApiProfile>).custom_endpoint_ack;
-    const out = String(await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store, { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'Allow'; } })));
+    const out = String(await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store, { promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'allow'; } })));
     expect(out).toContain('cannot be shown');
     expect(store.get('zw')).toBeUndefined();
     expect(asked.some((q) => q.includes('ZW_KEY'))).toBe(false);
@@ -501,7 +501,7 @@ describe('W-Question: the owner is asked with what is stored, and only then does
     const asked: string[] = [];
     const p = { ...bearerOn('crm2', 'crm2.example', 'REPORT_KEY'), ...extra };
     delete (p as Partial<ApiProfile>).custom_endpoint_ack;
-    const ask: Ask = async (q) => { asked.push(flattenPrompt(q)); return 'Allow'; };
+    const ask: Ask = async (q) => { asked.push(flattenPrompt(q)); return 'allow'; };
     const out = String(await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store, { promptUser: ask, autonomy: 'autonomous' })));
     expect(out).toContain('no one can be asked');
     expect(store.get('crm2')).toBeUndefined();
@@ -539,7 +539,7 @@ describe('W-Mandate-save: a mandate\'s save is never asked and never widens a bi
     const asked: string[] = [];
     const p = { ...bearerOn('m-new', 'mandate.example', 'REPORT_KEY'), ...extra };
     const principal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
-    await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store, { principal, promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'Allow'; } }));
+    await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store, { principal, promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'allow'; } }));
     expect(asked.some((q) => q.includes('REPORT_KEY'))).toBe(false);
     expect(bindings()?.boundOf('REPORT_KEY')).toEqual(['https://reports.example']);
   });
@@ -590,7 +590,7 @@ describe('W-Normal: what was allowed keeps working', () => {
 });
 
 describe('W-901D-switch: a profile switched from oauth2 by a save signs in with its own key under the old token name', () => {
-  const allowAll: Ask = async () => 'Allow';
+  const allowAll: Ask = async () => 'allow';
   const slot = accessTokenKey('owner');
   const asBearer = (): ApiProfile => ({ ...owner(), ...extra, auth: { type: 'bearer', vault_keys: [slot] } } as ApiProfile);
 

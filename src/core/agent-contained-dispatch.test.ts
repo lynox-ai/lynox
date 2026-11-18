@@ -85,7 +85,7 @@ function agentWith(tools: ToolEntry[], thread: { current?: string; origin?: stri
   const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools, toolContext });
   agent.currentThreadId = thread.current;
   agent.originThreadId = thread.origin;
-  const prompt = vi.fn().mockResolvedValue('Allow');
+  const prompt = vi.fn().mockResolvedValue('allow');
   agent.promptUser = prompt;
   return { agent, prompt };
 }

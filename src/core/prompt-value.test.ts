@@ -164,7 +164,7 @@ describe('promptUser callers', () => {
     // `effectiveSignal.prompt`, and `effectiveSignal.warning` appears nowhere but in its
     // `[BLOCKED` check. An alias of the signal is not seen, and the file's other promptUser
     // calls are not checked by this entry.
-    'core/agent.ts': { proof: /^(?![\s\S]*effectiveSignal\.warning(?!\.includes\('\[BLOCKED'\)))(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow deep')(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow', 'Deny')/ },
+    'core/agent.ts': { proof: /^(?![\s\S]*effectiveSignal\.warning(?!\.includes\('\[BLOCKED'\)))(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, consentOptions\(kind\), consentMeta\(kind, askMeta\)\))/ },
   };
 
   /** Blank out comment bodies and string contents, keeping offsets intact. */

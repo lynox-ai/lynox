@@ -20,7 +20,7 @@ const json = (body: unknown, status = 200): Response =>
 const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)); };
 
 const QUESTION = { pending: true, promptType: 'ask_user', question: 'Which list, A or B?', options: ['A', 'B'], promptId: 'p1' };
-const DECISION = { pending: true, promptType: 'ask_user', question: '⚠ New email needs your OK', options: ['Allow', 'Deny', '\x00'], promptId: 'p2' };
+const DECISION = { pending: true, promptType: 'ask_user', question: '⚠ New email needs your OK', options: ['allow', 'deny'], consent: 'guard', promptId: 'p2' };
 const SCHEDULED = { runs: [{ runId: 'sq1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0, attachable: false }] };
 const NOTHING = { runs: [] };
 

@@ -1517,6 +1517,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.consent_allow_deep': { de: 'Deep erlauben', en: 'Allow deep' },
 	'chat.consent_run_balanced': { de: 'Auf balanced ausführen', en: 'Run on balanced' },
 	'chat.consent_cancel': { de: 'Abbrechen', en: 'Cancel' },
+	'chat.consent_unrecognised': { de: 'Die Antwort wurde nicht erkannt, darum wurde nichts erlaubt. Lade die Seite neu und frag noch einmal.', en: 'The answer was not recognised, so nothing was allowed. Reload the page and ask again.' },
 	'chat.permission_running': { de: 'Erlaubt — wird ausgeführt…', en: 'Allowed — running…' },
 	'chat.permission_denied_running': { de: 'Abgelehnt — wird beendet…', en: 'Denied — finishing up…' },
 	'chat.skip': { de: 'Überspringen', en: 'Skip' },
