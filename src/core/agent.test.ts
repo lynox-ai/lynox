@@ -2627,6 +2627,25 @@ describe('Agent', () => {
       expect(tool.handler).toHaveBeenCalledTimes(runs ? 1 : 0);
     });
 
+    it('a first use of a secret asked with the keys: only allow consents, typed text refuses', async () => {
+      for (const [answer, consents] of [['allow', true], ['deny', false], ['yes', false], ['Erlauben', false], ['y', false]] as const) {
+        const store = makeSecretStore();
+        const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+        const promptUser = vi.fn().mockResolvedValue(answer);
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_c', name: 'http_request', input: { url: 'https://api.example.com', headers: { Authorization: 'Bearer secret:MY_KEY' } } }]))
+          .mockResolvedValueOnce(endTurnResponse('Done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser, secretStore: store });
+        await agent.send('Call API');
+        const [, options, meta] = promptUser.mock.calls[0] as [unknown, string[], { consent?: string } | undefined];
+        expect(options, answer).toEqual(['allow', 'deny']);
+        expect(meta?.consent, answer).toBe('guard');
+        if (consents) expect(store.recordConsent, answer).toHaveBeenCalled();
+        else expect(store.recordConsent, answer).not.toHaveBeenCalled();
+        expect(tool.handler, answer).toHaveBeenCalledTimes(consents ? 1 : 0);
+      }
+    });
+
     it('resolves secret:KEY_NAME in tool input after consent', async () => {
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));

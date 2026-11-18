@@ -36,7 +36,7 @@ export function decideConsent(kind: ConsentKind, answer: string): ConsentOutcome
 }
 
 /** Said to the model after a refusal, so it can tell the person why nothing happened. */
-export const CONSENT_UNRECOGNISED_SENTENCE = 'The answer was not one of the offered choices, so nothing was allowed. An outdated page sends answers this version no longer reads: the person should reload it and ask again.';
+export const CONSENT_UNRECOGNISED_SENTENCE = 'The answer was not one of the offered choices, so nothing was allowed. Tell the user to ask again and answer with the buttons; if no buttons were shown, their page is outdated and needs a reload first.';
 
 /**
  * The refusal as said to the model: `refusal` as it is, and after an answer that was none of

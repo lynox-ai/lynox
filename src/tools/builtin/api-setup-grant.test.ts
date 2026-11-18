@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { CONSENT_UNRECOGNISED_SENTENCE } from '../../core/consent-ask.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -2054,6 +2055,17 @@ describe('create/update — the grant record belongs to the engine', () => {
 describe('(285) delete asks the person before it removes anything', () => {
   const connected = () => crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1', [REFRESH]: 'rt-1' }) } });
   const vaultOf = () => makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'at-1', [REFRESH]: 'rt-1' });
+
+  it('an answer that is no key leaves the profile as it was, and says why', async () => {
+    for (const answer of ['yes', 'Erlauben', 'y', 'Allow']) {
+      const store = new ApiStore();
+      store.register(connected());
+      const vault = vaultOf();
+      const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vault, vi.fn(async () => answer))) as string;
+      expect(result, answer).toBe(`Blocked: API profile "crm-api" not deleted — user declined. ${CONSENT_UNRECOGNISED_SENTENCE}`);
+      expect(store.get('crm-api'), answer).toBeDefined();
+    }
+  });
 
   it('a "Deny" leaves the profile and its tokens as they were', async () => {
     const store = new ApiStore();

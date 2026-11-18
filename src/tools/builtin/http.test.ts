@@ -7311,6 +7311,16 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     );
   });
 
+  it('11/14 — GET exfiltration: an answer that is no key refuses and says why', async () => {
+    for (const answer of ['yes', 'Erlauben', 'y', 'Allow']) {
+      mockDnsPublic();
+      const promptUser = vi.fn().mockResolvedValue(answer);
+      const out = await refusal({ url: `http://example.com/api?data=${'a'.repeat(600)}` }, makeAgent({ promptUser }));
+      expect(String(out), answer).toContain('The answer was not one of the offered choices');
+      expect((promptUser.mock.calls[0] as unknown[])[2], answer).toMatchObject({ consent: 'guard' });
+    }
+  });
+
   it('11/14 — GET exfiltration denied by the user', async () => {
     mockDnsPublic();
     const promptUser = vi.fn().mockResolvedValue('deny');

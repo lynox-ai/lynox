@@ -9246,6 +9246,28 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('the live prompt frame carries the engine\'s consent marker, and a question without it carries none', async () => {
+      for (const [meta, expected] of [[{ consent: 'guard' }, 'guard'], [{ consent: 'deep' }, 'deep'], [undefined, undefined]] as const) {
+        await withStores(async (ps) => {
+          mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+          let parked: Promise<unknown> | undefined;
+          mockSessionRun.mockImplementationOnce(async () => {
+            parked = (mockSessionInstance.promptUser as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>))(
+              '⚠ Command: x', meta ? ['allow', 'deny'] : ['Allow', 'Deny', '\x00'], meta);
+            await new Promise((r) => setImmediate(r));
+            return 'done';
+          });
+          const text = await (await jsonFetch('/api/sessions/sse-consent/run', { method: 'POST', body: JSON.stringify({ task: 'go', protocol: 2 }) })).text();
+          const frame = text.split('\n').find((l) => l.startsWith('data:') && l.includes('"promptId"'));
+          expect(frame, 'no prompt frame on the stream').toBeDefined();
+          expect((JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>)['consent'], String(expected)).toBe(expected);
+          const pending = ps.getPending('sse-consent');
+          if (pending) ps.expirePrompt(pending.id, 'run_stopped');
+          await parked;
+        });
+      }
+    });
+
     // With no prompt store there is no way to ask — and nothing is made up. `promptUser` used to
     // answer 'n' (to a consent dialog a silent deny, to ask_user a fabricated reply) and
     // `promptTabs` an empty list. Both now end the run as "needs input".
