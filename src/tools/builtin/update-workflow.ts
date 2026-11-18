@@ -1,6 +1,6 @@
 import type { ToolEntry, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { applyModifications, quotedId, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { isStepIdShape, OUTSIDE_SHAPE, STEP_ID_MAX } from '../../orchestrator/step-id.js';
+import { isStepIdShape, OUTSIDE_SHAPE, runStepIds, STEP_ID_MAX } from '../../orchestrator/step-id.js';
 import { getPipeline, forgetPipeline, buildManifest } from './pipeline.js';
 import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
@@ -182,8 +182,10 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     // BEFORE persisting, so a structurally broken edit is rejected here at save
     // rather than deferred to a failed cron run. The run-volatile path validates
     // the same way (executePipelineById → buildManifest → validateManifest).
+    // Every id is in the shape here, but a stored `input_from` entry outside it that names no step
+    // is not: the check sees it as `unknown-step-<j>`, so its refusal does not quote it.
     try {
-      validateManifest(buildManifest(planned.name, steps, planned.on_failure ?? 'stop'));
+      validateManifest(buildManifest(planned.name, runStepIds(steps), planned.on_failure ?? 'stop'));
     } catch (err: unknown) {
       return `Error: The edit produces an invalid workflow: ${getErrorMessage(err)}`;
     }

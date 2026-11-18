@@ -306,7 +306,7 @@ describe('WorkerLoop', () => {
     );
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', principal: OWNER_PRINCIPAL },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL },
     );
   });
 
@@ -349,7 +349,7 @@ describe('WorkerLoop', () => {
 
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', principal: OWNER_PRINCIPAL },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL },
     );
   });
 
@@ -506,6 +506,8 @@ describe('WorkerLoop', () => {
     await fire(makeTask({ id: 't-bgm', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
     expect(override).toHaveBeenCalledWith('watch', undefined);
     expect(analysisSession._recreateAgent).toHaveBeenCalledWith({ backgroundSlot: slot });
+    // The watch's analysis turn is recorded as the watch's, never as the owner's.
+    expect(analysisSession.run).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ triggerOrigin: 'watch', triggerId: 't-bgm' }));
 
     vi.mocked(analysisSession._recreateAgent).mockClear();
     override.mockReturnValue({});
@@ -2737,7 +2739,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', principal: OWNER_PRINCIPAL });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL });
   });
 
   it('does not duplicate the title when description equals title', async () => {
@@ -2754,7 +2756,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', principal: OWNER_PRINCIPAL });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL });
   });
 
   // ---- 13. resolveTaskInput resolves pending input ----

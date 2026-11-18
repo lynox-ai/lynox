@@ -36,9 +36,9 @@ import type { SecretScope } from '../types/index.js';
 import { deriveEngineEncKey } from './engine-db.js';
 import { deriveHistoryEncKey } from './run-history.js';
 import { isPlainStore, type PlainStore } from './migration-rekey.js';
-import type { MigrationCeiling } from './migration-ceiling.js';
+import { MIGRATION_MEMORY, ownMemoryLimitMb, type MigrationCeiling } from './migration-ceiling.js';
 import {
-  choosePlainPaths, rewriteLedgersForPlain, rewriteStoreForPlain,
+  choosePlainPaths, plainFormRefusal, rewriteLedgersForPlain, rewriteStoreForPlain,
   type PathReason, type PlainLedgers, type PlainSourceResult,
 } from './migration-plain-source.js';
 import {
@@ -113,6 +113,22 @@ export interface ExportOptions {
 /** The merge ledgers' cap at the destination (`MAX_MEMORY_BUNDLE_BYTES` in the importer). */
 const SWEEPS_CAP_BYTES = 64 * 1024 * 1024;
 
+/** A database during one export: its raw chunks, and on the plaintext path its snapshot and plaintext form. */
+interface StoreEntry {
+  name: string;
+  /** Its position in the collected chunks. */
+  at: number;
+  raw: PlaintextChunk[];
+  /** A plaintext-path store's snapshot until `formPlain` has judged it; null otherwise. */
+  image: Buffer | null;
+  plain: PlainSourceResult | null;
+  /** Set when `formPlain` did not build the plaintext form because of the store's size. */
+  refused?: 'bounds' | 'memory' | 'source-memory' | undefined;
+}
+
+/** The merge ledgers during one export. */
+interface SweepsEntry { at: number; raw: PlaintextChunk[]; plain: PlainLedgers | null }
+
 interface PlaintextChunk {
   meta: MigrationChunkMeta;
   data: Buffer;
@@ -141,6 +157,7 @@ function splitIntoChunks(
   data: Buffer,
   type: MigrationChunkMeta['type'],
   name: string,
+  copy: boolean = true,
 ): PlaintextChunk[] {
   if (data.length <= MAX_CHUNK_BYTES) {
     return [{
@@ -163,7 +180,8 @@ function splitIntoChunks(
         originalSize: part.length,
         checksum: sha256(part),
       },
-      data: Buffer.from(part), // copy to detach from the source buffer
+      // A copy detaches it from the source buffer; a view when the caller keeps that buffer only for these parts.
+      data: copy ? Buffer.from(part) : part,
     });
     offset = end;
     partNum++;
@@ -194,6 +212,10 @@ export class MigrationExporter {
   private readonly portableDirLimits: { maxEntries: number; maxBytes: number } | undefined;
   /** Overrides for the migration's bounds, for the same reason: a test cannot build 500 MiB. */
   private readonly bounds: { maxChunks: number; maxTotalBytes: number };
+  /** The sweeps chunk's cap at the destination; a test lowers it, as for the bounds. */
+  private readonly sweepsCapBytes: number;
+  /** Where the source reads its own memory limit and resident memory (MiB). */
+  private readonly ownMemory: { limitMb: () => number; rssMb: () => number };
   /** Workspace entries the current export left out; reset per `export()`. */
   private skipped: string[] = [];
   /** Set by `collectWorkspace` when it left the workspace out; reset per `export()`. */
@@ -204,9 +226,14 @@ export class MigrationExporter {
     vaultKey?: string | undefined;
     portableDirLimits?: { maxEntries: number; maxBytes: number } | undefined;
     bounds?: { maxChunks: number; maxTotalBytes: number } | undefined;
+    sweepsCapBytes?: number | undefined;
+    /** This instance's memory limit and resident memory, MiB; a test sets them, production reads them. */
+    ownMemory?: { limitMb: () => number; rssMb: () => number } | undefined;
   } | undefined) {
+    this.ownMemory = options?.ownMemory ?? { limitMb: ownMemoryLimitMb, rssMb: () => process.memoryUsage().rss / (1024 * 1024) };
     this.portableDirLimits = options?.portableDirLimits;
     this.bounds = options?.bounds ?? { maxChunks: MIGRATION_MAX_CHUNKS, maxTotalBytes: MIGRATION_MAX_TOTAL_BYTES };
+    this.sweepsCapBytes = options?.sweepsCapBytes ?? SWEEPS_CAP_BYTES;
     this.lynoxDir = options?.lynoxDir ?? getLynoxDir();
     const key = options?.vaultKey ?? process.env['LYNOX_VAULT_KEY'];
     if (!key) {
@@ -228,9 +255,13 @@ export class MigrationExporter {
     this.skipped = [];
     this.workspaceOmitted = false;
     const plan = options?.plain;
-    /** Where each database's chunks go in `plaintextChunks`, and both forms of a plaintext-path store. */
-    const databases: Array<{ name: string; at: number; raw: PlaintextChunk[]; plain: PlainSourceResult | null }> = [];
-    let sweeps: { at: number; raw: PlaintextChunk[]; plain: PlainLedgers | null } | null = null;
+    /**
+     * Where each database's chunks go in `plaintextChunks`, and both forms of a plaintext-path store.
+     * `image` is a plaintext-path store's snapshot, held until its plaintext form is built (or refused).
+     */
+    const databases: StoreEntry[] = [];
+    let sweeps: SweepsEntry | null = null;
+    let ledgerFiles: Record<string, string> | null = null;
 
     // Every buffer collected below may hold plaintext (secrets, and the stores' plaintext forms);
     // a throw anywhere before the return zeroes all of them on the way out.
@@ -241,13 +272,13 @@ export class MigrationExporter {
       const secretsChunk = this.collectSecrets();
       if (secretsChunk) plaintextChunks.push(secretsChunk);
 
-      // 2. SQLite databases — VACUUM INTO temp copies; on the plaintext path also decrypted in memory
+      // 2. SQLite databases — VACUUM INTO temp copies. On the plaintext path a store's plaintext form
+      //    is built only after everything else is collected (step 6), when its size can be judged.
       for (const dbName of SQLITE_DBS) {
         onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dbName });
         const snapshot = this.snapshotDatabase(dbName);
         if (!snapshot) continue;
-        const plain = plan && isPlainStore(dbName) ? this.plainForm(snapshot, dbName) : null;
-        databases.push({ name: dbName, at: plaintextChunks.length, raw: splitIntoChunks(snapshot, 'sqlite_db', dbName), plain });
+        databases.push({ name: dbName, at: plaintextChunks.length, raw: splitIntoChunks(snapshot, 'sqlite_db', dbName, false), image: plan && isPlainStore(dbName) ? snapshot : null, plain: null });
       }
 
       // 3. Artifacts
@@ -260,11 +291,10 @@ export class MigrationExporter {
       plaintextChunks.push(...this.collectMemory());
 
       onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'sweeps' });
-      const ledgerFiles = this.readSweeps();
+      ledgerFiles = this.readSweeps();
       if (ledgerFiles) {
         const raw = splitIntoChunks(Buffer.from(JSON.stringify({ files: ledgerFiles }), 'utf-8'), 'sweeps', 'sweeps');
-        const plain = plan && databases.some((d) => d.name === 'engine.db' && d.plain) ? this.plainLedgers(ledgerFiles) : null;
-        sweeps = { at: plaintextChunks.length, raw, plain };
+        sweeps = { at: plaintextChunks.length, raw, plain: null };
       }
 
       for (const dirName of GENERIC_PORTABLE_DIRS) {
@@ -276,8 +306,10 @@ export class MigrationExporter {
       const configChunk = this.collectConfig();
       if (configChunk) plaintextChunks.push(configChunk);
 
-      // 6. The databases and the merge ledgers, each in the form its path takes. The path is chosen
-      //    only now, over every chunk: the destination judges the whole bundle.
+      // 6. The stores' plaintext forms, each only when its size allows it, then the databases and the
+      //    merge ledgers, each in the form its path takes. The path is chosen only now, over every
+      //    chunk: the destination judges the whole bundle.
+      if (plan) this.formPlain(plaintextChunks, databases, sweeps, ledgerFiles, plan.ceiling);
       const report = plan ? this.placeDatabases(plaintextChunks, databases, sweeps, plan.ceiling) : this.placeRaw(plaintextChunks, databases, sweeps);
 
       // Assign sequence numbers
@@ -361,6 +393,48 @@ export class MigrationExporter {
     }
   }
 
+  /**
+   * Build each plaintext-path store's plaintext form, but only for a store whose raw size passes
+   * `plainFormRefusal` against everything else collected: the rewrite holds several copies of the
+   * store, so one that could never travel in plaintext is not rewritten. Then the merge ledgers'
+   * plaintext form, when engine.db has one.
+   */
+  private formPlain(
+    chunks: PlaintextChunk[],
+    databases: StoreEntry[],
+    sweeps: SweepsEntry | null,
+    ledgerFiles: Record<string, string> | null,
+    ceiling: MigrationCeiling,
+  ): void {
+    const bytes = (cs: PlaintextChunk[]): number => cs.reduce((n, c) => n + c.data.length, 0);
+    const restBytes = bytes(chunks) + (sweeps ? bytes(sweeps.raw) : 0);
+    // This instance's memory is read before the first rewrite: a store judged later is judged
+    // together with the stores already let through, whose forms are then in memory. It is read
+    // again for each later store, so growth the line does not foresee is not missed either.
+    const limitMb = this.ownMemory.limitMb();
+    const rssMb = this.ownMemory.rssMb();
+    let formedBytes = 0;
+    for (const d of databases) {
+      const image = d.image;
+      if (!image || !isPlainStore(d.name)) continue;
+      d.image = null;
+      const othersBytes = restBytes + databases.reduce((n, o) => n + (o === d ? 0 : bytes(o.raw)), 0);
+      const refused = plainFormRefusal({
+        ceiling, rawBytes: image.length, othersBytes, restBytes, maxTotalBytes: this.bounds.maxTotalBytes,
+        source: { limitMb, rssMb, rssNowMb: formedBytes === 0 ? rssMb : this.ownMemory.rssMb(), baseMb: MIGRATION_MEMORY.kSourceBaseMb, k: MIGRATION_MEMORY.kSource, formedBytes },
+      });
+      if (refused) d.refused = refused;
+      else {
+        // Counted even when the rewrite then fails: its copies were held all the same.
+        formedBytes += image.length;
+        d.plain = this.plainForm(image, d.name);
+      }
+    }
+    // The ledgers' plaintext form only when engine.db has one and their raw form is within the
+    // sweeps cap: above it the choice sends engine.db raw anyway, so the form is not built.
+    if (sweeps && ledgerFiles && bytes(sweeps.raw) <= this.sweepsCapBytes && databases.some((d) => d.name === 'engine.db' && d.plain)) sweeps.plain = this.plainLedgers(ledgerFiles);
+  }
+
   /** A store's plaintext form, or null when its rewrite fails (it then travels raw). */
   private plainForm(snapshot: Buffer, store: PlainStore): PlainSourceResult | null {
     const key = store === 'engine.db' ? deriveEngineEncKey(this.vaultKey) : deriveHistoryEncKey(this.vaultKey);
@@ -408,8 +482,8 @@ export class MigrationExporter {
    */
   private placeDatabases(
     chunks: PlaintextChunk[],
-    databases: Array<{ name: string; at: number; raw: PlaintextChunk[]; plain: PlainSourceResult | null }>,
-    sweeps: { at: number; raw: PlaintextChunk[]; plain: PlainLedgers | null } | null,
+    databases: StoreEntry[],
+    sweeps: SweepsEntry | null,
     ceiling: MigrationCeiling,
   ): PlainExportReport {
     const bytes = (cs: PlaintextChunk[]): number => cs.reduce((n, c) => n + c.data.length, 0);
@@ -417,11 +491,11 @@ export class MigrationExporter {
     const stores = databases.filter((d): d is typeof d & { name: PlainStore } => isPlainStore(d.name));
     let paths = choosePlainPaths({
       ceiling,
-      stores: stores.map((d) => ({ store: d.name, plainBytes: d.plain ? d.plain.payload.length : null, rawBytes: bytes(d.raw) })),
+      stores: stores.map((d) => ({ store: d.name, plainBytes: d.plain ? d.plain.payload.length : null, rawBytes: bytes(d.raw), refused: d.refused })),
       otherBytes: bytes(chunks),
       otherDatabaseBytes: databases.filter((d) => !isPlainStore(d.name)).reduce((n, d) => n + bytes(d.raw), 0),
       sweeps: sweeps ? { rawBytes: bytes(sweeps.raw), plainBytes: sweeps.plain ? sweeps.plain.payload.length : null } : null,
-      sweepsCapBytes: SWEEPS_CAP_BYTES,
+      sweepsCapBytes: this.sweepsCapBytes,
     });
     const plainStore = (d: { name: string; plain: PlainSourceResult | null }): boolean => isPlainStore(d.name) && paths.get(d.name)?.path === 'plain' && d.plain !== null;
     const plainLedgers = (): boolean => sweeps !== null && sweeps.plain !== null && paths.get('engine.db')?.path === 'plain';

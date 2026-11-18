@@ -1,6 +1,6 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
-import { isStepIdShape, stepIdRefusal } from './step-id.js';
+import { isStepIdShape, stepIdRefusal, stepRunIds } from './step-id.js';
 import { fieldReferencing } from './template-refs.js';
 
 /**
@@ -52,7 +52,7 @@ function alikeIndexes(steps: readonly InlinePipelineStep[], id: string): number[
  * either by its position instead, `#<n>` as the step list numbers it. A step stored with the id
  * `#<n>` (before new ids refused it) is what `#<n>` names; renamed, `#<n>` is position n again.
  */
-function resolveStep(steps: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' {
+function resolveStep(steps: readonly InlinePipelineStep[], id: string, runNames?: ReadonlyMap<string, string>): number | 'missing' | 'ambiguous' {
   // The stored id first, so every step stays reachable by its own id, whatever ids it shares a
   // list with; a refusal that names a position someone's id takes says to rename that step first
   // (`byPosition`).
@@ -64,7 +64,18 @@ function resolveStep(steps: readonly InlinePipelineStep[], id: string): number |
     return at < steps.length ? at : 'missing';
   }
   const alike = alikeIndexes(steps, id);
-  if (alike.length <= 1) return alike[0] ?? 'missing';
+  // A run names a step stored outside the shape `step-<n>` (`stepRunNames`): that name reaches it too.
+  // It stands for the stored id it had before this call's first change, so a step this call removed
+  // or renamed earlier does not hand its name to another one.
+  if (alike.length === 0) {
+    const storedId = runNames?.get(id);
+    if (storedId === undefined) return 'missing';
+    const at = steps.findIndex(s => s.id === storedId);
+    // Two steps stored with the same id share a run name: it names neither for sure.
+    if (at !== -1 && steps.some((s, j) => j !== at && s.id === storedId)) return 'ambiguous';
+    return at === -1 ? 'missing' : at;
+  }
+  if (alike.length === 1) return alike[0]!;
   const exact = steps.findIndex(s => s.id === id);
   return exact !== -1 && id !== stripHiddenInName(id) ? exact : 'ambiguous';
 }
@@ -82,11 +93,25 @@ export function byPosition(steps: readonly InlinePipelineStep[], i: number): str
     : `step_id "${ref}", after a rename_step with step_id "${ref}" that gives step #${other + 1}, stored with the id "${ref}", a new id`;
 }
 
+/** Positions as a reader lists them: "#1 and #3", "#1, #3 and #5". */
+function listedPositions(indexes: readonly number[]): string {
+  const positions = indexes.map(i => `#${i + 1}`);
+  return positions.length > 1 ? `${positions.slice(0, -1).join(', ')} and ${positions[positions.length - 1]}` : positions.join('');
+}
+
 /** The refusal for an id that names two steps, which `what` cannot choose between. */
-function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: string): string {
+function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: string, runNames?: ReadonlyMap<string, string>): string {
+  const change = what === 'task update' ? 'this update' : what === 'removal' ? 'this removal' : what === 'renaming' ? 'this rename' : what;
   const alike = alikeIndexes(steps, id);
+  if (alike.length === 0) {
+    // A run name two steps share: they were stored with the same id, outside the shape.
+    const storedId = runNames?.get(id);
+    const shared = steps.flatMap((s, i) => (s.id === storedId ? [i] : []));
+    const at = shared[shared.length - 1] ?? 0;
+    return `Error: Steps ${listedPositions(shared)} were stored with the same id, which runs as ${quotedId(id)}, so ${change} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, at)}. To end the clash, give one of them its own id (rename_step with ${byPosition(steps, at)}).`;
+  }
   const last = alike[alike.length - 1]!;
-  return `Error: Steps ${alike.map(i => `#${i + 1}`).join(', ')} all read as ${quotedId(id)} (their ids differ only in characters that do not show), so ${what} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, last)}.`;
+  return `Error: Steps ${listedPositions(alike)} all read as ${quotedId(id)} (their ids differ only in characters that do not show), so ${change} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, last)}.`;
 }
 
 /** `text` with every `{{<from>…}}` reference to a step's output pointed at `to`. */
@@ -118,8 +143,10 @@ function renamedInTemplate(value: unknown, from: string, to: string): unknown {
  * says which step it reached.
  */
 export function applyModifications(steps: InlinePipelineStep[], modifications: StepModification[], notes?: string[]): string | null {
+  // The names runs give steps stored outside the shape, taken once from the list as it came in.
+  const runNames = stepRunIds(steps);
   const stepIndex = (list: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' => {
-    const at = resolveStep(list, id);
+    const at = resolveStep(list, id, runNames);
     if (typeof at === 'number' && /^#\d+$/.test(id) && at !== Number(id.slice(1)) - 1) {
       notes?.push(`${quotedId(id)} named step #${at + 1}, stored with that id, not the step at position ${id.slice(1)}.`);
     }
@@ -147,7 +174,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       const missing: string[] = [];
       for (const dep of mod.input_from ?? []) {
         const at = stepIndex(steps, dep);
-        if (at === 'ambiguous') return ambiguousText(steps, dep, `the input of add_step ${quotedId(mod.step_id)}`);
+        if (at === 'ambiguous') return ambiguousText(steps, dep, `the input of add_step ${quotedId(mod.step_id)}`, runNames);
         if (at === 'missing') missing.push(quotedId(dep));
         else inputFrom.push(steps[at]!.id);
       }
@@ -161,7 +188,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       };
       if (mod.after !== undefined) {
         const at = stepIndex(steps, mod.after);
-        if (at === 'ambiguous') return ambiguousText(steps, mod.after, `the insertion after it (add_step ${quotedId(mod.step_id)})`);
+        if (at === 'ambiguous') return ambiguousText(steps, mod.after, `the insertion after it (add_step ${quotedId(mod.step_id)})`, runNames);
         if (at === 'missing') return `Error: add_step ${quotedId(mod.step_id)} requests insertion after ${quotedId(mod.after)}, which does not exist.`;
         steps.splice(at + 1, 0, newStep);
       } else {
@@ -192,7 +219,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
 
     const what = mod.action === 'remove' ? 'removal' : mod.action === 'update_task' ? 'task update' : 'renaming';
     const idx = stepIndex(steps, mod.step_id);
-    if (idx === 'ambiguous') return ambiguousText(steps, mod.step_id, what);
+    if (idx === 'ambiguous') return ambiguousText(steps, mod.step_id, what, runNames);
     if (idx === 'missing') return `Error: Step ${quotedId(mod.step_id)} not found for ${what}.`;
 
     if (mod.action === 'rename_step') {

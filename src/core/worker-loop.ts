@@ -2436,6 +2436,8 @@ export class WorkerLoop {
         ownerStopped,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
         notices: this.#bulkNotices(),
+        // Read at the call, so a connection confirmed again since the run halted counts.
+        shopifyGrantOf: (host) => this.engine.getApiStore()?.getByHostname(host)?.oauth_grant,
       });
     } catch (err: unknown) {
       // What leaves here reaches the run result, the notification, the follow-up prompt and the
@@ -3254,7 +3256,7 @@ export class WorkerLoop {
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     this.#stopIfStarterEnded(active, starter, task.id);
-    const result = await session.run(prompt, { triggerOrigin: task.source, principal: runAs });
+    const result = await session.run(prompt, { triggerOrigin: task.source, triggerId: task.id, principal: runAs });
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
     // knowing it ever happened: `costGuard` makes the agent stop and RETURN its text — it
@@ -4051,7 +4053,7 @@ export class WorkerLoop {
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
     this.#stopIfStarterEnded(stopEntry, starter, task.id);
-    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', principal: runAs });
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', triggerId: task.id, principal: runAs });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;

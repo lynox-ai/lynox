@@ -227,6 +227,13 @@ describe('the placeholder in the way out is quoted only in the step id shape', (
 });
 
 describe('rename_step rewrites a reference only where it is one', () => {
+  it('a step stored outside the id shape, renamed by its run name, takes its readers and their references along', () => {
+    const s: InlinePipelineStep[] = [{ id: 'Old Fetch', task: 'Fetch' }, { id: 'mail', task: 'Mail it', input_template: { body: 'Your {{Old Fetch.result}}' }, input_from: ['Old Fetch'] }];
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: 'step-1', value: 'fetch' }])).toBeNull();
+    expect(s.map(x => x.id)).toEqual(['fetch', 'mail']);
+    expect(s[1]).toMatchObject({ input_from: ['fetch'], input_template: { body: 'Your {{fetch.result}}' } });
+  });
+
   it('a rename that would turn a placeholder in a reading step into a live reference is refused', () => {
     // b keeps {{a.result}} as mail text (a was renamed away), and reads y: renaming y to a would feed y's output into the mail.
     const s: InlinePipelineStep[] = [{ id: 'y', task: 'Fetch' }, { id: 'b', task: 'Mail it', input_template: { body: 'Your {{a.result}}' }, input_from: ['y'] }];

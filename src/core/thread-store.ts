@@ -47,6 +47,13 @@ export interface ThreadMessageRecord {
    *  rendered in the UI but excluded from the model's API context. 0 = an
    *  ordinary API message. See migration v32. */
   display_only: number;
+  /** Who wrote this message (v73): the `runAuthorTag` of the run whose typed turn it is. NULL
+   *  for every row the engine writes itself and for every row from before the column, and NULL
+   *  is unknown, never the owner. A trigger's turn carries `trigger:<id>`, never `owner`.
+   *  `owner` names who sent the row, not who wrote every word in it: the row holds the whole
+   *  user content, so a context preamble (an opened mail, a run's result) and uploaded files
+   *  stand in it too. A reader that needs the owner's own words separates them structurally. */
+  author: string | null;
   created_at: string;
 }
 
@@ -329,14 +336,18 @@ export class ThreadStore {
 
   // ── Message Persistence ──
 
+  /**
+   * `author` is recorded on every message of this call (see `ThreadMessageRecord.author`). Only
+   * the run's own typed turn passes one; every other writer leaves it out, and the rows are NULL.
+   */
   appendMessages(threadId: string, messages: BetaMessageParam[], startSeq: number, threadUpdates?: {
     message_count?: number | undefined;
     total_tokens?: number | undefined;
     total_cost_usd?: number | undefined;
-  }): void {
+  }, author?: string | undefined): void {
     const insert = this.db.prepare(`
-      INSERT INTO thread_messages (thread_id, seq, role, content_json)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO thread_messages (thread_id, seq, role, content_json, author)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
     // Share one transaction (and one fsync under WAL) between the insert
@@ -351,6 +362,7 @@ export class ThreadStore {
           start + i,
           msg.role,
           JSON.stringify(msg.content),
+          author ?? null,
         );
       }
       if (threadUpdates) this.updateThread(threadId, threadUpdates);
