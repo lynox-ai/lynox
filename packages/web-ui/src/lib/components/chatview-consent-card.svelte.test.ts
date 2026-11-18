@@ -37,7 +37,7 @@ function sseStream(): { body: ReadableStream<Uint8Array>; send: (type: string, d
 	return {
 		body,
 		send: (type, data) => ctrl.enqueue(enc.encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`)),
-		close: () => ctrl.close(),
+		close: () => { try { ctrl.close(); } catch { /* a test that dropped the stream closed it already */ } },
 	};
 }
 
@@ -62,6 +62,7 @@ let run: ReturnType<typeof sseStream>;
 let replies: Array<{ answer?: unknown; promptId?: unknown }>;
 let refuse: boolean;
 let keyRefused: boolean;
+let runBusy: boolean;
 let replyStatus: 'fresh' | 'answered_before' | 'unknown' | 'conflict' | 'forbidden' | 'bad' | 'network' | 'redirected' | 'not_json' | 'no_ok' | 'empty' | 'closed' | 'server_error';
 let i18n: typeof import('../i18n.svelte.js');
 
@@ -75,6 +76,7 @@ beforeEach(async () => {
 	refuse = false;
 	keyRefused = false;
 	replyStatus = 'fresh';
+	runBusy = false;
 	target = document.createElement('div');
 	document.body.appendChild(target);
 });
@@ -94,6 +96,7 @@ async function renderPrompt(options: string[], consent?: 'guard' | 'deep', befor
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
+		if (url.endsWith('/sessions/t1/run') && runBusy) return json({ error: 'Session is busy' }, 409);
 		if (url.endsWith('/sessions/t1/run')) return new Response(run.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		if (url.endsWith('/sessions/t1/reply')) {
 			replies.push(JSON.parse(String(init?.body ?? '{}')) as { answer?: unknown });
@@ -118,6 +121,7 @@ async function renderPrompt(options: string[], consent?: 'guard' | 'deep', befor
 			if (replyStatus === 'answered_before') return json({ ok: true, idempotent: true, ...(refuse ? { refused: 'unrecognised_answer' } : {}) });
 			return json(refuse ? { ok: true, refused: 'unrecognised_answer' } : { ok: true });
 		}
+		if (url.endsWith('/sessions/t1/pending-prompt')) return json(runBusy ? { pending: true, promptType: 'ask_user', question: '⚠ Command: x', options: ['allow', 'deny'], promptId: 'p1', consent: 'guard' } : { pending: false });
 		if (url.endsWith('/threads/t1')) return json({ thread: null });
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/threads/t1/messages')) return json({ messages: [] });
@@ -281,14 +285,36 @@ describe('text typed as the answer', () => {
 		expect(JSON.stringify(store.getMessages())).not.toContain('Hunter2');
 	});
 
-	it('an answer read as none of the keys does not hide a sentence already standing (a refused key)', async () => {
+	// The sentence is the server's verdict on the newest answer; whatever stands was set earlier in
+	// the same run (every run starts with no error), so it gives way.
+	it('an answer read as none of the keys replaces a sentence standing from before: the open question', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['allow', 'deny'], 'guard');
+		// The stream drops while the question stays open on the server; a message sent then is
+		// refused because of it.
+		runBusy = true;
+		run.close();
+		await new Promise((r) => setTimeout(r, 1500));
+		await settle();
+		await store.checkPendingPrompt(); // as after a reload: the question is still open
+		await settle();
+		svelte.flushSync();
+		void store.sendMessage('and then the next thing');
+		await settle();
+		expect(store.getChatError()).toBe(i18n.t('chat.error_blocked_by_prompt'));
+		refuse = true;
+		await type('ja');
+		expect(replies.map((r) => r.answer)).toEqual(['ja']);
+		expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
+	});
+
+	it('an answer read as none of the keys replaces a sentence standing from before: a refused key', async () => {
 		i18n.setLocale('de');
 		await renderPrompt(['allow', 'deny'], 'guard');
 		keyRefused = true;
 		await type('password: Hunter2!x');
-		const standing = store.getChatError();
-		expect([i18n.t('chat.mandate_key_input'), i18n.t('chat.mandate_key_input_returned')]).toContain(standing);
-		// The question comes back, and the next typed answer is none of its keys.
+		expect([i18n.t('chat.mandate_key_input'), i18n.t('chat.mandate_key_input_returned')]).toContain(store.getChatError());
+		// The question comes back, and the next typed answer is sent and read as none of its keys.
 		keyRefused = false;
 		refuse = true;
 		run.send('prompt', { question: '⚠ Command: x', options: ['allow', 'deny'], promptId: 'p2', agent: 'lynox', consent: 'guard' });
@@ -296,7 +322,7 @@ describe('text typed as the answer', () => {
 		svelte.flushSync();
 		await type('vielleicht');
 		expect(replies.map((r) => r.answer)).toEqual(['password: Hunter2!x', 'vielleicht']);
-		expect(store.getChatError()).toBe(standing);
+		expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
 	});
 
 	it('control: with nothing standing, an answer read as none of the keys says so', async () => {
