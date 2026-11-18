@@ -19,7 +19,7 @@ export interface BulkI18n {
 export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.intro', 'bulk.deselect.taken_out',
 	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
-	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
+	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded', 'bulk.halt.discarded',
 	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note', 'bulk.markup.restores_note_active',
 	// Only the owner approves: a mandate reads that the owner can still approve the rest.
 	'bulk.invalid.html_too_long', 'bulk.invalid.html_too_long_woocommerce',
@@ -153,8 +153,22 @@ export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'li
 
 /** The word over a halted run's cause. An owner's stop is a stop, not a halt: „angehalten“ is
  *  the word of a run that ended where its approval, a failure or a limit told it to. */
-export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' {
+export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' {
+	// A discarded run reads "Discarded" next to the sentence and the chip that say so (U-324).
+	if (run.haltKey === 'discarded') return 'bulk.head.discarded';
 	return run.haltKey === 'stoppedByOwner' ? 'bulk.head.stopped' : 'bulk.head.halted';
+}
+
+/** A run's phase as the list names it: a run the owner discarded before approving it reads
+ *  "discarded", not "aborted" (U-324); every other run by its phase. */
+export function bulkPhaseKey(run: Pick<BulkRun, 'phase' | 'haltKey'>): string {
+	return run.phase === 'aborted' && run.haltKey === 'discarded' ? 'bulk.phase.discarded' : `bulk.phase.${run.phase}`;
+}
+
+/** A run's phase carries the halted or stopped suffix in the list; a discarded one does not, since
+ *  its phase already says why it ended. */
+export function bulkPhaseHasSuffix(run: Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason'>): boolean {
+	return run.haltReason !== null && !(run.phase === 'aborted' && run.haltKey === 'discarded');
 }
 
 /** The same distinction for the suffix on a run's phase in the list. */
@@ -891,7 +905,7 @@ export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'>, i18n: 
 
 /** The halts that end an unapproved run before it wrote anything: another judged run took its
  *  place, or the access that planned it ended. Both leave the run aborted. */
-const BULK_ENDED_UNAPPROVED = new Set(['superseded', 'mandateEnded']);
+const BULK_ENDED_UNAPPROVED = new Set(['superseded', 'mandateEnded', 'discarded']);
 
 /** The label key of the button that starts a run waiting for its start, exactly as the page
  *  shows it; null where the page shows no button (a judge it cannot use, or a list or judge
@@ -1030,9 +1044,12 @@ export function bulkStep(run: BulkStepRun): BulkStepName {
 }
 
 /** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
- *  („zurückgenommen“), not „fertig“: its values are no longer live. */
-export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'>, step: BulkStepName): string {
-	return step === 'done' && run.phase === 'undone' ? 'bulk.phase.undone' : `bulk.step.${step}`;
+ *  („zurückgenommen“), not „fertig“: its values are no longer live. A discarded run's reads
+ *  „verworfen“ the same way: it was never written. */
+export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'> & Partial<Pick<BulkRun, 'haltKey'>>, step: BulkStepName): string {
+	if (step === 'done' && run.phase === 'undone') return 'bulk.phase.undone';
+	if (step === 'done' && run.phase === 'aborted' && run.haltKey === 'discarded') return 'bulk.phase.discarded';
+	return `bulk.step.${step}`;
 }
 
 /** Whether a target's after-value is shown as not live: an undo or a rollback took it back, or, on

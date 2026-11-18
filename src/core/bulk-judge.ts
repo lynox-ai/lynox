@@ -55,6 +55,10 @@ export interface BulkJudgeOutcome {
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
   retryAt?: number | undefined;
+  /** Set on a `halted` outcome when the pass found its run no longer its own to read (gone,
+   *  ended before its approval, halted by another pass, or moved on). The summary then cannot say
+   *  which; the worker reads it from the ledger. */
+  gone?: true | undefined;
 }
 
 /** The model a run's tier resolved to, and the client that reaches it. */
@@ -646,7 +650,8 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (ledger.listUnread(runId).length > 0) {
     if (!deps.readTargets) return halt(BULK_HALT_REASONS.unavailable);
     const read = await deps.readTargets();
-    if (read.status !== 'done') return { status: read.status, summary: read.summary, retryAt: read.retryAt };
+    // A read that found its run no longer its own says so to the worker, which reads why.
+    if (read.status !== 'done') return { status: read.status, summary: read.summary, retryAt: read.retryAt, gone: read.gone };
     if (ledger.listUnread(runId).length > 0) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge has targets left to read.');
   }
 
@@ -668,7 +673,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     if (deps.signal?.aborted) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge paused.');
     const current = ledger.getJudgeRun(runId);
     if (!current || current.phase !== 'planned' || current.haltReason !== null) {
-      return { status: 'halted', summary: summarize(ledger, runId, say.judgeStopped, say) };
+      return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.judgeStopped, say) };
     }
     // The operator's switch, asked before every paid call: a Shopify run judged while it is off
     // could never be approved (`approve` refuses it), so nothing more is spent on it.
@@ -899,7 +904,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (bookingFailed) return halt(BULK_HALT_REASONS.unavailable);
   if (ledger.listUnjudged(runId).length > 0) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge has targets left to judge.');
   if (!ledger.finishJudge(runId)) {
-    return { status: 'halted', summary: summarize(ledger, runId, say.judgeStopped, say) };
+    return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.judgeStopped, say) };
   }
   // A filtered list whose every product fell out before the judge says that no product matched.
   const list = ledger.getListRun(runId);
@@ -907,9 +912,12 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   return { status: 'done', summary: summarize(ledger, runId, noneLeft ?? say.judgeDone, say) };
 
   function halt(reason: BulkHaltReason): BulkJudgeOutcome {
-    // Only a run still planned and not halted: a run superseded or stopped meanwhile keeps its reason.
+    // Only a run still planned and not halted: a run superseded or stopped meanwhile keeps its
+    // reason, which is not this pass's to tell; the worker reads it from the ledger (`gone`).
     ledger.haltPreview(runId, reason);
-    return { status: 'halted', summary: summarize(ledger, runId, say.halted('judge', reason), say) };
+    const held = ledger.getJudgeRun(runId);
+    const gone = held === null || held.phase !== 'planned' || held.haltReason !== reason;
+    return { status: 'halted', ...(gone ? { gone: true as const } : {}), summary: summarize(ledger, runId, say.halted('judge', reason), say) };
   }
   function pending(retryAt: number, lead: string): BulkJudgeOutcome {
     return { status: 'pending', summary: summarize(ledger, runId, lead), retryAt };

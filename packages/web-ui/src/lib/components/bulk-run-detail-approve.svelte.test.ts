@@ -1517,3 +1517,62 @@ describe('the next step of a halt for an outdated connection consent', () => {
 		expect(haltLine()).toMatch(planAgain());
 	});
 });
+
+describe('discarding a run before approving it (U-324)', () => {
+	it('offers the owner "Discard" on a preview, asks first, and discards only on the confirmation', async () => {
+		await render();
+		const open = target.querySelector<HTMLButtonElement>('[data-testid="bulk-discard-open"]');
+		expect(open?.textContent?.trim()).toBe(t('bulk.discard.button'));
+		// Secondary, never red: lynox writes nothing by it.
+		expect(open?.className ?? '').not.toMatch(/danger/);
+		expect(target.querySelector('[data-testid="bulk-discard-confirm"]')).toBeNull();
+		open!.click();
+		await settle();
+		const box = target.querySelector('[data-testid="bulk-discard"]')!;
+		expect(box.textContent).toContain(t('bulk.discard.confirm_title'));
+		expect(box.textContent).toContain(t('bulk.discard.confirm_text'));
+		expect(posts).toEqual([]);
+		// Cancel closes it and sends nothing.
+		buttonByText(t('bulk.discard.cancel'))!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-discard-confirm"]')).toBeNull();
+		expect(posts).toEqual([]);
+		target.querySelector<HTMLButtonElement>('[data-testid="bulk-discard-open"]')!.click();
+		await settle();
+		target.querySelector<HTMLButtonElement>('[data-testid="bulk-discard-confirm"]')!.click();
+		await settle();
+		expect(posts).toHaveLength(1);
+		expect(posts[0]!.url.endsWith('/bulk/runs/r1/discard')).toBe(true);
+	});
+
+	it('offers a mandate no discard, and offers none on a run past its approval', async () => {
+		viewerOf = 'mandate';
+		resetSettingsViewer();
+		await render();
+		expect(target.querySelector('[data-testid="bulk-discard"]')).toBeNull();
+		if (component) unmount(component);
+		component = undefined;
+		viewerOf = 'owner';
+		resetSettingsViewer();
+		run = makeRun({ phase: 'approved', maxTargets: 1 });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-discard"]')).toBeNull();
+	});
+
+	it('names a discarded run as discarded, the owner as "you" and anyone else the owner', async () => {
+		for (const [viewer, key] of [['owner', 'bulk.halt.discarded'], ['mandate', 'bulk.halt.discarded_mandate']] as const) {
+			viewerOf = viewer;
+			resetSettingsViewer();
+			run = makeRun({ phase: 'aborted', haltReason: 'the owner discarded this run before approving it', haltKey: 'discarded' });
+			await render();
+			const text = target.textContent ?? '';
+			expect([viewer, text.includes(t(key))]).toEqual([viewer, true]);
+			// The last step's chip says discarded, not done.
+			expect(target.querySelector('[aria-current="step"]')?.textContent).toBe(t('bulk.phase.discarded'));
+			expect(target.querySelector('[data-testid="bulk-discard"]')).toBeNull();
+			if (component) unmount(component);
+			component = undefined;
+		}
+		resetSettingsViewer();
+	});
+});

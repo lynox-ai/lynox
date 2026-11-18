@@ -139,6 +139,8 @@ const DE_HALT_REST: Readonly<Partial<Record<keyof typeof BULK_HALT_REASONS, stri
   shopifyReadOff: 'Lesen von Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.',
   shopifyWriteOff: 'Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen.',
   superseded: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
+  // To the owner, on whose device the push lands (U-324).
+  discarded: 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.',
   judgeModel: 'Der KI-Anbieter dieses Laufs hat kein Modell zum Beurteilen, oder der Betreiber erlaubt es nicht.',
 };
 /** The German of each bulk lead, as ux wrote it (Rest-P), compared whole. */
@@ -280,7 +282,7 @@ describe('the notice tables', () => {
       expect([k, BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS[k])]).toEqual([k, own.en]);
     }
     // The reasons whose German push is the page's sentence word for word: the comparison above ran on them.
-    expect(shared).toEqual(['listNotAList', 'listUnreadable', 'listNoProgress', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost']);
+    expect(shared).toEqual(['listNotAList', 'listUnreadable', 'listNoProgress', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'discarded']);
   });
 
   it('says each bulk lead and each worker sentence in German as ux wrote it', () => {
