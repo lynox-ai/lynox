@@ -136,69 +136,73 @@ export class SecretVault {
     ensureDirSync(dir);
 
     this.db = new Database(dbPath);
-
-    // Set restrictive permissions on vault DB file
-    try { chmodSync(dbPath, FILE_MODE_PRIVATE); } catch { /* best-effort — may fail on some filesystems */ }
-
-    this.db.pragma('journal_mode = WAL');
-    // Same wait as the other stores: without it the erasure's checkpoint reports
-    // `busy` the instant another connection reads, instead of waiting it out.
-    this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
-    zeroDeletedContent(this.db);
-
-    // Set restrictive permissions on WAL journal files
-    for (const suffix of ['-wal', '-shm']) {
-      const journalPath = `${dbPath}${suffix}`;
-      if (existsSync(journalPath)) {
-        try { chmodSync(journalPath, FILE_MODE_PRIVATE); } catch { /* best-effort */ }
-      }
-    }
-
-    this._migrate();
-
-    // Warn about weak keys (low entropy)
-    const entropy = estimateKeyEntropy(passphrase);
-    if (entropy < MIN_KEY_ENTROPY_BITS) {
-      process.stderr.write(
-        `⚠ Vault key has low entropy (~${Math.round(entropy)} bits, minimum ${MIN_KEY_ENTROPY_BITS} recommended). ` +
-        `Generate a strong key: openssl rand -base64 48\n`,
-      );
-    }
-
-    const salt = this._getOrCreateSalt();
-    // Use hash of passphrase as cache key to avoid keeping plaintext in memory
-    const passphraseHash = createHash('sha256').update(passphrase).digest('hex');
-    const cacheKey = `${dbPath}:${passphraseHash}:${salt.toString('hex')}`;
-    let canonical = _derivedKeyCache.get(cacheKey);
-    if (!canonical) {
-      canonical = pbkdf2Sync(
-        passphrase,
-        salt,
-        PBKDF2_ITERATIONS,
-        CRYPTO_KEY_LENGTH,
-        PBKDF2_DIGEST,
-      );
-      _derivedKeyCache.set(cacheKey, canonical);
-    }
-    // Hold a PER-INSTANCE copy of the key — never the cached Buffer itself.
-    // The cache is shared across every SecretVault opened on the same
-    // (dbPath, passphrase, salt); if instances shared one Buffer, close()'s
-    // fill(0) — or a transient rotateVault()/migration-export vault closing —
-    // would zero the key material out from under a still-live vault, silently
-    // corrupting every subsequent encrypt/decrypt. The cache retains the
-    // canonical key for the process lifetime (its whole point: skip the
-    // 600K-iteration PBKDF2 on re-open) — so unlike before, the cached copy is
-    // never scrubbed. That is an accepted tradeoff: the passphrase it derives
-    // from already lives in process.env for the whole process, so an attacker
-    // who can read process memory can re-derive the key regardless.
-    this.derivedKey = Buffer.from(canonical);
-
-    // Before anything is written: is this the key the vault was written with? A mismatch closes
-    // the connection and throws, so no entry, marker or check row lands under a foreign key.
+    // From here on every throw closes the connection (catch below).
+    let key: Buffer | undefined;
     try {
+      // Set restrictive permissions on vault DB file
+      try { chmodSync(dbPath, FILE_MODE_PRIVATE); } catch { /* best-effort — may fail on some filesystems */ }
+
+      this.db.pragma('journal_mode = WAL');
+      // Same wait as the other stores: without it the erasure's checkpoint reports
+      // `busy` the instant another connection reads, instead of waiting it out.
+      this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+      zeroDeletedContent(this.db);
+
+      // Set restrictive permissions on WAL journal files
+      for (const suffix of ['-wal', '-shm']) {
+        const journalPath = `${dbPath}${suffix}`;
+        if (existsSync(journalPath)) {
+          try { chmodSync(journalPath, FILE_MODE_PRIVATE); } catch { /* best-effort */ }
+        }
+      }
+
+      this._migrate();
+
+      // Warn about weak keys (low entropy)
+      const entropy = estimateKeyEntropy(passphrase);
+      if (entropy < MIN_KEY_ENTROPY_BITS) {
+        process.stderr.write(
+          `⚠ Vault key has low entropy (~${Math.round(entropy)} bits, minimum ${MIN_KEY_ENTROPY_BITS} recommended). ` +
+          `Generate a strong key: openssl rand -base64 48\n`,
+        );
+      }
+
+      const salt = this._getOrCreateSalt();
+      // Use hash of passphrase as cache key to avoid keeping plaintext in memory
+      const passphraseHash = createHash('sha256').update(passphrase).digest('hex');
+      const cacheKey = `${dbPath}:${passphraseHash}:${salt.toString('hex')}`;
+      let canonical = _derivedKeyCache.get(cacheKey);
+      if (!canonical) {
+        canonical = pbkdf2Sync(
+          passphrase,
+          salt,
+          PBKDF2_ITERATIONS,
+          CRYPTO_KEY_LENGTH,
+          PBKDF2_DIGEST,
+        );
+        _derivedKeyCache.set(cacheKey, canonical);
+      }
+      // Hold a PER-INSTANCE copy of the key — never the cached Buffer itself.
+      // The cache is shared across every SecretVault opened on the same
+      // (dbPath, passphrase, salt); if instances shared one Buffer, close()'s
+      // fill(0) — or a transient rotateVault()/migration-export vault closing —
+      // would zero the key material out from under a still-live vault, silently
+      // corrupting every subsequent encrypt/decrypt. The cache retains the
+      // canonical key for the process lifetime (its whole point: skip the
+      // 600K-iteration PBKDF2 on re-open) — so unlike before, the cached copy is
+      // never scrubbed. That is an accepted tradeoff: the passphrase it derives
+      // from already lives in process.env for the whole process, so an attacker
+      // who can read process memory can re-derive the key regardless.
+      key = Buffer.from(canonical);
+      this.derivedKey = key;
+
+      // Before anything is written: is this the key the vault was written with? A mismatch
+      // throws, so no entry, marker or check row lands under a foreign key.
       this._checkKey(dir);
     } catch (err) {
-      this.derivedKey.fill(0);
+      // Whatever throws after the file is open (the key check, a migration, the salt, a busy
+      // database) closes the connection and clears the key copy, so nothing is left behind.
+      key?.fill(0);
       this.db.close();
       throw err;
     }

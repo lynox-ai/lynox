@@ -24,10 +24,21 @@ describe('SecretVault open', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('without a key it throws before it opens anything: no vault file is created', () => {
+  it('without a key it throws and creates no vault file', () => {
     vi.stubEnv('LYNOX_VAULT_KEY', '');
     expect(() => new SecretVault({ path })).toThrow('Vault master key required');
     expect(existsSync(path), 'no vault file was created').toBe(false);
+  });
+
+  it('a throw after the file is open closes the connection', () => {
+    const close = vi.spyOn(Database.prototype, 'close');
+    const real = Database.prototype.prepare;
+    vi.spyOn(Database.prototype, 'prepare').mockImplementation(function (this: Database.Database, sql: string) {
+      if (sql.includes("INTO vault_meta (key, value) VALUES ('pbkdf2_salt'")) throw new Error('disk I/O error');
+      return real.call(this, sql);
+    });
+    expect(() => new SecretVault({ path, masterKey: KEY })).toThrow('disk I/O error');
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it('two first opens at once under different keys: whichever checks in first pins the vault, the other is refused', () => {
