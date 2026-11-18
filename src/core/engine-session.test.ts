@@ -863,7 +863,7 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockSend).not.toHaveBeenCalled();
     });
 
-    it('a flagged request is asked with the keys and goes to the model only on allow; typed text refuses and says why', async () => {
+    it('a flagged request is asked with the keys and goes to the model only on allow; typed text refuses', async () => {
       for (const [answer, sent] of [['allow', true], ['deny', false], ['yes', false], ['Erlauben', false], ['y', false]] as const) {
         mockSend.mockClear();
         const { session } = await createEngineAndSession();
@@ -875,7 +875,8 @@ describe('Engine + Session (Orchestrator)', () => {
         expect(promptUser.mock.calls[0]?.[2], answer).toMatchObject({ consent: 'guard' });
         expect(mockSend, answer).toHaveBeenCalledTimes(sent ? 1 : 0);
         if (!sent) expect(out, answer).toContain('Request denied by user after content policy flag');
-        if (!sent && answer !== 'deny') expect(out, answer).toContain('The answer was not one of the offered choices');
+        // The run's result is read by the person: no sentence meant for the model in it.
+        expect(out, answer).not.toContain('The answer was not one of the offered choices');
       }
     });
 

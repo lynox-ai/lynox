@@ -88,7 +88,8 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, consentOfPayload, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
-import { CONSENT_UNRECOGNISED, consentAnswer } from '../contract/prompt.js';
+import { CONSENT_UNRECOGNISED } from '../contract/prompt.js';
+import { decideConsent } from '../core/consent-ask.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ApprovalStore } from '../core/approval-store.js';
@@ -1317,7 +1318,8 @@ function refuseClosedPrompt(res: ServerResponse, row: Pick<PendingPromptRow, 'cl
  */
 function consentReply(row: PendingPromptRow, answer: string): { ok: true; refused?: typeof CONSENT_UNRECOGNISED } {
   const kind = consentOfPayload(row.payload_json);
-  if (kind === undefined || answer === '' || consentAnswer(kind, answer) !== undefined) return { ok: true };
+  // The engine's own reading of the answer: a dismissal is no refusal to explain.
+  if (kind === undefined || decideConsent(kind, answer) !== 'unrecognised') return { ok: true };
   return { ok: true, refused: CONSENT_UNRECOGNISED };
 }
 
@@ -5987,7 +5989,9 @@ export class LynoxHTTPApi {
         if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
         if (existing.prompt_type !== 'ask_user' || existing.questions_json) { errorResponse(res, 409, 'Prompt is a different kind of question'); return; }
         if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
-        if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
+        // A retry learns what the recorded answer decided, so a lost first response does not turn
+        // an unrecognised answer into a silent "no".
+        if (existing.status === 'answered') { jsonResponse(res, 200, { ...consentReply(existing, existing.answer ?? ''), idempotent: true }); return; }
         if (!this._answerRecorded(_req, res, by, promptId)) return;
         // Pending, yet not answered: its time ran out before the sweep marked it. Nothing between
         // the read above and this write yields, so another answer cannot settle it in between

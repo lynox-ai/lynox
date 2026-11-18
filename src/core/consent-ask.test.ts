@@ -67,6 +67,10 @@ describe('decideConsent', () => {
     expect(consentRefusal('deny', 'Blocked: x — user declined.')).toBe('Blocked: x — user declined.');
     expect(consentRefusal('dismissed', 'Blocked: x — user declined.')).toBe('Blocked: x — user declined.');
     expect(consentRefusal('unrecognised', 'Blocked: x — user declined.')).toBe(`Blocked: x — user declined. ${CONSENT_UNRECOGNISED_SENTENCE}`);
+    // A refusal without a closing mark gets one, so the sentence after it reads as its own.
+    expect(consentRefusal('unrecognised', 'Permission denied by user: bash')).toBe(`Permission denied by user: bash. ${CONSENT_UNRECOGNISED_SENTENCE}`);
+    expect(consentRefusal('unrecognised', 'Secret use denied by user')).toBe(`Secret use denied by user. ${CONSENT_UNRECOGNISED_SENTENCE}`);
+    expect(consentRefusal('deny', 'Permission denied by user: bash')).toBe('Permission denied by user: bash');
   });
 
   it('asks with the kind\'s keys and nothing to type in, and marks the question', () => {

@@ -9,8 +9,8 @@
  * offers fixed keys, never words. The client decides how the card looks from the
  * marker alone, never from the option texts, and shows each key in its own words.
  * An answer approves only when it is exactly one of the kind's keys: any other text
- * — a label, a word in another language, typed text, an older client's `y` —
- * approves nothing.
+ * — a label, a word in another language, an older client's `y`, typed text that is
+ * not exactly a key — approves nothing.
  *
  * DEPENDENCY-FREE: pure literals, types, and functions.
  */

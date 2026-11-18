@@ -123,15 +123,6 @@ export type PromptOutcome =
   | { status: 'aborted' };
 
 /**
- * Is this payload the engine-posed onboarding card?
- *
- * Parsed, not substring-matched. `payload_json` is caller-supplied on
- * `insertConnectMail`, so a `.includes('onboarding_basics')` would misread an
- * account id or folder name that merely contains those characters — and it must
- * agree with the `json_extract(... '$.kind')` the SQL uses, or the two halves of
- * the same rule can disagree. Malformed JSON is not an onboarding card.
- */
-/**
  * The engine's own confirmation a stored question is, read from its engine-only marker
  * (`insertAskUser`'s `consent`). Parsed, not substring-matched; anything else — no marker, a
  * malformed one, a question stored before the marker existed — is no consent at all.
@@ -148,6 +139,15 @@ export function consentOfPayload(payloadJson: string | null): ConsentKind | unde
   }
 }
 
+/**
+ * Is this payload the engine-posed onboarding card?
+ *
+ * Parsed, not substring-matched. `payload_json` is caller-supplied on
+ * `insertConnectMail`, so a `.includes('onboarding_basics')` would misread an
+ * account id or folder name that merely contains those characters — and it must
+ * agree with the `json_extract(... '$.kind')` the SQL uses, or the two halves of
+ * the same rule can disagree. Malformed JSON is not an onboarding card.
+ */
 function isOnboardingBasicsPayload(payloadJson: string | null): boolean {
   if (payloadJson === null) return false;
   try {

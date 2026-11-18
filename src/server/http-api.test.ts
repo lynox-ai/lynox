@@ -3574,7 +3574,7 @@ describe('LynoxHTTPApi', () => {
       engineRef.getPromptStore = (): unknown => store;
       const guard = (sid: string): string => store.insertAskUser(sid, '⚠ Command: x', ['allow', 'deny'], false, undefined, undefined, undefined, undefined, 'guard');
       try {
-        for (const [answer, refused] of [['allow', false], ['deny', false], ['y', true], ['yes', true], ['Erlauben', true], ['Allow', true], ['allow deep', true]] as const) {
+        for (const [answer, refused] of [['allow', false], ['deny', false], ['__dismissed__', false], ['y', true], ['yes', true], ['Erlauben', true], ['Allow', true], ['allow deep', true]] as const) {
           const sid = `s-consent-${answer.replace(/\W/g, '_')}`;
           const id = guard(sid);
           const res = await jsonFetch(`/api/sessions/${sid}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer }) });
@@ -3583,6 +3583,11 @@ describe('LynoxHTTPApi', () => {
           expect(body.refused, answer).toBe(refused ? 'unrecognised_answer' : undefined);
           // Recorded either way: the gate reads it, and refuses what is no key.
           expect(store.getById(id)?.answer, answer).toBe(answer);
+          // A retry whose first response was lost learns the same.
+          const retry = await jsonFetch(`/api/sessions/${sid}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer }) });
+          const again = await retry.json() as { idempotent?: boolean; refused?: string };
+          expect(again.idempotent, answer).toBe(true);
+          expect(again.refused, answer).toBe(refused ? 'unrecognised_answer' : undefined);
         }
         // An older client answers without a promptId: the same.
         guard('s-consent-legacy');

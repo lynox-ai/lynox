@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { consentMeta, consentOptions, consentRefusal, decideConsent } from './consent-ask.js';
+import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
@@ -1025,7 +1025,9 @@ export class Session {
         }
         const outcome = decideConsent('guard', answer);
         if (outcome !== 'allow') {
-          const msg = consentRefusal(outcome, `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`);
+          // The run's result, read by the person, not by the model: no sentence for the model here
+          // (the reply route already tells the person an unrecognised answer allowed nothing).
+          const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }

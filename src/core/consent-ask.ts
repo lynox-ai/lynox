@@ -7,9 +7,9 @@ import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
  *
  * The options are the kind's fixed keys (`src/contract/prompt.ts`), the question is marked
  * with the kind, and the answer counts only as exactly one of those keys. Nothing that reads
- * words decides here: a label, another language's word, text typed into the chat or an older
- * client's `y` approves nothing — and is told apart from a plain "no", so the person learns
- * their answer was not recognised.
+ * words decides here: a label, another language's word or an older client's `y` approves
+ * nothing, and neither does typed text unless it is exactly a key — and such an answer is told
+ * apart from a plain "no", so the person learns their answer was not recognised.
  */
 
 /** The options to offer: the kind's keys, and nothing to type in. */
@@ -44,5 +44,7 @@ export const CONSENT_UNRECOGNISED_SENTENCE = 'The answer was not one of the offe
  * decided ("— user declined.") still reads as one, and one they did not does not.
  */
 export function consentRefusal(outcome: ConsentOutcome, refusal: string): string {
-  return outcome === 'unrecognised' ? `${refusal} ${CONSENT_UNRECOGNISED_SENTENCE}` : refusal;
+  if (outcome !== 'unrecognised') return refusal;
+  const ended = /[.!?]$/.test(refusal.trimEnd()) ? refusal.trimEnd() : `${refusal.trimEnd()}.`;
+  return `${ended} ${CONSENT_UNRECOGNISED_SENTENCE}`;
 }

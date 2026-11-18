@@ -3286,8 +3286,37 @@ describe('httpRequestTool', () => {
       const [r1, r2] = await results;
       expect(r1).toContain('denied by user');
       expect(r2).toContain('denied by user');
+      expect(r1).not.toContain('The answer was not one of the offered choices');
       expect(promptUser).toHaveBeenCalledTimes(1);
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('an answer that is no key refuses every caller sharing the question, and each one says why', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(createMockResponse({ json: { ok: true } })));
+      vi.stubGlobal('fetch', fetchMock);
+      let resolvePrompt: (ans: string) => void = () => {};
+      const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>(() =>
+        new Promise<string>((res) => { resolvePrompt = res; }),
+      );
+      const batch = {};
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }), principal: OWNER_PRINCIPAL, approvalBatch: () => batch } as never;
+      const url = `https://api-parallel-unrecognised-${Date.now()}.example.com/v1/x`;
+      const pair = (): CallSlot => ({ abort: new AbortController(), twins: 2 });
+      const results = [
+        runInCallSlot(pair(), () => handler({ url, method: 'POST', body: '{"a":1}' }, agent)),
+        runInCallSlot(pair(), () => handler({ url, method: 'POST', body: '{"a":1}' }, agent)),
+      ];
+      await new Promise((r) => setTimeout(r, 5));
+      resolvePrompt('yes');
+      const outs = (await Promise.allSettled(results)).map((r) => (r.status === 'fulfilled' ? String(r.value) : String((r.reason as { agentVisibleResult?: string }).agentVisibleResult ?? (r.reason as Error).message)));
+      expect(outs).toHaveLength(2);
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+      for (const out of outs) {
+        expect(out).toContain('denied by user.');
+        expect(out).toContain('The answer was not one of the offered choices');
+      }
     });
 
     it('re-prompts after a denial (no stale approval in the pending map)', async () => {

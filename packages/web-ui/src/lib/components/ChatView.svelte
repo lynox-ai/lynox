@@ -1297,7 +1297,7 @@
 		// and pushing the chat off-screen. Users only need the last answer
 		// to reconsider via the "edit" button below.
 		answeredPrompts = [{ question: pendingPermission.question, answer: display ?? answer }];
-		// Permission-guard answers ('y'/'n') hand off to a tool that takes
+		// Answers to the engine's confirmations (its keys) hand off to a tool that takes
 		// seconds to run. The store clears `pendingPermission` synchronously
 		// inside replyPermission(), so without this we'd swap straight from
 		// the prompt card to the streaming spinner with no acknowledgment
