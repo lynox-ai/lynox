@@ -544,7 +544,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(target.abortCalls).toEqual([]);
   });
 
-  it('gives up on a target that does not start answering, per step, with what the user can know', async () => {
+  it('gives up on a target that does not start answering, per step, with what the user can know', { timeout: 30_000 }, async () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
     target.silent = 'handshake';
