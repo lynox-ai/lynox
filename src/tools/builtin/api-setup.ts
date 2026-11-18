@@ -34,6 +34,7 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv, singleLine } from '../../core/prompt-value.js';
+import type { PromptText } from '../../types/agent.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
@@ -1854,6 +1855,113 @@ function consentOf(agent: IAgent, profile: ApiProfile): Pick<OAuthGrantRecord, '
   return p.mandateId === undefined ? { connected_by: principalTag(p) } : { connected_by: principalTag(p), connected_mandate_id: p.mandateId };
 }
 
+// Split as the engine sends it: on whitespace only. A comma is part of a scope, so "read,write" is
+// one scope and "read write" two.
+const scopeTokens = (scope: string | undefined): string[] =>
+  (scope ?? '').split(/\s+/).filter((s) => s !== '');
+
+/**
+ * A profile value as the save question shows it: on one line, so a value cannot draw a list line
+ * of its own, and withheld where it has the shape of a credential. Tool input passes through the
+ * secret resolver before the handler, so a field written as a vault reference holds the value.
+ */
+const shownValue = (value: string): string => {
+  const line = singleLine(value);
+  return maskSecretPatterns(line, { includeGeneric: true }) === line ? line : '(a value shaped like a credential, not shown)';
+};
+
+/** An address as the save question shows it: its origin stays visible when the rest is withheld. */
+const shownUrl = (value: string): string => {
+  const shown = shownValue(value);
+  if (shown === singleLine(value)) return shown;
+  try { return `${new URL(value).origin} (the rest is shaped like a credential, not shown)`; } catch { return shown; }
+};
+
+export const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
+
+/**
+ * Which secret name each place of a profile reads, by place rather than as a set: a name moved to
+ * another place, or `vault_keys` put in another order, sends another credential. For basic auth the
+ * pair actually sent is a place of its own, because each half falls back to `vault_keys` (http.ts).
+ * Keyed by the label the question shows: `vault_keys` reads as "secret read", counted from the
+ * first when the profile reads several.
+ */
+const secretPlacesOf = (p: ApiProfile, several: boolean): Map<string, string> => {
+  const places = new Map<string, string>();
+  const put = (label: string, name: string | undefined): void => { if (typeof name === 'string' && name !== '') places.set(label, name); };
+  const a = p.auth;
+  (a?.vault_keys ?? []).forEach((name, i) => { put(several ? `secret read (${ordinal(i + 1)})` : 'secret read', name); });
+  put('secret read for the user name (username_key)', a?.username_key);
+  put('secret read for the password (password_key)', a?.password_key);
+  if (a?.type === 'basic') {
+    put('secret read for the user name sent (basic auth)', a.username_key ?? a.vault_keys?.[0]);
+    put('secret read for the password sent (basic auth)', a.password_key ?? a.vault_keys?.[1]);
+  }
+  put('secret read for the OAuth client id (oauth.client_id_key)', a?.oauth?.client_id_key);
+  put('secret read for the OAuth client secret (oauth.client_secret_key)', a?.oauth?.client_secret_key);
+  put('secret read for the OAuth refresh token (oauth.refresh_token_key)', a?.oauth?.refresh_token_key);
+  return places;
+};
+
+/**
+ * What a save changes against the stored profile, in the fields that decide where a credential
+ * goes, how it travels and what it may do. One line each, with the values as values, in the order
+ * of what matters most to someone who reads only the first lines: where the secret goes and which
+ * one is read, then what it may do (grant, audience, scopes, the provider's parameters). Empty for
+ * a new profile or a save that changes none of these.
+ * `widens` is false only for a line that takes something away without anything taking its place:
+ * a scope removed while others remain (with none left, a provider may grant its default), or a
+ * place that no longer reads a secret. That narrows what the profile may do.
+ */
+export interface SecurityChange { readonly text: PromptText; readonly widens: boolean }
+
+export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile): SecurityChange[] {
+  if (prior === undefined) return [];
+  const out: SecurityChange[] = [];
+  const add = (text: PromptText, widens = true): void => { out.push({ text, widens }); };
+  const field = (label: string, a: string | undefined, b: string | undefined, show: (v: string) => string = shownValue): void => {
+    if ((a ?? '') !== (b ?? '')) add(pv`${label}: ${a === undefined ? '(none)' : show(a)} → ${b === undefined ? '(none)' : show(b)}`);
+  };
+  // Where the secret goes, how it travels, and which one is read.
+  field('address (base_url)', prior.base_url, next.base_url, shownUrl);
+  field('token address (token_url)', prior.auth?.oauth?.token_url, next.auth?.oauth?.token_url, shownUrl);
+  field('how the secret is attached (auth.type)', prior.auth?.type, next.auth?.type);
+  field('header it is sent in (auth.header_name)', prior.auth?.header_name, next.auth?.header_name);
+  field('query parameter it is sent in (auth.query_param)', prior.auth?.query_param, next.auth?.query_param);
+  field('basic auth form (auth.basic_format)', prior.auth?.basic_format, next.auth?.basic_format);
+  field('token request body (auth.oauth.body_format)', prior.auth?.oauth?.body_format, next.auth?.oauth?.body_format);
+  const several = Math.max(prior.auth?.vault_keys?.length ?? 0, next.auth?.vault_keys?.length ?? 0) > 1;
+  const [sWas, sNow] = [secretPlacesOf(prior, several), secretPlacesOf(next, several)];
+  for (const label of [...new Set([...sWas.keys(), ...sNow.keys()])]) {
+    const [a, b] = [sWas.get(label), sNow.get(label)];
+    if (a === b) continue;
+    add(pv`${label}: ${a === undefined ? '(none)' : shownValue(a)} → ${b === undefined ? '(none)' : shownValue(b)}`, b !== undefined);
+  }
+  // What it may do.
+  field('grant type', prior.auth?.oauth?.grant_type, next.auth?.oauth?.grant_type);
+  field('audience', prior.auth?.oauth?.audience, next.auth?.oauth?.audience);
+  const was = new Set(scopeTokens(prior.auth?.oauth?.scope));
+  const now = new Set(scopeTokens(next.auth?.oauth?.scope));
+  const added = [...now].filter((s) => !was.has(s));
+  const removed = [...was].filter((s) => !now.has(s));
+  if (added.length > 0) add(pv`scopes added: ${shownValue(added.join(' '))}`);
+  if (removed.length > 0) {
+    add(now.size === 0
+      ? pv`scopes removed: ${shownValue(removed.join(' '))} (none left: the provider decides which it grants)`
+      : pv`scopes removed: ${shownValue(removed.join(' '))}`, now.size === 0);
+  }
+  const pp = (p: ApiProfile): Record<string, unknown> =>
+    isPlainRecord(p.auth?.oauth?.preset_params) ? p.auth!.oauth!.preset_params as Record<string, unknown> : {};
+  const [ppWas, ppNow] = [pp(prior), pp(next)];
+  for (const key of [...new Set([...Object.keys(ppWas), ...Object.keys(ppNow)])].sort()) {
+    const [a, b] = [ppWas[key], ppNow[key]];
+    if (JSON.stringify(a) !== JSON.stringify(b)) {
+      add(pv`provider parameter ${shownValue(key)}: ${a === undefined ? '(none)' : shownValue(String(a))} → ${b === undefined ? '(none)' : shownValue(String(b))}`);
+    }
+  }
+  return out;
+}
+
 /**
  * A mandate's turn changes only a profile the mandate wrote (PRD customer-granted-operator-
  * access §3.13, H2). Every rule that reads a profile — the preset write refusal, the vetted
@@ -2357,6 +2465,16 @@ ${draftJson}
       // prompted") that could never be followed — the prompt was unreachable and the
       // else-branch below deleted any ack that did exist.
       const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
+      // What this save changes in the fields that decide where a credential goes and what it may
+      // do. Any such change is asked about, on any host and for any kind of profile, and named in
+      // the question: a consent to "save this profile" is not a consent to the scope a text in a
+      // tool result asked the model to add. A refresh sends the stored scope and audience, and a
+      // swap to a name already bound to the same address sends another credential there, so
+      // neither the host check nor the binding question covers them.
+      const changes = securityChanges(prior, profile);
+      // Only a change that widens or moves something asks on its own; a save that only takes a
+      // scope or a secret away narrows the profile. Every change is still listed when it asks.
+      const widens = changes.some((c) => c.widens);
       // Two questions, one prompt, and the redirect half is asked even when the
       // host IS vetted. That is not thoroughness: it is what keeps the refusal
       // at connect time followable. If this only ran for non-vetted hosts, a
@@ -2364,7 +2482,7 @@ ${draftJson}
       // would refuse for want of an acceptance, and its advice — save again and
       // accept — would point at a prompt that never appears. That dead end is
       // the one this file already carries a scar from.
-      if (nonVetted.length > 0 || redirectUrls.length > 0) {
+      if (nonVetted.length > 0 || redirectUrls.length > 0 || widens) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -2416,9 +2534,16 @@ ${draftJson}
           if (nonVetted.length > 0) {
             return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
           }
+          // A change to where a credential goes or what it may do, with nobody to accept it: refused.
+          if (widens) {
+            return `Blocked: profile "${profile.id}" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, and that they can save it again by asking lynox in a chat where they can answer. Do not try to save it in another way.`;
+          }
         } else {
+          const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c.text}` : pv`${acc}\n- ${c.text}`, undefined);
+          const changeBlock = changeList === undefined ? pv`` : pv`This save changes:${changeList}\n\n`;
+          const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
           const answer = await agent.promptUser(
-            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this profile?`,
             ['Allow', 'Deny', '\x00'],
           );
           if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
