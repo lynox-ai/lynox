@@ -548,7 +548,7 @@
 
 <!-- A field's name (U-333): the host's readable name where lynox has one, as its own word; else the
      name the planner set, in a value box, so it does not read as a word of lynox's. -->
-{#snippet fieldName(field: string)}{@const key = bulkFieldLabelKey(host, field)}{#if key !== null}{t(key)}{:else}<span class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono" data-testid="bulk-field-own-name">{bulkVisibleText(field)}</span>{/if}{/snippet}
+{#snippet fieldName(field: string)}{@const key = bulkFieldLabelKey(host, field)}{#if key !== null}{t(key)}{:else}<span class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono text-text" data-testid="bulk-field-own-name">{bulkVisibleText(field)}</span>{/if}{/snippet}
 
 <!-- A target's new value with a mark behind each hidden character it adds where text may carry
      one: the word in the text, the kind and code point only in the label. -->
