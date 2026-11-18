@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { SecretStore } from './secret-store.js';
 import {
-  bodyFieldNames, bodyForQuestion, bodyMayWriteGraphql, urlMayWriteGraphql, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
+  GATE_READ_MAX_BYTES, URL_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, pathReadable, pathHoldsSecret, queryForQuestion, urlQueryStrings, bodyFieldNames, bodyForQuestion, bodyMayWriteGraphql, urlMayWriteGraphql, sentBytes, carriesInlineBinary, effectiveWriteMethod, overrideUnreadInPath, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
   readAddressWrites,
 } from './outbound-write.js';
 
@@ -264,6 +264,61 @@ describe('a body the gate cannot read is gated as a DELETE', () => {
     ['utf8, without the hyphen', 'application/json; charset=utf8', 'POST'],
   ] as const)('charset %s', (_k, contentType, want) => {
     expect(effectiveWriteMethod('POST', { 'Content-Type': contentType }, U, '{"a":1}')).toBe(want);
+  });
+});
+
+// Every reading of the body costs time in its size, and the gate reads it about
+// ten times per call. Past the bound it is not read at all, and counts as unreadable.
+describe('a body larger than the gate reads', () => {
+  const MULTIPART = { 'content-type': 'multipart/form-data; boundary=b' };
+  /** The form that costs the gate most to read (a part header with many `; `), `bytes` long. */
+  const slowMultipart = (bytes: number): string => {
+    const head = 'content-disposition: form-data';
+    const tail = 'name="note"\r\n\r\nhello';
+    const filler = '; '.repeat(Math.floor((bytes - head.length - tail.length) / 2));
+    const body = head + filler + tail;
+    return body + 'x'.repeat(bytes - body.length);
+  };
+  /** A JSON body `bytes` long whose `_method` is not a method: read, the request is refused (null). */
+  const notAMethod = (bytes: number, pad = 'x'): string => {
+    const open = '{"_method":"NOPE","pad":"';
+    const close = '"}';
+    const n = Math.floor((bytes - open.length - close.length) / new TextEncoder().encode(pad).byteLength);
+    const body = open + pad.repeat(n) + close;
+    return body + ' '.repeat(bytes - new TextEncoder().encode(body).byteLength);
+  };
+
+  it('reads a body of exactly the bound as before', () => {
+    const body = slowMultipart(GATE_READ_MAX_BYTES);
+    expect(new TextEncoder().encode(body).byteLength).toBe(GATE_READ_MAX_BYTES);
+    expect(effectiveWriteMethod('POST', MULTIPART, U, body)).toBe('POST');
+    expect(writeMethodsNamed('POST', MULTIPART, U, body)).toEqual(['POST']);
+  });
+
+  it('gates a body one byte over the bound as a DELETE', () => {
+    const body = slowMultipart(GATE_READ_MAX_BYTES + 1);
+    expect(effectiveWriteMethod('POST', MULTIPART, U, body)).toBe('DELETE');
+    expect(writeMethodsNamed('POST', MULTIPART, U, body)).toEqual(['DELETE', 'POST']);
+  });
+
+  it('does not read a body over the bound at all', () => {
+    // Read, the `_method` that is no method refuses the request; past the bound nothing reads it.
+    const at = notAMethod(GATE_READ_MAX_BYTES);
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, at)).toBeNull();
+    const over = notAMethod(GATE_READ_MAX_BYTES + 1);
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, over)).toBe('DELETE');
+  });
+
+  it('counts the bytes sent, not the characters', () => {
+    // Fewer characters than the bound, more bytes once encoded as UTF-8.
+    const body = notAMethod(GATE_READ_MAX_BYTES + 2, 'ü');
+    expect(body.length).toBeLessThan(GATE_READ_MAX_BYTES);
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, body)).toBe('DELETE');
+  });
+
+  it('bounds each reading of a repaired body on its own', () => {
+    const small = '{"a":1}';
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, [small, notAMethod(GATE_READ_MAX_BYTES + 1)])).toBe('DELETE');
   });
 });
 
@@ -864,14 +919,15 @@ describe('bodyMayWriteGraphql — a body a GraphQL server on any path may run as
   });
 
   it('reads in linear time: a long run of blanks after the word, and the word many times', () => {
+    // Each body just under the bound past which it is not read (`GATE_READ_MAX_BYTES`).
     const started = Date.now();
     expect(bodyMayWriteGraphql(JSON.stringify({ query: `mutation${' '.repeat(200_000)}x` }), JSON_CT)).toBe(false);
-    expect(bodyMayWriteGraphql(JSON.stringify({ query: 'mutation '.repeat(50_000) }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: 'mutation '.repeat(29_000) }), JSON_CT)).toBe(false);
     expect(bodyMayWriteGraphql(JSON.stringify({ query: `mutation #${'#'.repeat(100_000)}` }), JSON_CT)).toBe(false);
     expect(bodyMayWriteGraphql(`mutation${' ,'.repeat(100_000)}`, {})).toBe(false);
     // A comment with no line break after it, at each of many words.
-    expect(bodyMayWriteGraphql(JSON.stringify({ query: 'mutation#'.repeat(50_000) }), JSON_CT)).toBe(false);
-    expect(bodyMayWriteGraphql('mutation#'.repeat(50_000), {})).toBe(false);
+    expect(bodyMayWriteGraphql(JSON.stringify({ query: 'mutation#'.repeat(29_000) }), JSON_CT)).toBe(false);
+    expect(bodyMayWriteGraphql('mutation#'.repeat(29_000), {})).toBe(false);
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
@@ -961,6 +1017,125 @@ describe('a short secret through the store\'s own mask', () => {
       expect(bodyForQuestion(JSON.stringify({ a: enc(pin) }), mask)).toEqual({ unshowable: 'escaped-secret' });
       expect(bodyForQuestion(JSON.stringify({ a: pin }), mask)).toEqual({ text: '{\n  "a": "***"\n}', escapedSecret: false });
     }
+  });
+});
+
+// The question reads a part (path, query, body) in every way a server may decode
+// it, and masks each reading. A part whose readings would cost more than the budget is not read on:
+// it counts as unreadable, the question does not show it, and a hidden secret is assumed.
+describe('a part too costly to read every way', () => {
+  const plain = (t: string): string => t;
+  /** Built to be slow: each piece has escapes of every kind a server reads, so its readings differ. */
+  const slowPiece = (i: number): string => `p%u0025${i % 90 + 10}%E9%80%2541%u0041`;
+  const slowPath = `https://h.example/${Array.from({ length: 1000 }, (_, i) => slowPiece(i)).join('/')}`;
+  const slowForm = Array.from({ length: 1000 }, (_, i) => `f${i}=v%u0025${i % 90 + 10}%E9%2541+y`).join('&');
+  /** A German product text sent as a form, 30 KB: many escapes, all of one kind. */
+  const de = 'Unser Produkt für die Küche: grösser, schöner, günstiger. Lieferung nach Zürich & Basel – inkl. Mwst. ';
+  const germanForm = Array.from({ length: 200 }, (_, i) => `f${i}=${encodeURIComponent(de).replace(/%20/g, '+')}`).join('&');
+
+  it('shows a German product form of 30 KB as before', () => {
+    const shown = bodyForQuestion(germanForm, plain, 'application/x-www-form-urlencoded');
+    expect('text' in shown && shown.text.includes('Küche')).toBe(true);
+    expect(queryForQuestion(`?${germanForm}`, plain).unreadable).toBe(false);
+    expect(bodyFieldNames(germanForm, plain)).toMatch(/^fields "f0"/);
+  });
+
+  it('does not show a body built to be slow, and counts it as unreadable', () => {
+    expect(bodyForQuestion(slowForm, plain, 'application/x-www-form-urlencoded')).toEqual({ unshowable: 'unreadable' });
+    // The names are read only for the first twelve fields: many slow fields cost them little.
+    expect(bodyFieldNames(slowForm, plain)).toMatch(/^fields "f0"/);
+    // Fields whose names are built to be slow are named by the body's size.
+    const slowName = [1, 2, 3].map((k) => `${Array.from({ length: 2400 }, (_, i) => slowPiece(i + k)).join('')}=1`).join('&');
+    expect(bodyFieldNames(slowName, plain)).toBe(`body of ${new TextEncoder().encode(slowName).byteLength} bytes`);
+  });
+
+  it('does not show a query built to be slow, and counts it as hiding a secret', () => {
+    expect(queryForQuestion(`?${slowForm}`, plain)).toEqual({ text: '', secret: true, escaped: true, unreadable: true });
+  });
+
+  it('does not show a path built to be slow, and counts it as holding a secret', () => {
+    expect(pathReadable(slowPath, plain)).toBe(false);
+    expect(pathForQuestion(slowPath, plain)).toBe('(not shown: too many encoded characters to check for a stored secret)');
+    expect(pathHoldsSecret(slowPath, plain)).toBe(true);
+    // A short path with the same escapes is read as before.
+    const short = `https://h.example/${slowPiece(1)}`;
+    expect(pathReadable(short, plain)).toBe(true);
+    expect(pathHoldsSecret(short, plain)).toBe(false);
+  });
+
+  it('counts a URL built to be slow as GraphQL with a query string in its URL-only checks', () => {
+    // An escape that does not decode makes the path's routing unknown, so it is read every way.
+    expect(isGraphqlEndpoint(`${slowPath}/%zz`)).toBe(true);
+    expect(isGraphqlEndpoint('https://h.example/a%zz/b')).toBe(false);
+    // Near the longest URL a request may have, one reading of the whole path is past the budget.
+    const longest = `https://h.example/${Array.from({ length: 2400 }, (_, i) => slowPiece(i)).join('/')}`;
+    expect(longest.length).toBeLessThanOrEqual(URL_MAX_BYTES);
+    expect(urlQueryStrings(longest)).toEqual(['', '(unread)']);
+    expect(graphqlUrlWrites(longest)).toBe(true);
+    expect(urlQueryStrings('https://h.example/a%2541')).toEqual(['']);
+    expect(graphqlUrlWrites(slowPath)).toBe(false);
+  });
+
+  it('refuses an override behind a path too costly to read for queries', () => {
+    const slowPrefix = `https://h.example/${Array.from({ length: 2400 }, (_, i) => slowPiece(i)).join('/')}`;
+    const hidden = `${slowPrefix}/x%3F_method=DELETE`;
+    expect(hidden.length).toBeLessThanOrEqual(URL_MAX_BYTES);
+    expect(urlQueryStrings(hidden)).toContain('(unread)');
+    // Neither a read nor a write passes as sent: the override cannot be ruled out.
+    expect(effectiveWriteMethod('GET', {}, hidden)).toBeNull();
+    expect(effectiveWriteMethod('POST', {}, hidden)).toBeNull();
+    expect(writeMethodsNamed('POST', {}, hidden)).toEqual(['POST']);
+    // The reason is named on its own, and only for a method that is one: any other value keeps
+    // the text that does not repeat it.
+    expect(overrideUnreadInPath('GET', hidden)).toBe(true);
+    expect(overrideUnreadInPath('nope', hidden)).toBe(false);
+    expect(overrideUnreadInPath('GET', 'https://h.example/x%3F_method=DELETE')).toBe(false);
+    // The same override behind a short path is read and gated as the DELETE it names.
+    expect(effectiveWriteMethod('POST', {}, 'https://h.example/x%3F_method=DELETE')).toBe('DELETE');
+    // A watch or feed address with such a path is read as a write too, so it is refused.
+    expect(readAddressWrites(hidden)).toBe(true);
+    expect(readAddressWrites('https://h.example/x%3Fpage=2')).toBe(false);
+    // Nor does a contract grant a write to such a URL: its query may name a GraphQL mutation.
+    expect(urlMayWriteGraphql(hidden)).toBe(true);
+    expect(urlMayWriteGraphql('https://h.example/x%3Fpage=2')).toBe(false);
+  });
+
+  it('counts a body over the bound as one a GraphQL server may run as a write, unread', () => {
+    const sized = (bytes: number): string => `{"a":"${'x'.repeat(bytes - 8)}"}`;
+    expect(sentBytes(sized(GATE_READ_MAX_BYTES))).toBe(GATE_READ_MAX_BYTES);
+    expect(bodyMayWriteGraphql(sized(GATE_READ_MAX_BYTES), { 'Content-Type': 'application/json' })).toBe(false);
+    expect(bodyMayWriteGraphql(sized(GATE_READ_MAX_BYTES + 1), { 'Content-Type': 'application/json' })).toBe(true);
+    // Counted in bytes: a body of fewer characters than the bound, past it in UTF-8.
+    const umlauts = `{"a":"${'ü'.repeat(GATE_READ_MAX_BYTES / 2)}"}`;
+    expect(umlauts.length).toBeLessThan(GATE_READ_MAX_BYTES);
+    expect(bodyMayWriteGraphql(umlauts, { 'Content-Type': 'application/json' })).toBe(true);
+  });
+
+  it('gives each part its own budget: a slow path leaves the body readable', () => {
+    expect(pathReadable(slowPath, plain)).toBe(false);
+    expect('text' in bodyForQuestion('{"a":"b"}', plain, 'application/json')).toBe(true);
+  });
+});
+
+// A header name longer than a line is shown is refused before it is read.
+describe('a header name longer than the question shows', () => {
+  it('is refused unread and not named', () => {
+    const name = `x-${'%u0041'.repeat(40)}`;
+    expect(name.length).toBeGreaterThan(SHOWN_HEADER_MAX_CHARS);
+    expect(headersForQuestion({ [name]: 'v' }, (t) => t, () => 'show')).toEqual({ unshowable: { reason: 'name-too-long', length: name.length } });
+    const atBound = `x-${'a'.repeat(SHOWN_HEADER_MAX_CHARS - 2)}`;
+    expect(headersForQuestion({ [atBound]: 'v' }, (t) => t, () => 'show')).toEqual({ unshowable: { reason: 'too-long', name: atBound, length: atBound.length + 3 } });
+  });
+});
+
+// The gate reads one call's body about ten times; the reading is kept by a digest of body and headers.
+describe('the body read once per body and headers', () => {
+  it('reads the same body under other headers anew', () => {
+    // The same body, first sent compressed (unreadable), then plain: each read on its own.
+    const body = '{"a":886}';
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json', 'content-encoding': 'gzip' }, U, body)).toBe('DELETE');
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, body)).toBe('POST');
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json', 'content-encoding': 'gzip' }, U, body)).toBe('DELETE');
   });
 });
 
