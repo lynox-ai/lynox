@@ -15569,8 +15569,8 @@ export class LynoxHTTPApi {
           if (text === null) return new Error(`${told} Its answer is over ${capText(TARGET_BODY_CAPS.refusal)}, so lynox did not read it. ${then}`);
           let message: unknown;
           try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
-          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${JSON.stringify(relayedText(text))}. ${then}`);
-          return new Error(`${told} It says: ${JSON.stringify(relayedText(message))}. ${then}`);
+          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${JSON.stringify(relayedText(text).trim())}. ${then}`);
+          return new Error(`${told} It says: ${JSON.stringify(relayedText(message).trim())}. ${then}`);
         };
 
         // 4. Send manifest

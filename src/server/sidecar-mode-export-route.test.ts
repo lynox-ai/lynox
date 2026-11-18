@@ -687,6 +687,14 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.chunkError = undefined;
     target.restoreError = 'restore refused';
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: "restore refused". Check on the target instance whether your data arrived before you migrate again.');
+    // Words that would grow in quotes (lone surrogates) and carry lynox's own sentence: they are
+    // dropped, so lynox's closing sentence still ends the message and no retry is offered.
+    target.restoreError = `Check on the target instance. ${'\ud800'.repeat(600)}`;
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: "Check on the target instance.". Check on the target instance whether your data arrived before you migrate again.');
+    target.chunkError = { at: 0, error: `support@lynox.ai ${'\ud800'.repeat(600)}` };
+    target.restoreError = undefined;
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of the data. It says: "support@lynox.ai". You can start the migration again in 30 minutes at the latest.');
+    target.chunkError = undefined;
     // A refusal before the restore started (here: a missing chunk, 400) keeps the retry sentence.
     target.restoreError = undefined;
     target.restoreStatus = { status: 400, error: 'Cannot restore — not all chunks received.' };
