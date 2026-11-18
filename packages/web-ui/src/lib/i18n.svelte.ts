@@ -2995,6 +2995,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'migration.back': { de: 'Zurück', en: 'Back' },
 	'migration.next': { de: 'Weiter', en: 'Next' },
 	'migration.retry': { de: 'Erneut versuchen', en: 'Try Again' },
+	'migration.error_not_started': { de: 'Diese Instanz hat die Migration nicht gestartet. Es wurde nichts übertragen.', en: 'This instance did not start the migration. Nothing was transferred.' },
+	'migration.error_reason': { de: 'Angegebener Grund: {reason}', en: 'Reason given: {reason}' },
 	'migration.error_title': { de: 'Die Migration wurde nicht abgeschlossen.', en: 'The migration did not finish.' },
 	'migration.retry_from': { de: 'Ein neuer Versuch ist ab {time} möglich.', en: 'You can try again from {time}.' },
 	'migration.check_target_first': { de: 'Prüfe zuerst auf der Zielinstanz, ob deine Daten angekommen sind. Starte erst danach eine neue Migration.', en: 'First check on the target instance whether your data arrived. Only then start a new migration.' },

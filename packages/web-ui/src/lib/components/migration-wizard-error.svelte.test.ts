@@ -25,6 +25,8 @@ const SENTENCE = 'The target instance could not restore the data. It says: "Cann
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let events: string;
+/** When set, how the export route answers instead of the event stream. */
+let exportAnswer: (() => Response) | null;
 
 beforeEach(() => {
 	reset();
@@ -33,8 +35,10 @@ beforeEach(() => {
 	document.body.appendChild(target);
 	_resetManagedStatus();
 	events = '';
+	exportAnswer = null;
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
+		if (u.endsWith('/migration/export') && exportAnswer) return exportAnswer();
 		if (u.endsWith('/migration/export')) return new Response(events, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		const body = u.endsWith('/config') ? { billing_tier_set: false } : { secrets: 1, databases: ['engine.db'], artifacts: 0, hasConfig: true };
 		return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -159,5 +163,59 @@ describe('the migration wizard after an error', () => {
 		expect(target.textContent).not.toContain('Restoring data on target...');
 		release?.();
 		await running;
+	});
+});
+
+describe('the migration wizard when this instance does not start the migration', () => {
+	async function refusedWith(answer: () => Response): Promise<void> {
+		exportAnswer = answer;
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(getStep()).toBe('error');
+	}
+
+	for (const lang of ['de', 'en'] as const) {
+		it(`says so in its own words and shows the reason given beside it, not as the engine's (${lang})`, async () => {
+			const before = getLocale();
+			setLocale(lang);
+			try {
+				await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+				expect(text('migration-error-detail')).toBe(t('migration.error_not_started'));
+				expect(q('migration-error-detail')?.getAttribute('lang')).toBeNull();
+				expect(text('migration-error-reason')).toBe(tf('migration.error_reason', { reason: 'targetUrl must resolve to a public host' }));
+				expect(q('migration-error-reason')?.getAttribute('lang')).toBeNull();
+				expect(getRetry()).toBe('now');
+			} finally {
+				setLocale(before);
+			}
+		});
+	}
+
+	it('shows no reason for an answer that is not the instance\'s JSON, such as a proxy\'s error page', async () => {
+		await refusedWith(() => new Response('<html><body><h1>502 Bad Gateway</h1></body></html>', { status: 502, headers: { 'Content-Type': 'text/html' } }));
+		expect(text('migration-error-detail')).toBe(t('migration.error_not_started'));
+		expect(q('migration-error-reason')).toBeNull();
+		expect(target.textContent).not.toContain('Bad Gateway');
+	});
+
+	it('shows the reason on one line, without control or bidi characters, and cut', async () => {
+		await refusedWith(() => new Response(JSON.stringify({ error: `bad\n\u202Eline\u0007 ${'x'.repeat(400)}` }), { status: 400 }));
+		const reason = text('migration-error-reason') ?? '';
+		expect(reason).not.toMatch(/[\n\u202E\u0007]/);
+		expect(reason.startsWith(tf('migration.error_reason', { reason: 'bad line x' }))).toBe(true);
+		expect(reason.endsWith('…')).toBe(true);
+		expect([...reason].length).toBe([...tf('migration.error_reason', { reason: '' })].length + 200);
+	});
+
+	it('clears the reason once the user starts over', async () => {
+		await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host' }), { status: 400 }));
+		expect(q('migration-error-reason')).not.toBeNull();
+		reset();
+		await settle();
+		expect(q('migration-error-reason')).toBeNull();
 	});
 });

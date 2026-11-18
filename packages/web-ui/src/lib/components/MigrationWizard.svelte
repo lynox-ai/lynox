@@ -20,6 +20,7 @@
 		getErrorAt,
 		getErrorStep,
 		getErrorFromEngine,
+		getErrorReason,
 		MIGRATION_HOLD_MS,
 	} from '../stores/migration.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
@@ -40,6 +41,7 @@
 	const targetUrl = $derived(getTargetUrl());
 	const retry = $derived(getRetry());
 	const errorFromEngine = $derived(getErrorFromEngine());
+	const errorReason = $derived(getErrorReason());
 	// With `later` the target may hold its session for 30 minutes from the error; the retry opens then,
 	// without a reload.
 	const retryFrom = $derived(getErrorAt() + MIGRATION_HOLD_MS);
@@ -346,6 +348,10 @@
 				<p data-testid="migration-error-title" class="text-sm font-medium text-danger">{t('migration.error_title')}</p>
 				<!-- The engine's sentence (with the target's own words) is English: marked so for a screen reader. -->
 				<p data-testid="migration-error-detail" class="break-words text-xs text-text-muted" lang={errorFromEngine ? 'en' : undefined}>{error}</p>
+				{#if errorReason}
+					<!-- Whatever answered the start request said this; not marked as the engine's sentence. -->
+					<p data-testid="migration-error-reason" class="break-words text-xs text-text-muted">{tf('migration.error_reason', { reason: errorReason })}</p>
+				{/if}
 				{#if retry === 'check'}
 					<p data-testid="migration-check-target" class="text-xs text-warning">{t('migration.check_target_first')}</p>
 				{:else if held}

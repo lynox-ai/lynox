@@ -55,6 +55,8 @@ const target: {
   otherCurve?: boolean;
   /** Fail the restore request with the network guard's own refusal. */
   guardBlocksRestore?: boolean;
+  /** The network guard refuses this request before it goes out, naming the address the name resolved to. */
+  guardBlocks?: 'handshake' | 'completion' | 'manifest' | 'chunk' | undefined;
   /** The text of that refusal, when not the default one. */
   guardText?: string | undefined;
   /** Answer this step with a body of `bytes` bytes: the handshake, its refusal, or the restore's report. */
@@ -126,6 +128,7 @@ vi.mock('../core/network-guard.js', async (original) => {
         const foreign = generateKeyPairSync('ec', { namedCurve: 'secp256k1' }).publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
         return json({ ...p, serverPubKey: foreign, signature: signHandshake(foreign, deriveSigningKey(TOKEN)) });
       }
+      if (target.guardBlocks !== undefined && target.guardBlocks === step) throw new Error('Blocked: "target.example" resolves to private IP "10.0.0.5"');
       if (target.guardBlocksRestore && step === 'restore') throw new Error(target.guardText ?? 'Blocked: the redirect points to a private address');
       if (target.badSignature && step === 'handshake') {
         const p = target.importer!.startHandshake(TOKEN);
@@ -282,6 +285,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.badSignature = false;
     target.otherCurve = false;
     target.guardBlocksRestore = false;
+    target.guardBlocks = undefined;
     target.guardText = undefined;
     target.abort = undefined;
     target.abortCalls = [];
@@ -599,6 +603,19 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(await message()).toBe('lynox could not reach the target instance. lynox stopped before sending your data. You can start the migration again in 30 minutes at the latest.');
     target.unreachable = 'chunk';
     expect(await message()).toBe('lynox lost the connection to the target instance while sending part 1 of the data. lynox stopped; the target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
+  });
+
+  it('words a request the guard does not let out per step, never with the guard\'s own text', async () => {
+    setShellIsolationForTest(sidecar);
+    const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
+    target.guardBlocks = 'handshake';
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: lynox could not send its request to it. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    target.guardBlocks = 'completion';
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: lynox could not send its request to it. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    target.guardBlocks = 'manifest';
+    expect(await message()).toBe('lynox could not send its request to the target instance. lynox stopped before sending your data. You can start the migration again in 30 minutes at the latest.');
+    target.guardBlocks = 'chunk';
+    expect(await message()).toBe('lynox could not send part 1 of the data to the target instance. lynox stopped; the target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
   });
 
   it('treats a server key that does not parse, or is on another curve, as an answer in the wrong format', async () => {

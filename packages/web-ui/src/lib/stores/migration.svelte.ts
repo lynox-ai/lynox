@@ -73,6 +73,11 @@ let errorAt = $state(0);
 let errorStep = $state<MigrationStep>('preview');
 /** The error text is the engine's own sentence (English, with the target's words), not the UI's. */
 let errorFromEngine = $state(false);
+/**
+ * The reason this instance gave for not starting the migration, cleaned and cut. Shown next to the
+ * wizard's own sentence, not as the engine's: a proxy in front of it can answer in its place.
+ */
+let errorReason = $state('');
 let abortController: AbortController | null = null;
 
 // ── Getters ──
@@ -82,6 +87,7 @@ export function getRetry(): MigrationRetry { return retry; }
 export function getErrorAt(): number { return errorAt; }
 export function getErrorStep(): MigrationStep { return errorStep; }
 export function getErrorFromEngine(): boolean { return errorFromEngine; }
+export function getErrorReason(): string { return errorReason; }
 
 /** The longest a target holds an unfinished session (the engine's sentence says "30 minutes at the latest"). */
 export const MIGRATION_HOLD_MS = 30 * 60 * 1000;
@@ -90,6 +96,7 @@ function fail(message: string, from: { engine: boolean; retry?: MigrationRetry }
 	if (step !== 'error') errorStep = step;
 	error = message;
 	errorFromEngine = from.engine;
+	errorReason = '';
 	retry = from.retry ?? 'now';
 	errorAt = Date.now();
 	step = 'error';
@@ -172,13 +179,18 @@ export async function startMigration(): Promise<void> {
 		});
 
 		if (!res.ok) {
-			const detail = await res.text().catch(() => '');
-			throw new Error(detail || 'Migration request failed');
+			// Turned down before anything went out: the wizard's sentence, the answer's reason at most beside it.
+			fail(t('migration.error_not_started'), { engine: false });
+			errorReason = await refusalReason(res);
+			return;
 		}
 
 		// Read SSE stream
 		const reader = res.body?.getReader();
-		if (!reader) throw new Error('No response stream');
+		if (!reader) {
+			fail(t('migration.error_incomplete'), { engine: false });
+			return;
+		}
 
 		const decoder = new TextDecoder();
 		let buffer = '';
@@ -220,6 +232,23 @@ export async function startMigration(): Promise<void> {
 	}
 }
 
+/** Longest reason shown from a refused start. */
+const REASON_MAX = 200;
+
+/**
+ * The `error` of a JSON answer that refused the start, without control and bidi characters, on one
+ * line and cut at `REASON_MAX`; empty for any other body (a proxy's page, plain text).
+ */
+async function refusalReason(res: Response): Promise<string> {
+	let said: unknown;
+	try { said = (JSON.parse(await res.text()) as { error?: unknown }).error; } catch { return ''; }
+	if (typeof said !== 'string') return '';
+	// eslint-disable-next-line no-control-regex
+	const text = said.replace(/[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
+	const chars = [...text];
+	return chars.length > REASON_MAX ? `${chars.slice(0, REASON_MAX - 1).join('')}…` : text;
+}
+
 export function cancelMigration(): void {
 	abortController?.abort();
 	fail(t('migration.cancelled'), { engine: false });
@@ -234,6 +263,7 @@ export function reset(): void {
 	retry = 'now';
 	errorAt = 0;
 	errorFromEngine = false;
+	errorReason = '';
 	errorStep = 'preview';
 	progress = null;
 	verification = null;
