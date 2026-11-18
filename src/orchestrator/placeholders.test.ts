@@ -57,6 +57,10 @@ describe('placeholders — the same matches as the regexes it replaces', () => {
     }
   });
 
+  it('replaces in one pass: a replacement is never read again', () => {
+    expect(replacePlaceholders('{{a}} {{b}}', (_m, inner) => (inner === 'a' ? '{{b}}' : 'B'))).toBe('{{b}} B');
+  });
+
   it('replaces as String.replace with that regex does, passing the same match and inner text', () => {
     const mark = (match: string, inner: string): string => `<${match}|${inner}>`;
     for (const text of CASES) {
