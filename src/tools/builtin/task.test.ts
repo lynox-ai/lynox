@@ -59,6 +59,27 @@ describe('Task Tools', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  describe('task_create records who set it up', () => {
+    it('a turn the owner typed records the owner, on a schedule and on a to-do', async () => {
+      const agent = { ...makeAgent(), writeAuthor: 'owner' } as IAgent;
+      await taskCreateTool.handler({ title: 'Bericht', schedule: '0 9 * * 1', assignee: 'lynox' }, agent);
+      await taskCreateTool.handler({ title: 'Rückruf', assignee: 'anna' }, agent);
+      const rows = [engine, history].flatMap((d) => ['triggers', 'tasks'].flatMap((t) => {
+        try { return d.getDb().prepare(`SELECT title, created_by FROM ${t}`).all(); } catch { return []; }
+      })) as Array<{ title: string; created_by: string | null }>;
+      expect(rows.find((r) => r.title === 'Bericht')?.created_by).toBe('owner');
+      expect(rows.find((r) => r.title === 'Rückruf')?.created_by).toBe('owner');
+    });
+
+    it('a trigger\'s run under the owner\'s principal records nobody', async () => {
+      const agent = { ...makeAgent(), writeAuthor: 'trigger:t-1' } as IAgent;
+      await taskCreateTool.handler({ title: 'Folgebericht', schedule: '0 9 * * 1', assignee: 'lynox' }, agent);
+      const row = engine.getDb().prepare("SELECT created_by FROM triggers WHERE title = 'Folgebericht'").get() as { created_by: string | null } | undefined;
+      expect(row, 'positive control: the trigger exists').toBeDefined();
+      expect(row!.created_by).toBeNull();
+    });
+  });
+
   describe('task_create', () => {
     it('should create a task', async () => {
       const result = await taskCreateTool.handler({ title: 'New task' }, makeAgent());

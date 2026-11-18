@@ -5,7 +5,7 @@ import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
-import { isOwnerPrincipal, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
@@ -431,8 +431,12 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         parentTaskId: input.parent_task_id,
         // A mandate's turn writes under the mandate's name, so what it schedules waits for the
         // owner's stamp exactly as it does when created over HTTP (PRD customer-granted-operator-
-        // access §3.12, H2). The owner's turns leave it absent, as before.
-        ...(isOwnerPrincipal(agent.principal) ? {} : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
+        // access §3.12, H2). A turn the owner typed records the owner; any other turn under the
+        // owner's principal (a trigger's or a workflow's run) records nobody, which never reads as
+        // the owner's.
+        ...(isOwnerPrincipal(agent.principal)
+          ? (agent.writeAuthor === principalTag(OWNER_PRINCIPAL) ? { createdBy: principalTag(OWNER_PRINCIPAL) } : {})
+          : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
         ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
       };
       // Whose session reads the report: only the owner confirms a held-back row.
