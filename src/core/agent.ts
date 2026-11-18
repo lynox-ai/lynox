@@ -590,23 +590,23 @@ export class Agent implements IAgent {
    * only the targets the input named, a reply's default recipients come from the mail it answers.
    * Approving the card never makes them owner-known: an approved send is logged as not owner-named.
    */
-  private _filingTargetOrigin(filing: ApprovalFiling): { targetOrigin?: { foreign: string[]; origin: SendOrigin } } {
+  private _filingTargetOrigin(filing: ApprovalFiling): { targetOrigin?: { unnamed: string[]; origin: SendOrigin } } {
     const checked = currentCallTargetOrigin();
     const known = new Set(checked?.known ?? []);
     const addresses = [...filing.payload.to, ...filing.payload.cc, ...(filing.kind === 'mail_send' ? filing.payload.bcc : [])].map((a) => a.address);
-    const foreign: string[] = [];
+    const unnamed: string[] = [];
     for (const address of addresses) {
       const target = normalizeMailTarget(address);
-      if (target === null) { foreign.push(address); continue; }
+      if (target === null) { unnamed.push(address); continue; }
       if (known.has(target.value)) continue;
-      if (this._ownerKnownVerdict(target) !== 'known') foreign.push(target.value);
+      if (this._ownerKnownVerdict(target) !== 'known') unnamed.push(target.value);
     }
-    if (foreign.length === 0) return {};
+    if (unnamed.length === 0) return {};
     // A reply's own recipients come from the mail it answers; anything else from the run.
-    const origin: SendOrigin = filing.kind === 'mail_reply' && checked?.foreign === undefined
+    const origin: SendOrigin = filing.kind === 'mail_reply' && checked?.unnamed === undefined
       ? { kind: 'readMail', sender: filing.payload.original.from }
-      : checked?.foreign?.origin ?? this.originOfTargets();
-    return { targetOrigin: { foreign, origin } };
+      : checked?.unnamed?.origin ?? this.originOfTargets();
+    return { targetOrigin: { unnamed, origin } };
   }
 
   private _fileApproval(filing: ApprovalFiling): FilingOutcome {
@@ -5142,7 +5142,7 @@ export class Agent implements IAgent {
     const shown = targetsUnread && shownTargets.length === 0 ? '?' : shownTargets.join(', ');
     const noun: TargetNoun = foreign[0]?.target.kind === 'host' || (foreign.length === 0 && tc.name === 'http_request') ? 'host' : 'mail';
     const origin = this.originOfTargets();
-    const passed: CallTargetOrigin = { known, allKnown: false, foreign: { targets: shownTargets, origin } };
+    const passed: CallTargetOrigin = { known, allKnown: false, unnamed: { targets: shownTargets, origin } };
     if (filingCall) return { origin: passed };
 
     const refuse = async (text: string): Promise<{ refusal: BetaToolResultBlockParam }> => {

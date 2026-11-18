@@ -270,13 +270,13 @@ describe('the card\'s fields', () => {
   it('names where a recipient the owner did not name comes from, in both languages, and nothing without it', () => {
     const card = approvalCard(entry({ origin: {
       source: 'task', triggerId: 'trg-o', runId: 'run-o', rootRunId: 'run-o',
-      targetOrigin: { foreign: ['x@evil.example'], origin: { kind: 'triggerRun', name: 'Bericht', author: 'h@x.ch' } },
+      targetOrigin: { unnamed: ['x@evil.example'], origin: { kind: 'triggerRun', name: 'Bericht', author: 'h@x.ch' } },
     } }), owner);
     expect(card.targetOrigin).toEqual({
       de: 'Empfänger stammt aus dem Trigger "Bericht" von h@x.ch.',
       en: 'Recipient comes from the trigger "Bericht" set up by h@x.ch.',
     });
-    const unknown = approvalCard(entry({ origin: { source: 'task', triggerId: 'trg-o', runId: 'run-o', rootRunId: 'run-o', targetOrigin: { foreign: ['x@evil.example'], origin: { kind: 'unknown' } } } }), owner);
+    const unknown = approvalCard(entry({ origin: { source: 'task', triggerId: 'trg-o', runId: 'run-o', rootRunId: 'run-o', targetOrigin: { unnamed: ['x@evil.example'], origin: { kind: 'unknown' } } } }), owner);
     expect(unknown.targetOrigin).toEqual({ de: 'Woher der Empfänger stammt, kann lynox nicht feststellen.', en: 'lynox cannot tell where the recipient comes from.' });
     expect(approvalCard(entry(), owner).targetOrigin).toBeNull();
   });

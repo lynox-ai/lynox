@@ -2315,7 +2315,7 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
 
   it('a mail sent after a yes to the origin question is not logged as owner-named; one with every recipient named is', async () => {
     const send = createMailSendTool(registry, ctx);
-    await runInCallSlot(slotWith({ known: [], allKnown: false, foreign: { targets: ['bob@example.com'], origin: { kind: 'unknown' } } }), () =>
+    await runInCallSlot(slotWith({ known: [], allKnown: false, unnamed: { targets: ['bob@example.com'], origin: { kind: 'unknown' } } }), () =>
       send.handler({ to: 'bob@example.com', subject: 's', body: 'b' }, yesAgent));
     expect(stateDb.isOwnerKnownRecipient('bob@example.com')).toBe(false);
     await runInCallSlot(slotWith({ known: ['carl@example.com'], allKnown: true }), () =>

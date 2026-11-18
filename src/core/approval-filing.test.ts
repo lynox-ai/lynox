@@ -173,7 +173,7 @@ describe('the danger check lets a queueable call of a filing run through, marked
     // The recipient is one the owner did not name (this agent knows none): the card says so.
     expect(store.get(id)!.origin).toEqual({
       source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'root-9', threadId: 'th-1', afterUntrusted: false,
-      targetOrigin: { foreign: ['bob@example.com'], origin: { kind: 'unknown' } },
+      targetOrigin: { unnamed: ['bob@example.com'], origin: { kind: 'unknown' } },
     });
   });
 

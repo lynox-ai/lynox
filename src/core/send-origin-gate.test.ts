@@ -101,7 +101,7 @@ describe('in the owner\'s chat', () => {
     expect(ask.asked).toHaveLength(2);
     expect(tool.calls.map((c) => c.ownerKnownAll)).toEqual([false, false]);
     expect(tool.calls[0]!.origin?.allKnown).toBe(false);
-    expect(tool.calls[0]!.origin?.foreign?.targets).toEqual(['x@evil.example']);
+    expect(tool.calls[0]!.origin?.unnamed?.targets).toEqual(['x@evil.example']);
   });
 
   it('one foreign target among known ones asks, and names only the foreign one', async () => {
@@ -281,7 +281,7 @@ describe('a call filed for its owner\'s approval goes on, with where its target 
       vi.unstubAllEnvs();
     }
     expect(tool.calls).toHaveLength(1);
-    expect(tool.calls[0]!.origin).toEqual({ known: [], allKnown: false, foreign: { targets: ['x@evil.example'], origin } });
+    expect(tool.calls[0]!.origin).toEqual({ known: [], allKnown: false, unnamed: { targets: ['x@evil.example'], origin } });
   });
 });
 

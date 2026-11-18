@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -159,12 +159,59 @@ describe('DataStore: who wrote a row', () => {
       expect(crm.contactOrigin('anna@firma.ch')?.writtenBy).toBeNull();
     });
 
-    it('putRowVerbatim stamps the time it wrote with, too', () => {
+    it('putRowVerbatim stamps its write, too', () => {
       keyed();
       ds.putRowVerbatim('leads', { email: 'a@x' }, stamp('owner'));
       expect(ds.sourceOfRow('leads', 'email', 'a@x')?.writtenBy).toBe('owner');
       db().prepare('UPDATE ds_leads SET _updated_at = ? WHERE email = ?').run('2099-01-01T00:00:00.000Z', 'a@x');
       expect(ds.sourceOfRow('leads', 'email', 'a@x')?.writtenBy).toBeNull();
+    });
+
+    // Every UPDATE path, whatever it changes: the database clears the stamp of any UPDATE that does
+    // not write a new one, so a path that forgets the stamp cannot leave the last writer standing.
+    it.each([
+      ['a user column, without _updated_at', 'UPDATE ds_contacts SET name = \'Anna X\' WHERE email = ?'],
+      ['_updated_at alone', 'UPDATE ds_contacts SET _updated_at = \'2099-01-01T00:00:00.000Z\' WHERE email = ?'],
+      ['nothing but the stamp columns other than the stamp', 'UPDATE ds_contacts SET _written_by = \'owner\' WHERE email = ?'],
+    ])('an UPDATE that sets %s leaves no known writer', (_label, sql) => {
+      crm.upsertContact({ name: 'Anna', email: 'anna@firma.ch' }, stamp('owner'));
+      db().prepare(sql).run('anna@firma.ch');
+      expect(crm.contactOrigin('anna@firma.ch')?.writtenBy).toBeNull();
+    });
+
+    it('CONTROL: two stamped writes in a row keep their writer, even within one millisecond', () => {
+      vi.useFakeTimers({ now: new Date('2026-11-18T08:00:00.000Z'), toFake: ['Date'] });
+      try {
+        crm.upsertContact({ name: 'Anna', email: 'anna@firma.ch' }, stamp('owner'));
+        crm.upsertContact({ name: 'Anna B', email: 'anna@firma.ch' }, stamp('owner'));
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(crm.contactOrigin('anna@firma.ch')?.writtenBy).toBe('owner');
+    });
+
+    it('a subject repoint and its rollback leave no known writer on the rows they move', () => {
+      ds.createCollection({ name: 'deals', scope: SCOPE, columns: [{ name: 'email', type: 'string' }, { name: 'who', type: 'subject' }], uniqueKey: ['email'] });
+      ds.insertRecords({ collection: 'deals', records: [{ email: 'a@x', who: 'old-id' }, { email: 'b@x', who: 'other' }], stamp: stamp('owner') });
+      const moved = ds.repointSubjectId('old-id', 'new-id');
+      expect(ds.sourceOfRow('deals', 'email', 'a@x')?.writtenBy).toBeNull();
+      expect(ds.sourceOfRow('deals', 'email', 'b@x')?.writtenBy).toBe('owner');
+      ds.insertRecords({ collection: 'deals', records: [{ email: 'a@x', who: 'new-id' }], stamp: stamp('owner') });
+      ds.rollbackRepoint('old-id', 'new-id', moved);
+      expect(ds.sourceOfRow('deals', 'email', 'a@x')?.writtenBy).toBeNull();
+    });
+
+    it('a table without the trigger counts as not migrated, and the boot step adds it', () => {
+      crm.upsertContact({ name: 'Anna', email: 'anna@firma.ch' }, stamp('owner'));
+      db().exec('DROP TRIGGER ds_contacts__writer_unknown;');
+      const path = ds['db'].name as string;
+      ds.close();
+      ds = new DataStore(path);
+      crm = new CRM(ds);
+      expect(() => crm.contactOrigin('anna@firma.ch')).toThrow(/has not been migrated/);
+      expect(ds.ensureSourceColumns().migrated).toContain('contacts');
+      db().prepare('UPDATE ds_contacts SET name = ? WHERE email = ?').run('Anna X', 'anna@firma.ch');
+      expect(crm.contactOrigin('anna@firma.ch')?.writtenBy).toBeNull();
     });
   });
 
@@ -186,7 +233,7 @@ describe('DataStore: who wrote a row', () => {
   describe('a contacts table that was not migrated', () => {
     it('sourceOfRow throws, and the check before a send reads it as unreadable, never as known', async () => {
       crm.upsertContact({ name: 'Anna', email: 'anna@firma.ch' }, stamp('owner'));
-      db().exec('ALTER TABLE ds_contacts DROP COLUMN _written_at;');
+      db().exec('DROP TRIGGER ds_contacts__writer_unknown; ALTER TABLE ds_contacts DROP COLUMN _written_at;');
       const path = ds['db'].name as string;
       ds.close();
       ds = new DataStore(path);

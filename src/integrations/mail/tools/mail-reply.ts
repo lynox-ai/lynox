@@ -153,7 +153,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
  */
 function replyRecipientsNotOwnerKnown(agent: IAgent, recipients: readonly string[]): string[] {
   const checked = currentCallTargetOrigin();
-  const seen = new Set<string>([...(checked?.known ?? []), ...(checked?.foreign?.targets ?? [])]);
+  const seen = new Set<string>([...(checked?.known ?? []), ...(checked?.unnamed?.targets ?? [])]);
   const unnamed: string[] = [];
   for (const r of recipients) {
     const target = normalizeMailTarget(r);

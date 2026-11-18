@@ -249,13 +249,13 @@ export function currentCallFiling(): boolean {
  * What the check before a send found about one call's targets. `known` lists the normalized
  * targets the check found the owner had named; `allKnown` is true only when the call named at
  * least one target and every one of them was owner-known without a question. A yes to the
- * question never sets it. `foreign` is set when a target was not owner-known and the call went on
+ * question never sets it. `unnamed` is set when a target was not owner-known and the call went on
  * anyway (a filing, or a yes): the targets, and where they come from.
  */
 export interface CallTargetOrigin {
   readonly known: readonly string[];
   readonly allKnown: boolean;
-  readonly foreign?: { readonly targets: readonly string[]; readonly origin: import('./origin-notices.js').SendOrigin } | undefined;
+  readonly unnamed?: { readonly targets: readonly string[]; readonly origin: import('./origin-notices.js').SendOrigin } | undefined;
 }
 
 /** The current call's {@link CallTargetOrigin}; `undefined` outside a slot or without a check. */

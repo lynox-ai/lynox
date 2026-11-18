@@ -73,7 +73,7 @@ export interface ApprovalOrigin {
   /** The recipients the owner had not named when the run filed, and where they come from: the
    *  card says so. Approving the card does not make them owner-known. Absent when every recipient
    *  was owner-known, and on a record from before. */
-  targetOrigin?: { foreign: string[]; origin: import('./origin-notices.js').SendOrigin } | undefined;
+  targetOrigin?: { unnamed: string[]; origin: import('./origin-notices.js').SendOrigin } | undefined;
 }
 
 export interface StoredAddress {
@@ -342,7 +342,7 @@ const ORIGIN_KINDS: ReadonlySet<unknown> = new Set(['helperThread', 'triggerRun'
 function isTargetOrigin(v: unknown): boolean {
   if (typeof v !== 'object' || v === null) return false;
   const t = v as Record<string, unknown>;
-  if (!isStringList(t['foreign'])) return false;
+  if (!isStringList(t['unnamed'])) return false;
   const origin = t['origin'];
   if (typeof origin !== 'object' || origin === null) return false;
   const o = origin as Record<string, unknown>;
