@@ -704,7 +704,7 @@ describe('the sentence and the way on for a halt', () => {
 		run = judged({ targetSystem: 'data_store', judgeRule: { ...rule, context: ['note'] } });
 		await render();
 		const rows = target.querySelector('[data-testid="bulk-start-context"]');
-		expect(rows!.querySelector('code')?.textContent).toBe('note');
+		expect(rows!.querySelector('[data-testid="bulk-field-own-name"]')?.textContent).toBe('note');
 		unmount(component!);
 		component = undefined;
 
@@ -1574,5 +1574,122 @@ describe('discarding a run before approving it (U-324)', () => {
 			component = undefined;
 		}
 		resetSettingsViewer();
+	});
+});
+
+// The start of a judged run (U-333): the fields the judge sets in words, not as the schema, and
+// a line under the disabled start button that says what is missing.
+describe('the start of a judged run, in words', () => {
+	const judged = (o: Partial<BulkRunDetailData> = {}): BulkRunDetailData => makeRun({
+		phase: 'planned', haltKey: 'listed', haltReason: 'engine English', checksum: null,
+		judge: { tier: 'standard', unjudged: 3 }, judgeRuleHash: 'h1',
+		judgeServedBy: { provider: 'anthropic', label: 'Modell' },
+		judgeRule: { rule: 'Schreib die Beschreibung neu.', schema: { properties: { body_html: { type: 'string', maxLength: 5000 } } }, tier: 'standard' },
+		list: { state: 'done' }, startDomains: null,
+		...o,
+	});
+	const fieldLines = (): string[] => [...target.querySelectorAll('[data-testid="bulk-start-field"]')].map((li) => li.textContent?.trim() ?? '');
+	const type = (el: HTMLInputElement | HTMLTextAreaElement, value: string): void => {
+		el.value = value;
+		el.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+	};
+	const capField = (): HTMLInputElement => target.querySelector('input[inputmode="decimal"]')!;
+	const domainField = (): HTMLTextAreaElement => target.querySelector('[data-testid="bulk-start-domains"] textarea')!;
+	const startButton = (): HTMLButtonElement => buttonByText(t(bulkStartButtonKey(run, 'judge', false) ?? 'bulk.start.judge'))!;
+	const hint = (): string | null => target.querySelector('[data-testid="bulk-start-hint"]')?.textContent ?? null;
+
+	it('names each field the judge sets with its shape in words, and shows no schema', async () => {
+		run = judged({ judgeRule: { rule: 'r', tier: 'standard', schema: { properties: {
+			seo_title: { type: 'string', maxLength: 70 },
+			seo_description: { type: 'string', minLength: 10, maxLength: 160 },
+			tone: { type: 'string', enum: ['kurz', 'lang'] },
+			price: { type: 'number', minimum: 0, maximum: 100 },
+			stock: { type: 'integer', minimum: 1 },
+			rank: { type: 'integer', maximum: 9 },
+			weight: { type: 'number' },
+			active: { type: 'boolean' },
+		} } } });
+		await render();
+		expect(fieldLines()).toEqual([
+			`${t('bulk.field.shopify.seo_title')}: ${tf('bulk.shape.text_max', { max: '70' })}`,
+			`${t('bulk.field.shopify.seo_description')}: ${tf('bulk.shape.text_range', { min: '10', max: '160' })}`,
+			`tone: ${tf('bulk.shape.choice', { values: '"kurz", "lang"' })}`,
+			`price: ${tf('bulk.shape.number_range', { min: '0', max: '100' })}`,
+			`stock: ${tf('bulk.shape.integer_min', { min: '1' })}`,
+			`rank: ${tf('bulk.shape.integer_max', { max: '9' })}`,
+			`weight: ${t('bulk.shape.number')}`,
+			`active: ${t('bulk.shape.boolean')}`,
+		]);
+		const block = target.querySelector('[data-testid="bulk-start-field"]')!.parentElement!;
+		expect(block.textContent).not.toMatch(/maxLength|"type"|[{}]/);
+		// The planner's names stand in a value box; the store's readable names do not.
+		expect([...block.querySelectorAll('[data-testid="bulk-field-own-name"]')].map((e) => e.textContent))
+			.toEqual(['tone', 'price', 'stock', 'rank', 'weight', 'active']);
+	});
+
+	it('words the shapes in English too', async () => {
+		const before = getLocale();
+		setLocale('en');
+		onTestFinished(() => { setLocale(before); });
+		run = judged({ judgeRule: { rule: 'r', tier: 'standard', schema: { properties: { seo_title: { type: 'string', maxLength: 70 }, ok: { type: 'boolean' } } } } });
+		await render();
+		expect(fieldLines()).toEqual(['SEO title: Text, at most 70 characters', 'ok: yes or no']);
+	});
+
+	it('names a field of another host in the value box, a shape it does not know without JSON', async () => {
+		run = judged({ targetSystem: 'http:api.example.invalid', list: null, judgeRule: { rule: 'r', tier: 'standard', schema: { properties: { seo_title: { type: 'string', maxLength: 70 }, note: { type: 'string', minLength: 0, maxLength: 20 }, odd: { type: 'array' } } } } });
+		await render();
+		// A shortest length of 0 is no bound: it reads as "at most", not "0 to 20".
+		expect(fieldLines()).toEqual([`seo_title: ${tf('bulk.shape.text_max', { max: '70' })}`, `note: ${tf('bulk.shape.text_max', { max: '20' })}`, 'odd']);
+		expect(target.querySelectorAll('[data-testid="bulk-start-field"] [data-testid="bulk-field-own-name"]')).toHaveLength(3);
+	});
+
+	it('says under the disabled start what is missing, and nothing once it can start', async () => {
+		run = judged();
+		await render();
+		expect(startButton().disabled).toBe(true);
+		expect(hint()).toBe(t('bulk.start.hint_cap'));
+		expect(startButton().getAttribute('aria-describedby')).toBe('bulk-start-hint');
+		expect(target.querySelector('#bulk-start-hint')?.textContent).toBe(t('bulk.start.hint_cap'));
+
+		type(domainField(), 'https://mein-shop.ch/pfad');
+		expect(hint()).toBe(t('bulk.start.hint_both'));
+
+		type(capField(), '5');
+		expect(startButton().disabled).toBe(true);
+		expect(hint()).toBe(t('bulk.start.hint_domains'));
+
+		type(domainField(), 'mein-shop.ch');
+		expect(startButton().disabled).toBe(false);
+		expect(hint()).toBeNull();
+		expect(startButton().hasAttribute('aria-describedby')).toBe(false);
+	});
+
+	it('leaves the cost limit out of the hint while its own line says the amount is wrong', async () => {
+		run = judged();
+		await render();
+		type(capField(), '0');
+		expect(startButton().disabled).toBe(true);
+		expect(target.textContent).toContain(t('bulk.start.cap_invalid'));
+		expect(hint()).toBeNull();
+
+		type(domainField(), 'https://mein-shop.ch/pfad');
+		expect(hint()).toBe(t('bulk.start.hint_domains'));
+	});
+
+	it('shows the hint on the start that ends another run, too', async () => {
+		run = judged();
+		refuseResume = 'supersede_required';
+		await render();
+		type(capField(), '5');
+		startButton().click();
+		await settle();
+		const supersede = buttonByText(t(bulkStartButtonKey(run, 'judge', true) ?? 'bulk.start.supersede_yes'))!;
+		expect(hint()).toBeNull();
+		type(capField(), '');
+		expect(supersede.disabled).toBe(true);
+		expect(hint()).toBe(t('bulk.start.hint_cap'));
+		expect(supersede.getAttribute('aria-describedby')).toBe('bulk-start-hint');
 	});
 });
