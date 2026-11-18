@@ -117,7 +117,7 @@ export class VaultKeyMismatchError extends Error {
 export class SecretVault {
   private readonly db: Database.Database;
   private readonly derivedKey: Buffer;
-  /** True when this open created the salt: a brand-new vault, not one written before. */
+  /** True when this open found no salt: it creates the vault (or races another open that does). */
   private saltCreated = false;
 
   constructor(options?: VaultOptions | undefined) {
