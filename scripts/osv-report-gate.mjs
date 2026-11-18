@@ -66,7 +66,9 @@ const BLOCKING_BANDS = new Set(['HIGH', 'CRITICAL']);
  * not to be reachable in this repo. An entry matches one advisory id on one package at the exact
  * versions listed, and only until its `expires` date (inclusive, UTC); after that the finding
  * blocks again and says that its acceptance ran out. A matched finding is still printed. An entry
- * that matches nothing in a run is reported, so a resolved one gets removed.
+ * that matches nothing in a run fails the gate: the advisory was withdrawn, the version moved, or
+ * its severity fell below the floor, and an acceptance nobody needs any more must not wait for the
+ * next finding that happens to fit it.
  *
  * Every entry has a premise check in tests/osv-accepted-premise.test.ts that fails as soon as the
  * code starts using what the advisory needs; an entry without one fails that test.
@@ -82,21 +84,6 @@ export const ACCEPTED = [
       'experimental remote functions flag and use form, query or command. core enables neither ' +
       '(no flag in svelte.config.js, no .remote files, no $app/server import). The fix is kit 3.1.1, ' +
       'a major upgrade, planned before the expiry.',
-  },
-  {
-    id: 'GHSA-fc5q-39xc-vjpf',
-    package: 'picomatch',
-    versions: ['2.3.2', '4.0.4', '4.0.7'],
-    expires: '2026-12-01',
-    reason:
-      'ReDoS in glob patterns with repeated single-branch extglobs; it needs an attacker-chosen ' +
-      'pattern. The picomatch package is only in build and test tooling (vite, vitest, tinyglobby, ' +
-      'fdir) and in the docs site, which is private and in neither package nor the image; no ' +
-      "runtime dependency of either published package reaches it. The error reporter's bundler " +
-      'plugins ship as a runtime dependency and bring two packages that inline their own copy, ' +
-      'which this scan cannot see: ' +
-      'rollup and the Sentry CLI package. The engine loads only the reporter\'s main entry, which ' +
-      'loads neither. No patched release exists yet; bump when one does.',
   },
 ];
 
@@ -324,9 +311,10 @@ export function main(argv) {
     below.push(...one.below);
     accepted.push(...one.accepted);
   }
-  const ok = errors.length === 0 && blocking.length === 0;
-  // Over all reports: an entry no finding matched is due for removal. It does not block.
+  // Over all reports: an entry no finding matched is stale and blocks until it is removed. It
+  // stays apart from `errors`, which the daily watch reads as "no verdict".
   const unused = ACCEPTED.filter((a) => !accepted.some((h) => h.id === a.id && a.versions.some((v) => h.package === `${a.package}@${v}`))).map((a) => `${a.package} ${a.id}`);
+  const ok = errors.length === 0 && blocking.length === 0 && unused.length === 0;
 
   // The daily watch needs the same classification as the merge gate but files
   // an issue instead of failing, so it reads counts rather than an exit code.
@@ -346,7 +334,7 @@ export function main(argv) {
   for (const a of accepted) {
     console.log(`::warning::${a.source}: ${a.package} ${a.id} (${a.severity}) accepted until ${a.until}: ${a.reason}`);
   }
-  for (const u of unused) console.log(`::warning::osv-report-gate: accepted entry ${u} matched no finding; remove it`);
+  for (const u of unused) console.error(`::error::osv-report-gate: accepted entry ${u} matched no finding in this run; remove it (withdrawn, fixed, or below the floor now)`);
   for (const b of below) console.log(`  below the floor: ${b.package} ${b.id} (${b.severity})`);
   // An annotation, as the step it replaces emitted: a line in a 3000-line log
   // that nobody scrolls to is not a report.
@@ -355,7 +343,7 @@ export function main(argv) {
   }
 
   console.log(
-    `osv-report-gate: ${blocking.length + below.length + accepted.length} finding(s), ${blocking.length} blocking, ${accepted.length} accepted`,
+    `osv-report-gate: ${blocking.length + below.length + accepted.length} finding(s), ${blocking.length} blocking, ${accepted.length} accepted, ${unused.length} stale acceptance(s)`,
   );
   return ok ? 0 : 1;
 }

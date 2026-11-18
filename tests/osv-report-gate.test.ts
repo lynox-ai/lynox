@@ -22,6 +22,29 @@ const MALICIOUS_REPORT = JSON.parse(
   readFileSync(fileURLToPath(new URL('./fixtures/osv-report-malicious.json', import.meta.url)), 'utf8'),
 );
 
+/**
+ * One HIGH finding for every shipped acceptance, at its first listed version: what a run in which
+ * each acceptance is still needed looks like. A run without them fails on the stale entries, so a
+ * test that wants "nothing blocks" adds these, and a test that wants a failure for its own reason
+ * adds them too, or the stale entries would fail it for the wrong one.
+ */
+function acceptedFindings(): Array<Record<string, unknown>> {
+  return ACCEPTED.map((a: { id: string; package: string; versions: string[] }) => ({
+    source: { path: 'pnpm-lock.yaml', type: 'lockfile' },
+    packages: [{
+      package: { name: a.package, version: a.versions[0], ecosystem: 'npm' },
+      vulnerabilities: [{ id: a.id, database_specific: { severity: 'HIGH' } }],
+      groups: [{ ids: [a.id], max_severity: '7.5' }],
+    }],
+  }));
+}
+
+/** `doc` plus the accepted findings, and the exit code the scanner gives for the result. */
+function withAccepted(doc: { results: unknown[] }): [{ results: unknown[] }, string] {
+  const results = [...doc.results, ...acceptedFindings()];
+  return [{ results }, results.length > 0 ? '1' : '0'];
+}
+
 /** One finding, shaped like real scanner output, with everything overridable. */
 function report(vuln: Record<string, unknown>, group: Record<string, unknown> = {}) {
   return {
@@ -243,8 +266,39 @@ describe('the contract CI actually depends on', () => {
     // Driven as a PROCESS, because the exit status is the whole interface
     // between this script and the workflow. Calling evaluate() directly cannot
     // see `return ok ? 0 : 1` become `return 0`.
-    expect(run(MALICIOUS_REPORT, '1').status).toBe(1);
-    expect(run({ results: [] }, '0').status).toBe(0);
+    expect(run(...withAccepted(MALICIOUS_REPORT)).status).toBe(1);
+    expect(run(...withAccepted({ results: [] })).status).toBe(0);
+  });
+
+  it('fails on an acceptance that no finding matched, and names it', () => {
+    // A withdrawn advisory disappears from the scan; its acceptance must not wait silently for
+    // the next finding that happens to fit it.
+    const r = run({ results: [] }, '0');
+    expect(r.status).toBe(1);
+    for (const a of ACCEPTED) expect(r.stderr).toContain(`::error::osv-report-gate: accepted entry ${a.package} ${a.id} matched no finding`);
+    expect(r.stdout).toContain(`${ACCEPTED.length} stale acceptance(s)`);
+    // Control: the same run with every acceptance matched passes and names none.
+    const ok = run(...withAccepted({ results: [] }));
+    expect(ok.status).toBe(0);
+    expect(ok.stderr).not.toContain('matched no finding');
+    expect(ok.stdout).toContain('0 stale acceptance(s)');
+  });
+
+  it('counts an acceptance whose finding dropped below the floor as stale', () => {
+    const [doc, rc] = withAccepted({ results: [] });
+    const first = (doc.results[0] as { packages: Array<{ vulnerabilities: Array<Record<string, unknown>>; groups: Array<Record<string, unknown>> }> }).packages[0]!;
+    first.vulnerabilities[0]!['database_specific'] = { severity: 'LOW' };
+    first.groups[0]!['max_severity'] = '2.0';
+    const r = run(doc, rc);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`accepted entry ${ACCEPTED[0]!.package} ${ACCEPTED[0]!.id} matched no finding`);
+  });
+
+  it('puts stale acceptances in the json verdict apart from errors, which the daily watch reads as no verdict', () => {
+    const v = JSON.parse(run({ results: [] }, '0', ['--format=json']).stdout);
+    expect(v.ok).toBe(false);
+    expect(v.errors).toEqual([]);
+    expect(v.unused).toEqual(ACCEPTED.map((a: { id: string; package: string }) => `${a.package} ${a.id}`));
   });
 
   it('exits non-zero and says so when the report cannot be read at all', () => {
@@ -273,7 +327,7 @@ describe('the contract CI actually depends on', () => {
         }],
       }],
     };
-    const r = run(doc, '1');
+    const r = run(...withAccepted(doc));
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('::warning::');
     expect(r.stdout).toContain('below the floor: left-pad@1.0.0 GHSA-a-b-c (LOW)');
@@ -338,7 +392,7 @@ describe('one scan per lockfile: several --report/--rc pairs', () => {
   }
 
   it('passes when every scan completed and nothing blocks', () => {
-    expect(runPairs([[CLEAN, '0'], [CLEAN, '0']]).status).toBe(0);
+    expect(runPairs([withAccepted(CLEAN), [CLEAN, '0']]).status).toBe(0);
   });
 
   it('FAILS when the SECOND lockfile yielded no packages, though the first is clean — the gap it closes', () => {
@@ -364,8 +418,10 @@ describe('one scan per lockfile: several --report/--rc pairs', () => {
   });
 
   it('FAILS on a blocking finding in any report, and counts across all of them', () => {
-    expect(runPairs([[CLEAN, '0'], [MALICIOUS_REPORT, '1']]).status).toBe(1);
-    expect(runPairs([[MALICIOUS_REPORT, '1'], [CLEAN, '0']]).status).toBe(1);
+    // The acceptances are matched in the other report, so only the blocking finding can fail these.
+    const blocked = (r: { status: number | null; stderr: string }) => r.status === 1 && r.stderr.includes('MAL-2023-8697') && !r.stderr.includes('matched no finding');
+    expect(blocked(runPairs([withAccepted(CLEAN), [MALICIOUS_REPORT, '1']]))).toBe(true);
+    expect(blocked(runPairs([[MALICIOUS_REPORT, '1'], withAccepted(CLEAN)]))).toBe(true);
     const v = JSON.parse(runPairs([[MALICIOUS_REPORT, '1'], [MALICIOUS_REPORT, '1']], ['--format=json']).stdout);
     expect(v.blocking).toHaveLength(2);
   });
@@ -462,13 +518,13 @@ describe('an accepted finding: one id, one package, exact versions, until a date
     const a = ACCEPTED[0]!;
     const dir = mkdtempSync(join(tmpdir(), 'osv-gate-acc-'));
     const file = join(dir, 'osv.json');
-    writeFileSync(file, JSON.stringify(highOn(a.package, a.versions[0]!, a.id)));
+    writeFileSync(file, JSON.stringify(withAccepted({ results: [] })[0]));
     const r = spawnSync(process.execPath, [SCRIPT, '--report', file, '--rc', '1'], { encoding: 'utf8' });
     // Valid only until the entry's date; past it this test would see the block, which is the point.
     if (new Date().toISOString().slice(0, 10) <= a.expires) {
       expect(r.status).toBe(0);
       expect(r.stdout).toContain(`accepted until ${a.expires}`);
-      expect(r.stdout).toContain('1 finding(s), 0 blocking, 1 accepted');
+      expect(r.stdout).toContain(`${ACCEPTED.length} finding(s), 0 blocking, ${ACCEPTED.length} accepted, 0 stale acceptance(s)`);
     } else {
       expect(r.status).toBe(1);
       expect(r.stderr).toContain('acceptance expired');
