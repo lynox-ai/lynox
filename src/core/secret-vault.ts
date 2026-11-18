@@ -74,6 +74,39 @@ interface CountRow {
   c: number;
 }
 
+/** The `vault_meta` row that proves which key a vault was written with. */
+const KEY_CHECK_META = 'key_check';
+/** What the check row holds once decrypted; anything else is another key's. */
+const KEY_CHECK_PLAINTEXT = 'lynox-vault-key-check-v1';
+
+/**
+ * The sentence an operator reads when lynox stops because its vault key does not open the vault
+ * on disk (U-329). It names the directory to copy, the way back (the right key) and, for a key
+ * that is lost, what starting over costs and how to do it by hand: lynox deletes nothing itself,
+ * and the moved files open again with the original key.
+ */
+export function vaultKeyMismatchText(dataDir: string): string {
+  return `lynox does not start: LYNOX_VAULT_KEY does not open the existing vault (vault.db in ${dataDir}). ` +
+    'The vault was written with a different key, and lynox does not write to a vault under a different key. ' +
+    'Set LYNOX_VAULT_KEY to the key the vault was created with and start lynox again. ' +
+    'If that key is lost, the secrets in this vault cannot be recovered. To start over with an empty vault, ' +
+    'stop lynox, move vault.db, vault.db-wal and vault.db-shm out of the data directory, and start again: ' +
+    'lynox then creates a new vault under the current key, and every stored secret (API keys, tokens, ' +
+    'connections) has to be entered again. Keep the moved files: if the original key turns up, they open ' +
+    'with it again.';
+}
+
+/**
+ * The vault on disk was written with another key than the one loaded. Thrown before anything is
+ * written to it, so the vault stays as it was and opens again under its own key.
+ */
+export class VaultKeyMismatchError extends Error {
+  constructor(dataDir: string) {
+    super(vaultKeyMismatchText(dataDir));
+    this.name = 'VaultKeyMismatchError';
+  }
+}
+
 /**
  * Encrypted SQLite vault for secrets.
  *
@@ -84,6 +117,8 @@ interface CountRow {
 export class SecretVault {
   private readonly db: Database.Database;
   private readonly derivedKey: Buffer;
+  /** True when this open created the salt: a brand-new vault, not one written before. */
+  private saltCreated = false;
 
   constructor(options?: VaultOptions | undefined) {
     const dbPath = options?.path ?? getVaultDbPath();
@@ -157,6 +192,61 @@ export class SecretVault {
     // from already lives in process.env for the whole process, so an attacker
     // who can read process memory can re-derive the key regardless.
     this.derivedKey = Buffer.from(canonical);
+
+    // Before anything is written: is this the key the vault was written with? A mismatch closes
+    // the connection and throws, so no entry, marker or check row lands under a foreign key.
+    try {
+      this._checkKey(dir);
+    } catch (err) {
+      this.derivedKey.fill(0);
+      this.db.close();
+      throw err;
+    }
+  }
+
+  /**
+   * The key check. A vault carries one encrypted row in `vault_meta` that only its own key opens.
+   * - The row is there: it must decrypt to the expected text, otherwise the key is foreign.
+   * - No row yet (a new vault, or one written before the check existed): it is written only when
+   *   every stored entry decrypts, which includes an empty vault. When none does, the key is
+   *   foreign. When some do and some do not, the vault already holds entries under two keys: no
+   *   row is written, because it would fix whichever key is loaded now as the right one, and the
+   *   start goes on as before with the count of entries that do not decrypt.
+   */
+  private _checkKey(dataDir: string): void {
+    const row = this.db.prepare('SELECT value FROM vault_meta WHERE key = ?').get(KEY_CHECK_META) as { value: Buffer } | undefined;
+    if (row) {
+      if (this._openKeyCheck(row.value) !== KEY_CHECK_PLAINTEXT) throw new VaultKeyMismatchError(dataDir);
+      return;
+    }
+    const total = this.size;
+    const failed = this.undecryptableCount();
+    if (total > 0 && failed === total) throw new VaultKeyMismatchError(dataDir);
+    if (failed > 0) return;
+    // An empty vault written before the check existed tells nothing about its key: pinning it to
+    // whichever key opens it first would refuse the right key later. It gets its row on the first
+    // open that finds an entry under the key; a vault created by this open gets it now.
+    if (total === 0 && !this.saltCreated) return;
+    const { encrypted, iv, authTag } = this._encrypt(KEY_CHECK_PLAINTEXT);
+    // Two processes may open a vault without a row at once. The first row stands; the second open
+    // checks against it like any later one.
+    this.db.prepare('INSERT OR IGNORE INTO vault_meta (key, value) VALUES (?, ?)').run(KEY_CHECK_META, Buffer.concat([iv, authTag, encrypted]));
+    const stored = this.db.prepare('SELECT value FROM vault_meta WHERE key = ?').get(KEY_CHECK_META) as { value: Buffer } | undefined;
+    if (!stored || this._openKeyCheck(stored.value) !== KEY_CHECK_PLAINTEXT) throw new VaultKeyMismatchError(dataDir);
+  }
+
+  /** The decrypted check row, or null when it does not decrypt under the loaded key. */
+  private _openKeyCheck(value: Buffer): string | null {
+    if (value.length <= CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH) return null;
+    try {
+      return this._decrypt(
+        value.subarray(CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH),
+        value.subarray(0, CRYPTO_IV_LENGTH),
+        value.subarray(CRYPTO_IV_LENGTH, CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH),
+      );
+    } catch {
+      return null;
+    }
   }
 
   private _migrate(): void {
@@ -191,6 +281,7 @@ export class SecretVault {
     this.db.prepare(
       "INSERT INTO vault_meta (key, value) VALUES ('pbkdf2_salt', ?)",
     ).run(salt);
+    this.saltCreated = true;
     return salt;
   }
 
@@ -442,10 +533,15 @@ export class SecretVault {
     let db: Database.Database | undefined;
     let newVault: SecretVault | undefined;
     try {
-      // Delete old salt so a new one is generated for the new key
+      // Delete old salt so a new one is generated for the new key, and the old key's check row
+      // with it: the new vault writes its own on open, while it is still empty. In one
+      // transaction, so a vault never holds the new salt next to the old key's check.
       db = new Database(dbPath);
-      db.prepare("DELETE FROM vault_meta WHERE key = 'pbkdf2_salt'").run();
-      db.prepare('DELETE FROM vault_secrets').run();
+      const wipe = db;
+      wipe.transaction(() => {
+        wipe.prepare("DELETE FROM vault_meta WHERE key IN ('pbkdf2_salt', ?)").run(KEY_CHECK_META);
+        wipe.prepare('DELETE FROM vault_secrets').run();
+      })();
       db.close();
       db = undefined;
 

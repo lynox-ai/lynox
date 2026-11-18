@@ -721,9 +721,14 @@ describe('Engine + Session (Orchestrator)', () => {
     it('builds no plugin manager on a half-provisioned instance that then fails to start', async () => {
       const before = process.env['LYNOX_BILLING_TIER'];
       const beforeKey = process.env['LYNOX_VAULT_KEY'];
+      const beforeDir = process.env['LYNOX_DATA_DIR'];
       process.env['LYNOX_BILLING_TIER'] = 'hosted';
-      // The delivered vault key, so the start gets past the key to the managed hook.
+      // The delivered vault key, so the start gets past the key to the managed hook. In a data
+      // directory of its own: the shared one holds a vault an earlier boot wrote under another
+      // key, and a key that does not open the vault stops the start before the hook.
       process.env['LYNOX_VAULT_KEY'] = 'A'.repeat(64);
+      const dataDir = mkdtempForWorkspace(joinForWorkspace(tmpdirForWorkspace(), 'lynox-halfprov-'));
+      process.env['LYNOX_DATA_DIR'] = dataDir;
       _resetVaultKeySource();
       try {
         const engine = new Engine({} as import('../types/index.js').LynoxConfig);
@@ -734,6 +739,9 @@ describe('Engine + Session (Orchestrator)', () => {
         else process.env['LYNOX_BILLING_TIER'] = before;
         if (beforeKey === undefined) delete process.env['LYNOX_VAULT_KEY'];
         else process.env['LYNOX_VAULT_KEY'] = beforeKey;
+        if (beforeDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+        else process.env['LYNOX_DATA_DIR'] = beforeDir;
+        rmForWorkspace(dataDir, { recursive: true, force: true });
         _resetVaultKeySource();
       }
     });

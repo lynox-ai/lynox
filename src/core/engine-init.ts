@@ -26,7 +26,7 @@ import type {
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
 import { resolveProviderApiKey, migrateLegacyEndpointKey, poolSuppliesLLMKeys } from './llm/provider-keys.js';
-import { SecretVault } from './secret-vault.js';
+import { SecretVault, VaultKeyMismatchError, getVaultDbPath } from './secret-vault.js';
 import { SecretStore } from './secret-store.js';
 import { setVaultApiKeyExists, anthropicKeyMayHoldApiKey } from './config.js';
 import { channels, type MemoryStoreMessage } from './observability.js';
@@ -506,6 +506,24 @@ function requireDeliveredVaultKey(): void {
 }
 
 /**
+ * Stop the start when the loaded vault key does not open the vault on disk (`SecretVault`'s key
+ * check). Called right after the key is settled and before any store opens, so nothing on this
+ * boot writes under a key that is not the vault's. Only that refusal stops the start: no vault yet,
+ * no key, or a vault that cannot be opened for another reason leaves it to `initSecrets`, as before.
+ */
+export function assertVaultKeyOpensVault(): void {
+  if (!process.env['LYNOX_VAULT_KEY'] || !existsSync(getVaultDbPath())) return;
+  let vault: SecretVault | null = null;
+  try {
+    vault = new SecretVault();
+  } catch (err) {
+    if (err instanceof VaultKeyMismatchError) throw err;
+  } finally {
+    vault?.close();
+  }
+}
+
+/**
  * The `<secrets>` listing: every agent-visible name as a `secret:` reference, with its masked
  * value, except a name that holds a connection's token. Those are used through their API profile
  * and are counted per profile, not named (`describeConnectionTokens`). Left out entirely, the
@@ -641,7 +659,10 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
 
       // Inform config module about vault api_key presence
       setVaultApiKeyExists(vault.has('ANTHROPIC_API_KEY'));
-    } catch {
+    } catch (err) {
+      // A vault the loaded key does not open stops the start: going on without it would let the
+      // one-shot migration below run against an empty view and write its marker again.
+      if (err instanceof VaultKeyMismatchError) throw err;
       vault = null;
       // Warn if vault.db exists but vault key is missing
       if (!process.env['LYNOX_VAULT_KEY']) {
@@ -679,7 +700,8 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
     // account / OAuth / SMTP/IMAP / engine-internal) are excluded so their
     // names never enter the model context (and cannot be referenced for exfil).
     secretsBriefing = renderSecretsBriefing(store);
-  } catch {
+  } catch (err) {
+    if (err instanceof VaultKeyMismatchError) throw err;
     store = null;
   }
 

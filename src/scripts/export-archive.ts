@@ -38,7 +38,7 @@ import { acquireSlot, releaseSlotByJob, touchSlotByJob } from '../core/export-sl
 import { deriveHistoryEncKey } from '../core/run-history.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { SecretStore } from '../core/secret-store.js';
-import { SecretVault } from '../core/secret-vault.js';
+import { SecretVault, VaultKeyMismatchError } from '../core/secret-vault.js';
 import type { LynoxUserConfig } from '../types/index.js';
 import { EXPORT_STAGING_DIR, ExportSpaceError } from '../core/workspace-export.js';
 
@@ -138,7 +138,14 @@ export async function main(): Promise<void> {
     let vault: SecretVault | null = null;
     if (existsSync(vaultPath)) {
       if (vaultKey === '') { slot.release(); fail(5, 'the vault key is missing; nothing was exported'); }
-      vault = new SecretVault({ path: vaultPath, masterKey: vaultKey });
+      try {
+        vault = new SecretVault({ path: vaultPath, masterKey: vaultKey });
+      } catch (err) {
+        // The vault's key check refused the key: the same answer as an entry that does not decrypt.
+        if (!(err instanceof VaultKeyMismatchError)) throw err;
+        slot.release();
+        fail(5, 'the vault key does not open the vault; nothing was exported');
+      }
       if (vault.undecryptableCount() > 0) { vault.close(); slot.release(); fail(5, 'the vault key does not open the vault; nothing was exported'); }
     }
     const settings = readSettings(dataDir);

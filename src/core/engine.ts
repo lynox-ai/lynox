@@ -126,6 +126,7 @@ import {
   initSecrets,
   renderSecretsBriefing,
   ensureVaultKey,
+  assertVaultKeyOpensVault,
   initScopes,
   initMemoryInstance,
   initEmbeddingProvider,
@@ -1338,6 +1339,9 @@ export class Engine {
     // this phase, so on self-hosted (key in ~/.lynox/vault.key, not exported)
     // both stores would otherwise capture no key and write plaintext. Idempotent.
     ensureVaultKey();
+    // A key that does not open the vault on disk stops the start here, before any store below
+    // opens or writes under it (`assertVaultKeyOpensVault`).
+    assertVaultKeyOpensVault();
 
     // Initialize run history (optional — fails gracefully)
     try {

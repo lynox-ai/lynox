@@ -48,6 +48,7 @@ const INBOX_ENV_VARS = [
   'LYNOX_HTTP_SECRET',
   'LYNOX_VAULT_KEY',
   'LYNOX_VAULT_KEY_SOURCE',
+  'LYNOX_DATA_DIR',
 ];
 
 beforeEach(() => {
@@ -211,8 +212,11 @@ describe('Engine boot — unified-inbox flag', () => {
     process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
     process.env['LYNOX_INBOX_LLM_REGION'] = 'eu';
     process.env['LYNOX_BILLING_TIER'] = 'managed';
-    // A hosted instance starts only on the vault key the platform delivers in the environment.
+    // A hosted instance starts only on the vault key the platform delivers in the environment,
+    // and only on a vault that key opens: a data directory of its own, not one an earlier boot
+    // wrote a vault into under a generated key.
     process.env['LYNOX_VAULT_KEY'] = 'A'.repeat(64);
+    process.env['LYNOX_DATA_DIR'] = tmp;
     _resetVaultKeySource();
     process.env['MISTRAL_API_KEY'] = 'pool-mistral-key';
     // A pool tier boots the managed hook, which needs these; nothing listens on the port, so its
