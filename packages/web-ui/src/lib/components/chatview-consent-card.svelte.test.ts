@@ -206,3 +206,53 @@ describe('the model\'s batched questions', () => {
 		expect(target.textContent).not.toContain('Continue?');
 	});
 });
+
+describe('text typed as the answer', () => {
+	const type = async (text: string): Promise<void> => {
+		const area = target.querySelector<HTMLTextAreaElement>('textarea');
+		if (!area) throw new Error('no message field');
+		area.value = text;
+		area.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		const send = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.getAttribute('aria-label') === i18n.t('chat.send'));
+		if (!send) throw new Error('no send button');
+		send.click();
+		await settle();
+	};
+	const lines = (): string[] => [...target.querySelectorAll('[data-typed-answer]')].map((e) => (e.textContent ?? '').replace(/\s+/g, ' ').trim());
+
+	for (const locale of ['de', 'en'] as const) {
+		it(`${locale}: to the engine's confirmation, it stays in the chat where the question stood, and the refusal stands beside it`, async () => {
+			i18n.setLocale(locale);
+			await renderPrompt(['allow', 'deny'], 'guard');
+			refuse = true;
+			await type(locale === 'de' ? 'ja' : 'yes');
+			expect(replies.map((r) => r.answer)).toEqual([locale === 'de' ? 'ja' : 'yes']);
+			expect(lines()).toEqual([`${i18n.t('chat.typed_answer')} "${locale === 'de' ? 'ja' : 'yes'}"`]);
+			expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
+			// The run's result comes after the line, not over it.
+			run.send('done', { result: 'Not sent to the AI model.' });
+			await settle();
+			svelte.flushSync();
+			expect(lines()).toHaveLength(1);
+			expect(target.textContent).toContain('Not sent to the AI model.');
+			const text = target.textContent ?? '';
+			expect(text.indexOf(i18n.t('chat.typed_answer'))).toBeLessThan(text.indexOf('Not sent to the AI model.'));
+		});
+	}
+
+	it('a click leaves no line: the button already says what was answered', async () => {
+		i18n.setLocale('de');
+		const bar = await renderPrompt(['allow', 'deny'], 'guard');
+		await click(bar, i18n.t('chat.allow'));
+		expect(lines()).toEqual([]);
+	});
+
+	it('to a question the model wrote, it adds no line', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['Allow', 'Deny', '\x00']);
+		await type('ja');
+		expect(replies.map((r) => r.answer)).toEqual(['ja']);
+		expect(lines()).toEqual([]);
+	});
+});

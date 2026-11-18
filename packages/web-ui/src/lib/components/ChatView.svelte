@@ -5,6 +5,7 @@
 		retryFailedTurn,
 		abortRun,
 		replyPermission,
+		noteTypedAnswer,
 		replyPermissionTabs,
 		postTabProgress,
 		getPendingTabsPrompt,
@@ -533,7 +534,8 @@
 		| { type: 'thinking'; text: string }
 		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status']; unsuccessful: boolean }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
-		| { type: 'spawn'; spawnId: string };
+		| { type: 'spawn'; spawnId: string }
+		| { type: 'answer'; text: string };
 
 	/** Wrap artifact content in a fenced code block whose delimiter is long
 	 *  enough to survive any backtick run inside the content. CommonMark closes
@@ -596,6 +598,8 @@
 				if (block.text) result.push({ type: 'thinking', text: block.text });
 			} else if (block.type === 'text' && block.text) {
 				result.push({ type: 'text', text: block.text });
+			} else if (block.type === 'answer') {
+				result.push({ type: 'answer', text: block.text });
 			} else if (block.type === 'spawn') {
 				// Never folded into a neighbouring group: a delegation is its own
 				// panel, and two batches in a row must stay two panels.
@@ -1902,6 +1906,9 @@
 		if (pendingPermission && task) {
 			inputText = '';
 			if (textareaEl) textareaEl.style.height = 'auto';
+			// Typed text answering the engine's own confirmation stays in the chat, where the
+			// question stood, so a refusal that follows reads as an answer to something.
+			if (pendingPermission.consent !== undefined) noteTypedAnswer(task);
 			answerPrompt(task);
 			return;
 		}
@@ -2957,6 +2964,8 @@
 								</div>
 							{:else if gBlock.type === 'spawn'}
 								{@render subAgentPanel(msg, gBlock.spawnId)}
+							{:else if gBlock.type === 'answer'}
+								<p class="text-xs text-text-subtle pl-3" data-typed-answer>{t('chat.typed_answer')} <span class="font-mono">"{gBlock.text}"</span></p>
 							{:else if gBlock.type === 'thinking' && gBlock.text}
 								<!-- Mask once: the preview must be redacted too, not just
 								     the body — a secret in the first chars would otherwise

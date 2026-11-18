@@ -2590,7 +2590,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const result = typeof data['result'] === 'string' ? data['result'] : '';
 			if (!msg.content && !streamedText && result.trim()) {
 				msg.content = result;
-				msg.blocks = [{ type: 'text', text: result }];
+				// After any line already there (a typed answer to a confirmation), not over it.
+				msg.blocks = [...(msg.blocks ?? []), { type: 'text', text: result }];
 			}
 			// Budget threshold check — usage dashboard Phase 4. Dynamic import
 			// keeps the alerts code out of the initial chat-store bundle for
@@ -3391,6 +3392,19 @@ export async function reviewKnowledge(
 
 export function getMessages() {
 	return messages;
+}
+/**
+ * Keep text the person typed as the answer to one of the engine's confirmations in the chat:
+ * a line in the answer being written, where the question stood. Without a reply in progress,
+ * a reply of its own carries it.
+ */
+export function noteTypedAnswer(text: string): void {
+	const last = messages[messages.length - 1];
+	if (last?.role === 'assistant') {
+		last.blocks = [...(last.blocks ?? []), { type: 'answer', text }];
+		return;
+	}
+	messages.push({ role: 'assistant', content: '', blocks: [{ type: 'answer', text }], createdAt: new Date().toISOString() });
 }
 /** Add a temporary placeholder message (e.g. voice transcription bubble). Returns its index. */
 export function pushPlaceholder(content: string): number {
