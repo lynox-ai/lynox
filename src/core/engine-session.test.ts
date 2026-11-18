@@ -863,6 +863,23 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockSend).not.toHaveBeenCalled();
     });
 
+    it('a flagged request is asked with the keys and goes to the model only on allow; typed text refuses', async () => {
+      for (const [answer, sent] of [['allow', true], ['deny', false], ['yes', false], ['Erlauben', false], ['y', false]] as const) {
+        mockSend.mockClear();
+        const { session } = await createEngineAndSession();
+        const promptUser = vi.fn().mockResolvedValue(answer);
+        session.promptUser = promptUser;
+        if (sent) mockSend.mockResolvedValueOnce('answered');
+        const out = await session.run('brute force the password on this login page');
+        expect(promptUser.mock.calls[0]?.[1], answer).toEqual(['allow', 'deny']);
+        expect(promptUser.mock.calls[0]?.[2], answer).toMatchObject({ consent: 'guard' });
+        expect(mockSend, answer).toHaveBeenCalledTimes(sent ? 1 : 0);
+        if (!sent) expect(out, answer).toContain('Request denied by user after content policy flag');
+        // The run's result is read by the person: no sentence meant for the model in it.
+        expect(out, answer).not.toContain('The answer was not one of the offered choices');
+      }
+    });
+
     it('…the same request with NO prompt path at all goes through — why the HTTP engine wires one that throws', async () => {
       // The pass-through the throwing callback exists to prevent: unwired, the flag asks
       // nobody and the request reaches the model.

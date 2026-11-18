@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from './consent-ask.js';
 import { noticeLanguage } from './notice-language.js';
 import { SECRET_DIALOG, type DialogLanguage } from '../tools/dialog-text.js';
 import { dialogToolHead } from '../tools/tool-words.js';
@@ -4444,9 +4445,10 @@ export class Agent implements IAgent {
     return inSessionPromptChain(this.sessionCounters, async () => {
       const unbound = verdict.pending(); // another call in this batch may have been approved meanwhile
       if (unbound.length === 0) return null;
-      const answer = runSignal?.aborted ? null : await this.promptUser!(verdict.question(unbound), ['Allow', 'Deny', '\x00']);
+      const answer = runSignal?.aborted ? null : await this.promptUser!(verdict.question(unbound), consentOptions('guard'), consentMeta('guard'));
       if (answer === null) return refuse('The run was stopped before the secret could be approved.');
-      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) return refuse(verdict.denied(unbound));
+      const outcome = decideConsent('guard', answer);
+      if (outcome !== 'allow') return refuse(consentRefusal(outcome, verdict.denied(unbound)));
       verdict.approve(unbound);
       return null;
     });
@@ -5168,9 +5170,8 @@ export class Agent implements IAgent {
         // stores the question decides whether its reader watches this run, and refuses it for
         // one who does not (`PromptStore.insertQuestion`).
         const askMeta = effectiveSignal.hardBlock === true ? { blocked: true } : undefined;
-        const answer = offersDowngrade
-          ? await this.promptUser(effectiveSignal.prompt, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], askMeta)
-          : await this.promptUser(effectiveSignal.prompt, ['Allow', 'Deny', '\x00'], askMeta);
+        const kind = offersDowngrade ? 'deep' : 'guard';
+        const answer = await this.promptUser(effectiveSignal.prompt, consentOptions(kind), consentMeta(kind, askMeta));
         if (answer === UNATTENDED_BLOCK_ANSWER) {
           const refusal = `Blocked: ${tc.name} — this action is blocked, and in a run nobody watches it is not queued for approval. A person has to do it by hand.`;
           // Streamed like the non-interactive refusal below: the owner of a run nobody watches
@@ -5180,14 +5181,15 @@ export class Agent implements IAgent {
           }
           return { type: 'tool_result', tool_use_id: tc.id, content: refusal, is_error: true };
         }
-        const normalized = answer.toLowerCase();
-        if (offersDowngrade && normalized === 'run on balanced') {
+        // Only the kind's own keys decide; every other answer refuses (`decideConsent`).
+        const outcome = decideConsent(kind, answer);
+        if (outcome === 'balanced') {
           downgradeDecision = 'balanced';
-        } else if (!(offersDowngrade ? ['y', 'yes', 'allow', 'allow deep'] : ['y', 'yes', 'allow']).includes(normalized)) {
+        } else if (outcome !== 'allow' && outcome !== 'deep') {
           return {
             type: 'tool_result',
             tool_use_id: tc.id,
-            content: `Permission denied by user: ${tc.name}`,
+            content: consentRefusal(outcome, `Permission denied by user: ${tc.name}`),
             is_error: true,
           };
         }
@@ -5339,10 +5341,12 @@ export class Agent implements IAgent {
           if (this.promptUser) {
             const answer = await this.promptUser(
               SECRET_DIALOG[this.dialogLanguage].plain(dialogToolHead(tc.name, this.dialogLanguage), unconsented.join(', ')),
-              ['Allow', 'Deny', '\x00'],
+              consentOptions('guard'),
+              consentMeta('guard'),
             );
-            if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-              return { type: 'tool_result', tool_use_id: tc.id, content: 'Secret use denied by user', is_error: true };
+            const outcome = decideConsent('guard', answer);
+            if (outcome !== 'allow') {
+              return { type: 'tool_result', tool_use_id: tc.id, content: consentRefusal(outcome, `Secret use denied by user`), is_error: true };
             }
             for (const n of unconsented) this.secretStore!.recordConsent(n);
           } else {

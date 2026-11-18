@@ -523,7 +523,7 @@ describe('the predicate: a request carries only a registered owner\'s access tok
     mockProcess
       .mockResolvedValueOnce({ content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'http_request', input: { url, method: 'GET', headers: { 'X-Data': `secret:${name}` } } }], stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } })
       .mockResolvedValueOnce({ content: [{ type: 'text' as const, text: 'Done' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } });
-    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: await agentVault({ SHOPIFY_ACCESS_TOKEN: value('shop', 'access') }), toolContext: ctx, promptUser: vi.fn().mockResolvedValue('Allow') });
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: await agentVault({ SHOPIFY_ACCESS_TOKEN: value('shop', 'access') }), toolContext: ctx, promptUser: vi.fn().mockResolvedValue('allow') });
     await agent.send('go');
     return JSON.stringify(agent.getMessages()[2]);
   }
@@ -592,7 +592,7 @@ describe('an update that ends sharing empties the reader\'s token slots before i
       principal: { kind: 'owner' },
       sessionCounters: { httpRequests: 0 },
       secretStore: vault,
-      promptUser: async () => 'Allow',
+      promptUser: async () => 'allow',
       getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
       toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
     } as never;
@@ -650,7 +650,7 @@ describe('an update that ends sharing empties the reader\'s token slots before i
       mockProcess
         .mockResolvedValueOnce({ content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'http_request', input: { url: 'https://bexio-b.example/v1/x', method: 'GET', headers } }], stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } })
         .mockResolvedValueOnce({ content: [{ type: 'text' as const, text: 'Done' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } });
-      await new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: agentStore, toolContext: ctx, promptUser: vi.fn().mockResolvedValue('Allow') }).send('go');
+      await new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: agentStore, toolContext: ctx, promptUser: vi.fn().mockResolvedValue('allow') }).send('go');
     };
     await run({ 'X-Data': 'secret:B_OUT' });
     expect(sent.some((s) => JSON.stringify(s.headers).includes(VAULT()['B_OUT']!))).toBe(false);
@@ -836,7 +836,7 @@ describe('an update of a profile the boot held back', () => {
     const agent = {
       principal: { kind: 'owner' }, sessionCounters: { httpRequests: 0 },
       secretStore: { resolve: () => null, resolveSecretRefs: (i: unknown) => i, listNames: () => [] },
-      promptUser: async () => 'Allow',
+      promptUser: async () => 'allow',
       getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
       toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
     } as never;
@@ -849,7 +849,7 @@ describe('an update of a profile the boot held back', () => {
   const heldAgent = (store: ApiStore, principal: unknown): never => ({
     principal, sessionCounters: { httpRequests: 0 },
     secretStore: { resolve: () => null, resolveSecretRefs: (i: unknown) => i, listNames: () => [] },
-    promptUser: async () => 'Allow',
+    promptUser: async () => 'allow',
     getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
     toolContext: { auditLog: testAuditLog().log, vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   }) as never;

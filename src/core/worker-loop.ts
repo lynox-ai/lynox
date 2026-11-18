@@ -8,6 +8,8 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { CONSENT_KEYS, type ConsentKind } from '../contract/prompt.js';
+import { CONSENT_LABELS } from '../tools/dialog-text.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
@@ -709,6 +711,11 @@ export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: stri
   if (grant === null) return false;
   const lastParty = t.edited_by ?? t.created_by;
   return isMandateTag(lastParty) && lastParty === principalTag(grant.principal);
+}
+
+/** An engine consent's options as a notification lists them: the keys in the owner's words. */
+function consentInquiryOptions(kind: ConsentKind, language: 'de' | 'en'): string[] {
+  return CONSENT_KEYS[kind].map((key) => CONSENT_LABELS[language][key]);
 }
 
 export class WorkerLoop {
@@ -2963,7 +2970,7 @@ export class WorkerLoop {
         promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: false }, session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
           principal: runAs,
           handRun: active?.handRun === true,
-        });
+        }, meta?.consent);
       } catch (err: unknown) {
         if (err instanceof UnattendedBlockError) return UNATTENDED_BLOCK_ANSWER;
         throw err;
@@ -3047,7 +3054,7 @@ export class WorkerLoop {
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: questionReduced
           ? { question: notices.containedQuestionInquiry }
-          : { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+          : { question: offBoxQuestion, options: meta?.consent !== undefined ? consentInquiryOptions(meta.consent, noticeLanguage(this.engine.config?.language)) : inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });

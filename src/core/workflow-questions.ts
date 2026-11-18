@@ -142,7 +142,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       promptId = store.insertQuestion({ blocked: meta?.blocked === true, attended: false }, deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
         principal: deps.principal,
         handRun: deps.handRun,
-      });
+      }, meta?.consent);
     } catch (err: unknown) {
       // A database the engine already closed is the teardown, as after the wait.
       if (!store.isOpen()) return neverSettles();

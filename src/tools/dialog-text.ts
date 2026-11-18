@@ -12,6 +12,7 @@
  * the person wrote.
  */
 
+import type { ConsentKey } from '../contract/prompt.js';
 import type { NoticeLanguage } from '../core/notice-language.js';
 import { pv } from '../core/prompt-value.js';
 import type { PromptText } from '../types/agent.js';
@@ -466,4 +467,14 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
       return pv`⚠ ${word}: die Verbindung des API-Profils ${p.name} (Id ${p.id}) übernehmen? Sie wurde beim Anbieter in der Sitzung von ${p.by} autorisiert, ${p.known ? 'deren Zugang beendet ist' : 'und lynox kann nicht feststellen, ob der Zugang dieser Person noch besteht'}. Nach der Übernahme gehört das Profil dir. lynox sendet dann bei deinen Anfragen und Läufen an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'} die Tokens der Verbindung und die Vault-Namen, die dieses Profil nennt. Sie werden gelesen wie bei jedem deiner Profile, Werte aus der Umgebung eingeschlossen: ${shown.length > 0 ? shown : 'keine'}. Übernehmen?`;
     },
   },
+};
+
+/**
+ * How a consent key reads where the engine itself names it (a notification that lists a
+ * question's options). The web UI shows the same words from its own table; a test holds the two
+ * equal. The keys themselves are the wire (`src/contract/prompt.ts`).
+ */
+export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentKey, string>>>> = {
+  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow deep', balanced: 'Run on balanced', cancel: 'Cancel' },
+  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Deep erlauben', balanced: 'Auf balanced ausführen', cancel: 'Abbrechen' },
 };

@@ -8,6 +8,7 @@ import type { AutonomyLevel } from './modes.js';
 import type { AgentWarning } from './models.js';
 import type { ConversationGrants } from '../core/conversation-grants.js';
 import type { CallApiCost, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { ConsentKind } from '../contract/prompt.js';
 
 export interface TabQuestion {
   question: string;
@@ -92,6 +93,14 @@ export interface PromptMeta extends PromptOrigin {
    * only, like `signal`.
    */
   blocked?: boolean | undefined;
+  /**
+   * The question is one of the engine's own confirmations (`src/contract/prompt.ts`): its
+   * options are that kind's fixed keys, the client draws its consent card from this marker
+   * alone, and the answer approves only as one of those keys. Set only by the engine's
+   * consent gates through `consentMeta`; a question the model writes (`ask_user`) never
+   * carries it, whatever its options say.
+   */
+  consent?: ConsentKind | undefined;
 }
 
 /**
