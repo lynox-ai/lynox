@@ -8,6 +8,7 @@ import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { ContainedRefusalReason } from '../core/containment.js';
+import type { SendTarget } from '../core/send-target.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -165,6 +166,17 @@ export interface ToolEntry<TInput = unknown> {
    * A tool a mandate may use declares this exactly when it is on `MANDATE_STORED_MAIL_READERS`.
    */
   storedMailRead?: ((input: TInput) => string | null) | undefined;
+  /**
+   * Where a call SENDS to, as the person would name it: each mail address and each host the
+   * call delivers to, normalized (`send-target.ts`), or `null` for a call that sends to no
+   * target the model chose (a read). Read from the input as the model wrote it, before any
+   * secret is resolved. A declaration that throws means the targets are unknown, and unknown
+   * counts as foreign. A tool reads its targets with the same parser its handler sends with,
+   * so the list checked is the list sent. An empty list is no assurance: it says the input
+   * names no target, not that the call sends to none (a reply without an override still goes
+   * to the mail's sender). A reader never treats `[]` as owner-known.
+   */
+  sendTargets?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
   /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of

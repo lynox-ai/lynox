@@ -7,7 +7,7 @@ import { stripUntrustedSeparators } from './sanitize.js';
 import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
 import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
 import { stripHidden, stripHiddenInName } from './hidden-text.js';
-import { isStepIdShape, shownStepId, storedStepOrder } from '../orchestrator/step-id.js';
+import { isStepIdShape, shownRunStepId, shownStepId, stepRunNames, storedSteps } from '../orchestrator/step-id.js';
 import { detectSensitiveContent } from '../integrations/inbox/sensitive-content.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
@@ -341,9 +341,9 @@ function storedName(s: string, max: number): string {
 }
 
 /** A stored step id in the preamble: itself in the allowed shape, otherwise its position in the
- *  workflow (`step-id.ts`), or the note alone where no position is known (`index` absent or -1). */
-function storedStepId(id: string, index: number | undefined): string {
-  return isStepIdShape(id) ? storedName(id, MAX_STEP_ID_CHARS) : shownStepId(id, index === -1 ? undefined : index);
+ *  workflow (`step-id.ts`) with the name its runs use, or the note alone where no position is known. */
+function storedStepId(id: string, index: number | undefined, runName?: string): string {
+  return isStepIdShape(id) ? storedName(id, MAX_STEP_ID_CHARS) : shownStepId(id, index === -1 ? undefined : index, runName);
 }
 
 /**
@@ -629,8 +629,9 @@ export function resolveChatContext(
       return null;
     }
     if (wf.template !== true) return null; // only saved workflows are editable
+    const runNames = stepRunNames(wf.steps ?? []);
     const steps = (wf.steps ?? [])
-      .map((s, i) => `  ${i + 1}. [${storedStepId(s.id, i)}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
+      .map((s, i) => `  ${i + 1}. [${storedStepId(s.id, i, runNames.get(s.id))}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
       .join('\n');
     return (
       `[Loaded saved workflow for editing — id: ${wf.id}]\n` +
@@ -658,9 +659,10 @@ export function resolveChatContext(
     }
   }
   const stepResults = runHistory.getPipelineStepResults(run.id);
-  const order = storedStepOrder(run.workflow_id ? runHistory.getPlannedPipeline(run.workflow_id) : undefined);
+  // A run names a step stored outside the shape by its run name: shown with its position and the bridge.
+  const stored = storedSteps(run.workflow_id ? runHistory.getPlannedPipeline(run.workflow_id) : undefined);
   const trace = stepResults
-    .map(s => `  [${s.status}] ${storedStepId(s.step_id, order?.indexOf(s.step_id))}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
+    .map(s => `  [${s.status}] ${isStepIdShape(s.step_id) && !stored?.length ? storedName(s.step_id, MAX_STEP_ID_CHARS) : shownRunStepId(s.step_id, stored)}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
     .join('\n');
   const hasFailure = run.status === 'failed' || stepResults.some(s => s.status === 'failed' || s.error);
   // Only point at the editable workflow if it still exists — a run can outlive a
