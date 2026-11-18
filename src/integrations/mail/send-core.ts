@@ -152,6 +152,13 @@ export interface SendCoreOptions {
    * rate-limit. Default false.
    */
   skipRateLimit?: boolean | undefined;
+  /**
+   * Every recipient of this send was one the owner had named, as the caller checked it. It is
+   * recorded on the sent log (`SentMailLogInput.originOwnerKnown`), and only such a send makes
+   * its recipients count as known later. Default false: a send approved on a card, and every
+   * caller that did not check, records false.
+   */
+  originOwnerKnown?: boolean | undefined;
 }
 
 /** A `beforeSend` outcome: the mail was filed (or refused) for approval, not sent. */
@@ -381,6 +388,7 @@ export async function commitSend(
         bcc,
         subject: input.subject,
         bodyChars: sendInput.text.length,
+        originOwnerKnown: opts.originOwnerKnown === true,
       };
       if (input.inReplyTo !== undefined) sentLogInput.inReplyTo = input.inReplyTo;
       if (followupId !== null) sentLogInput.followupId = followupId;

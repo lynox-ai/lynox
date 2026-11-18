@@ -99,6 +99,8 @@ export interface AgentConfig {
    * A spawned child carries its parent's.
    */
   principal?:          import('../core/request-principal.js').RequestPrincipal | undefined;
+  /** Who this agent's writes are recorded as (`IAgent.writeAuthor`). Absent: unknown. */
+  writeAuthor?:        string | null | undefined;
   /**
    * A workflow step's own `fail_step` tool (runtime-adapter.ts, `createFailStepTool`), when this
    * agent runs a step. Matched by IDENTITY of this entry, never by its name: it passes the
