@@ -376,6 +376,17 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.manifestError = undefined;
     target.manifestRaw = 'bad gateway';
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: "bad gateway". You can start the migration again in 30 minutes at the latest.');
+    // No words left to quote, in the error text or the raw answer: said as such, never as empty quotes.
+    target.manifestRaw = undefined;
+    for (const error of ['\n\t ', '\u202e']) {
+      target.manifestError = error;
+      expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. The target instance gave no readable reason. You can start the migration again in 30 minutes at the latest.');
+    }
+    target.manifestError = undefined;
+    for (const raw of ['', ' \u200b ']) {
+      target.manifestRaw = raw;
+      expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. The target instance gave no readable reason. You can start the migration again in 30 minutes at the latest.');
+    }
   });
 
   it('reads each answer of the destination up to its cap and names the step when one is larger', async () => {
@@ -434,7 +445,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     // A refusal without any words of its own.
     for (const error of ['', '\n\t ', '\u202e']) {
       target.handshakeRefusal = { error };
-      expect(await message()).toBe('The target instance did not accept the migration. Nothing was transferred.');
+      expect(await message()).toBe('The target instance did not accept the migration. The target instance gave no readable reason. Nothing was transferred.');
     }
   });
 

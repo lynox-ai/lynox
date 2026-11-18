@@ -15432,6 +15432,8 @@ export class LynoxHTTPApi {
         // a new attempt away until then; every stop from here says when to try again, except where
         // the user has to check the target first.
         const AGAIN = 'You can start the migration again in 30 minutes at the latest.';
+        // Said where the target's answer leaves no words to quote once the hidden characters are gone.
+        const NO_REASON = 'The target instance gave no readable reason.';
         const handshakeFailed = (w: Why): string =>
           `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred. ${AGAIN}`;
         /**
@@ -15477,7 +15479,7 @@ export class LynoxHTTPApi {
           // Quoted, so the target's words cannot run on into lynox's own sentence.
           const words = relayedText(said).trim();
           throw new Error(words === ''
-            ? 'The target instance did not accept the migration. Nothing was transferred.'
+            ? `The target instance did not accept the migration. ${NO_REASON} Nothing was transferred.`
             : `The target instance did not accept the migration. It says: ${JSON.stringify(words)}. Nothing was transferred.`);
         }
         // The target answered the handshake: from here it holds a session (a refusal above starts none).
@@ -15569,8 +15571,12 @@ export class LynoxHTTPApi {
           if (text === null) return new Error(`${told} Its answer is over ${capText(TARGET_BODY_CAPS.refusal)}, so lynox did not read it. ${then}`);
           let message: unknown;
           try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
-          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${JSON.stringify(relayedText(text).trim())}. ${then}`);
-          return new Error(`${told} It says: ${JSON.stringify(relayedText(message).trim())}. ${then}`);
+          if (typeof message !== 'string' || message === '') {
+            const raw = relayedText(text).trim();
+            return new Error(raw === '' ? `${told} ${NO_REASON} ${then}` : `${step}: ${JSON.stringify(raw)}. ${then}`);
+          }
+          const words = relayedText(message).trim();
+          return new Error(words === '' ? `${told} ${NO_REASON} ${then}` : `${told} It says: ${JSON.stringify(words)}. ${then}`);
         };
 
         // 4. Send manifest
