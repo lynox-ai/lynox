@@ -123,6 +123,14 @@ export class SecretVault {
   constructor(options?: VaultOptions | undefined) {
     const dbPath = options?.path ?? getVaultDbPath();
 
+    // The key first: without one nothing is opened, so no connection is left behind by the throw.
+    const passphrase = options?.masterKey ?? process.env['LYNOX_VAULT_KEY'];
+    if (!passphrase) {
+      throw new Error(
+        'Vault master key required. Set LYNOX_VAULT_KEY env var or pass masterKey option.',
+      );
+    }
+
     // Ensure directory exists
     const dir = join(dbPath, '..');
     ensureDirSync(dir);
@@ -147,14 +155,6 @@ export class SecretVault {
     }
 
     this._migrate();
-
-    // Derive encryption key
-    const passphrase = options?.masterKey ?? process.env['LYNOX_VAULT_KEY'];
-    if (!passphrase) {
-      throw new Error(
-        'Vault master key required. Set LYNOX_VAULT_KEY env var or pass masterKey option.',
-      );
-    }
 
     // Warn about weak keys (low entropy)
     const entropy = estimateKeyEntropy(passphrase);
@@ -277,12 +277,17 @@ export class SecretVault {
 
     if (row) return row.salt;
 
-    const salt = randomBytes(SALT_LENGTH);
-    this.db.prepare(
-      "INSERT INTO vault_meta (key, value) VALUES ('pbkdf2_salt', ?)",
-    ).run(salt);
-    this.saltCreated = true;
-    return salt;
+    // Two processes may create the same new vault at once: the first salt stands, and the second
+    // open derives its key from that one instead of failing on the duplicate.
+    const inserted = this.db.prepare(
+      "INSERT OR IGNORE INTO vault_meta (key, value) VALUES ('pbkdf2_salt', ?)",
+    ).run(randomBytes(SALT_LENGTH));
+    this.saltCreated = inserted.changes === 1;
+    const stored = this.db.prepare(
+      "SELECT value as salt FROM vault_meta WHERE key = 'pbkdf2_salt'",
+    ).get() as SaltRow | undefined;
+    if (!stored) throw new Error('Vault salt could not be read back after it was written.');
+    return stored.salt;
   }
 
   private _encrypt(plaintext: string): { encrypted: Buffer; iv: Buffer; authTag: Buffer } {
