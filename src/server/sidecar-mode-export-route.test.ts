@@ -356,26 +356,26 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.health = HEALTH;
     const events = await exportTo();
     expect((events.get('error') as { message: string }).message)
-      .toBe('The target instance refused the migration. It says: The manifest carries a store as plaintext, which the target instance does not take yet; the source has to send it raw. You can start the migration again in 30 minutes at the latest.');
+      .toBe('The target instance refused the migration. It says: "The manifest carries a store as plaintext, which the target instance does not take yet; the source has to send it raw.". You can start the migration again in 30 minutes at the latest.');
   });
 
   it('shows at most 500 characters of a destination\'s text, and marks the cut', async () => {
     setShellIsolationForTest(sidecar);
     target.manifestError = 'x'.repeat(499) + 'yz';
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: ${'x'.repeat(499)}y… You can start the migration again in 30 minutes at the latest.`);
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: "${'x'.repeat(499)}y…". You can start the migration again in 30 minutes at the latest.`);
     target.manifestError = 'x'.repeat(500);
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: ${'x'.repeat(500)} You can start the migration again in 30 minutes at the latest.`);
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: "${'x'.repeat(500)}". You can start the migration again in 30 minutes at the latest.`);
   });
 
   it('keeps the raw answer, named by its step, when the destination gives no usable error text', async () => {
     setShellIsolationForTest(sidecar);
     for (const error of ['', 42, null]) {
       target.manifestError = error;
-      expect(((await exportTo()).get('error') as { message: string }).message).toBe(`Manifest rejected: ${JSON.stringify({ error })} You can start the migration again in 30 minutes at the latest.`);
+      expect(((await exportTo()).get('error') as { message: string }).message).toBe(`Manifest rejected: ${JSON.stringify(JSON.stringify({ error }))}. You can start the migration again in 30 minutes at the latest.`);
     }
     target.manifestError = undefined;
     target.manifestRaw = 'bad gateway';
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: bad gateway You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: "bad gateway". You can start the migration again in 30 minutes at the latest.');
   });
 
   it('reads each answer of the destination up to its cap and names the step when one is larger', async () => {
@@ -390,13 +390,13 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.large = { at: 'handshake-refusal', bytes: TARGET_BODY_CAPS.handshake + 1 };
     expect(await message()).toBe('lynox could not set up the connection to the target instance: its answer is over 64 KiB, so lynox did not read it. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
     target.large = { at: 'handshake-refusal', bytes: 600 };
-    expect(await message()).toBe(`The target instance did not accept the migration. It says: ${'x'.repeat(500)}… Nothing was transferred.`);
+    expect(await message()).toBe(`The target instance did not accept the migration. It says: "${'x'.repeat(500)}…". Nothing was transferred.`);
     // A refusal of the manifest (the same reader serves the chunks and the restore).
     target.large = undefined;
     target.manifestRaw = 'x'.repeat(TARGET_BODY_CAPS.refusal + 1);
     expect(await message()).toBe('The target instance refused the migration. Its answer is over 64 KiB, so lynox did not read it. You can start the migration again in 30 minutes at the latest.');
     target.manifestRaw = 'x'.repeat(TARGET_BODY_CAPS.refusal);
-    expect(await message()).toBe(`Manifest rejected: ${'x'.repeat(500)}… You can start the migration again in 30 minutes at the latest.`);
+    expect(await message()).toBe(`Manifest rejected: "${'x'.repeat(500)}…". You can start the migration again in 30 minutes at the latest.`);
     // The restore's report.
     target.manifestRaw = undefined;
     target.large = { at: 'restore', bytes: TARGET_BODY_CAPS.restore };
@@ -430,7 +430,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(await message()).toBe(told);
     // Control: another refusal is shown as the target's text.
     target.handshakeRefusal = { error: 'Invalid migration token' };
-    expect(await message()).toBe('The target instance did not accept the migration. It says: Invalid migration token. Nothing was transferred.');
+    expect(await message()).toBe('The target instance did not accept the migration. It says: "Invalid migration token". Nothing was transferred.');
     // A refusal without any words of its own.
     for (const error of ['', '\n\t ', '\u202e']) {
       target.handshakeRefusal = { error };
@@ -458,16 +458,16 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
     target.manifestError = 'The bundle names a store this instance does not know';
     target.abort = 'real';
-    expect(await message()).toBe('The target instance refused the migration. It says: The bundle names a store this instance does not know.');
+    expect(await message()).toBe('The target instance refused the migration. It says: "The bundle names a store this instance does not know".');
     // Not confirmed: the session may still be held, so the 30 minutes stay.
     target.abort = { status: 200, body: { aborted: false } };
-    expect(await message()).toBe('The target instance refused the migration. It says: The bundle names a store this instance does not know You can start the migration again in 30 minutes at the latest.');
+    expect(await message()).toBe('The target instance refused the migration. It says: "The bundle names a store this instance does not know". You can start the migration again in 30 minutes at the latest.');
     expect(target.abortCalls).toHaveLength(2);
     // The target failing or busy is no refusal of the manifest: once the session ended, start again now.
     target.abort = 'real';
     for (const status of [503, 429]) {
       target.manifestStatus = status;
-      expect(await message()).toBe('The target instance refused the migration. It says: The bundle names a store this instance does not know You can start the migration again now.');
+      expect(await message()).toBe('The target instance refused the migration. It says: "The bundle names a store this instance does not know". You can start the migration again now.');
     }
   });
 
@@ -642,28 +642,55 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect((events.get('done') as { verification: unknown }).verification).toEqual({ databasesRestored: ['engine.db'], portableDirSkipped: ['workspace/ab c'], secretsImported: 2 });
   });
 
+  it('keeps the target\'s words in quotes, so they cannot pose as lynox\'s own sentence', async () => {
+    setShellIsolationForTest(sidecar);
+    const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
+    const AGAIN = 'You can start the migration again in 30 minutes at the latest.';
+    const NOW = 'You can start the migration again now.';
+    // Words carrying a quote and lynox's own sentences, in both forms.
+    const posing = `Say "ok". ${AGAIN} ${NOW}`;
+    const quoted = '"Say \\"ok\\". You can start the migration again in 30 minutes at the latest. You can start the migration again now."';
+    // Refused manifest, session ended: the words stand alone, untouched inside their quotes.
+    target.manifestError = posing;
+    target.abort = 'real';
+    expect(await message()).toBe(`The target instance refused the migration. It says: ${quoted}.`);
+    // Not confirmed: lynox's own 30 minutes follow the words, once.
+    target.abort = { status: 200, body: { aborted: false } };
+    expect(await message()).toBe(`The target instance refused the migration. It says: ${quoted}. ${AGAIN}`);
+    // The target busy, session ended: lynox's sentence becomes "now", the quoted copy stays as it was.
+    target.abort = 'real';
+    target.manifestStatus = 503;
+    expect(await message()).toBe(`The target instance refused the migration. It says: ${quoted}. ${NOW}`);
+    target.manifestError = undefined;
+    target.manifestStatus = undefined;
+    // After the manifest no session can be ended: the target's "now" does not replace lynox's 30 minutes.
+    target.chunkError = { at: 0, error: posing };
+    expect(await message()).toBe(`The target instance refused part 1 of the data. It says: ${quoted}. ${AGAIN}`);
+    target.chunkError = undefined;
+  });
+
   it('shows the destination\'s words without control or bidi characters', async () => {
     setShellIsolationForTest(sidecar);
     target.manifestError = 'refused\u202E gnp.exe\nnext\u2066line\u0007';
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. It says: refused gnp.exe nextline You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. It says: "refused gnp.exe nextline". You can start the migration again in 30 minutes at the latest.');
     target.manifestError = undefined;
     target.manifestRaw = 'bad\r\ngateway\u202D';
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: bad  gateway You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: "bad  gateway". You can start the migration again in 30 minutes at the latest.');
   });
 
   it('says which part of the data the destination refused, counted from 1, and that it could not restore', async () => {
     setShellIsolationForTest(sidecar);
     target.chunkError = { at: 0, error: 'chunk refused' };
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of the data. It says: chunk refused You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
     target.chunkError = { at: 2, error: 'chunk refused' };
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 3 of the data. It says: chunk refused You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 3 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
     target.chunkError = undefined;
     target.restoreError = 'restore refused';
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: restore refused Check on the target instance whether your data arrived before you migrate again.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: "restore refused". Check on the target instance whether your data arrived before you migrate again.');
     // A refusal before the restore started (here: a missing chunk, 400) keeps the retry sentence.
     target.restoreError = undefined;
     target.restoreStatus = { status: 400, error: 'Cannot restore — not all chunks received.' };
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: Cannot restore — not all chunks received. You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: "Cannot restore — not all chunks received.". You can start the migration again in 30 minutes at the latest.');
   });
 
   it('zeroizes the transfer key when the handshake completion fails', async () => {

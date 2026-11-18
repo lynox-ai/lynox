@@ -15474,10 +15474,11 @@ export class LynoxHTTPApi {
           }
           // The target's own words, cleaned and cut; a refusal here starts no session on it.
           const said = typeof refused?.error === 'string' ? refused.error : errText;
+          // Quoted, so the target's words cannot run on into lynox's own sentence.
           const words = relayedText(said).trim();
           throw new Error(words === ''
             ? 'The target instance did not accept the migration. Nothing was transferred.'
-            : `The target instance did not accept the migration. It says: ${words}${/[.!?…]$/.test(words) ? '' : '.'} Nothing was transferred.`);
+            : `The target instance did not accept the migration. It says: ${JSON.stringify(words)}. Nothing was transferred.`);
         }
         // The target answered the handshake: from here it holds a session (a refusal above starts none).
         sessionMayBeHeld = true;
@@ -15556,6 +15557,8 @@ export class LynoxHTTPApi {
         // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
         // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
         // The answer is read up to its cap, and the target's words lose control and bidi characters.
+        // They stand in quotes (inner quotes escaped), so they cannot run on into lynox's own sentence
+        // or pose as it; lynox's sentence always comes last.
         // `then` is what the user can do next: try again later, or, once the restore ran, check the target.
         const refusal = async (r: Response, step: string, told: string, then: string = AGAIN): Promise<Error> => {
           let text: string | null;
@@ -15566,8 +15569,8 @@ export class LynoxHTTPApi {
           if (text === null) return new Error(`${told} Its answer is over ${capText(TARGET_BODY_CAPS.refusal)}, so lynox did not read it. ${then}`);
           let message: unknown;
           try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
-          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${relayedText(text)} ${then}`);
-          return new Error(`${told} It says: ${relayedText(message)} ${then}`);
+          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${JSON.stringify(relayedText(text))}. ${then}`);
+          return new Error(`${told} It says: ${JSON.stringify(relayedText(message))}. ${then}`);
         };
 
         // 4. Send manifest
@@ -15681,8 +15684,10 @@ export class LynoxHTTPApi {
         // Once the target has ended the session nothing holds a new attempt. After a refused manifest
         // the target's words stand alone; elsewhere the user can start again now.
         const unheld = (): string => {
-          if (!manifestRefused) return shown.replace(AGAIN_TEXT, NOW_TEXT);
-          const bare = shown.replace(` ${AGAIN_TEXT}`, '').trim();
+          if (!shown.endsWith(AGAIN_TEXT)) return shown;
+          const before = shown.slice(0, -AGAIN_TEXT.length);
+          if (!manifestRefused) return `${before}${NOW_TEXT}`;
+          const bare = before.trim();
           return `${bare}${/[.!?…]$/.test(bare) ? '' : '.'}`;
         };
         sendEvent('error', { message: freed ? unheld() : shown });
