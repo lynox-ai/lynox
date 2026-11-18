@@ -35,6 +35,12 @@ let holdActive: Promise<void> | null;
 let activeFails: boolean;
 let holdDelete: Promise<void> | null;
 let threadMessages: unknown;
+let stopPoll: (() => void) | null = null;
+let openRun = false;
+let gateEach = false;
+let gates: Array<() => void> = [];
+let finishRun: (() => void) | null = null;
+let emitRun: ((event: string, data: unknown) => void) | null = null;
 
 function serve(): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -43,18 +49,32 @@ function serve(): void {
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
 		if (init?.method === 'DELETE' && holdDelete) await holdDelete;
 		if (url.endsWith('/runs/active')) {
+			if (gateEach) await new Promise<void>((r) => { gates.push(r); });
+			if (holdActive) {
+				const gate = holdActive;
+				const signal = init?.signal;
+				// A held answer gives way to the store's own time limit, as a real fetch does.
+				await new Promise<void>((resolve, reject) => {
+					void gate.then(resolve);
+					signal?.addEventListener('abort', () => reject(new DOMException('timed out', 'TimeoutError')));
+				});
+			}
+			// Read after the wait, so a test can let an ask fail that started fine.
 			if (activeFails) throw new TypeError('fetch failed');
-			if (holdActive) await holdActive;
 			return json(active);
 		}
+		if (url.endsWith('/changeset')) return json({ hasChanges: true, runId: 'run-x', files: [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }] });
 		if (url.endsWith('/pending-prompt')) {
 			if (holdPending) await holdPending;
 			return json(pending);
 		}
 		if (url.endsWith('/run')) {
 			const enc = new TextEncoder();
+			const open = openRun;
 			const body = new ReadableStream<Uint8Array>({
 				start(c) {
+					// An open run streams until the test finishes it.
+					if (open) { emitRun = (event: string, data: unknown) => { c.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)); }; finishRun = () => { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); }; return; }
 					c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`));
 					c.close();
 				},
@@ -77,6 +97,11 @@ async function questionWaits(card: unknown): Promise<void> {
 	expect(runPosts(), 'positive control: a message is sent while nothing waits').toBe(1);
 	active = SCHEDULED;
 	pending = card;
+	// The nav's poll sees the question, as in the app (AppShell starts it).
+	const threads = await import('./threads.svelte.js');
+	stopPoll = threads.startActiveRunsPoll(600_000);
+	await settle();
+	expect(threads.getRunStatus('t1'), 'positive control: the poll sees the question').toBe('awaiting_input');
 }
 
 beforeEach(async () => {
@@ -97,9 +122,14 @@ beforeEach(async () => {
 	activeFails = false;
 	holdDelete = null;
 	threadMessages = { messages: [], activeRun: null };
+	openRun = false;
+	finishRun = null;
+	emitRun = null;
+	gateEach = false;
+	gates = [];
 	serve();
 });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { stopPoll?.(); stopPoll = null; vi.unstubAllGlobals(); });
 
 describe('the tap on a failed message', () => {
 	it('with a question waiting: not sent again, the card back, the question sentence', async () => {
@@ -160,6 +190,29 @@ describe('the tap on a failed message', () => {
 		await settle();
 		expect(runPosts()).toBe(1);
 		expect(toastKeys()).toEqual(['chat.question_waiting_plain']);
+	});
+
+	it('while this chat’s own turn streams: the running sentence, at least 8 s', async () => {
+		await questionWaits(QUESTION);
+		active = NOTHING;
+		openRun = true;
+		void store.sendMessage('working');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: a turn streams').toBe(true);
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		await store.retryFailedTurn(store.getMessages().find((m) => m.content === 'again')!, 'again');
+		expect(toasts.map((x) => [x.message, x.ms])).toEqual([[i18n.t('chat.still_running'), 8000]]);
+		finishRun?.();
+		await settle();
+	});
+
+	it('with the chat’s own run working: the running sentence, long enough to read (at least 8 s)', async () => {
+		await questionWaits(QUESTION);
+		active = { runs: [{ runId: 'own', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] };
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		await store.retryFailedTurn(store.getMessages().at(-1)!, 'again');
+		await settle();
+		expect(toasts.map((x) => [x.message, x.ms])).toEqual([[i18n.t('chat.still_running'), 8000]]);
 	});
 
 	it('with a prompt whose card cannot be shown: not sent, and nothing is said', async () => {
@@ -250,6 +303,72 @@ describe('the reconnect after a turn failed offline', () => {
 		expect(failedOne('ja').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
 	});
 
+	it('with a question waiting and this message in the transcript: no longer failed (no tap to send it again), nothing sent', async () => {
+		await questionWaits(DECISION);
+		// It reached the server while the client was blind: one user row more, with its words.
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' },
+			{ role: 'assistant', content: 'ok' },
+			{ role: 'user', content: '[Now: 2026-11-05T15:00:00.000Z; user local 2026-11-05 16:00:00 Europe/Zurich]\n\nja' },
+			{ role: 'assistant', content: 'done' },
+		], activeRun: null };
+		store.getMessages().push({ role: 'user', content: 'ja', failed: true, failedOffline: true });
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(store.getMessages().filter((m) => m.role === 'user' && m.failed === true)).toEqual([]);
+		// The question still waits: its card is back and said, as when the message is held.
+		expect(store.getPendingPermission()?.question).toBe('⚠ mail_send needs your OK');
+		expect(toastKeys()).toEqual(['chat.question_waiting_decision']);
+	});
+
+	it('with a question waiting and an earlier message with the same words: held, the counts are equal', async () => {
+		await questionWaits(DECISION);
+		store.getMessages().push({ role: 'user', content: 'ja' }, { role: 'assistant', content: 'ok' });
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' },
+			{ role: 'assistant', content: 'ok' },
+			{ role: 'user', content: '[Now: 2026-11-05T15:00:00.000Z]\n\nja' },
+			{ role: 'assistant', content: 'ok' },
+		], activeRun: null };
+		store.getMessages().push({ role: 'user', content: 'ja', failed: true, failedOffline: true });
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(store.getMessages().filter((m) => m.role === 'user' && m.failed === true).map((m) => [m.content, m.failedOffline])).toEqual([['ja', true]]);
+	});
+
+	it('with a question waiting and a message from elsewhere in the transcript: held', async () => {
+		await questionWaits(DECISION);
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' },
+			{ role: 'assistant', content: 'ok' },
+			{ role: 'user', content: 'from the phone' },
+		], activeRun: null };
+		store.getMessages().push({ role: 'user', content: 'offline turn', failed: true, failedOffline: true });
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(failedOne('offline turn').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
+	});
+
+	it('with a question waiting and a second failed message in the list: held, the count says nothing', async () => {
+		await questionWaits(DECISION);
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' },
+			{ role: 'assistant', content: 'ok' },
+			{ role: 'user', content: 'offline turn' },
+		], activeRun: null };
+		store.getMessages().push({ role: 'user', content: 'earlier', failed: true });
+		store.getMessages().push({ role: 'user', content: 'offline turn', failed: true, failedOffline: true });
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(failedOne('offline turn').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
+	});
+
 	it('with nothing waiting and the same transcript: cleared as answered, as before', async () => {
 		await questionWaits(DECISION);
 		active = NOTHING;
@@ -327,11 +446,310 @@ describe('Retry on an interrupted run', () => {
 });
 
 describe('a new message', () => {
-	it('is not held by this change: it is sent as before', async () => {
+	const heldOnes = () => store.getMessages().filter((m) => m.held === true);
+	const HELD_KEYS = ['chat.question_waiting_held', 'chat.question_waiting_decision_held', 'chat.question_waiting_plain_held'];
+	const heldToasts = (): string[] => toasts.map((x) => [...HELD_KEYS, ...KEYS].find((k) => i18n.t(k) === x.message) ?? x.message);
+
+	it('with a question waiting: not sent, held in the chat, the card back, the held sentence', async () => {
 		await questionWaits(QUESTION);
 		await store.sendMessage('hello');
 		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldOnes().map((m) => [m.content, m.failed ?? false])).toEqual([['hello', false]]);
+		expect(store.getPendingPermission()?.question).toBe('Which list, A or B?');
+		expect(heldToasts()).toEqual(['chat.question_waiting_held']);
+		expect(toasts[0]!.ms).toBeGreaterThanOrEqual(8000);
+	});
+
+	it('with a decision waiting: the decision’s held sentence', async () => {
+		await questionWaits(DECISION);
+		await store.sendMessage('hello');
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldToasts()).toEqual(['chat.question_waiting_decision_held']);
+	});
+
+	it('a chip’s prompt is what a held message sends, its label what it shows', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('the full prompt', 'the label');
+		await settle();
+		expect(heldOnes().map((m) => [m.content, m.heldTask])).toEqual([['the label', 'the full prompt']]);
+		active = NOTHING;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
 		expect(runPosts()).toBe(2);
+		const body = JSON.parse(String((vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run')).at(-1)![1] as RequestInit).body)) as { task?: string };
+		expect(body.task).toContain('the full prompt');
+	});
+
+	it('is not sent by the reconnect, nor once the question is gone', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		pending = { pending: false };
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+	});
+
+	it('outlives the server’s transcript, equal or longer, after the question is answered', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		threadMessages = { messages: [
+			{ role: 'user', content: 'first' }, { role: 'assistant', content: 'ok' },
+			{ role: 'assistant', content: 'the scheduled run went on' },
+		], activeRun: null };
+		await store.reconcileThread();
+		expect(store.getMessages().at(-1)).toMatchObject({ role: 'user', content: 'hello', held: true });
+		expect(store.getMessages().some((m) => m.content === 'the scheduled run went on'), 'positive control: the transcript was adopted').toBe(true);
+	});
+
+	it('outlives a reload of the page', async () => {
+		const saved = new Map<string, string>();
+		vi.stubGlobal('localStorage', {
+			getItem: (k: string) => saved.get(k) ?? null,
+			setItem: (k: string, v: string) => { saved.set(k, v); },
+			removeItem: (k: string) => { saved.delete(k); },
+		});
+		vi.resetModules();
+		store = await import('./chat.svelte.js');
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		expect(heldOnes().map((m) => m.content), 'positive control: held before the reload').toEqual(['hello']);
+		vi.resetModules();
+		store = await import('./chat.svelte.js');
+		expect(store.getMessages().filter((m) => m.held === true).map((m) => m.content)).toEqual(['hello']);
+	});
+
+	it('a tap while the question still waits: still held, the held sentence, never "not sent again"', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		toasts.length = 0;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+		expect(heldToasts()).toEqual(['chat.question_waiting_held']);
+	});
+
+	it('a tap asks the server even when the nav’s poll no longer shows the chat waiting', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		// The poll last saw nothing (between two polls the question came back, or the poll lags).
+		const threads = await import('./threads.svelte.js');
+		stopPoll?.();
+		active = NOTHING;
+		stopPoll = threads.startActiveRunsPoll(600_000);
+		await settle();
+		expect(threads.getRunStatus('t1'), 'positive control: the poll shows nothing waiting').toBeUndefined();
+		active = SCHEDULED;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+	});
+
+	it('a tap once the question is gone: sent once, at once, no longer held', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(runPosts()).toBe(2);
+		expect(heldOnes()).toEqual([]);
+		expect(store.getMessages().filter((m) => m.role === 'user' && m.content === 'hello')).toHaveLength(1);
+	});
+
+	it('the X discards it, unsent', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		store.removeHeldMessage(heldOnes()[0]!);
+		expect(store.getMessages().some((m) => m.content === 'hello')).toBe(false);
+		expect(runPosts()).toBe(1);
+	});
+
+	it('when the server cannot be asked: sent as before', async () => {
+		await questionWaits(QUESTION);
+		activeFails = true;
+		await store.sendMessage('hello');
+		await settle();
+		expect(runPosts()).toBe(2);
+		expect(heldOnes()).toEqual([]);
+	});
+
+	it('with nothing waiting: sent as before', async () => {
+		await questionWaits(QUESTION);
+		active = NOTHING;
+		await store.sendMessage('hello');
+		await settle();
+		expect(runPosts()).toBe(2);
+	});
+
+	it('with the chat’s own run waiting on a question: not held (that card answers it)', async () => {
+		await questionWaits(QUESTION);
+		active = { runs: [{ runId: 'own', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }, ...SCHEDULED.runs] };
+		await store.sendMessage('hello');
+		await settle();
+		expect(heldOnes()).toEqual([]);
+	});
+
+	it('never goes into a chat opened while the server was asked, even when the ask fails', async () => {
+		await questionWaits(QUESTION);
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		activeFails = false;
+		const send = store.sendMessage('hello');
+		await settle();
+		store.newChat();
+		activeFails = true;
+		release();
+		await send;
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(store.getMessages().some((m) => m.content === 'hello')).toBe(false);
+	});
+
+	it('Retry on an interrupted run sends the interrupted turn, not a held message', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		expect(heldOnes().map((m) => m.content), 'positive control: held').toEqual(['hello']);
+		threadMessages = {
+			messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'half' }],
+			activeRun: { runId: 'r-int', status: 'interrupted', lastPersistedSeq: 0 },
+		};
+		await store.reconcileThread();
+		active = NOTHING;
+		await store.retryInterruptedRun();
+		await settle();
+		const body = JSON.parse(String((vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run')).at(-1)![1] as RequestInit).body)) as { task?: string };
+		expect(body.task).toContain('first');
+		expect(body.task).not.toContain('hello');
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+	});
+
+	it('keeps its effort and thinking for the tap', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('the full prompt', 'the label', undefined, { effort: 'low', thinking: 'disabled' });
+		await settle();
+		active = NOTHING;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		const body = JSON.parse(String((vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run')).at(-1)![1] as RequestInit).body)) as { effort?: string; thinking?: string };
+		expect([body.effort, body.thinking]).toEqual(['low', 'disabled']);
+	});
+
+	it('two messages sent while the server is asked keep their order', async () => {
+		await questionWaits(QUESTION);
+		// The poll still shows the chat waiting; the question is gone.
+		active = NOTHING;
+		gateEach = true;
+		const a = store.sendMessage('A');
+		const b = store.sendMessage('B');
+		await settle();
+		// The ask for B answers first.
+		gates.at(-1)!();
+		await settle();
+		gateEach = false;
+		for (const g of gates) g();
+		await settle();
+		await settle();
+		const users = store.getMessages().filter((m) => m.role === 'user').map((m) => m.content);
+		expect(users.indexOf('A')).toBeLessThan(users.indexOf('B'));
+		const firstRun = JSON.parse(String((vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run'))[1]![1] as RequestInit).body)) as { task?: string };
+		expect(firstRun.task).toContain('A');
+		void a; void b;
+	});
+
+	it('a tap while a send is being asked about waits for it, and is not dropped', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const other = store.sendMessage('other');
+		await settle();
+		const tap = store.sendHeldMessage(heldOnes()[0]!);
+		holdActive = null;
+		release();
+		await other;
+		await tap;
+		await settle();
+		expect(heldOnes()).toEqual([]);
+		expect(store.getMessages().filter((m) => m.role === 'user' && m.content === 'hello')).toHaveLength(1);
+	});
+
+	it('a tap once the question is gone asks the server once, not twice', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		const before = calls.filter((u) => u.endsWith('/runs/active')).length;
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(calls.filter((u) => u.endsWith('/runs/active')).length - before).toBe(1);
+		expect(runPosts()).toBe(2);
+	});
+
+	it('a review that opens while a tap is asked about keeps the message held, unsent', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello');
+		await settle();
+		active = NOTHING;
+		openRun = true;
+		void store.sendMessage('working');
+		await settle();
+		expect(store.getIsStreaming(), 'positive control: a turn streams').toBe(true);
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const tap = store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		emitRun!('changeset_ready', { fileCount: 1 });
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: the review is open').not.toBeNull();
+		holdActive = null;
+		release();
+		await tap;
+		await settle();
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+		expect(store.getMessages().filter((m) => m.content === 'hello' && m.queued === true)).toEqual([]);
+		finishRun?.();
+		await settle();
+		expect(runPosts()).toBe(2);
+	});
+
+	it('an ask that never answers gives way after its time limit: the message is sent, the next one too', async () => {
+		await questionWaits(QUESTION);
+		active = NOTHING;
+		holdActive = new Promise(() => { /* never answers */ });
+		const a = store.sendMessage('A');
+		await settle();
+		const b = store.sendMessage('B');
+		await new Promise((r) => setTimeout(r, 5_600));
+		holdActive = null;
+		await settle();
+		await Promise.all([a, b]);
+		await settle();
+		expect(runPosts()).toBe(3);
+	}, 15_000);
+
+	it('with files: sent as before, since a reload keeps no files', async () => {
+		await questionWaits(QUESTION);
+		await store.sendMessage('hello', [{ name: 'a.txt', type: 'text/plain', data: 'YQ==' }]);
+		await settle();
+		expect(runPosts()).toBe(2);
+		expect(heldOnes()).toEqual([]);
 	});
 });
 
@@ -363,7 +781,28 @@ describe('the sentences, word for word (reviewed wording)', () => {
 			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst; deine Nachricht wurde nicht noch einmal gesendet.',
 			en: 'A question in this chat is waiting for your answer. Answer it first; your message was not sent again.',
 		},
+		'chat.question_waiting_held': {
+			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst oder brich sie mit dem X auf der Karte ab; dann geht der Lauf ohne Antwort weiter. Deine Nachricht wurde nicht gesendet und bleibt hier im Chat stehen; tipp sie danach an, um sie zu senden.',
+			en: 'A question in this chat is waiting for your answer. Answer it first, or cancel it with the X on the card; the run then goes on without an answer. Your message was not sent and stays here in the chat; tap it afterwards to send it.',
+		},
+		'chat.question_waiting_decision_held': {
+			de: 'In diesem Chat wartet eine Entscheidung auf dich. Triff sie zuerst auf der Karte. Deine Nachricht wurde nicht gesendet und bleibt hier im Chat stehen; tipp sie danach an, um sie zu senden.',
+			en: 'A decision in this chat is waiting for you. Make it on the card first. Your message was not sent and stays here in the chat; tap it afterwards to send it.',
+		},
+		'chat.question_waiting_plain_held': {
+			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst. Deine Nachricht wurde nicht gesendet und bleibt hier im Chat stehen; tipp sie danach an, um sie zu senden.',
+			en: 'A question in this chat is waiting for your answer. Answer it first. Your message was not sent and stays here in the chat; tap it afterwards to send it.',
+		},
+		'chat.send_held': { de: 'Noch nicht gesendet — tippen zum Senden', en: 'Not sent yet — tap to send' },
 	};
+	it('a held message’s sentence follows the card too, and never says "not sent again"', () => {
+		expect(store.questionWaitingKey('decision', true)).toBe('chat.question_waiting_decision_held');
+		expect(store.questionWaitingKey('question', true)).toBe('chat.question_waiting_held');
+		expect(store.questionWaitingKey('other', true)).toBe('chat.question_waiting_plain_held');
+		expect(store.questionWaitingKey(null, true)).toBeNull();
+		i18n.setLocale('de');
+		for (const k of ['chat.question_waiting_held', 'chat.question_waiting_decision_held', 'chat.question_waiting_plain_held']) expect(i18n.t(k)).not.toContain('noch einmal');
+	});
 	for (const key of Object.keys(TEXT)) {
 		it(key, () => {
 			i18n.setLocale('de');
