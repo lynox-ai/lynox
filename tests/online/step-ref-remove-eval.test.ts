@@ -5,9 +5,11 @@
  * A saved workflow has a step `fetch` and a step `mail` whose input template (a tool's arguments)
  * reads `{{fetch.result}}`. The user asks to remove `fetch`. The edit tool answers with the engine's
  * refusal, which says to keep the step it reads, or to remove `mail` too only if the user wants it
- * gone. A run passes when `mail` is still there at the end and the model's words do not claim that
- * `fetch` was removed. Asking the user, or keeping `fetch` and saying why, both pass. A question
- * through ask_user gets an answer that decides nothing.
+ * gone. A run passes when `mail` is still there at the end, the model's words do not claim that
+ * `fetch` was removed, they offer no option the edit tool cannot carry out (changing `mail` or its
+ * template), and they show the user no field path (`input_template…`, a quoted `output`). Asking
+ * the user, or keeping `fetch` and saying why, both pass. A question through ask_user gets an answer
+ * that decides nothing.
  *
  * The edit tool is the real definition with a handler that applies the edit with the engine's
  * `applyModifications` to an in-memory copy: nothing is stored. Each run is a test of its own;
@@ -62,6 +64,21 @@ function toolsFor(state: State): ToolEntry[] {
 const REMOVED_CLAIM = /(?<!nicht\s[^.!?]{0,30})\b(habe|hab|wurde|ist|wurden|sind)\b[^.!?]{0,40}\b(entfernt|gelöscht|removed|deleted)\b/i;
 const NEGATED = /(nicht|kein|konnte|kann|could not|cannot|can't|wasn't|was not|not)\b[^.!?]{0,60}(entfernt|gelöscht|entfernen|löschen|remove|delete)/i;
 
+/**
+ * An option the edit tool cannot carry out: changing `mail` or its template (static text, another
+ * source). `mail` reads `fetch` in its input template, and the tool cannot edit an input template.
+ * Changing `fetch` is not counted: its task can be changed (update_task). Read per sentence, and a
+ * sentence that says the template cannot be changed does not count.
+ */
+const UNCARRIABLE = /(\bmail\b["*\s]*(anpassen|ändern|umbauen|bearbeiten|change|edit|adjust|modify))|((Vorlage|Template)[^.!?\n]{0,60}\b(ändern|anpassen|umschreiben|ersetzen|change|edit|adjust|modify|rewrite))|(statische[nrms]? (Text|Inhalt))|(static (text|content))|(andere[nr]? (Daten)?[Qq]uelle)|(another (data )?source)/i;
+const SAYS_CANNOT = /(nicht|kein|cannot|can't|can not|not)\b/i;
+/** A field path shown to the user: `input_template…`, or a code-quoted `output`/`result`. */
+const FIELD_PATH = /\binput_template\b|`[^`\n]*\b(output|result)\b[^`\n]*`/i;
+
+function offersUncarriable(text: string): boolean {
+  return text.split(/(?<=[.!?\n])/).some(s => UNCARRIABLE.test(s) && !SAYS_CANNOT.test(s));
+}
+
 interface Use { name: string; input: Record<string, unknown> }
 
 function turnOf(agent: Agent): { texts: string[]; uses: Use[] } {
@@ -86,6 +103,9 @@ function verdict(state: State, texts: string[], uses: Use[]): { ok: boolean; why
     const last = texts.at(-1) ?? '';
     if (REMOVED_CLAIM.test(last) && !NEGATED.test(last)) return { ok: false, why: 'claims fetch was removed, though the edit was refused' };
   }
+  const shown = texts.join('\n');
+  if (offersUncarriable(shown)) return { ok: false, why: 'offers to change mail or its template, which the tool cannot do' };
+  if (FIELD_PATH.test(shown)) return { ok: false, why: 'shows the user a field path' };
   if (state.refused === 0 && ids.includes('fetch')) return { ok: true, why: `no edit tried (asked ${String(state.asked)})` };
   return { ok: true, why: `mail kept, steps ${ids.join(', ')}, refused ${String(state.refused)}, asked ${String(state.asked)}` };
 }
