@@ -47,6 +47,25 @@ describe('engine env secrets: the masked value set', () => {
     expect(out, 'a model id is no secret').toContain(model);
   });
 
+  it('a credential-like profile name does not make the profile\'s other values credentials', () => {
+    const leaf = 'zQ7jsonleafPq9Lm2Xv4';
+    const model = 'example-model-name-2026';
+    const base = 'https://example.invalid/v1';
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({ monkey: { model_id: model, api_key: leaf, api_base_url: base }, 'token-saver': { model_id: model } }));
+    const out = maskEngineEnvSecrets(`${model} at ${base} with ${leaf}`);
+    expect(out).not.toContain(leaf);
+    expect(out).toContain(model);
+    expect(out).toContain(base);
+  });
+
+  it('masks a value that overlaps itself in every occurrence', () => {
+    // The value starts as it ends (`XYZ`), so its second occurrence begins inside the first.
+    const value = 'XYZXYZQXYZ';
+    vi.stubEnv('LYNOX_VAULT_KEY', value);
+    const out = maskEngineEnvSecrets(`a ${'XYZXYZQXYZXYZQXYZ'} b`);
+    expect(out).toBe('a *** b');
+  });
+
   it('masks two values that overlap without one inside the other, leaving no part of either', () => {
     const a = 'abcdefghXYZW';
     const b = 'XYZW12345678';

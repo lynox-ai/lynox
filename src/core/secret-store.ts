@@ -718,7 +718,9 @@ function valueSpans(text: string, values: readonly string[]): MaskSpan[] {
       const at = text.indexOf(value, from);
       if (at === -1) break;
       spans.push({ start: at, end: at + value.length, suffix: value.length >= MASK_SUFFIX_MIN_LENGTH });
-      from = at + value.length;
+      // One step on, not past the match: a value that overlaps itself (`XYZXYZ` in `XYZXYZXYZ`)
+      // is found again, and the merge joins the spans.
+      from = at + 1;
     }
   }
   return spans;
@@ -824,11 +826,13 @@ function credentialLeavesOfJson(json: string): string[] {
   let parsed: unknown;
   try { parsed = JSON.parse(json); } catch { return []; }
   const out: string[] = [];
+  // Only the nearest property name decides, and an array takes its property's: a profile named
+  // `monkey` or `token-saver` must not make its model id and base URL credentials.
   const walk = (v: unknown, underCredential: boolean): void => {
     if (typeof v === 'string') { if (underCredential) out.push(v); return; }
     if (Array.isArray(v)) { for (const x of v) walk(x, underCredential); return; }
     if (v !== null && typeof v === 'object') {
-      for (const [k, x] of Object.entries(v as Record<string, unknown>)) walk(x, underCredential || CREDENTIAL_PROPERTY.test(k));
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) walk(x, CREDENTIAL_PROPERTY.test(k));
     }
   };
   walk(parsed, false);
