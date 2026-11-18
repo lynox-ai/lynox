@@ -673,6 +673,10 @@
 	}
 
 	let inputText = $state('');
+	/** Whether something other than the person put text into the composer since it was last
+	 *  empty (a draft handed back, a prefill): such a message does not say it was typed. */
+	let composerPrefilled = false;
+	$effect(() => { if (inputText === '') composerPrefilled = false; });
 	let messagesEl: HTMLDivElement;
 	let autoScroll = $state(true);
 	// DK-UX: inline edit state for the untrusted-knowledge review chip (edit_approve).
@@ -1132,7 +1136,7 @@
 								// through `await sendMessage` would freeze the composer on
 								// "Transcribing…" for the entire answer.
 								transcribing = false;
-								void sendMessage(`🎤 ${trimmed}`, undefined, undefined, { typed: true });
+								void sendMessage(`🎤 ${trimmed}`, undefined, undefined, { typed: true, composedFromEmpty: true });
 							} else {
 								// Append rather than replace so a typed prefix isn't
 								// clobbered when the user dictates after typing.
@@ -1696,6 +1700,7 @@
 	function openPlanInNewChat() {
 		planInNewChat();
 		inputText = getContainedPrefill() ?? '';
+		composerPrefilled = inputText !== '';
 		void tick().then(() => {
 			if (!textareaEl) return;
 			autoResize({ target: textareaEl } as unknown as Event);
@@ -1817,6 +1822,7 @@
 	$effect(() => registerComposerDraft((text) => {
 		if (inputText.trim() !== '') return false;
 		inputText = text;
+		composerPrefilled = true;
 		focusInput();
 		return true;
 	}));
@@ -1827,6 +1833,7 @@
 	afterNavigate(() => {
 		// A chat opened with "Plan in a new chat" keeps its prefill until its first run.
 		inputText = getContainedPrefill() ?? '';
+		composerPrefilled = inputText !== '';
 		focusInput();
 		stopSpeech();
 		releaseMicNow();
@@ -1898,6 +1905,7 @@
 		// An open changeset review holds the send. Ask before clearing, so the text stays.
 		if (sendBlockedByReview()) return;
 		const files = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
+		const fromEmpty = !composerPrefilled;
 		inputText = '';
 		pendingFiles = [];
 		if (textareaEl) textareaEl.style.height = 'auto';
@@ -1909,7 +1917,7 @@
 		// after) is what makes it robust.
 		pinToBottomFor(1500);
 		// Only text the user typed is marked: the stand-in for a files-only send is the app's.
-		await sendMessage(task || t('chat.analyze_files'), undefined, files, task ? { typed: true } : undefined);
+		await sendMessage(task || t('chat.analyze_files'), undefined, files, task ? { typed: true, ...(fromEmpty ? { composedFromEmpty: true } : {}) } : undefined);
 	}
 
 	function isAtBottom(): boolean {

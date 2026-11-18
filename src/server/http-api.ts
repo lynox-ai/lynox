@@ -1910,6 +1910,15 @@ const ERASURE_MANY_UNKNOWN = 20;
 
 // ── Server Class ─────────────────────────────────────────────────────────────
 
+/**
+ * The run's typed text from a request: the client's `typed` field, only when it is a non-empty
+ * string found word for word in the request's task, cleaned like the task. Anything else: none.
+ */
+export function typedOf(typed: unknown, taskText: string): { typedText: string } | undefined {
+  if (typeof typed !== 'string' || typed.trim() === '' || !taskText.includes(typed)) return undefined;
+  return { typedText: withoutTypedCredentials(stripUntrustedSeparators(typed)) };
+}
+
 export class LynoxHTTPApi {
   private engine: Engine | null = null;
   private clientErrorResolver: (() => SecretStoreLike | null) | null = null;
@@ -5024,8 +5033,11 @@ export class LynoxHTTPApi {
         showsChangesetReview: b?.['shows_changeset_review'] === true,
         // Only what the person typed, kept apart from the loaded context and the files above:
         // the boundary is this string, not a sentinel in the composed message, which loaded
-        // content could carry itself.
-        typedText: safeTaskText,
+        // content could carry itself. Never derived from `task`: a task can be a prefill (a
+        // mail's subject, a chip, a retry), which the person did not write. The client sends
+        // `typed` only for a message started from an empty composer, and it counts only when it
+        // stands in this request's task word for word.
+        ...(typedOf(b?.['typed'], taskText) ?? {}),
       };
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on

@@ -11969,11 +11969,31 @@ describe('LynoxHTTPApi', () => {
     it('passes only the typed words as what was typed, apart from the context it loaded before them', async () => {
       mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
       mockSessionRun.mockClear();
-      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'an anna@firma.ch', context: { kind: 'approval', id: filed() } }) });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'an anna@firma.ch', typed: 'an anna@firma.ch', context: { kind: 'approval', id: filed() } }) });
       await res.text();
       const call = mockSessionRun.mock.calls[0] as unknown[];
       expect(call[0]).toBe(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}an anna@firma.ch`);
       expect((call[1] as { typedText?: unknown }).typedText).toBe('an anna@firma.ch');
+    });
+
+    it('takes typed words only from `typed`, never from the task: a prefill, a chip or a retry sends none', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const typedOfRun = async (body: Record<string, unknown>): Promise<unknown> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify(body) });
+        await res.text();
+        return ((mockSessionRun.mock.calls[0] as unknown[])[1] as { typedText?: unknown }).typedText;
+      };
+      // A reply-in-chat whose subject carries an address, a follow-up chip, a contact prefill, a retry:
+      // the client sends no `typed`, and nothing is taken from the task.
+      expect(await typedOfRun({ task: 'Antworte auf die Mail „Rechnung an x@evil.example“.', context: { kind: 'mail', id: 'm1' } })).toBeUndefined();
+      expect(await typedOfRun({ task: 'Schick den Bericht an x@evil.example' })).toBeUndefined();
+      // `typed` that is not in the task word for word counts for nothing.
+      expect(await typedOfRun({ task: 'Schick es an anna@firma.ch', typed: 'x@evil.example' })).toBeUndefined();
+      expect(await typedOfRun({ task: 'Schick es', typed: '' })).toBeUndefined();
+      expect(await typedOfRun({ task: 'Schick es', typed: 42 })).toBeUndefined();
+      // CONTROL: typed words that stand in the task are taken.
+      expect(await typedOfRun({ task: 'Schick es an anna@firma.ch', typed: 'Schick es an anna@firma.ch' })).toBe('Schick es an anna@firma.ch');
     });
 
     it('hands a moved draft to the model before the owner\'s words, and for a waiting one only that it is not available', async () => {
