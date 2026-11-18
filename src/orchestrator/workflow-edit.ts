@@ -310,12 +310,16 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       const which = was === undefined ? `the step this edit adds ("${s.id}")`
         : isStepIdShape(was.id) ? `step "${was.id}"` : `step #${String(was.at)} (its position before this edit)`;
       // An input template cannot be edited, so keeping the step it reads is the way that loses nothing;
-      // removing the reader too is named last, and only with the user's word.
+      // removing the reader too is named last, and only with the user's word. Changing the template is
+      // not offered: this tool cannot, and a step added here runs a task, which is another kind of step.
+      // The field path stays out of the text, because the model passes it on to the user.
       if (field !== 'task') {
         const renamedToo = was !== undefined && was.id !== s.id && isStepIdShape(was.id)
           ? ` This edit also renames ${which}: if you remove it, name it by its new id.` : '';
-        return `Error: remove: ${which} reads the output of a step this edit removes, in its ${field}, and its input template cannot be edited. `
-          + `Keep the step it reads, or remove ${which} too only if the user wants it gone.${renamedToo}`;
+        return `Error: remove: ${which} reads the output of a step this edit removes, in its input template. `
+          + `Two ways fit this request: keep the step it reads, or remove ${which} too, only if the user wants it gone. `
+          + `No edit this tool can make lets ${which} stop reading it: do not offer to change ${which} or its template, not even as an option. `
+          + `When you tell the user, name the place in words (for example: in the template of the step that reads it), not as a field path.${renamedToo}`;
       }
       const fix = `Change that reference in the same edit (update_task), or remove ${which} too.`;
       // A step this edit renames is named by its old id, which no longer finds it after the rename: an
