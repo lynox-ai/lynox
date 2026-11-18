@@ -276,6 +276,8 @@ describe('the migration wizard when the event stream breaks', () => {
 		await startMigration();
 		await settle();
 		expect(getStep()).toBe('error');
+		expect(getError()).toBe('stream broke');
+		expect(text('migration-error-detail')).toBe('stream broke');
 		expect(q('migration-error-detail')?.getAttribute('lang')).toBeNull();
 	});
 });

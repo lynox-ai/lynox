@@ -15446,7 +15446,7 @@ export class LynoxHTTPApi {
         /**
          * A request to the target with its deadline for the answer to start. Past it, when the
          * connection fails, when the request did not go out (the network guard refusing the address
-         * the name now resolves to, or the name not resolving in time), or on any other error (an
+         * the name now resolves to, or a name that does not resolve), or on any other error (an
          * answer that cannot be read as one), the step's own words (`words`); the error's own text
          * never reaches the user.
          */
@@ -15457,8 +15457,9 @@ export class LynoxHTTPApi {
             if (err instanceof TransferOutOfTime) throw new Error(outOfTime());
             if (err instanceof TargetDidNotAnswer) throw new Error(words('silent'));
             if (isConnectionFailure(err)) throw new Error(words('unreachable'));
-            // Refused before anything was sent: the guard, or the name not resolving in time.
-            const unsent = err instanceof Error && (err.message.startsWith('Blocked:') || err.message === 'DNS timeout');
+            // Refused before anything was sent: the guard, which also turns a name that does not
+            // resolve (in time) into its refusal.
+            const unsent = err instanceof Error && err.message.startsWith('Blocked:');
             // Only the error's kind: its text can carry the address the target's name resolved to.
             process.stderr.write(`[lynox:http] migration: a request to the target ${unsent ? 'did not go out' : 'failed'} (${err instanceof Error ? err.name : 'unknown error'})\n`);
             throw new Error(words(unsent ? 'unsent' : 'failed'));
