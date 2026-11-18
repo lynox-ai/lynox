@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
-import { reset, setTarget, startMigration, getStep, getRetry, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
+import { reset, setTarget, startMigration, getStep, getRetry, getErrorReason, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
 import { getToasts, dismissToast } from '../stores/toast.svelte.js';
 import { _resetManagedStatus } from '../stores/integrations/managed.svelte.js';
 
@@ -216,6 +216,19 @@ describe('the migration wizard when this instance does not start the migration',
 		expect(q('migration-error-reason')).not.toBeNull();
 		reset();
 		await settle();
+		expect(getErrorReason()).toBe('');
+		expect(q('migration-error-reason')).toBeNull();
+	});
+
+	it('does not keep the reason under a later error of another kind', async () => {
+		await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host' }), { status: 400 }));
+		expect(q('migration-error-reason')).not.toBeNull();
+		// The next attempt starts, and the engine stops it with its own sentence.
+		exportAnswer = null;
+		events = sse('error', { message: SENTENCE, retry: 'later' });
+		await startMigration();
+		await settle();
+		expect(text('migration-error-detail')).toBe(SENTENCE);
 		expect(q('migration-error-reason')).toBeNull();
 	});
 });
