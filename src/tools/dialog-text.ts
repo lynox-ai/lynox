@@ -489,8 +489,6 @@ interface ContentFlagText {
   /** For a label without its own phrase. */
   readonly foundFallback: string;
   readonly refused: (why: ContentFlagRefusal, found: string) => string;
-  /** The question the engine asks before such a request goes to the model. */
-  readonly question: (found: string) => string;
 }
 
 /**
@@ -512,7 +510,6 @@ export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>
       : why === 'unrecognised'
         ? `Not sent to the AI model. lynox had found ${found} in your message. If you meant it, send it again and allow it with the button.`
         : `Not sent to the AI model: nobody answered the question. lynox had found ${found} in your message. If you meant it, send it again and allow it.`,
-    question: (found) => `⚠ Flagged message: lynox found ${found} in it. Send it to the AI model anyway?`,
   },
   de: {
     found: {
@@ -527,7 +524,6 @@ export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>
       : why === 'unrecognised'
         ? `Nicht an das KI-Modell geschickt. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie mit dem Knopf.`
         : `Nicht an das KI-Modell geschickt: Niemand hat die Frage beantwortet. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie.`,
-    question: (found) => `⚠ Auffällige Nachricht: lynox hat darin ${found} gefunden. Trotzdem an das KI-Modell schicken?`,
   },
 };
 
@@ -537,10 +533,25 @@ export function contentFlagRefusal(language: DialogLanguage, why: ContentFlagRef
   return text.refused(why, (label !== undefined ? text.found[label] : undefined) ?? text.foundFallback);
 }
 
-/** The content check's question in `language`. Engine text throughout (the finding is a fixed
- *  phrase from the table), so it is all frame. */
-export function contentFlagQuestion(language: DialogLanguage, label: string | undefined): PromptText {
+/** What the content check found, as engine text: a fixed phrase from the table, so it is
+ *  frame, like a tool word — never the label itself. */
+export function contentFlagFound(language: DialogLanguage, label: string | undefined): PromptText {
   const text = CONTENT_FLAG_TEXT[language];
   const found = (label !== undefined ? text.found[label] : undefined) ?? text.foundFallback;
-  return { [PROMPT_TEXT_BRAND]: true, segments: [{ kind: 'frame', text: text.question(found) }] };
+  return { [PROMPT_TEXT_BRAND]: true, segments: [{ kind: 'frame', text: found }] };
 }
+
+/** The content check's question before a flagged request goes to the model. `found` comes
+ *  from `contentFlagFound`, so the whole question is engine text. */
+export interface ContentFlagDialog {
+  readonly question: (found: PromptText) => PromptText;
+}
+
+export const CONTENT_FLAG_DIALOG: Readonly<Record<DialogLanguage, ContentFlagDialog>> = {
+  en: {
+    question: (found) => pv`⚠ Flagged message: lynox found ${found} in it. Send it to the AI model anyway?`,
+  },
+  de: {
+    question: (found) => pv`⚠ Auffällige Nachricht: lynox hat darin ${found} gefunden. Trotzdem an das KI-Modell schicken?`,
+  },
+};

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
-import { contentFlagQuestion, contentFlagRefusal } from '../tools/dialog-text.js';
+import { CONTENT_FLAG_DIALOG, contentFlagFound, contentFlagRefusal } from '../tools/dialog-text.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -1006,10 +1006,11 @@ export class Session {
         return msg;
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
+        const language = noticeLanguage(this.engine.config.language);
         let answer: string;
         try {
           answer = await this.agent.promptUser(
-            contentFlagQuestion(noticeLanguage(this.engine.config.language), inputCheck.reason),
+            CONTENT_FLAG_DIALOG[language].question(contentFlagFound(language, inputCheck.reason)),
             consentOptions('guard'),
             consentMeta('guard'),
           );
@@ -1028,7 +1029,7 @@ export class Session {
           // The run's result, read by the person in the instance's language: the run ends here,
           // before the model is called and before anything is stored, so the model never reads it.
           const why = outcome === 'unrecognised' ? 'unrecognised' : outcome === 'dismissed' ? 'unanswered' : 'declined';
-          const msg = contentFlagRefusal(noticeLanguage(this.engine.config.language), why, inputCheck.reason);
+          const msg = contentFlagRefusal(language, why, inputCheck.reason);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           return msg;
         }
