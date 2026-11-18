@@ -465,7 +465,7 @@ describe('the cache keeps a clean result longer than a doubtful one', () => {
   it('does not hold the EN-only fallback for an hour after an empty 200', async () => {
     // ⚠ The other half of the same line, and a review had to point at it: an empty
     // but successful response with no `total` fires NO diagnostic, so `doubtful`
-    // stays false and only `voices.length > 0` keeps the five-entry hardcoded
+    // stays false and only `voices.length > 0` keeps the four-entry hardcoded
     // fallback out of the long cache. That guard had no witness — exactly the class
     // this commit exists for, on the other half of its own condition.
     vi.useFakeTimers();
@@ -478,8 +478,9 @@ describe('the cache keeps a clean result longer than a doubtful one', () => {
       const voices = await listMistralVoices();
       // ⚠ Counted, not bounded. `toBeLessThan(TOTAL)` is satisfied by 0 as well, so
       // it could not see the fallback substitution disappearing — the prose said
-      // "five-entry hardcoded fallback" and the assertion never counted five.
-      expect(voices).toHaveLength(5);
+      // "five-entry hardcoded fallback" and the assertion never counted five. The
+      // list has four entries since it holds only slugs the live catalog has.
+      expect(voices).toHaveLength(4);
       const afterFirst = requested.length;
       vi.setSystemTime(Date.now() + 5 * 60_000);
       await listMistralVoices();
