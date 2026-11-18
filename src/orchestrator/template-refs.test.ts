@@ -254,6 +254,20 @@ describe('rename_step rewrites a reference only where it is one', () => {
       .toBe('Error: rename_step: step #2 reads step #1 and holds text starting with "{{a" in its input_template.body, which the new id would turn into a reference to step #1. Choose another id.');
   });
 
+  it('a step this edit added is named by its new id in the rename and set_input_from refusals', () => {
+    const own: InlinePipelineStep[] = [{ id: 'a', task: 'A' }, { id: 'b', task: 'B' }];
+    expect(applyModifications(own, [{ action: 'add_step', step_id: 'n', value: 'Use {{x.result}}', after: 'a' }, { action: 'rename_step', step_id: 'n', value: 'x' }]))
+      .toBe('Error: rename_step: the step this edit adds ("n") holds text starting with "{{x" in its task, which the new id would turn into a reference to the step itself. Choose another id.');
+    const read: InlinePipelineStep[] = [{ id: 'a', task: 'A' }, { id: 'Mail It', task: 'Mail', input_template: { body: '{{x.y}}' } }];
+    expect(applyModifications(read, [{ action: 'add_step', step_id: 'n', value: 'N', after: 'a' }, { action: 'set_input_from', step_id: 'step-2', input_from: ['n'] }, { action: 'rename_step', step_id: 'n', value: 'x' }]))
+      .toBe('Error: rename_step: step #2 reads the step this edit adds ("n") and holds text starting with "{{x" in its input_template.body, which the new id would turn into a reference to the step this edit adds ("n"). Choose another id.');
+    const self: InlinePipelineStep[] = [{ id: 'a', task: 'A' }, { id: 'b', task: 'B' }];
+    expect(applyModifications(self, [{ action: 'add_step', step_id: 'n', value: 'N', after: 'a' }, { action: 'set_input_from', step_id: 'n', input_from: ['n'] }]))
+      .toBe('Error: set_input_from: the step this edit adds ("n") cannot read its own output.');
+    expect(applyModifications([{ id: 'a', task: 'A' }, { id: 'b', task: 'B' }], [{ action: 'set_input_from', step_id: 'b', input_from: ['b'] }]))
+      .toBe('Error: set_input_from: step #2 cannot read its own output.');
+  });
+
   it('a step stored outside the id shape, renamed by its run name, takes its readers and their references along', () => {
     const s: InlinePipelineStep[] = [{ id: 'Old Fetch', task: 'Fetch' }, { id: 'mail', task: 'Mail it', input_template: { body: 'Your {{Old Fetch.result}}' }, input_from: ['Old Fetch'] }];
     expect(applyModifications(s, [{ action: 'rename_step', step_id: 'step-1', value: 'fetch' }])).toBeNull();

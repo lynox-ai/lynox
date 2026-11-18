@@ -159,6 +159,13 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
   // caller's next edit starts from that list, and a refusal after the edit names a step as it reads
   // there (steps keep their object through update_task, rename_step and set_input_from).
   const stored = new Map(steps.map((s, i) => [s, { id: s.id, at: i + 1 }] as const));
+  // A step as a refusal during the edit names it: by its position in that list (a refused edit is
+  // discarded, so the next one starts from there), or, added by this edit and so not in it, by its
+  // new id, which has the id shape (`newIdProblem`).
+  const shownStepNow = (s: InlinePipelineStep): string => {
+    const was = stored.get(s);
+    return was !== undefined ? `step #${String(was.at)}` : `the step this edit adds ("${s.id}")`;
+  };
   for (const mod of modifications) {
     if (mod.action === 'add_step') {
       // The shape first, so no refusal quotes an id outside it back to the model.
@@ -207,12 +214,12 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       const missing: string[] = [];
       for (const dep of mod.input_from ?? []) {
         const d = stepIndex(steps, dep);
-        if (d === 'ambiguous') return ambiguousText(steps, dep, `the input of step #${String(at + 1)} (set_input_from)`, runNames);
+        if (d === 'ambiguous') return ambiguousText(steps, dep, `the input of ${shownStepNow(steps[at]!)} (set_input_from)`, runNames);
         if (d === 'missing') { missing.push(quotedId(dep)); continue; }
-        if (d === at) return `Error: set_input_from: step #${String(at + 1)} cannot read its own output.`;
+        if (d === at) return `Error: set_input_from: ${shownStepNow(steps[at]!)} cannot read its own output.`;
         if (!inputFrom.includes(steps[d]!.id)) inputFrom.push(steps[d]!.id);
       }
-      if (missing.length > 0) return `Error: set_input_from for step #${String(at + 1)} names unknown step(s): ${missing.join(', ')}.`;
+      if (missing.length > 0) return `Error: set_input_from for ${shownStepNow(steps[at]!)} names unknown step(s): ${missing.join(', ')}.`;
       steps[at]!.input_from = inputFrom.length > 0 ? inputFrom : undefined;
       continue;
     }
@@ -238,21 +245,18 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       // system a tool writes to) would read this step's output there once its input_from names `to`;
       // in the step itself, that text would become a reference to itself.
       if (to !== from) {
-        // Positions as in the list this edit started from: a refused edit is discarded, so the next
-        // one starts from there (a step this edit added has none there, and is named where it stands).
-        const shownAt = (s: InlinePipelineStep, i: number): string => String(stored.get(s)?.at ?? i + 1);
         for (const [i, s] of steps.entries()) {
           if (i !== idx && !(s.input_from ?? []).includes(from)) continue;
           const field = fieldReferencing(s, to);
           if (!field) continue;
           if (i === idx) {
-            return `Error: rename_step: step #${shownAt(s, i)} holds text starting with "{{${to}" in its ${field}, `
+            return `Error: rename_step: ${shownStepNow(s)} holds text starting with "{{${to}" in its ${field}, `
               + 'which the new id would turn into a reference to the step itself. Choose another id.';
           }
-          const reader = isStepIdShape(s.id) ? `step "${s.id}"` : `step #${shownAt(s, i)}`;
-          const renamed = shownAt(steps[idx]!, idx);
-          return `Error: rename_step: ${reader} reads step #${renamed} and holds text starting with "{{${to}" in its ${field}, `
-            + `which the new id would turn into a reference to step #${renamed}. Choose another id.`;
+          const reader = isStepIdShape(s.id) ? `step "${s.id}"` : shownStepNow(s);
+          const renamed = shownStepNow(steps[idx]!);
+          return `Error: rename_step: ${reader} reads ${renamed} and holds text starting with "{{${to}" in its ${field}, `
+            + `which the new id would turn into a reference to ${renamed}. Choose another id.`;
         }
       }
       steps[idx]!.id = to;
