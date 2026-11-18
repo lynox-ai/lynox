@@ -61,6 +61,7 @@ let store: typeof import('../stores/chat.svelte.js');
 let run: ReturnType<typeof sseStream>;
 let replies: Array<{ answer?: unknown; promptId?: unknown }>;
 let refuse: boolean;
+let keyRefused: boolean;
 let i18n: typeof import('../i18n.svelte.js');
 
 beforeEach(async () => {
@@ -71,6 +72,7 @@ beforeEach(async () => {
 	i18n = await import('../i18n.svelte.js');
 	replies = [];
 	refuse = false;
+	keyRefused = false;
 	target = document.createElement('div');
 	document.body.appendChild(target);
 });
@@ -93,6 +95,7 @@ async function renderPrompt(options: string[], consent?: 'guard' | 'deep', befor
 		if (url.endsWith('/sessions/t1/run')) return new Response(run.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		if (url.endsWith('/sessions/t1/reply')) {
 			replies.push(JSON.parse(String(init?.body ?? '{}')) as { answer?: unknown });
+			if (keyRefused) return json({ error: 'No key here.', code: 'mandate_key_input' }, 422);
 			return json(refuse ? { ok: true, refused: 'unrecognised_answer' } : { ok: true });
 		}
 		if (url.endsWith('/threads/t1')) return json({ thread: null });
@@ -246,6 +249,32 @@ describe('text typed as the answer', () => {
 		const bar = await renderPrompt(['allow', 'deny'], 'guard');
 		await click(bar, i18n.t('chat.allow'));
 		expect(lines()).toEqual([]);
+	});
+
+	it('one the engine did not take (a key it refused) is not kept: it was not given', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['allow', 'deny'], 'guard');
+		keyRefused = true;
+		await type('password: Hunter2!x');
+		expect(replies.map((r) => r.answer)).toEqual(['password: Hunter2!x']);
+		expect(lines()).toEqual([]);
+		expect(JSON.stringify(store.getMessages())).not.toContain('Hunter2');
+	});
+
+	it('goes into the reply of the run that asked, also when a message waits behind it', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['allow', 'deny'], 'guard');
+		void store.sendMessage('and then the next thing');
+		await settle();
+		refuse = true;
+		await type('ja');
+		const msgs = store.getMessages();
+		const holder = msgs.findIndex((m) => m.blocks?.some((b) => b.type === 'answer'));
+		const waiting = msgs.findIndex((m) => m.role === 'user' && m.content === 'and then the next thing');
+		expect(waiting).toBeGreaterThan(-1);
+		expect(holder).toBeGreaterThan(-1);
+		expect(holder).toBeLessThan(waiting);
+		expect(lines()).toHaveLength(1);
 	});
 
 	it('to a question the model wrote, it adds no line', async () => {

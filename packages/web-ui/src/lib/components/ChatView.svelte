@@ -5,7 +5,6 @@
 		retryFailedTurn,
 		abortRun,
 		replyPermission,
-		noteTypedAnswer,
 		replyPermissionTabs,
 		postTabProgress,
 		getPendingTabsPrompt,
@@ -1263,7 +1262,7 @@
 		setupSaving = false;
 	}
 
-	function answerPrompt(answer: string, display?: string) {
+	function answerPrompt(answer: string, display?: string, typed = false) {
 		// Batch mode handles both v1 (sequential) and v2 (tabs). The v2 path
 		// has no pendingPermission — it has pendingTabsPrompt instead — so we
 		// must NOT early-return on !pendingPermission in batch mode.
@@ -1315,7 +1314,7 @@
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
 		}
 		selectedOptions = [];
-		void replyPermission(answer); /* never rejects; a reply that does not arrive is reported */
+		void replyPermission(answer, { typed }); /* never rejects; a reply that does not arrive is reported */
 	}
 
 	/** Toggle an option in/out of the multi-select working set. */
@@ -1906,10 +1905,7 @@
 		if (pendingPermission && task) {
 			inputText = '';
 			if (textareaEl) textareaEl.style.height = 'auto';
-			// Typed text answering the engine's own confirmation stays in the chat, where the
-			// question stood, so a refusal that follows reads as an answer to something.
-			if (pendingPermission.consent !== undefined) noteTypedAnswer(task);
-			answerPrompt(task);
+			answerPrompt(task, undefined, true);
 			return;
 		}
 
@@ -2965,7 +2961,7 @@
 							{:else if gBlock.type === 'spawn'}
 								{@render subAgentPanel(msg, gBlock.spawnId)}
 							{:else if gBlock.type === 'answer'}
-								<p class="text-xs text-text-subtle pl-3" data-typed-answer>{t('chat.typed_answer')} <span class="font-mono">"{gBlock.text}"</span></p>
+								<p class="text-xs text-text-subtle pl-3" data-typed-answer data-ai-generated="false">{t('chat.typed_answer')} <span class="font-mono">"{gBlock.text}"</span></p>
 							{:else if gBlock.type === 'thinking' && gBlock.text}
 								<!-- Mask once: the preview must be redacted too, not just
 								     the body — a secret in the first chars would otherwise

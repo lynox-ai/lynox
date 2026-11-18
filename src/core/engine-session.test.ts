@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 
 // === Mocks ===
 
@@ -887,6 +888,7 @@ describe('Engine + Session (Orchestrator)', () => {
         ['en', '__dismissed__', 'Not sent to the AI model: nobody answered the question. lynox had found signs of an attack on credentials in your message. If you meant it, send it again and allow it.'],
         ['de', 'deny', 'Nicht an das KI-Modell geschickt: Du hast abgelehnt. lynox hatte in deiner Nachricht Hinweise auf einen Angriff auf Zugangsdaten gefunden.'],
         ['de', 'ja', 'Nicht an das KI-Modell geschickt: Deine Antwort zählt nicht als Freigabe. lynox hatte in deiner Nachricht Hinweise auf einen Angriff auf Zugangsdaten gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie mit dem Knopf.'],
+        ['en', UNATTENDED_BLOCK_ANSWER, 'Not sent to the AI model: nobody answered the question. lynox had found signs of an attack on credentials in your message. If you meant it, send it again and allow it.'],
         ['de', '', 'Nicht an das KI-Modell geschickt: Niemand hat die Frage beantwortet. lynox hatte in deiner Nachricht Hinweise auf einen Angriff auf Zugangsdaten gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie.'],
       ] as const;
       for (const [language, answer, said] of cases) {
