@@ -41,6 +41,7 @@ let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let run: BulkRunDetailData;
 let opened: string[];
+let viewer: 'owner' | 'mandate';
 let locale: ReturnType<typeof getLocale>;
 
 beforeEach(() => {
@@ -50,10 +51,11 @@ beforeEach(() => {
 	document.body.appendChild(target);
 	resetSettingsViewer();
 	opened = [];
+	viewer = 'owner';
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
-		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
+		if (u.endsWith('/config')) return reply({ managed: true, viewer });
 		if (/\/targets\?/.test(u)) return reply({ targets: [] });
 		return reply(run);
 	}));
@@ -157,18 +159,26 @@ describe('a halted undo continues in its own words', () => {
 
 describe('a halted undo continuing would not help', () => {
 	const none = (): string => target.querySelector('[data-testid="bulk-resume-none"]')!.textContent!;
-	const sentence = (): string => t('bulk.resume.none_undo').replace('{link}', t('bulk.resume.none_undo_link'));
+	const sentence = (key: string): string => t(key).replace('{link}', t('bulk.resume.none_undo_link'));
 
 	it('says to start it again from the page of the run it undoes, and links that page', async () => {
+		await render({ haltKey: 'checksum' });
+		expect(none()).toBe(sentence('bulk.resume.none_undo'));
+		buttonByText(t('bulk.resume.none_undo_link'))!.click();
+		expect(opened).toEqual(['src1']);
+	});
+
+	// The halt names its own step first (reconnect the store): starting again comes after it.
+	it('says to start it again afterwards where its halt names a step of its own', async () => {
 		await render({ haltKey: 'consentOutdated' });
-		expect(none()).toBe(sentence());
+		expect(none()).toBe(sentence('bulk.resume.none_undo_after'));
 		buttonByText(t('bulk.resume.none_undo_link'))!.click();
 		expect(opened).toEqual(['src1']);
 	});
 
 	it('says the same without a link where the undo names no run', async () => {
-		await render({ haltKey: 'consentOutdated', sourceRunId: null });
-		expect(none()).toBe(sentence());
+		await render({ haltKey: 'checksum', sourceRunId: null });
+		expect(none()).toBe(sentence('bulk.resume.none_undo'));
 		expect(buttonByText(t('bulk.resume.none_undo_link'))).toBeUndefined();
 	});
 
@@ -179,8 +189,61 @@ describe('a halted undo continuing would not help', () => {
 
 	it('reads in English as approved', async () => {
 		setLocale('en');
-		await render({ haltKey: 'consentOutdated' });
+		await render({ haltKey: 'checksum' });
 		expect(none()).toBe('Continuing would not help. Start the undo again from the page of the bulk run it undoes.');
+		unmount(component!);
+		component = undefined;
+		await render({ haltKey: 'consentOutdated' });
+		expect(none()).toBe('Continuing would not help. Start the undo again afterwards, from the page of the bulk run it undoes.');
 		expect(tf('bulk.resume.window_undo', {})).toBe('By continuing you approve the undo again, as shown above.');
+	});
+});
+
+// Every halt sentence an undo reaches that names the write has its undo words (U-335).
+describe('a halted undo names its halt as taking back', () => {
+	const vars = { provider: 'demo.myshopify.com', host: 'demo.myshopify.com' };
+	const consent = { field: t('bulk.consent.field.seo_title'), path: `${t('nav.settings')} → ${t('settings.apis')}` };
+	const undoCases: [string, Partial<BulkRunDetailData>, () => string, () => string][] = [
+		['a target outside the grant', { haltKey: 'contract' }, () => tf('bulk.halt.contract_undo', vars), () => tf('bulk.halt.contract', vars)],
+		['a log that could not record the run', { haltKey: 'runUnrecorded' }, () => tf('bulk.halt.runUnrecorded_undo', vars), () => tf('bulk.halt.runUnrecorded', vars)],
+		['markup the store added', { haltKey: 'markupAddedByShop' }, () => tf('bulk.halt.markupAddedByShop_undo', vars), () => tf('bulk.halt.markupAddedByShop', vars)],
+		['markup the store added, the step before', { haltKey: 'markupAddedByShop' }, () => tf('bulk.halt.markupAddedByShop_before_undo', vars), () => tf('bulk.halt.markupAddedByShop_before', vars)],
+		['a connection that does not cover the field, nothing undone', { haltKey: 'consentOutdated', applied: 0, consentFields: ['seo_title'] }, () => tf('bulk.halt.consentOutdated_undo', consent), () => tf('bulk.halt.consentOutdated', consent)],
+		['a connection that does not cover the field, some undone', { haltKey: 'consentOutdated', consentFields: ['seo_title'] }, () => tf('bulk.halt.consentOutdated_more_undo', consent), () => tf('bulk.halt.consentOutdated_more', consent)],
+		['a discarded undo', { phase: 'aborted', haltKey: 'discarded' }, () => t('bulk.halt.discarded_undo'), () => t('bulk.halt.discarded')],
+	];
+	for (const [name, o, undo, write] of undoCases) {
+		it(`words ${name} in undo words, and a write in its own`, async () => {
+			expect(await render(o)).toContain(undo());
+			expect(target.textContent).not.toContain(write());
+			unmount(component!);
+			component = undefined;
+			expect(await render({ ...o, kind: 'apply', sourceRunId: null })).toContain(write());
+		});
+	}
+
+	it('tells a mandate the owner starts the undo again after reconnecting, and that the owner discarded it', async () => {
+		viewer = 'mandate';
+		expect(await render({ haltKey: 'consentOutdated', consentFields: ['seo_title'] })).toContain(tf('bulk.halt.consentOutdated_more_undo_mandate', consent));
+		unmount(component!);
+		component = undefined;
+		expect(await render({ haltKey: 'consentOutdated', applied: 0, consentFields: ['seo_title'] })).toContain(tf('bulk.halt.consentOutdated_undo_mandate', consent));
+		unmount(component!);
+		component = undefined;
+		expect(await render({ phase: 'aborted', haltKey: 'discarded' })).toContain(t('bulk.halt.discarded_undo_mandate'));
+	});
+
+	it('says an atomic undo that rolled back starts again from the page of the run it undoes, linked', async () => {
+		const sentence = t('bulk.halt.atomicRolledBack_undo').replace('{link}', t('bulk.resume.none_undo_link'));
+		const text = await render({ phase: 'aborted', haltKey: 'atomicRolledBack', atomic: true });
+		expect(text).toContain(sentence);
+		expect(text).not.toContain(t('bulk.halt.atomicRolledBack'));
+		buttonByText(t('bulk.resume.none_undo_link'))!.click();
+		expect(opened).toEqual(['src1']);
+		unmount(component!);
+		component = undefined;
+		// Without a run to open, the same words stand, unlinked.
+		expect(await render({ phase: 'aborted', haltKey: 'atomicRolledBack', atomic: true, sourceRunId: null })).toContain(sentence);
+		expect(buttonByText(t('bulk.resume.none_undo_link'))).toBeUndefined();
 	});
 });
