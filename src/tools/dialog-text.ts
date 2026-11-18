@@ -15,7 +15,7 @@
 import type { ConsentKey } from '../contract/prompt.js';
 import type { NoticeLanguage } from '../core/notice-language.js';
 import { pv } from '../core/prompt-value.js';
-import type { PromptText } from '../types/agent.js';
+import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 
 /** The language a confirmation dialog is asked in. */
 export type DialogLanguage = NoticeLanguage;
@@ -489,6 +489,8 @@ interface ContentFlagText {
   /** For a label without its own phrase. */
   readonly foundFallback: string;
   readonly refused: (why: ContentFlagRefusal, found: string) => string;
+  /** The question the engine asks before such a request goes to the model. */
+  readonly question: (found: string) => string;
 }
 
 /**
@@ -508,8 +510,9 @@ export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>
     refused: (why, found) => why === 'declined'
       ? `Not sent to the AI model: you declined. lynox had found ${found} in your message.`
       : why === 'unrecognised'
-        ? `Not sent to the AI model: your answer does not count as approval. lynox had found ${found} in your message. If you meant it, send it again and allow it with the button.`
+        ? `Not sent to the AI model. lynox had found ${found} in your message. If you meant it, send it again and allow it with the button.`
         : `Not sent to the AI model: nobody answered the question. lynox had found ${found} in your message. If you meant it, send it again and allow it.`,
+    question: (found) => `⚠ Flagged message: lynox found ${found} in it. Send it to the AI model anyway?`,
   },
   de: {
     found: {
@@ -522,8 +525,9 @@ export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>
     refused: (why, found) => why === 'declined'
       ? `Nicht an das KI-Modell geschickt: Du hast abgelehnt. lynox hatte in deiner Nachricht ${found} gefunden.`
       : why === 'unrecognised'
-        ? `Nicht an das KI-Modell geschickt: Deine Antwort zählt nicht als Freigabe. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie mit dem Knopf.`
+        ? `Nicht an das KI-Modell geschickt. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie mit dem Knopf.`
         : `Nicht an das KI-Modell geschickt: Niemand hat die Frage beantwortet. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie.`,
+    question: (found) => `⚠ Auffällige Nachricht: lynox hat darin ${found} gefunden. Trotzdem an das KI-Modell schicken?`,
   },
 };
 
@@ -531,4 +535,12 @@ export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>
 export function contentFlagRefusal(language: DialogLanguage, why: ContentFlagRefusal, label: string | undefined): string {
   const text = CONTENT_FLAG_TEXT[language];
   return text.refused(why, (label !== undefined ? text.found[label] : undefined) ?? text.foundFallback);
+}
+
+/** The content check's question in `language`. Engine text throughout (the finding is a fixed
+ *  phrase from the table), so it is all frame. */
+export function contentFlagQuestion(language: DialogLanguage, label: string | undefined): PromptText {
+  const text = CONTENT_FLAG_TEXT[language];
+  const found = (label !== undefined ? text.found[label] : undefined) ?? text.foundFallback;
+  return { [PROMPT_TEXT_BRAND]: true, segments: [{ kind: 'frame', text: text.question(found) }] };
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
-import { contentFlagRefusal } from '../tools/dialog-text.js';
+import { contentFlagQuestion, contentFlagRefusal } from '../tools/dialog-text.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -89,7 +89,6 @@ import type { SecretStore } from './secret-store.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { DataStore } from './data-store.js';
-import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
@@ -1010,7 +1009,7 @@ export class Session {
         let answer: string;
         try {
           answer = await this.agent.promptUser(
-            pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
+            contentFlagQuestion(noticeLanguage(this.engine.config.language), inputCheck.reason),
             consentOptions('guard'),
             consentMeta('guard'),
           );
