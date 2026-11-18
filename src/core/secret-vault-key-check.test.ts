@@ -175,6 +175,9 @@ describe('SecretVault key check', () => {
     const v = open(KEY_A);
     expect(v.undecryptableCount()).toBe(1);
     expect(v.get('P1')).toBe('one');
+    expect(v.get('FROM_B'), 'the foreign entry reads as missing').toBeNull();
+    expect(v.getAll().has('FROM_B')).toBe(false);
+    expect(v.getAll().get('P1')?.value).toBe('one');
     v.close();
     expect(checkRows(), 'a mixed vault is not stamped with the key loaded now').toBe(0);
   });

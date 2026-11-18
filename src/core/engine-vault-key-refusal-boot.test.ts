@@ -31,6 +31,7 @@ describe('Engine boot — a vault key that does not open the vault', () => {
     vi.stubEnv('LYNOX_DATA_DIR', dir);
     vi.stubEnv('LYNOX_BILLING_TIER', '');
     vi.stubEnv('LYNOX_MANAGED_MODE', '');
+    vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', '');
     const v = new SecretVault({ path: join(dir, 'vault.db'), masterKey: KEY_A });
     v.set('PROBE_A', 'alpha');
     v.close();
@@ -50,6 +51,15 @@ describe('Engine boot — a vault key that does not open the vault', () => {
     }
     expect(existsSync(join(d, 'history.db')), 'history.db was not opened').toBe(false);
     expect(existsSync(join(d, 'engine.db')), 'engine.db was not opened').toBe(false);
+    // The vault is as it was: its entry opens under its own key, nothing was added under B.
+    const a = new SecretVault({ path: join(d, 'vault.db'), masterKey: KEY_A });
+    try {
+      expect(a.list().map(e => e.name)).toEqual(['PROBE_A']);
+      expect(a.get('PROBE_A')).toBe('alpha');
+      expect(a.undecryptableCount()).toBe(0);
+    } finally {
+      a.close();
+    }
   });
 
   it('CONTROL: under the vault\'s own key the same boot opens the stores', async () => {
@@ -65,6 +75,7 @@ describe('Engine boot — a vault key that does not open the vault', () => {
       stderr.mockRestore();
     }
     await engine.shutdown();
-    expect(existsSync(join(d, 'history.db')) || existsSync(join(d, 'engine.db'))).toBe(true);
+    expect(existsSync(join(d, 'history.db'))).toBe(true);
+    expect(existsSync(join(d, 'engine.db'))).toBe(true);
   });
 });
