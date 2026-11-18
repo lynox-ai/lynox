@@ -221,7 +221,7 @@ describe('writing a plan or a workflow with a character that renders as nothing'
     const json = JSON.stringify(toPortableWorkflow(planned), null, 2);
     const fence = buildFence(json);
     const out = await importWorkflowTool.handler({ block: `${fence}${LYNOX_WORKFLOW_INFO_STRING}\n${json}\n${fence}` }, agent());
-    expect(out).toMatch(/refused to save this workflow — steps\[0\]\.task contains a character that renders as nothing \(U\+E0074\)/);
+    expect(out).toMatch(/refused to save this workflow — step #1 \(steps\[0\]\.task\) contains a character that renders as nothing \(U\+E0074\)/);
     expect(getPipelineStore().size).toBe(0);
   });
 
@@ -241,13 +241,28 @@ describe('writing a plan or a workflow with a character that renders as nothing'
     expect(() => history.insertPlannedPipeline({ ...base, reasoning: `seen on a page${ZWSP}` }, OWNER_PRINCIPAL)).not.toThrow();
   });
 
+  // U-316: a step is named first as every other text names it, counted from 1, then by its path.
+  it('names a step in the refusal by its number, then its path; a place outside the steps keeps its path alone', () => {
+    const base = { id: 'wf_1', name: 'Report', goal: 'Send it', steps: [{ id: 'a', task: 'A' }, { id: 'b', task: 'B' }, { id: 'c', task: 'C' }], reasoning: '', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z' };
+    const steps = base.steps.map((s, i) => (i === 2 ? { ...s, task: `C${ZWSP}` } : s));
+    expect(() => history.insertPlannedPipeline({ ...base, steps }, OWNER_PRINCIPAL))
+      .toThrow('refused to save this workflow — step #3 (steps[2].task) contains a character that renders as nothing (U+200B).');
+    expect(() => history.insertPlannedPipeline({ ...base, goal: `Send${ZWSP}` }, OWNER_PRINCIPAL))
+      .toThrow('refused to save this workflow — goal contains a character that renders as nothing (U+200B).');
+    // A numbered place outside the step list is not a step.
+    expect(() => history.insertPlannedPipeline({ ...base, parameters: [{ name: 'list', description: `which${ZWSP}` }] } as typeof base, OWNER_PRINCIPAL))
+      .toThrow(/refused to save this workflow — parameters\[0\]\S* contains a character/);
+    // Only the workflow's step list is numbered: a plan's or a task's own paths keep their form.
+    expect(hiddenCharRefusal('plan', { path: 'steps[1]', codePoint: 'U+200B' } as never)).toContain('— steps[1] contains');
+  });
+
   it('the save chokepoint refuses it in a step id, where a name takes none of the places running text may', () => {
     const base = { id: 'wf_1', name: 'Report', goal: 'Send it', steps: [{ id: 's1', task: 'Fetch' }], reasoning: '', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z' };
     const ZWNJ = String.fromCodePoint(0x200C);
     expect(() => history.insertPlannedPipeline({ ...base, steps: [{ id: 'fetch', task: 'Fetch' }, { id: `send${tagged('x')}`, task: 'Send' }] }, OWNER_PRINCIPAL))
-      .toThrow(/refused to save this workflow — steps\[1\]\.id contains a character that renders as nothing \(U\+E0078\)/);
+      .toThrow(/refused to save this workflow — step #2 \(steps\[1\]\.id\) contains a character that renders as nothing \(U\+E0078\)/);
     // ZWNJ between letters is a place running text may carry one: in a task it is saved, in an id it is not.
-    expect(() => history.insertPlannedPipeline({ ...base, steps: [{ id: `me${ZWNJ}ku`, task: 'Fetch' }] }, OWNER_PRINCIPAL)).toThrow(/steps\[0\]\.id contains/);
+    expect(() => history.insertPlannedPipeline({ ...base, steps: [{ id: `me${ZWNJ}ku`, task: 'Fetch' }] }, OWNER_PRINCIPAL)).toThrow(/step #1 \(steps\[0\]\.id\) contains/);
     expect(() => history.insertPlannedPipeline({ ...base, id: 'wf_2', steps: [{ id: 's1', task: `me${ZWNJ}ku` }] }, OWNER_PRINCIPAL)).not.toThrow();
     expect(() => history.insertPlannedPipeline({ ...base, id: 'wf_3', steps: [{ id: 'fetch-2', task: 'Fetch' }] }, OWNER_PRINCIPAL)).not.toThrow();
   });
