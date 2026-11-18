@@ -845,6 +845,14 @@
 							<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.no_judge_model')}</p>
 						{/if}
 					{:else}
+						{#if (restartKind === 'judge' || restartKind === 'judge_cap') && run.judgeRule}
+							<!-- Judging again goes on with the same rule: the owner sees it as at the first start (U-335). -->
+							<div data-testid="bulk-restart-rule">
+								<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
+								<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+								<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.start.rule_drafted')}</p>
+							</div>
+						{/if}
 						{#if restartKind === 'judge_cap'}
 							<div class="text-sm space-y-1">
 								<label class="flex flex-wrap items-center gap-2">

@@ -138,3 +138,34 @@ describe('a judged run says lynox wrote its rule', () => {
 		expect(drafted()).toEqual([]);
 	});
 });
+
+// Judging again after a halt goes on with the same rule: the owner sees it as at the first start.
+describe('a judged run that judges again shows its rule as at the start', () => {
+	const halted = (haltKey: string): Partial<BulkRunDetailData> => ({ ...judged, phase: 'planned', haltKey, haltReason: haltKey, checksum: null, total: 1, costCapUsd: 1 });
+
+	it('shows the rule and the start sentence where the owner judges again after a halt', async () => {
+		await render(halted('unavailable'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')?.textContent).toContain(RULE);
+		expect(drafted()).toEqual([t('bulk.start.rule_drafted')]);
+		expect(target.textContent).toContain(t('bulk.restart.judge'));
+	});
+
+	it('shows them too where judging again needs a higher cost cap', async () => {
+		await render(halted('costCap'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')?.textContent).toContain(RULE);
+		expect(drafted()).toEqual([t('bulk.start.rule_drafted')]);
+	});
+
+	it('control: a run without a judge that reads again shows no rule and no sentence', async () => {
+		await render({ phase: 'planned', haltKey: 'unavailable', haltReason: 'unavailable', checksum: null, total: 1 });
+		expect(target.textContent).toContain(t('bulk.restart.read'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
+		expect(drafted()).toEqual([]);
+	});
+
+	it('control: a judged run whose rule did not reach the page shows no empty box', async () => {
+		await render({ ...halted('unavailable'), judgeRule: null });
+		expect(target.textContent).toContain(t('bulk.restart.judge'));
+		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
+	});
+});
