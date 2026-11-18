@@ -85,7 +85,7 @@ afterEach(() => {
 });
 
 /** Starts a turn, has the engine ask with `options` (and `consent`), renders ChatView, returns the prompt bar. */
-async function renderPrompt(options: string[], consent?: 'guard' | 'deep'): Promise<HTMLElement> {
+async function renderPrompt(options: string[], consent?: 'guard' | 'deep', before?: () => void): Promise<HTMLElement> {
 	run = sseStream();
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
@@ -102,6 +102,8 @@ async function renderPrompt(options: string[], consent?: 'guard' | 'deep'): Prom
 		return json({});
 	}));
 	void store.sendMessage('clean up');
+	await settle();
+	before?.();
 	await settle();
 	run.send('prompt', { question: '⚠ Command: x', options, promptId: 'p1', agent: 'lynox', ...(consent ? { consent } : {}) });
 	await settle();
@@ -167,4 +169,24 @@ describe('a question the model wrote', () => {
 			expect(replies.map((r) => r.answer)).toEqual([first]);
 		});
 	}
+});
+
+describe('the model\'s batched questions', () => {
+	const batch = (): void => run.send('tool_call', {
+		name: 'ask_user', id: 'tc1', status: 'running',
+		input: { questions: [{ question: 'Continue?', options: ['allow', 'deny'] }, { question: 'And then?', options: ['allow', 'deny'] }] },
+	});
+
+	it('control: a model\'s question while its batch runs is shown as the batch', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['allow', 'deny'], undefined, batch).catch(() => null);
+		expect(target.textContent).toContain('Continue?');
+	});
+
+	it('never take the engine\'s confirmation into the batch: its own card is shown', async () => {
+		i18n.setLocale('de');
+		const bar = await renderPrompt(['allow', 'deny'], 'guard', batch);
+		expect(buttons(bar)).toEqual(expect.arrayContaining([i18n.t('chat.allow'), i18n.t('chat.deny')]));
+		expect(target.textContent).not.toContain('Continue?');
+	});
 });

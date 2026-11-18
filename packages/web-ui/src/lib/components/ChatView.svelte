@@ -1341,6 +1341,9 @@
 		// answer. Fixed timing (setTimeout) raced on slow connections; the
 		// observer approach below removes that race for legacy engines.
 		for (let idx = 0; idx < batchAnswers.length; idx++) {
+			// A model's answers answer the model's questions only: the engine's own confirmation,
+			// arrived between two of them, is left for its own card.
+			if (getPendingPermission()?.consent !== undefined) break;
 			const prevPromptId = getPendingPermission()?.promptId;
 			void replyPermission(batchAnswers[idx]!); /* never rejects; a reply that does not arrive is reported */
 			if (idx + 1 < batchAnswers.length) {
@@ -1408,6 +1411,12 @@
 		if (pendingTabsPrompt) return; // v2 path owns it
 		if (!pendingPermission) {
 			if (!isStreaming && inBatchMode && batchMode === 'v1') resetBatch();
+			return;
+		}
+		// The engine's own confirmation is never one of the model's batched questions: its card
+		// is shown, and no batch answer can reach it.
+		if (pendingPermission.consent !== undefined) {
+			if (inBatchMode && batchMode === 'v1') resetBatch();
 			return;
 		}
 		const lastMsg = messages[messages.length - 1];
