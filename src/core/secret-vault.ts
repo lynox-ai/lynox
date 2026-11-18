@@ -278,11 +278,13 @@ export class SecretVault {
     if (row) return row.salt;
 
     // Two processes may create the same new vault at once: the first salt stands, and the second
-    // open derives its key from that one instead of failing on the duplicate.
-    const inserted = this.db.prepare(
+    // open derives its key from that one instead of failing on the duplicate. Both found no salt,
+    // so both count as the vault's first open: each writes or checks the key-check row, and one
+    // under another key is refused rather than left unpinned.
+    this.db.prepare(
       "INSERT OR IGNORE INTO vault_meta (key, value) VALUES ('pbkdf2_salt', ?)",
     ).run(randomBytes(SALT_LENGTH));
-    this.saltCreated = inserted.changes === 1;
+    this.saltCreated = true;
     const stored = this.db.prepare(
       "SELECT value as salt FROM vault_meta WHERE key = 'pbkdf2_salt'",
     ).get() as SaltRow | undefined;
