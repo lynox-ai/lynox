@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
-import { reset, setTarget, startMigration, getStep, getRetry, getErrorReason, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
+import { reset, setTarget, startMigration, cancelMigration, getStep, getRetry, getError, getErrorReason, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
 import { getToasts, dismissToast } from '../stores/toast.svelte.js';
 import { _resetManagedStatus } from '../stores/integrations/managed.svelte.js';
 
@@ -27,6 +27,8 @@ let component: Record<string, unknown> | undefined;
 let events: string;
 /** When set, how the export route answers instead of the event stream. */
 let exportAnswer: (() => Response) | null;
+/** When set, how the preview route answers. */
+let previewAnswer: (() => Response) | null;
 
 beforeEach(() => {
 	reset();
@@ -36,9 +38,11 @@ beforeEach(() => {
 	_resetManagedStatus();
 	events = '';
 	exportAnswer = null;
+	previewAnswer = null;
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		if (u.endsWith('/migration/export') && exportAnswer) return exportAnswer();
+		if (u.endsWith('/migration/preview') && previewAnswer) return previewAnswer();
 		if (u.endsWith('/migration/export')) return new Response(events, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		const body = u.endsWith('/config') ? { billing_tier_set: false } : { secrets: 1, databases: ['engine.db'], artifacts: 0, hasConfig: true };
 		return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -230,5 +234,60 @@ describe('the migration wizard when this instance does not start the migration',
 		await settle();
 		expect(text('migration-error-detail')).toBe(SENTENCE);
 		expect(q('migration-error-reason')).toBeNull();
+	});
+
+	it('shows no reason from an answer longer than it reads', async () => {
+		await refusedWith(() => new Response(JSON.stringify({ error: 'x'.repeat(9000) }), { status: 400 }));
+		expect(text('migration-error-detail')).toBe(t('migration.error_not_started'));
+		expect(q('migration-error-reason')).toBeNull();
+	});
+
+	it('keeps the user\'s cancel when the refusal arrives while its answer is still being read', async () => {
+		let finish: (() => void) | undefined;
+		exportAnswer = () => new Response(new ReadableStream<Uint8Array>({
+			start(c) {
+				c.enqueue(new TextEncoder().encode('{"error":"targetUrl must'));
+				finish = () => { c.enqueue(new TextEncoder().encode(' resolve to a public host"}')); c.close(); };
+			},
+		}), { status: 400 });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		const started = startMigration();
+		await settle();
+		cancelMigration();
+		finish?.();
+		await started;
+		await settle();
+		expect(getError()).toBe(t('migration.cancelled'));
+		expect(getErrorReason()).toBe('');
+		expect(q('migration-error-reason')).toBeNull();
+	});
+});
+
+describe('the migration wizard when the event stream breaks', () => {
+	it('shows the browser\'s text as its own, not marked as the engine\'s sentence', async () => {
+		exportAnswer = () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('stream broke')); } }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(getStep()).toBe('error');
+		expect(q('migration-error-detail')?.getAttribute('lang')).toBeNull();
+	});
+});
+
+describe('the migration wizard when the preview cannot be loaded', () => {
+	it('says so in its own words, not with the answer\'s text', async () => {
+		previewAnswer = () => new Response('<html><body><h1>502 Bad Gateway</h1></body></html>', { status: 502, headers: { 'Content-Type': 'text/html' } });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		expect(getError()).toBe(t('migration.error_preview'));
+		expect(target.textContent).toContain(t('migration.error_preview'));
+		expect(target.textContent).not.toContain('Bad Gateway');
 	});
 });

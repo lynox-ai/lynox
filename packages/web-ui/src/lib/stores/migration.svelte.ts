@@ -119,12 +119,14 @@ export async function loadPreview(): Promise<void> {
 	try {
 		const res = await fetch(`${getApiBase()}/migration/preview`);
 		if (!res.ok) {
-			const detail = await res.text().catch(() => '');
-			throw new Error(detail || 'Failed to load preview');
+			// The wizard's own sentence: the answer can be a proxy's page or the engine's English text.
+			await res.body?.cancel().catch(() => {});
+			error = t('migration.error_preview');
+			return;
 		}
 		preview = (await res.json()) as MigrationPreview;
-	} catch (err: unknown) {
-		error = err instanceof Error ? err.message : t('migration.error_preview');
+	} catch {
+		error = t('migration.error_preview');
 	} finally {
 		loading = false;
 	}
@@ -180,8 +182,12 @@ export async function startMigration(): Promise<void> {
 
 		if (!res.ok) {
 			// Turned down before anything went out: the wizard's sentence, the answer's reason at most beside it.
+			// The reason is read first, so it cannot land on a state the user has moved on from.
+			const reason = await refusalReason(res);
+			// Cancelled while the answer was read: `cancelMigration` has already said so.
+			if (step !== 'transferring') return;
 			fail(t('migration.error_not_started'), { engine: false });
-			errorReason = await refusalReason(res);
+			errorReason = reason;
 			return;
 		}
 
@@ -223,8 +229,8 @@ export async function startMigration(): Promise<void> {
 			// `cancelMigration` has already said so.
 			if (step === 'transferring') fail(t('migration.cancelled'), { engine: false });
 		} else if (step === 'transferring') {
-			// A refused request carries the engine's own text; a failed fetch (TypeError) the browser's.
-			if (err instanceof Error) fail(err.message, { engine: err.name !== 'TypeError' });
+			// A failed fetch or a broken stream: the browser's own text, not the engine's sentence.
+			if (err instanceof Error) fail(err.message, { engine: false });
 			else fail(t('migration.error_unknown'), { engine: false });
 		}
 	} finally {
@@ -234,6 +240,31 @@ export async function startMigration(): Promise<void> {
 
 /** Longest reason shown from a refused start. */
 const REASON_MAX = 200;
+/** Most of a refused start's answer read for its reason (bytes); a longer answer gives none. */
+const REASON_READ_MAX = 8 * 1024;
+
+/** The answer's body up to `REASON_READ_MAX` bytes; null when it is longer or cannot be read. */
+async function readCapped(res: Response): Promise<string | null> {
+	const reader = res.body?.getReader();
+	if (!reader) return null;
+	const parts: Uint8Array[] = [];
+	let size = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			size += value.byteLength;
+			if (size > REASON_READ_MAX) { await reader.cancel().catch(() => {}); return null; }
+			parts.push(value);
+		}
+	} catch {
+		return null;
+	}
+	const all = new Uint8Array(size);
+	let at = 0;
+	for (const p of parts) { all.set(p, at); at += p.byteLength; }
+	return new TextDecoder().decode(all);
+}
 
 /**
  * The `error` of a JSON answer that refused the start, without control and bidi characters, on one
@@ -241,9 +272,10 @@ const REASON_MAX = 200;
  */
 async function refusalReason(res: Response): Promise<string> {
 	let said: unknown;
-	try { said = (JSON.parse(await res.text()) as { error?: unknown }).error; } catch { return ''; }
+	const body = await readCapped(res);
+	if (body === null) return '';
+	try { said = (JSON.parse(body) as { error?: unknown }).error; } catch { return ''; }
 	if (typeof said !== 'string') return '';
-	// eslint-disable-next-line no-control-regex
 	const text = said.replace(/[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
 	const chars = [...text];
 	return chars.length > REASON_MAX ? `${chars.slice(0, REASON_MAX - 1).join('')}…` : text;
