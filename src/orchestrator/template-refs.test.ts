@@ -268,6 +268,21 @@ describe('rename_step rewrites a reference only where it is one', () => {
       .toBe('Error: set_input_from: step #2 cannot read its own output.');
   });
 
+  it('set_input_from refusals name a stored step by its position before an earlier add_step moved it', () => {
+    const mk = (): InlinePipelineStep[] => [{ id: 'fetch', task: 'F' }, { id: 'sum', task: 'S' }, { id: 'X One', task: 'X1' }, { id: 'X One', task: 'X2' }];
+    const add = { action: 'add_step' as const, step_id: 'n', value: 'N', after: 'fetch' };
+    expect(applyModifications(mk(), [add, { action: 'set_input_from', step_id: 'sum', input_from: ['sum'] }]))
+      .toBe('Error: set_input_from: step #2 cannot read its own output.');
+    expect(applyModifications(mk(), [add, { action: 'set_input_from', step_id: 'sum', input_from: ['nope'] }]))
+      .toBe('Error: set_input_from for step #2 names unknown step(s): "nope".');
+    expect(applyModifications(mk(), [add, { action: 'set_input_from', step_id: 'n', input_from: ['nope'] }]))
+      .toBe('Error: set_input_from for the step this edit adds ("n") names unknown step(s): "nope".');
+    expect(applyModifications(mk(), [add, { action: 'set_input_from', step_id: 'sum', input_from: ['step-3'] }]) ?? '')
+      .toContain('the input of step #2 (set_input_from)');
+    expect(applyModifications(mk(), [add, { action: 'set_input_from', step_id: 'n', input_from: ['step-3'] }]) ?? '')
+      .toContain('the input of the step this edit adds ("n") (set_input_from)');
+  });
+
   it('a step stored outside the id shape, renamed by its run name, takes its readers and their references along', () => {
     const s: InlinePipelineStep[] = [{ id: 'Old Fetch', task: 'Fetch' }, { id: 'mail', task: 'Mail it', input_template: { body: 'Your {{Old Fetch.result}}' }, input_from: ['Old Fetch'] }];
     expect(applyModifications(s, [{ action: 'rename_step', step_id: 'step-1', value: 'fetch' }])).toBeNull();
