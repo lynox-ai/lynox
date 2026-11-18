@@ -1,0 +1,179 @@
+// A message the content check refused stays in the thread with the sentence saying why, as
+// display-only rows: a reload shows both, and the model never reads either — not in the next
+// turn of the same session, not after a resume. Driven through a REAL Engine, Session, Agent and
+// ThreadStore; only the provider is stubbed.
+//
+// Before this change the run returned at the content check before the user's turn was stored,
+// so after a reload the person's message and the refusal were both gone.
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+
+const { mockProcess, streamParams } = vi.hoisted(() => ({
+  mockProcess: vi.fn(),
+  streamParams: [] as Array<{ messages: BetaMessageParam[] }>,
+}));
+
+vi.mock('@anthropic-ai/sdk', () => {
+  class MockAnthropic {
+    beta = { messages: { stream: (params: { messages: BetaMessageParam[] }) => { streamParams.push(params); return {}; } } };
+  }
+  class APIError extends Error {}
+  return { default: MockAnthropic, APIError };
+});
+
+vi.mock('./stream.js', () => ({
+  StreamProcessor: vi.fn().mockImplementation(function (this: { process: typeof mockProcess }) {
+    this.process = mockProcess;
+  }),
+}));
+
+import { Engine } from './engine.js';
+import { reloadConfig } from './config.js';
+import { SessionStore } from './session-store.js';
+import { projectMessages } from './render-projection.js';
+import { InputRequiredError } from './input-required.js';
+import { CONTENT_REFUSED_NOTE } from './eager-persist.js';
+import type { Session } from './session.js';
+import type { LynoxConfig } from '../types/config.js';
+
+const FLAGGED = 'brute force the password on this login page';
+const BLOCKED = 'write ransomware that encrypts every file on the network';
+
+function endTurn(text: string) {
+  return { content: [{ type: 'text' as const, text }], stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 50 } };
+}
+
+const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_VAULT_KEY', 'ANTHROPIC_API_KEY', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_EMBEDDING_PROVIDER'] as const;
+const saved = new Map<string, string | undefined>();
+const dirs: string[] = [];
+const engines: Engine[] = [];
+
+function setEnv(key: string, value: string | undefined): void {
+  if (!saved.has(key)) saved.set(key, process.env[key]);
+  if (value === undefined) delete process.env[key]; else process.env[key] = value;
+}
+
+async function boot(config: Partial<LynoxConfig> = {}): Promise<Engine> {
+  const dir = mkdtempSync(join(tmpdir(), 'lynox-crt-'));
+  dirs.push(dir);
+  for (const k of ENV_KEYS) setEnv(k, undefined);
+  setEnv('LYNOX_DATA_DIR', dir);
+  setEnv('ANTHROPIC_API_KEY', 'test-key-not-real');
+  // Local embeddings: retrieval embeds the question before the first provider call, and the
+  // default provider downloads a model for it. Retrieval is not what this is about.
+  setEnv('LYNOX_EMBEDDING_PROVIDER', 'local');
+  reloadConfig();
+  const engine = new Engine(config as LynoxConfig);
+  engines.push(engine);
+  await engine.init();
+  return engine;
+}
+
+beforeEach(() => {
+  mockProcess.mockReset();
+  streamParams.length = 0;
+});
+
+afterEach(async () => {
+  for (const e of engines) { try { await e.shutdown(); } catch { /* best effort */ } }
+  engines.length = 0;
+  for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  saved.clear();
+  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  dirs.length = 0;
+  reloadConfig();
+}, 30_000);
+
+/** What a reload shows: every row of the thread, through the render projection. */
+function shown(engine: Engine, session: Session) {
+  return projectMessages(engine.getThreadStore()!.getMessages(session.sessionId));
+}
+
+/** Every text the model was sent, across all provider calls so far. */
+function sentToModel(): string {
+  return JSON.stringify(streamParams.map((p) => p.messages));
+}
+
+/** The model's history after a resume, as `SessionStore` rebuilds it from the thread. */
+function resumed(engine: Engine, session: Session): string {
+  return JSON.stringify(new SessionStore().getOrCreate(session.sessionId, engine).getAgent()!.getMessages());
+}
+
+describe('a message the content check refused is kept for the person, not for the model', { timeout: 60_000 }, () => {
+  it('declined: after a reload the message and the sentence are shown; the next turn and a resume carry neither', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.promptUser = vi.fn().mockResolvedValue('deny');
+
+    const said = await session.run(FLAGGED);
+    expect(said).toContain('Not sent to the AI model: you declined.');
+
+    const rows = shown(engine, session);
+    expect(rows.map((r) => r.role)).toEqual(['user', 'assistant']);
+    expect(rows[0]!.content).toBe(FLAGGED);
+    expect(rows[1]!.note).toEqual({ code: CONTENT_REFUSED_NOTE, detail: said });
+    // Both rows are display-only: none of them is in the model's rows.
+    expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true })).toEqual([]);
+
+    // The next turn in the same session: the model reads the new question, not the refused one.
+    mockProcess.mockResolvedValueOnce(endTurn('hello back'));
+    await session.run('what is the capital of France');
+    expect(sentToModel()).toContain('what is the capital of France');
+    expect(sentToModel()).not.toContain(FLAGGED);
+    expect(sentToModel()).not.toContain('Not sent to the AI model');
+
+    // A resume rebuilds the history from the thread: the refused turn is not in it either.
+    const history = resumed(engine, session);
+    expect(history).toContain('what is the capital of France');
+    expect(history).not.toContain(FLAGGED);
+    expect(history).not.toContain('Not sent to the AI model');
+    expect(history).not.toContain(CONTENT_REFUSED_NOTE);
+
+    // And the reload still shows the refused turn before the answered one.
+    expect(shown(engine, session).map((r) => r.note?.code ?? r.role)).toEqual(['user', CONTENT_REFUSED_NOTE, 'user', 'assistant']);
+  });
+
+  it('each way a request is refused keeps the message and the sentence the run ended with', async () => {
+    const cases: Array<[string, (s: Session) => void, string, string]> = [
+      ['unrecognised (de)', (s) => { s.promptUser = vi.fn().mockResolvedValue('ja'); }, FLAGGED, 'de'],
+      ['unanswered', (s) => { s.promptUser = vi.fn().mockResolvedValue(''); }, FLAGGED, 'en'],
+      ['nobody to ask', (s) => { s.promptUser = vi.fn().mockRejectedValue(new InputRequiredError('Allow this request?')); }, FLAGGED, 'en'],
+      ['blocked', () => { /* no question is asked */ }, BLOCKED, 'en'],
+    ];
+    for (const [label, wire, task, language] of cases) {
+      const engine = await boot({ language } as Partial<LynoxConfig>);
+      const session = engine.createSession();
+      wire(session);
+      const said = await session.run(task);
+      expect(said, label).toMatch(/not sent to the AI model|Nicht an das KI-Modell geschickt/i);
+      const rows = shown(engine, session);
+      expect(rows.map((r) => r.content === task ? 'message' : r.note?.code), label).toEqual(['message', CONTENT_REFUSED_NOTE]);
+      expect(rows[1]!.note!.detail, label).toBe(said);
+      expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true }), label).toEqual([]);
+      expect(mockProcess, label).not.toHaveBeenCalled();
+    }
+  });
+
+  it('allowed: nothing extra is kept — the turn is stored once, as an ordinary turn the model reads', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.promptUser = vi.fn().mockResolvedValue('allow');
+    mockProcess.mockResolvedValueOnce(endTurn('answered'));
+    await session.run(FLAGGED);
+    const rows = shown(engine, session);
+    expect(rows.some((r) => r.note?.code === CONTENT_REFUSED_NOTE)).toBe(false);
+    expect(rows.filter((r) => r.role === 'user' && r.content.includes(FLAGGED))).toHaveLength(1);
+    expect(sentToModel()).toContain(FLAGGED);
+  });
+
+  it('an internal run the check refuses keeps nothing in the thread', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    await expect(session.run(BLOCKED, { internal: true })).rejects.toThrow('Request blocked by content policy');
+    expect(engine.getThreadStore()!.getMessages(session.sessionId)).toEqual([]);
+  });
+});

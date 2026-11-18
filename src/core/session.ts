@@ -75,7 +75,7 @@ import { approvalChatTitle } from './approval-chat-title.js';
 import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
-import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, persistRefusedTurn, capStopNote } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
 import { buildCompactionSummaryPrompt } from './compaction-prompt.js';
@@ -1003,6 +1003,7 @@ export class Session {
       if (inputCheck.action === 'block') {
         const msg = `⚠ Request blocked by content policy: ${inputCheck.reason ?? 'prohibited content'}. This request was not sent to the AI model.`;
         if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+        persistRefusedTurn(threadStore, this.sessionId, task, msg);
         return msg;
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
@@ -1022,15 +1023,18 @@ export class Session {
           if (!isInputRequired(err)) throw err;
           const msg = `⚠ Request flagged by content policy: ${inputCheck.reason ?? 'suspicious content'}. There is no one to allow it, so it was not sent to the AI model.`;
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+          persistRefusedTurn(threadStore, this.sessionId, task, msg);
           return msg;
         }
         const outcome = decideConsent('guard', answer);
         if (outcome !== 'allow') {
           // The run's result, read by the person in the instance's language: the run ends here,
-          // before the model is called and before anything is stored, so the model never reads it.
+          // before the model is called. The message and this sentence are kept as display-only
+          // rows, so a reload shows both and the model never reads either.
           const why = outcome === 'unrecognised' ? 'unrecognised' : outcome === 'dismissed' ? 'unanswered' : 'declined';
           const msg = contentFlagRefusal(language, why, inputCheck.reason);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+          persistRefusedTurn(threadStore, this.sessionId, task, msg);
           return msg;
         }
       }
