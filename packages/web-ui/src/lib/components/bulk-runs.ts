@@ -334,16 +334,18 @@ export function bulkResumeText(
 	const limit = run.failureLimit;
 	const open = run.resumeOpen;
 	const failures = key === 'failureRate' || key === 'consecutiveFailures';
-	const cause = key === 'failureRate' ? (limit === 0 ? i18n.t('bulk.halt.failureRate_write0') : i18n.tf('bulk.halt.failureRate_write', { limit: String(limit) }))
-		: key === 'consecutiveFailures' ? i18n.t('bulk.halt.consecutiveFailures_write')
-		: key === 'unrecorded' ? i18n.tf('bulk.halt.unrecorded_write', vars)
+	// An undo takes its targets back: its own words wherever the sentence names the write (U-335).
+	const verb = run.kind === 'undo' ? 'undo' : 'write';
+	const cause = key === 'failureRate' ? (limit === 0 ? i18n.t(`bulk.halt.failureRate_${verb}0`) : i18n.tf(`bulk.halt.failureRate_${verb}`, { limit: String(limit) }))
+		: key === 'consecutiveFailures' ? i18n.t(`bulk.halt.consecutiveFailures_${verb}`)
+		: key === 'unrecorded' ? i18n.tf(`bulk.halt.unrecorded_${verb}`, vars)
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
 		// "wrote nothing" only where nothing of the run was written or sent.
 		: key === 'consentOutdated' ? i18n.tf(run.applied === 0 && run.sentUnknown === 0 ? 'bulk.halt.consentOutdated' : 'bulk.halt.consentOutdated_more', {
 			field: bulkConsentFields(run.consentFields, i18n), path: `${i18n.t('nav.settings')} → ${i18n.t('settings.apis')}`,
 		})
 		: i18n.tf(`bulk.halt.${key}`, vars);
-	const beforeKey = failures ? 'bulk.halt.failures_before_write'
+	const beforeKey = failures ? `bulk.halt.failures_before_${verb}`
 		: key === 'credential' ? 'bulk.halt.credential_before'
 		: key === 'unauthorized' || key === 'unavailable' ? `bulk.halt.${key}_before`
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
@@ -352,7 +354,7 @@ export function bulkResumeText(
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, check: null, kept: null, soFar: null, allows: null };
 	// Nothing to send: no step before writing on applies, and what is left needs a new run.
-	if (kind === 'nothing') return { cause, before: null, check: i18n.tf('bulk.resume.nothing_left', vars), kept: null, soFar: null, allows: null };
+	if (kind === 'nothing') return { cause, before: null, check: i18n.tf(`bulk.resume.nothing_left${run.kind === 'undo' ? '_undo' : ''}`, vars), kept: null, soFar: null, allows: null };
 	// Checking sends nothing, so the failures' "before you continue writing" does not apply; a
 	// halt's own step (reconnect the access, switch writing back on) still comes first.
 	if (kind === 'check') {
@@ -365,8 +367,6 @@ export function bulkResumeText(
 	// nothing is said to stay: a write sent and failed may still have reached its target, which the
 	// next try reads first and counts as written.
 	const capped = kind === 'max' || run.resumeTries < open;
-	// An undo takes its targets back: its own words, the same cases (U-335).
-	const verb = run.kind === 'undo' ? 'undo' : 'write';
 	const kept = i18n.t(`bulk.resume.kept_${verb}${run.applied === 0 ? '_none' : ''}${capped ? '_capped' : ''}`);
 	if (!failures) return { cause, before, check: null, kept, soFar: null, allows: null };
 	const f = run.failed;

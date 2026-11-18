@@ -114,6 +114,37 @@ describe('a halted undo continues in its own words', () => {
 		expect(text).not.toContain(t('bulk.resume.allows_again_zero'));
 	});
 
+	// One word on the whole page: the halt and the step before continuing say "undo" too.
+	it('names the failures that halted it as targets not undone, and the step before as continuing the undo', async () => {
+		const once = await render({ haltKey: 'failureRate', failureLimit: 0 });
+		expect(once).toContain(t('bulk.halt.failureRate_undo0'));
+		expect(once).toContain(t('bulk.halt.failures_before_undo'));
+		expect(once).not.toContain(t('bulk.halt.failureRate_write0'));
+		expect(once).not.toContain(t('bulk.halt.failures_before_write'));
+		unmount(component!);
+		component = undefined;
+		expect(await render({ haltKey: 'failureRate', failureLimit: 2 })).toContain(tf('bulk.halt.failureRate_undo', { limit: '2' }));
+		unmount(component!);
+		component = undefined;
+		expect(await render({ haltKey: 'consecutiveFailures', failureLimit: 2 })).toContain(t('bulk.halt.consecutiveFailures_undo'));
+		unmount(component!);
+		component = undefined;
+		expect(await render({ haltKey: 'unrecorded' })).toContain(tf('bulk.halt.unrecorded_undo', { provider: 'demo.myshopify.com', host: 'demo.myshopify.com' }));
+	});
+
+	it('says an undo that has only conflicts left sends nothing and overwrites nothing', async () => {
+		const text = await render({ haltKey: 'unavailable', conflicts: 2 });
+		expect(text).toContain(tf('bulk.resume.nothing_left_undo', { provider: 'demo.myshopify.com' }));
+		expect(text).not.toContain(tf('bulk.resume.nothing_left', { provider: 'demo.myshopify.com' }));
+	});
+
+	it('control: a halted write keeps the words of its halt and of nothing left', async () => {
+		expect(await render({ kind: 'apply', sourceRunId: null, haltKey: 'failureRate', failureLimit: 0 })).toContain(t('bulk.halt.failures_before_write'));
+		unmount(component!);
+		component = undefined;
+		expect(await render({ kind: 'apply', sourceRunId: null, haltKey: 'unavailable', conflicts: 2 })).toContain(tf('bulk.resume.nothing_left', { provider: 'demo.myshopify.com' }));
+	});
+
 	it('control: a halted write keeps the words of writing on', async () => {
 		const text = await render({ kind: 'apply', sourceRunId: null });
 		expect(text).toContain(t('bulk.resume.kept_write'));
