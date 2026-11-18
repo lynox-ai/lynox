@@ -15502,7 +15502,7 @@ export class LynoxHTTPApi {
         }
         if (!handshakeValid) {
           // Not passing: it fails the same way on every attempt (a wrong token or a foreign key).
-          throw new Error('Handshake signature invalid — refusing to derive transfer key. If this happens again, write to support@lynox.ai.');
+          throw new Error('lynox could not confirm that it is talking to the target instance, so it did not set up the connection. Nothing was transferred. If this happens again, write to support@lynox.ai.');
         }
         // Only a target whose signature checks is asked to end its session later. An older target
         // names no session; it has no abort either, and holds the session 30 minutes.
@@ -15534,7 +15534,7 @@ export class LynoxHTTPApi {
             body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
           }, TARGET_REQUEST_TIMEOUTS_MS.handshake, handshakeFailed);
           await discardBody(completeRes);
-          if (!completeRes.ok) throw new Error(`Handshake completion failed. ${AGAIN}`);
+          if (!completeRes.ok) throw new Error(`lynox could not finish setting up the connection to the target instance. Nothing was transferred. ${AGAIN}`);
 
           sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
 
@@ -15556,13 +15556,13 @@ export class LynoxHTTPApi {
         const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace, plain: exportPlain } = exported;
         // A refusal from the destination is shown as its own text, which is written for the
         // person migrating; the raw response only when it carries none.
-        // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
-        // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
+        // `told` says in lynox's words which step failed, followed by the target's own words (its
+        // error text, else its raw answer) when it gave any, cut at 500 characters with a mark that it was.
         // The answer is read up to its cap, and the target's words lose control and bidi characters.
         // They stand in quotes (inner quotes escaped), so they cannot run on into lynox's own sentence
         // or pose as it; lynox's sentence always comes last.
         // `then` is what the user can do next: try again later, or, once the restore ran, check the target.
-        const refusal = async (r: Response, step: string, told: string, then: string = AGAIN): Promise<Error> => {
+        const refusal = async (r: Response, told: string, then: string = AGAIN): Promise<Error> => {
           let text: string | null;
           try { text = await readTargetBody(r, TARGET_BODY_CAPS.refusal, TARGET_BODY_TIMEOUT_MS); } catch (err: unknown) {
             if (err instanceof TargetAnswerTooSlow) return new Error(`${told} It did not finish its answer within ${durationText(TARGET_BODY_TIMEOUT_MS)}. ${then}`);
@@ -15573,7 +15573,7 @@ export class LynoxHTTPApi {
           try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
           if (typeof message !== 'string' || message === '') {
             const raw = relayedText(text).trim();
-            return new Error(raw === '' ? `${told} ${NO_REASON} ${then}` : `${step}: ${JSON.stringify(raw)}. ${then}`);
+            return new Error(raw === '' ? `${told} ${NO_REASON} ${then}` : `${told} It says: ${JSON.stringify(raw)}. ${then}`);
           }
           const words = relayedText(message).trim();
           return new Error(words === '' ? `${told} ${NO_REASON} ${then}` : `${told} It says: ${JSON.stringify(words)}. ${then}`);
@@ -15589,7 +15589,7 @@ export class LynoxHTTPApi {
         if (!mRes.ok) {
           // A refusal of the manifest itself (4xx), not the target failing or busy (5xx, 429).
           manifestRefused = mRes.status >= 400 && mRes.status < 500 && mRes.status !== 429;
-          throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+          throw await refusal(mRes, 'The target instance refused the migration.');
         }
         manifestAccepted = true;
         await discardBody(mRes);
@@ -15608,7 +15608,7 @@ export class LynoxHTTPApi {
             headers: migrationHeaders,
             body: JSON.stringify(chunks[i]),
           }, TARGET_REQUEST_TIMEOUTS_MS.chunk, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.chunk)} while receiving part ${String(i + 1)} of the data.` : `lynox lost the connection to the target instance while sending part ${String(i + 1)} of the data.`} lynox stopped; the target instance has not restored anything. ${AGAIN}`);
-          if (!cRes.ok) throw await refusal(cRes, `Chunk ${String(i)} rejected`, `The target instance refused part ${String(i + 1)} of the data.`);
+          if (!cRes.ok) throw await refusal(cRes, `The target instance refused part ${String(i + 1)} of ${String(chunks.length)} of the data.`);
           await discardBody(cRes);
         }
 
@@ -15635,7 +15635,7 @@ export class LynoxHTTPApi {
         }
         // A 4xx is the target turning the restore down before it started (a missing chunk, sidecar
         // mode); a 5xx is the restore failing on the way, which can leave part of it applied.
-        if (!rRes.ok) throw await refusal(rRes, 'Restore failed', 'The target instance could not restore the data.', rRes.status >= 500 ? 'Check on the target instance whether your data arrived before you migrate again.' : AGAIN);
+        if (!rRes.ok) throw await refusal(rRes, 'The target instance could not restore the data.', rRes.status >= 500 ? 'Check on the target instance whether your data arrived before you migrate again.' : AGAIN);
 
         const result = await readTargetJson(rRes, TARGET_BODY_CAPS.restore, restoreUnknown, TARGET_BODY_TIMEOUT_MS) as { success?: unknown; verification?: unknown } | null;
         // Files the export could not carry (a link, a name that cannot travel) are named in the result,
@@ -15696,7 +15696,13 @@ export class LynoxHTTPApi {
           const bare = before.trim();
           return `${bare}${/[.!?…]$/.test(bare) ? '' : '.'}`;
         };
-        sendEvent('error', { message: freed ? unheld() : shown });
+        const final = freed ? unheld() : shown;
+        // What the user can do next, for the UI to follow rather than parse the sentence: check the
+        // target first (the restore may have run), wait while the target may still hold its session,
+        // or start again now.
+        const CHECK_TEXT = 'Check on the target instance whether your data arrived before you migrate again.';
+        const retry = final.endsWith(CHECK_TEXT) ? 'check' : sessionMayBeHeld && !freed ? 'later' : 'now';
+        sendEvent('error', { message: final, retry });
       } finally {
         res.end();
       }
