@@ -1655,10 +1655,11 @@ const MIGRATIONS: string[] = [
   // around them in the same message (a loaded mail or run as context, an uploaded file). Keyed
   // by the message's seq, written in the transaction that writes the message; only a route that
   // knows where the typed words end writes one. A turn without a row has no typed words anyone
-  // can rely on, and reads as none.
+  // can rely on, and reads as none. `principal` is the author tag of the run that wrote them;
+  // only rows whose principal is the owner are read as the owner's words.
   // `thread_read_outside`: the thread's conversation has taken in content from outside (the
   // agent's sticky latch). Only ever inserted, never deleted except with its thread, and
-  // written before or with the message that carries what was read, so a resume after a
+  // written in the transaction of the message that carries what was read, so a resume after a
   // compaction that summarized the read away still knows it. Tables, not columns: the
   // statements can run again on a database that has them.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (74);
@@ -1666,6 +1667,7 @@ const MIGRATIONS: string[] = [
      thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
      seq INTEGER NOT NULL,
      text TEXT NOT NULL,
+     principal TEXT,
      PRIMARY KEY (thread_id, seq)
    );
    CREATE TABLE IF NOT EXISTS thread_read_outside (

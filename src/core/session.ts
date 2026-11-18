@@ -73,6 +73,7 @@ import { approvalChatTitle } from './approval-chat-title.js';
 import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
+import { ReadOutsideUnrecordedError } from './thread-store.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
@@ -1372,8 +1373,9 @@ export class Session {
     // internal runs (compaction summary) so a system prompt never shows as a
     // user message.
     let userTurnPrePersisted = false;
-    // A turn that carries outside content itself (an upload) is recorded as such before the turn
-    // is written (`ConversationLatch`): the thread is never behind the message.
+    let readOutsideUnrecorded: ReadOutsideUnrecordedError | undefined;
+    // A turn that carries outside content itself (an upload) arms the thread's record of outside
+    // reads, which is written with the turn or the turn is not written (`ConversationLatch`).
     if (runOptions?.internal !== true && userContentHoldsMarker(userContent)) this._latch().set();
     if (threadStore && runOptions?.internal !== true) {
       try {
@@ -1387,9 +1389,11 @@ export class Session {
           runOptions?.typedText,
         );
         userTurnPrePersisted = true;
-      } catch {
+      } catch (err) {
         // Fire-and-forget — eager-persist still covers the happy path; never
-        // block the run on a persistence hiccup.
+        // block the run on a persistence hiccup. Except the record of outside reads: a turn that
+        // carries a read is not stored without it, and does not run (`ReadOutsideUnrecordedError`).
+        if (err instanceof ReadOutsideUnrecordedError) readOutsideUnrecorded = err;
       }
     }
 
@@ -1427,6 +1431,7 @@ export class Session {
       // Stopped before the agent could hear it: ends the turn as a stop, before the provider,
       // through the same recording as a stop the agent heard.
       if (runOptions?.internal !== true && this._stopBeforeSend) throw new RunAbortedError();
+      if (readOutsideUnrecorded !== undefined) throw readOutsideUnrecorded;
       sentToAgent = true;
       const result = await runAgent.send(
         userContent,
@@ -1656,7 +1661,11 @@ export class Session {
             );
             threadStore.updateThread(this.sessionId, { message_count: before + 1 });
           }
-        } catch { /* fire-and-forget */ }
+        } catch (err) {
+          // Fire-and-forget, except a turn whose record of outside reads could not be written:
+          // its messages were not stored, and it ends with the error.
+          if (err instanceof ReadOutsideUnrecordedError) throw err;
+        }
       }
 
       // Auto-confirm retrieved memories on success

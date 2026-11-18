@@ -1224,9 +1224,9 @@ export class Agent implements IAgent {
   restoreConversationTaint(): void { this._armConversationLatch(); }
 
   /**
-   * Set the sticky conversation latch and its record on the thread (`ConversationLatch`), in
-   * that order and synchronously: every place that sets the latch does so before the message
-   * that carries what was read is written, so the record is never behind the message.
+   * Set the sticky conversation latch and arm its record on the thread (`ConversationLatch`).
+   * Every place that sets the latch does so before the message that carries what was read is
+   * written, and the store writes the record in that message's transaction, or neither.
    */
   private _armConversationLatch(): void {
     this._conversationSawUntrusted = true;

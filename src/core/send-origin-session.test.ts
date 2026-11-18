@@ -191,28 +191,35 @@ describe('contacts', { timeout: 60_000 }, () => {
 });
 
 describe('the conversation\'s record of outside reads', { timeout: 60_000 }, () => {
-  it('is written before the turn that carries the read, and stays when that write fails', async () => {
+  it('is written in the transaction of the turn that carries the read: if it fails, the turn is not stored and the run fails', async () => {
     const engine = await boot();
-    const store = engine.getThreadStore()!;
+    const db = engine.getRunHistory()!.getDb();
     const session = engine.createSession();
-    const seenAtAppend: boolean[] = [];
-    const original = store.appendMessages.bind(store);
-    const spy = vi.spyOn(store, 'appendMessages').mockImplementation((...args: Parameters<typeof store.appendMessages>) => {
-      seenAtAppend.push(store.readOutside(session.sessionId));
-      if (seenAtAppend.length === 1) throw new Error('crash while writing the turn');
-      original(...args);
-    });
-    try {
-      const content = [
-        { type: 'text' as const, text: wrapUntrustedData('[File: a.txt]\ninhalt', 'file_upload') },
-        { type: 'text' as const, text: 'lies' },
-      ];
-      await session.run(content, { principal: OWNER_PRINCIPAL, typedText: 'lies' });
-    } finally {
-      spy.mockRestore();
-    }
-    expect(seenAtAppend[0], 'the record was there when the turn was written').toBe(true);
-    expect(store.readOutside(session.sessionId)).toBe(true);
+    await session.run('hallo', { principal: OWNER_PRINCIPAL, typedText: 'hallo' });
+    db.exec("CREATE TRIGGER fail_read_outside BEFORE INSERT ON thread_read_outside BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+    const content = [
+      { type: 'text' as const, text: wrapUntrustedData('[File: a.txt]\nmallory@evil.example', 'file_upload') },
+      { type: 'text' as const, text: 'lies' },
+    ];
+    await expect(session.run(content, { principal: OWNER_PRINCIPAL, typedText: 'lies' })).rejects.toThrow('This conversation could not be saved.');
+    // No message the model reads again carries the read: on a reload it is not there to send to.
+    const stored = db.prepare("SELECT COUNT(*) AS n FROM thread_messages WHERE thread_id = ? AND display_only = 0 AND content_json LIKE '%mallory@evil.example%'").get(session.sessionId) as { n: number };
+    expect(stored.n).toBe(0);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM thread_read_outside WHERE thread_id = ?').get(session.sessionId)).toEqual({ n: 0 });
+  });
+
+  it('CONTROL: the same turn with a record that can be written is stored with its record', async () => {
+    const engine = await boot();
+    const db = engine.getRunHistory()!.getDb();
+    const session = engine.createSession();
+    const content = [
+      { type: 'text' as const, text: wrapUntrustedData('[File: a.txt]\nmallory@evil.example', 'file_upload') },
+      { type: 'text' as const, text: 'lies' },
+    ];
+    await session.run(content, { principal: OWNER_PRINCIPAL, typedText: 'lies' });
+    const stored = db.prepare("SELECT COUNT(*) AS n FROM thread_messages WHERE thread_id = ? AND display_only = 0 AND content_json LIKE '%mallory@evil.example%'").get(session.sessionId) as { n: number };
+    expect(stored.n).toBe(1);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM thread_read_outside WHERE thread_id = ?').get(session.sessionId)).toEqual({ n: 1 });
   });
 
   it('a resume after a compaction that summarized the read away still counts as having read outside content', async () => {

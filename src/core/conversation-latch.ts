@@ -9,18 +9,20 @@
  * (`_written_untrusted`). This record is read on every load (`Agent.loadMessages`) next to the
  * history scan, and a resume counts as having read outside content when either says so.
  *
- * Only set, never cleared: a new conversation is a new thread, which has no record. Set
- * synchronously when the agent's latch is set, which is before the message that carries the read
- * is written. One object per conversation: a sub-agent and every workflow step of the
- * conversation get the same, by reference, and set it under the conversation's thread.
+ * Only set, never cleared: a new conversation is a new thread, which has no record. Setting it
+ * arms the thread in its store (`ThreadStore.armReadOutside`); the record itself is written in
+ * the same transaction as the next message of the thread, which is the message that carries the
+ * read. A write that fails fails that message too: the message is not stored, and the turn ends
+ * with an error (`ReadOutsideUnrecordedError`). One object per conversation: a sub-agent and every
+ * workflow step of the conversation get the same, by reference, and arm the conversation's thread.
  *
- * Fail-closed both ways: a record that cannot be read counts as set, and a write that fails is
- * kept in memory, where this conversation still reads it as set.
+ * A record that cannot be read counts as set.
  */
 
 /** Where a thread's record is kept (`ThreadStore`). */
 export interface ConversationLatchSink {
-  markReadOutside(threadId: string): void;
+  /** Arm the thread: its next message is written together with the record. */
+  armReadOutside(threadId: string): void;
   readOutside(threadId: string): boolean;
 }
 
@@ -41,16 +43,12 @@ export class ConversationLatch {
     return new ConversationLatch(threadId, sink);
   }
 
-  /** Record it. Written before this returns; a failed write keeps it in memory. */
+  /** Record it: the thread's next message is written with the record, or not at all. */
   set(): void {
     if (this._set) return;
     this._set = true;
     if (this.threadId === undefined || this._sink === undefined) return;
-    try {
-      this._sink.markReadOutside(this.threadId);
-    } catch {
-      // Kept in memory: this conversation still reads it as set.
-    }
+    this._sink.armReadOutside(this.threadId);
   }
 
   /** Whether it is recorded. A record that cannot be read counts as set. */
