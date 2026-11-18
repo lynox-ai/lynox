@@ -380,6 +380,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.head.halted': { de: 'Angehalten', en: 'Halted' },
 	'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' },
 	'bulk.head.discarded': { de: 'Verworfen', en: 'Discarded' },
+	// An aborted run cannot be continued; a superseded one has a newer run in its place (U-342).
+	'bulk.head.aborted': { de: 'Abgebrochen', en: 'Aborted' },
+	'bulk.head.replaced': { de: 'Ersetzt', en: 'Replaced' },
 	'bulk.halted_after_probe': { de: 'Wie geplant nach dem ersten Ziel angehalten.', en: 'Stopped after the first target, as planned.' },
 	'bulk.resumes_at': { de: 'Unterbrochen. lynox setzt den Lauf ab {time} fort.', en: 'Interrupted. lynox resumes the run from {time}.' },
 	'bulk.awaiting_start': { de: 'Dieser Lauf ist geplant und noch nicht gestartet.', en: 'This run is planned and has not started yet.' },

@@ -152,12 +152,16 @@ export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'li
 	return run.judge !== null && (run.list ?? null) !== null && bulkHostOf(run.targetSystem) !== null;
 }
 
-/** The word over a halted run's cause. An owner's stop is a stop, not a halt: „angehalten“ is
- *  the word of a run that ended where its approval, a failure or a limit told it to. */
-export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' {
+/** The word over a halted run's cause: it says whether the run can go on from there (U-342). An
+ *  owner's stop is a stop, not a halt: „angehalten“ is the word of a run that stopped where its
+ *  approval, a failure or a limit told it to and can be continued. An aborted run cannot: it
+ *  reads „abgebrochen“, or „ersetzt“ where a newer run took its place. */
+export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'> & Partial<Pick<BulkRun, 'phase'>>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' | 'bulk.head.aborted' | 'bulk.head.replaced' {
 	// A discarded run reads "Discarded" next to the sentence and the chip that say so (U-324).
 	if (run.haltKey === 'discarded') return 'bulk.head.discarded';
-	return run.haltKey === 'stoppedByOwner' ? 'bulk.head.stopped' : 'bulk.head.halted';
+	if (run.haltKey === 'stoppedByOwner') return 'bulk.head.stopped';
+	if (run.phase === 'aborted') return run.haltKey === 'superseded' ? 'bulk.head.replaced' : 'bulk.head.aborted';
+	return 'bulk.head.halted';
 }
 
 /** A run's phase as the list names it: a run the owner discarded before approving it reads
@@ -1097,7 +1101,8 @@ export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntity
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
 export type BulkStepName = (typeof BULK_STEPS)[number];
 
-type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>;
+type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>
+	& Partial<Pick<BulkRunDetailData, 'haltKey' | 'applied' | 'conflicts' | 'failed' | 'sentUnknown'>>;
 
 /** Whether the run has a probe step: two or more targets to write (counted as the write counts
  *  them), and its probe does not hold yet or it confirmed one of its own. A run at its probe is
@@ -1113,14 +1118,28 @@ export function bulkSteps(run: BulkStepRun): readonly BulkStepName[] {
 	return bulkHasProbeStep(run) ? BULK_STEPS : BULK_STEPS.filter((s) => s !== 'probe');
 }
 
-/** Which of {@link BULK_STEPS} the run is at. A run without a probe step writes its one target
- *  under "run", though the engine may hold it there as at a probe. */
-export function bulkStep(run: BulkStepRun): BulkStepName {
+/** Which of {@link BULK_STEPS} the run is at, or null where the page cannot know. A run without
+ *  a probe step writes its one target under "run", though the engine may hold it there as at a
+ *  probe. The chip marks the step the run stands at, not how it ended (U-342): an approved run
+ *  that halted before it sent anything still stands at its approval; an aborted run stands where
+ *  it was writing; a run that ended before its approval may never have been previewed, so no
+ *  step is marked, except a discarded one, whose last step reads „verworfen“. */
+export function bulkStep(run: BulkStepRun): BulkStepName | null {
 	if (run.phase === 'planned') return 'planned';
 	if (run.phase === 'previewed') return 'approval';
 	if (bulkAtProbe(run) && bulkHasProbeStep(run)) return 'probe';
+	if (run.phase === 'approved' && run.haltReason !== null && bulkSentNothing(run)) return 'approval';
 	if (run.phase === 'approved' || run.phase === 'writing') return 'run';
+	if (run.phase === 'aborted') {
+		if (run.haltKey === 'discarded') return 'done';
+		return run.haltKey !== null && run.haltKey !== undefined && BULK_ENDED_UNAPPROVED.has(run.haltKey) ? null : 'run';
+	}
 	return 'done';
+}
+
+/** Whether the run has sent nothing yet: nothing written, in conflict, failed or sent unknown. */
+function bulkSentNothing(run: BulkStepRun): boolean {
+	return (run.applied ?? 0) + (run.conflicts ?? 0) + (run.failed ?? 0) + (run.sentUnknown ?? 0) === 0;
 }
 
 /** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
