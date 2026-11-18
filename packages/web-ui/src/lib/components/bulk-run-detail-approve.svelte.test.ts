@@ -1732,7 +1732,7 @@ describe('the start of a judged run, in words', () => {
 	// One word for the step (U-339): the owner reads „Beurteilung“ on the button, in the hints and in
 	// the push, so the two words cannot read as two steps. „Urteil“ stays only for what the model
 	// decides about one target. In English "judging", without "the".
-	it('calls the step „Beurteilung“ on the button and in every start sentence, in English "judging"', async () => {
+	it('calls the step „Beurteilung“ on the start and restart buttons and in the start sentences that name it, in English "judging"', async () => {
 		const before = getLocale();
 		onTestFinished(() => setLocale(before));
 		const keys = ['bulk.start.judge', 'bulk.restart.judge', 'bulk.start.listed_judge', 'bulk.start.judge_own_key', 'bulk.start.supersede',
@@ -1756,13 +1756,25 @@ describe('the start of a judged run, in words', () => {
 	});
 
 	// Amounts on the run page read as the cost field does: the number, then „USD“ (U-339).
+	// The run a start would end has spent 0.50 (the engine's answer); this run has spent 0.25, so the
+	// sentence shows the other run's cost and not this one's.
 	it('shows the cost so far and the limit as amounts in USD, and the cost of the run a start ends too', async () => {
-		run = judged({ costUsd: 0.5, costCapUsd: 5 });
+		run = judged({ costUsd: 0.25, costCapUsd: 5 });
 		refuseResume = 'supersede_required';
 		await render();
-		expect(target.querySelector('[data-testid="bulk-head-cost"]')?.textContent).toBe('0.50 USD / 5.00 USD');
+		expect(target.querySelector('[data-testid="bulk-head-cost"]')?.textContent).toBe('0.25 USD / 5.00 USD');
 		type(capField(), '5');
 		startButton().click();
+		await settle();
+		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50 USD' }));
+		expect(target.textContent).not.toContain('$0.50');
+	});
+
+	it('shows the cost of the run a restart ends in USD as well', async () => {
+		run = judged({ haltKey: 'unavailable', costUsd: 0.25 });
+		refuseResume = 'supersede_required';
+		await render();
+		buttonByText(t('bulk.restart.judge'))!.click();
 		await settle();
 		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50 USD' }));
 		expect(target.textContent).not.toContain('$0.50');
