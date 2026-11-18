@@ -6,6 +6,7 @@ import { Engine, type LynoxHooks } from './engine.js';
 import { reloadConfig } from './config.js';
 import type { DeliverySummary, NotificationChannel } from './notification-router.js';
 import type { LynoxConfig, LynoxUserConfig } from '../types/index.js';
+import { _resetVaultKeySource } from './vault-key-source.js';
 
 /**
  * An escalation that reached nobody is handed to the engine's hooks, so the managed hook can ask
@@ -61,7 +62,10 @@ describe('Engine boot — an undelivered escalation reaches the control plane', 
       setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-boot');
       setEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'https://cp.test');
       setEnv('LYNOX_HTTP_SECRET', 'boot-secret');
+      // A hosted instance starts only on the vault key the platform delivers in the environment.
+      setEnv('LYNOX_VAULT_KEY', 'A'.repeat(64));
     }
+    _resetVaultKeySource();
     const fetchSpy = vi.fn().mockImplementation(() =>
       Promise.resolve({ ok: true, json: async () => ({ allowed: true, spend_gate: 'unfunded' }) }));
     vi.stubGlobal('fetch', fetchSpy);

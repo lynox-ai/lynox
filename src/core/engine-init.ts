@@ -3,7 +3,8 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
-import { VAULT_KEY_PATTERN, recordVaultKeySource, sourceOfEnvKey } from './vault-key-source.js';
+import { VAULT_KEY_PATTERN, keyDelivery, recordVaultKeySource, sourceOfEnvKey, vaultKeySource } from './vault-key-source.js';
+import { readEnvAlias } from './env.js';
 import { processErrorText } from './error-egress.js';
 import { existsSync, readFileSync, writeFileSync, lstatSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -439,6 +440,10 @@ export function loadVaultKeyFromDotEnv(): void {
  * + idempotent so `Engine.init()` can hoist it ahead of persistence.
  */
 export function ensureVaultKey(): void {
+  if (readEnvAlias('LYNOX_BILLING_TIER')) {
+    requireDeliveredVaultKey();
+    return;
+  }
   if (process.env['LYNOX_VAULT_KEY']) {
     recordVaultKeySource(sourceOfEnvKey());
     return;
@@ -477,6 +482,27 @@ export function ensureVaultKey(): void {
     recordVaultKeySource('none');
     process.stderr.write('⚠ Could not write vault key file. Secrets will not be persisted.\n');
   }
+}
+
+/** Why a managed instance does not start: the sentence the operator reads in its log. */
+export const MANAGED_VAULT_KEY_REFUSAL =
+  'This instance is hosted by the lynox platform, and the platform did not hand it a usable vault key ' +
+  '(LYNOX_VAULT_KEY in the container environment). lynox does not start: without that key, chats and ' +
+  'connections would be stored unencrypted or under a key the platform does not hold. The key comes ' +
+  'from the platform, not from this instance; redeliver it from the control plane and restart.';
+
+/**
+ * On an instance the control plane hosts, the vault key is the one it delivers in the environment,
+ * and nothing else: a key read from the volume's `.env` or `vault.key`, or one generated here, is
+ * not a key the platform holds, and no key at all leaves new rows unencrypted. Either way the start
+ * stops, before anything is read or written. The rule is the one the platform measures
+ * (`keyDelivery` = `env`), so delivery and acceptance agree. A self-hosted start never comes here.
+ */
+function requireDeliveredVaultKey(): void {
+  const key = process.env['LYNOX_VAULT_KEY'];
+  const source = vaultKeySource() ?? (key ? sourceOfEnvKey() : 'none');
+  if (keyDelivery(source, key) !== 'env') throw new Error(MANAGED_VAULT_KEY_REFUSAL);
+  recordVaultKeySource('env');
 }
 
 /**

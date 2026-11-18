@@ -311,3 +311,52 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     expect(start(home, { LYNOX_VAULT_KEY_SOURCE: 'env' }).keySource).toBe('none');
   });
 });
+
+describe.each([['host'], ['busybox']] as const)('with %s tools, on an instance the platform hosts, the entrypoint starts only on the key the platform delivered', set => {
+  beforeAll(() => { tools = set; });
+  beforeEach(ctx => { if (set === 'busybox' && BUSYBOX === undefined) ctx.skip(); });
+  const KEY = 'K'.repeat(64);
+
+  it('starts on a key in the environment and says it came from there (control)', () => {
+    const { home } = sandbox();
+    const run = start(home, { LYNOX_BILLING_TIER: 'managed', [VAR]: KEY });
+    expect(run.status).toBe(0);
+    expect(run.engineKey).toBe(KEY);
+    expect(run.keySource).toBe('env');
+  });
+
+  it('stops without a key, and neither reads the volume\'s .env nor writes a new key into it', () => {
+    const { home, lynox } = sandbox();
+    const envFile = join(lynox, '.env');
+    writeFileSync(envFile, `${VAR}=${KEY}\n`, { mode: 0o600 });
+    const run = start(home, { LYNOX_BILLING_TIER: 'managed' });
+    expect(run.status).toBe(1);
+    expect(run.engineKey).toBeNull();
+    expect(run.err).toContain('the platform did not hand it');
+    expect(readFileSync(envFile, 'utf8')).toBe(`${VAR}=${KEY}\n`);
+  });
+
+  it('stops on an empty key on a first start, and writes no key', () => {
+    const { home, lynox } = sandbox();
+    const run = start(home, { LYNOX_BILLING_TIER: 'managed', [VAR]: '' });
+    expect(run.status).toBe(1);
+    expect(run.engineKey).toBeNull();
+    expect(existsSync(join(lynox, '.env'))).toBe(false);
+  });
+
+  it('applies the same rule under the legacy name of the billing tier', () => {
+    const { home } = sandbox();
+    const run = start(home, { LYNOX_MANAGED_MODE: 'managed' });
+    expect(run.status).toBe(1);
+    expect(run.engineKey).toBeNull();
+    expect(run.err).toContain('the platform did not hand it');
+  });
+
+  it('leaves a self-hosted first start as it was: it generates a key (control)', () => {
+    const { home, lynox } = sandbox();
+    const run = start(home);
+    expect(run.status).toBe(0);
+    expect(run.keySource).toBe('minted');
+    expect(keyLines(join(lynox, '.env'))).toHaveLength(1);
+  });
+});

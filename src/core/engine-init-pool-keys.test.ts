@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { initSecrets } from './engine-init.js';
 import { SecretVault } from './secret-vault.js';
 import type { LynoxUserConfig } from '../types/index.js';
+import { _resetVaultKeySource } from './vault-key-source.js';
 
 /**
  * What the boot does with an LLM key the user stored in the vault, per billing tier.
@@ -21,7 +22,10 @@ describe('initSecrets — vault LLM keys on a pool tier stay in the vault', () =
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-pool-keys-'));
     vi.stubEnv('LYNOX_DATA_DIR', dir);
-    vi.stubEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-pool-0000000000');
+    // A well-formed key: a hosted start refuses one of another form.
+    vi.stubEnv('LYNOX_VAULT_KEY', 'testvaultkeyforpool00000000000000000');
+    vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', undefined);
+    _resetVaultKeySource();
     vi.stubEnv('LYNOX_BILLING_TIER', '');
     vi.stubEnv('LYNOX_MANAGED_MODE', '');
     vi.stubEnv('ANTHROPIC_API_KEY', '');

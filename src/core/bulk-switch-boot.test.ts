@@ -6,6 +6,7 @@ import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import type { LynoxConfig, IAgent } from '../types/index.js';
 import type { Session } from './session.js';
+import { _resetVaultKeySource } from './vault-key-source.js';
 
 /**
  * Bulk runs follow the switch LIVE, without a restart: a real
@@ -40,7 +41,7 @@ describe('Engine — bulk runs switched live', () => {
   const dirs: string[] = [];
   const engines: Engine[] = [];
   const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_FEATURE_BULK_RUNS',
-    'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_HTTP_SECRET'] as const;
+    'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_HTTP_SECRET', 'LYNOX_VAULT_KEY', 'LYNOX_VAULT_KEY_SOURCE'] as const;
   const saved = new Map<string, string | undefined>();
 
   function setEnv(key: string, value: string | undefined): void {
@@ -79,6 +80,10 @@ describe('Engine — bulk runs switched live', () => {
     setEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'http://127.0.0.1:9');
     setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-test');
     setEnv('LYNOX_HTTP_SECRET', 'x'.repeat(32));
+    // A hosted instance starts only on the vault key the platform delivers in the environment.
+    setEnv('LYNOX_VAULT_KEY', 'A'.repeat(64));
+    setEnv('LYNOX_VAULT_KEY_SOURCE', undefined);
+    _resetVaultKeySource();
   }
 
   async function boot(): Promise<Engine> {

@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from '../../src/core/engine.js';
+import { _resetVaultKeySource } from '../../src/core/vault-key-source.js';
 
 // The options each real bootstrap was called with, so a test can read what the cold boot chose
 // for the classifier's key and meter. The bootstrap itself still runs.
@@ -45,6 +46,8 @@ const INBOX_ENV_VARS = [
   'LYNOX_MANAGED_CONTROL_PLANE_URL',
   'LYNOX_MANAGED_INSTANCE_ID',
   'LYNOX_HTTP_SECRET',
+  'LYNOX_VAULT_KEY',
+  'LYNOX_VAULT_KEY_SOURCE',
 ];
 
 beforeEach(() => {
@@ -208,6 +211,9 @@ describe('Engine boot — unified-inbox flag', () => {
     process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
     process.env['LYNOX_INBOX_LLM_REGION'] = 'eu';
     process.env['LYNOX_BILLING_TIER'] = 'managed';
+    // A hosted instance starts only on the vault key the platform delivers in the environment.
+    process.env['LYNOX_VAULT_KEY'] = 'A'.repeat(64);
+    _resetVaultKeySource();
     process.env['MISTRAL_API_KEY'] = 'pool-mistral-key';
     // A pool tier boots the managed hook, which needs these; nothing listens on the port, so its
     // status sync fails and leaves the boot alone.

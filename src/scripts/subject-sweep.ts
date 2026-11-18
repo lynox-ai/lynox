@@ -41,6 +41,7 @@ import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
+import { ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
 import { SubjectStore, personNameTokens, isPersonSubsetSafe, makeSubjectExternalRefs } from '../core/subject-store.js';
 import type { SubjectExternalRefs } from '../core/subject-store.js';
 import { DataStore } from '../core/data-store.js';
@@ -518,6 +519,11 @@ export function rollback(engineDb: EngineDb, ledger: Ledger): { restored: number
 export function main(): void {
   const args = parseArgs(process.argv.slice(2));
   if (args.dataDir) setDataDir(args.dataDir);
+  // The vault key as the engine settles it (as the backfill scripts do): engine.db's HKDF must match
+  // the engine's, and on an instance the platform hosts only the delivered key opens it; without
+  // that key the sweep stops here instead of writing under none.
+  loadVaultKeyFromDotEnv();
+  ensureVaultKey();
   const dir = getLynoxDir();
   const engineDb = new EngineDb(join(dir, 'engine.db'));   // ctor migrates on open (no-op)
   try {
