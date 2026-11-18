@@ -1732,7 +1732,7 @@ describe('the start of a judged run, in words', () => {
 	// One word for the step (U-339): the owner reads „Beurteilung“ on the button, in the hints and in
 	// the push, so the two words cannot read as two steps. „Urteil“ stays only for what the model
 	// decides about one target. In English "judging", without "the".
-	it('calls the step „Beurteilung“ on the start and restart buttons and in the start sentences that name it, in English "judging"', async () => {
+	it('calls the step „Beurteilung“ on the start and restart buttons and in the start sentences that name it, in English "judging" and never "a judge"', async () => {
 		const before = getLocale();
 		onTestFinished(() => setLocale(before));
 		const keys = ['bulk.start.judge', 'bulk.restart.judge', 'bulk.start.listed_judge', 'bulk.start.judge_own_key', 'bulk.start.supersede',
@@ -1746,7 +1746,7 @@ describe('the start of a judged run, in words', () => {
 		expect(t('bulk.start.judge')).toBe('Beurteilung starten');
 		expect(t('bulk.restart.judge')).toBe('Beurteilung fortsetzen');
 		setLocale('en');
-		for (const key of keys) expect(t(key), key).not.toMatch(/the judging/);
+		for (const key of keys) expect(t(key), key).not.toMatch(/the judging|\ba judge\b/);
 		expect(t('bulk.start.judge')).toBe('Start judging');
 		expect(t('bulk.restart.judge')).toBe('Continue judging');
 		setLocale('de');
