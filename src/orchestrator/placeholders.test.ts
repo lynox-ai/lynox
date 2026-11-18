@@ -112,8 +112,10 @@ describe('every placeholder site stays fast on long stored text', () => {
     expect(ms).toBeLessThan(BOUND_MS);
   });
 
-  // Only this shape tells the per-match regex from the scanner; on a single `{{` before spaces it
-  // was linear already.
+  // Only this shape tells the per-match regexes from the scanner at every site. On a single `{{`
+  // before spaces `/\{\{([^}]+)\}\}/g` was linear already, and the `(\s*)` form in `renamedRefs`
+  // grows with the square of the spaces but stays far under the bound at a size the anchored
+  // regex can still finish.
   for (const [shape, text] of [['repeated {{', REPEATED]] as const) {
     it(`resolveTaskTemplate (${shape})`, () => {
       const { value, ms } = timed(() => resolveTaskTemplate(text, {}));
