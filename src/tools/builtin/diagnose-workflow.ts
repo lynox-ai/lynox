@@ -5,7 +5,7 @@ import { stripHidden } from '../../core/hidden-text.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR } from '../../orchestrator/run-source.js';
 import { WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_STOPPED_ERROR } from '../../orchestrator/workflow-stop.js';
 import { GateExpiredError, GateRejectedError } from '../../types/orchestration.js';
-import { isStepIdShape, shownStepId, storedStepOrder } from '../../orchestrator/step-id.js';
+import { shownRunStepId, storedSteps } from '../../orchestrator/step-id.js';
 import { setUpByOther, shownMandate, type ShownMandate } from '../../core/request-principal.js';
 
 interface DiagnoseInput {
@@ -174,11 +174,9 @@ export const diagnoseWorkflowTool: ToolEntry<DiagnoseInput> = {
     // A step id stored before ids had a shape (`step-id.ts`) is shown by its position in the workflow
     // (`#2`, as update_workflow_steps takes it), or by the note alone when the workflow is gone.
     const planned = run.workflow_id ? runHistory.getPlannedPipeline(run.workflow_id) : undefined;
-    const order = storedStepOrder(planned);
-    const shownId = (id: string): string => {
-      const at = order?.indexOf(id) ?? -1;
-      return isStepIdShape(id) ? id : shownStepId(id, at === -1 ? undefined : at);
-    };
+    // A run names such a step by its run name (`step-2`): it is shown with its position and the bridge.
+    const stored = storedSteps(planned);
+    const shownId = (id: string): string => shownRunStepId(id, stored);
     const failed = steps.filter(s => s.status === 'failed' || s.error);
 
     const stepErrors = new Map<string, string[]>();
