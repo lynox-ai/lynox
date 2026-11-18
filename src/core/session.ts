@@ -1147,6 +1147,10 @@ export class Session {
     // (without this, eager checkpoints during the run inflate existingCount
     // and the first-run title generation never fires).
     const startMessageCount = this.engine.getThreadStore()?.getMessageCount(this.sessionId) ?? 0;
+    // "First run" for the title counts only the rows the model reads. A refused message or a
+    // failed turn leaves display-only rows behind; counted, they made the next accepted turn
+    // look like a later one, and the thread kept no title.
+    const startApiMessageCount = this.engine.getThreadStore()?.getApiMessageCount(this.sessionId) ?? 0;
 
     // Compute prompt hash from the system prompt the agent uses
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
@@ -1482,7 +1486,7 @@ export class Session {
       // still ALWAYS write the cost / token rollup (eager-persist doesn't
       // know token counts; those are only computed here at run-end) plus
       // the first-run title — both gated on the START count, not the now
-      // (`startMessageCount === 0` = "thread was empty when this run began").
+      // (`startApiMessageCount === 0` = "the model had read nothing in this thread when this run began").
       if (threadStore && this.agent) {
         try {
           const agent = this.agent;
@@ -1528,7 +1532,7 @@ export class Session {
           }
           // An internal run (a summary in a session of its own) has no user words to title, and
           // its prompt is another thread's history: it would go to a second model call.
-          if (startMessageCount === 0 && !agent.isInternalRun) {
+          if (startApiMessageCount === 0 && !agent.isInternalRun) {
             // Derive the title from the user's OWN words, not the engine framing:
             // a context-opened chat (💬 mail-reply / fix / workflow-edit) carries a
             // `[Loaded …]\n[/loaded-context]\n\n` preamble on its first message that

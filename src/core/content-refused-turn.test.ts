@@ -170,6 +170,22 @@ describe('a message the content check refused is kept for the person, not for th
     expect(sentToModel()).toContain(FLAGGED);
   });
 
+  it('a refused first message does not take the title from the next accepted one', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.promptUser = vi.fn().mockResolvedValue('deny');
+    await session.run(FLAGGED);
+    const store = engine.getThreadStore()!;
+    expect(store.getThread(session.sessionId)?.title ?? '').toBe('');
+
+    mockProcess.mockResolvedValue(endTurn('Paris.'));
+    await session.run('what is the capital of France');
+    const title = store.getThread(session.sessionId)?.title ?? '';
+    expect(title).not.toBe('');
+    // Titled from the accepted message, never from the refused one.
+    expect(title.toLowerCase()).not.toContain('brute');
+  });
+
   it('an internal run the check refuses keeps nothing in the thread', async () => {
     const engine = await boot();
     const session = engine.createSession();
