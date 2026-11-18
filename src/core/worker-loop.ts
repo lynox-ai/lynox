@@ -1483,9 +1483,9 @@ export class WorkerLoop {
 
       // The owner's notice of paused plans (`plan-pause.ts`), in the reminder's order: only with a
       // channel, claimed before it is sent, so two processes on one file send it once and none is
-      // used up while no channel is registered. At boot the worker starts before the server
-      // registers its push channel, so a pause from the boot sweep is told on the first tick that
-      // has a channel — usually the second. Fenced like the reminder.
+      // used up while no channel is registered. The server registers its push channel before it
+      // starts the worker, so a pause from the boot sweep is told on the first tick when push is
+      // set up. Fenced like the reminder.
       try {
         if (planPauseOn() && this.notificationRouter.hasChannels()) {
           const db = this.engine.getEngineDb()?.getDb();
@@ -3802,7 +3802,7 @@ export class WorkerLoop {
       try {
         return this.engine.getTaskManager()?.startEscalation(triggerId, startedAt, retry) ?? false;
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${processErrorText(err)}\n`);
         return false;
       }
     };

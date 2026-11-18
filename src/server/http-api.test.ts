@@ -270,6 +270,8 @@ vi.mock('../core/engine.js', () => ({
     this.init = vi.fn().mockReturnValue(Promise.resolve(this));
     this.startWorkerLoop = vi.fn();
     this.getWorkerLoop = vi.fn().mockReturnValue(null);
+    // The push channel registers here at boot; the order against startWorkerLoop is tested.
+    this.getNotificationRouter = vi.fn().mockReturnValue({ register: vi.fn() });
     this.shutdown = vi.fn().mockResolvedValue(undefined);
     this.createSession = vi.fn().mockReturnValue(mockSessionInstance);
     this.getMailStateDb = vi.fn().mockReturnValue(null);
@@ -887,6 +889,27 @@ describe('LynoxHTTPApi', () => {
         const fixtureStructure = dropOptional(structure(fixture) as Record<string, unknown>);
         if (fixtureStructure['build_sha'] === 'string') fixtureStructure['build_sha'] = 'null|string';
         expect(liveStructure, `live /health diverges from fixtures/${name}`).toEqual(fixtureStructure);
+      }
+    });
+  });
+
+  describe('boot order: push before the worker loop', () => {
+    // The loop ticks as soon as it starts. A scheduled question it escalates before the push
+    // channel is registered finds no channel at all and is recorded as `no_channel`, on an
+    // instance where push works.
+    // Its own instance: the shared one booted before beforeEach cleared every mock's calls.
+    it('registers the push channel with the router before it starts the worker loop', async () => {
+      const own = new LynoxHTTPApi();
+      try {
+        await own.init();
+        const engine = (own as unknown as { engine: { startWorkerLoop: ReturnType<typeof vi.fn>; getNotificationRouter: ReturnType<typeof vi.fn> } }).engine;
+        const router = engine.getNotificationRouter.mock.results[0]?.value as { register: ReturnType<typeof vi.fn> } | undefined;
+        expect(router, 'the boot must have asked for the router').toBeDefined();
+        expect(router!.register).toHaveBeenCalledTimes(1);
+        expect(engine.startWorkerLoop).toHaveBeenCalledTimes(1);
+        expect(router!.register.mock.invocationCallOrder[0]!).toBeLessThan(engine.startWorkerLoop.mock.invocationCallOrder[0]!);
+      } finally {
+        await own.shutdown();
       }
     });
   });
