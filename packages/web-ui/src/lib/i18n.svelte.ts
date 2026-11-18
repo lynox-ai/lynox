@@ -2433,6 +2433,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'takeover.role.edited': { de: 'Bearbeitet von {name}', en: 'Edited by {name}' },
 	'takeover.role.workflow-created': { de: 'Nutzt den Workflow „{workflow}“, den {name} angelegt hat', en: 'Uses the workflow “{workflow}”, which {name} created' },
 	'takeover.role.workflow-edited': { de: 'Nutzt den Workflow „{workflow}“, den {name} geändert hat', en: 'Uses the workflow “{workflow}”, which {name} changed' },
+	'takeover.workflow_gone': { de: 'Der Workflow dieses Plans fehlt. So führt der Plan nichts aus.', en: 'This plan\'s workflow is missing. As it is, the plan does nothing.' },
 	'takeover.f2.created': { de: 'Dieser Plan nutzt den Workflow „{workflow}“, den {name} angelegt hat. Übernimmst du den Plan, übernimmst du auch den Workflow.', en: 'This plan uses the workflow “{workflow}”, which {name} created. If you take over the plan, you also take over the workflow.' },
 	'takeover.f2.changed': { de: 'Dieser Plan nutzt den Workflow „{workflow}“, den {name} geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow.', en: 'This plan uses the workflow “{workflow}”, which {name} changed. If you take over the plan, you also take over the workflow.' },
 	'takeover.f2.released': { de: 'Dann laufen auch diese Pläne wieder: {plans}.', en: 'These plans then run again too: {plans}.' },

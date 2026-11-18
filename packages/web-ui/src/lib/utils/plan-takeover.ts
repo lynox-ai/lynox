@@ -43,6 +43,8 @@ export interface TakeoverPreview {
 	runsAs: string;
 	/** `from`: whose mark on the workflow the takeover reads, by address and role (engine `planMandate`). */
 	workflow: { id: string; name: string; takenOver: boolean; from?: { name: string; role: 'workflow-edited' | 'workflow-created' } | null } | null;
+	/** A workflow plan without its workflow (deleted, or never bound): it runs nothing as it is. */
+	workflowGone?: boolean;
 	memberChanges: TakeoverMemberChange[];
 	alsoReleased: Array<{ id: string; title: string }>;
 	connections: TakeoverConnection[];
@@ -52,7 +54,7 @@ export interface TakeoverPreview {
 
 /** One sentence of the confirmation; `kind` names the text it is (T-1 … T-6, F2), for tests and markup. */
 export interface TakeoverLine {
-	kind: 'role' | 'f2' | 'member_change' | 'connection' | 'runs_as_owner' | 'runs_as_member' | 'missed' | 'partial';
+	kind: 'role' | 'workflow_gone' | 'f2' | 'member_change' | 'connection' | 'runs_as_owner' | 'runs_as_member' | 'missed' | 'partial';
 	text: string;
 }
 
@@ -72,9 +74,11 @@ export function planList(titles: readonly string[]): string {
 /**
  * The role lines of one member (Fassung 4): every role that applies, except the workflow role F2
  * already says for this member (ux, review of the dialog: the two lines said the same).
+ * A workflow role without a workflow to name (none in the preview) is not said: its line would quote nothing.
  */
 function roleLines(m: TakeoverMember, workflow: string | null, saidByF2: TakeoverMember['roles'][number] | null): TakeoverLine[] {
-	return m.roles.filter((role) => role !== saidByF2).map((role) => ({
+	const namable = (role: TakeoverMember['roles'][number]): boolean => workflow !== null || role === 'created' || role === 'edited';
+	return m.roles.filter((role) => role !== saidByF2 && namable(role)).map((role) => ({
 		kind: 'role' as const,
 		text: role === 'created' || role === 'edited'
 			? tf(`takeover.role.${role}`, { name: m.name })
@@ -180,6 +184,8 @@ export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => s
 			lines.push(line);
 		}
 	}
+	// In place of the workflow roles, which have no workflow to name: the plan is a workflow plan, and its workflow is missing.
+	if (p.workflowGone === true) lines.push({ kind: 'workflow_gone', text: t('takeover.workflow_gone') });
 	if (f2 !== null) lines.push(f2.line);
 	lines.push(...memberChangeLines(p));
 	lines.push(...connectionLines(p));
