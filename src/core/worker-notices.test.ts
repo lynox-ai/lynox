@@ -282,7 +282,7 @@ describe('the notice tables', () => {
       expect([k, BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS[k])]).toEqual([k, own.en]);
     }
     // The reasons whose German push is the page's sentence word for word: the comparison above ran on them.
-    expect(shared).toEqual(['listNotAList', 'listUnreadable', 'listNoProgress', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost']);
+    expect(shared).toEqual(['listNotAList', 'listUnreadable', 'listNoProgress', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'discarded']);
   });
 
   it('says each bulk lead and each worker sentence in German as ux wrote it', () => {

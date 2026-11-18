@@ -2294,6 +2294,20 @@ describe('a judged Shopify run', () => {
     return box;
   }
 
+  it('passes on that its read found the run no longer its own, so the worker can say why', async () => {
+    fill(2);
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun();
+      expect(ledger.listUnread(id).length).toBeGreaterThan(0);
+      const read = { status: 'halted' as const, gone: true as const, summary: 'Bulk preview stopped.' };
+      const out = await runBulkJudge(id, { ...judgeDeps(id).deps, readTargets: async () => read });
+      expect(out).toMatchObject({ status: 'halted', gone: true });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   // PRD shopify-preset §21.2 item 5 (N6): the canonical form re-escapes text and can be longer than
   // the raw verdict the schema bounded; it is what is stored and sent, so it is bounded again.
   it('leaves out a description whose canonical form is longer than the rule\'s bound, and keeps one that fits', async () => {
