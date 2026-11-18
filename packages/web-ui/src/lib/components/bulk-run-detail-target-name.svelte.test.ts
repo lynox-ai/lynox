@@ -230,17 +230,18 @@ describe('a field name inside a sentence (U-333)', () => {
 		expect(line?.textContent).toBe(tf('bulk.preview.sent_unchanged', { fields: `${t('bulk.field.shopify.seo_description')}, custom_note` }));
 	});
 
-	it('boxes a planner-set name in the probe sentence, next to a Shopify label without one', async () => {
+	it('boxes a planner-set name in the probe sentence, isolated, next to a Shopify label without one', async () => {
 		run = makeRun({ phase: 'writing', undone: 0, undoneBy: null, targetSystem: SHOP, total: 17, applied: 1,
 			haltKey: 'probeRequired', haltReason: 'probeRequired', probe: { key: 'gid://shopify/Product/77', fields: ['seo_title', 'custom_note'] } });
 		targets = [seoTarget(1)];
 		await render();
 		const sentence = target.querySelector('[data-testid="bulk-probe-explain"]');
 		expect(boxes(sentence)).toEqual(['custom_note']);
-		expect(sentence?.textContent).toContain(`${t('bulk.field.shopify.seo_title')}, custom_note`);
-		// The words after the name are still there, in their place.
-		const [, after] = t('bulk.probe.explain').split('{field}');
-		expect(sentence?.textContent?.endsWith(after!)).toBe(true);
+		// The whole sentence, so the target and the provider around the name are filled in too.
+		const probeName = (target.querySelector('[data-testid="bulk-probe-admin"]')?.textContent ?? '').replace('↗', '').trim();
+		expect(sentence?.textContent).toBe(tf('bulk.probe.explain', { target: probeName, provider: 'demo.myshopify.com', field: `${t('bulk.field.shopify.seo_title')}, custom_note` }));
+		// The box isolates its text, so a name written right to left cannot move the quotes around it.
+		expect(sentence?.querySelector('[data-testid="bulk-field-own-name"]')?.tagName).toBe('BDI');
 	});
 
 	it('boxes the field that held a credential at each place the refusal names it', async () => {
