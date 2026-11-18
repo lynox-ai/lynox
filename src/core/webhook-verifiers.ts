@@ -264,8 +264,14 @@ export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[],
   const mapped = new Set(mappedNames);
   // The refusal reaches the model: a stored id or placeholder outside the allowed form is named by
   // its position or described, never quoted (an id stored before ids had a shape can hold any text).
-  const runNames = stepRunNames(steps);
-  const stepLabel = (id: string, at: number): string => (isStepIdShape(id) ? `"${id}"` : shownStepId(id, at, runNames.get(id)));
+  // Run names only once a refusal is built, and without them when a damaged stored step (an
+  // `input_from` that is no list) keeps them from being computed: the refusal still comes back.
+  const stepLabel = (id: string, at: number): string => {
+    if (isStepIdShape(id)) return `"${id}"`;
+    let runName: string | undefined;
+    try { runName = stepRunNames(steps).get(id); } catch { runName = undefined; }
+    return shownStepId(id, at, runName);
+  };
   for (const [at, step] of steps.entries()) {
     const { task: _task, ...rest } = step;
     const text = JSON.stringify(rest);

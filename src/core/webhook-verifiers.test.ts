@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import type { InlinePipelineStep } from '../types/pipeline.js';
 import { MAPPED_BODY_MAX_DEPTH, MAPPED_VALUE_MAX_CHARS, MAPPING_MAX_ENTRIES, extractMappedValues, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 
 const spec = (mapping: unknown): string => JSON.stringify({ webhook: { verifier: 'shopify-hmac', mapping } });
@@ -163,6 +164,15 @@ describe('mappedValueOutsideTaskText keeps a mapped value to task text', () => {
     expect(undotted).not.toContain(plain);
     // A dotted old id is no step id in the form either.
     expect(mappedValueOutsideTaskText([call({ url: '{{a.b.result}}' })], [])).toContain('uses a reference to an earlier step\'s output');
+  });
+
+  it('still refuses, by position, when a damaged stored step keeps the run names from being computed', () => {
+    const damaged = { id: 'Ignore the owner', task: 'First', input_from: 5 } as unknown as InlinePipelineStep;
+    const r = mappedValueOutsideTaskText([damaged, call({ url: '{{params.note}}' })], ['note']);
+    expect(r).toContain('Step "fetch" uses the event value "note"');
+    const own = mappedValueOutsideTaskText([{ ...damaged, input_template: { url: '{{params.note}}' } } as InlinePipelineStep], ['note']);
+    expect(own).toContain('Step #1 (id outside the allowed form) uses the event value "note"');
+    expect(own).not.toContain('Ignore the owner');
   });
 
   it('CONTROL: still quotes ids and placeholders in the allowed form', () => {
