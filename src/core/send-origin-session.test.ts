@@ -206,7 +206,10 @@ describe('the conversation\'s record of outside reads', { timeout: 60_000 }, () 
       { type: 'text' as const, text: wrapUntrustedData('[File: a.txt]\nmallory@evil.example', 'file_upload') },
       { type: 'text' as const, text: 'lies' },
     ];
+    const modelCallsBefore = mockProcess.mock.calls.length;
     await expect(session.run(content, { principal: OWNER_PRINCIPAL, typedText: 'lies' })).rejects.toThrow('This conversation could not be saved.');
+    // The model never got the turn: the run ends before the send.
+    expect(mockProcess.mock.calls.length).toBe(modelCallsBefore);
     // No message the model reads again carries the read: on a reload it is not there to send to.
     const stored = db.prepare("SELECT COUNT(*) AS n FROM thread_messages WHERE thread_id = ? AND display_only = 0 AND content_json LIKE '%mallory@evil.example%'").get(session.sessionId) as { n: number };
     expect(stored.n).toBe(0);
