@@ -31,7 +31,7 @@ import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 import { currentCallFiling, currentCallOwnerKnownFor, currentCallTargetOrigin } from '../../../core/call-connection.js';
 import { UNATTENDED_BLOCK_ANSWER } from '../../../core/prompt-store.js';
 import { noticeLanguage } from '../../../core/notice-language.js';
-import { originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originReplyAsk, originUnreadable, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
+import { originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originUnreadable, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
 import { normalizeMailTarget } from '../../../core/send-target.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import type { MailReplyPayload, StoredAddress } from '../../../core/approval-store.js';
@@ -135,9 +135,16 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         const lang = agent.noticeLanguage ?? noticeLanguage(undefined);
         // A reply that goes only to the one the mail came from (its Reply-To, else its From) says so
         // in its own words; any other recipient the owner did not name is listed with the mail.
+        // When that address is a Reply-To that is not the mail's sender, and the sender gets no copy,
+        // the question names both: the reply does not go to the person who wrote.
         const defaultTo = input.to ? undefined : normalizeMailTarget(prepared.commit.to[0]?.address ?? '')?.value;
+        const fromAddresses = prepared.filing.original.from.split(',')
+          .map((a) => normalizeMailTarget(a.trim())?.value).filter((a): a is string => a !== undefined);
+        const normalizedRecipients = new Set(recipients.map((r) => normalizeMailTarget(r)?.value));
+        const toReplyAddressOnly = defaultTo !== undefined && fromAddresses.length > 0
+          && !fromAddresses.includes(defaultTo) && !fromAddresses.some((a) => normalizedRecipients.has(a));
         const ask = unnamed.length === 1 && defaultTo !== undefined && unnamed[0] === defaultTo
-          ? originReplyAsk(defaultTo, lang)
+          ? (toReplyAddressOnly ? originReplyToAsk(defaultTo, prepared.filing.original.from, lang) : originReplyAsk(defaultTo, lang))
           : originAsk('mail_reply', input, 'mail', targets, origin, lang);
         const question = unnamed.length > 0 ? pv`${prepared.preview}\n\n${ask}` : prepared.preview;
         const answer = await agent.promptUser(question, ['Yes', 'No'], unnamed.length > 0 ? { blocked: true } : undefined);

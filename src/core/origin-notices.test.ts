@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  originAsk, originCardMail, originDenied, originLookupFailedUnattended, originRefusedMandate, originRefusedUnattended, originReplyAsk, originRunNotice, originUnreadable,
+  originAsk, originCardMail, originDenied, originLookupFailedUnattended, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originRunNotice, originUnreadable,
   targetList, TOOLS_WITH_WORDS, type OriginTargets, type SendOrigin,
 } from './origin-notices.js';
 import { flattenPrompt } from './prompt-value.js';
@@ -93,7 +93,7 @@ describe('the question to the owner', () => {
 
   it('several targets in the plural, and an unreadable one as words, not "?"', () => {
     const q = flattenPrompt(originAsk('mail_send', {}, 'mail', { values: ['a@x.ch', 'b@y.ch'], unreadable: true }, { kind: 'readContent' }, 'de'));
-    expect(q).toBe('Mail senden: Die Empfänger "a@x.ch", "b@y.ch" und eine Adresse, die lynox nicht lesen konnte, hast nicht du genannt. Sie stammen aus Inhalt, den lynox gelesen hat. Trotzdem senden?\n\nEin Ja gilt nur für diesen einen Versand.');
+    expect(q).toBe('Mail senden: Die Empfänger "a@x.ch", "b@y.ch" und eine Adresse, die lynox nicht lesen konnte, hast nicht du genannt. Sie stammen aus Inhalten, die lynox gelesen hat. Trotzdem senden?\n\nEin Ja gilt nur für diesen einen Versand.');
     expect(q).not.toContain('?"');
     expect(flattenPrompt(originAsk('mail_send', {}, 'mail', { values: ['a@x.ch', 'b@y.ch'], unreadable: false }, { kind: 'unknown' }, 'en'))).toBe(
       'Send mail: you did not name the recipients "a@x.ch" and "b@y.ch". lynox cannot tell where they come from. Send anyway?\n\nA yes applies to this one send only.');
@@ -126,6 +126,40 @@ describe('the question to the owner', () => {
     // A tool without words of its own is named as an external tool, its name in quotes.
     expect(flattenPrompt(originAsk('crm_push', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'de'))).toMatch(/^Externes Werkzeug "crm_push": /);
     expect(flattenPrompt(originAsk('crm_push', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'en'))).toMatch(/^External tool "crm_push": /);
+  });
+
+  it('a reply that goes to the read mail\'s Reply-To, not to its sender, says both addresses, in each language', () => {
+    expect(flattenPrompt(originReplyToAsk('billing@evil.example', 'alice@example.com', 'de'))).toBe(
+      'Antwort auf Mail: Die Antwort geht an "billing@evil.example", nicht an den Absender "alice@example.com". "billing@evil.example" steht in der gelesenen Mail als Antwortadresse. Diese Adresse hast nicht du genannt. Trotzdem senden?\n\nEin Ja gilt nur für diesen einen Versand.');
+    expect(flattenPrompt(originReplyToAsk('billing@evil.example', 'alice@example.com', 'en'))).toBe(
+      'Reply to email: the reply goes to "billing@evil.example", not to the sender "alice@example.com". The mail lynox read gives "billing@evil.example" as its reply address. You did not name this address. Send anyway?\n\nA yes applies to this one send only.');
+  });
+
+  it('content lynox read is "Inhalten, die lynox gelesen hat" in German, in the singular too', () => {
+    expect(flattenPrompt(originAsk('mail_send', {}, 'mail', one('a@x.ch'), { kind: 'readContent' }, 'de'))).toContain('Er stammt aus Inhalten, die lynox gelesen hat. Trotzdem senden?');
+    expect(originCardMail({ kind: 'readContent' }, 'de')).toBe('Empfänger stammt aus Inhalten, die lynox gelesen hat.');
+    expect(flattenPrompt(originAsk('mail_send', {}, 'mail', one('a@x.ch'), { kind: 'readContent' }, 'en'))).toContain('It comes from content lynox read. Send anyway?');
+  });
+
+  it('a guest already on the calendar event is said to come from its current guest list, in each language and number', () => {
+    const guests: SendOrigin = { kind: 'eventGuests' };
+    const two: OriginTargets = { values: ['g@x.ch', 'h@y.ch'], unreadable: false };
+    const ask = (t: OriginTargets, lang: 'de' | 'en'): string => flattenPrompt(originAsk('google_calendar', { action: 'update_event' }, 'mail', t, guests, lang));
+    expect(ask(one('g@x.ch'), 'de')).toBe('Google Calendar: Termin ändern: Den Empfänger "g@x.ch" hast nicht du genannt. Er stammt aus der bisherigen Gästeliste des Termins. Trotzdem senden?\n\nEin Ja gilt nur für diesen einen Versand.');
+    expect(ask(two, 'de')).toContain('Sie stammen aus der bisherigen Gästeliste des Termins. Trotzdem senden?');
+    expect(ask(one('g@x.ch'), 'en')).toBe('Google Calendar: change event: you did not name the recipient "g@x.ch". It comes from the event\'s current guest list. Send anyway?\n\nA yes applies to this one send only.');
+    expect(ask(two, 'en')).toContain('They come from the event\'s current guest list. Send anyway?');
+    // The reason the model texts give.
+    expect(originRefusedUnattended(one('g@x.ch'), guests)).toContain('it came from the event\'s current guest list');
+    expect(originRefusedUnattended(two, guests)).toContain('they came from the event\'s current guest list');
+    // The run result the owner reads.
+    expect(originRunNotice('Termine', { targets: one('g@x.ch'), noun: 'mail', origin: guests }, 'de')).toBe(
+      'Der Trigger "Termine" hat nicht an "g@x.ch" gesendet: Diesen Empfänger hast nicht du genannt, er stammt aus der bisherigen Gästeliste des Termins. Ein Lauf ohne dich kann nicht nachfragen. Soll es trotzdem hinaus, bitte lynox im Chat darum, dann fragt lynox dich.');
+    expect(originRunNotice('Termine', { targets: one('g@x.ch'), noun: 'mail', origin: guests }, 'en')).toBe(
+      'The trigger "Termine" did not send to "g@x.ch": you did not name this recipient; it comes from the event\'s current guest list. A run without you cannot ask. If it should go out anyway, ask lynox in the chat, and lynox will ask you.');
+    // The approval card.
+    expect(originCardMail(guests, 'de')).toBe('Empfänger stammt aus der bisherigen Gästeliste des Termins.');
+    expect(originCardMail(guests, 'en')).toBe('Recipient comes from the event\'s current guest list.');
   });
 
   it('a reply to the read mail\'s sender has its own form', () => {

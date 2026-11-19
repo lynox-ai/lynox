@@ -598,14 +598,15 @@ type GuestCheck =
  */
 async function checkExistingGuests(auth: GoogleAuth, input: CalendarInput, agent: IAgent): Promise<GuestCheck> {
   const guests = await existingGuests(auth, input);
-  const origin: SendOrigin = { kind: 'unknown' };
-  const report = (targets: OriginTargets): void => {
+  const report = (targets: OriginTargets, origin: SendOrigin): void => {
     try { agent.onOriginRefused?.({ targets, noun: 'mail', origin }); } catch { /* the refusal stands */ }
   };
   if (guests === null || guests.some((g) => normalizeMailTarget(g) === null)) {
-    report({ values: [], unreadable: true });
+    report({ values: [], unreadable: true }, { kind: 'unknown' });
     return { kind: 'refused', text: originUnreadable('mail') };
   }
+  // The guest list was read: a guest on it comes from it, and every sentence says so.
+  const origin: SendOrigin = { kind: 'eventGuests' };
   const checked = new Set(currentCallTargetOrigin()?.known ?? []);
   const unnamed: string[] = [];
   for (const g of guests) {
@@ -615,7 +616,7 @@ async function checkExistingGuests(auth: GoogleAuth, input: CalendarInput, agent
   }
   if (unnamed.length === 0) return { kind: 'pass' };
   const targets: OriginTargets = { values: unnamed, unreadable: false };
-  const refused = (text: string): string => { report(targets); return text; };
+  const refused = (text: string): string => { report(targets, origin); return text; };
   if (agent.principal.kind !== 'owner') return { kind: 'refused', text: refused(originRefusedMandate(targets, origin, 'mail')) };
   return { kind: 'ask', targets, origin, refused };
 }

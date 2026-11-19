@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { MANDATE_TAG_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, TRIGGER_AUTHOR_PREFIX, UNKNOWN_RUN_TAG, WORKFLOW_AUTHOR_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
 import type { DeliverySummary } from './notification-router.js';
@@ -241,6 +241,15 @@ const KEEP_MARKER_IF_UNSTAMPED_SQL =
 
 /** Drops the owner's takeover of the editor mark: written with every new mandate editor mark. */
 export const CLEAR_EDITOR_COVER_SQL = 'covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL';
+
+/**
+ * Whether the trigger's `edited_by` is a run's tag (`isRunTag` in request-principal.ts), as SQL.
+ * The prefixes are the code's own constants, compared exactly (not with LIKE), so the two cannot
+ * read a tag differently.
+ */
+const EDITED_BY_RUN_SQL = `(substr(edited_by, 1, ${TRIGGER_AUTHOR_PREFIX.length}) = '${TRIGGER_AUTHOR_PREFIX}'`
+  + ` OR substr(edited_by, 1, ${WORKFLOW_AUTHOR_PREFIX.length}) = '${WORKFLOW_AUTHOR_PREFIX}'`
+  + ` OR edited_by = '${UNKNOWN_RUN_TAG}')`;
 
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
 const TRIGGER_READ_COLS =
@@ -748,6 +757,9 @@ export class TriggerStore {
     // A named stamper takes the trigger over: it becomes the last party in `edited_by`,
     // which is what the mandate gate in {@link getDue} reads. Without it, a schedule a
     // mandate set up would be held again by the owner's own later rename, forever.
+    // Except over a run's tag: a stamp agrees to the run, not to an instruction a run rewrote,
+    // so that instruction still does not count as the owner's (`ownerInstructionCounts`). A run's
+    // tag is no mandate, so the mandate gate reads it as the stamper's would.
     const by = confirmedAt === null ? null : (confirmedBy ?? null);
     return this.db.prepare(
       // The reminder marker survives only while a trigger stays unstamped throughout: a write
@@ -760,8 +772,8 @@ export class TriggerStore {
       // a list clears any earlier one. Every other write that moves the stamp leaves the column
       // as it is, and the list stops counting because it names the stamp it was written with
       // (`stampFromRow` in plan-stamp.ts).
-      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, stamp_connections = ?, updated_at = datetime('now') WHERE id = ?`,
-    ).run(confirmedAt, by, by, confirmedAt, confirmedAt === null ? null : (stampConnections ?? null), id).changes > 0;
+      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = CASE WHEN ? IS NULL OR ${EDITED_BY_RUN_SQL} THEN edited_by ELSE ? END, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, stamp_connections = ?, updated_at = datetime('now') WHERE id = ?`,
+    ).run(confirmedAt, by, by, by, confirmedAt, confirmedAt === null ? null : (stampConnections ?? null), id).changes > 0;
   }
 
   /**
@@ -833,6 +845,17 @@ export class TriggerStore {
    */
   markEditedByRun(id: string, runTag: string): boolean {
     return this.db.prepare(`UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ?`).run(runTag, id).changes > 0;
+  }
+
+  /**
+   * The owner's own turn rewrote the instruction of a trigger a run had rewritten before: the
+   * instruction is the owner's words again, so `edited_by` goes back to the owner. Only over a
+   * run's tag: a mandate's mark, and with it the mandate gate, is left exactly as it is. Called
+   * AFTER the owner's change landed, so a change that fails leaves the run's tag standing.
+   */
+  markOwnerRewroteRunEdit(id: string): boolean {
+    return this.db.prepare(`UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ? AND ${EDITED_BY_RUN_SQL}`)
+      .run(principalTag({ kind: 'owner' }), id).changes > 0;
   }
 
   /**

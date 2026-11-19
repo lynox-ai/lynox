@@ -956,6 +956,13 @@ export class TaskManager {
     return this.history.markTriggerEditedByRun(trigger.id, runTag);
   }
 
+  /** The owner's own rewrite of a trigger's instruction a run had rewritten: see `TriggerStore.markOwnerRewroteRunEdit`. */
+  markOwnerRewroteRunEdit(id: string): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (!trigger) return false;
+    return this.history.markTriggerOwnerRewroteRunEdit(trigger.id);
+  }
+
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */
   createWatch(params: TaskCreateParams & {
     watchUrl: string;

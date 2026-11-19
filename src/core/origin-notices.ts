@@ -36,6 +36,8 @@ export type SendOrigin =
   | { readonly kind: 'readPage'; readonly host: string }
   | { readonly kind: 'readContent' }
   | { readonly kind: 'childAgent' }
+  /** A guest already invited to the calendar event a change goes out to, read from the event. */
+  | { readonly kind: 'eventGuests' }
   | { readonly kind: 'unknown' };
 
 /** A mail target is a recipient, a host target an address. */
@@ -105,9 +107,11 @@ export function originFrom(origin: SendOrigin, lang: NoticeLanguage): PromptText
     case 'readPage':
       return lang === 'de' ? pv`einer Seite auf "${q(origin.host)}", die lynox gelesen hat` : pv`a page on "${q(origin.host)}" that lynox read`;
     case 'readContent':
-      return lang === 'de' ? pv`Inhalt, den lynox gelesen hat` : pv`content lynox read`;
+      return lang === 'de' ? pv`Inhalten, die lynox gelesen hat` : pv`content lynox read`;
     case 'childAgent':
       return lang === 'de' ? pv`einer Teilaufgabe, die lynox delegiert hat` : pv`a subtask lynox delegated`;
+    case 'eventGuests':
+      return lang === 'de' ? pv`der bisherigen Gästeliste des Termins` : pv`the event's current guest list`;
     case 'unknown':
       return null;
   }
@@ -174,6 +178,17 @@ export function originReplyAsk(sender: string, lang: NoticeLanguage): PromptText
   return lang === 'de'
     ? pv`Antwort auf Mail: Die Antwort geht an "${q(sender)}", den Absender der gelesenen Mail. Diese Adresse hast nicht du genannt. Trotzdem senden?\n\n${originAskOnce(lang)}`
     : pv`Reply to email: the reply goes to "${q(sender)}", the sender of the mail lynox read. You did not name this address. Send anyway?\n\n${originAskOnce(lang)}`;
+}
+
+/**
+ * The question for a reply that goes only to the Reply-To address of the mail it answers, when
+ * that address is not its sender (`from`, the mail's From) and the sender gets no copy: the owner
+ * is told the reply does not go to the person who wrote.
+ */
+export function originReplyToAsk(to: string, from: string, lang: NoticeLanguage): PromptText {
+  return lang === 'de'
+    ? pv`Antwort auf Mail: Die Antwort geht an "${q(to)}", nicht an den Absender "${q(from)}". "${q(to)}" steht in der gelesenen Mail als Antwortadresse. Diese Adresse hast nicht du genannt. Trotzdem senden?\n\n${originAskOnce(lang)}`
+    : pv`Reply to email: the reply goes to "${q(to)}", not to the sender "${q(from)}". The mail lynox read gives "${q(to)}" as its reply address. You did not name this address. Send anyway?\n\n${originAskOnce(lang)}`;
 }
 
 /** Said right after the question. */

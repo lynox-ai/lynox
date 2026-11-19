@@ -336,7 +336,7 @@ function originIsComplete(o: ApprovalOrigin): boolean {
     && o.eventId !== '';
 }
 
-const ORIGIN_KINDS: ReadonlySet<unknown> = new Set(['helperThread', 'triggerRun', 'workflowRun', 'readMail', 'readPage', 'readContent', 'childAgent', 'unknown']);
+const ORIGIN_KINDS: ReadonlySet<unknown> = new Set(['helperThread', 'triggerRun', 'workflowRun', 'readMail', 'readPage', 'readContent', 'childAgent', 'eventGuests', 'unknown']);
 
 /** A stored `targetOrigin`: a list of recipients and an origin of a kind this engine knows. */
 function isTargetOrigin(v: unknown): boolean {

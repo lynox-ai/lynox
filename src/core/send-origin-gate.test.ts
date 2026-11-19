@@ -238,6 +238,30 @@ describe('where nobody can be asked, the send is refused and nothing is parked',
     expect(String(result.content)).toContain('Not sent: the owner did not name "api.evil.example"; it came from the workflow "Abgleich".');
   });
 
+  it('a source that cannot be read: the run learns that where the target comes from is not known, not the origin it would have had', async () => {
+    const refused: unknown[] = [];
+    const broken = OwnerKnownTargets.of({ ownerTexts: () => { throw new Error('closed'); } });
+    const origin: SendOrigin = { kind: 'triggerRun', name: 'Bericht', setUpBy: { kind: 'owner' } };
+    const run = agentOf({ tools: [sender('http_request')], autonomy: 'autonomous', sendOrigin: origin, ownerKnown: broken, onOriginRefused: (r: unknown) => refused.push(r) });
+    const result = await call(run, 'http_request', { url: 'https://api.firma.ch/x' });
+    expect(String(result.content)).toContain('lynox could not check where "api.firma.ch" comes from');
+    // The guard's path, which refuses without asking, reports the same.
+    const guarded = agentOf({ tools: [sender('http_request', { requiresConfirmation: false })], autonomy: 'autonomous', sendOrigin: origin, ownerKnown: broken, onOriginRefused: (r: unknown) => refused.push(r) });
+    await call(guarded, 'http_request', { url: 'https://api.firma.ch/x', method: 'POST', body: '{}' });
+    expect(refused).toEqual([
+      { targets: { values: ['api.firma.ch'], unreadable: false }, noun: 'host', origin: { kind: 'unknown' } },
+      { targets: { values: ['api.firma.ch'], unreadable: false }, noun: 'host', origin: { kind: 'unknown' } },
+    ]);
+  });
+
+  it('CONTROL: a source that reads gives the run the origin it has', async () => {
+    const refused: unknown[] = [];
+    const origin: SendOrigin = { kind: 'triggerRun', name: 'Bericht', setUpBy: { kind: 'owner' } };
+    const run = agentOf({ tools: [sender('http_request')], autonomy: 'autonomous', sendOrigin: origin, ownerKnown: owner(), onOriginRefused: (r: unknown) => refused.push(r) });
+    await call(run, 'http_request', { url: 'https://api.firma.ch/x' });
+    expect(refused).toEqual([{ targets: { values: ['api.firma.ch'], unreadable: false }, noun: 'host', origin }]);
+  });
+
   it('a write the guard refuses without asking keeps the guard\'s text, and the run still learns where the target came from', async () => {
     const refused: unknown[] = [];
     const tool = sender('http_request', { requiresConfirmation: false });
@@ -328,6 +352,24 @@ describe('a call filed for its owner\'s approval goes on, with where its target 
     }
     expect(tool.calls).toHaveLength(1);
     expect(tool.calls[0]!.origin).toEqual({ known: [], allKnown: false, unnamed: { targets: ['x@evil.example'], origin } });
+  });
+
+  it('with a source that cannot be read, the slot says where the target comes from is not known', async () => {
+    const tool = sender();
+    const origin: SendOrigin = { kind: 'triggerRun', name: 'Bericht', setUpBy: { kind: 'owner' } };
+    const broken = OwnerKnownTargets.of({ ownerTexts: () => { throw new Error('closed'); } });
+    const agent = agentOf({
+      tools: [tool], autonomy: 'autonomous', sendOrigin: origin, ownerKnown: broken,
+      approvalFiling: { source: 'task', triggerId: 't', store: { file: vi.fn() }, createdBy: 'owner', mandateId: null },
+    });
+    vi.stubEnv('LYNOX_FEATURE_APPROVAL_QUEUE', '1');
+    try {
+      await call(agent, 'mail_send', { to: ['x@evil.example'] });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(tool.calls).toHaveLength(1);
+    expect(tool.calls[0]!.origin).toEqual({ known: [], allKnown: false, unnamed: { targets: ['x@evil.example'], origin: { kind: 'unknown' } } });
   });
 });
 

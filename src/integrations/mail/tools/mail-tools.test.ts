@@ -2313,15 +2313,40 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
     expect(stateDb.isOwnerKnownRecipient('alice@example.com')).toBe(false);
   });
 
-  it('the question names where the reply really goes: the Reply-To, not the From', async () => {
+  it.each([
+    ['en', 'Reply to email: the reply goes to "billing@evil.example", not to the sender "alice@example.com". The mail lynox read gives "billing@evil.example" as its reply address. You did not name this address. Send anyway?\n\nA yes applies to this one send only.'],
+    ['de', 'Antwort auf Mail: Die Antwort geht an "billing@evil.example", nicht an den Absender "alice@example.com". "billing@evil.example" steht in der gelesenen Mail als Antwortadresse. Diese Adresse hast nicht du genannt. Trotzdem senden?\n\nEin Ja gilt nur für diesen einen Versand.'],
+  ] as const)('a reply that goes only to a Reply-To that is not the sender says so, naming both (%s)', async (lang, sentence) => {
     provider.fetch.mockResolvedValue({
       envelope: { ...envelope(12, { messageId: '<o12@x>', from: 'alice@example.com', subject: 'Angebot' }), replyTo: [{ address: 'billing@evil.example' }] },
       text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
     });
+    const { agent, asked } = replyAgent('No', { noticeLanguage: lang });
+    await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);
+    expect(asked[0]!.q.endsWith(sentence)).toBe(true);
+    expect(asked[0]!.meta?.blocked).toBe(true);
+  });
+
+  it('CONTROL: a Reply-To that is not the sender, with the sender among the recipients, keeps the sender\'s sentence', async () => {
+    provider.fetch.mockResolvedValue({
+      envelope: { ...envelope(12, { messageId: '<o12@x>', from: 'alice@example.com', subject: 'Angebot' }), replyTo: [{ address: 'billing@evil.example' }] },
+      text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    const { agent, asked } = replyAgent('No', { ownerKnown: { known: (t: { value: string }) => (t.value === 'alice@example.com' ? 'known' as const : 'foreign' as const) } });
+    await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.', cc: 'alice@example.com' }, agent);
+    expect(asked[0]!.q).toContain('Reply to email: the reply goes to "billing@evil.example", the sender of the mail lynox read.');
+    expect(asked[0]!.q).not.toContain('not to the sender');
+  });
+
+  it('CONTROL: a Reply-To that is the sender, in another case, keeps the sender\'s sentence', async () => {
+    provider.fetch.mockResolvedValue({
+      envelope: { ...envelope(12, { messageId: '<o12@x>', from: 'alice@example.com', subject: 'Angebot' }), replyTo: [{ address: 'Alice@Example.com' }] },
+      text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
     const { agent, asked } = replyAgent('No');
     await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);
-    expect(asked[0]!.q).toContain('Reply to email: the reply goes to "billing@evil.example", the sender of the mail lynox read.');
-    expect(asked[0]!.q).not.toContain('the reply goes to "alice@example.com"');
+    expect(asked[0]!.q).toContain('Reply to email: the reply goes to "alice@example.com", the sender of the mail lynox read. You did not name this address. Send anyway?');
+    expect(asked[0]!.q).not.toContain('not to the sender');
   });
 
   it('reply_all names every recipient the owner did not name, each in quotes, joined with "and"', async () => {
