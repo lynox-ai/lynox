@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 
 // When the engine ends a run with a sentence of its own (the content check refused the message, a
-// run hook blocked it, nobody could answer its question), `done` says so (`notice`). The chat then
+// budget or a run hook blocked it), `done` says so (`notice`). The chat then
 // shows that sentence as a lynox note — the one a reload shows — without the AI mark. A model
 // reply keeps the mark.
 
@@ -126,12 +126,6 @@ describe('a run that ended with lynox\'s own sentence', () => {
 		await endRun('de', { result: `Run blocked: ${REASON}`, notice: 'run_blocked' });
 		expect(text(notice())).toBe(`Vor dem Senden geprüft Diese Nachricht ging nicht an das KI-Modell. ${REASON}`);
 	});
-
-	it('a run whose question nobody could answer is the note that run leaves in the thread', async () => {
-		await endRun('en', { result: 'Approve the refund?', notice: 'input_required' });
-		expect(text(notice())).toBe(`${i18n.t('chat.note.input_required.title')} ${i18n.t('chat.note.input_required')} Approve the refund?`);
-		expect(target.querySelector('.ai-badge')).toBeNull();
-	});
 });
 
 describe('control: the model\'s words keep the AI mark', () => {
@@ -143,8 +137,8 @@ describe('control: the model\'s words keep the AI mark', () => {
 		expect(text(reply())).toContain('Paris.');
 	});
 
-	it('a notice the chat does not know is shown as before, with the mark', async () => {
-		await endRun('de', { result: 'Paris.', notice: 'something_else' });
+	it('a notice the chat does not take (a question that may be the model\'s) is shown as before, with the mark', async () => {
+		await endRun('de', { result: 'Approve the refund?', notice: 'input_required' });
 		expect(notice()).toBeNull();
 		expect(target.querySelector('.ai-badge')).not.toBeNull();
 	});

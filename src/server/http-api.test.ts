@@ -2951,10 +2951,12 @@ describe('LynoxHTTPApi', () => {
       expect('notice' in done).toBe(false);
     });
 
-    it('a run that ended needing input is marked as lynox\'s own sentence too', async () => {
+    it('a run that ended needing input carries no notice: its question may be the model\'s own words', async () => {
       mockSessionRun.mockImplementationOnce(async () => { throw new InputRequiredError('Approve the refund?'); });
       const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'refund' }) });
-      expect(doneFrame(await res.text())).toMatchObject({ notice: 'input_required' });
+      const done = doneFrame(await res.text());
+      expect(done['result']).toContain('Approve the refund?');
+      expect('notice' in done).toBe(false);
     });
 
     it('echoes the run usage in the done event', async () => {

@@ -3423,8 +3423,8 @@ export function getMessages() {
 	return messages;
 }
 /** The codes `done.notice` may carry: a run the engine ended with a sentence of its own. */
-const ENGINE_NOTICES = ['content_refused', 'run_blocked', 'input_required'] as const;
-/** How the engine opens a blocked run's sentence; the note's title says it, so the line keeps the reason. */
+const ENGINE_NOTICES = ['content_refused', 'run_blocked'] as const;
+/** How the engine opens a hook's block; the note's title says it, so the line keeps the reason. */
 const RUN_BLOCKED_PREFIX = 'Run blocked: ';
 function engineNotice(value: unknown): (typeof ENGINE_NOTICES)[number] | undefined {
 	return ENGINE_NOTICES.find((c) => c === value);

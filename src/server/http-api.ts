@@ -5697,7 +5697,7 @@ export class LynoxHTTPApi {
           // No `usage`: `getLastRunUsage` is set only by a run that succeeds, so here it would be
           // the PREVIOUS run's — and the chat footer takes it as this turn's.
           const msg = capForClient(maskForClient(err.message, { includeGeneric: true }));
-          res.write(`event: done\ndata: ${JSON.stringify({ result: msg, notice: 'input_required' })}\n\n`);
+          res.write(`event: done\ndata: ${JSON.stringify({ result: msg })}\n\n`);
           res.end();
         } else if (!aborted) {
           // Masked AND capped: this string is a runtime/provider error rendered

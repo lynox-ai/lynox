@@ -12,10 +12,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
-const { mockProcess, streamParams } = vi.hoisted(() => ({
+const { mockProcess, streamParams, budget } = vi.hoisted(() => ({
   mockProcess: vi.fn(),
   streamParams: [] as Array<{ messages: BetaMessageParam[] }>,
+  /** Set to a reason to have the persistent budget refuse the next run. */
+  budget: { refuse: undefined as string | undefined },
 }));
+
+vi.mock('./session-budget.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./session-budget.js')>();
+  return {
+    ...actual,
+    checkPersistentBudget: () => budget.refuse === undefined
+      ? actual.checkPersistentBudget()
+      : { allowed: false, todayCostUSD: 5, monthCostUSD: 5, dailyLimitUSD: 5, monthlyLimitUSD: null, reason: budget.refuse },
+  };
+});
 
 vi.mock('@anthropic-ai/sdk', () => {
   class MockAnthropic {
@@ -74,6 +86,7 @@ async function boot(config: Partial<LynoxConfig> = {}): Promise<Engine> {
 }
 
 beforeEach(() => {
+  budget.refuse = undefined;
   mockProcess.mockReset();
   streamParams.length = 0;
 });
@@ -223,6 +236,12 @@ describe('a message the content check refused is kept for the person, not for th
     mockProcess.mockResolvedValueOnce(endTurn('Madrid.'));
     await session.run('and of Spain');
     expect(session.getLastRunNotice()).toBeUndefined();
+
+    // The daily or monthly budget refusing the run: lynox's sentence as well.
+    budget.refuse = 'Daily spending cap ($5) reached. Today: $5.00.';
+    expect(await session.run('and of Italy')).toBe('Daily spending cap ($5) reached. Today: $5.00.');
+    expect(session.getLastRunNotice()).toBe('run_blocked');
+    expect(mockProcess).toHaveBeenCalledTimes(2);
   });
 
   it('an allowed flagged message the model answers is no notice of lynox', async () => {

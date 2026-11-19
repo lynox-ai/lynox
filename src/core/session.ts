@@ -962,6 +962,7 @@ export class Session {
       // An internal (compaction) run must NOT return the block string — it would
       // be injected as the thread's authoritative summary. Throw instead.
       if (runOptions?.internal === true) throw new InternalRunBlockedError(reason);
+      this._lastRunNotice = 'run_blocked';
       return reason;
     }
 
@@ -2457,7 +2458,7 @@ export class Session {
   }
 
   /** Whether the last run the person started ended with a sentence of lynox's own — a request
-   *  the content check refused, or one a run hook blocked — rather than with a model reply, and
+   *  the content check refused, or one the budget or a run hook blocked — rather than with a model reply, and
    *  which. Set only by the engine at those returns; the HTTP API echoes it in the `done` event
    *  so the chat does not mark that sentence as written by the AI model. */
   getLastRunNotice(): EngineNoticeCode | undefined {
