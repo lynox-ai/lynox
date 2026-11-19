@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
 import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
 
@@ -2669,7 +2670,7 @@ describe('gate-record — the `ux:` line', () => {
     it('a confirmation inside another keeps its own block, and the outer one holds a digest of it', () => {
       const [outer, inner] = JSON.parse(uxConfirmBlocks(`'a_confirm': {\n\t'a_confirm': {\n\t\tde: 'X',\n\t},\n\tde: 'Y',\n},`).get('a_confirm') ?? '[]') as string[];
       expect(inner).toBe(`\t'a_confirm': {\n\t\tde: 'X',\n\t},`);
-      expect(outer).toMatch(/^'a_confirm': \{\n\0[0-9a-f]{64}\n\tde: 'Y',\n\},$/);
+      expect(outer).toBe(`'a_confirm': {\n\0${createHash('sha256').update(inner ?? '').digest('hex')}\n\tde: 'Y',\n},`);
       const two = (x: string, y: string) => `'a_confirm': {\n\t'b_confirm': {\n\t\tde: '${x}',\n\t},\n\tde: '${y}',\n},`;
       expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('X2', 'Y') }).review).toBe(true);
       expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('X', 'Y2') }).review).toBe(true);
@@ -2679,6 +2680,11 @@ describe('gate-record — the `ux:` line', () => {
       // Two confirmations holding the same inner key swap places: every line stays, only what each one holds moves.
       const pair = (a: string, b: string) => `export const t = {\n  '${a}': {\n    'confirm': {\n      de: 'Löschen',\n    },\n  },\n  '${b}': {\n    'confirm': {\n      de: 'Archivieren',\n    },\n  },\n};`;
       expect(owed([F], { [F]: pair('delete_confirm', 'archive_confirm') }, { [F]: pair('archive_confirm', 'delete_confirm') }).review).toBe(true);
+      // A line of the file that reads like a digest is kept apart from one: it cannot stand in for the entry it names.
+      const x = `  'k_confirm': {\n    de: 'Alles löschen',\n  },`;
+      const d = `\0${createHash('sha256').update(x).digest('hex')}`;
+      const fake = (a: string, z: string) => `'a_confirm': {\n${a}\n  de: 'Y',\n},\n'z': {\n${z}\n},`;
+      expect(owed([F], { [F]: fake(d, x) }, { [F]: fake(x, d) }).review).toBe(true);
     });
 
     it('deeply nested confirmations cost the length of the file, not its length times their depth', () => {

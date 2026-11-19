@@ -478,9 +478,11 @@ export function uxOwed({ files, base, head, read }) {
  * an entry opening. Lines are kept as they are, blank and comment-like ones too: inside a
  * template literal they are what the user reads, so a new indent counts as a change. A
  * confirmation inside another keeps its lines in its own block, and the outer block holds, where
- * they stood, a digest of that block: every line is kept once, so a file of deeply nested
- * confirmations costs its length, not its length times its depth, and the outer block still
- * changes with what it holds, wherever that moves. `null` text (an absent file) has none. Pure.
+ * they stood, a digest of that block (a line of the file that starts with `\0` gets one more, so
+ * it never reads as a digest): every line is kept once, plus 65 characters for each nested entry,
+ * so a file of deeply nested confirmations costs its length, not its length times its depth, and
+ * the outer block still changes with what it holds, wherever that moves. `null` text (an absent
+ * file) has none. Pure.
  *
  * @param {string|null} text
  * @returns {Map<string, string>}
@@ -513,7 +515,8 @@ export function uxConfirmBlocks(text) {
     if (m !== null) while (open.length > 0 && at <= open[open.length - 1].at) end(open.pop());
     const outer = open.length > 0 ? open[open.length - 1] : null;
     if (m === null || !/confirm/i.test(m[2])) {
-      if (outer !== null) outer.body.push(l);
+      // A line that starts like a digest gets one more \0, so it never reads as one.
+      if (outer !== null) outer.body.push(l.startsWith('\0') ? `\0${l}` : l);
       continue;
     }
     if (!out.has(m[2])) out.set(m[2], []);
