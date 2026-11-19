@@ -739,7 +739,7 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     expect(text(other)).toBe(`other ${MARK}`);
   });
 
-  it('without the scrub, names every workflow it reached, nested ones included, and no other', () => {
+  it('names every workflow it reached, nested ones included, and no other', () => {
     const db = history.getDb();
     db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES ('wf-a', 'wf', 'running', '{}', 'thread-a'), ('wf-b', 'wf', 'running', '{}', 'thread-b')`).run();
     db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, parent_run_id) VALUES ('wf-a-inner', 'wf2', 'running', '{}', 'wf-a')`).run();
