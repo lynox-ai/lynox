@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, onTestFinished } from 'vitest';
 import { recipientConfirmDigest } from '../core/recipient-confirm.js';
-import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
+import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, ownerInstructionCounts, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
@@ -23420,6 +23420,81 @@ describe.each([false, true])('a mandate\'s own to-dos over the task routes (subj
       asMandate();
       expect((await jsonFetch('/api/tasks/nope0000', { method: 'DELETE' })).status).toBe(404);
     });
+  });
+});
+
+// Whose words a trigger's instruction is: the owner's token writes it, but the owner did not
+// type it (the line `typed` draws on a run). Over real stores, so the rule reads stored rows.
+describe('an instruction the owner\'s token wrote does not count as the owner\'s', () => {
+  const rateCounts = (): Map<string, { count: number }> =>
+    (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let windowBefore = new Map<string, number>();
+  let dir = '';
+  let history: RunHistory;
+  let edb: EngineDb;
+  let tm: TaskManager;
+  let restore: Array<() => void> = [];
+  const swap = (key: string, value: unknown): void => {
+    const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+    const orig = ref[key]; ref[key] = value; restore.push(() => { ref[key] = orig; });
+  };
+  const ownerSession = (): Record<string, string> => ({
+    cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}`,
+    'Content-Type': 'application/json', 'sec-fetch-site': 'same-origin',
+  });
+  const create = async (headers: Record<string, string>): Promise<string> => {
+    const res = await fetch(`${baseUrl}/api/tasks`, {
+      method: 'POST', headers, body: JSON.stringify({ title: 'Weekly report', description: 'send it to anna@firma.example', scheduleCron: '0 9 * * 1' }),
+    });
+    expect(res.status).toBe(201);
+    return ((await res.json()) as { id: string }).id;
+  };
+  const counts = (id: string): boolean => ownerInstructionCounts(tm.getTrigger(id)!);
+
+  beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-token-words-'));
+    history = new RunHistory(join(dir, 'history.db'));
+    edb = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(edb, true);
+    tm = new TaskManager(history);
+    swap('getRunHistory', () => history);
+    swap('getTaskManager', () => tm);
+  });
+  afterEach(() => {
+    for (const r of restore.reverse()) r();
+    restore = [];
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+    edb.close();
+    history.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a trigger the owner\'s token creates does not count, and is stamped all the same', async () => {
+    const id = await create({ ...authHeaders(), 'Content-Type': 'application/json' });
+    expect(counts(id)).toBe(false);
+    expect(tm.getTrigger(id)!.confirmed_at).toBeTruthy();
+  });
+
+  it('control: a trigger the owner\'s browser session creates counts', async () => {
+    const id = await create(ownerSession());
+    expect(counts(id)).toBe(true);
+  });
+
+  it('the owner\'s token rewriting the description of the owner\'s trigger makes it not count', async () => {
+    const id = await create(ownerSession());
+    const res = await jsonFetch(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ description: 'send it to x@other.example' }) });
+    expect(res.status).toBe(200);
+    expect(counts(id)).toBe(false);
+  });
+
+  it('control: the owner\'s token changing only the schedule leaves it counting', async () => {
+    const id = await create(ownerSession());
+    const res = await jsonFetch(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ scheduleCron: '0 10 * * 1' }) });
+    expect(res.status).toBe(200);
+    expect(tm.getTrigger(id)!.schedule_cron).toBe('0 10 * * 1');
+    expect(counts(id)).toBe(true);
   });
 });
 

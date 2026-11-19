@@ -57,6 +57,7 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
+import type { UntrustedCause } from '../core/untrusted-signals.js';
 import { getLynoxDir, loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
@@ -2908,6 +2909,20 @@ export class LynoxHTTPApi {
   /** What the browser attached on its own, for `_refusedAsAmbientCrossSite`. */
   private _ambientOf(req: IncomingMessage, secret: string | undefined): 'none' | 'no-secret' | 'cookie' {
     return !secret ? 'no-secret' : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
+  }
+
+  /**
+   * The mark a trigger's instruction gets when the owner's token, not the owner's browser
+   * session, wrote it (`created_untrusted`), or undefined when the words count as the owner's.
+   * The same line `typed` draws: a token's client (a script, an integration) passes on text it
+   * did not have typed, so the targets it names must not be owner-known in the trigger's run
+   * (`ownerInstructionCounts`). Stored as the cause a webhook event's content gets, content that
+   * reached the engine from outside: every reader takes it as not clean. A mandate's write is
+   * marked by its own rules, so only the owner's principal is looked at here.
+   */
+  private _ownerTokenWords(req: IncomingMessage): UntrustedCause | undefined {
+    if (!isOwnerPrincipal(this._principalOf(req))) return undefined;
+    return this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none' ? 'external-tool' : undefined;
   }
 
   /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
@@ -9520,9 +9535,12 @@ export class LynoxHTTPApi {
         // non-run_agent effects.
         // Only the owner's request stamps; a mandate's trigger lands unconfirmed, like one
         // the agent tool creates.
+        // The stamp below is the same either way; only whose words the instruction counts as differs.
+        const tokenWords = this._ownerTokenWords(_req);
         const baseParams = {
           title, description, assignee, dueDate, createdBy, createdMandateId,
           ...(byOwner ? { confirmedAt: new Date().toISOString(), confirmedBy: createdBy } : {}),
+          ...(tokenWords !== undefined ? { createdUntrusted: tokenWords } : {}),
         };
         const task = scheduleCron
           ? taskManager.createScheduled({ ...baseParams, scheduleCron })
@@ -9595,8 +9613,12 @@ export class LynoxHTTPApi {
       try {
         // `untrusted` is what the agent's turn had taken in (task_update reads it off the agent); a
         // request does not get to say it, so it is dropped here rather than stored as sent.
+        // An owner's token that rewrites the instruction marks it, as a creation does
+        // (`_ownerTokenWords`). The store reads the mark only with a title or description edit, and
+        // only adds it: a schedule change marks nothing, and the owner's browser session clears none.
         const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
-        task = taskManager.update(params['id']!, edit as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        const tokenWords = this._ownerTokenWords(_req);
+        task = taskManager.update(params['id']!, { ...edit, ...(tokenWords !== undefined ? { untrusted: tokenWords } : {}) } as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
