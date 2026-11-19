@@ -183,7 +183,7 @@ describe('the migration wizard when this instance does not start the migration',
 	}
 
 	for (const lang of ['de', 'en'] as const) {
-		it(`says so in its own words and shows its reason beside it, in a box, not as the engine's (${lang})`, async () => {
+		it(`says so in its own words and shows its reason beside it in its own element, not as the engine's (${lang})`, async () => {
 			const before = getLocale();
 			setLocale(lang);
 			try {
@@ -270,6 +270,8 @@ describe('the migration wizard when this instance does not start the migration',
 		expect(getError()).toBe(t('migration.cancelled'));
 		expect(getErrorReason()).toBe('');
 		expect(q('migration-error-reason')).toBeNull();
+		expect(getErrorNotStarted()).toBe(false);
+		expect(text('migration-error-title')).toBe(t('migration.error_title'));
 	});
 });
 

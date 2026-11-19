@@ -351,8 +351,8 @@
 				<!-- The engine's sentence (with the target's own words) is English: marked so for a screen reader. -->
 				<p data-testid="migration-error-detail" class="break-words text-xs text-text-muted" lang={errorFromEngine ? 'en' : undefined}>{error}</p>
 				{#if errorReason}
-					<!-- Whatever answered the start request said this: set apart in its own isolated box, so it
-					     cannot pass for lynox's words nor turn the text around it; not marked as the engine's sentence. -->
+					<!-- Whatever answered the start request said this: its raw text is set apart in its own isolated
+					     element with a border, as a value rather than a sentence; not marked as the engine's sentence. -->
 					<p data-testid="migration-error-reason" class="break-words text-xs text-text-muted">{t('migration.error_reason')} <bdi data-foreign-value class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone font-mono">{errorReason}</bdi></p>
 				{/if}
 				{#if retry === 'check'}
