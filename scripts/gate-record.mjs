@@ -328,14 +328,17 @@ export function requiredGates(files) {
  * What it cannot see, stated so nobody reads more into it: a lock tightened by editing only its
  * condition (`if (role !== 'owner')`); a refusal spelled otherwise (a German text, a
  * `ForbiddenError`); a line that starts as a comment, even with code after it or inside a
- * template literal the user reads. Those stay the author's to declare. And where it errs the
- * other way, it asks for a review it did not need: a renamed file reads as all-new lines, as does
- * a re-indented one, the inner lines of a multi-line import or type are read as sites, and a
- * confirmation entry that only changes its layout (one line to several) reads as reworded.
+ * template literal the user reads; a confirmation entry whose key line `UX_NEW_TEXT` does not
+ * read (an unquoted key, a comment after `{`), and an entry cut short by a line inside a template
+ * literal that looks like an entry opening at the key's indent. Those stay the author's to
+ * declare. And where it errs the other way, it asks for a review it did not need: a renamed file
+ * reads as all-new lines, as does a re-indented one, the inner lines of a multi-line import or
+ * type are read as sites, and a confirmation entry that only changes its indent or layout reads
+ * as reworded.
  *
- * A confirmation entry (a key naming `confirm`) is compared as a WHOLE BLOCK between the two
- * ends, by key, not line by line: its wording is the consent, and a line count cannot see a
- * reworded line whose text also stands in another entry, or two entries swapping their lines.
+ * A confirmation entry (a key naming `confirm`) is compared as a block between the two ends, by
+ * key, not line by line (`uxConfirmBlocks`): its wording is the consent, and a line count cannot
+ * see a reworded line whose text also stands in another entry, or two entries swapping lines.
  *
  * Lines are compared as a MULTISET, read with `git cat-file`, never with `git diff`: a full diff
  * can run an author-chosen diff driver, which `--name-only` avoids for the file list and this
@@ -433,12 +436,9 @@ export function uxOwed({ files, base, head, read }) {
       const bBlocks = uxConfirmBlocks(b.value);
       const hBlocks = uxConfirmBlocks(h.value);
       const reworded = [...hBlocks].filter(([k, v]) => bBlocks.has(k) && bBlocks.get(k) !== v).map(([k]) => k);
-      // A confirmation both ends hold is judged by its block alone, so a re-indented key line is
-      // no rewording; every other changed entry still counts by its line.
-      const byBlock = (k) => bBlocks.has(k) && hBlocks.has(k);
       keys = {
         added: entries.filter((m) => !inBase(m[2])).map((m) => m[2]),
-        changed: [...entries.filter((m) => inBase(m[2]) && !byBlock(m[2])).map((m) => m[2]), ...reworded],
+        changed: [...entries.filter((m) => inBase(m[2])).map((m) => m[2]), ...reworded],
       };
     }
     if (keys.added.some((k) => UX_KEY_NAME.test(k))) why.push(`${f} adds a user text that says what to do next`);
@@ -449,33 +449,36 @@ export function uxOwed({ files, base, head, read }) {
 
 /**
  * Each confirmation entry of a source file (a `UX_NEW_TEXT` line whose key names `confirm`) with
- * its whole text, by key; the same key several times keeps every block, in order. An entry over
- * several lines runs to its closing `}` line, to a line that ends in `}` or `},`, or to the next
- * entry. Each line is trimmed, and blank and comment lines are dropped, so re-indenting or a
- * blank line is no rewording. `null` text (an absent file) has none. Pure.
+ * its text, by key; the same key several times keeps every block, in order. A block runs from
+ * the key line up to the next line, at the key line's indent or less, that opens another entry or
+ * is any other code, and it takes in a closing line starting with `}` at that indent or less. So
+ * it holds nested entries, a value that starts on the key line and goes on below, and the lines
+ * of a template literal, whatever their indent. Lines are kept as they are, blank and comment-like
+ * ones too: inside a template literal they are what the user reads, so a new indent counts as a
+ * change. `null` text (an absent file) has none. Pure.
  *
  * @param {string|null} text
  * @returns {Map<string, string>}
  */
 export function uxConfirmBlocks(text) {
   const out = new Map();
-  const add = (key, lines) => out.set(key, [...(out.has(key) ? [out.get(key)] : []), lines.join('\n')].join('\n\u0000\n'));
   const all = (text ?? '').split('\n');
+  const indent = (l) => /^\s*/.exec(l)[0].length;
   for (let i = 0; i < all.length; i++) {
     const m = UX_NEW_TEXT.exec(all[i]);
     if (m === null || !/confirm/i.test(m[2])) continue;
-    const body = [all[i].trim()];
-    if (/\{\s*$/.test(all[i])) {
-      for (let j = i + 1; j < all.length; j++) {
-        if (UX_NEW_TEXT.test(all[j])) break;
-        const l = all[j].trim();
-        if (l !== '' && !UX_COMMENT.test(l)) body.push(l);
-        if (/^\}/.test(l) || /\}\s*,?$/.test(l)) break;
-      }
+    const at = indent(all[i]);
+    const body = [all[i]];
+    for (let j = i + 1; j < all.length; j++) {
+      const l = all[j];
+      const t = l.trim();
+      if (t !== '' && indent(l) <= at && t.startsWith('}')) { body.push(l); break; }
+      if (t !== '' && indent(l) <= at && UX_NEW_TEXT.test(l)) break;
+      body.push(l);
     }
-    add(m[2], body);
+    out.set(m[2], [...(out.get(m[2]) ?? []), body.join('\n')]);
   }
-  return out;
+  return new Map([...out].map(([k, v]) => [k, JSON.stringify(v)]));
 }
 
 /**
