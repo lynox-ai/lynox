@@ -21,6 +21,7 @@
 		getErrorStep,
 		getErrorFromEngine,
 		getErrorReason,
+		getErrorNotStarted,
 		MIGRATION_HOLD_MS,
 	} from '../stores/migration.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
@@ -42,6 +43,7 @@
 	const retry = $derived(getRetry());
 	const errorFromEngine = $derived(getErrorFromEngine());
 	const errorReason = $derived(getErrorReason());
+	const errorNotStarted = $derived(getErrorNotStarted());
 	// With `later` the target may hold its session for 30 minutes from the error; the retry opens then,
 	// without a reload.
 	const retryFrom = $derived(getErrorAt() + MIGRATION_HOLD_MS);
@@ -345,12 +347,13 @@
 	{#if step === 'error'}
 		<div class="rounded-[var(--radius-md)] border border-danger/30 bg-danger/5">
 			<div class="px-4 py-6 text-center space-y-3">
-				<p data-testid="migration-error-title" class="text-sm font-medium text-danger">{t('migration.error_title')}</p>
+				<p data-testid="migration-error-title" class="text-sm font-medium text-danger">{t(errorNotStarted ? 'migration.error_title_not_started' : 'migration.error_title')}</p>
 				<!-- The engine's sentence (with the target's own words) is English: marked so for a screen reader. -->
 				<p data-testid="migration-error-detail" class="break-words text-xs text-text-muted" lang={errorFromEngine ? 'en' : undefined}>{error}</p>
 				{#if errorReason}
-					<!-- Whatever answered the start request said this; not marked as the engine's sentence. -->
-					<p data-testid="migration-error-reason" class="break-words text-xs text-text-muted">{tf('migration.error_reason', { reason: errorReason })}</p>
+					<!-- Whatever answered the start request said this: set apart in its own isolated box, so it
+					     cannot pass for lynox's words nor turn the text around it; not marked as the engine's sentence. -->
+					<p data-testid="migration-error-reason" class="break-words text-xs text-text-muted">{t('migration.error_reason')} <bdi data-foreign-value class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone font-mono">{errorReason}</bdi></p>
 				{/if}
 				{#if retry === 'check'}
 					<p data-testid="migration-check-target" class="text-xs text-warning">{t('migration.check_target_first')}</p>

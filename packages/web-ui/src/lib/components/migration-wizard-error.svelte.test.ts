@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
-import { reset, setTarget, startMigration, cancelMigration, getStep, getRetry, getError, getErrorReason, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
+import { reset, setTarget, startMigration, cancelMigration, getStep, getRetry, getError, getErrorReason, getErrorNotStarted, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
 import { getToasts, dismissToast } from '../stores/toast.svelte.js';
 import { _resetManagedStatus } from '../stores/integrations/managed.svelte.js';
 
@@ -183,14 +183,17 @@ describe('the migration wizard when this instance does not start the migration',
 	}
 
 	for (const lang of ['de', 'en'] as const) {
-		it(`says so in its own words and shows the reason given beside it, not as the engine's (${lang})`, async () => {
+		it(`says so in its own words and shows its reason beside it, in a box, not as the engine's (${lang})`, async () => {
 			const before = getLocale();
 			setLocale(lang);
 			try {
 				await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+				expect(text('migration-error-title')).toBe(t('migration.error_title_not_started'));
 				expect(text('migration-error-detail')).toBe(t('migration.error_not_started'));
 				expect(q('migration-error-detail')?.getAttribute('lang')).toBeNull();
-				expect(text('migration-error-reason')).toBe(tf('migration.error_reason', { reason: 'targetUrl must resolve to a public host' }));
+				expect(text('migration-error-reason')).toBe(`${t('migration.error_reason')} targetUrl must resolve to a public host`);
+				// The reason is someone else's value: in its own isolated box, not part of the sentence.
+				expect(q('migration-error-reason')?.querySelector('bdi[data-foreign-value]')?.textContent).toBe('targetUrl must resolve to a public host');
 				expect(q('migration-error-reason')?.getAttribute('lang')).toBeNull();
 				expect(getRetry()).toBe('now');
 			} finally {
@@ -201,6 +204,7 @@ describe('the migration wizard when this instance does not start the migration',
 
 	it('shows no reason for an answer that is not the instance\'s JSON, such as a proxy\'s error page', async () => {
 		await refusedWith(() => new Response('<html><body><h1>502 Bad Gateway</h1></body></html>', { status: 502, headers: { 'Content-Type': 'text/html' } }));
+		expect(text('migration-error-title')).toBe(t('migration.error_title_not_started'));
 		expect(text('migration-error-detail')).toBe(t('migration.error_not_started'));
 		expect(q('migration-error-reason')).toBeNull();
 		expect(target.textContent).not.toContain('Bad Gateway');
@@ -210,17 +214,18 @@ describe('the migration wizard when this instance does not start the migration',
 		await refusedWith(() => new Response(JSON.stringify({ error: `bad\n\u202Eline\u0007 ${'x'.repeat(400)}` }), { status: 400 }));
 		const reason = text('migration-error-reason') ?? '';
 		expect(reason).not.toMatch(/[\n\u202E\u0007]/);
-		expect(reason.startsWith(tf('migration.error_reason', { reason: 'bad line x' }))).toBe(true);
+		expect(reason.startsWith(`${t('migration.error_reason')} bad line x`)).toBe(true);
 		expect(reason.endsWith('…')).toBe(true);
-		expect([...reason].length).toBe([...tf('migration.error_reason', { reason: '' })].length + 200);
+		expect([...reason].length).toBe([...`${t('migration.error_reason')} `].length + 200);
 	});
 
-	it('clears the reason once the user starts over', async () => {
+	it('clears the reason, and that it did not start, once the user starts over', async () => {
 		await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host' }), { status: 400 }));
 		expect(q('migration-error-reason')).not.toBeNull();
 		reset();
 		await settle();
 		expect(getErrorReason()).toBe('');
+		expect(getErrorNotStarted()).toBe(false);
 		expect(q('migration-error-reason')).toBeNull();
 	});
 
@@ -234,6 +239,8 @@ describe('the migration wizard when this instance does not start the migration',
 		await settle();
 		expect(text('migration-error-detail')).toBe(SENTENCE);
 		expect(q('migration-error-reason')).toBeNull();
+		// It started this time, so it did not finish.
+		expect(text('migration-error-title')).toBe(t('migration.error_title'));
 	});
 
 	it('shows no reason from an answer longer than it reads', async () => {

@@ -78,6 +78,8 @@ let errorFromEngine = $state(false);
  * wizard's own sentence, not as the engine's: a proxy in front of it can answer in its place.
  */
 let errorReason = $state('');
+/** The migration never started (the start request was turned down), so the wizard does not say it did not finish. */
+let errorNotStarted = $state(false);
 let abortController: AbortController | null = null;
 
 // ── Getters ──
@@ -88,15 +90,17 @@ export function getErrorAt(): number { return errorAt; }
 export function getErrorStep(): MigrationStep { return errorStep; }
 export function getErrorFromEngine(): boolean { return errorFromEngine; }
 export function getErrorReason(): string { return errorReason; }
+export function getErrorNotStarted(): boolean { return errorNotStarted; }
 
 /** The longest a target holds an unfinished session (the engine's sentence says "30 minutes at the latest"). */
 export const MIGRATION_HOLD_MS = 30 * 60 * 1000;
 
-function fail(message: string, from: { engine: boolean; retry?: MigrationRetry }): void {
+function fail(message: string, from: { engine: boolean; retry?: MigrationRetry; notStarted?: boolean }): void {
 	if (step !== 'error') errorStep = step;
 	error = message;
 	errorFromEngine = from.engine;
 	errorReason = '';
+	errorNotStarted = from.notStarted ?? false;
 	retry = from.retry ?? 'now';
 	errorAt = Date.now();
 	step = 'error';
@@ -186,7 +190,7 @@ export async function startMigration(): Promise<void> {
 			const reason = await refusalReason(res);
 			// Cancelled while the answer was read: `cancelMigration` has already said so.
 			if (step !== 'transferring') return;
-			fail(t('migration.error_not_started'), { engine: false });
+			fail(t('migration.error_not_started'), { engine: false, notStarted: true });
 			errorReason = reason;
 			return;
 		}
@@ -296,6 +300,7 @@ export function reset(): void {
 	errorAt = 0;
 	errorFromEngine = false;
 	errorReason = '';
+	errorNotStarted = false;
 	errorStep = 'preview';
 	progress = null;
 	verification = null;
