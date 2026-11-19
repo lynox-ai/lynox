@@ -416,11 +416,13 @@ describe('every writer of the flat file leaves an untrusted turn\'s lines where 
 });
 
 describe('the writers of the flat file are the counted ones', () => {
-  // Every call that ADDS text to the flat memory file, by file. A writer that can run on an
-  // untrusted turn must leave lines an untrusted row covers (or refuse there): the tests above,
-  // one per writer. Writers that never run on an agent turn: the HTTP routes behind the memory
-  // view (an operator's own edit) and the migration import (restores files with their rows).
-  // A new writer fails this test until it is added here with its proof.
+  // Every call of the memory write API that ADDS text to the flat file, by file. A writer that
+  // can run on an untrusted turn must leave lines an untrusted row covers (or refuse there): the
+  // tests above, one per writer. Writers that never run on an agent turn: the HTTP routes behind
+  // the memory view (an operator's own edit). A new caller fails this test until it is added
+  // here with its proof. What the scan does not see: a call through an alias or destructured
+  // method, and writes below the API — Memory's own file writes, the migration import and the
+  // backup restore, which put whole files back together with their database, off any turn.
   const EXPECTED: Record<string, string[]> = {
     'src/core/memory.ts': ['this.appendScoped', 'this.updateScoped', 'this.appendScoped', 'this.append'],
     'src/core/memory-facade.ts': ['memory.append', 'memory.save', 'memory.update'],
@@ -437,6 +439,7 @@ describe('the writers of the flat file are the counted ones', () => {
     const { readdirSync, readFileSync } = await import('node:fs');
     const root = fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
     const found: Record<string, string[]> = {};
+    const facades: string[] = [];
     const walk = (dir: string): void => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
         const p = join(dir, e.name);
@@ -445,9 +448,10 @@ describe('the writers of the flat file are the counted ones', () => {
         const rel = p.slice(root.length + 1);
         const src = readFileSync(p, 'utf-8');
         const calls: string[] = [];
-        for (const m of src.matchAll(/new MemoryFacade\([^;]*?\)\)\.(append|update|save)\(|\bmemory\??\.(append|appendScoped|update|updateScoped|save)\(/g)) {
+        for (const m of src.matchAll(/new MemoryFacade\([^;]*?\)\)\.(append|update|save)\(|memory!?\??\.(append|appendScoped|update|updateScoped|save)\(/gi)) {
           calls.push(m[1] ? `MemoryFacade.${m[1]}` : `memory.${m[2]!}`);
         }
+        if (/new MemoryFacade\(/.test(src) && rel !== 'src/core/memory-facade.ts') facades.push(rel);
         if (rel === 'src/core/memory.ts') {
           for (const m of src.matchAll(/\bthis\.(append|appendScoped|updateScoped)\(/g)) calls.push(`this.${m[1]!}`);
         }
@@ -456,5 +460,7 @@ describe('the writers of the flat file are the counted ones', () => {
     };
     walk(join(root, 'src'));
     expect(found).toEqual(EXPECTED);
+    // A facade held in a variable writes through calls the scan above cannot attribute.
+    expect(facades).toEqual(['src/server/http-api.ts']);
   });
 });

@@ -609,11 +609,9 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     // succeeds, KG mirror sync runs as before.
     const memory = agent.memory;
     // On an untrusted turn the lines the edit leaves behind get an untrusted row (below); the
-    // file is read first to tell which lines are new.
-    const untrustedTurn = deriveTurnUntrusted(agent);
-    const before = untrustedTurn && agent.toolContext.knowledgeLayer
-      ? ((scopeRef ? await memory.loadScoped(input.namespace, scopeRef) : await memory.load(input.namespace)) ?? '')
-      : '';
+    // file is read before and after the edit to tell which lines are new.
+    const readFile = async (): Promise<string> => (scopeRef ? await memory.loadScoped(input.namespace, scopeRef) : await memory.load(input.namespace)) ?? '';
+    const before = agent.toolContext.knowledgeLayer ? await readFile() : '';
     const exact = await withInstanceWrite(agent, { site: 'memory_update#exact', kind: 'change', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['update'] }, async (w) => {
       const exactOk = await w.run('update', () => (scopeRef
         ? memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef)
@@ -627,7 +625,7 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         // updated above (it edits content the user can already see); the trust-sensitive KG
         // re-extraction is skipped — the KG keeps its prior extraction until a clean-turn edit.
         const kg = agent.toolContext.knowledgeLayer;
-        if (kg && !untrustedTurn) {
+        if (kg && !deriveTurnUntrusted(agent)) {
           const defaultScope: MemoryScopeRef = scopeRef
             ?? agent.activeScopes?.[0]
             ?? { type: 'context', id: '' };
@@ -659,9 +657,10 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
           // untrusted, as memory_store writes one: the flat file now holds text no existing row
           // covers, and a read path marks a line only where an untrusted row contains it. The
           // whole lines, not `new_content`: the edit replaces a substring, so a line can join
-          // attacker text to text that was there before.
+          // attacker text to text that was there before. Read from the file as written: a write
+          // that lands between the two reads is covered too, never missed.
           const prior = new Set(before.split('\n'));
-          const left = before.replace(input.old_content, input.new_content).split('\n').filter(l => l.trim() && !prior.has(l));
+          const left = (await readFile()).split('\n').filter(l => l.trim() && !prior.has(l));
           const rowScope: MemoryScopeRef = scopeRef ?? agent.activeScopes?.[0] ?? { type: 'context', id: '' };
           publishMemoryStore({
             namespace: input.namespace, content: left.length > 0 ? left.join('\n') : input.new_content, scopeType: rowScope.type, scopeId: rowScope.id,
