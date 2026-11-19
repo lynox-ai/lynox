@@ -609,7 +609,7 @@ describe('createInboxClassifierHook — prefilter rules', () => {
     expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'MAILER-DAEMON@mx.example' }] }))).toBe('prefilter_filed');
     expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: [{ address: 'postmaster@mx.example' }] }))).toBe('prefilter_filed');
     expect(queueCalls).toHaveLength(0);
-    const reason = 'Meldet eine unzustellbare Mail. Prüf in deinen gesendeten Mails, ob das stimmt.';
+    const reason = 'Meldet, dass eine deiner Mails nicht ankam. Prüf in deinen gesendeten Mails, ob das stimmt.';
     expect(inbox.listItems().map((i) => [i.bucket, i.reasonDe])).toEqual([['requires_user', reason], ['requires_user', reason]]);
     expect(notifyNewItem).not.toHaveBeenCalled();
     expect(ruleOf('imap:thread-1')).toBe('bounce');

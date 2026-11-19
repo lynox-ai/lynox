@@ -337,7 +337,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // newsletter domain behind a contact's address must not file it as handled.
     const pre = prefilter({ ...env, from: env.from.slice(0, 1) });
     const filed: { bucket: 'requires_user' | 'auto_handled'; reasonDe: string } | undefined = pre.rule === 'bounce'
-      ? { bucket: 'requires_user', reasonDe: 'Meldet eine unzustellbare Mail. Prüf in deinen gesendeten Mails, ob das stimmt.' }
+      ? { bucket: 'requires_user', reasonDe: 'Meldet, dass eine deiner Mails nicht ankam. Prüf in deinen gesendeten Mails, ob das stimmt.' }
       : (pre.rule === 'newsletter_domain' || pre.rule === 'bulk_subdomain') && pre.domain !== undefined
         ? { bucket: 'auto_handled', reasonDe: `Newsletter-Domain: ${pre.domain}` }
         : undefined;
