@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
 	formatRunElapsed,
+	promptAnchorShown,
+	promptFormInView,
 	isPipelineRunning,
 	prefersReducedMotion,
 	scrollBehaviorForMotion,
@@ -230,5 +232,28 @@ describe('isPipelineRunning', () => {
 	it('tolerates a null/garbage step entry without throwing', () => {
 		expect(isPipelineRunning({ steps: [null, { status: 'running' }] })).toBe(true);
 		expect(isPipelineRunning({ steps: [null] })).toBe(false);
+	});
+});
+
+describe('promptFormInView / promptAnchorShown', () => {
+	const entry = (isIntersecting: boolean, visible: number, height: number) => ({ isIntersecting, intersectionRect: { height: visible }, boundingClientRect: { height } });
+
+	it('counts the question as seen once its first line shows, not a sliver', () => {
+		expect(promptFormInView(entry(true, 48, 300))).toBe(true);
+		expect(promptFormInView(entry(true, 47, 300))).toBe(false);
+		expect(promptFormInView(entry(false, 300, 300))).toBe(false);
+	});
+
+	it('counts a card smaller than a line as seen when all of it shows', () => {
+		expect(promptFormInView(entry(true, 30, 30))).toBe(true);
+		expect(promptFormInView(entry(true, 29, 30))).toBe(false);
+	});
+
+	it('shows the bar only for a question off screen, or where it cannot know', () => {
+		expect(promptAnchorShown({ kind: 'seen', inView: true })).toBe(false);
+		expect(promptAnchorShown({ kind: 'seen', inView: false })).toBe(true);
+		expect(promptAnchorShown({ kind: 'pending' })).toBe(false);
+		expect(promptAnchorShown({ kind: 'absent' })).toBe(true);
+		expect(promptAnchorShown({ kind: 'unobservable' })).toBe(true);
 	});
 });

@@ -357,7 +357,7 @@ export const SPAWN_DIALOG: Readonly<Record<DialogLanguage, SpawnDialog>> = {
     tierDeep: 'the DEEP tier (a stronger reasoning model, more capable but more expensive)',
     tailDowngrade: 'Allow only if the work genuinely needs deep; otherwise choose "Run on balanced".',
     tailPinned: 'A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.',
-    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} on ${tier}. Estimated cost ~$${costUsd} against this session. Provider: ${providers}. ${tail}`,
+    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} on ${tier}. Estimated model cost for this session: about $${costUsd}. Provider: ${providers}. ${tail}`,
   },
   de: {
     children: (count) => count === 1 ? 'Eine Teilaufgabe würde' : `${count} Teilaufgaben würden`,
@@ -365,7 +365,7 @@ export const SPAWN_DIALOG: Readonly<Record<DialogLanguage, SpawnDialog>> = {
     tierDeep: 'der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer)',
     tailDowngrade: 'Erlaube das nur, wenn die Arbeit wirklich DEEP braucht; sonst wähle „Auf balanced ausführen“.',
     tailPinned: 'Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.',
-    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} auf ${tier} laufen. Geschätzte Kosten ~$${costUsd} für diese Sitzung. Anbieter: ${providers}. ${tail}`,
+    sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} auf ${tier} laufen. Geschätzte Modellkosten für diese Sitzung: etwa $${costUsd}. Anbieter: ${providers}. ${tail}`,
   },
 };
 
