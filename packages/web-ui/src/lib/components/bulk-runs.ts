@@ -844,8 +844,13 @@ export function bulkFieldShapeText(shape: unknown, i18n: BulkI18n, locale = 'en-
 	const s = shape as Record<string, unknown>;
 	// Numbers as the UI language writes them (32’000, 0.0000001), never as JavaScript prints them (1e-7).
 	// A value that reads as zero has no sign: a schema's -0, or a negative value too small to show.
-	const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 20, signDisplay: 'negative' });
-	const num = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? format.format(v) : null);
+	// (Not `signDisplay: 'negative'`: an engine that predates that value throws on it.)
+	const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 20 });
+	const num = (v: unknown): string | null => {
+		if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+		const text = format.format(v);
+		return /^-[0.,]*$/.test(text) ? text.slice(1) : text;
+	};
 	switch (s['type']) {
 		case 'string': {
 			if (bulkFieldChoices(s) !== null) return i18n.t('bulk.shape.choice');
