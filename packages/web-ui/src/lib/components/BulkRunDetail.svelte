@@ -433,7 +433,7 @@
 	// Counted over the loaded targets: a preview the owner approves is loaded whole.
 	const seoEntity = $derived(approving ? bulkSeoEntityCount(targets) : 0);
 	// Same: a preview the owner approves is loaded whole, so every target that shares a value is here.
-	const sameValue = $derived(approving ? bulkSameValueOthers(targets, { shopify, judged: run?.judge != null }) : new Map<number, number>());
+	const sameValue = $derived(approving ? bulkSameValueOthers(targets, { shopify, judged: (run?.judge ?? null) !== null }) : new Map<number, number>());
 	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
 	const foldedUnchanged = $derived(targets.length - shownTargets.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
