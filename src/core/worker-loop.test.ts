@@ -3284,8 +3284,10 @@ describe('WorkerLoop', () => {
     expect(tm.recordTaskRun).toHaveBeenCalledWith('pipe-task-reserved', expect.stringContaining('step #1 (steps[0].id): "params", "__proto__" and "constructor" cannot be step ids'), 'failed', { noRetry: true });
     expect(router.notify).toHaveBeenCalledTimes(1);
     expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ body: WORKER_NOTICES.de.workflowStepIdReserved(1) }));
-    expect(WORKER_NOTICES.de.workflowStepIdReserved(1)).toBe('Schritt 1 dieses Workflows trägt einen Namen, den lynox für etwas anderes braucht. Darum lief der Workflow nicht, und er läuft erst wieder, wenn der Schritt anders heisst. Bitte lynox im Chat, diesen Schritt umzubenennen.');
-    expect(WORKER_NOTICES.en.workflowStepIdReserved(1)).toBe('Step 1 of this workflow has a name lynox uses for something else, so the workflow did not run, and it will not run until that step is renamed. Ask lynox in a chat to rename that step.');
+    // No retry offer: the cause stays until the step changes.
+    expect((router.notify as ReturnType<typeof vi.fn>).mock.calls[0]![0]).not.toHaveProperty('followUps');
+    expect(WORKER_NOTICES.de.workflowStepIdReserved(1)).toBe('Schritt 1 dieses Workflows trägt einen Namen, den lynox für etwas anderes braucht. Darum lief der Workflow nicht, und er läuft erst wieder, wenn der Schritt anders heisst oder entfernt ist. Bitte lynox im Chat, diesen Schritt umzubenennen.');
+    expect(WORKER_NOTICES.en.workflowStepIdReserved(1)).toBe('Step 1 of this workflow has a name lynox uses for something else, so the workflow did not run, and it will not run until that step is renamed or removed. Ask lynox in a chat to rename that step.');
   });
 
   it('executePipeline refuses a parameter name with a hidden character with the name\'s own fixed text', async () => {
