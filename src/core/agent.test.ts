@@ -3603,6 +3603,34 @@ describe('Agent', () => {
       expect(logged.join('')).not.toContain('step recorder gone');
     });
 
+    it('records a failed call once when its error event throws, and gives the model the call\'s error, not the stream\'s', async () => {
+      const recorded: RecordedCall[] = [];
+      const onStream = async (e: StreamEvent): Promise<void> => {
+        if (e.type === 'tool_result') throw new Error('stream gone');
+      };
+      const tool = makeTool('bad_tool', vi.fn(async () => { throw new Error('tool broke'); }));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-bad', name: 'bad_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], onStream, recordToolCall: (c) => { recorded.push(c as RecordedCall); } });
+      const logged: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+      try {
+        await agent.send('go');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(recorded.filter(c => c.toolName === 'bad_tool').map(c => c.isError)).toEqual([true]);
+      const block = agent.getMessages()
+        .flatMap(m => (Array.isArray((m as { content: unknown }).content) ? (m as { content: Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }> }).content : []))
+        .find(b => b.type === 'tool_result' && b.tool_use_id === 'tu-bad');
+      expect(block?.is_error).toBe(true);
+      expect(JSON.stringify(block?.content)).toContain('tool broke');
+      expect(JSON.stringify(block?.content)).not.toContain('stream gone');
+      expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a bad_tool call was recorded, but its result event could not be delivered (Error)\n']);
+      expect(logged.join('')).not.toContain('stream gone');
+    });
+
     describe('the connection a call resolved', () => {
       // Source-connection PRD, first build cut. The http resolver notes the profile
       // it resolved into the call's slot (call-connection.ts); the agent opens one
@@ -6783,6 +6811,23 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     // The call beside it in the same batch finished rather than being cut off.
     expect(sibling.handler).toHaveBeenCalledTimes(1);
     expect(siblingFinished, 'the run ended only after its slow sibling settled').toBe(true);
+  });
+
+  it('the run still ends as "needs input" when delivering the call\'s result event throws', async () => {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Approve the refund?' } }]))
+      .mockResolvedValueOnce(endTurnResponse('carried on'));
+    const onStream = async (e: StreamEvent): Promise<void> => {
+      if (e.type === 'tool_result') throw new Error('stream gone');
+    };
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], onStream });
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await expect(agent.send('Process the refunds')).rejects.toThrow(InputRequiredError);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(mockProcess).toHaveBeenCalledTimes(1);
   });
 
   it('the error names the question, masked through the vault before it leaves the agent', async () => {
