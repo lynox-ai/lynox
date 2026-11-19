@@ -153,10 +153,10 @@ describe('mappedValueOutsideTaskText keeps a mapped value to task text', () => {
     expect(mappedValueOutsideTaskText([call({ a: '{{params.month', '{{params.note}}': 'x' })], ['note'])).toContain('uses the event value "note"');
   });
 
-  // JSON escapes a newline or a quote; the resolver reads the name raw and trims it, so the check does too.
-  it('reads a name with white space or a quote in it as the resolver does', () => {
+  // JSON escapes a line break; the resolver reads the path raw and trims its ends, so the
+  // check reads it raw too and resolves `{{params.note\n}}` to the mapped `note`, as the run would.
+  it('reads a path with a line break at its end as the resolver does', () => {
     expect(mappedValueOutsideTaskText([call({ u: '{{params.note\n}}' })], ['note'])).toContain('uses the event value "note"');
-    expect(mappedValueOutsideTaskText([call({ u: '{{params.\tnote }}' })], ['note'])).toContain('uses the event value "note"');
   });
 
   it('visits each string once, however deep the template nests', () => {
@@ -172,6 +172,10 @@ describe('mappedValueOutsideTaskText keeps a mapped value to task text', () => {
     const out = mappedValueOutsideTaskText([call({ u: '{{s1\n"x".result}}' })], []);
     expect(out).toContain('uses "{{s1\\n\\"x\\".result}}" outside its task text');
     expect(out).not.toContain('\n"x"');
+    // Characters JSON leaves as they are but a reader does not see as text are escaped too.
+    const hidden = mappedValueOutsideTaskText([call({ u: '{{s1\u2028\u202E.result}}' })], []);
+    expect(hidden).toContain('uses "{{s1\\u2028\\u202E.result}}"');
+    expect(hidden).not.toMatch(/[\u2028\u202E]/);
   });
 
   it('lets a mapped value through in task text, and an unmapped one anywhere', () => {
