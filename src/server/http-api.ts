@@ -6596,7 +6596,7 @@ export class LynoxHTTPApi {
         }
       }
       // A retry reads a workflow's step outputs from memory, not from the file: those go as well.
-      forgetExecutedStatesOfChat(id);
+      forgetExecutedStatesOfChat(id, workflows);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 

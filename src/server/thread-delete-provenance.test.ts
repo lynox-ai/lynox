@@ -536,7 +536,31 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(getExecutedResult(`wf-run-${id}`)).toBeUndefined();
     expect(getExecutedResult(`wf-late-${id}`)).toBeUndefined();
     expect(getExecutedResult(`wf-other-${id}`)).toBeDefined();
-    forgetExecutedStatesOfChat(other);
+    forgetExecutedStatesOfChat(other, []);
+  });
+
+  it('deleting a chat forgets its workflow by id after a retry from another chat made that chat the origin', async () => {
+    const { ts } = stores();
+    const id = randomUUID();
+    const retrier = randomUUID();
+    ts.createThread(id, { title: 'ran a workflow another chat retried' });
+    const workflow = `wf-retried-${id}`;
+    const quiet = `wf-quiet-${id}`;
+    const db = runHistory().getDb();
+    for (const wf of [workflow, quiet]) {
+      db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES (?, 'wf', 'completed', '{}', ?)`).run(wf, id);
+    }
+    const state = { manifest: { name: 'wf', steps: [] }, state: { outputs: new Map() }, ranAs: 'owner' } as unknown as Parameters<typeof recordExecutedState>[1];
+    // The retry records the state again with the retrying chat as its origin; the outputs are this chat's.
+    recordExecutedState(workflow, { ...state, originThreadId: retrier });
+
+    expect((await deleteChat(id)).status).toBe(200);
+    // One the chat's runs reached that records no chat of its own ends after the delete.
+    recordExecutedState(quiet, state);
+
+    expect(getExecutedResult(workflow)).toBeUndefined();
+    expect(getExecutedResult(quiet)).toBeUndefined();
+    forgetExecutedStatesOfChat(retrier, []);
   });
 
   it('a question a schedule parked in the chat before the delete is closed too', async () => {

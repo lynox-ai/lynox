@@ -161,6 +161,8 @@ export function recordExecutedState(id: string, value: ExecutedState): void {
   executedStates.delete(id);
   // A run a deleted chat started that ends after the delete: its outputs are not kept for a retry.
   if (value.originThreadId !== undefined && deletedChats.has(value.originThreadId)) return;
+  // One a deleted chat reached by its runs but that records no chat of its own (no parent agent).
+  if (value.originThreadId === undefined && deletedWorkflows.has(id)) return;
   if (executedStates.size >= MAX_EXECUTED_STATES) {
     const oldest = executedStates.keys().next().value;
     if (oldest !== undefined) executedStates.delete(oldest);
@@ -170,7 +172,17 @@ export function recordExecutedState(id: string, value: ExecutedState): void {
 
 /** Chats deleted in this process, whose workflow outputs are no longer kept for a retry. Ids only. */
 const deletedChats = new Set<string>();
+/** Workflows those chats reached in history.db, by id: what the origin above does not name. */
+const deletedWorkflows = new Set<string>();
 const MAX_DELETED_CHATS = 10_000;
+
+function remember(set: Set<string>, value: string): void {
+  if (set.size >= MAX_DELETED_CHATS) {
+    const oldest = set.values().next().value;
+    if (oldest !== undefined) set.delete(oldest);
+  }
+  set.add(value);
+}
 
 /**
  * Forgets what the workflows a deleted chat started produced, and keeps forgetting what one still
@@ -178,15 +190,15 @@ const MAX_DELETED_CHATS = 10_000;
  * so without this a retry from another chat would write the deleted chat's outputs into a new run.
  * Returns how many were forgotten now.
  */
-export function forgetExecutedStatesOfChat(threadId: string): number {
-  if (deletedChats.size >= MAX_DELETED_CHATS) {
-    const oldest = deletedChats.values().next().value;
-    if (oldest !== undefined) deletedChats.delete(oldest);
-  }
-  deletedChats.add(threadId);
+export function forgetExecutedStatesOfChat(threadId: string, pipelineIds: readonly string[]): number {
+  remember(deletedChats, threadId);
+  for (const id of pipelineIds) remember(deletedWorkflows, id);
+  // By id as well as by origin: a retry from another chat makes that chat the origin of the state
+  // (see the retry's record), while the outputs it holds are still the ones this chat's run made.
+  const ids = new Set(pipelineIds);
   let forgotten = 0;
   for (const [id, entry] of executedStates) {
-    if (entry.originThreadId === threadId) { executedStates.delete(id); forgotten += 1; }
+    if (ids.has(id) || entry.originThreadId === threadId) { executedStates.delete(id); forgotten += 1; }
   }
   return forgotten;
 }

@@ -306,7 +306,8 @@ export function reencryptColumns(
   // The guard that keeps a deleted chat's runs blank is triggers on these tables
   // (`deleted-chat-guard.ts`). They are dropped from the image by name, not let through: a dropped
   // trigger does nothing whatever its body says, and history.db creates them again when it opens.
-  // Any other trigger is still refused below.
+  // Any other trigger on a table of the set is still refused below; one on a table outside the
+  // set is not checked here, as before.
   if (store === 'history.db') db.exec(dropDeletedChatGuardDdl());
   const trigger = db.prepare(`SELECT tbl_name AS t FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN (${setTables.map(() => '?').join(', ')}) LIMIT 1`).get(...setTables.map((t) => t.toLowerCase())) as { t: string } | undefined;
   if (trigger) throw refuse(`carries a trigger on ${trigger.t}`);
