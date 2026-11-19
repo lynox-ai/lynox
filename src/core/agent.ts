@@ -5120,7 +5120,7 @@ export class Agent implements IAgent {
    *   asked with a blocked question, which a run nobody watches refuses before it is stored. A
    *   yes holds for this call only: nothing is added, and the slot is not `allKnown`.
    */
-  private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean, guardRefuses = false, taintedBefore = false): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
+  private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean, guardRefuses: boolean, taintedBefore: boolean): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
     // `sendTargetsWhenLatched` counts only when the conversation had taken in foreign content BEFORE
     // this call's batch: a reading tool arms the latch for its own call before this check runs, so
     // the latch as it stands now would gate the first read of a clean conversation. The flags hold

