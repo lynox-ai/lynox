@@ -121,6 +121,8 @@ function writeStamp(now: string): string {
  * The trigger that clears a row's writer stamp on every UPDATE that did not set a new one. It is
  * in the database file, so a binary that does not know the stamp columns runs it too. The table
  * name comes from COLLECTION_NAME_RE-checked metadata.
+ *
+ * A write that replaces a whole row (`REPLACE`, `INSERT OR REPLACE`) stamps the new row itself.
  */
 function writerTriggerSql(tableName: string): string {
   return `CREATE TRIGGER IF NOT EXISTS "${tableName}__writer_unknown" AFTER UPDATE ON "${tableName}" FOR EACH ROW `

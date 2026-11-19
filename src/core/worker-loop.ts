@@ -8,6 +8,7 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { recipientsConfirmable } from './recipient-confirm.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
@@ -719,10 +720,9 @@ export class WorkerLoop {
     const setUpBy: TriggerSetUpBy = mandate !== undefined ? { kind: 'other', who: mandate.address }
       : task.created_by === principalTag(OWNER_PRINCIPAL) ? { kind: 'owner' }
         : { kind: 'unknown' };
-    // A trigger from before its creator was recorded is not told to re-save itself
-    // (`predatesRecord`): no save the owner can make today records the creator, and the sentence
-    // would promise one.
-    return { kind: 'triggerRun', name: task.title, setUpBy };
+    // A trigger from before its creator was recorded, nobody else's hand in it: its refusal points
+    // the owner at "Confirm recipients" in the Triggers view (`recipient-confirm.ts`).
+    return { kind: 'triggerRun', name: task.title, setUpBy, ...(recipientsConfirmable(task) ? { predatesRecord: true } : {}) };
   }
 
   /** The result lines for the sends this run refused, or null when it refused none. */
@@ -3693,7 +3693,10 @@ export class WorkerLoop {
     // refused, or one that may have landed before a refused redirect, and why the run
     // had no write grant. A refused write does not fail its step, so without this the
     // only trace is a tool result nobody reads.
-    const grantLines = [...(result.grantNote !== undefined ? [result.grantNote] : []), ...(result.writeNotes ?? [])];
+    // And each send a step refused for a target the owner did not name, in the trigger's words:
+    // also when the run ended for it (a question it could not ask), so the end names the cause.
+    const originNotice = this.#originRefusedNotice(task, result.originRefusals ?? []);
+    const grantLines = [...(originNotice !== null ? originNotice.split('\n') : []), ...(result.grantNote !== undefined ? [result.grantNote] : []), ...(result.writeNotes ?? [])];
     const grantReport = grantLines.length > 0 ? `\n${grantLines.map((l) => `• ${l}`).join('\n')}` : '';
     const success = result.status === 'completed';
     endEvent(this.#runSlotOf(task.id), success

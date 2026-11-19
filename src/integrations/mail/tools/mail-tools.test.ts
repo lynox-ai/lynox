@@ -2348,6 +2348,25 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
     expect(stateDb.isOwnerKnownRecipient('carl@example.com')).toBe(false);
   });
 
+  it('a no to the question where a recipient comes from tells the model it was not allowed, not that it was cancelled', async () => {
+    const { agent } = replyAgent('No');
+    const out = await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);
+    expect(out).toBe('Not sent: the user did not allow sending to "alice@example.com". Do not send this, and do not try again with another recipient or address. Tell the user it was not sent.');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('a recipient of the answered mail that does not read as an address refuses the reply, unasked', async () => {
+    provider.fetch.mockResolvedValue({
+      envelope: { ...envelope(12, { messageId: '<o12@x>', from: 'alice@example.com', subject: 'Angebot' }), cc: [{ address: 'not-an-address' }] },
+      text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    const { agent, asked } = replyAgent('Yes');
+    const out = await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.', reply_all: true }, agent);
+    expect(asked).toEqual([]);
+    expect(out).toContain('Not sent: lynox could not read the recipient of this send');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
   it('a refusal in mail_reply is reported to the run', async () => {
     const refused: unknown[] = [];
     const { agent } = replyAgent(UNATTENDED_BLOCK_ANSWER, { onOriginRefused: (r: unknown) => refused.push(r) });

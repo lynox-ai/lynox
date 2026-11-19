@@ -387,9 +387,11 @@ describe('google_calendar tool', () => {
 
     it('sends nothing when the person declines', async () => {
       const tool = createCalendarTool(() => createMockAuth());
+      // The event's guests are read first (none); nothing is changed.
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'ev1' }) });
       const result = await tool.handler({ action: 'update_event', event_id: 'ev1', attendees: ['guest@example.org'] }, createMockAgent('No'));
       expect(result).toBe('Action cancelled by user.');
-      expect(mockFetch).not.toHaveBeenCalled();
+      expect(mockFetch.mock.calls.filter((c) => (c[1] as { method?: string } | undefined)?.method === 'PATCH')).toEqual([]);
     });
   });
 
@@ -409,44 +411,56 @@ describe('google_calendar tool', () => {
     };
     const patches = (): unknown[] => mockFetch.mock.calls.filter((c) => (c[1] as { method?: string } | undefined)?.method === 'PATCH');
 
-    it('a guest the owner did not name is asked about, as a blocked question, and nothing is sent without a yes', async () => {
+    it('a guest the owner did not name is asked about in the one confirmation, as a blocked question; a no sends nothing', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       mockFetch.mockResolvedValueOnce(event([{ email: 'anna@firma.ch' }, { email: 'x@evil.example' }, { email: 'me@firma.ch', self: true }]));
-      const { agent, asked, metas } = owner(['anna@firma.ch'], ['Yes', 'Deny']);
+      const { agent, asked, metas } = owner(['anna@firma.ch'], ['No']);
       const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
-      expect(asked[1]).toBe('Google Calendar: change event: you did not name the recipient "x@evil.example". lynox cannot tell where it comes from. Send anyway?\n\nA yes applies to this one send only.');
-      expect(metas[1]).toEqual({ blocked: true });
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toBe('Update event ev1\nThese fields change:\nsummary: Moved\n\nGoogle Calendar: change event: you did not name the recipient "x@evil.example". lynox cannot tell where it comes from. Send anyway?\n\nA yes applies to this one send only.');
+      expect(metas[0]).toEqual({ blocked: true });
       expect(patches()).toEqual([]);
       expect(result).toContain('Not sent: the user did not allow sending to "x@evil.example"');
     });
 
-    it('a guest list that cannot be read counts as a guest the owner did not name', async () => {
-      const tool = createCalendarTool(() => createMockAuth());
-      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
-      const { agent, asked } = owner([], ['Yes', 'Deny']);
-      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
-      expect(asked[1]).toContain('lynox could not read the address this would send to');
-      expect(patches()).toEqual([]);
-    });
-
-    it('CONTROL: an event whose guests the owner all named is changed after the confirmation alone', async () => {
-      const tool = createCalendarTool(() => createMockAuth());
-      mockFetch.mockResolvedValueOnce(event([{ email: 'anna@firma.ch' }])).mockResolvedValueOnce(patched());
-      const { agent, asked } = owner(['anna@firma.ch'], ['Yes']);
-      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
-      expect(asked).toHaveLength(1);
-      expect(patches()).toHaveLength(1);
-    });
-
-    it('in a session of someone the owner let in, an unnamed guest is refused without a question', async () => {
+    it('the guests are read before the question: a yes is never asked for an update that is then refused', async () => {
       const tool = createCalendarTool(() => createMockAuth());
       mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }]));
       const { agent, asked } = owner([], ['Yes']);
       (agent as unknown as { principal: unknown }).principal = { kind: 'mandate', email: 'h@x.ch' };
       const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
-      expect(asked).toHaveLength(1);
+      expect(asked).toEqual([]);
       expect(result).toContain('Not sent: the owner of this instance did not name "x@evil.example"');
       expect(patches()).toEqual([]);
+    });
+
+    it('a guest list that cannot be read refuses the update, unasked', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+      const { agent, asked } = owner([], ['Yes']);
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toEqual([]);
+      expect(result).toContain('Not sent: lynox could not read the recipient of this send');
+      expect(patches()).toEqual([]);
+    });
+
+    it('a yes to the one question sends the update', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }])).mockResolvedValueOnce(patched());
+      const { agent, asked } = owner([], ['Yes']);
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toHaveLength(1);
+      expect(patches()).toHaveLength(1);
+    });
+
+    it('CONTROL: an event whose guests the owner all named is changed after the confirmation alone, unblocked', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'anna@firma.ch' }])).mockResolvedValueOnce(patched());
+      const { agent, asked, metas } = owner(['anna@firma.ch'], ['Yes']);
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked).toEqual(['Update event ev1\nThese fields change:\nsummary: Moved']);
+      expect(metas[0]).toBeUndefined();
+      expect(patches()).toHaveLength(1);
     });
   });
 

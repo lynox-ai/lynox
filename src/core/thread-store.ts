@@ -405,6 +405,9 @@ export class ThreadStore {
     });
 
     batch(messages, startSeq);
+    // Disarmed only once the record is stored. A failed write leaves the thread armed, so every
+    // later message of it tries the record again and is refused with it until one succeeds: the
+    // turns of a conversation whose read is not on record are not stored (fail-closed).
     if (recordRead && messages.length > 0) this._readOutsideArmed.delete(threadId);
   }
 

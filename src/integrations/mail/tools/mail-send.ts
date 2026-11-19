@@ -14,6 +14,7 @@ import type { MailContext } from '../context.js';
 import {
   buildSendPreview,
   parseAddressList,
+  recipientFieldTargets,
   sendMail,
   type SendCoreInput,
   type SendCoreOptions,
@@ -21,7 +22,6 @@ import {
 import type { MailRegistry } from './registry.js';
 import type { MailAddress } from '../provider.js';
 import { reflowMailBody } from '../body-reflow.js';
-import { mailTargets } from '../../../core/send-target.js';
 import { currentCallOwnerKnownFor, currentCallFiling } from '../../../core/call-connection.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import { approvalFollowup, type StoredAddress } from '../../../core/approval-store.js';
@@ -52,9 +52,7 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
   return {
     outwardWrite: () => 'send',
     // Every recipient, parsed as the handler parses them for the send.
-    sendTargets: (input) => mailTargets(
-      [input.to, input.cc, input.bcc].flatMap((field) => parseAddressList(field).map((a) => a.address)),
-    ),
+    sendTargets: (input) => recipientFieldTargets([input.to, input.cc, input.bcc], undefined, true),
     definition: {
       name: 'mail_send',
       description:

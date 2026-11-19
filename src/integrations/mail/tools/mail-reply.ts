@@ -16,9 +16,8 @@ import {
   type MailSendResult,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, previewAddressList, recipientFieldTargets, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
-import { mailTargets } from '../../../core/send-target.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry, accountForRow } from './registry.js';
@@ -32,7 +31,7 @@ import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 import { currentCallFiling, currentCallOwnerKnownFor, currentCallTargetOrigin } from '../../../core/call-connection.js';
 import { UNATTENDED_BLOCK_ANSWER } from '../../../core/prompt-store.js';
 import { noticeLanguage } from '../../../core/notice-language.js';
-import { originAsk, originRefusedMandate, originRefusedUnattended, originReplyAsk, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
+import { originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originReplyAsk, originUnreadable, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
 import { normalizeMailTarget } from '../../../core/send-target.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import type { MailReplyPayload, StoredAddress } from '../../../core/approval-store.js';
@@ -62,9 +61,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
     // Only the recipients the call names: the `to` and `cc` overrides, parsed with this tool's
     // own parser. The default recipients (the original sender, and everyone on reply_all) come
     // from the mail being answered, which the input does not hold.
-    sendTargets: (input) => mailTargets(
-      [input.to, input.cc].flatMap((field) => parseAddressList(field).map((a) => a.address)),
-    ),
+    sendTargets: (input) => recipientFieldTargets([input.to, input.cc], parseAddressList),
     definition: {
       name: 'mail_reply',
       description:
@@ -119,8 +116,14 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // confirmation, which is then a blocked question: a run nobody watches refuses it, and a
         // session of someone else the owner let in does not send to it at all.
         const recipients = [...prepared.commit.to, ...prepared.commit.cc].map((a) => a.address);
-        const unnamed = replyRecipientsNotOwnerKnown(agent, recipients);
         const origin: SendOrigin = { kind: 'readMail', sender: prepared.filing.original.from };
+        // A recipient of the mail being answered that does not read as an address refuses the
+        // whole reply, unasked, as the dispatcher does for one the input names.
+        if (recipients.some((r) => normalizeMailTarget(r) === null)) {
+          try { agent.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: 'mail', origin }); } catch { /* the refusal stands */ }
+          return originUnreadable('mail');
+        }
+        const unnamed = replyRecipientsNotOwnerKnown(agent, recipients);
         const targets: OriginTargets = { values: unnamed, unreadable: false };
         const refused = (text: string): string => {
           try { agent.onOriginRefused?.({ targets, noun: 'mail', origin }); } catch { /* the refusal stands */ }
@@ -140,7 +143,9 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         const answer = await agent.promptUser(question, ['Yes', 'No'], unnamed.length > 0 ? { blocked: true } : undefined);
         if (answer === UNATTENDED_BLOCK_ANSWER) return refused(originRefusedUnattended(targets, origin));
         if (!isApproval(answer)) {
-          return 'mail_reply cancelled by user.';
+          // A no to the question where a recipient comes from is said as such, so the model does
+          // not try another recipient.
+          return unnamed.length > 0 ? originDenied(targets) : 'mail_reply cancelled by user.';
         }
 
         // Owner-named in the log only when the dispatcher checked every recipient and found it
@@ -158,8 +163,8 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
 
 /**
  * The recipients of a reply that are neither among the targets the dispatcher checked for this
- * call (the `to`/`cc` overrides, asked about there when foreign) nor owner-known now. A recipient
- * that does not read as an address counts as not named.
+ * call (the `to`/`cc` overrides, asked about there when foreign) nor owner-known now. The caller
+ * refuses a reply with a recipient that does not read as an address before this.
  */
 function replyRecipientsNotOwnerKnown(agent: IAgent, recipients: readonly string[]): string[] {
   const checked = currentCallTargetOrigin();
@@ -167,7 +172,7 @@ function replyRecipientsNotOwnerKnown(agent: IAgent, recipients: readonly string
   const unnamed: string[] = [];
   for (const r of recipients) {
     const target = normalizeMailTarget(r);
-    if (target === null) { unnamed.push(r); continue; }
+    if (target === null) continue;
     if (seen.has(target.value)) continue;
     if ((agent.ownerKnown?.known(target) ?? 'foreign') !== 'known') unnamed.push(target.value);
   }

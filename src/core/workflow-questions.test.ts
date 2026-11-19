@@ -144,8 +144,10 @@ describe('a question of a scheduled workflow run', () => {
     const asked = h.q.ask('rm -rf /?', ['Allow', 'Deny'], { blocked: true });
     expect(await stillPending(asked), 'refused at once, not waiting for an answer').toBe(false);
     // The asker gets the unattended answer, so the model reads why it was refused (where the
-    // target came from), not that the user said no.
+    // target came from), not that the user said no; and the run ends there, as not asked.
     await expect(asked).resolves.toBe(UNATTENDED_BLOCK_ANSWER);
+    expect(h.q.unanswered).toBe(true);
+    expect(h.q.unansweredBecause).toBe('not_asked');
     expect(h.prompts.getPending(RUN_ID)).toBeUndefined();
     expect(h.notified).toEqual([]);
     // Twin, on a fresh run (the refusal ends the run's questions, as a failed write does): the

@@ -3628,6 +3628,16 @@ export class RunHistory {
     return this._requireTriggerStore().markEditedBy(id, editor, clearStamp);
   }
 
+  /** See `TriggerStore.confirmOwnerCreator`. */
+  confirmTriggerRecipients(id: string, expect: string): import('./recipient-confirm.js').RecipientConfirmOutcome {
+    return this._requireTriggerStore().confirmOwnerCreator(id, expect);
+  }
+
+  /** See `TriggerStore.markEditedByRun`. */
+  markTriggerEditedByRun(id: string, runTag: string): boolean {
+    return this._requireTriggerStore().markEditedByRun(id, runTag);
+  }
+
 
   /** Delete a planned pipeline. Returns false if no row matched. */
   deletePlannedPipeline(id: string): boolean {

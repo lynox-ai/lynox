@@ -6,6 +6,7 @@
  *
  */
 
+import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
@@ -1910,12 +1911,15 @@ const ERASURE_MANY_UNKNOWN = 20;
 
 // ── Server Class ─────────────────────────────────────────────────────────────
 
+/** Longer than any message a person types into the composer: such a `typed` is not recorded. */
+export const TYPED_TEXT_MAX = 20_000;
+
 /**
  * The run's typed text from a request: the client's `typed` field, only when it is a non-empty
  * string found word for word in the request's task, cleaned like the task. Anything else: none.
  */
 export function typedOf(typed: unknown, taskText: string): { typedText: string } | undefined {
-  if (typeof typed !== 'string' || typed.trim() === '' || !taskText.includes(typed)) return undefined;
+  if (typeof typed !== 'string' || typed.trim() === '' || typed.length > TYPED_TEXT_MAX || !taskText.includes(typed)) return undefined;
   return { typedText: withoutTypedCredentials(stripUntrustedSeparators(typed)) };
 }
 
@@ -9320,6 +9324,9 @@ export class LynoxHTTPApi {
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
             workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',
+            // A trigger from before its creator was recorded sends to nobody its instruction names
+            // until the owner confirms its recipients; the view offers that to the owner only.
+            recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger),
             ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
           };
         });
@@ -9867,6 +9874,41 @@ export class LynoxHTTPApi {
       }
       jsonResponse(res, 200, { ...triggerForRoute(out.trigger, this._principalOf(_req)), runsAs: out.runsAs });
     }, ownerOnly('take over a plan')));
+
+    // "Confirm recipients" (`recipient-confirm.ts`): the owner, in a browser session, makes a
+    // trigger from before its creator was recorded count as their own. The preview shows the
+    // instruction and its digest; the confirmation sends the digest back and records the owner
+    // as the trigger's creator, and nothing else. A token is refused, the owner's included: a
+    // script or a tool must never be able to make an instruction the owner's.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/triggers/:id/confirm-recipients-preview', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const t = history.getTrigger(params['id']!);
+      if (!t) { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (!recipientsConfirmable(t)) { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, {
+        title: t.title, description: t.description ?? '', effect: t.effect ?? null,
+        pipeline_id: t.pipeline_id ?? null, params: t.pipeline_params ?? null, watch_config: t.watch_config ?? null,
+        expect: recipientConfirmDigest(t),
+      });
+    }, ownerOnly('confirm a trigger\'s recipients')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/confirm-recipients', async (req, res, params, body) => {
+      if (this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'Recipients are confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm from the preview.', 'expect_required'); return; }
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const out = history.confirmTriggerRecipients(params['id']!, expected);
+      if (out === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (out === 'changed') { errorResponse(res, 409, 'Nothing confirmed: the trigger has changed in the meantime.', 'changed'); return; }
+      if (out === 'not_confirmable') { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, { confirmed: true });
+    }, ownerOnly('confirm a trigger\'s recipients')));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
     // control). Delegates to the WorkerLoop so the manual run goes through the

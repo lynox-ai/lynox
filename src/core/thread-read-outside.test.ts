@@ -51,6 +51,13 @@ describe('ThreadStore: the record of outside reads', () => {
     expect(() => store.appendMessages('th', [{ role: 'user', content: 'tool result' }], 0)).toThrow(ReadOutsideUnrecordedError);
     expect(count(history, 'SELECT COUNT(*) AS n FROM thread_messages')).toBe(0);
     expect(store.readOutside('th')).toBe(true);
+    // Fail-closed until a write succeeds: the next message that can be stored carries the record,
+    // and only then is the thread no longer armed in memory.
+    history.getDb().exec('DROP TRIGGER fail_read_outside');
+    store.appendMessages('th', [{ role: 'user', content: 'weiter' }], 0);
+    expect(count(history, 'SELECT COUNT(*) AS n FROM thread_read_outside')).toBe(1);
+    expect((store as unknown as { _readOutsideArmed: Set<string> })._readOutsideArmed.has('th')).toBe(false);
+    expect(store.readOutside('th'), 'the stored record still says so').toBe(true);
   });
 
   it('a message that carries outside content writes the record without an arm', () => {

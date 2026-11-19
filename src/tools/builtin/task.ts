@@ -418,7 +418,15 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       // reminder to confirm it says so (worker-loop `consentOneBody`), and what its run files for
       // approval counts as after outside content (`executeStandard` → `afterUntrusted`). Only a
       // workflow run is also seeded tainted (`executePipeline`); a run_agent run is not.
-      const createdUntrusted = describeTurnUntrusted(agent);
+      // The instruction is the model's text, and it can carry what the conversation took in: a turn
+      // in a thread someone the owner let in started, or one whose conversation read outside
+      // content earlier (the latch, also after a compaction summarized the read away), files it as
+      // taken in from the conversation, so it never counts as the owner's own instruction.
+      const turnCause = describeTurnUntrusted(agent);
+      const createdUntrusted = turnCause === 'none'
+        && (agent.sendOrigin?.kind === 'helperThread' || agent.conversationLatch?.isSet() === true)
+        ? 'conversation' as const
+        : turnCause;
       const baseParams = {
         title: input.title,
         description: input.description,
@@ -678,6 +686,12 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (!isOwnerPrincipal(agent.principal)) {
           const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
           if (trigger) w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue);
+        } else if (agent.writeAuthor !== principalTag(OWNER_PRINCIPAL)) {
+          // Under the owner's principal but not the owner's own turn (a trigger's or a workflow's
+          // run): the change is the run's, so the trigger's instruction stops counting as the
+          // owner's. An unknown author is marked as such, never left as the owner.
+          const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
+          if (trigger) w.run('mark', () => managerRef.markEditedByRun(trigger.id, agent.writeAuthor ?? 'unknown'), ifTrue);
         }
         if (input.status === 'completed') {
           const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal), ifNonNull);

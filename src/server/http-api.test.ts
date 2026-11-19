@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, onTestFinished } from 'vitest';
+import { recipientConfirmDigest } from '../core/recipient-confirm.js';
 import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
@@ -6,7 +7,7 @@ import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, statSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
@@ -1321,6 +1322,95 @@ describe('LynoxHTTPApi', () => {
       expect(eraseRefusal()).toContain('support@lynox.ai');
       delete process.env['LYNOX_MANAGED_MODE'];
       delete process.env['LYNOX_BILLING_TIER'];
+    });
+
+    describe('confirm a trigger\'s recipients', () => {
+      const LEGACY = { id: 'old-1', title: 'Bericht', description: 'an anna@firma.ch', effect: 'run_agent' };
+      const withHistory = async <T>(trigger: Record<string, unknown> | undefined, run: (confirmed: Array<[string, string]>) => Promise<T>): Promise<T> => {
+        const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const saved = ref['getRunHistory'];
+        const confirmed: Array<[string, string]> = [];
+        ref['getRunHistory'] = () => ({
+          getTrigger: () => trigger,
+          confirmTriggerRecipients: (id: string, expect: string) => { confirmed.push([id, expect]); return expect === recipientConfirmDigest(trigger as never) ? 'confirmed' : 'changed'; },
+        });
+        try { return await run(confirmed); } finally { ref['getRunHistory'] = saved; }
+      };
+      const post = (headers: Record<string, string>, expect: string): Promise<Response> => fetch(`${baseUrl}/api/triggers/old-1/confirm-recipients`, {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ expect }),
+      });
+      const owner = (): Record<string, string> => ({ cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}` });
+
+      it('the owner\'s browser session confirms what the preview showed', async () => {
+        repayRateWindow();
+        await withHistory(LEGACY, async (confirmed) => {
+          const shown = await (await fetch(`${baseUrl}/api/triggers/old-1/confirm-recipients-preview`, { headers: owner() })).json() as { expect: string; description: string };
+          expect(shown.description).toBe('an anna@firma.ch');
+          const res = await post(owner(), shown.expect);
+          expect(res.status).toBe(200);
+          expect(confirmed).toEqual([['old-1', shown.expect]]);
+        });
+      });
+
+      it('a token is refused, the owner\'s own included, and nothing is confirmed', async () => {
+        repayRateWindow();
+        await withHistory(LEGACY, async (confirmed) => {
+          const res = await post(authHeaders(), recipientConfirmDigest(LEGACY as never));
+          expect(res.status).toBe(403);
+          expect(((await res.json()) as { code?: string }).code).toBe('session_only');
+          expect(confirmed).toEqual([]);
+        });
+      });
+
+      it('a mandate\'s session is refused, and nothing is confirmed', async () => {
+        repayRateWindow();
+        await withHistory(LEGACY, async (confirmed) => {
+          const res = await post({ cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token}` }, recipientConfirmDigest(LEGACY as never));
+          expect(res.status).toBe(403);
+          expect(confirmed).toEqual([]);
+        });
+      });
+
+      it('a trigger changed between the preview and the click answers 409 changed', async () => {
+        repayRateWindow();
+        const shownBefore = recipientConfirmDigest(LEGACY as never);
+        await withHistory({ ...LEGACY, description: 'an x@evil.example' }, async () => {
+          const res = await post(owner(), shownBefore);
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { code?: string }).code).toBe('changed');
+        });
+      });
+
+      it('the list flags such a trigger for the owner only', async () => {
+        repayRateWindow();
+        const listed = [{ ...LEGACY, status: 'open' }, { ...LEGACY, id: 'own-1', created_by: 'owner', status: 'open' }];
+        const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const saved = [ref['getTaskManager'], ref['getWorkerLoop']];
+        ref['getTaskManager'] = () => ({ listTriggers: () => listed });
+        ref['getWorkerLoop'] = () => null;
+        try {
+          const rowsFor = async (headers: Record<string, string>): Promise<Array<[string, unknown]>> =>
+            ((await (await fetch(`${baseUrl}/api/triggers`, { headers })).json()) as { triggers: Array<{ id: string; recipients_unconfirmed?: boolean }> }).triggers.map((r) => [r.id, r.recipients_unconfirmed]);
+          expect(await rowsFor(owner())).toEqual([['old-1', true], ['own-1', false]]);
+          expect(await rowsFor({ cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token}` })).toEqual([['old-1', false], ['own-1', false]]);
+        } finally { [ref['getTaskManager'], ref['getWorkerLoop']] = saved; }
+      });
+    });
+
+    it('no tool reaches the route that confirms a trigger\'s recipients', () => {
+      const hits: string[] = [];
+      const walk = (dir: string): void => {
+        for (const name of readdirSync(dir)) {
+          const path = join(dir, name);
+          if (statSync(path).isDirectory()) { walk(path); continue; }
+          if (!path.endsWith('.ts') || path.endsWith('.test.ts')) continue;
+          if (readFileSync(path, 'utf8').includes('confirm-recipients')) hits.push(path.slice(path.indexOf('src/')));
+        }
+      };
+      walk(join(import.meta.dirname, '..'));
+      // Positive control: the scan finds the route itself.
+      expect(hits).toContain('src/server/http-api.ts');
+      expect(hits).toEqual(['src/server/http-api.ts']);
     });
 
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
@@ -11463,7 +11553,7 @@ describe('LynoxHTTPApi', () => {
       // (`triggerForRoute`), on by default since the takeover is in the view.
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
-        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'running', 'stoppable', 'title', 'workflow_awaits_stamp']);
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'recipients_unconfirmed', 'running', 'stoppable', 'title', 'workflow_awaits_stamp']);
       });
     });
 
@@ -11992,6 +12082,9 @@ describe('LynoxHTTPApi', () => {
       expect(await typedOfRun({ task: 'Schick es an anna@firma.ch', typed: 'x@evil.example' })).toBeUndefined();
       expect(await typedOfRun({ task: 'Schick es', typed: '' })).toBeUndefined();
       expect(await typedOfRun({ task: 'Schick es', typed: 42 })).toBeUndefined();
+      // Longer than anyone types: not recorded.
+      const long = `an x@evil.example ${'a'.repeat(20_000)}`;
+      expect(await typedOfRun({ task: long, typed: long })).toBeUndefined();
       // CONTROL: typed words that stand in the task are taken.
       expect(await typedOfRun({ task: 'Schick es an anna@firma.ch', typed: 'Schick es an anna@firma.ch' })).toBe('Schick es an anna@firma.ch');
     });
@@ -22994,7 +23087,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/confirm-recipients-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });

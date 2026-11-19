@@ -84,7 +84,7 @@ import { noticeLanguage } from './notice-language.js';
 import { normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
 import {
   originAsk, originBashAfterForeign, originDenied, originLookupFailedHead, originLookupFailedMandate, originLookupFailedUnattended,
-  originRefusedMandate, originRefusedUnattended, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
+  originRefusedMandate, originRefusedUnattended, originUnreadable, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
 } from './origin-notices.js';
 import type { CallTargetOrigin } from './call-connection.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -5114,8 +5114,8 @@ export class Agent implements IAgent {
    *   reply's sender) and checks them itself; it is no assurance, so it is never `allKnown`.
    * - Every target owner-known: passes, and the slot says so (`allKnown`), which is what lets a
    *   mail be logged as sent to owner-named recipients.
-   * - Otherwise (a target not owner-known, a source that could not be read, targets that could
-   *   not be read): a call filed for approval passes and its card names the origin; a session of
+   * - A target that could not be read: the whole call is refused, in every session, unasked.
+   * - Otherwise (a target not owner-known, a source that could not be read): a call filed for approval passes and its card names the origin; a session of
    *   someone other than the owner is refused; a run with no one to ask is refused; the owner is
    *   asked with a blocked question, which a run nobody watches refuses before it is stored. A
    *   yes holds for this call only: nothing is added, and the slot is not `allKnown`.
@@ -5131,16 +5131,29 @@ export class Agent implements IAgent {
       targetsUnread = true;
     }
     if (targets === null) return {};
-    if (targets.length === 0 && !targetsUnread) return { origin: { known: [], allKnown: false } };
+    // A target that could not be read (the declaration threw: an address that does not parse, an
+    // empty one, a recipient field that yields none) refuses the whole call, in every session and
+    // without a question: a yes to a target nobody can see would hold for anything.
+    if (targetsUnread) {
+      const unreadNoun: TargetNoun = tc.name === 'http_request' ? 'host' : 'mail';
+      try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
+      if (guardRefuses) return {};
+      const text = originUnreadable(unreadNoun);
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+      }
+      return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
+    }
+    if (targets.length === 0) return { origin: { known: [], allKnown: false } };
     const verdicts = targets.map((t) => ({ target: t, verdict: this._ownerKnownVerdict(t) }));
     const foreign = verdicts.filter((v) => v.verdict !== 'known');
     const known = verdicts.filter((v) => v.verdict === 'known').map((v) => v.target.value);
-    if (foreign.length === 0 && !targetsUnread) return { origin: { known, allKnown: true } };
+    if (foreign.length === 0) return { origin: { known, allKnown: true } };
 
-    const lookupFailed = targetsUnread || foreign.some((v) => v.verdict === 'unreadable');
+    const lookupFailed = foreign.some((v) => v.verdict === 'unreadable');
     const shownTargets = foreign.map((v) => v.target.value);
-    const shown: OriginTargets = { values: shownTargets, unreadable: targetsUnread };
-    const noun: TargetNoun = foreign[0]?.target.kind === 'host' || (foreign.length === 0 && tc.name === 'http_request') ? 'host' : 'mail';
+    const shown: OriginTargets = { values: shownTargets, unreadable: false };
+    const noun: TargetNoun = foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
     const origin = this.originOfTargets();
     const passed: CallTargetOrigin = { known, allKnown: false, unnamed: { targets: shownTargets, origin } };
     // The guard refuses this call without asking anyone, with its own text; the run's owner still

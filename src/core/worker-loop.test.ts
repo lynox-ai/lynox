@@ -306,7 +306,7 @@ describe('WorkerLoop', () => {
     );
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' } } },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' }, predatesRecord: true } },
     );
   });
 
@@ -349,7 +349,7 @@ describe('WorkerLoop', () => {
 
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' } } },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' }, predatesRecord: true } },
     );
   });
 
@@ -2775,7 +2775,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' } } });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' }, predatesRecord: true } });
   });
 
   it('does not duplicate the title when description equals title', async () => {
@@ -2792,7 +2792,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' } } });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' }, predatesRecord: true } });
   });
 
   // ---- 13. resolveTaskInput resolves pending input ----

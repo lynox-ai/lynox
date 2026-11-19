@@ -28,7 +28,8 @@ export type TriggerSetUpBy =
 export type SendOrigin =
   | { readonly kind: 'helperThread'; readonly helper: string }
   /** `predatesRecord`: the trigger was set up before its creator was recorded, so its own
-   *  instruction cannot count as the owner's; saving it once as the owner does. */
+   *  instruction cannot count as the owner's; the owner confirming its recipients in the
+   *  Triggers view does. */
   | { readonly kind: 'triggerRun'; readonly name: string; readonly setUpBy: TriggerSetUpBy; readonly predatesRecord?: boolean | undefined }
   | { readonly kind: 'workflowRun'; readonly name: string }
   | { readonly kind: 'readMail'; readonly sender: string }
@@ -53,9 +54,14 @@ export interface OriginRefusal {
   readonly origin: SendOrigin;
 }
 
+/** Every character that reads as a quote mark: the initial and final quote punctuation of every
+ *  script, and the look-alikes Unicode files elsewhere (fullwidth, primes, CJK corner brackets,
+ *  ornaments). */
+const QUOTE_LIKE = /["`\p{Pi}\p{Pf}\u201A\u201E\uFF02\u2033\u2036\u301D\u301E\u301F\u300C\u300D\u300E\u300F\u2039\u203A\u275D\u275E\u275B\u275C\u2E42\uFF62\uFF63]/gu;
+
 /** A value for inside ASCII quotes: one line, and no quote of its own. */
 export function q(v: string): string {
-  return singleLine(v).replace(/["„“”«»‘’‚`]/gu, "'");
+  return singleLine(v).replace(QUOTE_LIKE, "'");
 }
 
 const quoted = (v: string): string => `"${q(v)}"`;
@@ -126,12 +132,12 @@ const TOOL_WORDS: Readonly<Record<string, readonly [de: string, en: string]>> = 
 /** The tool names {@link toolWord} has words for; a test holds this against every tool that declares send targets. */
 export const TOOLS_WITH_WORDS: ReadonlySet<string> = new Set(Object.keys(TOOL_WORDS).map((k) => k.split(':')[0]!));
 
-/** The word a question starts with. A tool without words of its own gets the general one, never its name. */
+/** The word a question starts with. A tool without words of its own is named as an external tool, in quotes. */
 function toolWord(tool: string, input: unknown, lang: NoticeLanguage): string {
   const action = typeof input === 'object' && input !== null ? (input as { action?: unknown }).action : undefined;
   const key = tool === 'google_calendar' ? `google_calendar:${action === 'update_event' || action === 'update' ? 'update' : 'create'}` : tool;
-  // wording pending review: the general word for a tool without words of its own.
-  const pair = TOOL_WORDS[key] ?? ['Senden', 'Send'];
+  const pair = TOOL_WORDS[key];
+  if (pair === undefined) return lang === 'de' ? `Externes Werkzeug ${quoted(tool)}` : `External tool ${quoted(tool)}`;
   return lang === 'de' ? pair[0] : pair[1];
 }
 
@@ -144,11 +150,6 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
   const from = originFrom(origin, lang);
   const list = targetList(targets, lang);
   const many = countOf(targets) > 1;
-  if (targets.values.length === 0) {
-    // wording pending review: a question whose only target did not read as an address.
-    const head = lang === 'de' ? pv`${word}: lynox konnte die Adresse nicht lesen, an die gesendet werden soll. ` : pv`${word}: lynox could not read the address this would send to. `;
-    return pv`${head}${lang === 'de' ? 'Trotzdem senden?' : 'Send anyway?'}\n\n${originAskOnce(lang)}`;
-  }
   if (lang === 'de') {
     const head = noun === 'mail'
       ? (many ? pv`${word}: Die Empfänger ${list} hast nicht du genannt. ` : pv`${word}: Den Empfänger ${list} hast nicht du genannt. `)
@@ -185,42 +186,57 @@ export function originDenied(targets: OriginTargets): string {
   return `Not sent: the user did not allow sending to ${targetList(targets, 'en')}. Do not send this, and do not try again with another recipient or address. Tell the user it was not sent.`;
 }
 
-/** "it comes from …" for a model text, or the sentence that says it is not known. */
-function comesFrom(origin: SendOrigin): string {
+/** "it comes from …" / "they come from …" for a model text, or the sentence that says it is not known. */
+function comesFrom(origin: SendOrigin, many: boolean): string {
   const from = fromText(origin, 'en');
-  return from === null ? 'lynox cannot tell where it comes from' : `it comes from ${from}`;
+  if (from === null) return `lynox cannot tell where ${many ? 'they come' : 'it comes'} from`;
+  return `${many ? 'they come' : 'it comes'} from ${from}`;
 }
 
-const UNATTENDED_REST = 'A run without a reader cannot ask the owner, so lynox does not send to it. Do not try another recipient or address. Report that this send needs the owner: they can start it again from the chat, where lynox can ask them.';
-const mandateRest = (noun: TargetNoun): string =>
-  `In this session lynox does not send to such a ${noun === 'mail' ? 'recipient' : 'address'} and cannot ask. Do not try another recipient or address. Tell the user that only the owner can send this, from their own chat.`;
+const unattendedRest = (many: boolean): string =>
+  `A run without a reader cannot ask the owner, so lynox does not send to ${many ? 'them' : 'it'}. Do not try another recipient or address. Report that this send needs the owner: they can start it again from the chat, where lynox can ask them.`;
+const mandateRest = (noun: TargetNoun, many: boolean): string => {
+  const what = noun === 'mail' ? (many ? 'such recipients' : 'such a recipient') : (many ? 'such addresses' : 'such an address');
+  return `In this session lynox does not send to ${what} and cannot ask. Do not try another recipient or address. Tell the user that only the owner can send this, from their own chat.`;
+};
 
 /** To the model, in a run nobody watches. A trigger from before its creator was recorded says how to fix that. */
 export function originRefusedUnattended(targets: OriginTargets, origin: SendOrigin): string {
+  const many = countOf(targets) > 1;
   if (origin.kind === 'triggerRun' && origin.predatesRecord === true) {
-    return `Not sent: the trigger "${q(origin.name)}" dates from before an update, so lynox cannot tell that the owner set it up, and ${targetList(targets, 'en')} does not count as named by the owner. Do not try another recipient or address. Report that the owner can open the trigger once and save it again; after that it sends.`;
+    return `Not sent: the trigger "${q(origin.name)}" dates from before an update, so lynox cannot tell that the owner set it up, and ${targetList(targets, 'en')} ${many ? 'do' : 'does'} not count as named by the owner. Do not try another recipient or address. Report that the owner can open the trigger under Triggers and choose "Confirm recipients"; after that it sends.`;
   }
-  return `Not sent: the owner did not name ${targetList(targets, 'en')}; ${comesFrom(origin)}. ${UNATTENDED_REST}`;
+  return `Not sent: the owner did not name ${targetList(targets, 'en')}; ${comesFrom(origin, many)}. ${unattendedRest(many)}`;
 }
 
 /** To the model, in a session of someone the owner let in. */
 export function originRefusedMandate(targets: OriginTargets, origin: SendOrigin, noun: TargetNoun): string {
-  return `Not sent: the owner of this instance did not name ${targetList(targets, 'en')}; ${comesFrom(origin)}. ${mandateRest(noun)}`;
+  const many = countOf(targets) > 1;
+  return `Not sent: the owner of this instance did not name ${targetList(targets, 'en')}; ${comesFrom(origin, many)}. ${mandateRest(noun, many)}`;
+}
+
+/**
+ * To the model, in any session, when a target of the call could not be read: the whole call is
+ * refused, without a question. A yes to a target nobody can see would hold for anything.
+ */
+export function originUnreadable(noun: TargetNoun): string {
+  return `Not sent: lynox could not read the ${noun === 'mail' ? 'recipient' : 'address'} of this send, so it does not send and cannot ask. Do not try another recipient or address. Tell the user it was not sent and that lynox could not read where it should go.`;
 }
 
 /** The beginning of a model text when a source could not be read; the rest follows the situation. */
 export function originLookupFailedHead(targets: OriginTargets): string {
-  return `lynox could not check where ${targetList(targets, 'en')} comes from, so it counts as not named by the owner.`;
+  const many = countOf(targets) > 1;
+  return `lynox could not check where ${targetList(targets, 'en')} ${many ? 'come' : 'comes'} from, so ${many ? 'they count' : 'it counts'} as not named by the owner.`;
 }
 
 /** To the model, in a run nobody watches, when a source could not be read. */
 export function originLookupFailedUnattended(targets: OriginTargets): string {
-  return `${originLookupFailedHead(targets)} ${UNATTENDED_REST}`;
+  return `${originLookupFailedHead(targets)} ${unattendedRest(countOf(targets) > 1)}`;
 }
 
 /** To the model, in a mandate's session, when a source could not be read. */
 export function originLookupFailedMandate(targets: OriginTargets, noun: TargetNoun): string {
-  return `${originLookupFailedHead(targets)} ${mandateRest(noun)}`;
+  return `${originLookupFailedHead(targets)} ${mandateRest(noun, countOf(targets) > 1)}`;
 }
 
 /** The line on an approval card for a mail a run filed. */
@@ -244,17 +260,17 @@ export function originRunNotice(name: string, refusal: OriginRefusal, lang: Noti
   const tail = lang === 'de'
     ? 'Ein Lauf ohne dich kann nicht nachfragen. Soll es trotzdem hinaus, bitte lynox im Chat darum, dann fragt lynox dich.'
     : 'A run without you cannot ask. If it should go out anyway, ask lynox in the chat, and lynox will ask you.';
-  if (targets.values.length === 0) {
-    // wording pending review: the rest of the sentence when the only target did not read.
+  // A target that could not be read refuses the whole call: the notice names no list.
+  if (targets.unreadable || targets.values.length === 0) {
     return lang === 'de'
-      ? `${trigger} hat nicht gesendet: lynox konnte die Adresse nicht lesen, darum gilt sie als nicht von dir genannt. ${tail}`
-      : `${trigger} did not send: lynox could not read the address, so it counts as not named by you. ${tail}`;
+      ? `${trigger} hat nicht gesendet: lynox konnte ${noun === 'mail' ? 'den Empfänger' : 'die Adresse'} nicht lesen. Prüfe den Trigger mit lynox im Chat.`
+      : `${trigger} did not send: lynox could not read the ${noun === 'mail' ? 'recipient' : 'address'}. Check the trigger with lynox in the chat.`;
   }
   const list = targetList(targets, lang);
   if (origin.kind === 'triggerRun' && origin.predatesRecord === true) {
     return lang === 'de'
-      ? `${trigger} hat nicht an ${list} gesendet: Er stammt aus der Zeit vor einem Update, darum weiss lynox nicht, dass du ihn angelegt hast. Öffne ihn einmal und speichere ihn neu, danach zählen seine Empfänger als von dir genannt.`
-      : `${trigger} did not send to ${list}: it dates from before an update, so lynox cannot tell that you set it up. Open it once and save it again; after that its recipients count as named by you.`;
+      ? `${trigger} hat nicht an ${list} gesendet: Er stammt aus der Zeit vor einem Update, darum weiss lynox nicht, dass du ihn angelegt hast. Öffne ihn unter Trigger und wähle „Empfänger bestätigen“, danach sendet er wieder.`
+      : `${trigger} did not send to ${list}: it dates from before an update, so lynox cannot tell that you set it up. Open it under Triggers and choose "Confirm recipients"; after that it sends again.`;
   }
   const many = countOf(targets) > 1;
   const from = fromText(origin, lang);

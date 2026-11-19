@@ -141,13 +141,41 @@ describe('in the owner\'s chat', () => {
     expect(String(result.content)).toContain('lynox could not check where "anna@firma.ch" comes from, so it counts as not named by the owner.');
   });
 
-  it('targets that cannot be read count as foreign', async () => {
+  it('a target that cannot be read refuses the whole call, also next to a readable one, in the owner\'s chat, unasked', async () => {
     const tool = sender();
-    const ask = asker('Deny');
-    const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('anna@firma.ch') });
-    await call(agent, 'mail_send', { to: ['not an address'] });
-    expect(ask.asked).toHaveLength(1);
+    const ask = asker('Allow');
+    const refused: unknown[] = [];
+    const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('anna@firma.ch'), onOriginRefused: (r: unknown) => refused.push(r) });
+    const result = await call(agent, 'mail_send', { to: ['anna@firma.ch', 'not an address'] });
+    expect(ask.asked, 'no question: a yes to a target nobody can see would hold for anything').toEqual([]);
     expect(tool.calls).toEqual([]);
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain('Not sent: lynox could not read the recipient of this send, so it does not send and cannot ask. Do not try another recipient or address. Tell the user it was not sent and that lynox could not read where it should go.');
+    expect(refused).toEqual([{ targets: { values: [], unreadable: true }, noun: 'mail', origin: { kind: 'unknown' } }]);
+  });
+
+  it('a recipient field that yields no address refuses the call; an empty field does not', async () => {
+    const { recipientFieldTargets } = await import('../integrations/mail/send-core.js');
+    expect(() => recipientFieldTargets(['Anna Muster'])).toThrow();
+    expect(() => recipientFieldTargets([42])).toThrow();
+    // CONTROL: a field that is not set, or set to nothing, sends to nobody and is no target.
+    expect(recipientFieldTargets([undefined, '', '  '])).toEqual([]);
+    expect(recipientFieldTargets(['Anna <anna@firma.ch>'])).toEqual([{ kind: 'mail', value: 'anna@firma.ch' }]);
+  });
+
+  it('a send with no default recipient and every recipient field empty is unreadable, never an empty list', async () => {
+    const { recipientFieldTargets } = await import('../integrations/mail/send-core.js');
+    expect(() => recipientFieldTargets([undefined, '', '  '], undefined, true)).toThrow();
+    // CONTROL: one readable recipient is enough, and the plain form keeps an empty list for a
+    // send that has a default recipient (a reply goes to the read mail's sender).
+    expect(recipientFieldTargets(['', 'anna@firma.ch'], undefined, true)).toEqual([{ kind: 'mail', value: 'anna@firma.ch' }]);
+    expect(recipientFieldTargets([undefined, ''])).toEqual([]);
+    // The send tool itself declares it so: a mail_send with every field empty is unreadable.
+    const { createMailSendTool } = await import('../integrations/mail/tools/mail-send.js');
+    const mailSend = createMailSendTool({} as unknown as Parameters<typeof createMailSendTool>[0]);
+    expect(() => mailSend.sendTargets!({ to: '', subject: 's', body: 'b' } as Parameters<NonNullable<typeof mailSend.sendTargets>>[0])).toThrow();
+    expect(mailSend.sendTargets!({ to: 'anna@firma.ch', subject: 's', body: 'b' } as Parameters<NonNullable<typeof mailSend.sendTargets>>[0]))
+      .toEqual([{ kind: 'mail', value: 'anna@firma.ch' }]);
   });
 
   it('an empty list is no assurance: the call goes on to its handler, never marked owner-named', async () => {

@@ -5,6 +5,7 @@ import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTr
 import type { DeliverySummary } from './notification-router.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
 import { PLAN_PAUSE_SQL_FN, planPauseOn } from './plan-pause.js';
+import { recipientConfirmDigest, recipientsConfirmable, type RecipientConfirmOutcome } from './recipient-confirm.js';
 
 /**
  * The parked status, as a typed constant rather than a SQL literal, so the two
@@ -802,6 +803,36 @@ export class TriggerStore {
         ? `UPDATE triggers SET edited_by = ?${mandate}, confirmed_at = NULL, confirmed_by = NULL, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}, updated_at = datetime('now') WHERE id = ?`
         : `UPDATE triggers SET edited_by = ?${mandate}, updated_at = datetime('now') WHERE id = ?`,
     ).run(...params, id).changes > 0;
+  }
+
+  /**
+   * The owner confirms the recipients of a trigger from before its creator was recorded
+   * (`recipient-confirm.ts`): its creator becomes the owner, and nothing else changes. Read, checked
+   * and written in one transaction, so a change between the check and the write cannot slip in:
+   * the trigger must still be confirmable and its instruction must still be the one the owner was
+   * shown (`expect`).
+   */
+  confirmOwnerCreator(id: string, expect: string): RecipientConfirmOutcome {
+    return this.db.transaction((): RecipientConfirmOutcome => {
+      const t = this.getById(id);
+      if (t === undefined) return 'not_found';
+      if (!recipientsConfirmable(t)) return 'not_confirmable';
+      if (recipientConfirmDigest(t) !== expect) return 'changed';
+      const changed = this.db.prepare(
+        `UPDATE triggers SET created_by = ? WHERE id = ? AND COALESCE(created_by, '') = ''`,
+      ).run(principalTag({ kind: 'owner' }), t.id).changes;
+      return changed > 0 ? 'confirmed' : 'not_confirmable';
+    })();
+  }
+
+  /**
+   * A run's change of a trigger under the owner's principal (a trigger's or a workflow's run, any
+   * session turn the owner did not write): `edited_by` takes the run's tag, so the trigger's
+   * instruction no longer counts as the owner's (`ownerInstructionCounts`). The stamp stays: the
+   * run acted for the owner, and the schedule keeps running as before.
+   */
+  markEditedByRun(id: string, runTag: string): boolean {
+    return this.db.prepare(`UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ?`).run(runTag, id).changes > 0;
   }
 
   /**

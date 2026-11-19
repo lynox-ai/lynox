@@ -948,6 +948,14 @@ export class TaskManager {
     return this.history.markTriggerEditedBy(trigger.id, editor, clearStamp);
   }
 
+  /** A run's change of a trigger under the owner's principal: see `TriggerStore.markEditedByRun`. */
+  markEditedByRun(id: string, runTag: string): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (!trigger) return false;
+    refuseBulkTrigger(trigger);
+    return this.history.markTriggerEditedByRun(trigger.id, runTag);
+  }
+
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */
   createWatch(params: TaskCreateParams & {
     watchUrl: string;

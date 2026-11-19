@@ -144,9 +144,15 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
         handRun: deps.handRun,
       });
     } catch (err: unknown) {
-      // A blocked question (where a send target comes from) is refused before it is stored: the
-      // caller reads the refusal and says it to the model in its own words.
-      if (err instanceof UnattendedBlockError) return UNATTENDED_BLOCK_ANSWER;
+      // A blocked question (where a send target comes from, a guard's hard block) is refused before
+      // it is stored. The run ends there, visibly, as a question it could not ask: a step that
+      // went on without the answer could end the run succeeded with the owner told nothing. The
+      // asker still gets the unattended answer, so a send check reports where its target came
+      // from (`onOriginRefused`), which the run's result then names.
+      if (err instanceof UnattendedBlockError) {
+        this.#endUnanswered('not_asked');
+        return UNATTENDED_BLOCK_ANSWER;
+      }
       // A database the engine already closed is the teardown, as after the wait.
       if (!store.isOpen()) return neverSettles();
       // Otherwise the question could not be put to the owner — e.g. a question of the owner's

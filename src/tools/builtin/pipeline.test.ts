@@ -1499,6 +1499,18 @@ describe('runSavedWorkflow', () => {
     expect(mockRunManifest.mock.calls.map((c) => (c[2] as { paramsKeptFromSteps?: boolean }).paramsKeptFromSteps)).toEqual([true, undefined]);
   });
 
+  it('a send its steps refuse for a target the owner did not name comes back with the result', async () => {
+    const id = seedSavedWorkflow();
+    const refusal = { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } };
+    // The step's send check reports through the run's accumulator, as a step agent does.
+    mockRunManifest.mockImplementationOnce(async (_m: unknown, _c: unknown, opts: { runTaint?: { onOriginRefused?: (r: unknown) => void } }) => {
+      opts.runTaint?.onOriginRefused?.(refusal);
+      return makeRunState({ runId: 'r-o' });
+    });
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL });
+    expect(result.originRefusals).toEqual([refusal]);
+  });
+
   it('CONTROL: runs a workflow the caller\'s check lets through', async () => {
     const id = seedSavedWorkflow();
     mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'fresh-run-2' }));
@@ -2473,7 +2485,7 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL, tools: mockTools });
     const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
-    expect(opts['runTaint']).toEqual({ seeded: 'none', earned: 'none' });
+    expect(opts['runTaint']).toEqual({ seeded: 'none', earned: 'none', onOriginRefused: expect.any(Function) });
   });
 
   it('seeds the headless run from what the scheduling session had taken in', async () => {
@@ -2487,7 +2499,7 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL, tools: mockTools, seed: 'external-tool' });
     const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
-    expect(opts['runTaint']).toEqual({ seeded: 'external-tool', earned: 'none' });
+    expect(opts['runTaint']).toEqual({ seeded: 'external-tool', earned: 'none', onOriginRefused: expect.any(Function) });
   });
 
   it('leaves secretStore undefined for a chat agent with no vault (backward-compat)', async () => {
