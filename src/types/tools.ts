@@ -178,6 +178,14 @@ export interface ToolEntry<TInput = unknown> {
    */
   sendTargets?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
   /**
+   * Like `sendTargets`, but read only while the conversation latch is set: once something from
+   * outside the owner's own words is in the conversation. For a call that is a plain read on a
+   * clean conversation and can carry data out only after foreign content arrived (a GET whose
+   * query a read page could have filled). Same contract as `sendTargets`; a tool declares one of
+   * the two, and `sendTargets` wins if both are set.
+   */
+  sendTargetsWhenLatched?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
+  /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
    * looping back to the model. Use for terminal tools whose whole job is a

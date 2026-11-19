@@ -5121,11 +5121,13 @@ export class Agent implements IAgent {
    *   yes holds for this call only: nothing is added, and the slot is not `allKnown`.
    */
   private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean, guardRefuses = false): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
-    if (tool.sendTargets === undefined) return {};
+    const declared = tool.sendTargets
+      ?? (tool.sendTargetsWhenLatched !== undefined && this.conversationLatch?.isSet() === true ? tool.sendTargetsWhenLatched : undefined);
+    if (declared === undefined) return {};
     let targets: readonly SendTarget[] | null;
     let targetsUnread = false;
     try {
-      targets = tool.sendTargets(tc.input);
+      targets = declared(tc.input);
     } catch {
       targets = [];
       targetsUnread = true;
@@ -5135,7 +5137,7 @@ export class Agent implements IAgent {
     // empty one, a recipient field that yields none) refuses the whole call, in every session and
     // without a question: a yes to a target nobody can see would hold for anything.
     if (targetsUnread) {
-      const unreadNoun: TargetNoun = tc.name === 'http_request' ? 'host' : 'mail';
+      const unreadNoun: TargetNoun = tc.name === 'http_request' || tc.name === 'web_research' ? 'host' : 'mail';
       try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
       if (guardRefuses) return {};
       const text = originUnreadable(unreadNoun);

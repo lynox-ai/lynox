@@ -10,6 +10,20 @@ import { rerankSearchResults } from './search-reranker.js';
 import { currentCallSignal } from '../../core/call-connection.js';
 import { delegatedRedirects, httpTarget, outwardReadRecorder } from '../../core/audit-log.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
+import { hostTargets } from '../../core/send-target.js';
+
+/**
+ * Whether a read URL carries a query, the part a server receives as data. The fragment never
+ * leaves the browser side, so it is not checked. A URL that does not parse counts as carrying
+ * one: the check then refuses it as unreadable instead of letting it through.
+ */
+export function readUrlHasQuery(url: string): boolean {
+  try {
+    return new URL(url.trim()).search.length > 1;
+  } catch {
+    return true;
+  }
+}
 
 interface WebSearchInput {
   action: 'search' | 'read';
@@ -107,6 +121,11 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
     // A read of a page names it, host and path. A search names only that it searched: its
     // text can carry a customer's name, and the trail holds no content.
     outwardRead: (input) => (input.action === 'read' && typeof input.url === 'string' ? httpTarget('GET', input.url) : 'search'),
+    // Once foreign content is in the conversation, a read URL with a query can carry data out:
+    // a page that was read can ask for `https://host/?q=<what the chat holds>`. Such a read goes
+    // through the same origin check as a send. A URL without a query stays a plain read.
+    // Not covered: data in the path or in the host name.
+    sendTargetsWhenLatched: (input) => (input.action === 'read' && typeof input.url === 'string' && readUrlHasQuery(input.url) ? hostTargets(input.url) : null),
     definition: {
       name: 'web_research',
       description: `Search the web or read a URL. Provider: ${provider.name}.
