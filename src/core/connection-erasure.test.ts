@@ -9,6 +9,7 @@ import { ApiStore, type ApiProfile } from './api-store.js';
 import { RunHistory } from './run-history.js';
 import {
   blankRunHistoryContent,
+  blankRunHistoryRows,
   coveredGrantSet,
   erasureOnDeleteEnabled,
   erasureRecords,
@@ -736,6 +737,20 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     expect([text(step), text(inner)]).toEqual([FALLBACK_MARKER, FALLBACK_MARKER]);
     expect((db.prepare('SELECT input_json AS i FROM run_tool_calls WHERE run_id = ?').get(step) as { i: string }).i).toBe(FALLBACK_MARKER);
     expect(text(other)).toBe(`other ${MARK}`);
+  });
+
+  it('an erasure blanks a process promoted to a workflow too; a chat delete keeps it', () => {
+    const db = history.getDb();
+    const steps = () => (db.prepare("SELECT steps_json AS s FROM processes WHERE id = 'saved'").get() as { s: string }).s;
+    const runId = history.insertRun({ sessionId: 'thread-a', taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    db.prepare(`INSERT INTO processes (id, name, description, source_run_id, steps_json, promoted_to_pipeline_id) VALUES ('saved', 'weekly', 'd', ?, ?, 'wf-saved')`)
+      .run(runId, `[{"q":"${MARK}"}]`);
+
+    blankRunHistoryRows(db, { threadIds: ['thread-a'], keepPromotedProcesses: true });
+    expect(steps()).toBe(`[{"q":"${MARK}"}]`);
+
+    blankRunHistoryContent(db, { threadIds: ['thread-a'] });
+    expect(steps()).toBe(FALLBACK_MARKER);
   });
 
   it('a period given in ISO form reaches exactly the runs inside it', () => {
