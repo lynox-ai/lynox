@@ -1997,7 +1997,7 @@ describe('WorkerLoop', () => {
       await new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000).tick();
       await vi.advanceTimersByTimeAsync(0);
       const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
-      expect(msg?.body).toMatch(/turn limit[\s\S]*\n\nThe trigger "Daily Report" did not send to "x@evil\.example"/);
+      expect(msg?.body).toMatch(/^[^\n]*turn limit[\s\S]*\n\nThe trigger "Daily Report" did not send to "x@evil\.example"[^\n]*\n\nPartial findings so far\.$/);
     });
 
     it('leaves a true end of turn alone', async () => {
