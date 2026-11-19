@@ -303,17 +303,38 @@ export interface UsageSummaryPeriod {
  */
 export interface UsageSummaryResponse {
   managed: boolean;
-  /** Raw stored tier (not normalized) — same tolerance as UsageStatusResponse.tier. */
+  /** Raw stored tier (not normalized) — same tolerance as UsageStatusResponse.tier. The current plan; after a mid-period upgrade `budget_cents` is still that of the plan the period started on, see `plan_switch_credit`. */
   tier?: string | undefined;
-  /** Included (subscription) budget this period. */
+  /** Included (subscription) budget this period: of the plan the period started on (see `plan_switch_credit`). */
   budget_cents?: number | undefined;
   /** Genuine top-ups (credit packs) granted this period. */
   topup_cents?: number | undefined;
-  /** included budget + top-ups — the denominator the dashboard sizes against. */
+  /** included budget + top-ups (+ a plan-switch credit) — the denominator the dashboard sizes against. */
   available_cents?: number | undefined;
   used_cents?: number | undefined;
   balance_cents?: number | undefined;
   period?: UsageSummaryPeriod | null | undefined;
+  /**
+   * Present only for the rest of a period in which the plan was upgraded: `budget_cents`
+   * stays the budget of the plan the period started on, and the upgrades' prorated
+   * credits count in `available_cents`. After more than one upgrade in a period, `credit_cents`
+   * is their sum, and both `tier` fields and `full_budget_cents` name the current plan. Absent or `null`
+   * otherwise; older clients ignore it. The sums are the producer's; the type does not
+   * enforce them.
+   */
+  plan_switch_credit?: UsagePlanSwitchCredit | null | undefined;
+}
+
+/** The prorated credit of the period's mid-period upgrade(s), and when the new plan's full budget applies. */
+export interface UsagePlanSwitchCredit {
+  /** Sum of the period's upgrade credits. */
+  credit_cents: number;
+  /** Raw stored tier upgraded to (not normalized). */
+  tier: string;
+  /** The new plan's full included budget. */
+  full_budget_cents: number;
+  /** When `full_budget_cents` applies: the start of the next period. */
+  full_from_iso: string;
 }
 
 // === Health — GET /api/health (CP ← engine) ===

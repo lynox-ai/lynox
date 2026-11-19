@@ -92,6 +92,18 @@ describe('contract fixtures: typed mirrors (fixture bytes ≡ contract types)', 
     expect(f.available_cents).toBe(f.budget_cents! + f.topup_cents!);
     expect(f.used_cents).toBe(f.available_cents! - f.balance_cents!);
   });
+
+  it('the plan-switch summary fixture counts the credit as available on top of the old budget (available = budget + topup + credit; used = available - balance)', () => {
+    const f = TYPED_MIRRORS['usage-summary-response.managed.plan-switch.json'] as UsageSummaryResponse;
+    const credit = f.plan_switch_credit!;
+    expect(f.available_cents).toBe(f.budget_cents! + f.topup_cents! + credit.credit_cents);
+    expect(f.used_cents).toBe(f.available_cents! - f.balance_cents!);
+    // The full budget is the new plan's and applies from the next period, not now.
+    expect(credit.full_budget_cents).toBeGreaterThan(f.budget_cents!);
+    expect(credit.full_from_iso).toBe(f.period!.end_iso);
+    // Both tier fields name the current plan.
+    expect(credit.tier).toBe(f.tier);
+  });
 });
 
 describe('contract fixtures: set hygiene', () => {
