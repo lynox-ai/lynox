@@ -511,7 +511,7 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 });
 
 describe('an answer that names no question', () => {
-	type Setup = { prompt: Record<string, unknown>; answer?: string; open?: boolean | 'secret' | 'down' | 'null' | 'unknown'; onPending?: () => void };
+	type Setup = { prompt: Record<string, unknown>; answer?: string; open?: boolean | 'secret' | 'down' | 'null' | 'unknown' | 'number' | 'empty'; onPending?: () => void };
 	async function answerWith({ prompt, answer = 'Yes', open = true, onPending }: Setup): Promise<{ replies: number; pendingAsked: number; drafted: string[] }> {
 		const drafted: string[] = [];
 		store.registerComposerDraft((text) => { drafted.push(text); return true; });
@@ -523,6 +523,8 @@ describe('an answer that names no question', () => {
 				onPending?.();
 				if (open === 'down') return json({ error: 'unavailable' }, 503);
 				if (open === 'null') return json(null);
+				if (open === 'number') return json(42);
+				if (open === 'empty') return json({});
 				if (open === 'unknown') return json({ pending: true, promptType: 'a_kind_this_client_does_not_know', promptId: 'p-new' });
 				if (open === 'secret') return json({ pending: true, promptType: 'ask_secret', promptId: 'p-secret', secretName: 'SHOP_TOKEN', question: 'Your shop token?' });
 				return open
@@ -566,8 +568,8 @@ describe('an answer that names no question', () => {
 		expect(store.getChatError()).toBe(await say('chat.reply_needs_question'));
 	});
 
-	it('does not say no question is open when the server\'s answer is not an object', async () => {
-		const { pendingAsked } = await answerWith({ prompt: {}, open: 'null' });
+	it.each(['null', 'number', 'empty'] as const)('does not say no question is open when the server\'s answer does not say so (%s)', async (open) => {
+		const { pendingAsked } = await answerWith({ prompt: {}, open });
 		expect(pendingAsked, 'the open question was not asked for, so this proves nothing').toBeGreaterThan(0);
 		expect(store.getChatError()).toBe(await say('chat.reply_needs_question'));
 	});

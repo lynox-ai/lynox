@@ -3090,7 +3090,7 @@ export async function checkPendingPrompt(onAnswered?: (nothingOpen: boolean) => 
 		// asked for, and set now it would show in another one.
 		if (sessionId !== sid) return null;
 		// This call got the server's word on what is open; a failed one knows nothing about it.
-		onAnswered?.(!data['pending']);
+		onAnswered?.(data['pending'] === false);
 		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;
