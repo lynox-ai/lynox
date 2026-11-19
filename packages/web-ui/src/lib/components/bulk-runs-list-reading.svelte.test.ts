@@ -186,8 +186,9 @@ describe('the runs list at phone width', () => {
 			expect(count.classList.contains('sm:hidden')).toBe(true);
 			expect(line.firstElementChild).toBe(count);
 			const host = line.querySelector<HTMLElement>('[data-testid="bulk-run-host-narrow"]')!;
-			// Its own line, so it starts at the line's edge; overflow-wrap breaks only a word wider than the line.
-			expect([...host.classList]).toEqual(expect.arrayContaining(['block', 'sm:hidden', 'break-words']));
+			// Its own line, so it starts at the line's edge. overflow-wrap:anywhere lets a host wider than the line
+			// break, and lets the table shrink the column to the phone's width instead of pushing the status out.
+			expect([...host.classList]).toEqual(expect.arrayContaining(['block', 'sm:hidden', '[overflow-wrap:anywhere]']));
 			expect(line.lastElementChild).toBe(host);
 		}
 	});
