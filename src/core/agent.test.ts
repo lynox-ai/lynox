@@ -88,6 +88,7 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE, toolStoppedMessage, TOOL_STOPPED_RESULT_NOTE } from './agent.js';
+import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { createStepStreamHandler } from '../orchestrator/runtime-adapter.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
@@ -3599,7 +3600,7 @@ describe('Agent', () => {
       expect(block?.is_error).toBeUndefined();
       expect(JSON.stringify(block?.content)).toContain('fine');
       // The log names the error's kind, never its text.
-      expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a ok_tool call was recorded, but its result event could not be delivered (Error)\n']);
+      expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a ok_tool call has settled, but its result event could not be delivered (Error)\n']);
       expect(logged.join('')).not.toContain('step recorder gone');
     });
 
@@ -3627,7 +3628,7 @@ describe('Agent', () => {
       expect(block?.is_error).toBe(true);
       expect(JSON.stringify(block?.content)).toContain('tool broke');
       expect(JSON.stringify(block?.content)).not.toContain('stream gone');
-      expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a bad_tool call was recorded, but its result event could not be delivered (Error)\n']);
+      expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a bad_tool call has settled, but its result event could not be delivered (Error)\n']);
       expect(logged.join('')).not.toContain('stream gone');
     });
 
@@ -6786,6 +6787,109 @@ describe('a secret reference in a tool whose destination cannot be read', () => 
 });
 
 /**
+ * A call answered without running — a repeated call, a contained chat's refusal, a blocked call in
+ * a run nobody watches, a refusal with no one to ask — streams its answer like any other result.
+ * A stream that throws on that event must not take the answer's place: the model reads the call's
+ * own text, never the stream's error.
+ */
+describe('a call answered without running keeps its own answer when its result event throws', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  afterEach(() => { vi.mocked(isDangerousDetailed).mockReturnValue(null); });
+
+  type ResultEvent = Extract<StreamEvent, { type: 'tool_result' }>;
+  const throwingStream = () => {
+    const seen: ResultEvent[] = [];
+    const onStream = async (e: StreamEvent): Promise<void> => {
+      if (e.type === 'tool_result') { seen.push(e); throw new Error('stream gone'); }
+    };
+    return { seen, onStream };
+  };
+  const modelBlock = (agent: Agent, id: string) => agent.getMessages()
+    .flatMap(m => (Array.isArray((m as { content: unknown }).content) ? (m as { content: Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }> }).content : []))
+    .find(b => b.type === 'tool_result' && b.tool_use_id === id);
+  const sendQuietly = async (agent: Agent): Promise<string[]> => {
+    const logged: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+    try {
+      await agent.send('go');
+    } finally {
+      spy.mockRestore();
+    }
+    return logged.filter(l => l.includes('could not be delivered'));
+  };
+  const expectOwnAnswer = (agent: Agent, id: string, seen: ResultEvent[], logged: string[], toolName: string) => {
+    const event = seen.find(e => e.toolUseId === id);
+    expect(event, 'the stream was handed the answer and threw').toBeDefined();
+    const block = modelBlock(agent, id);
+    expect(block?.is_error).toBe(true);
+    expect(String(block?.content)).toContain(event!.result);
+    expect(String(block?.content)).not.toContain('stream gone');
+    expect(logged).toEqual([`[lynox:agent] a ${toolName} call has settled, but its result event could not be delivered (Error)\n`]);
+  };
+
+  it('a repeated call: the model reads the escalation', async () => {
+    const handler = vi.fn().mockResolvedValue('API profile "wrong" not found.');
+    // 3 runs reach the limit, the 4th is answered by the guard, then the model stops.
+    for (let i = 0; i < 4; i++) {
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: `tu_${String(i)}`, name: 'test_lookup', input: { id: 'wrong' } }]));
+    }
+    mockProcess.mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('test_lookup', handler)], onStream });
+    const logged = await sendQuietly(agent);
+    expect(handler).toHaveBeenCalledTimes(3);
+    // The three runs went through the guarded success path; only the escalation is asserted here.
+    expectOwnAnswer(agent, 'tu_3', seen, logged.filter((_, i) => i === 3), 'test_lookup');
+    expect(logged).toHaveLength(4);
+  });
+
+  it('a contained chat: the model reads the refusal', async () => {
+    const tool = makeTool('bash', vi.fn().mockResolvedValue('ran'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_c', name: 'bash', input: { command: 'ls' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], onStream });
+    agent.currentThreadId = 't1';
+    (agent.toolContext as unknown as Record<string, unknown>)['containment'] = { isContained: ({ threadId }: { threadId?: string }) => threadId === 't1' };
+    const logged = await sendQuietly(agent);
+    expect(tool.handler).not.toHaveBeenCalled();
+    expect(seen.find(e => e.toolUseId === 'tu_c')?.contained).toBeDefined();
+    expectOwnAnswer(agent, 'tu_c', seen, logged, 'bash');
+  });
+
+  it('a blocked call in a run nobody watches: the model reads the block', async () => {
+    vi.mocked(isDangerousDetailed).mockReturnValueOnce({ ...danger('Dangerous'), hardBlock: true });
+    const tool = makeTool('bash', vi.fn().mockResolvedValue('ran'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_b', name: 'bash', input: { command: 'rm -rf /' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const promptUser = vi.fn(async () => UNATTENDED_BLOCK_ANSWER);
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser, onStream });
+    const logged = await sendQuietly(agent);
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(tool.handler).not.toHaveBeenCalled();
+    expect(String(modelBlock(agent, 'tu_b')?.content)).toContain('in a run nobody watches it is not queued for approval');
+    expectOwnAnswer(agent, 'tu_b', seen, logged, 'bash');
+  });
+
+  it('no one to ask: the model reads the refusal', async () => {
+    vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous'));
+    const tool = makeTool('bash', vi.fn().mockResolvedValue('ran'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_h', name: 'bash', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], onStream });
+    const logged = await sendQuietly(agent);
+    expect(tool.handler).not.toHaveBeenCalled();
+    expect(String(modelBlock(agent, 'tu_h')?.content)).toContain('Permission denied (non-interactive)');
+    expectOwnAnswer(agent, 'tu_h', seen, logged, 'bash');
+  });
+});
+
+/**
  * A run with no way to ask a person, whose model asks anyway. The real `ask_user` tool, the
  * real agent loop: the chain the fail-open ran through.
  */
@@ -6919,6 +7023,30 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     expect(results[0]!.result).toContain('Needs input');
     expect(results[0]!.result).not.toContain('sk-live-SECRET');
     expect((results[0] as { toolUseId?: string }).toolUseId).toBe(gatedCall.id);
+  });
+
+  it('the refused gate still ends the run as "needs input" when delivering its result event throws', async () => {
+    // One model turn only: a second response queued here would outlive the test and answer the next one.
+    mockProcess.mockResolvedValueOnce(toolUseResponse([gatedCall]));
+    const promptUser = vi.fn((q: unknown) => Promise.reject(new InputRequiredError(flattenPrompt(q as Parameters<typeof flattenPrompt>[0]))));
+    let threw = false;
+    const onStream = async (e: StreamEvent): Promise<void> => {
+      if (e.type === 'tool_result') { threw = true; throw new Error('stream gone'); }
+    };
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('run_cmd', vi.fn())], secretStore: gateStore(), promptUser, onStream });
+    const logged: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+    let err: unknown;
+    try {
+      err = await agent.send('Fetch it').then(() => null, (e: unknown) => e);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(threw).toBe(true);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect((err as Error).message).not.toContain('stream gone');
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a run_cmd call has settled, but its result event could not be delivered (Error)\n']);
   });
 
   it('ask_user\'s own result is streamed once, not again by the batch', async () => {
