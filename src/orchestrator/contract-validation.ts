@@ -5,6 +5,7 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { isGraphqlEndpoint } from '../core/outbound-write.js';
 import { isReviewedHeaderName } from '../tools/permission-guard.js';
 import { headerListForNote } from '../core/write-notes.js';
+import { shownParamName } from './workflow-params.js';
 
 /**
  * Base `params.<name>` reference. Captures the base name up to the next path
@@ -378,14 +379,14 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
     for (const p of paramsReferencedInTemplate(step.input_template)) referenced.add(p);
   }
   for (const [name, c] of Object.entries(contract.paramConstraints)) {
-    if (!referenced.has(name)) return `parameter "${name}" is constrained but flows into no tool call.`;
+    if (!referenced.has(name)) return `parameter ${shownParamName(name)} is constrained but flows into no tool call.`;
     const keys = Object.keys(c).filter((k) => (c as Record<string, unknown>)[k] !== undefined);
     if (keys.length !== 1 || !Array.isArray(c.enum) || c.enum.length !== 1) {
-      return `parameter "${name}" must be bound to exactly one value.`;
+      return `parameter ${shownParamName(name)} must be bound to exactly one value.`;
     }
   }
   for (const name of referenced) {
-    if (!(name in contract.paramConstraints)) return `parameter "${name}" flows into a tool call and is not bound to a value.`;
+    if (!(name in contract.paramConstraints)) return `parameter ${shownParamName(name)} flows into a tool call and is not bound to a value.`;
   }
   return null;
 }
@@ -430,7 +431,7 @@ export function buildReviewedContract(
     for (const name of paramsReferencedInTemplate(step.input_template)) {
       const value = boundParams[name];
       if (typeof value !== 'string' && typeof value !== 'number') {
-        return { error: `Parameter "${name}" flows into a tool call and needs a text or number value for this schedule.` };
+        return { error: `Parameter ${shownParamName(name)} flows into a tool call and needs a text or number value for this schedule.` };
       }
       paramConstraints[name] = { enum: [value] };
     }

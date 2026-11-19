@@ -13,6 +13,7 @@
  * puts one (a joiner inside an emoji, ZWNJ between letters, a direction mark after a letter).
  */
 import { hiddenCharIndexes } from './hidden-chars.js';
+import { shownParamName } from '../orchestrator/workflow-params.js';
 
 export interface HiddenChar {
   /** Where in the value: `title`, `steps[2].task`, `params.list`; a key reads as `a key in params`. */
@@ -77,7 +78,7 @@ export function fixedRunRefusal(refusal: string): string {
 export function hiddenInRunValues(params: Readonly<Record<string, unknown>>): string | null {
   for (const [name, value] of Object.entries(params)) {
     if (hiddenCharIndexes(name, { inPlace: false }).length > 0) return HIDDEN_RUN_NAME_REFUSAL;
-    if (findHiddenChar(value) !== null) return `The value of parameter "${name}" holds a character that does not show as text. Enter the value again without it.`;
+    if (findHiddenChar(value) !== null) return `The value of parameter ${shownParamName(name)} holds a character that does not show as text. Enter the value again without it.`;
   }
   return null;
 }
