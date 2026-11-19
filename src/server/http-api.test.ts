@@ -3671,7 +3671,8 @@ describe('LynoxHTTPApi', () => {
         // close leaves it, as the stale-run test above does.
         const slots = (api as unknown as { runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number; orphanDeadlineAt?: number }> }).runningSessions;
         store.insertAskUser('s-parked', 'Go on?', ['Yes', 'No']);
-        slots.set('s-parked', { streamAlive: false, takeover: () => {}, lastEventAt: Date.now(), orphanDeadlineAt: Date.now() + 10 * 60_000 });
+        let parkedOnIt = true;
+        slots.set('s-parked', { streamAlive: false, takeover: () => {}, lastEventAt: Date.now(), parked: () => parkedOnIt, orphanDeadlineAt: Date.now() + 10 * 60_000 } as never);
         try {
           const parked = await (await jsonFetch('/api/sessions/s-parked/pending-prompt')).json() as { expiresInMs?: number };
           expect(parked.expiresInMs).toBeGreaterThan(9 * 60_000);
@@ -3680,6 +3681,16 @@ describe('LynoxHTTPApi', () => {
           slots.get('s-parked')!.streamAlive = true;
           const live = await (await jsonFetch('/api/sessions/s-parked/pending-prompt')).json() as { expiresInMs?: number };
           expect(live.expiresInMs).toBeGreaterThan(24 * 60 * 60_000 - 60_000);
+          // A run working headless (not parked on it): the watchdog ends nothing, the stored end holds.
+          slots.get('s-parked')!.streamAlive = false;
+          parkedOnIt = false;
+          const working = await (await jsonFetch('/api/sessions/s-parked/pending-prompt')).json() as { expiresInMs?: number };
+          expect(working.expiresInMs).toBeGreaterThan(24 * 60 * 60_000 - 60_000);
+          parkedOnIt = true;
+          // A deadline already past: the watchdog has looked and left the question; the stored end holds.
+          slots.get('s-parked')!.orphanDeadlineAt = Date.now() - 1000;
+          const looked = await (await jsonFetch('/api/sessions/s-parked/pending-prompt')).json() as { expiresInMs?: number };
+          expect(looked.expiresInMs).toBeGreaterThan(24 * 60 * 60_000 - 60_000);
           // The stored end still wins when it comes first.
           slots.get('s-parked')!.streamAlive = false;
           slots.get('s-parked')!.orphanDeadlineAt = Date.now() + 2 * 24 * 60 * 60_000;

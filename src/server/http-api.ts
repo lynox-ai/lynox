@@ -1947,10 +1947,14 @@ export class LynoxHTTPApi {
    *  `parked` is read by the thread's question, as before. */
   private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; orphanDeadlineAt?: number }>();
   /** When the orphan watchdog will end a session's open question: only while a run is parked
-   *  on it with its stream closed. Undefined otherwise. */
+   *  on its own question with its stream closed, and before the watchdog has looked. The watchdog
+   *  ends the question through the run's takeover, which expires only the run's own question;
+   *  another one open on the thread (a scheduled run's) keeps its stored end. Undefined otherwise. */
   private orphanDeadlineOf(sessionId: string): number | undefined {
     const slot = this.runningSessions.get(sessionId);
-    return slot !== undefined && !slot.streamAlive ? slot.orphanDeadlineAt : undefined;
+    if (slot === undefined || slot.streamAlive || slot.parked?.() !== true) return undefined;
+    const at = slot.orphanDeadlineAt;
+    return at !== undefined && at > Date.now() ? at : undefined;
   }
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
