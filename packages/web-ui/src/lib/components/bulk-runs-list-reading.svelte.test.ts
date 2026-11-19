@@ -175,29 +175,71 @@ describe('the runs list at phone width', () => {
 		];
 		const lines = await dateLines();
 		const date = /\d{2}[./]\d{2}[./]\d{4}, \d{2}:\d{2}/.exec(lines[0]!.line.textContent!)![0];
+		// While the run reads its list the title already says „– Ziele“: no count, no stray separator, nothing for a screen reader.
 		expect(lines.map(({ line }) => shown(line, false))).toEqual([
 			`1/3 · ${date}\nlynox-demo-shop.myshopify.com`,
-			`– · ${date}\ndemo.myshopify.com`,
+			`${date}\ndemo.myshopify.com`,
 		]);
 		expect(lines.map(({ line }) => shown(line, true))).toEqual([date, date]);
+		const reading = lines[1]!.line;
+		expect(reading.querySelector('[data-testid="bulk-run-count-narrow"]')).toBeNull();
+		expect(reading.querySelector('[data-testid="bulk-run-count-narrow-label"]')).toBeNull();
+		expect(reading.textContent).toBe(`${date}demo.myshopify.com`);
 		for (const { line, tr } of lines) {
-			const count = line.querySelector<HTMLElement>('[data-testid="bulk-run-count-narrow"]')!;
-			// The narrow count reads as the column does, and the column still shows from sm only.
+			// The column still shows from sm only, „–“ while the list is read.
 			const column = tr.querySelector<HTMLElement>('[data-testid="bulk-run-count"]')!;
-			expect(count.textContent).toBe(column.textContent);
 			expect(column.classList.contains('hidden') && column.classList.contains('sm:table-cell')).toBe(true);
-			expect(count.classList.contains('sm:hidden')).toBe(true);
-			// The column's header is hidden below sm: a screen reader hears the count after its name.
-			const label = line.querySelector<HTMLElement>('[data-testid="bulk-run-count-narrow-label"]')!;
-			expect(label.textContent).toBe('Ziele: ');
-			expect(label.classList.contains('sr-only') && label.classList.contains('sm:hidden')).toBe(true);
-			expect(line.firstElementChild).toBe(label);
-			expect(label.nextElementSibling).toBe(count);
 			const host = line.querySelector<HTMLElement>('[data-testid="bulk-run-host-narrow"]')!;
 			// Its own line, so it starts at the line's edge. overflow-wrap:anywhere lets a host wider than the line
 			// break, and lets the table shrink the column to the phone's width instead of pushing the status out.
 			expect([...host.classList]).toEqual(expect.arrayContaining(['block', 'sm:hidden', '[overflow-wrap:anywhere]']));
 			expect(line.lastElementChild).toBe(host);
 		}
+		expect(lines.map(({ tr }) => tr.querySelector('[data-testid="bulk-run-count"]')!.textContent)).toEqual(['1/3', '–']);
+		const { line, tr } = lines[0]!;
+		const count = line.querySelector<HTMLElement>('[data-testid="bulk-run-count-narrow"]')!;
+		// The narrow count reads as the column does.
+		expect(count.textContent).toBe(tr.querySelector('[data-testid="bulk-run-count"]')!.textContent);
+		expect(count.classList.contains('sm:hidden')).toBe(true);
+		// The column's header is hidden below sm: a screen reader hears the count after its name.
+		const label = line.querySelector<HTMLElement>('[data-testid="bulk-run-count-narrow-label"]')!;
+		expect(label.textContent).toBe('Ziele: ');
+		expect(label.classList.contains('sr-only') && label.classList.contains('sm:hidden')).toBe(true);
+		expect(line.firstElementChild).toBe(label);
+		expect(label.nextElementSibling).toBe(count);
+	});
+
+	// Below sm the status chip may break after its „·“ and nowhere else (U-338): each part keeps its words
+	// together, and from sm the chip stays on one line. A chip without a suffix is one unbreakable part.
+	it('lets the status chip break only after its „·“ below sm, in DE and EN', async () => {
+		runs = [
+			makeRun({ id: 'stopped', total: 3, applied: 1, phase: 'writing', haltReason: 'stopped', haltKey: 'stoppedByOwner' }),
+			makeRun({ id: 'halted', total: 3, applied: 1, phase: 'aborted', atomic: true, haltReason: 'x', haltKey: 'atomicRolledBack' }),
+			makeRun({ id: 'ready', total: 3, phase: 'previewed' }),
+		];
+		const chips = async (): Promise<{ text: string; parts: string[] }[]> => {
+			const list = await dateLines();
+			return list.map(({ tr }) => {
+				const chip = tr.querySelector<HTMLElement>('[data-testid="bulk-run-phase"]')!;
+				expect(chip.classList.contains('sm:whitespace-nowrap')).toBe(true);
+				expect(chip.classList.contains('whitespace-nowrap')).toBe(false);
+				const parts = [...chip.children] as HTMLElement[];
+				for (const p of parts) expect(p.classList.contains('whitespace-nowrap')).toBe(true);
+				return { text: chip.textContent!, parts: parts.map((p) => p.textContent!) };
+			});
+		};
+		expect(await chips()).toEqual([
+			{ text: 'schreibt · gestoppt', parts: ['schreibt ·', 'gestoppt'] },
+			{ text: 'abgebrochen · angehalten', parts: ['abgebrochen ·', 'angehalten'] },
+			{ text: 'Vorschau bereit', parts: ['Vorschau bereit'] },
+		]);
+		unmount(component!);
+		component = undefined;
+		setLocale('en');
+		expect(await chips()).toEqual([
+			{ text: 'writing · stopped', parts: ['writing ·', 'stopped'] },
+			{ text: 'aborted · halted', parts: ['aborted ·', 'halted'] },
+			{ text: 'preview ready', parts: ['preview ready'] },
+		]);
 	});
 });

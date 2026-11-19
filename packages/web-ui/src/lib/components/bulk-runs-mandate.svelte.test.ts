@@ -303,8 +303,10 @@ describe('a sentence that names an act of the owner\'s', () => {
 	it('sets a space between a run\'s date and its system on a narrow list', async () => {
 		viewer = 'owner';
 		await renderList();
-		const system = target.querySelector('tbody span.sm\\:hidden');
-		expect(system?.textContent?.startsWith(' · ')).toBe(true);
+		// The system stands on a line of its own below the date, so the two never run together (U-338).
+		const system = target.querySelector<HTMLElement>('tbody [data-testid="bulk-run-host-narrow"]')!;
+		expect(system.classList.contains('block') && system.classList.contains('sm:hidden')).toBe(true);
+		expect(system.previousSibling?.textContent).toMatch(/\d{2}:\d{2}( [AP]M)?$/);
 		unmount(component!);
 		component = undefined;
 	});
