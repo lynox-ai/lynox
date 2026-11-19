@@ -18,7 +18,7 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
   WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
+import { BULK_NOTICES, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { originRunNotice, type OriginRefusal, type SendOrigin, type TriggerSetUpBy } from './origin-notices.js';
@@ -827,7 +827,7 @@ export class WorkerLoop {
     result: string,
     status: RunEndStatus,
     run?: RunStarterSlot | null,
-    opts?: { readonly keepSchedule: true },
+    opts?: { readonly keepSchedule?: true; readonly noRetry?: true },
   ): boolean {
     // A request of this run that would have carried someone else's own login was refused: its
     // line goes under the result, and what ends as a success halts (`withMemberNotes`).
@@ -855,7 +855,7 @@ export class WorkerLoop {
     // A webhook run's event takes the end where nothing more specific was set: lynox's own
     // sentence, or the masked error of a run that threw.
     endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
-    const record = { ...(startedByOther(slot) ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
+    const record = { ...(startedByOther(slot) || opts?.noRetry === true ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
     return tm?.recordTaskRun(id, result, status, ...(Object.keys(record).length > 0 ? [record] : [])) ?? false;
   }
 
@@ -2562,6 +2562,7 @@ export class WorkerLoop {
       });
       return;
     }
+    if (outcome.gone === true) { this.#endGonePass(task, outcome.summary, 'preview'); return; }
     this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
   }
 
@@ -2656,6 +2657,7 @@ export class WorkerLoop {
       });
       return;
     }
+    if (outcome.gone === true) { this.#endGonePass(task, outcome.summary, 'judge'); return; }
     this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
   }
 
@@ -3678,6 +3680,16 @@ export class WorkerLoop {
       return;
     }
 
+    // A step refers to the output of a step it does not read: a retry meets the same refusal, so it is
+    // recorded as a failure without one and told in the owner's words (a webhook run's by its event).
+    // The record keeps the full refusal, which says how to repair it (`template-refs.ts`).
+    if (!result.ok && result.unresolvedRefStep !== undefined) {
+      const told = this.#notices().workflowRefUnresolved(result.unresolvedRefStep);
+      endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: told, runId: result.runId });
+      this.recordAndNotify(task, result.error ?? told, false, told, { noRetry: true });
+      return;
+    }
+
     if (!result.ok) {
       endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: result.error ?? 'The workflow run was refused.', runId: result.runId });
       // Surface conversion / validation / not-found / not-template errors as
@@ -3886,11 +3898,11 @@ export class WorkerLoop {
    * it halted, which its body no longer says (U-324). Read from the ledger, not from how the
    * pass returned: a pass that found its run dropped or moved on has not halted it.
    */
-  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string): void {
+  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      this.#recordRun(taskManager, task.id, resultSummary, look.status);
+      this.#recordRun(taskManager, task.id, resultSummary, look.status, undefined, opts);
     }
 
     // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that
@@ -3905,7 +3917,8 @@ export class WorkerLoop {
     // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
-      const shownEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted' : told.status;
+      const shownEnd: BulkPushEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
+        : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
       void this.notificationRouter.notify({
         title: `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`,
         body: told.result,
@@ -3915,17 +3928,63 @@ export class WorkerLoop {
     }
   }
 
-  /** Whether a bulk run's trigger leads to a run its ledger holds halted and not ended. */
-  #bulkRunHalted(task: TriggerRecord): boolean {
-    if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return false;
+  /**
+   * The run a bulk trigger leads to, as its ledger row holds it: null for any other trigger, a
+   * run that is gone, or a read that fails, which costs a push its words, never the push.
+   */
+  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null {
+    const row = this.#readBulkRunRow(task);
+    return row === 'unreadable' ? null : row;
+  }
+
+  /** {@link #bulkRunRow}, with a read that failed told apart from a run that is gone. */
+  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null | 'unreadable' {
+    if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return null;
     try {
       const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
-      // A plain row read: `getStatus` frees dead reads as it reads, and a title must not write.
+      // A plain row read: `getStatus` frees dead reads as it reads, and a push must not write.
       const st = ledger?.getRunForApply(task.bulk_run_id);
-      return st !== null && st !== undefined && typeof st.haltReason === 'string' && st.phase !== 'aborted' && st.phase !== 'done' && st.phase !== 'undone';
+      if (st === null || st === undefined) return null;
+      return { phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null };
     } catch {
-      return false;
+      return 'unreadable';
     }
+  }
+
+  /** Whether a bulk run's trigger leads to a run its ledger holds halted and not ended. */
+  #bulkRunHalted(task: TriggerRecord): boolean {
+    const row = this.#bulkRunRow(task);
+    return row !== null && row.haltReason !== null && row.phase !== 'aborted' && row.phase !== 'done' && row.phase !== 'undone';
+  }
+
+  /** Whether a bulk run's trigger leads to a run the owner discarded before approving it. */
+  #bulkRunDiscarded(task: TriggerRecord): boolean {
+    const row = this.#bulkRunRow(task);
+    return row !== null && row.phase === 'aborted' && isDiscardReason(row.haltReason);
+  }
+
+  /**
+   * A preview or judge pass that found its run no longer its own to read. The pass knows only
+   * that; the ledger knows why, and the record and the push say it (U-324). A run ended before
+   * its approval (discarded by the owner, superseded, or planned under an access that ended) is
+   * told as stopped with its own sentence. A run another pass left halted in this stage is told
+   * as that halt. A run that is gone or moved past this stage is recorded and not pushed: the pass
+   * that took it on reports for itself. lynox wrote nothing in any of them. A ledger that cannot
+   * be read, or a run still planned and unhalted, says nothing of the kind: it is told as before.
+   */
+  #endGonePass(task: TriggerRecord, summary: string, phase: 'preview' | 'judge'): void {
+    const row = this.#readBulkRunRow(task);
+    if (row === 'unreadable' || (row !== null && row.phase === 'planned' && row.haltReason === null)) {
+      this.recordAndNotify(task, summary, false);
+      return;
+    }
+    if (row !== null && row.haltReason !== null && (row.phase === 'aborted' || row.phase === 'planned')) {
+      const sentence = this.#bulkNotices().halted(phase, row.haltReason);
+      this.recordAndNotify(task, sentence, row.phase === 'aborted' ? 'stopped' : false);
+      return;
+    }
+    const taskManager = this.engine.getTaskManager();
+    if (taskManager) this.#recordRun(taskManager, task.id, summary, 'failed');
   }
 
   /**
@@ -3933,7 +3992,7 @@ export class WorkerLoop {
    * model that lists it; its push names the stage, how it ended and the host instead (U-324),
    * in the owner's language. Every other trigger's push carries its title as it is.
    */
-  #pushTitleOf(task: TriggerRecord, end: keyof typeof RUN_END_LOOK): string {
+  #pushTitleOf(task: TriggerRecord, end: BulkPushEnd): string {
     const effect = task.effect;
     if (effect !== 'bulk_preview' && effect !== 'bulk_judge' && effect !== 'bulk_apply' && effect !== 'bulk_undo') return task.title;
     // The host is a read of the ledger: a read that fails costs the title its host, never the push.

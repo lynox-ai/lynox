@@ -25,6 +25,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
 import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepRunNames } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
@@ -662,6 +663,9 @@ export interface RunSavedWorkflowResult {
   /** For a refusal whose `error` names stored text: the same refusal in words lynox wrote alone,
    *  for a sink that may not carry stored text (`FixedTextError`). */
   fixedError?: string | undefined;
+  /** For a refusal because a step refers to the output of a step its run cannot read
+   *  (`templateRefIssue`): that step's position, 1-based, which the owner is told in fixed words. */
+  unresolvedRefStep?: number | undefined;
 }
 
 /**
@@ -963,6 +967,13 @@ export async function runSavedWorkflow(
   }
 
   const writeNotes = new Set<string>();
+
+  // A reference no run resolves (`template-refs.ts`), here before `validateManifest` refuses it, so
+  // the caller can tell the owner which step in fixed words (`unresolvedRefStep`).
+  const refIssue = templateRefIssue(steps, { params: bound.params });
+  if (refIssue !== null) {
+    return { ok: false, error: `Workflow execution failed: Invalid manifest: ${refIssue}`, unresolvedRefStep: templateRefStep(refIssue) };
+  }
 
   try {
     // Honour the workflow's stored failure strategy instead of hardcoding 'stop'
@@ -1415,7 +1426,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     // One run's changes: drop a step or change its task. Ids and the step list change only in the
     // stored workflow (`update_workflow_steps`), where they are saved and checked.
     if (input.modifications.some(m => m.action !== 'remove' && m.action !== 'update_task')) {
-      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.';
+      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, or change what a step reads (set_input_from), edit the workflow with update_workflow_steps.';
     }
     const error = applyModifications(steps, input.modifications);
     if (error) return error;

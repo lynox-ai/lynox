@@ -978,9 +978,9 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
   // between letters is escaped, while the same character in the step's result stays.
   it('changes one run\'s steps by removal and task only: a rename or an added step goes to the stored workflow', async () => {
     const pipelineId = seedStoredPipeline([{ id: 'analyze', task: 'Analyze code' }]);
-    for (const action of ['rename_step', 'add_step']) {
+    for (const action of ['rename_step', 'add_step', 'set_input_from']) {
       const result = await runWorkflowTool.handler({ workflow_id: pipelineId, modifications: [{ action, step_id: 'analyze', value: 'x' }] } as never, makePipelineAgent());
-      expect(result, action).toBe('Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.');
+      expect(result, action).toBe('Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, or change what a step reads (set_input_from), edit the workflow with update_workflow_steps.');
     }
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
@@ -1509,6 +1509,21 @@ describe('runSavedWorkflow', () => {
     });
     const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL });
     expect(result.originRefusals).toEqual([refusal]);
+  });
+
+  it('a stored workflow whose reference no run resolves is refused before the run, with the repair the owner is told', async () => {
+    // Saved before references were checked. A scheduled run reaches the owner through this result:
+    // the worker throws its error and pushes it (`worker-loop.ts`, the task failure path).
+    const { validateManifest } = await vi.importActual<typeof import('../../orchestrator/validate.js')>('../../orchestrator/validate.js');
+    mockValidateManifest.mockImplementation((m: unknown) => validateManifest(m));
+    const id = seedSavedWorkflow({ steps: [{ id: 'fetch', task: 'Fetch' }, { id: 'sum', task: 'Sum {{fetch.result}}' }] });
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('step #2 (steps[1].task): it refers to the output of step "fetch", which is not in this step\'s input_from');
+    expect(result.error).toContain('(in a saved workflow: set_input_from)');
+    // The worker tells the owner which step, in fixed words (`WorkerNotices.workflowRefUnresolved`).
+    expect(result.unresolvedRefStep).toBe(2);
+    expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
   it('CONTROL: runs a workflow the caller\'s check lets through', async () => {

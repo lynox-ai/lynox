@@ -10409,6 +10409,20 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('approve a bulk run')));
 
+    // Discarding a run before its approval: the owner's act, like the approval it forgoes. A
+    // mandate asks the owner (U-324). Nothing was written, so nothing is told: the owner did it.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/discard', async (_req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const id = params['id']!;
+      if (ledger.getStatus(id) === null) { errorResponse(res, 404, 'No bulk run with this id.', 'not_found'); return; }
+      if (!ledger.discardRun(id)) {
+        errorResponse(res, 409, 'Only a run that is not yet approved can be discarded; an approved run is stopped instead.', 'not_discardable');
+        return;
+      }
+      jsonResponse(res, 200, withBinding(ledger.getStatus(id)!));
+    }, ownerOnly('discard a bulk run')));
+
     // Taking one target out of a previewed run before approving it, or putting it back (PRD
     // shopify-preset §20.2 item 4). An owner's act like the approval it changes; the checksum is
     // the one the owner saw, and the answer carries the new one.
