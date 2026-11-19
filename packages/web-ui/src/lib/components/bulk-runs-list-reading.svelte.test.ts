@@ -119,9 +119,7 @@ describe('the runs list names a run\'s host once', () => {
 			makeRun({ id: 'undo1', total: 1, kind: 'undo', sourceRunId: 'one' }),
 		];
 		const titleOf = (tr: HTMLTableRowElement): string => tr.querySelector('td button')!.textContent!.trim();
-		const de = await mountList();
-		expect(de.map(titleOf)).toEqual(['2 Ziele', '1 Ziel', 'Rücknahme · 2 Ziele', 'Rücknahme · 1 Ziel']);
-		for (const tr of de) {
+		const placesOnce = (list: HTMLTableRowElement[]): void => { for (const tr of list) {
 			// Each place carries the host once, and the two places never show at the same width.
 			expect(tr.textContent!.split('demo.myshopify.com').length - 1).toBe(2);
 			const narrow = tr.querySelector('[data-testid="bulk-run-host-narrow"]')!;
@@ -130,11 +128,16 @@ describe('the runs list names a run\'s host once', () => {
 			expect(narrow.classList.contains('sm:hidden')).toBe(true);
 			expect(wide.textContent).toBe('demo.myshopify.com');
 			expect(wide.classList.contains('hidden') && wide.classList.contains('sm:table-cell')).toBe(true);
-		}
+		} };
+		const de = await mountList();
+		expect(de.map(titleOf)).toEqual(['2 Ziele', '1 Ziel', 'Rücknahme · 2 Ziele', 'Rücknahme · 1 Ziel']);
+		placesOnce(de);
 		unmount(component!);
 		component = undefined;
 		setLocale('en');
-		expect((await mountList()).map(titleOf)).toEqual(['2 targets', '1 target', 'Undo · 2 targets', 'Undo · 1 target']);
+		const en = await mountList();
+		expect(en.map(titleOf)).toEqual(['2 targets', '1 target', 'Undo · 2 targets', 'Undo · 1 target']);
+		placesOnce(en);
 	});
 
 	it('shows „–“ in the cost column for a run that spent nothing or sent no cost, and the amount for one that did', async () => {
