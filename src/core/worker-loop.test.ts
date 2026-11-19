@@ -3243,6 +3243,53 @@ describe('WorkerLoop', () => {
     expect(router.notify).not.toHaveBeenCalled();
   });
 
+  it('executePipeline records a step with a reserved id as a failure without a retry and tells the owner to rename it', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'pipe-task-reserved', pipeline_id: 'pipeline-reserved', effect: 'run_workflow' });
+    // Saved before a save refused it: the first step is named `params`.
+    const planned = JSON.stringify({
+      id: 'pipeline-reserved', name: 'Weekly report', goal: 'report',
+      steps: [{ id: 'params', task: 'fetch' }, { id: 's2', task: 'sum {{params.result}}', input_from: ['params'] }],
+      reasoning: 'plan', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z', parameters: [],
+    });
+    const tm = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => tm),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getSecretStore: vi.fn(() => null),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })),
+      getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-reserved', manifest_json: planned })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+      config: { language: 'de' },
+    } as unknown as Engine;
+    const router = makeNotificationRouter(true);
+    const loop = new WorkerLoop(engine, router, 60_000);
+    const { _resetPipelineStore } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+
+    await expect((loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP())).resolves.toBeUndefined();
+    // The record keeps the full refusal with its repair; no retry, which would meet the same refusal.
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('pipe-task-reserved', expect.stringContaining('step #1 (steps[0].id): "params", "__proto__" and "constructor" cannot be step ids'), 'failed', { noRetry: true });
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ body: WORKER_NOTICES.de.workflowStepIdReserved(1) }));
+    // No retry offer: the cause stays until the step changes.
+    expect((router.notify as ReturnType<typeof vi.fn>).mock.calls[0]![0]).not.toHaveProperty('followUps');
+    expect(WORKER_NOTICES.de.workflowStepIdReserved(1)).toBe('Schritt 1 dieses Workflows trägt einen Namen, den lynox für etwas anderes braucht. Darum lief der Workflow nicht, und er läuft erst wieder, wenn der Schritt anders heisst oder entfernt ist. Bitte lynox im Chat, diesen Schritt umzubenennen.');
+    expect(WORKER_NOTICES.en.workflowStepIdReserved(1)).toBe('Step 1 of this workflow has a name lynox uses for something else, so the workflow did not run, and it will not run until that step is renamed or removed. Ask lynox in a chat to rename that step.');
+  });
+
   it('executePipeline refuses a parameter name with a hidden character with the name\'s own fixed text', async () => {
     vi.useRealTimers();
     // The save takes a ZWNJ between letters in a parameter; a run reads names strictly.
