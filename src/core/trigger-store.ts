@@ -854,17 +854,6 @@ export class TriggerStore {
   }
 
   /**
-   * The owner's own turn rewrote the instruction of a trigger a run had rewritten before: the
-   * instruction is the owner's words again, so `edited_by` goes back to the owner. Only over a
-   * run's tag: a mandate's mark, and with it the mandate gate, is left exactly as it is. Called
-   * AFTER the owner's change landed, so a change that fails leaves the run's tag standing.
-   */
-  markOwnerRewroteRunEdit(id: string): boolean {
-    return this.db.prepare(`UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ? AND ${EDITED_BY_RUN_SQL}`)
-      .run(principalTag({ kind: 'owner' }), id).changes > 0;
-  }
-
-  /**
    * S3f write-cutover: partial field update DIRECTLY on engine.db, mirroring the
    * legacy `updateTrigger`. `title`/`description`/`status` map to columns;
    * `nextRunAt` → `next_run_at` (empty-string/null clears); `scheduleCron` →

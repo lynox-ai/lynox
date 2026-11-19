@@ -2327,15 +2327,17 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
     expect(asked[0]!.meta?.blocked).toBe(true);
   });
 
-  it('CONTROL: a Reply-To that is not the sender, with the sender among the recipients, keeps the sender\'s sentence', async () => {
+  it('a Reply-To that is not the sender, with the sender among the recipients, gets the general question, never called the sender', async () => {
     provider.fetch.mockResolvedValue({
       envelope: { ...envelope(12, { messageId: '<o12@x>', from: 'alice@example.com', subject: 'Angebot' }), replyTo: [{ address: 'billing@evil.example' }] },
       text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
     });
     const { agent, asked } = replyAgent('No', { ownerKnown: { known: (t: { value: string }) => (t.value === 'alice@example.com' ? 'known' as const : 'foreign' as const) } });
     await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.', cc: 'alice@example.com' }, agent);
-    expect(asked[0]!.q).toContain('Reply to email: the reply goes to "billing@evil.example", the sender of the mail lynox read.');
+    expect(asked[0]!.q).toContain('"billing@evil.example"');
+    expect(asked[0]!.q).not.toContain('the sender of the mail');
     expect(asked[0]!.q).not.toContain('not to the sender');
+    expect(asked[0]!.meta?.blocked).toBe(true);
   });
 
   it('CONTROL: a Reply-To that is the sender, in another case, keeps the sender\'s sentence', async () => {

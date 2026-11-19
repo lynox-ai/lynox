@@ -133,19 +133,24 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           return refused(originRefusedMandate(targets, origin, 'mail'));
         }
         const lang = agent.noticeLanguage ?? noticeLanguage(undefined);
-        // A reply that goes only to the one the mail came from (its Reply-To, else its From) says so
-        // in its own words; any other recipient the owner did not name is listed with the mail.
-        // When that address is a Reply-To that is not the mail's sender, and the sender gets no copy,
-        // the question names both: the reply does not go to the person who wrote.
+        // A reply whose one unnamed recipient is the address it goes to by default says so in its
+        // own words, and only where those words are true:
+        //  - that address is the mail's sender: the sender's sentence;
+        //  - it is a Reply-To, the mail has one readable sender, and the sender gets no copy: the
+        //    question names both, the reply does not go to the person who wrote;
+        //  - otherwise (the sender gets a copy, or the sender cannot be read as one address): the
+        //    general question, which lists the recipient with where it came from.
         const defaultTo = input.to ? undefined : normalizeMailTarget(prepared.commit.to[0]?.address ?? '')?.value;
         const fromAddresses = prepared.filing.original.from.split(',')
           .map((a) => normalizeMailTarget(a.trim())?.value).filter((a): a is string => a !== undefined);
         const normalizedRecipients = new Set(recipients.map((r) => normalizeMailTarget(r)?.value));
-        const toReplyAddressOnly = defaultTo !== undefined && fromAddresses.length > 0
-          && !fromAddresses.includes(defaultTo) && !fromAddresses.some((a) => normalizedRecipients.has(a));
-        const ask = unnamed.length === 1 && defaultTo !== undefined && unnamed[0] === defaultTo
-          ? (toReplyAddressOnly ? originReplyToAsk(defaultTo, prepared.filing.original.from, lang) : originReplyAsk(defaultTo, lang))
-          : originAsk('mail_reply', input, 'mail', targets, origin, lang);
+        const onlyDefault = unnamed.length === 1 && defaultTo !== undefined && unnamed[0] === defaultTo;
+        const sender = fromAddresses.length === 1 ? fromAddresses[0] : undefined;
+        const ask = onlyDefault && fromAddresses.includes(defaultTo)
+          ? originReplyAsk(defaultTo, lang)
+          : onlyDefault && sender !== undefined && !normalizedRecipients.has(sender)
+            ? originReplyToAsk(defaultTo, sender, lang)
+            : originAsk('mail_reply', input, 'mail', targets, origin, lang);
         const question = unnamed.length > 0 ? pv`${prepared.preview}\n\n${ask}` : prepared.preview;
         const answer = await agent.promptUser(question, ['Yes', 'No'], unnamed.length > 0 ? { blocked: true } : undefined);
         if (answer === UNATTENDED_BLOCK_ANSWER) return refused(originRefusedUnattended(targets, origin));

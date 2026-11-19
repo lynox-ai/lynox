@@ -3642,11 +3642,6 @@ export class RunHistory {
     return this._requireTriggerStore().markEditedByRun(id, runTag);
   }
 
-  /** See `TriggerStore.markOwnerRewroteRunEdit`. */
-  markTriggerOwnerRewroteRunEdit(id: string): boolean {
-    return this._requireTriggerStore().markOwnerRewroteRunEdit(id);
-  }
-
 
   /** Delete a planned pipeline. Returns false if no row matched. */
   deletePlannedPipeline(id: string): boolean {

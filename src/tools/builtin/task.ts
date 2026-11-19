@@ -733,13 +733,9 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
           untrusted: instructionTakenIn(agent),
         }, scopeFilter, agent.principal), ifNonNull);
         if (!task) return `Task not found: ${input.task_id}`;
-        // The owner's own turn rewrote the instruction: a run's earlier rewrite no longer stands
-        // in it, so it is the owner's again. After the change, so a change that failed leaves the
-        // run's tag; what this turn had taken in still counts against it (`created_untrusted`).
-        if (isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL)
-          && (input.title !== undefined || input.description !== undefined) && 'effect' in task) {
-          w.run('mark', () => managerRef.markOwnerRewroteRunEdit(task.id), ifTrue);
-        }
+        // A run's earlier rewrite keeps its tag after a later change in the owner's own turn: a
+        // change of the title or of part of the description leaves the run's words in place, and
+        // nothing here can tell which. Only a trigger the owner sets up anew counts as theirs.
         // Surface the new schedule when it changed so the agent can confirm
         // the reschedule landed (mirrors the create path's "scheduled for …"
         // string, which the LLM is already trained to read back).
