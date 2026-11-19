@@ -134,7 +134,7 @@ describe('the button that opens a bulk run bulk_plan recorded', () => {
 		expect(links()[0]!.closest('.ai-message-wrap')).not.toBeNull();
 	});
 
-	it('is not shown for an answer without a recorded run', async () => {
+	it('is not shown for an answer whose plan was refused, which streams no run', async () => {
 		await turnThenRender('Hallo', [
 			['tool_call', { name: 'bulk_plan', input: { target_system: 'workspace' } }],
 			['tool_result', { name: 'bulk_plan', result: 'Error: Give exactly one of source_file, source_collection or source_list.' }],
@@ -152,6 +152,33 @@ describe('the button that opens a bulk run bulk_plan recorded', () => {
 	])('is not shown when the streamed id is not in the ledger\'s form (%s)', async (_kind, runId) => {
 		await turnThenRender('Plane den Lauf', planned(runId));
 		expect(links()).toEqual([]);
+	});
+
+	it('appears under the answer in a chat already on screen when the run is recorded', async () => {
+		serve([...planned(RUN), ['text', { text: 'Geplant.' }]]);
+		const { default: ChatView } = await import('./ChatView.svelte');
+		component = svelte.mount(ChatView, { target });
+		svelte.flushSync();
+		await settle();
+		expect(links()).toEqual([]);
+		await store.sendMessage('Plane den Lauf', undefined, undefined, { typed: true });
+		await settle();
+		svelte.flushSync();
+		expect(links().map((a) => a.getAttribute('href'))).toEqual([`/app/activity?tab=bulk&run=${RUN}`]);
+	});
+
+	it('stays on the server\'s answer whose bulk_plan call reported the run, when the page was reloaded mid-answer', async () => {
+		await turnThenRender('Plane den Lauf', [...planned(RUN), ['text', { text: 'Geplant. Du findest ihn unter Aktivität.' }]]);
+		// The server kept the answer only up to the tool round.
+		transcript = [
+			{ role: 'user', content: 'Plane den Lauf' },
+			{ role: 'assistant', content: '', toolCalls: [{ name: 'bulk_plan', input: {}, status: 'done', result: `Dry run recorded.\nBulk run ${RUN} (workspace, phase previewed)` }] },
+		];
+		await new Promise((r) => setTimeout(r, 600));
+		await store.resumeThread('t1');
+		await settle();
+		svelte.flushSync();
+		expect(links().map((a) => a.getAttribute('href'))).toEqual([`/app/activity?tab=bulk&run=${RUN}`]);
 	});
 
 	it('opens the last run when one answer recorded two', async () => {

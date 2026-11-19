@@ -25,17 +25,19 @@ export function bulkRunHref(runId: string): string {
 
 /**
  * The model's follow-up chips without the ones that name the planned run's id: the button opens the
- * run, and a chip would show the raw id to the user (U-361). Other chips stay.
+ * run, and a chip would show the raw id to the user (U-361). A chip counts as naming it when it holds
+ * the whole id or its first group, the eight characters a model shortens it to. Other chips stay.
  */
 export function followUpsWithoutRun(followUps: FollowUpSuggestion[], runId: string | undefined): FollowUpSuggestion[] {
 	if (runId === undefined) return followUps;
-	const id = runId.toLowerCase();
-	return followUps.filter((f) => !f.label.toLowerCase().includes(id) && !f.task.toLowerCase().includes(id));
+	const short = runId.toLowerCase().split('-')[0]!;
+	return followUps.filter((f) => !f.label.toLowerCase().includes(short) && !f.task.toLowerCase().includes(short));
 }
 
 interface RunBearer {
 	role: string;
 	content: string;
+	toolCalls?: ReadonlyArray<{ name: string; result?: string | undefined }> | undefined;
 	plannedBulkRunId?: string | undefined;
 }
 
@@ -43,7 +45,11 @@ interface RunBearer {
  * Keeps the button when the chat takes the server's transcript in place of its own: the server's
  * messages never carry the run id, which reached this browser on the stream only. Each local
  * message's id goes to its counterpart in the adopted list (same role and text, in order, as for the
- * knowledge chips); a message without a counterpart keeps none, so no button lands on another answer.
+ * knowledge chips). A message whose text differs from the server's (a reload while the answer was
+ * still streaming keeps a longer local text) has no counterpart; its id then goes to the server's
+ * answer whose bulk_plan call reported that very run. The id stays the one this browser got from the
+ * stream; the server's text only says where it belongs. Without either, the id is dropped, so no
+ * button lands on another answer.
  */
 export function carryPlannedBulkRuns(local: readonly RunBearer[], adopted: readonly RunBearer[]): void {
 	if (!local.some((m) => m.plannedBulkRunId !== undefined)) return;
@@ -58,8 +64,10 @@ export function carryPlannedBulkRuns(local: readonly RunBearer[], adopted: reado
 				break;
 			}
 		}
-		if (target && src.plannedBulkRunId !== undefined && target.plannedBulkRunId === undefined) {
-			target.plannedBulkRunId = src.plannedBulkRunId;
-		}
+		const id = src.plannedBulkRunId;
+		if (id === undefined) continue;
+		target ??= adopted.find((m) => m.role === 'assistant'
+			&& m.toolCalls?.some((tc) => tc.name === 'bulk_plan' && (tc.result ?? '').includes(id)) === true);
+		if (target && target.plannedBulkRunId === undefined) target.plannedBulkRunId = id;
 	}
 }
