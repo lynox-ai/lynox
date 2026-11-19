@@ -2139,6 +2139,20 @@ describe('WorkerLoop', () => {
     expect(recorded).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": you did not name this recipient; it comes from content lynox read\. A run without you cannot ask\. If it should go out anyway, ask lynox in the chat, and lynox will ask you\.\n\nBericht erstellt\.$/);
   });
 
+  it('the push at the end of the run carries the refused send before the run\'s text', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Bericht erstellt.');
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    const body = (vi.mocked(router.notify).mock.calls[0]![0] as { body: string }).body;
+    expect(body).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": you did not name this recipient; it comes from content lynox read\. A run without you cannot ask\. If it should go out anyway, ask lynox in the chat, and lynox will ask you\.\n\nBericht erstellt\.$/);
+  });
+
   it('a send the run tried again shows its refusal once; another target gets its own line', async () => {
     const task = makeTask();
     const tm = makeTaskManager([task]);
