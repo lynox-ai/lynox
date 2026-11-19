@@ -3,6 +3,7 @@ import { ALL_NAMESPACES } from '../../types/index.js';
 import { publishMemoryStore } from '../../core/observability.js';
 import { runOutsideCallSlot } from '../../core/call-connection.js';
 import { DATE_PREFIX_RE } from '../../core/memory-facade.js';
+import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTION } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
@@ -53,6 +54,37 @@ function cameInUntrusted(agent: IAgent, lines: readonly string[], namespace: Mem
     }
   }
   return false;
+}
+
+const SUPERSEDED_PREFIX_RE = /^\[SUPERSEDED \d{4}-\d{2}-\d{2}\]\s*/;
+
+/**
+ * Which flat lines of `namespace` came in untrusted, for a path that hands them to the model.
+ * A line is marked when an active knowledge row written untrusted contains its text; such a
+ * line goes to the model wrapped as untrusted data, which marks the turn that reads it, so the
+ * text cannot be stored again as trusted. A line no row vouches either way for is not marked
+ * (no graph, no row: there is nothing to read the mark from); a lookup that fails marks every
+ * line, so a broken graph does not pass for a clean one.
+ */
+function untrustedLinesOf(agent: IAgent, namespace: MemoryNamespace): (line: string) => boolean {
+  const kg = agent.toolContext.knowledgeLayer;
+  if (!kg?.untrustedTextsIn) return () => false;
+  let texts: string[];
+  try {
+    texts = kg.untrustedTextsIn(namespace).map(t => t.toLowerCase());
+  } catch {
+    return () => true;
+  }
+  if (texts.length === 0) return () => false;
+  return (line) => {
+    const body = line.replace(SUPERSEDED_PREFIX_RE, '').replace(DATE_PREFIX_RE, '').trim().toLowerCase();
+    return body.length > 0 && texts.some(t => t.includes(body));
+  };
+}
+
+/** `text` with each line `isUntrusted` holds for wrapped as untrusted data. */
+function markUntrustedLines(text: string, isUntrusted: (line: string) => boolean, namespace: MemoryNamespace): string {
+  return text.split('\n').map(l => (l.trim() && isUntrusted(l) ? wrapUntrustedData(l, `memory:${namespace}`) : l)).join('\n');
 }
 
 /**
@@ -401,6 +433,10 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         : `No content found in ${input.namespace} namespace.`;
     }
 
+    // Lines that came in untrusted reach the model wrapped as such (untrustedLinesOf).
+    const isUntrusted = untrustedLinesOf(agent, input.namespace);
+    const mark = (text: string): string => markUntrustedLines(text, isUntrusted, input.namespace);
+
     // With a query: substring-filter, then cap at the response token budget
     // so a 20K-line namespace with a thousand matches doesn't flood context.
     // Newest matches are preferred (file order = append order = chronology).
@@ -411,25 +447,25 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
         .filter(l => l.trim().length > 0)
         .filter(l => l.toLowerCase().includes(queryLower));
       if (matches.length === 0) {
-        return content; // no matches — return the whole namespace as before
+        return mark(content); // no matches — return the whole namespace as before
       }
       const { text, shown, total } = boundQueryMatches(matches, RECALL_QUERY_TOKEN_BUDGET);
       if (shown >= total) {
-        return text;
+        return mark(text);
       }
-      return `${text}\n\n[Showing ${shown} of ${total} matching ${input.namespace} entries — most recent first, capped to keep context lean.]`;
+      return `${mark(text)}\n\n[Showing ${shown} of ${total} matching ${input.namespace} entries — most recent first, capped to keep context lean.]`;
     }
 
     // No-query (namespace-only): a full dump is 15-20K tokens of context bloat.
     // Return a recency/importance-ranked subset capped at the token budget.
     const { text, shown, total } = rankNoQueryEntries(content, RECALL_NO_QUERY_TOKEN_BUDGET);
     if (shown === 0) {
-      return content; // nothing to rank (single empty line etc.) — return as-is
+      return mark(content); // nothing to rank (single empty line etc.) — return as-is
     }
     if (shown >= total) {
-      return text; // whole namespace fit within the budget — no truncation note
+      return mark(text); // whole namespace fit within the budget — no truncation note
     }
-    return `${text}\n\n[Showing ${shown} of ${total} ${input.namespace} entries — most recent first, capped to keep context lean. Pass a \`query\` to memory_recall to retrieve the full matching set.]`;
+    return `${mark(text)}\n\n[Showing ${shown} of ${total} ${input.namespace} entries — most recent first, capped to keep context lean. Pass a \`query\` to memory_recall to retrieve the full matching set.]`;
   },
 };
 
@@ -770,6 +806,8 @@ export const memoryListTool: ToolEntry<MemoryListInput> = {
       for (const ns of namespaces) {
         const content = await agent.memory.loadScoped(ns, scope);
         if (!content) continue;
+        // Lines that came in untrusted reach the model wrapped as such (untrustedLinesOf).
+        const isUntrusted = untrustedLinesOf(agent, ns);
 
         let lines = content.split('\n').filter(l => l.trim().length > 0);
         if (patternLower) {
@@ -779,7 +817,7 @@ export const memoryListTool: ToolEntry<MemoryListInput> = {
 
         const truncated = lines.slice(0, limit);
         const remaining = lines.length - truncated.length;
-        const entriesText = truncated.map(l => `  - ${l}`).join('\n');
+        const entriesText = truncated.map(l => `  - ${isUntrusted(l) ? wrapUntrustedData(l, `memory:${ns}`) : l}`).join('\n');
         nsResults.push(`[${ns}] (${lines.length} entries)\n${entriesText}${remaining > 0 ? `\n  ... and ${remaining} more` : ''}`);
       }
 
@@ -875,6 +913,8 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
     const matchedLine = lines[matchIdx]!;
     // Read before the original is retired below: the copy keeps the original's mark.
     const sourceUntrusted = deriveTurnUntrusted(agent) || cameInUntrusted(agent, [matchedLine], input.namespace, fromRef);
+    // The result quotes the line, so a line that came in untrusted is quoted wrapped as such.
+    const quoteUntrusted = untrustedLinesOf(agent, input.namespace)(matchedLine);
 
     const memory = agent.memory;
     return withInstanceWrite(agent, { site: 'memory_promote#move', kind: 'move', store: 'memory', target: () => memoryTarget(input.namespace, ['from', fromRef], ['to', toRef]), main: ['append', 'delete'] }, async (w) => {
@@ -914,7 +954,8 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
         actor: actorOf(agent), trail: trailOf('memory_promote#move', w.correlationId),
       });
 
-      return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n"${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}"`;
+      const quote = `${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}`;
+      return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n${quoteUntrusted ? wrapUntrustedData(quote, `memory:${input.namespace}`) : `"${quote}"`}`;
     });
   },
 };

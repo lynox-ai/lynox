@@ -362,6 +362,9 @@ export interface IKnowledgeLayer {
    *  match. Optional so a test double need not wire it: a caller without it, like a caller that
    *  gets `null`, treats the text as untrusted. */
   sourceUntrustedOf?(pattern: string, namespace: MemoryNamespace, scope?: MemoryScopeRef | undefined): boolean | null;
+  /** The texts of the active memories in `namespace` written untrusted. Optional so a test
+   *  double need not wire it: a read path without it marks no line. */
+  untrustedTextsIn?(namespace: MemoryNamespace): readonly string[];
   eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   updateMemoryText(
     oldText: string,
