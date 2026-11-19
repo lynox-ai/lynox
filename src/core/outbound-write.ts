@@ -935,12 +935,12 @@ function serverReadings(text: string): Set<string> {
 
 /** Whether a server reading of `text` holds a secret `mask` knows. Asked of text the mask
  *  already ran over: a secret left after a reading was written in a form the mask did not see. */
-function hidesEncodedSecret(text: string, mask: (text: string) => string): boolean {
+function hidesEncodedSecret(text: string, mask: (text: string) => string, unread = true): boolean {
   const readings = serverReadings(text);
   for (const read of readings) {
     if (mask(read) !== read) return true;
   }
-  return jsonTextHides(text, readings, mask);
+  return jsonTextHides(text, readings, mask, unread);
 }
 
 /**
@@ -948,36 +948,54 @@ function hidesEncodedSecret(text: string, mask: (text: string) => string): boole
  * that is JSON text again, and one more. A server that parses such a value reads its strings
  * unescaped, so a secret written there with an escape (`s…`) is one the mask did not see.
  * JSON text deeper than this counts as holding a secret (it is not read, so it is not shown),
- * and so does JSON text whose strings, read, add up to more than {@link JSON_TEXT_BUDGET_CHARS}.
+ * and so does JSON text whose reading costs more than {@link JSON_TEXT_BUDGET_CHARS}.
  */
 const JSON_TEXT_DEPTH = 3;
-/** The most characters the server readings of the strings of JSON text inside one value may add
- *  up to, each reading counted with 64 characters on top: every one is masked once more. */
-const JSON_TEXT_BUDGET_CHARS = 600_000;
+/** The most characters reading the JSON text inside one value may cost: each text parsed, and
+ *  each server reading of a string in it, counted by its length and 32 characters on top (each
+ *  is masked once more, or parsed). */
+const JSON_TEXT_BUDGET_CHARS = 2_000_000;
 
 /**
- * Whether JSON text in a server reading of `text`, or of one side of a `name=value` pair in it
- * (a form body, a query), holds a secret `mask` knows in one of its strings (keys and values),
- * as that string or in a server reading of it, and so on down to {@link JSON_TEXT_DEPTH}.
- * `readings` are those of `text`, taken once by the caller.
+ * Whether JSON text in `text` holds a secret `mask` knows in one of its strings (keys and values,
+ * a shadowed duplicate key's too), as that string or in a server reading of it, and so on down to
+ * {@link JSON_TEXT_DEPTH}. JSON text is looked for in every server reading of `text` and of each
+ * side of a `name=value` pair in it (a form body, a query; split before it is decoded, the way a
+ * server splits it), whole, from each `=` or `&` to the next `&` (a form inside a decoded value),
+ * and line by line (one JSON document per line, a multipart part). `readings` are those of
+ * `text`, taken once by the caller. `unread` is what JSON text past the depth or the budget counts
+ * as: `true` (holding a secret) for a decision, `false` for the reading a masked one is compared
+ * with (`pathHoldsSecret`).
  */
-function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: string) => string): boolean {
+function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: string) => string, unread = true): boolean {
   const seen = new Set<string>();
+  const parsed = new Set<string>();
   let left = JSON_TEXT_BUDGET_CHARS;
   const hides = (t: string, ofT: Iterable<string>, depth: number): boolean => {
     for (const reads of [ofT, ...formSides(t).map(serverReadings)]) {
       for (const read of reads) {
-        for (const s of jsonStrings(read)) {
-          if (seen.has(s)) continue;
-          seen.add(s);
-          if (depth >= JSON_TEXT_DEPTH) return true;
-          const ofS = serverReadings(s);
-          for (const r of ofS) {
-            left -= r.length + 64;
-            if (left < 0) return true;
-            if (mask(r) !== r) return true;
+        for (const candidate of jsonCandidates(read)) {
+          if (parsed.has(candidate)) continue;
+          parsed.add(candidate);
+          left -= 32;
+          if (left < 0) return unread;
+          const strings = jsonStrings(candidate);
+          if (strings.length > 0) left -= candidate.length;
+          for (const s of strings) {
+            if (seen.has(s)) continue;
+            seen.add(s);
+            if (depth >= JSON_TEXT_DEPTH) {
+              if (unread) return true;
+              continue;
+            }
+            const ofS = serverReadings(s);
+            for (const r of ofS) {
+              left -= r.length + 32;
+              if (left < 0) return unread;
+              if (mask(r) !== r) return true;
+            }
+            if (hides(s, ofS, depth + 1)) return true;
           }
-          if (hides(s, ofS, depth + 1)) return true;
         }
       }
     }
@@ -988,7 +1006,7 @@ function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: st
 
 /** Both sides of every `name=value` pair of `text` read as a form, the way a server splits it
  *  before it decodes; only a side that may read as JSON text (it starts with `{`, `[` or `"`, or
- *  with an escape that may turn into one). None when `text` has no `&` or `=`. */
+ *  with an escape or a space that may come before one). None when `text` has no `&` or `=`. */
 function formSides(text: string): string[] {
   if (!/[&=]/.test(text)) return [];
   return text.split('&')
@@ -999,26 +1017,40 @@ function formSides(text: string): string[] {
     .filter((side) => /^[\s+]*[{["%]/.test(side));
 }
 
-/** Every string (key and value) of `text` parsed as JSON, at any depth of its structure; none
- *  when it does not parse, or is not an object, an array or a string. */
-function jsonStrings(text: string): string[] {
-  if (!/^\s*[{["]/.test(text)) return [];
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { return []; }
-  const out: string[] = [];
-  // Walked without recursion: the structure may be nested deeper than the call stack.
-  const stack: unknown[] = [parsed];
-  while (stack.length > 0) {
-    const v = stack.pop();
-    if (typeof v === 'string') out.push(v);
-    else if (Array.isArray(v)) stack.push(...v);
-    else if (v !== null && typeof v === 'object') {
-      for (const [k, x] of Object.entries(v)) {
-        out.push(k);
-        stack.push(x);
-      }
+/** The pieces of one reading that may be JSON text a server parses: the reading itself; from the
+ *  start and after each `=` or `&` up to the next `&` (a form, also one inside a decoded value);
+ *  from the start and after each line break up to the next one (one JSON document per line, a
+ *  multipart part). Only a piece that starts like JSON text, after spaces. */
+function jsonCandidates(read: string): string[] {
+  const out = [read];
+  const starts = (s: string) => /[\s{["]/.test(s);
+  for (let i = 0; i < read.length; i++) {
+    const before = i === 0 ? '' : read[i - 1]!;
+    if (!starts(read[i]!)) continue;
+    // A piece that runs from the start to the end is the reading itself, already in.
+    if (i === 0 || before === '=' || before === '&') {
+      const end = read.indexOf('&', i);
+      if (i > 0 || end >= 0) out.push(read.slice(i, end < 0 ? read.length : end));
+    }
+    if (i === 0 || before === '\n') {
+      const end = read.indexOf('\n', i);
+      if (i > 0 || end >= 0) out.push(read.slice(i, end < 0 ? read.length : end));
     }
   }
+  return out;
+}
+
+/** Every string literal (key and value, each of two equal keys too) of `text` when it parses as
+ *  JSON (an object, an array or a string), after spaces and a byte order mark, which a server
+ *  reading bytes may drop; none otherwise. Read from the text, not from the parse: a parse keeps
+ *  only the last of two equal keys, and a server may read the other. */
+function jsonStrings(text: string): string[] {
+  // Sliced, not replaced: no copy of a long text that is no JSON.
+  const body = text.slice(Math.max(0, text.search(/\S/)));
+  if (!/^[{["]/.test(body)) return [];
+  try { JSON.parse(body); } catch { return []; }
+  const out: string[] = [];
+  for (const [literal] of body.matchAll(/"(?:[^"\\]|\\.)*"/g)) out.push(JSON.parse(literal) as string);
   return out;
 }
 
@@ -1029,13 +1061,13 @@ function jsonStrings(text: string): string[] {
  * shown text would then hand that secret to whoever reads it, as `%73ecret` or as
  * `caf�-secret`. A secret only the shown reading holds is masked in it.
  */
-function shownPiece(raw: string, read: string, mask: (text: string) => string): string {
+function shownPiece(raw: string, read: string, mask: (text: string) => string, unread = true): string {
   const readings = serverReadings(raw);
   for (const other of readings) {
     if (other !== read && mask(other) !== other) return '***';
   }
   // JSON text whose string holds a secret only unescaped: the shown reading would show it escaped.
-  if (jsonTextHides(raw, readings, mask)) return '***';
+  if (jsonTextHides(raw, readings, mask, unread)) return '***';
   return mask(read);
 }
 
@@ -1102,11 +1134,13 @@ export function pathForQuestion(url: string, mask: (text: string) => string): st
  * is clipped, so a secret past the clip still counts.
  */
 export function pathHoldsSecret(url: string, mask: (text: string) => string): boolean {
-  return pathShown(url, mask) !== pathShown(url, (text) => text);
+  // Compared with the path read with nothing masked and JSON text past what is read left as it
+  // is: JSON text the question stars because it is not read (`jsonTextHides`) counts too.
+  return pathShown(url, mask) !== pathShown(url, (text) => text, false);
 }
 
 /** {@link pathForQuestion} before it is clipped; `undefined` for a URL that does not parse. */
-function pathShown(url: string, mask: (text: string) => string): string | undefined {
+function pathShown(url: string, mask: (text: string) => string, unread = true): string | undefined {
   let parsed: URL;
   try { parsed = new URL(url); } catch { return undefined; }
   // Masked in both forms, encoded and decoded: a secret with a character the URL encodes is
@@ -1116,11 +1150,11 @@ function pathShown(url: string, mask: (text: string) => string): string | undefi
   // Masked whole first, so a secret holding a `/` is found before the split.
   const pieces = mask(parsed.pathname).split('/').map((raw) => {
     const read = lenientDecode(raw);
-    const shown = shownPiece(raw, read, mask);
+    const shown = shownPiece(raw, read, mask, unread);
     return { left: shown === read ? raw : '', shown };
   });
   // A secret only a reading across segments holds (`%61/b` read twice) stars the whole path.
-  const path = hidesEncodedSecret(pieces.map((p) => p.left).join('/'), mask)
+  const path = hidesEncodedSecret(pieces.map((p) => p.left).join('/'), mask, unread)
     ? '/***'
     : pieces.map((p) => p.shown).join('/');
   // Keys from the query as sent, not `searchParams`: that decodes once as UTF-8 only. Masked
@@ -1128,7 +1162,7 @@ function pathShown(url: string, mask: (text: string) => string): string | undefi
   const rawKeys = mask(parsed.search).slice(1).split('&').filter((pair) => pair !== '');
   const keys = [...new Set(rawKeys.map((pair) => {
     const { raw, read } = formName(pair);
-    return shownPiece(raw, read, mask);
+    return shownPiece(raw, read, mask, unread);
   }))];
   const query = keys.length > 0 ? `?${keys.map((k) => `${k}=…`).join('&')}` : '';
   return `${path}${query}`;

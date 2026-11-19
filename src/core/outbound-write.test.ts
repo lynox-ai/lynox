@@ -1026,9 +1026,46 @@ describe('a secret inside JSON text inside a value', () => {
   });
 
   it('JSON text whose strings, read, add up past the budget is not shown, with no secret in it', () => {
-    const many = (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => `v${i}`));
-    expect('text' in bodyForQuestion(JSON.stringify({ value: many(1000) }), mask)).toBe(true);
-    expect(bodyForQuestion(JSON.stringify({ value: many(10_000) }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    // Each string of about 1 KB costs about 2 KB of the 2 M budget: parsed once, read once.
+    const many = (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => `${'x'.repeat(1000)}${i}`));
+    expect('text' in bodyForQuestion(JSON.stringify({ value: many(800) }), mask)).toBe(true);
+    expect(bodyForQuestion(JSON.stringify({ value: many(1200) }), mask)).toEqual({ unshowable: 'escaped-secret' });
+  });
+
+  it('JSON text with many short strings is read, not counted as unread', () => {
+    const many = JSON.stringify(Array.from({ length: 8000 }, (_, i) => `v${i}`));
+    expect('text' in bodyForQuestion(JSON.stringify({ value: many }), mask)).toBe(true);
+  });
+
+  it('a wide array in JSON text is read without running out of stack', () => {
+    const wide = `[${Array(200_000).fill('1').join(',')}]`;
+    expect(() => bodyForQuestion(JSON.stringify({ value: wide }), mask)).not.toThrow();
+    expect('text' in bodyForQuestion(JSON.stringify({ value: wide }), mask)).toBe(true);
+  });
+
+  it('the first of two equal keys in JSON text is read too, which a parse drops and a server may keep', () => {
+    const dup = `{"a":"\\u0068${STORED.slice(1)}","a":"x"}`;
+    expect((JSON.parse(dup) as { a: string }).a).toBe('x');
+    expect(bodyForQuestion(JSON.stringify({ value: dup }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`value=${encodeURIComponent(dup)}`, mask, FORM)).toEqual({ text: 'value = ***', escapedSecret: true });
+  });
+
+  it('JSON text in a form inside a decoded form value is read', () => {
+    expect(bodyForQuestion(`p=${encodeURIComponent(`b=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+    expect(bodyForQuestion(`p=b%3D${encodeURIComponent(encodeURIComponent(escaped))}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+    expect(bodyForQuestion(`p=${encodeURIComponent(`b=${plainInner}`)}`, mask, FORM)).toEqual({ text: 'p = b={"token":"***cret"}', escapedSecret: false });
+  });
+
+  it('one JSON document per line, and a multipart part, are read line by line', () => {
+    expect(bodyForQuestion(`{"a":1}\n${escaped}`, mask, 'application/x-ndjson')).toEqual({ unshowable: 'escaped-secret' });
+    const part = (inner: string) => `--b\r\nContent-Type: application/json\r\n\r\n${inner}\r\n--b--`;
+    expect(bodyForQuestion(part(escaped), mask, 'multipart/form-data; boundary=b')).toEqual({ unshowable: 'escaped-secret' });
+    expect('text' in bodyForQuestion(part(plainInner), mask, 'multipart/form-data; boundary=b')).toBe(true);
+  });
+
+  it('JSON text after a byte order mark is read', () => {
+    expect(bodyForQuestion(`value=%EF%BB%BF${encodeURIComponent(escaped)}`, mask, FORM)).toEqual({ text: 'value = ***', escapedSecret: true });
+    expect(bodyForQuestion(`\uFEFF${escaped}`, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
   });
 
   it('JSON text percent-encoded in a form body: the value is starred and the body counts as sending the secret', () => {
@@ -1062,5 +1099,14 @@ describe('a secret inside JSON text inside a value', () => {
     expect(pathForQuestion(url, mask)).toBe('/a/***');
     expect(pathHoldsSecret(url, mask)).toBe(true);
     expect(pathHoldsSecret(`https://h.example/a/${encodeURIComponent('{"a":"b"}')}`, mask)).toBe(false);
+  });
+
+  it('JSON text in a path segment nested past what is read counts as holding a secret, as it is starred', () => {
+    const deep = (inner: string) => `https://h.example/a/${encodeURIComponent(wrap(wrap(wrap(inner))))}`;
+    expect(pathForQuestion(deep(escaped), mask)).toBe('/a/***');
+    expect(pathHoldsSecret(deep(escaped), mask)).toBe(true);
+    expect(pathHoldsSecret(deep('{"a":"b"}'), mask)).toBe(true);
+    // Control: one level less is read, and holds nothing.
+    expect(pathHoldsSecret(`https://h.example/a/${encodeURIComponent(wrap(wrap('{"a":"b"}')))}`, mask)).toBe(false);
   });
 });
