@@ -5,6 +5,7 @@ import { blobToEmbed, cosineSimilarity } from './embedding.js';
 import { canSupersede } from './provenance.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import { ENCRYPTED_PREFIX } from './strict-decrypt.js';
+import { sourceKeptSql } from './relation-source.js';
 
 /** The columns {@link MemoryGraphStore.getStub} reads back (test/inspection). */
 export interface MemoryStubRow {
@@ -537,6 +538,15 @@ export class MemoryGraphStore {
     }).immediate();
   }
 
+  /** The engine.db mirror of {@link AgentMemoryDb.markReplaced}, in one transaction. */
+  markReplaced(ids: string[], successorId: string): number {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => '?').join(',');
+    return this.db.transaction(() => this.db.prepare(
+      `UPDATE memories SET superseded_by = ?, updated_at = datetime('now') WHERE id IN (${placeholders}) AND is_active = 0 AND superseded_by IS NULL AND id <> ?`,
+    ).run(successorId, ...ids, successorId).changes)();
+  }
+
   /**
    * Deactivate memory stubs by id (`is_active = 0`) — the engine.db mirror of a
    * legacy pattern-deactivation (`memory_delete` / `memory_update`). The caller
@@ -582,10 +592,11 @@ export class MemoryGraphStore {
 
   /**
    * Delete superseded/inactive stubs (`is_active = 0`) — the engine.db port of the
-   * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children, and the
-   * orphan-subject reap runs here too (a `memory_delete` soft-deletes, gc hard-deletes,
-   * and it is the hard delete that would otherwise leave the minted subject's name
-   * behind).
+   * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children, the
+   * relationships sourced from a deleted stub (no successor) go first in the same
+   * transaction, and the orphan-subject reap runs here too (a `memory_delete`
+   * soft-deletes, gc hard-deletes, and it is the hard delete that would otherwise leave
+   * the minted subject's name behind).
    *
    * Unlike {@link purgeMemories} the reap is NOT in the delete's transaction: gc is a
    * best-effort sweep whose caller (`KnowledgeLayer.gc`) swallows failures, so a reaper
@@ -600,6 +611,13 @@ export class MemoryGraphStore {
       const found = this.orphanReaper
         ? this._linkedSubjectIds('SELECT id FROM memories WHERE is_active = 0', [])
         : [];
+      // Before the memories, as `purgeMemories` does: the FK is ON DELETE SET NULL, so a
+      // relationship sourced from a deleted stub would survive it with its `description`
+      // and no source, indistinguishable from an edge that never had one. Deleted means
+      // deactivated without a successor; a superseded stub's relationships stay as before.
+      this.db.prepare(
+        'DELETE FROM relationships WHERE source_memory_id IN (SELECT id FROM memories WHERE is_active = 0 AND superseded_by IS NULL)',
+      ).run();
       const changes = this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
       return { deleted: changes, candidates: found };
     }).immediate();
@@ -803,6 +821,7 @@ export class MemoryGraphStore {
       JOIN relationships r ON (ms.subject_id = r.from_subject_id OR ms.subject_id = r.to_subject_id)
       WHERE (r.from_subject_id = ? OR r.to_subject_id = ?)
         AND ms.subject_id != ?
+        AND ${sourceKeptSql('r')}
         ${activeClause}
       ORDER BY m.created_at DESC LIMIT ?
     `).all(subjectId, subjectId, subjectId, safeLimit) as EngineMemoryRaw[];

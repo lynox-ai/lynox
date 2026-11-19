@@ -95,7 +95,11 @@ export type CaptureEvent =
  * outcomes and cannot tell which rule produced which. `outcome` says WHAT happened
  * (`pending_review` / `active`); this says which of the three rules decided it.
  *
- * - `turn_trusted`     — the turn ingested nothing external; no gate applied.
+ * - `turn_trusted`     — the turn ingested nothing external, and the extractor placed the
+ *                        fact under the operator label; no gate applied.
+ * - `turn_trusted_assistant` — the turn ingested nothing external, but the fact stands only
+ *                        under the assistant label (a draft or example the assistant wrote,
+ *                        or an unparseable attribution); it goes to review (row 1103).
  * - `excerpt_external` — the excerpt itself embeds wrapped third-party text, so the
  *                        extractor's own attribution was NOT consulted (it is written by
  *                        a model reading attacker-reachable content).
@@ -115,6 +119,7 @@ export type CaptureEvent =
  */
 export type CaptureRouting =
   | 'turn_trusted'
+  | 'turn_trusted_assistant'
   | 'excerpt_external'
   | 'injection_suspected'
   | 'fact_external'
@@ -141,13 +146,17 @@ export type CaptureRouting =
  * `remember_invoked` with `source: 'model'`. Counting it as a suppression would file a
  * success under a failure heading.
  *
+ * `trail_unavailable` fires per FACT, not per turn, after `capture_ran`: the recovery pass found
+ * the fact, and its row in the actor trail could not be written (660a-3), so the fact was not
+ * written either. Like `fallback_off`, the turn is already in the denominator.
+ *
  * `no_memory` is the one worth reading twice: it is a null-check on the LEGACY store object
  * that also gates the DK path, which never touches it. A sub-agent spawned with
  * `isolated_memory: true` gets no `Memory` while still inheriting the DK flag, so it can
  * emit the fire-rate's numerator and never its denominator. That is a mechanism, not yet a
  * diagnosis of any particular sink.
  */
-export type CaptureSuppressedReason = 'no_memory' | 'extraction_off' | 'internal_run' | 'fallback_off';
+export type CaptureSuppressedReason = 'no_memory' | 'extraction_off' | 'internal_run' | 'fallback_off' | 'trail_unavailable';
 
 /**
  * The three reasons that fire INSTEAD of `capture_eligible` — the turn never entered the

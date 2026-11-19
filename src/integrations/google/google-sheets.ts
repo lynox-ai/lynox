@@ -9,7 +9,7 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
-import { namedTarget } from '../../core/audit-log.js';
+import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
 
 // === Types ===
 
@@ -136,7 +136,7 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
   return {
     outwardWrite: (input) => (SHEETS_OUTWARD_ACTIONS.has(input.action) ? input.action : null),
     outwardRead: (input) => {
-      if (input.action === 'read') return `read ${namedTarget([['spreadsheet', input.spreadsheet_id], ['range', input.range]])}`.trimEnd();
+      if (input.action === 'read') return `read ${namedTarget([['spreadsheet', input.spreadsheet_id === undefined ? undefined : withoutAddresses(input.spreadsheet_id)], ['range', input.range === undefined ? undefined : withoutAddresses(input.range)]])}`.trimEnd();
       if (input.action === 'list') return 'list';
       return null;
     },

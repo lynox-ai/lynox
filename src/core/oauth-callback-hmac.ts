@@ -27,8 +27,9 @@
  * readers differ on which copy counts.
  *
  * Tested against one published example (a third-party library's docs) and
- * vectors built with the library's procedure. No redirect from a real Shopify
- * store has gone through it yet.
+ * vectors built with the library's procedure. The first redirect from a real
+ * Shopify store reached it in October 2026. Why a redirect is refused goes to the
+ * server log ({@link shopifyCallbackRefusalLine}); the page does not say.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
@@ -42,9 +43,9 @@ export const SHOPIFY_CALLBACK_WINDOW_SECONDS = 90;
 /**
  * The store domain as Shopify's OAuth documentation checks it, anchored at both
  * ends. Stricter than the library's `sanitizeShop`, which also takes `_` and
- * other Shopify domains.
+ * other Shopify domains. Its label holds at most 63 characters, as a DNS label does.
  */
-const SHOPIFY_SHOP = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
+const SHOPIFY_SHOP = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}\.myshopify\.com$/;
 
 /** What the authorize redirect has to carry beyond the signature. */
 const REQUIRED = ['code', 'shop', 'state'] as const;
@@ -153,4 +154,37 @@ export function bindShopifyCallback(
     binding: { profileId, origin: `https://${shop}` },
     code: verdict.params.get('code') ?? '',
   };
+}
+
+/** A query parameter name that is written into the log as it is; anything else is only counted. */
+const LOGGABLE_PARAM = /^[a-z_]{1,32}$/;
+/** A profile id written into the log as it is; anything else is replaced. */
+const LOGGABLE_PROFILE = /^[A-Za-z0-9_.-]{1,64}$/;
+/** How many names the line lists; the rest are counted. Shopify's redirect carries six. */
+const LISTED_NAMES = 12;
+
+/**
+ * The server-log line for a refused Shopify callback: the reason, the profile and the NAMES of the
+ * query parameters, sorted. Never a value: the query carries the code, the state and the signature,
+ * and none of them belongs in a log. A name outside a plain lower-case pattern is counted, not
+ * written, since the query is whatever the browser was sent to, and the line must stay one line.
+ * Past {@link LISTED_NAMES} names the rest are counted too, so the line stays short.
+ */
+export function shopifyCallbackRefusalLine(
+  reason: Extract<ShopifyCallbackBinding, { ok: false }>['reason'],
+  profileId: string,
+  rawQuery: string,
+): string {
+  const names = new Set<string>();
+  let other = 0;
+  for (const name of new URLSearchParams(rawQuery).keys()) {
+    if (LOGGABLE_PARAM.test(name)) names.add(name);
+    else other++;
+  }
+  const sorted = [...names].sort((a, b) => a.localeCompare(b));
+  const listed = sorted.slice(0, LISTED_NAMES).join(',');
+  other += Math.max(0, sorted.length - LISTED_NAMES);
+  const profile = LOGGABLE_PROFILE.test(profileId) ? profileId : '(unprintable)';
+  const extra = other > 0 ? ` +${String(other)} other` : '';
+  return `[lynox] shopify callback refused: reason=${reason} profile=${profile} params=${listed === '' ? '(none)' : listed}${extra}\n`;
 }

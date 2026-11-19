@@ -60,6 +60,8 @@ describe('the worker wires the judge to the engine\'s managed hook', () => {
       getHooks: vi.fn(() => [hook!]),
       getContext: vi.fn(() => null),
       client: {},
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = { hasChannels: vi.fn(() => false), notify: vi.fn(async () => {}) } as unknown as NotificationRouter;
     const loop = new WorkerLoop(engine, router, 60_000);

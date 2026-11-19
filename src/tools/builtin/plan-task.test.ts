@@ -20,11 +20,15 @@ import { tmpdir } from 'node:os';
 import type { IAgent, LynoxUserConfig, PromptText } from '../../types/index.js';
 import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 import { InputRequiredError } from '../../core/input-required.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
+import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 
 const mockConfig: LynoxUserConfig = { api_key: 'test-key' };
 
 function makeAgent(overrides: Partial<IAgent> = {}, userConfig: LynoxUserConfig = {}): IAgent {
   const toolContext = createToolContext(userConfig);
+  // A mandate's writes leave rows in the actor trail and are refused without one.
+  toolContext.auditLog = testAuditLog().log;
   return {
     name: 'test',
     model: 'test-model',
@@ -819,6 +823,29 @@ describe('plan_task auto-planning fallback', () => {
     // The BOUND, exactly — not the estimate.
     expect(counters.costUSD).toBe(upperBoundUsd);
     expect(onAfterRun, 'the aborted call must not reach the tenant debit').not.toHaveBeenCalled();
+  });
+
+  it('hands the planning call the tool call\'s signal, and none outside a call', async () => {
+    const plan = { steps: [{ id: 'a', task: 'do it' }], reasoning: 'r', estimatedCost: 0 };
+    mockPlanDAG.mockResolvedValue(plan);
+    const slot: CallSlot = { abort: new AbortController() };
+    await runInCallSlot(slot, () => planTaskTool.handler({ summary: 'Create a report' }, makeAgent({ promptUser: undefined }, mockConfig)));
+    expect((mockPlanDAG.mock.calls[0]![1] as { signal?: AbortSignal }).signal).toBe(slot.abort!.signal);
+
+    await planTaskTool.handler({ summary: 'Create a report' }, makeAgent({ promptUser: undefined }, mockConfig));
+    expect((mockPlanDAG.mock.calls[1]![1] as { signal?: AbortSignal }).signal).toBeUndefined();
+    mockPlanDAG.mockReset();
+  });
+
+  it('a planning call stopped with the run ends the call as stopped: no question, no workflow', async () => {
+    // planDAG throws an AbortError for a stop (dag-planner.test.ts); the handler must let it
+    // through rather than go on to ask about a plan nobody made.
+    mockPlanDAG.mockRejectedValueOnce(new DOMException('plan_task was stopped before a plan was made', 'AbortError'));
+    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const agent = makeAgent({ promptUser }, mockConfig);
+
+    await expect(planTaskTool.handler({ summary: 'Sync the shop' }, agent)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(promptUser).not.toHaveBeenCalled();
   });
 
   it('carries planDAG\'s declared model AND tools into the stored pipeline (auto-plan)', async () => {

@@ -8,8 +8,9 @@ import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGT
 import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
-import type { CallContract, CallFiled, GrantLift } from './call-connection.js';
-import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
+import type { CallApiCost, CallContract, CallFiled, GrantLift } from './call-connection.js';
+import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier, PlannedPipeline } from '../types/index.js';
+import { workflowStampState, type WorkflowStampState } from './workflow-stamp.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
@@ -23,8 +24,17 @@ import { WorkflowStore, type ContentMigrationCounts, type WorkflowAuthorship, ty
 import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
+import { HISTORY_MARKERS_DDL } from './history-markers.js';
+import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
+import { stepIdIssue } from '../orchestrator/step-id.js';
+import { templateRefIssue } from '../orchestrator/template-refs.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
+
+/** The key history.db's encrypted columns are stored under, derived from the vault key (see `deriveEngineEncKey`). */
+export function deriveHistoryEncKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
 
 function getDefaultDbPath(): string {
   return join(getLynoxDir(), 'history.db');
@@ -1614,6 +1624,33 @@ const MIGRATIONS: string[] = [
    ALTER TABLE run_tool_calls ADD COLUMN lift_entry TEXT CHECK (lift_entry IN ('v1'));
    ALTER TABLE run_tool_calls ADD COLUMN filing TEXT CHECK (filing IN ('queued', 'not-queued'));
    ALTER TABLE run_tool_calls ADD COLUMN approval_id TEXT;`,
+  // v70: history.db's copies of the two engine.db markers that must outlive engine.db
+  // (`history-markers.ts`, cut S3-E): `contained_threads` (the thread rows of `contained`) and
+  // `exact_marker_mirror` (the exact marker, with the instance it was set for). Written once,
+  // never changed. Not in HISTORY_KEPT_ON_ERASURE: the owner's erasure empties them with the
+  // threads. No backfill here: the boot copies what engine.db holds (`ContainmentMirror.syncFrom`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (70);${HISTORY_MARKERS_DDL}`,
+  // v71: the request a call sent to an API whose profile has a cost (`CallApiCost`), for the
+  // count and cost a run shows in its footer. `api_cost_source` is set exactly when the call sent
+  // one, so the count is the rows where it is not NULL; `api_cost_usd` is NULL for `none`. Written
+  // from the engine's own record of the call, never from tool input; the `response` amount is the
+  // provider's number, for display only. No backfill: nothing recorded it before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+   ALTER TABLE run_tool_calls ADD COLUMN api_cost_usd REAL CHECK (api_cost_usd IS NULL OR api_cost_usd >= 0);
+   ALTER TABLE run_tool_calls ADD COLUMN api_cost_source TEXT CHECK (api_cost_source IN ('response', 'profile', 'none'));`,
+  // v72: the chat run whose turn started a pipeline run (`ChatOrigin.runId`), nested runs
+  // included, so the chat's footer counts the paid API calls its workflow's steps sent
+  // (`getApiCallsOfRun`). NULL for a run no chat turn started and on every older row.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
+   ALTER TABLE pipeline_runs ADD COLUMN started_by_run_id TEXT;
+   CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started_by ON pipeline_runs(started_by_run_id);`,
+  // v73: who wrote a thread message (`ThreadMessageRecord.author`): a `principalTag` for a turn
+  // the person typed, or a run's own tag (`trigger:<id>`) for a turn a trigger started, which is
+  // never `owner`, not even for the owner's own trigger (`runAuthorTag`). NULL on every older
+  // row and on every row the engine writes itself (assistant turns, tool results, notes), and
+  // NULL means unknown: it is never read as the owner's. No backfill.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (73);
+   ALTER TABLE thread_messages ADD COLUMN author TEXT;`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -1673,7 +1710,7 @@ export class RunHistory {
     // Derive history encryption key via HKDF from vault key
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
-      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-history', HISTORY_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._encKey = deriveHistoryEncKey(vaultKey);
     } else {
       this._encKey = null;
     }
@@ -1958,15 +1995,18 @@ export class RunHistory {
     contract?: CallContract | undefined;
     lift?: GrantLift | undefined;
     filed?: CallFiled | undefined;
+    /** v71 (see there). Absent writes NULL: the call sent no request to an API with a cost. */
+    apiCost?: CallApiCost | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
       INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id, tool_use_id,
-        is_error, contract_state, contract_grant_id, lift_grant_id, lift_entry, filing, approval_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        is_error, contract_state, contract_grant_id, lift_grant_id, lift_entry, filing, approval_id, api_cost_usd, api_cost_source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null, params.toolUseId ?? null,
       params.isError === undefined ? null : (params.isError ? 1 : 0), params.contract?.state ?? null, params.contract?.grantId ?? null,
-      params.lift?.grantId ?? null, params.lift?.entry ?? null, params.filed?.outcome ?? null, params.filed?.approvalId ?? null);
+      params.lift?.grantId ?? null, params.lift?.entry ?? null, params.filed?.outcome ?? null, params.filed?.approvalId ?? null,
+      params.apiCost?.usd ?? null, params.apiCost?.source ?? null);
     return id;
   }
 
@@ -2128,6 +2168,24 @@ export class RunHistory {
    * Ordered by run creation, then `rowid` to disambiguate same-second runs
    * (`runs.created_at` has second granularity), then per-run sequence.
    */
+  /**
+   * The tool_use ids of this session's calls the ledger records as failed: thrown and soft
+   * failures alike (`is_error = 1`). Calls written before `tool_use_id` and `is_error` existed
+   * have neither and are not in it. Workflow steps' replayed calls are left out, as in
+   * `getSessionToolCalls`.
+   */
+  getFailedToolUseIds(sessionId: string): Set<string> {
+    const rows = this.db.prepare(`
+      SELECT tc.tool_use_id AS id FROM run_tool_calls tc
+      JOIN runs r ON r.id = tc.run_id
+      WHERE r.session_id = ?
+        AND r.run_type != 'pipeline_step'
+        AND tc.is_error = 1
+        AND tc.tool_use_id IS NOT NULL
+    `).all(sessionId) as Array<{ id: string }>;
+    return new Set(rows.map((r) => r.id));
+  }
+
   getSessionToolCalls(sessionId: string): ToolCallRecord[] {
     const rows = this.db.prepare(`
       SELECT tc.* FROM run_tool_calls tc
@@ -2422,10 +2480,17 @@ export class RunHistory {
    * of its own, so this is the row the spend aggregates — and with them the daily and monthly
    * limits — count it from. Never counted as a run or a turn.
    */
-  recordBulkJudgeCost(entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }): void {
-    this.db.prepare(
+  recordBulkJudgeCost(entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }): number {
+    return Number(this.db.prepare(
       'INSERT INTO bulk_cost_days (run_id, model_id, tokens_in, tokens_out, cost_usd) VALUES (?, ?, ?, ?, ?)',
-    ).run(entry.runId, entry.modelId, entry.tokensIn, entry.tokensOut, entry.costUsd);
+    ).run(entry.runId, entry.modelId, entry.tokensIn, entry.tokensOut, entry.costUsd).lastInsertRowid);
+  }
+
+  /** Replace a call's provisional row (its worst case, booked before the call) by what the call
+   *  cost; a call that was never paid for settles at 0. The row keeps its day. */
+  settleBulkJudgeCost(id: number, entry: { tokensIn: number; tokensOut: number; costUsd: number }): void {
+    this.db.prepare('UPDATE bulk_cost_days SET tokens_in = ?, tokens_out = ?, cost_usd = ? WHERE id = ?')
+      .run(entry.tokensIn, entry.tokensOut, entry.costUsd, id);
   }
 
   /** `byModel` with the judge's spend added per model; its calls add no run. */
@@ -2949,6 +3014,40 @@ export class RunHistory {
     return row?.total ?? 0;
   }
 
+  /**
+   * The requests to APIs with a cost that `runId` and every run it spawned, at any depth, sent
+   * (v71): how many, and the sum of the amounts known. `estimated` when any amount is a profile
+   * rate, `unpriced` how many had no amount. A sub-agent's calls are on its own run, so the
+   * spawn tree is walked like {@link getDescendantCostUsd}, here with the root and every status:
+   * a request a failed child sent was still sent. `UNION` for the same reason as there.
+   *
+   * A workflow a run of the tree started counts too (v72): its steps are `pipeline_step` runs
+   * under the pipeline run (`spawn_parent_id` = the pipeline's id), and the pipeline names the
+   * chat run that started it (`started_by_run_id`; a nested workflow carries the same chat run).
+   * Only calls are counted here, never `cost_usd`: a step's model spend stays out of every spend
+   * aggregate (A2), and this figure is a count of requests, not spend.
+   */
+  getApiCallsOfRun(runId: string): { calls: number; usd: number; estimated: boolean; unpriced: number } {
+    const row = this.db.prepare(`
+      WITH RECURSIVE tree AS (
+        SELECT id FROM runs WHERE id = ?
+        UNION
+        SELECT r.id FROM runs r JOIN tree t ON r.spawn_parent_id = t.id
+        UNION
+        SELECT r.id FROM runs r
+          JOIN pipeline_runs p ON r.spawn_parent_id = p.id
+          JOIN tree t ON p.started_by_run_id = t.id
+      )
+      SELECT COUNT(*) AS calls,
+             COALESCE(SUM(api_cost_usd), 0) AS usd,
+             COALESCE(MAX(api_cost_source = 'profile'), 0) AS estimated,
+             COALESCE(SUM(api_cost_source = 'none'), 0) AS unpriced
+      FROM run_tool_calls
+      WHERE run_id IN (SELECT id FROM tree) AND api_cost_source IS NOT NULL
+    `).get(runId) as { calls: number; usd: number; estimated: number; unpriced: number } | undefined;
+    return { calls: row?.calls ?? 0, usd: row?.usd ?? 0, estimated: (row?.estimated ?? 0) === 1, unpriced: row?.unpriced ?? 0 };
+  }
+
   // === Analytics delegates ===
 
   getRepeatTasks(contextId: string, minCount: number, days: number) {
@@ -2975,12 +3074,23 @@ export class RunHistory {
     return analytics.getToolStats(this.db, contextId, days);
   }
 
-  getPipelineStepStats(days: number) {
-    return analytics.getPipelineStepStats(this.db, days);
+  /**
+   * The chats any top-level workflow run was started from (register 1118). Without a time window:
+   * a stats query reads its own `now`, and a run that crosses the window's edge between the two
+   * reads must still be in this list.
+   */
+  getPipelineOriginChats(): string[] {
+    return (this.db.prepare(
+      "SELECT DISTINCT origin_thread_id AS id FROM pipeline_runs WHERE parent_run_id IS NULL AND origin_thread_id IS NOT NULL AND origin_thread_id != ''",
+    ).all() as Array<{ id: string }>).map((r) => r.id);
   }
 
-  getPipelineCostStats(days: number) {
-    return analytics.getPipelineCostStats(this.db, days);
+  getPipelineStepStats(days: number, hiddenChats: readonly string[] = []) {
+    return analytics.getPipelineStepStats(this.db, days, hiddenChats);
+  }
+
+  getPipelineCostStats(days: number, hiddenChats: readonly string[] = []) {
+    return analytics.getPipelineCostStats(this.db, days, hiddenChats);
   }
 
   getAvgStepCostByModelTier(days: number) {
@@ -3225,8 +3335,14 @@ export class RunHistory {
     grantId?: string | undefined;
     startedVia?: string | undefined;
     originThreadId?: string | undefined;
+    startedByRunId?: string | undefined;
   }): void {
     persistence.insertPipelineRun(this.db, params);
+  }
+
+  /** {@link getPipelineRunOrigin} for several runs at once: only the runs a chat started. */
+  getPipelineRunOrigins(ids: readonly string[]): Map<string, string> {
+    return persistence.getPipelineRunOrigins(this.db, ids);
   }
 
   /**
@@ -3319,13 +3435,39 @@ export class RunHistory {
   /** `author` is the request that saves: its turn's principal, or `null` for a write no request
    *  makes. Required, so no caller can leave it out (`WorkflowStore.upsert`). `copiedFrom` names
    *  the workflow whose steps this one copies; the copy then carries that workflow's mandate mark
-   *  (`WorkflowStore.upsertCopy`). */
+   *  (`WorkflowStore.upsertCopy`). Pass it only when the server knows the source itself; a
+   *  workflow imported from text or saved from what a session did carries its saver's mark alone. */
   insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; template?: boolean | undefined; capabilityContract?: CapabilityContract | undefined }, author: RequestPrincipal | null, copiedFrom?: string): void {
     // Fail-closed contract validation at the save chokepoint (Slice B / D2):
     // every producer (save_workflow, plan_task, the Slice-C edit tool) routes
     // through here, so a contract-governed workflow with an unconstrained
     // re-targetable param is rejected before it can be persisted + scheduled.
     // No contract → no-op, so existing playbooks are unaffected.
+    // The text a run hands the model as its instruction (name, goal, each step's task, the
+    // parameters) carries no character that renders as nothing outside the places real text puts
+    // one (`hidden-text.ts`, `hidden-chars.ts`): a workflow
+    // copied from someone else's would bring its hidden instructions along. Only tools save here,
+    // so a refusal reaches the model that wrote it. Not read: a step's `input_template`, which is
+    // a tool's arguments as a session captured them (scraped text may hold such a character, and
+    // the model saving it cannot rewrite them; a run shows them escaped, `runtime-adapter.ts`), and `reasoning`, the capture's own record, which
+    // never reaches a run's model. A step's id is a name: it reaches the model in a run's result
+    // and in a diagnosis, and takes none of the places real text may carry one.
+    const hidden = findHiddenChar({
+      name: planned.name,
+      goal: planned.goal,
+      steps: planned.steps.map((s) => ({ task: s.task })),
+      parameters: (planned as { parameters?: unknown }).parameters,
+    }) ?? planned.steps.reduce<ReturnType<typeof findHiddenInName>>(
+      (hit, s, i) => hit ?? (typeof s.id === 'string' ? findHiddenInName(s.id, `steps[${i}].id`) : null), null);
+    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
+    // A step's id has a limited shape (`step-id.ts`): it reaches the model next to lynox's own words.
+    // Every producer saves here, so no new plan carries a free-form id; one stored before the limit
+    // is shown by its position, and `update_workflow_steps` names the rename it needs first.
+    const shapeIssue = stepIdIssue(planned.steps);
+    if (shapeIssue) throw new Error(shapeIssue);
+    // A `{{<id>.result}}` no run could resolve is refused at the save, not met as raw text in a run.
+    const refIssue = templateRefIssue(planned.steps);
+    if (refIssue) throw new Error(refIssue);
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The
@@ -3383,9 +3525,38 @@ export class RunHistory {
     return this._requireWorkflowStore().rename(id, name, author);
   }
 
-  /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */
-  setWorkflowConfirmedAt(id: string, confirmedAt: string): boolean {
-    return this._requireWorkflowStore().setConfirmedAt(id, confirmedAt);
+  /** The owner's stamp on the workflow as it stands (`WorkflowStore.stampCurrent`): exact id,
+   *  with the digest of what runs, and a no-op when its stamp already holds. `expectDigest`:
+   *  only if the definition still has the digest the owner's preview showed. */
+  setWorkflowConfirmedAt(id: string, confirmedAt: string, expectDigest?: string | undefined): boolean {
+    return this._requireWorkflowStore().stampCurrent(id, confirmedAt, expectDigest);
+  }
+
+  /** The once-only boot pass over the stamps from before the digest (`WorkflowStore.stampExistingWorkflows`). */
+  stampExistingWorkflows(): number | null {
+    return this._requireWorkflowStore().stampExistingWorkflows();
+  }
+
+  /** Where `planned` stands for an unattended run (`workflow-stamp.ts`): its stamp against the
+   *  engine's hash, and the workflow's own marks. Without the verb graph nothing holds. */
+  workflowStampState(planned: PlannedPipeline): WorkflowStampState {
+    return this._workflowStore ? this._workflowStore.stampState(planned) : workflowStampState(null, planned, undefined);
+  }
+
+  /** The stored definition of exactly `id`, read from the database, never the pipeline cache. */
+  getWorkflowExact(id: string): PlannedPipeline | undefined {
+    return this._workflowStore?.definitionExact(id);
+  }
+
+  /** Whether a mandate ever set up or changed the workflow, taken over or not. Without the
+   *  verb graph: true, so a caller that gates on it refuses. */
+  workflowMandateShaped(id: string): boolean {
+    return this._workflowStore ? this._workflowStore.mandateShaped(id) : true;
+  }
+
+  /** The digest of `planned` as the owner's stamp would bind it, or null without the verb graph. */
+  workflowStampDigest(planned: PlannedPipeline): string | null {
+    return this._workflowStore ? this._workflowStore.stampDigest(planned) : null;
   }
 
   /**
@@ -3393,8 +3564,8 @@ export class RunHistory {
    * confirm, in one engine.db transaction (`WorkflowStore.acceptReviewedGrant`). `false` when
    * the workflow is gone; nothing is written then.
    */
-  acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string): boolean {
-    return this._requireWorkflowStore().acceptReviewedGrant(row, JSON.stringify(stamp), confirmedAt);
+  acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string, seen: PlannedPipeline): boolean {
+    return this._requireWorkflowStore().acceptReviewedGrant(row, JSON.stringify(stamp), confirmedAt, seen);
   }
 
   /**
@@ -3443,11 +3614,12 @@ export class RunHistory {
     return this._requireWorkflowStore().remove(id);
   }
 
-  markPipelineExecuted(id: string): void {
+  /** Whether the definition was removed: its run row says so (660b). */
+  markPipelineExecuted(id: string): boolean {
     // A one-shot that executed leaves the DEFINITION set (only non-templates reach
     // markPipelineExecuted). Drop its engine.db def row so the library no longer
     // lists it. The Run itself is a separate pipeline_runs SPINE row (D6).
-    this._requireWorkflowStore().dropExecuted(id);
+    return this._requireWorkflowStore().dropExecuted(id);
   }
 
   insertTask(params: {
@@ -3544,6 +3716,8 @@ export class RunHistory {
     waitingUntil?: string | null | undefined;
     /** The model tier the user chose for this trigger's runs; null clears the choice. */
     modelTier?: ModelTier | null | undefined;
+    /** See `TriggerStore.updateFields`: the mark of the turn that edits the instruction. */
+    editedUntrusted?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     return this._requireTriggerStore().updateFields(id, params, opts);
   }
@@ -3678,6 +3852,7 @@ export class RunHistory {
     scopeId?: string | undefined;
     status?: string | undefined;
     taskType?: string | undefined;
+    paused?: boolean | undefined;
     limit?: number | undefined;
   }): TriggerRecord[] {
     return this._triggerStore?.listFiltered(opts) ?? [];

@@ -32,8 +32,9 @@ import { MemoryGraphStore } from './memory-graph-store.js';
  *
  * Idempotency (D9 — strict deterministic 1:1, fuzzy-merge → S5): re-running over
  * the same legacy snapshot is convergent. `findOrCreate` name-dedups
- * person/organization/product; `createRelationship` upserts on the (from,kind,to)
- * triple. `engagement` is the one always-insert kind (`project → engagement`), so it
+ * person/organization/product; pass 2 leaves an edge of a (from,kind,to) triple
+ * that existed before the run as it is, so a re-run writes no edge twice and never
+ * strips a source or a CRM description. `engagement` is the one always-insert kind (`project → engagement`), so it
  * is created with a DETERMINISTIC id keyed on the legacy entity id + a pre-check, so
  * a re-run reuses it instead of doubling.
  */
@@ -102,6 +103,11 @@ export class SubjectGraphBackfill {
       }
 
       // Pass 2 — relations → subject↔subject edges (re-pointed via the pass-1 map).
+      // An edge that existed before this run (the mirror's, with its source, or a CRM
+      // edge) is left as it is: the backfill carries no source, and a re-assert would
+      // strip one or overwrite a description it did not write. Edges this run created
+      // take its further rows of the same triple, keeping the last filled description.
+      const preexisting = new Map<string, boolean>();
       for (let offset = 0; ; offset += pageSize) {
         const batch = this.memoryDb.listAllRelations({ limit: pageSize, offset });
         for (const r of batch) {
@@ -115,13 +121,21 @@ export class SubjectGraphBackfill {
           // created in pass 2 predates its memory stub (pass 3), so edge provenance is not
           // re-established (that would need a legacy-relation → engine-relationship id map
           // pass 2 does not keep). The memory STUBS themselves land in pass 3.
-          this.relationships.createRelationship({
-            fromSubjectId: from,
-            toSubjectId: to,
-            kind: r.relation_type,
-            description: r.description,
-            confidence: r.confidence,
-          });
+          const key = `${from}\u0000${r.relation_type}\u0000${to}`;
+          let before = preexisting.get(key);
+          if (before === undefined) {
+            before = this.relationships.hasEdge(from, r.relation_type, to);
+            preexisting.set(key, before);
+          }
+          if (!before) {
+            this.relationships.createRelationship({
+              fromSubjectId: from,
+              toSubjectId: to,
+              kind: r.relation_type,
+              description: r.description,
+              confidence: r.confidence,
+            });
+          }
           counts.relationsMapped++;
         }
         if (batch.length < pageSize) break;

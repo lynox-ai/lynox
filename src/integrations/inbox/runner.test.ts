@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
-import { buildInboxRunner, scrubErrorMessage, type InboxQueuePayload } from './runner.js';
+import { buildInboxRunner, scrubErrorMessage, SENSITIVE_WITHHELD_REASON_DE, withheldSensitive, type InboxQueuePayload } from './runner.js';
 import { InboxCostBudget } from './cost-budget.js';
 import type { LLMCaller } from './classifier/index.js';
 import type { MailAccountConfig } from '../mail/provider.js';
+import { configurePersistentBudget, resetPersistentBudget } from '../../core/session-budget.js';
 
 const ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
@@ -345,6 +346,68 @@ describe('buildInboxRunner — managed credit gate', () => {
   });
 });
 
+describe('buildInboxRunner — the instance spending caps', () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const spentToday = (usd: number) => ({ getCostByDay: () => [{ day: today, cost_usd: usd, run_count: 1 }] });
+  afterEach(() => { resetPersistentBudget(); });
+
+  it('without a host and at the daily cap, makes no classify call and writes the cap verdict', async () => {
+    configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const llm: LLMCaller = vi.fn(async () => 'should-not-be-called');
+    const queue = buildInboxRunner({ state: inbox, llm });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(llm).not.toHaveBeenCalled();
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.bucket).toBe('requires_user');
+    expect(items[0]?.reasonDe).toBe('Tägliches KI-Budget erreicht — manuell prüfen.');
+    const audit = inbox.listAuditForItem(items[0]!.id);
+    const payloadJson = JSON.parse(audit[0]!.payloadJson) as Record<string, unknown>;
+    expect(payloadJson['fail_reason']).toBe('budget_exceeded');
+  });
+
+  it('at the monthly cap, names the monthly budget in the verdict', async () => {
+    configurePersistentBudget({ costProvider: spentToday(20), dailyCapUSD: 100, monthlyCapUSD: 20 });
+    const llm: LLMCaller = vi.fn(async () => 'should-not-be-called');
+    const queue = buildInboxRunner({ state: inbox, llm });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(llm).not.toHaveBeenCalled();
+    expect(inbox.listItems()[0]?.reasonDe).toBe('Monatliches KI-Budget erreicht — manuell prüfen.');
+  });
+
+  it('without a host and under the cap, still makes the classify call', async () => {
+    configurePersistentBudget({ costProvider: spentToday(4.99), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const llm: LLMCaller = vi.fn(async () =>
+      JSON.stringify({ bucket: 'auto_handled', confidence: 0.95, one_line_why_de: 'k' }),
+    );
+    const queue = buildInboxRunner({ state: inbox, llm });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(inbox.listItems()[0]?.bucket).toBe('auto_handled');
+  });
+
+  it('a hook block under the cap keeps the credit text, not the cap text', async () => {
+    configurePersistentBudget({ costProvider: spentToday(1), dailyCapUSD: 5, monthlyCapUSD: 500 });
+    const llm: LLMCaller = vi.fn(async () => 'should-not-be-called');
+    const meteredHost = {
+      getHooks: () => [{ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } }],
+      getContext: () => undefined,
+    };
+    const queue = buildInboxRunner({ state: inbox, llm, meteredHost });
+    queue.enqueue(payload());
+    await queue.drain();
+
+    expect(llm).not.toHaveBeenCalled();
+    expect(inbox.listItems()[0]?.reasonDe).toBe('KI-Guthaben erschöpft — manuell prüfen.');
+  });
+});
+
 describe('buildInboxRunner — policy passthrough', () => {
   it('forwards maxConcurrency to the underlying queue', () => {
     const llm: LLMCaller = vi.fn(async () => '');
@@ -357,5 +420,102 @@ describe('buildInboxRunner — policy passthrough', () => {
     expect(queue.enqueue(payload({ threadKey: 'b' }))).toBe(true);
     expect(queue.enqueue(payload({ threadKey: 'c' }))).toBe(true);
     expect(queue.enqueue(payload({ threadKey: 'd' }))).toBe(false);
+  });
+});
+
+describe('buildInboxRunner — a mail the sensitive check flagged is never filed as handled', () => {
+  // Under `skip` (the default) such a mail never reaches the classifier
+  // (watcher-hook.test.ts: "detects an OTP-shaped mail and skips the LLM"). Under `mask` and
+  // `allow` it does, and the classifier's verdict is the one path that could file it as handled.
+  const handled: LLMCaller = async () =>
+    JSON.stringify({ bucket: 'auto_handled', confidence: 0.95, one_line_why_de: 'Newsletter' });
+
+  async function run(
+    sensitive: InboxQueuePayload['sensitive'],
+    llm: LLMCaller = handled,
+    input: Partial<InboxQueuePayload['classifierInput']> = {},
+  ) {
+    const notifyNewItem = vi.fn(async () => undefined);
+    const queue = buildInboxRunner({ state: inbox, llm, notifier: { notifyNewItem } });
+    const classifierInput = { ...payload().classifierInput, ...input };
+    queue.enqueue(payload(sensitive === undefined ? { classifierInput } : { sensitive, classifierInput }));
+    await queue.drain();
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    const audit = JSON.parse(inbox.listAuditForItem(items[0]!.id)[0]!.payloadJson) as Record<string, unknown>;
+    return { item: items[0]!, audit, notifyNewItem };
+  }
+
+  for (const [mode, sensitive] of [
+    ['mask', { categories: ['otp'], masked: true, redactionCount: 1 }],
+    ['allow', { categories: ['otp'], masked: false, redactionCount: 0 }],
+  ] as const) {
+    it(`shows it under ${mode} when the classifier files it as handled, and the audit says why`, async () => {
+      const { item, audit, notifyNewItem } = await run(sensitive);
+      expect(item.bucket).toBe('requires_user');
+      expect(item.reasonDe).toBe(SENSITIVE_WITHHELD_REASON_DE);
+      expect(audit).toMatchObject({
+        bucket: 'requires_user',
+        fail_reason: 'sensitive_content',
+        classifier_bucket: 'auto_handled',
+        sensitive_categories: ['otp'],
+        sensitive_masked: sensitive.masked,
+      });
+      // Shown like any mail that needs the owner: the notification goes out, told it is flagged.
+      expect(notifyNewItem).toHaveBeenCalledTimes(1);
+      expect((notifyNewItem.mock.calls[0] as unknown[])[1]).toEqual({ flagged: true });
+    });
+  }
+
+  it('tells the notifier a flagged mail is flagged on the dead-letter path, and a plain one is not', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const queue = buildInboxRunner({ state: inbox, llm: async () => { throw new Error('boom'); }, policy: { retryOnce: false }, notifier: { notifyNewItem } });
+    queue.enqueue(payload({ sensitive: { categories: ['otp'], masked: true, redactionCount: 1 } }));
+    queue.enqueue(payload({ threadKey: 'thr-plain' }));
+    await queue.drain();
+    const byThread = Object.fromEntries(notifyNewItem.mock.calls.map((c) => {
+      const [item, opts] = c as unknown as [{ threadKey: string }, unknown];
+      return [item.threadKey, opts];
+    }));
+    expect(byThread).toEqual({ 'imap:t1': { flagged: true }, 'thr-plain': { flagged: false } });
+  });
+
+  it('keeps the classifier\'s bucket for a mail without the flag (control)', async () => {
+    const { item, audit, notifyNewItem } = await run(undefined);
+    expect(item.bucket).toBe('auto_handled');
+    expect(item.reasonDe).toBe('Newsletter');
+    expect(audit).toMatchObject({ bucket: 'auto_handled', fail_reason: null });
+    expect(audit).not.toHaveProperty('classifier_bucket');
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  it('keeps the reason of a flagged mail the classifier already held back as forwarded', async () => {
+    const { item, audit } = await run({ categories: ['otp'], masked: true, redactionCount: 1 }, handled, {
+      subject: 'Fwd: Ihr Anmeldecode',
+      fromAddress: 'a.mustermann@example.com',
+    });
+    expect(item.bucket).toBe('requires_user');
+    expect(item.reasonDe).not.toBe(SENSITIVE_WITHHELD_REASON_DE);
+    expect(audit).toMatchObject({ fail_reason: 'forwarded_by_person' });
+    expect(audit).not.toHaveProperty('classifier_bucket');
+  });
+
+  it('keeps any other verdict on a flagged mail as the classifier gave it', async () => {
+    const draft: LLMCaller = async () =>
+      JSON.stringify({ bucket: 'draft_ready', confidence: 0.9, one_line_why_de: 'Antwort vorbereitet' });
+    const { item, audit } = await run({ categories: ['iban'], masked: true, redactionCount: 1 }, draft);
+    expect(item.bucket).toBe('draft_ready');
+    expect(item.reasonDe).toBe('Antwort vorbereitet');
+    expect(audit).toMatchObject({ fail_reason: null });
+    expect(audit).not.toHaveProperty('classifier_bucket');
+  });
+});
+
+describe('withheldSensitive', () => {
+  const verdict = { bucket: 'auto_handled', confidence: 0.9, reasonDe: 'r', failReason: null, classifierVersion: 'v', bodyTruncated: false } as const;
+
+
+  it('returns the very verdict when nothing changes, so the audit adds no classifier bucket', () => {
+    expect(withheldSensitive(verdict, {})).toBe(verdict);
   });
 });

@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { keepSettingsItem } from '../utils/billing-tier.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface SettingsItem {
 		href: string;
@@ -14,6 +15,13 @@
 		// (Managed-only — no subscription on Self-Host) without an async race.
 		managedOnly?: boolean;
 		hideOnMobile?: boolean;
+		/**
+		 * An API path the item's page reads, asked once: the item shows only once it answers ok.
+		 * For a page only the owner may read, so a helper is not shown an item that leads to a refusal.
+		 */
+		probe?: string;
+		/** Hidden from a mandate's session: the page holds only what the owner keeps (ux U-104). */
+		ownerOnly?: boolean;
 	}
 
 	interface SettingsSection {
@@ -37,11 +45,21 @@
 	// already running the PWA is nonsensical.
 	let isMobileOrPwa = $state<boolean | null>(null);
 	let engineVersion = $state<string | null>(null);
+	/**
+	 * The probes that did not refuse; an item with a probe stays hidden until its path is here. Only
+	 * a 401 or 403 keeps it hidden: a passing error on the owner's side (a restart, a 5xx, a 429,
+	 * no network) must not take the item away, and the page itself says what failed. A helper's
+	 * session is shown the item on such an error too; the page then asks again and shows an error
+	 * or its owner-only sentence. The log never answers a helper with entries: its own answer is a
+	 * 403, and anything before it is an error.
+	 */
+	let probesShown = $state<ReadonlySet<string>>(new Set());
 
 	$effect(() => {
+		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
 			.then(r => r.json())
-			.then((data: Record<string, unknown>) => { managed = !!data['managed']; })
+			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteViewer(data); })
 			.catch(() => { managed = false; });
 	});
 
@@ -88,7 +106,7 @@
 				// config — moved here from the Automation Hub. Two distinct
 				// primitives (a callable endpoint profile vs a secret), so two tiles.
 				{ href: '/app/settings/apis', titleKey: 'settings.apis', descKey: 'settings.apis_desc' },
-				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc' },
+				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc', ownerOnly: true },
 				// IA reorg (M6): ToolToggles unified from two identical tier-split
 				// mounts (workspace/tools Self-Host + privacy/tools Managed) into
 				// one all-tier entry here. The legacy routes 301 to /policy-tools.
@@ -102,7 +120,7 @@
 			labelKey: 'settings.section_workspace',
 			items: [
 				{ href: '/app/settings/workspace/backups', titleKey: 'settings.workspace.backups', descKey: 'settings.workspace.backups_desc', selfHostOnly: true },
-				{ href: '/app/settings/workspace/security', titleKey: 'settings.workspace.security', descKey: 'settings.workspace.security_desc', selfHostOnly: true },
+				{ href: '/app/settings/workspace/security', titleKey: 'settings.workspace.security', descKey: 'settings.workspace.security_desc', selfHostOnly: true, ownerOnly: true },
 				{ href: '/app/settings/workspace/limits', titleKey: 'settings.workspace.limits', descKey: 'settings.workspace.limits_desc', selfHostOnly: true },
 				{ href: '/app/settings/workspace/updates', titleKey: 'settings.workspace.updates', descKey: 'settings.workspace.updates_desc', selfHostOnly: true },
 			],
@@ -132,6 +150,7 @@
 				{ href: '/app/settings/account/onboarding', titleKey: 'settings.account.onboarding', descKey: 'settings.account.onboarding_desc' },
 				{ href: '/app/settings/account/billing', titleKey: 'settings.account.billing', descKey: 'settings.account.billing_desc', managedOnly: true },
 				{ href: '/app/settings/account/security', titleKey: 'settings.account.security', descKey: 'settings.account.security_desc' },
+				{ href: '/app/settings/account/access-log', titleKey: 'settings.account.access_trail', descKey: 'settings.account.access_trail_desc', probe: '/access-trail?limit=1' },
 				{ href: '/app/settings/account/mobile', titleKey: 'settings.account.mobile', descKey: 'mobile.settings_desc', hideOnMobile: true },
 				{ href: '/app/settings/account/migration', titleKey: 'settings.account.migration', descKey: 'migration.subtitle', selfHostOnly: true },
 			],
@@ -143,9 +162,20 @@
 	// hide mobile-only items on PWA / narrow viewports (and while unknown).
 	const hideMobileOnly = $derived(isMobileOrPwa !== false);
 
+	$effect(() => {
+		const paths = [...new Set(sections.flatMap((s) => s.items).map((i) => i.probe).filter((p): p is string => p !== undefined))];
+		for (const path of paths) {
+			fetch(`${getApiBase()}${path}`)
+				.then((r) => { if (r.status !== 401 && r.status !== 403) probesShown = new Set([...probesShown, path]); })
+				.catch(() => { probesShown = new Set([...probesShown, path]); });
+		}
+	});
+
 	function keepItem(i: SettingsItem): boolean {
 		if (!keepSettingsItem(i, managed)) return false;
+		if (i.probe !== undefined && !probesShown.has(i.probe)) return false;
 		if (i.hideOnMobile && hideMobileOnly) return false;
+		if (i.ownerOnly && isMandateSession()) return false;
 		return true;
 	}
 

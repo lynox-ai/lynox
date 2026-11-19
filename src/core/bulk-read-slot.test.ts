@@ -29,7 +29,7 @@ let triggers: TriggerStore;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'lynox-bulk-slot-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
   triggers = new TriggerStore(engineDb);
 });
 afterEach(() => {

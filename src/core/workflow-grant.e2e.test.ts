@@ -11,7 +11,7 @@
  * and never handed to the next would leave every unit green and the POST unsent.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -69,6 +69,9 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // A test whose run is refused before its steps leaves its model turns queued; they must not
+    // become the next test's turns.
+    mockProcess.mockReset();
     sent = [];
     vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
     restoreTransport = setPinnedTransportForTests(async (input) => {
@@ -113,9 +116,11 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
 
   // A stored memory the run can read: what a person approved earlier, not the run's own text.
   let recalls = 0;
+  // Whom the step agent that called it was built for (1055).
+  let recalledAs: unknown[] = [];
   const memoryRecallTool: ToolEntry = {
     definition: { name: 'memory_recall', description: 'recall', input_schema: { type: 'object' as const, properties: {} } },
-    handler: async () => { recalls++; return '- the weekly report goes to finance'; },
+    handler: async (_input: unknown, agent: IAgent) => { recalls++; recalledAs.push(agent.principal); return '- the weekly report goes to finance'; },
   };
 
   function engine(): Engine {
@@ -130,26 +135,146 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       getMemory: () => null,
       getRunHistory: () => history,
       getEngineDb: () => engineDb,
+      // No grant ends here: the plan pause (on by default) finds nothing to pause.
+      getMandateEnds: () => null,
       getSecretStore: () => null,
       getPromptStore: () => null,
       escalateToUser: () => null,
     } as unknown as Engine;
   }
 
-  async function fire(trigger: TriggerRecord): Promise<void> {
+  async function fire(trigger: TriggerRecord, starter?: RequestPrincipal): Promise<void> {
     const loop = new WorkerLoop(engine(), { hasChannels: () => false, notify } as never, 60_000);
-    await (loop as unknown as { executePipeline: (t: TriggerRecord, starter: undefined, ownerStop: AbortSignal) => Promise<void> }).executePipeline(tm.getTrigger(trigger.id)!, undefined, new AbortController().signal);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, starter: RequestPrincipal | undefined, ownerStop: AbortSignal) => Promise<void> }).executePipeline(tm.getTrigger(trigger.id)!, starter, new AbortController().signal);
   }
 
   const posts = (): PinnedTransportInput[] => sent.filter((s) => s.method === 'POST');
   const lastRun = (id: string): string => tm.getTrigger(id)?.last_run_result ?? '';
+
+  // A workflow a mandate shaped waits for the owner's stamp. Its
+  // schedule stays on and is not run, the owner is told once, and once the owner stamps the steps
+  // it runs without being switched on again.
+  it('a schedule of a workflow a mandate shaped waits for the owner\'s stamp, told once, and runs after it', async () => {
+    const eva = { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'g-eva' } as const;
+    history.insertPlannedPipeline({
+      id: 'wf-eva', name: 'wf-eva', goal: 'post the weekly report', reasoning: 'r', estimatedCost: 0,
+      createdAt: '2026-10-01T00:00:00.000Z', template: true,
+      steps: [{ id: 's1', task: 'post the weekly report' }],
+      ...{ mode: 'autonomous', parameters: [] },
+    } as Parameters<RunHistory['insertPlannedPipeline']>[0], eva);
+    forgetPipeline('wf-eva');
+    const trigger = tm.createPipelineTask({ title: 'Weekly', pipelineId: 'wf-eva', scheduleCron: CRON, pipelineParams: '{}' });
+    const told = vi.fn().mockResolvedValue(undefined);
+    // Eva's access is live: a plan of an ended mandate does not run whatever its stamp says.
+    const ends = { isLive: () => true, record: (): void => {} };
+    const base = engine();
+    (base.getToolContext() as unknown as Record<string, unknown>)['mandateEnds'] = ends;
+    const live = { ...base, getMandateEnds: () => ends } as unknown as Engine;
+    const loop = new WorkerLoop(live, { hasChannels: () => true, notify: told } as never, 60_000);
+    const run = async (): Promise<void> => (loop as unknown as { executePipeline: (t: TriggerRecord, starter: undefined, ownerStop: AbortSignal) => Promise<void> })
+      .executePipeline(tm.getTrigger(trigger.id)!, undefined, new AbortController().signal);
+    await run();
+    await run();
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(tm.getTrigger(trigger.id)?.enabled).toBeTruthy();
+    expect(tm.getTrigger(trigger.id)?.last_run_status).toBe('halted');
+    expect(lastRun(trigger.id)).toMatch(/waits for its owner to review its steps/);
+    expect(told.mock.calls.filter((c) => String((c[0] as { body: string }).body).includes('waits for its owner')).length).toBe(1);
+    // The owner stamps the steps as they are: the same schedule runs, not switched on again.
+    history.setWorkflowConfirmedAt('wf-eva', '2026-10-29T00:00:00.000Z');
+    forgetPipeline('wf-eva');
+    mockProcess.mockResolvedValueOnce(endTurn('done'));
+    await run();
+    expect(mockProcess).toHaveBeenCalled();
+    expect(lastRun(trigger.id)).toContain('Workflow completed');
+  });
+
+  it('a one-shot of a workflow a mandate shaped is switched off, not used up, and runs once stamped and switched on', async () => {
+    const eva = { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'g-eva' } as const;
+    history.insertPlannedPipeline({
+      id: 'wf-once', name: 'wf-once', goal: 'post once', reasoning: 'r', estimatedCost: 0,
+      createdAt: '2026-10-01T00:00:00.000Z', template: true,
+      steps: [{ id: 's1', task: 'post once' }],
+      ...{ mode: 'autonomous', parameters: [] },
+    } as Parameters<RunHistory['insertPlannedPipeline']>[0], eva);
+    forgetPipeline('wf-once');
+    const trigger = tm.createPipelineTask({ title: 'Once', pipelineId: 'wf-once', pipelineParams: '{}' });
+    const before = tm.getTrigger(trigger.id)!;
+    const ends = { isLive: () => true, record: (): void => {} };
+    const base = engine();
+    (base.getToolContext() as unknown as Record<string, unknown>)['mandateEnds'] = ends;
+    const loop = new WorkerLoop({ ...base, getMandateEnds: () => ends } as unknown as Engine, { hasChannels: () => true, notify: vi.fn().mockResolvedValue(undefined) } as never, 60_000);
+    const run = async (): Promise<void> => (loop as unknown as { executePipeline: (t: TriggerRecord, starter: undefined, ownerStop: AbortSignal) => Promise<void> })
+      .executePipeline(tm.getTrigger(trigger.id)!, undefined, new AbortController().signal);
+    await run();
+    expect(mockProcess).not.toHaveBeenCalled();
+    const held = tm.getTrigger(trigger.id)!;
+    expect(held.enabled).toBeFalsy();
+    expect(held.status).toBe(before.status);
+    expect(held.next_run_at).toBe(before.next_run_at);
+    expect(held.last_run_status).toBe('halted');
+    expect(lastRun(trigger.id)).toMatch(/switch it on again once its steps are stamped/);
+    const due = (): boolean => tm.getDueTriggers().some((t) => t.id === trigger.id);
+    expect(due()).toBe(false);
+    history.setWorkflowConfirmedAt('wf-once', '2026-10-29T00:00:00.000Z');
+    forgetPipeline('wf-once');
+    expect(due()).toBe(false); // the stamp does not switch it on
+    tm.setEnabled(trigger.id, true);
+    expect(due()).toBe(true);
+    mockProcess.mockResolvedValueOnce(endTurn('done'));
+    await run();
+    expect(mockProcess).toHaveBeenCalled();
+    expect(lastRun(trigger.id)).toContain('Workflow completed');
+  });
 
   it('verify-done: a workflow granted over the acceptance runs on its schedule, and the POST reaches the host', async () => {
     const trigger = accept(saveWorkflow());
     mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{"week":40}' })).mockResolvedValueOnce(endTurn('posted'));
     await fire(trigger);
     expect(posts().map((p) => p.url)).toEqual([TARGET]);
-    expect(lastRun(trigger.id)).toContain('Pipeline completed');
+    expect(lastRun(trigger.id)).toContain('Workflow completed');
+  });
+
+  describe('a headless run carries whom it is for down to its step agents (1055)', () => {
+    const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'grant-eva' };
+    beforeEach(() => { recalledAs = []; });
+    function scheduled(steps: PlannedPipeline['steps']): TriggerRecord {
+      const planned = saveWorkflow('wf-for', steps);
+      history.setWorkflowConfirmedAt(planned.id, '2026-10-01T00:00:00.000Z');
+      forgetPipeline(planned.id);
+      return tm.createPipelineTask({ title: 'Weekly', pipelineId: planned.id, scheduleCron: CRON, pipelineParams: '{}' });
+    }
+
+    it('a run for a mandate builds its step agent for that mandate', async () => {
+      const trigger = scheduled([{ id: 's1', task: 'recall where the report goes', tools: ['memory_recall'] }]);
+      mockProcess.mockResolvedValueOnce(toolUse('memory_recall', {})).mockResolvedValueOnce(endTurn('finance'));
+      await fire(trigger, MANDATE);
+      expect(recalledAs).toEqual([MANDATE]);
+      expect(lastRun(trigger.id)).toContain('Workflow completed');
+    });
+
+    it('CONTROL: the same run with no one named builds its step agent for the owner', async () => {
+      const trigger = scheduled([{ id: 's1', task: 'recall where the report goes', tools: ['memory_recall'] }]);
+      mockProcess.mockResolvedValueOnce(toolUse('memory_recall', {})).mockResolvedValueOnce(endTurn('finance'));
+      await fire(trigger);
+      expect(recalledAs).toEqual([OWNER_PRINCIPAL]);
+    });
+
+    it('a run for a mandate refuses a step that names a tool the mandate\'s lock withholds, before the model is asked', async () => {
+      const trigger = scheduled([{ id: 's1', task: 'clean up', tools: ['bash'] }]);
+      await fire(trigger, MANDATE);
+      expect(mockProcess).not.toHaveBeenCalled();
+      const [run] = history.getRecentPipelineRuns(1);
+      expect(history.getPipelineStepResults(run!.id).map((r) => r.error ?? '').join('\n')).toContain('needs bash');
+    });
+
+    it('CONTROL: the owner\'s run of that step is not refused for it', async () => {
+      const trigger = scheduled([{ id: 's1', task: 'clean up', tools: ['bash'] }]);
+      mockProcess.mockResolvedValueOnce(endTurn('nothing to clean'));
+      await fire(trigger);
+      expect(lastRun(trigger.id)).not.toContain('needs bash');
+      expect(mockProcess).toHaveBeenCalled();
+    });
   });
 
   it('without a grant the same POST is refused, and the owner\'s run record names verb, host and path', async () => {
@@ -183,7 +308,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     expect(lastRun(trigger.id)).not.toContain('sets a header');
   });
 
-  it('steps changed after the acceptance by a raw blob write: the checksum differs and the run does not write', async () => {
+  it('steps changed after the acceptance by a raw blob write: the owner\'s stamp stops holding and the run does not start', async () => {
     const planned = saveWorkflow();
     const trigger = accept(planned);
     engineDb.getDb().prepare("UPDATE workflows SET definition_json = json_set(definition_json, '$.steps[0].task', 'post something else') WHERE id = ?").run(planned.id);
@@ -191,7 +316,11 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
     await fire(trigger);
     expect(posts()).toEqual([]);
-    expect(lastRun(trigger.id)).toMatch(/changed after the grant was accepted/);
+    // The workflow stamp is bound to the steps (`workflow-stamp.ts`), like the grant's checksum:
+    // the run is held for the owner before any step, so the grant is never asked.
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(lastRun(trigger.id)).toMatch(/waits for its owner to review its steps/);
+    expect(tm.getTrigger(trigger.id)?.enabled).toBeTruthy();
   });
 
   it('a schedule the model adds with task_create runs without the grant, even with the same values', async () => {
@@ -292,7 +421,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     const planned = saveWorkflow();
     accept(planned);
     mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
-    const result = await runGuardedSavedWorkflow(engine(), planned.id, undefined, { origin: { kind: 'library', by: 'local' } });
+    const result = await runGuardedSavedWorkflow(engine(), planned.id, undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'local' } });
     expect(result.ok).toBe(true);
     expect(posts().map((p) => p.url)).toEqual([TARGET]);
   });
@@ -301,7 +430,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     const planned = saveWorkflow();
     accept(planned);
     mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
-    const result = await runGuardedSavedWorkflow(engine(), planned.id, undefined);
+    const result = await runGuardedSavedWorkflow(engine(), planned.id, undefined, { principal: OWNER_PRINCIPAL });
     expect(result.grantNote).toMatch(/does not carry one/);
     expect(posts()).toEqual([]);
   });
@@ -370,7 +499,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     it('without values runs with the schedule\'s values, under the grant', async () => {
       grantedParamWorkflow();
       mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
-      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library', by: 'local' } });
+      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'local' } });
       expect(result.grantNote).toBeUndefined();
       expect(posts().map((p) => p.url)).toEqual([TARGET]);
     });
@@ -378,7 +507,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     it('with another value for a parameter no constraint pins (task text only) runs without the grant', async () => {
       grantedParamWorkflow(true);
       mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
-      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', { week: '40', note: 'something else' }, { origin: { kind: 'library', by: 'local' } });
+      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', { week: '40', note: 'something else' }, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'local' } });
       expect(result.grantNote).toMatch(/other values than the ones the grant was accepted with/);
       expect(posts()).toEqual([]);
     });
@@ -386,7 +515,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     it('verify-done: a parameter in the task text, with the accepted values, runs under the grant and writes', async () => {
       grantedParamWorkflow(true);
       mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
-      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library', by: 'local' } });
+      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'local' } });
       expect(result.grantNote).toBeUndefined();
       expect(posts().map((p) => p.url)).toEqual([TARGET]);
     });
@@ -397,24 +526,26 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
         .mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'GET' }, 'tu_read'))
         .mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' }, 'tu_post'))
         .mockResolvedValueOnce(endTurn('done'));
-      await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library', by: 'local' } });
+      await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'local' } });
       expect(sent.map((s) => s.method)).toEqual(['GET']);
     });
 
-    it('a grant stamped with a value that does not show as text runs without the grant', async () => {
-      // A stamp from before values were checked: the run asks again at the handover.
+    it('a grant stamped with a value that does not show as text does not run', async () => {
+      // A stamp from before values were checked: the run asks again at the handover, and a value
+      // that does not show runs neither with the grant nor without it.
       grantedParamWorkflow(true);
       const wf = getPipeline('wf-vals', history)!;
       const hidden = { week: '40', note: 'as\u{E0041} agreed' };
-      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
       const ctx = engine().getToolContext();
-      const result = await runSavedWorkflow('wf-vals', history, { api_key: 'test-key' }, hidden, {
+      const result = await runSavedWorkflow('wf-vals', history, { api_key: 'test-key' }, hidden, { principal: OWNER_PRINCIPAL,
         tools: ctx.tools, toolContext: ctx, memory: null,
         decideGrant: () => ({ contract: wf.capabilityContract!, note: null, boundParams: hidden }),
         startedVia: 'library:local',
       });
-      expect(result.grantNote).toMatch(/holds a character that does not show as text/);
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/holds a character that does not show as text/);
       expect(posts()).toEqual([]);
+      expect(mockProcess).not.toHaveBeenCalled();
     });
   });
 
@@ -432,7 +563,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     const r = acceptWorkflowGrant(wf, { ...ENTRY, params: { week: '40' }, cron: CRON, afterUntrusted: false, checksum: shown.checksum, name: undefined, title: 't' }, 'local', { history, taskManager: tm, hasher: engineDb });
     expect(r.ok).toBe(true);
     forgetPipeline('wf-param');
-    const result = await runGuardedSavedWorkflow(engine(), 'wf-param', { week: '41' }, { origin: { kind: 'library', by: 'local' } });
+    const result = await runGuardedSavedWorkflow(engine(), 'wf-param', { week: '41' }, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'local' } });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/week/);
     expect(posts()).toEqual([]);
@@ -526,9 +657,9 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const loop = new WorkerLoop(engine(), { hasChannels: () => false, notify } as never, 60_000);
       expect(await loop.runTriggerNow(trigger.id)).toEqual({ ok: true });
       await vi.waitFor(() => expect(runRows()).toHaveLength(1));
-      await vi.waitFor(() => expect(lastRun(trigger.id)).toContain('Pipeline completed'));
+      await vi.waitFor(() => expect(lastRun(trigger.id)).toContain('Workflow completed'));
       mockProcess.mockResolvedValueOnce(endTurn('done'));
-      const lib = await runGuardedSavedWorkflow(engine(), 'wf-how', undefined, { origin: { kind: 'library', by: 'cookie:0123abcd' } });
+      const lib = await runGuardedSavedWorkflow(engine(), 'wf-how', undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'cookie:0123abcd' } });
       expect(lib.grantNote).toBeUndefined();
       const grantId = stampOf('wf-how').grantId;
       expect(runRows().map((r) => [r.workflow_grant_id, r.started_via])).toEqual([
@@ -541,7 +672,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const trigger = accept(saveWorkflow('wf-unrecorded'));
       const insert = vi.spyOn(history, 'insertPipelineRun').mockImplementationOnce(() => { throw new Error('SQLITE_FULL'); });
       mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
-      const refused = await runGuardedSavedWorkflow(engine(), 'wf-unrecorded', undefined, { origin: { kind: 'library', by: 'local' } });
+      const refused = await runGuardedSavedWorkflow(engine(), 'wf-unrecorded', undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'local' } });
       expect(posts()).toEqual([]);
       expect(refused.grantNote).toMatch(/could not be recorded/);
       // CONTROL: the same grant, the row written — the POST goes out.
@@ -580,7 +711,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     it('the run read API does not send how a run was started (it holds an auth-origin label)', async () => {
       accept(saveWorkflow('wf-api'));
       mockProcess.mockResolvedValueOnce(endTurn('done'));
-      const r = await runGuardedSavedWorkflow(engine(), 'wf-api', undefined, { origin: { kind: 'library', by: 'cookie:0123abcd' } });
+      const r = await runGuardedSavedWorkflow(engine(), 'wf-api', undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'cookie:0123abcd' } });
       // CONTROL: the row holds both.
       expect(runRows()[0]).toMatchObject({ started_via: 'library:cookie:0123abcd' });
       const read = history.getPipelineRun(r.runId!) as Record<string, unknown>;

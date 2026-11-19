@@ -45,7 +45,7 @@ describe('workspace root', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  const contextDir = (): string => resolveContext({ context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' } } as unknown as LynoxConfig).workspaceDir;
+  const contextDir = (): string => resolveContext({ context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' } } as unknown as LynoxConfig, { kind: 'local' }).workspaceDir;
 
   describe('the default is what it was (I3)', () => {
     it('unset: <data>/workspace by name, created 0700 at boot, and every consumer resolves under it', () => {

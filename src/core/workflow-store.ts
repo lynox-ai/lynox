@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import { isMandateTag, isOwnerPrincipal, principalTag, type RequestPrincipal } from './request-principal.js';
+import { isMandateTag, isOwnerPrincipal, planAuthorshipOfWorkflow, principalTag, type RequestPrincipal } from './request-principal.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
+import { mandateTouched, nextWorkflowStamp, stampOf, withWorkflowDefaults, workflowStampDigest, workflowStampState, type WorkflowStamp, type WorkflowStampState } from './workflow-stamp.js';
 
 /**
  * Escape LIKE metacharacters so a `%`/`_` in a (possibly client-supplied) id
@@ -28,7 +30,7 @@ function likePrefix(id: string): string {
  *
  * `definition_json` is stored PLAINTEXT — a faithful 1:1 relocation of the legacy
  * `pipeline_runs.manifest_json`, which is also plaintext. This lets the patch ops
- * (rename/setConfirmedAt) use surgical SQL `json_set` exactly like the legacy
+ * (rename/stampCurrent) use surgical SQL `json_set` exactly like the legacy
  * path (no read-modify-write, no encrypt/re-encrypt divergence). At-rest
  * encryption of verb-definition free-text is a real hardening but belongs in a
  * deliberate slice (legacy manifest_json parity + a key-loss-safe read path) —
@@ -70,6 +72,13 @@ export interface WorkflowAuthorship {
   mandateEditorId: string | null;
   mandateEditedAt: string | null;
   createdAt: string;
+  /** The marks the owner took over (`plan-takeover.ts`), as they stood; null when none. */
+  coveredCreatedBy: string | null;
+  coveredCreatedId: string | null;
+  coveredCreatedAt: string | null;
+  coveredEditedBy: string | null;
+  coveredEditedId: string | null;
+  coveredEditedAt: string | null;
 }
 
 /**
@@ -122,9 +131,12 @@ export interface ContentMigrationCounts {
 
 export class WorkflowStore {
   private readonly db: Database.Database;
+  /** The keyed hash the workflow stamp's digest is taken with. */
+  private readonly engine: EngineDb;
 
   constructor(engine: EngineDb) {
     this.db = engine.getDb();
+    this.engine = engine;
   }
 
   /**
@@ -163,7 +175,10 @@ export class WorkflowStore {
         updated_at = excluded.updated_at,
         mandate_editor = COALESCE(?, workflows.mandate_editor),
         mandate_editor_id = CASE WHEN ? IS NULL THEN workflows.mandate_editor_id ELSE ? END,
-        mandate_edited_at = CASE WHEN ? IS NULL THEN workflows.mandate_edited_at ELSE datetime('now') END
+        mandate_edited_at = CASE WHEN ? IS NULL THEN workflows.mandate_edited_at ELSE datetime('now') END,
+        covered_edited_by = CASE WHEN ? IS NULL THEN workflows.covered_edited_by ELSE NULL END,
+        covered_edited_id = CASE WHEN ? IS NULL THEN workflows.covered_edited_id ELSE NULL END,
+        covered_edited_at = CASE WHEN ? IS NULL THEN workflows.covered_edited_at ELSE NULL END
     `).run(
       row.id,
       row.name,
@@ -178,6 +193,7 @@ export class WorkflowStore {
       by.mandate,
       by.mandate, by.mandateId,
       by.mandate,
+      by.mandate, by.mandate, by.mandate,
     );
   }
 
@@ -188,6 +204,18 @@ export class WorkflowStore {
    * grant id and `created_at`. The copy holds that mandate's steps, so it answers for them as
    * the source does; its creator is still `author`. A source without a mandate mark (or one
    * that is gone) leaves the copy's editor empty.
+   *
+   * The owner's takeover of that mark travels with it into the copy's editor columns: from the
+   * source's editor cover, or its creator cover when the mark copied was the creator. Without it
+   * the copy of a workflow the owner took over would carry the ended mandate as a member again.
+   * Not a new edit, so the mark is not uncovered here.
+   *
+   * Only a path on which the server itself knows the source copies this way (`save_workflow` from
+   * an existing workflow). A workflow that
+   * comes back through the user's hands (`import_workflow` from an exported block, `save_workflow`
+   * from what a session did) is saved by {@link upsert} and carries only its saver's mark: a source named in
+   * pasted text can be edited or dropped by whoever pastes it, so a mark taken from there would
+   * protect nothing. A copy that must carry another's mark needs a path on the server.
    */
   upsertCopy(row: WorkflowRow, author: RequestPrincipal | null, sourceId: string): void {
     this.db.transaction(() => {
@@ -195,13 +223,13 @@ export class WorkflowStore {
       const src = this.authorship(sourceId);
       if (src === undefined) return;
       const mark = src.mandateEditor !== null
-        ? { editor: src.mandateEditor, id: src.mandateEditorId, at: src.mandateEditedAt }
+        ? { editor: src.mandateEditor, id: src.mandateEditorId, at: src.mandateEditedAt, cby: src.coveredEditedBy, cid: src.coveredEditedId, cat: src.coveredEditedAt }
         : isMandateTag(src.createdBy)
-          ? { editor: src.createdBy, id: src.createdMandateId, at: src.createdAt }
+          ? { editor: src.createdBy, id: src.createdMandateId, at: src.createdAt, cby: src.coveredCreatedBy, cid: src.coveredCreatedId, cat: src.coveredCreatedAt }
           : null;
       if (mark === null) return;
-      this.db.prepare('UPDATE workflows SET mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = ? WHERE id = ?')
-        .run(mark.editor, mark.id, mark.at, row.id);
+      this.db.prepare('UPDATE workflows SET mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = ?, covered_edited_by = ?, covered_edited_id = ?, covered_edited_at = ? WHERE id = ?')
+        .run(mark.editor, mark.id, mark.at, mark.cby, mark.cid, mark.cat, row.id);
     })();
   }
 
@@ -221,58 +249,148 @@ export class WorkflowStore {
    * in the same statement, like {@link upsert}.
    */
   rename(id: string, name: string, author: RequestPrincipal | null): boolean {
-    if (id === '') return false; // empty id → likePrefix '%' would match ALL rows
+    const target = this._resolveWriteId(id);
+    if (target === null) return false;
     const by = authorColumns(author);
     const res = by.mandate === null
       ? this.db.prepare(
-        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?) WHERE id = ? OR id LIKE ? ESCAPE '\\'",
-      ).run(name, name, id, likePrefix(id))
+        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?) WHERE id = ?",
+      ).run(name, name, target)
       : this.db.prepare(
-        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?), mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now') WHERE id = ? OR id LIKE ? ESCAPE '\\'",
-      ).run(name, name, by.mandate, by.mandateId, id, likePrefix(id));
+        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?), mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now'), covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL WHERE id = ?",
+      ).run(name, name, by.mandate, by.mandateId, target);
     return res.changes > 0;
   }
 
   /** Who made the workflow with exactly this id and which mandate changed it last, or
    *  `undefined` when there is none. */
+  /** Where `planned` stands for an unattended run: its stamp against this engine's hash and the
+   *  workflow's own marks, as {@link authorship} reads them (`workflow-stamp.ts`). */
+  stampState(planned: PlannedPipeline): WorkflowStampState {
+    const marks = this.authorship(planned.id);
+    return workflowStampState(this.engine, planned, marks === undefined ? undefined : planAuthorshipOfWorkflow(marks));
+  }
+
+  /** The stored definition of exactly `id` (no prefix), parsed with the defaults every reader
+   *  fills (`withWorkflowDefaults`); undefined when missing or unreadable. */
+  definitionExact(id: string): PlannedPipeline | undefined {
+    if (id === '') return undefined;
+    const row = this.db.prepare('SELECT definition_json FROM workflows WHERE id = ?').get(id) as { definition_json: string } | undefined;
+    if (row === undefined) return undefined;
+    try { return withWorkflowDefaults(JSON.parse(row.definition_json) as PlannedPipeline); } catch { return undefined; }
+  }
+
+  /** Whether a mandate ever set up or changed the workflow, taken over or not (`mandateTouched`). */
+  mandateShaped(id: string): boolean {
+    const marks = this.authorship(id);
+    return marks !== undefined && mandateTouched(planAuthorshipOfWorkflow(marks));
+  }
+
+  /** The digest the owner's stamp of `planned` would carry, with this engine's hash. */
+  stampDigest(planned: PlannedPipeline): string {
+    return workflowStampDigest(this.engine, planned).digest;
+  }
+
   authorship(id: string): WorkflowAuthorship | undefined {
     const r = this.db.prepare(
-      'SELECT created_by, created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, created_at FROM workflows WHERE id = ?',
+      `SELECT created_by, created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, created_at,
+              covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at
+       FROM workflows WHERE id = ?`,
     ).get(id) as {
       created_by: string | null; created_mandate_id: string | null; mandate_editor: string | null;
       mandate_editor_id: string | null; mandate_edited_at: string | null; created_at: string;
+      covered_created_by: string | null; covered_created_id: string | null; covered_created_at: string | null;
+      covered_edited_by: string | null; covered_edited_id: string | null; covered_edited_at: string | null;
     } | undefined;
     if (r === undefined) return undefined;
     return {
       createdBy: r.created_by, createdMandateId: r.created_mandate_id, mandateEditor: r.mandate_editor,
       mandateEditorId: r.mandate_editor_id, mandateEditedAt: r.mandate_edited_at, createdAt: r.created_at,
+      coveredCreatedBy: r.covered_created_by, coveredCreatedId: r.covered_created_id, coveredCreatedAt: r.covered_created_at,
+      coveredEditedBy: r.covered_edited_by, coveredEditedId: r.covered_edited_id, coveredEditedAt: r.covered_edited_at,
     };
   }
 
-  /** Stamp `definition_json.$.confirmedAt` (the human's first-run-confirm).
-   *  Like {@link rename}, does NOT bump `updated_at` — the legacy
-   *  `setWorkflowConfirmedAt` leaves `started_at` untouched (no list reorder). */
-  setConfirmedAt(id: string, confirmedAt: string): boolean {
-    if (id === '') return false; // empty id → likePrefix '%' would match ALL rows
-    const res = this.db.prepare(
-      "UPDATE workflows SET definition_json = json_set(definition_json, '$.confirmedAt', ?) WHERE id = ? OR id LIKE ? ESCAPE '\\'",
-    ).run(confirmedAt, id, likePrefix(id));
-    return res.changes > 0;
+  /**
+   * The owner's stamp on the definition as it stands now (`workflow-stamp.ts`): `confirmedAt`
+   * and the stamp with the digest of what runs, in one statement. Exact id only: a prefix would
+   * move the stamp of a second row. When the stamp it carries already holds, nothing is written
+   * and `confirmedAt` keeps its time, so the lists of its schedules stay valid. Like
+   * {@link rename}, does NOT bump `updated_at` (no list reorder). `expectDigest`: write only if
+   * the definition still has that digest (the owner's stamp act, against what its preview showed).
+   * Returns false when the row is missing, unreadable, or no longer has `expectDigest`.
+   */
+  stampCurrent(id: string, at: string, expectDigest?: string | undefined): boolean {
+    if (id === '') return false;
+    return this.db.transaction((): boolean => {
+      const row = this.db.prepare('SELECT definition_json FROM workflows WHERE id = ?').get(id) as { definition_json: string } | undefined;
+      if (row === undefined) return false;
+      let planned: PlannedPipeline;
+      try { planned = JSON.parse(row.definition_json) as PlannedPipeline; } catch { return false; }
+      if (expectDigest !== undefined && workflowStampDigest(this.engine, planned).digest !== expectDigest) return false;
+      const stamp = nextWorkflowStamp(this.engine, planned, at);
+      if (stamp === null) return true;
+      this.db.prepare(
+        "UPDATE workflows SET definition_json = json_set(definition_json, '$.confirmedAt', ?, '$.stamp', json(?)) WHERE id = ?",
+      ).run(stamp.at, JSON.stringify(stamp), id);
+      return true;
+    })();
+  }
+
+  /**
+   * Once per engine.db (marker v69): give every stamp from before the digest its digest, over
+   * the definition as it stands at that boot, except on a workflow a mandate set up or changed.
+   * The schedule lists stay bound to the stamp's time, which the stamp keeps (`plan-stamp.ts`);
+   * the stamp that holds is what makes that time mean these steps. It writes the inferred mode into a blob that has
+   * none, so a later change to the inference cannot unstamp it. Runs after the verb backfill and
+   * the content-schema migration. Afterwards a stamp without a digest does not hold: a backfill
+   * or a restored file that brings one back leaves the workflow waiting for the owner.
+   * Returns how many definitions got a stamp, or null when the pass had already run.
+   */
+  stampExistingWorkflows(): number | null {
+    return this.db.transaction((): number | null => {
+      if (this.engine.isWorkflowStampPassDone()) return null;
+      const rows = this.db.prepare('SELECT id, definition_json FROM workflows').all() as Array<{ id: string; definition_json: string }>;
+      const write = this.db.prepare('UPDATE workflows SET definition_json = ? WHERE id = ?');
+      let stamped = 0;
+      for (const row of rows) {
+        let blob: PlannedPipeline;
+        try { blob = JSON.parse(row.definition_json) as PlannedPipeline; } catch { continue; }
+        const at = blob.confirmedAt;
+        if (typeof at !== 'string' || at === '' || stampOf(blob) !== null) continue;
+        // A workflow a mandate set up or changed gets no stamp here: its `confirmedAt` was most
+        // likely written by a schedule that never showed the owner the steps, the gap the digest
+        // closes. It waits for the owner's own stamp act; its schedules stay on.
+        if (this.mandateShaped(row.id)) continue;
+        blob.mode ??= withWorkflowDefaults(structuredClone(blob)).mode;
+        const { digest, binding } = workflowStampDigest(this.engine, blob);
+        const stamp: WorkflowStamp = { at, digest, binding };
+        write.run(JSON.stringify({ ...blob, stamp }), row.id);
+        stamped++;
+      }
+      this.db.prepare('UPDATE workflow_stamp_marker SET done = 1 WHERE id = 1').run();
+      return stamped;
+    })();
   }
 
   /**
    * Write a reviewed grant: the contract, its stamp and the first-run-confirm, in ONE
    * statement, so no reader sees a stamp without its contract or a confirm without
-   * either. Exact id only — unlike the prefix-matched writers above, this one must never
-   * land on a second row. Does not bump `updated_at` (same as {@link setConfirmedAt}).
+   * either. Exact id only, not even an unambiguous prefix like the writers above: this one
+   * must land on exactly the row its caller read. Does not bump `updated_at` (same as {@link stampCurrent}).
    * A concurrent edit between the caller's read and this write is not lost silently: the
    * stamp's checksum covers the steps, so the run check refuses the mismatch.
    */
-  setReviewedGrant(id: string, contractJson: string, stampJson: string, confirmedAt: string): boolean {
+  setReviewedGrant(id: string, contractJson: string, stampJson: string, confirmedAt: string, seen: PlannedPipeline): boolean {
     if (id === '') return false;
+    // The owner's stamp goes with the grant, over the definition the acceptance checked
+    // (`seen`, with the contract it writes), not over whatever the row holds by now: an edit in
+    // between leaves a stamp that does not hold, as it leaves a grant whose checksum does not.
+    const { digest, binding } = workflowStampDigest(this.engine, { ...seen, capabilityContract: JSON.parse(contractJson) as PlannedPipeline['capabilityContract'] });
+    const stamp: WorkflowStamp = { at: confirmedAt, digest, binding };
     const res = this.db.prepare(
-      "UPDATE workflows SET definition_json = json_set(definition_json, '$.capabilityContract', json(?), '$.reviewedGrant', json(?), '$.confirmedAt', ?) WHERE id = ?",
-    ).run(contractJson, stampJson, confirmedAt, id);
+      "UPDATE workflows SET definition_json = json_set(definition_json, '$.capabilityContract', json(?), '$.reviewedGrant', json(?), '$.confirmedAt', ?, '$.stamp', json(?)) WHERE id = ?",
+    ).run(contractJson, stampJson, confirmedAt, JSON.stringify(stamp), id);
     return res.changes === 1;
   }
 
@@ -287,7 +405,7 @@ export class WorkflowStore {
    * it: otherwise the row would commit for a workflow deleted between the caller's read and
    * this write. Returns `false` in that case, after the rollback; any other failure throws.
    */
-  acceptReviewedGrant(row: WorkflowGrantRow, stampJson: string, confirmedAt: string): boolean {
+  acceptReviewedGrant(row: WorkflowGrantRow, stampJson: string, confirmedAt: string, seen: PlannedPipeline): boolean {
     const missing = new Error('workflow-grant: the workflow is gone');
     try {
       this.db.transaction(() => {
@@ -298,7 +416,7 @@ export class WorkflowStore {
           row.grantId, row.workflowId, row.contractJson, row.by, row.name, row.at,
           row.checksum, row.binding, row.triggerId, row.cron, row.boundParamsJson, row.afterUntrusted ? 1 : 0,
         );
-        if (!this.setReviewedGrant(row.workflowId, row.contractJson, stampJson, confirmedAt)) throw missing;
+        if (!this.setReviewedGrant(row.workflowId, row.contractJson, stampJson, confirmedAt, seen)) throw missing;
       })();
     } catch (err) {
       if (err === missing) return false;
@@ -322,13 +440,26 @@ export class WorkflowStore {
     };
   }
 
-  /** Prefix-matched delete (mirrors legacy `deletePlannedPipeline`). */
+  /** Delete one workflow, named by its id or an unambiguous prefix of it ({@link _resolveWriteId}). */
   remove(id: string): boolean {
-    if (id === '') return false; // empty id → likePrefix '%' would match ALL rows
-    const res = this.db.prepare(
-      "DELETE FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\'",
-    ).run(id, likePrefix(id));
-    return res.changes > 0;
+    const target = this._resolveWriteId(id);
+    if (target === null) return false;
+    return this.db.prepare('DELETE FROM workflows WHERE id = ?').run(target).changes > 0;
+  }
+
+  /**
+   * The one row a write names: the exact id, else the only id that starts with it, else none.
+   * A write never lands on every row an id is a prefix of: confirming, renaming or deleting
+   * `wf-a` must leave `wf-ab`, possibly another mandate's, alone. Same rule as
+   * `TriggerStore._resolveTargetWorkflowId`.
+   */
+  private _resolveWriteId(id: string): string | null {
+    if (id === '') return null; // likePrefix('') is a bare '%', which would match every row
+    const exact = this.db.prepare('SELECT id FROM workflows WHERE id = ?').get(id) as { id: string } | undefined;
+    if (exact) return exact.id;
+    const hits = this.db.prepare("SELECT id FROM workflows WHERE id LIKE ? ESCAPE '\\' LIMIT 2")
+      .all(likePrefix(id)) as Array<{ id: string }>;
+    return hits.length === 1 ? hits[0]!.id : null;
   }
 
   /**
@@ -355,7 +486,7 @@ export class WorkflowStore {
    *     row K leaves 1..K migrated and the next boot resumes at K+1;
    *   - forward-only — `transform` never downgrades.
    *
-   * Preserves `updated_at` (like {@link rename}/{@link setConfirmedAt}): a
+   * Preserves `updated_at` (like {@link rename}/{@link stampCurrent}): a
    * migration is NOT a user re-save and must not reorder the library list.
    * `transform` returns the re-serialized blob when it changed, or `null` to skip
    * (already-current OR malformed — a row we can't parse is left untouched).
@@ -373,12 +504,12 @@ export class WorkflowStore {
     return { scanned: rows.length, migrated };
   }
 
-  /** Read a single workflow definition (prefix-matched). */
+  /** Read a single workflow definition (prefix-matched; the exact id first, as in {@link getPlanned}). */
   get(id: string): StoredWorkflow | undefined {
     if (id === '') return undefined; // empty id → likePrefix '%' would match ALL rows
     const row = this.db.prepare(
-      "SELECT id, name, description, definition_json, is_template, created_at FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' LIMIT 1",
-    ).get(id, likePrefix(id)) as {
+      "SELECT id, name, description, definition_json, is_template, created_at FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' ORDER BY id = ? DESC LIMIT 1",
+    ).get(id, likePrefix(id), id) as {
       id: string; name: string; description: string; definition_json: string;
       is_template: number; created_at: string;
     } | undefined;
@@ -389,7 +520,7 @@ export class WorkflowStore {
   /**
    * List workflow definitions, most-recently-SAVED first. Orders by `updated_at`,
    * which the store bumps only on a full save (insert/re-save via {@link upsert}),
-   * NOT on rename/setConfirmedAt — so it matches the legacy `getPlannedPipelines`
+   * NOT on rename/stampCurrent — so it matches the legacy `getPlannedPipelines`
    * `ORDER BY started_at DESC` (started_at is likewise reset only on re-save).
    */
   list(limit = 100): StoredWorkflow[] {
@@ -413,9 +544,11 @@ export class WorkflowStore {
    */
   getPlanned(id: string): { id: string; manifest_json: string } | undefined {
     if (id === '') return undefined;
+    // The exact id first: a longer id that only starts with it must not answer for it, or a schedule
+    // checked and bound to that answer would target another workflow than the one named.
     const row = this.db.prepare(
-      "SELECT id, definition_json FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' LIMIT 1",
-    ).get(id, likePrefix(id)) as { id: string; definition_json: string } | undefined;
+      "SELECT id, definition_json FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' ORDER BY id = ? DESC LIMIT 1",
+    ).get(id, likePrefix(id), id) as { id: string; definition_json: string } | undefined;
     if (!row) return undefined;
     return { id: row.id, manifest_json: row.definition_json };
   }

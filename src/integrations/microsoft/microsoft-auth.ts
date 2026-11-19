@@ -2,6 +2,7 @@ import type { OAuthRefreshRequest } from '../../contract/http.js';
 import type { SecretVault } from '../../core/secret-vault.js';
 import type { HostPolicyContext } from '../../core/network-guard.js';
 import { cpFetch } from '../../core/connector-egress.js';
+import { processErrorText } from '../../core/error-egress.js';
 import { readControlPlaneIdentity, validateControlPlaneRefresh } from '../../core/control-plane-client.js';
 import {
   MICROSOFT_REFRESH_CODES,
@@ -465,7 +466,7 @@ export class MicrosoftAuth {
         },
       });
     } catch (err: unknown) {
-      console.warn(`[lynox] Microsoft token-change hook failed (${reason}): ${err instanceof Error ? err.message : String(err)}`);
+      console.warn(`[lynox] Microsoft token-change hook failed (${reason}): ${processErrorText(err)}`);
     }
   }
 }

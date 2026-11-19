@@ -8,6 +8,7 @@ import type { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
 import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
+import { stripHidden } from './hidden-text.js';
 
 /** Why a run lacks an answer it asked for. */
 export type UnansweredBecause = 'expired' | 'not_asked' | 'thread_deleted';
@@ -29,8 +30,14 @@ export interface WorkflowQuestionDeps {
   runId: string;
   /** The schedule that fired the run, named on the notification. */
   scheduleId: string;
-  /** The schedule's title: the thread's title and the notification's. */
+  /** The schedule's title: the thread's title and the notification's. Not a turn of its own:
+   *  someone else may have written it. */
   title: string;
+  /** The `user` turn that opens the thread: a fixed sentence of the engine's, which the model
+   *  reads as the owner's own words. */
+  opener: string;
+  /** The line that names the schedule above each question in the thread, the title quoted. */
+  titleLine: string;
   /** Who started the run, stamped on the prompt row (tag and, for a mandate, its grant) and the thread (tag). */
   principal: RequestPrincipal;
   handRun: boolean;
@@ -166,7 +173,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       if (cause === 'ttl') return this.#endUnanswered('expired');
       if (cause === 'thread_deleted') return this.#endUnanswered('thread_deleted');
       // A stop or a withdrawal: the question goes, so an answer given later finds it closed.
-      try { store.expirePrompt(promptId); } catch (err: unknown) {
+      try { store.expirePrompt(promptId, 'run_stopped'); } catch (err: unknown) {
         process.stderr.write(`[lynox:worker] withdrawing a workflow question failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
       return DISMISSED_ANSWER;
@@ -233,15 +240,19 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     const id = this.#deps.runId;
     try {
       if (!this.#threadReady) {
-        threads.createThread(id, { title: this.#deps.title, created_by: principalTag(this.#deps.principal) });
+        threads.createThread(id, { title: stripHidden(this.#deps.title), created_by: principalTag(this.#deps.principal) });
         this.#threadReady = true;
       }
       // A resumable conversation starts with a user turn and alternates, as an escalation
       // thread does (`escalation.ts`).
       const last = threads.getMessages(id, { apiOnly: true }).at(-1)?.role ?? null;
+      // The turns the model reads when the owner answers, without the characters that render as
+      // nothing (`hidden-text.ts`). The schedule's title may have been written by someone else, so
+      // it is no `user` turn, which speaks with the owner's voice: that turn is the engine's
+      // opener, and the title is quoted above the question.
       const seeds: BetaMessageParam[] = [];
-      if (last === null || last === 'assistant') seeds.push({ role: 'user', content: [{ type: 'text', text: this.#deps.title }] });
-      seeds.push({ role: 'assistant', content: [{ type: 'text', text }] });
+      if (last === null || last === 'assistant') seeds.push({ role: 'user', content: [{ type: 'text', text: this.#deps.opener }] });
+      seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(`${this.#deps.titleLine}\n\n${text}`) }] });
       const count = threads.getThread(id)?.message_count ?? 0;
       threads.appendMessages(id, seeds, threads.getNextSeq(id), { message_count: count + seeds.length });
       threads.updateThread(id, { is_unread: true });

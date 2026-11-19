@@ -9,7 +9,8 @@ import { wrapChannelMessage } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
-import { namedTarget } from '../../core/audit-log.js';
+import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
+import { mailTargets } from '../../core/send-target.js';
 
 // === Types ===
 
@@ -125,13 +126,15 @@ const DRIVE_WRITE_ACTIONS = new Set<DriveInput['action']>(['upload', 'create_doc
 export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<DriveInput> {
   return {
     outwardWrite: (input) => (DRIVE_WRITE_ACTIONS.has(input.action) ? input.action : null),
+    // A share sends the file to the address it names. No other action names a recipient.
+    sendTargets: (input) => (input.action !== 'share' ? null : input.email ? mailTargets([input.email]) : []),
     // A search names only that it searched: its query can name a customer. `move` reads the
     // file's folders before it moves it.
     outwardRead: (input) => {
       switch (input.action) {
         case 'search': return 'search';
-        case 'read': case 'move': return `${input.action} ${namedTarget([['file', input.file_id]])}`.trimEnd();
-        case 'list': return `list ${namedTarget([['folder', input.folder_id]])}`.trimEnd();
+        case 'read': case 'move': return `${input.action} ${namedTarget([['file', input.file_id === undefined ? undefined : withoutAddresses(input.file_id)]])}`.trimEnd();
+        case 'list': return `list ${namedTarget([['folder', input.folder_id === undefined ? undefined : withoutAddresses(input.folder_id)]])}`.trimEnd();
         default: return null;
       }
     },
@@ -516,7 +519,14 @@ async function handleMove(auth: GoogleAuth, input: DriveInput): Promise<string> 
   });
   if (!metaResponse.ok) return `Error: Failed to get file info (${metaResponse.status}).`;
   const meta = await metaResponse.json() as { parents?: string[] };
-  const removeParents = meta.parents?.join(',') ?? '';
+  // No current folder in the answer, for example a file shared with this account whose folder
+  // it cannot see: a move would only ADD the target, and what Drive does with that on a file
+  // that has a folder elsewhere is not documented. So nothing is sent.
+  const current = (Array.isArray(meta.parents) ? meta.parents : []).filter((p) => typeof p === 'string' && p !== '');
+  if (current.length === 0) {
+    return 'Error: Drive did not say which folder this file is in now (it may be shared with you from a folder you cannot see), so it was not moved. Nothing was changed. This tool cannot move a file whose current folder Drive does not report, so tell the user to move it in Drive itself.';
+  }
+  const removeParents = current.join(',');
 
   // Stopped after the read (the run's stop or the tool's time limit): the move has not
   // started, so it is not sent.

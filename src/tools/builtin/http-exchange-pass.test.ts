@@ -16,7 +16,7 @@ import { ExactClearance, type ExactMarker } from '../../core/exact-clearance.js'
 import { isStorePass, type StorePass } from '../../core/store-pass.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused } from '../../core/oauth-token-exchange.js';
-import { SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
+import { SHOPIFY_FETCH_TOKEN } from '../../core/shopify-host.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { storeExchangePassFor } from './http.js';
 
@@ -48,13 +48,15 @@ function clearance(): ExactClearance {
   );
 }
 
-function ctx(opts: { profiles?: ApiProfile[]; clearance?: ExactClearance | null; digest?: boolean } = {}): ToolContext {
+function ctx(opts: { profiles?: ApiProfile[]; clearance?: ExactClearance | null; digest?: boolean; local?: boolean } = {}): ToolContext {
   const store = new ApiStore();
   for (const p of opts.profiles ?? [shopProfile()]) store.register(p);
   return {
     apiStore: store,
     exactClearance: opts.clearance === undefined ? clearance() : opts.clearance,
     storeBindingDigest: opts.digest === false ? null : () => 'd',
+    // The process's shell mode (`shell-isolation.ts`): a store pass needs the sidecar.
+    shellIsolation: opts.local === true ? { kind: 'local' } : { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as never,
   } as unknown as ToolContext;
 }
 
@@ -63,7 +65,6 @@ const ENV = {
   LYNOX_MANAGED_CONTROL_PLANE_URL: 'https://cp.example.invalid',
   LYNOX_MANAGED_INSTANCE_ID: 'inst-1',
   LYNOX_HTTP_SECRET: 's',
-  LYNOX_SHELL_EXEC_SOCKET: '/run/lynox/shell.sock',
 };
 
 let restore: () => void;
@@ -114,7 +115,7 @@ describe('with the switch off, the exchange is refused as before', () => {
     expect(cpCalls).toBe(0);
     expect(markerSets).toBe(0);
     const r = await exchange(pass);
-    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_UNAVAILABLE}` });
+    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
     expect(sent).toHaveLength(0);
   });
 });
@@ -127,15 +128,15 @@ describe('each condition refuses alone', () => {
 
   it.each([
     ['no control-plane env', 'LYNOX_MANAGED_INSTANCE_ID'],
-    ['no sidecar socket', 'LYNOX_SHELL_EXEC_SOCKET'],
   ])('%s', async (_l, unset) => {
     vi.stubEnv(unset, '');
     await refuses(ctx());
   });
 
-  it('a socket of blanks', async () => {
-    vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', '   ');
-    await refuses(ctx());
+  it('a process not in sidecar mode, even with a socket in its env', async () => {
+    // The mode is the object built at boot; the env is not asked again here.
+    vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', '/run/lynox/shell.sock');
+    await refuses(ctx({ local: true }));
   });
 
   it('no clearance in the tool context', async () => { await refuses(ctx({ clearance: null })); });
@@ -183,7 +184,7 @@ describe('exchangeToken under the pass', () => {
   it('a credential pass does not open the exchange', async () => {
     const { mintStorePass } = await import('../../core/store-pass.js');
     const r = await exchange(mintStorePass(ORIGIN, 'X-Shopify-Access-Token', 'shpat_x'));
-    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_UNAVAILABLE}` });
+    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
     expect(sent).toHaveLength(0);
   });
 

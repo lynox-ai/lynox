@@ -53,9 +53,21 @@ describe.each([
   ['through the workspace', true],
   ['by path', false],
 ] as const)('the review and batch_files, %s', (_label, isolated) => {
+  let data: string;
+  let prevDataDir: string | undefined;
+
   beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-cs-writers-')));
-    if (isolated) setTenantWorkspace(root);
+    data = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-cs-writers-')));
+    prevDataDir = process.env['LYNOX_DATA_DIR'];
+    if (isolated) {
+      root = data;
+      setTenantWorkspace(root);
+    } else {
+      // By path, batch_files changes files only under the workspace root of the data dir.
+      process.env['LYNOX_DATA_DIR'] = data;
+      root = join(data, 'workspace');
+      mkdirSync(root);
+    }
     mgr = new ChangesetManager(root, 'run');
   });
 
@@ -64,7 +76,9 @@ describe.each([
     closeWorkspaceBase();
     clearTenantWorkspace();
     unreachable.on = false;
-    rmSync(root, { recursive: true, force: true });
+    if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+    else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    rmSync(data, { recursive: true, force: true });
   });
 
   it('the measured case: after the run created a file, the user\'s file is not moved onto its name, and both come out right', async () => {

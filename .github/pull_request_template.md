@@ -27,7 +27,7 @@ thing into a ritual you satisfy by pasting a SHA.
 
 **CI cannot verify that `gates`, `review`, `delta` or `mutations` are TRUE** — it checks their
 value, not that the work happened: an unknown gate name is always rejected, and a
-`delta` that is not `clean` or a surviving mutant are rejected wherever a delta round
+`delta` that is not `clean on <from>..<to>` or a surviving mutant are rejected wherever a delta round
 was owed (a markdown-only legal change owes none). They are your attestation and they
 are on the record. `head` is the **load-bearing** check: it must equal this
 PR's current head, so **update it after every push**. That is the difference between
@@ -73,6 +73,12 @@ gates the diff OWES, derived from the real file list, so leaving out a required
   handled them is clean. It means: nothing it found is left unhandled (fixed here, or
   filed as a register row in the private repo), and it ran at the head above. No exception: every fix makes a new head,
   so it is fix, re-run, attest, and it ends when a round finds nothing.
+  The field names the commits the round read: `delta: clean on <from>..<to>`, and CI
+  checks the range — `<to>` is the head, or only clean merges of the base branch follow
+  it (`gh pr update-branch` in its merge form needs no new round; `--rebase`, a
+  hand-resolved conflict, a merge of any other branch or any other commit does). `<from>` is
+  the commit before the first one the round read. CI checks only that the range ends at the
+  head; that a round ran over it stays your word. Short ids are fine (`e91555e4..35644af2`).
 - `mutations` — mutations of the CHANGED LINES, killed vs survived. A survivor
   means no test covers that line and fails the check.
 
@@ -88,9 +94,10 @@ head: <short SHA>
 gates: <which gates ran>
 review: <n> <model> <round|rounds>, <result>
 security: <origin>, <result>
-delta: <clean?>
+delta: clean on <from>..<to = head>
 mutations: <n> killed, <n> survived
 closes: <none — the only answer in this repo>
+ux: <reviewed U-number | self — way out: … | not user-facing — reason>
 ```
 
 **`closes:` is required, and in this public repo it is always `none`.** The
@@ -100,6 +107,21 @@ the title and the rest of the body: the check refuses a register id (`DEF-…`) 
 either. If this PR settles a row, close it with a PR in the private repo that names
 this PR's merge commit. The field stays required so that its absence is not mistaken
 for an answer.
+
+**`ux:` is due on every code change**, in one of three forms:
+
+- `ux: reviewed U-042` — the ux lane looked at it; the number is its decision.
+- `ux: self — way out: <what the user can still do>` — a change near the user that leaves
+  no new dead end. If the way out does not fit in one sentence, it needs a review.
+- `ux: not user-facing — <reason>`
+
+The check owes a REVIEW, and then only `reviewed` passes, when a line the diff adds
+reaches a refusal, a lock, a confirmation or a state the user has to see, when it adds a
+page or component, or a user text for a refusal, an error or an empty state. It also owes
+one when it cannot read the diff. A branch whose merge base predates the field is not
+held to it; rebasing onto main brings it under the rule.
+
+No private path in it: this record is public.
 
 **`security:` is only due when the diff touches the security path map**, and its
 first half says WHERE the round came from, not what it asked. Three origins,

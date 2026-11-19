@@ -46,6 +46,7 @@ import { detectSecretInContent } from '../tools/builtin/http.js';
 import { bulkStatusTool } from '../tools/builtin/bulk.js';
 import type { IAgent } from '../types/index.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
+import { shopifySeoEntityFields } from './bulk-shopify.js';
 
 /**
  * Build plan B, the write half (§1.4, §2.3–§2.4, §4 F5/F7): an approved external run is
@@ -63,14 +64,17 @@ let ledger: BulkLedger;
 interface Shop {
   items: Map<string, Record<string, unknown>>;
   requests: { method: string; path: string; body: unknown; auth: string | undefined }[];
-  /** Per `METHOD path`, answered instead: a status and headers. */
-  special: Map<string, { status: number; headers?: Record<string, string> }>;
+  /** Per `METHOD path`, answered instead: a status, headers and a body. */
+  special: Map<string, { status: number; headers?: Record<string, string>; body?: string }>;
   /** A PUT that replaces the resource with the body — the failure the probe is for. */
   replacingPut?: boolean;
   /** Paths whose write is applied and then answered 502: it landed, the answer says it failed. */
   landThenFail?: Set<string>;
   /** `METHOD path` whose request reaches the shop and whose connection then breaks. */
   dropAfter?: Set<string>;
+  /** Per `METHOD path`, the answers of the next requests in order (0: the connection breaks);
+   *  once used up, the shop answers as usual. */
+  sequence?: Map<string, number[]>;
 }
 
 /** A price as the shop stores it: always two decimals. */
@@ -93,8 +97,11 @@ function serve(s: Shop): () => void {
     const auth = Object.entries(input.headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
     s.requests.push({ method: input.method, path, body, auth });
     if (s.dropAfter?.has(`${input.method} ${path}`)) throw new Error('connection reset');
+    const next = s.sequence?.get(`${input.method} ${path}`)?.shift();
+    if (next === 0) throw new Error('connection reset');
+    if (next !== undefined) return new Response(null, { status: next, headers: next === 429 ? { 'retry-after': '1' } : {} });
     const sp = s.special.get(`${input.method} ${path}`);
-    if (sp) return new Response(null, { status: sp.status, headers: sp.headers ?? {} });
+    if (sp) return new Response(sp.body ?? null, { status: sp.status, headers: sp.headers ?? {} });
     const item = s.items.get(path);
     if (!item) return new Response(null, { status: 404 });
     if (input.method === 'PUT' && s.replacingPut) {
@@ -197,7 +204,7 @@ function targetErrors(runId: string): string[] {
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-ext-apply-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 
 afterEach(() => {
@@ -430,7 +437,7 @@ describe('applying an external run', () => {
       expect([s.items.get('/products/1')!['price'], s.items.get('/products/2')!['price']]).toEqual(['15.00', '15.00']);
       expect(targetErrors(runId)).toEqual(['secret']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, failed: 1 });
-      expect(done.summary).toContain('Applied 2, failed 1,');
+      expect(done.summary).toContain('2 applied, 1 failed,');
       const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
       expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Applied 2, failed 1, conflicts 0, undone 0.');
       expect(s.requests.filter((r) => r.path.includes(LOOKS_LIKE_A_KEY))).toEqual([]);
@@ -658,6 +665,22 @@ describe('applying an external run', () => {
     }
   });
 
+  // An API whose URL does not say it speaks GraphQL runs a `query` field as a document: the
+  // contract reads the body the run sends, not only its method and path.
+  it('sends no record whose body a GraphQL server would run as a mutation; CONTROL: a field that only names one is sent', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [url(0)], 'POST') });
+      expect(await c.write(url(0), 'POST', { query: 'mutation { deleteAll { id } }' })).toEqual({ kind: 'not_granted' });
+      expect(await c.write(url(0), 'POST', { documentId: 'stored-1' })).toEqual({ kind: 'not_granted' });
+      expect(s.requests.filter((r) => r.method === 'POST')).toEqual([]);
+      expect(await c.write(url(0), 'POST', { subscription: 'premium', note: 'Mutation (Variante) {neu}' })).not.toEqual({ kind: 'not_granted' });
+    } finally {
+      restore();
+    }
+  });
+
   it('waits out one 429 on a write, then writes', async () => {
     const s = shop();
     const restore = serve(s);
@@ -808,6 +831,8 @@ describe('applying an external run', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       s.requests.length = 0;
@@ -860,6 +885,8 @@ describe('applying an external run', () => {
         getAuditLog: () => ({ record: (e: (typeof recs)[number]) => { sentAtRecord.push(s.requests.length); recs.push(e); } }),
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       s.requests.length = 0;
@@ -917,6 +944,8 @@ describe('applying an external run', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       // The run was approved under this file's stand-in, which counts every form on HOST as
@@ -970,6 +999,8 @@ describe('applying an external run', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       s.requests.length = 0;
@@ -990,7 +1021,8 @@ describe('the write verb and the one-target probe', () => {
     // 25 targets, so one failure stays under the failure-rate halt: only the approval's bound
     // can stop the run after it.
     for (let i = 4; i < 25; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
-    s.special.set('PATCH /products/0', { status: 502 });
+    // A refusal, so the resume may send again; a send without a clear answer is not retried.
+    s.special.set('PATCH /products/0', { status: 422 });
     const restore = serve(s);
     try {
       const keys = Array.from({ length: 25 }, (_, i) => url(i));
@@ -1036,11 +1068,137 @@ describe('the write verb and the one-target probe', () => {
 
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
-      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets, sentUnknown: 1 });
+
+      // Nor is it sent again: whether the host applied it, the redirect does not say.
+      s.special.delete('PATCH /products/0');
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, sentUnknown: 1 });
 
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       expect(undo.status.total).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  for (const landed of [true, false]) {
+    it(`a send without a clear answer leaves a resume that only checks; found ${landed ? 'as planned it is the probe' : 'missing it stays unclear'}`, async () => {
+      const s = shop();
+      s.special.set('PATCH /products/1', { status: 303 });
+      const restore = serve(s);
+      try {
+        const c = client();
+        const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+        const checksum = ledger.computeChecksum(runId)!;
+        expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+        await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        // The one place is spent on the unclear send: the next pass would only read it.
+        expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, sentUnknown: 1, resumeTries: 1, resumeSends: 0 });
+        expect(ledger.probeBlockFor(runId)?.step).toBeNull();
+
+        s.special.delete('PATCH /products/1');
+        if (landed) s.items.get('/products/1')!['price'] = '15.00';
+        expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+        await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        // Checking sent nothing again.
+        expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
+        if (!landed) {
+          expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, sentUnknown: 1, resumeSends: 0, haltReason: BULK_HALT_REASONS.maxTargets });
+          expect(ledger.probeKey(runId)).toBeNull();
+          expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+          return;
+        }
+        // This run's own send, found arrived: the probe, confirmed like a written one.
+        expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, sentUnknown: 0, haltReason: BULK_HALT_REASONS.maxTargets });
+        expect(ledger.probeKey(runId)).toBe(url(1));
+        // Found, not written: the page says lynox cannot tell it wrote it.
+        expect(ledger.probeFound(runId)).toBe(true);
+        expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'confirm' });
+        expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+        expect(ledger.getStatus(runId)).toMatchObject({ resumeTries: 0, resumeSends: 0 });
+        expect(ledger.resume(runId, { checksum, maxTargets: 3 }).ok).toBe(true);
+        expect(ledger.getStatus(runId)).toMatchObject({ resumeTries: 2, resumeSends: 2 });
+        await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1', '/products/2', '/products/3']);
+        expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
+      } finally {
+        restore();
+      }
+    });
+  }
+
+  it('a target its run found as planned and never sent to is no probe, in a run from before sends were told apart', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      // A run from before sends were told apart from finds: the found target is counted applied.
+      engineDb.getDb().prepare('UPDATE bulk_runs SET unsent_tracked = 0 WHERE id = ?').run(runId);
+      s.items.get('/products/1')!['price'] = '15.00';
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1 });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).not.toContain('/products/1');
+      // Never sent to: someone else set the value, so it proves nothing about the run.
+      expect(ledger.probeKey(runId)).toBeNull();
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a target whose send the host refused, found as planned later, is no probe: someone else set it', async () => {
+    const s = shop();
+    s.special.set('PATCH /products/1', { status: 422 });
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      // A clear refusal: nothing unclear, so the next pass may send to it again.
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, failed: 1, sentUnknown: 0, resumeSends: 1 });
+
+      s.special.delete('PATCH /products/1');
+      s.items.get('/products/1')!['price'] = '15.00';
+      expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1 });
+      // The write form failed at the host; the value there is someone else's, so it confirms nothing.
+      expect(ledger.probeKey(runId)).toBeNull();
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'already_first' });
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a target whose unclear send was followed by a conflict is not counted among the sends of the next pass', async () => {
+    const s = shop();
+    s.special.set('PATCH /products/1', { status: 303 });
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      s.special.delete('PATCH /products/1');
+      // Someone set a third value: the check finds a conflict, and the run still never sends it again.
+      s.items.get('/products/1')!['price'] = '99.00';
+      expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, conflicts: 1, sentUnknown: 0, resumeTries: 1, resumeSends: 0 });
     } finally {
       restore();
     }
@@ -1059,7 +1217,7 @@ describe('the write verb and the one-target probe', () => {
 
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
-      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets, sentUnknown: 1 });
     } finally {
       restore();
     }
@@ -1098,7 +1256,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.approve(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
       // The first target changed since the preview (a conflict, nothing sent); the third fails.
       s.items.get('/products/0')!['price'] = '13.00';
-      s.special.set('PATCH /products/2', { status: 502 });
+      s.special.set('PATCH /products/2', { status: 422 });
 
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1', '/products/2']);
@@ -1109,6 +1267,33 @@ describe('the write verb and the one-target probe', () => {
       // The failed target is retried; the one never sent to is not written past the maximum.
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1', '/products/2', '/products/2']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, haltReason: BULK_HALT_REASONS.maxTargets });
+      // Its probe holds: nothing blocks it. Without the probe, two applied targets can no longer be one.
+      expect(ledger.probeBlockFor(runId)).toBeNull();
+      engineDb.getDb().prepare('DELETE FROM bulk_host_probes').run();
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'too_many' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a run from before found-as-planned targets were told apart, whose first target already held the value, is told so', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      // Such a run counts the target it found as planned as applied, and halts on it.
+      engineDb.getDb().prepare('UPDATE bulk_runs SET unsent_tracked = 0 WHERE id = ?').run(runId);
+      // Nothing applied yet: writing on under a maximum of one writes the probe.
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'write_one' });
+      s.items.get('/products/1')!['price'] = '15.00';
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: 'already_first' },
+      });
     } finally {
       restore();
     }
@@ -1130,6 +1315,9 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, haltReason: BULK_HALT_REASONS.maxTargets });
       // The written target is the probe; the one found as planned is none.
       expect(ledger.probeKey(runId)).toBe(url(2));
+      expect(ledger.probeFound(runId)).toBe(false);
+      // So the run stands at its probe: one target written, the found one not counted.
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'confirm' });
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
       expect(ledger.resume(runId, { checksum, maxTargets: 3 }).ok).toBe(true);
       await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
@@ -1137,6 +1325,48 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
       // Its undo takes back what the run wrote, not the value someone else set on the first.
       expect(ledger.countUndoable(runId)).toBe(2);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a run whose only send got no clear answer is not told to write one: it sends nothing more', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      // Nothing applied and nothing sent: writing on writes the probe.
+      expect(ledger.probeBlockFor(runId)?.step).toBe('write_one');
+      // The first send got no clear answer: it takes the one place, and lynox does not send it again.
+      ledger.markSent(runId, 0);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH')).toEqual([]);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, sentUnknown: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: null });
+      expect(ledger.resume(runId, { checksum, maxTargets: 3 })).toMatchObject({ ok: false, reason: 'probe_required', probe: { step: null } });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a run whose only send the host clearly refused is not told to write one, though writing on writes it', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      ledger.markSent(runId, 0);
+      ledger.markRefused(runId, 0);
+      // Once anything was sent, the step does not claim that writing on writes the probe; here it does.
+      expect(ledger.probeBlockFor(runId)?.step).toBeNull();
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
+      expect(ledger.probeKey(runId)).toBe(url(1));
     } finally {
       restore();
     }
@@ -1151,7 +1381,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
       for (const i of [1, 2, 3]) s.items.get(`/products/${String(i)}`)!['price'] = '15.00';
       const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
-      expect(out.summary).toContain('Applied 3 (3 already held the planned value and were sent nothing), failed 0');
+      expect(out.summary).toContain('3 applied (of which 3 already as planned), of');
       // Every target read, none written: the cap bounds the targets that receive the verb.
       expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
@@ -1213,15 +1443,18 @@ describe('the write verb and the one-target probe', () => {
       const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
       expect(await bulkStatusTool.handler({ run_id: runId }, agent))
         .toContain('Writes with PATCH. It can be applied to one target first; more only after the user has checked that one.');
-      expect(ledger.approve(runId, { checksum })).toEqual({ ok: false, reason: 'probe_required' });
-      expect(ledger.approve(runId, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required' });
+      const unprobed = { ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: null } };
+      expect(ledger.approve(runId, { checksum })).toEqual(unprobed);
+      expect(ledger.approve(runId, { checksum, maxTargets: 3 })).toEqual(unprobed);
       expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
 
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
       expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
-      // Not yet confirmed: the resume cannot widen it.
-      expect(ledger.resume(runId, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required' });
+      // Not yet confirmed: the resume cannot widen it, and says the one written target is the probe.
+      expect(ledger.resume(runId, { checksum, maxTargets: 3 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: 'confirm' },
+      });
 
       expect(ledger.confirmProbe(runId, { confirmedBy: '{"auth":"bearer"}' })).toEqual({ ok: true });
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(true);
@@ -1255,7 +1488,9 @@ describe('the write verb and the one-target probe', () => {
       seedProbe('PATCH');
       engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
       const put = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '9' } })), client({ contract: mintBulkContract(HOST, [url(2), url(3)], 'PUT') }), 'PUT');
-      expect(ledger.approve(put, { checksum: ledger.computeChecksum(put)! })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(put, { checksum: ledger.computeChecksum(put)! })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: null },
+      });
     } finally {
       restore();
     }
@@ -1306,6 +1541,23 @@ describe('the write verb and the one-target probe', () => {
     }
   });
 
+  it('does not mark an SEO text with an & on a host that is not a Shopify store', async () => {
+    const s = shop();
+    s.items.get('/products/0')!['seo_title'] = 'A und B';
+    const restore = serve(s);
+    try {
+      const runId = await previewedRun([{ target: url(0), after: { seo_title: 'A & B' } }]);
+      const t = ledger.getPreview(runId)[0]!;
+      expect(t.error).toBeNull();
+      // The same before and after would be marked on a store: only the host leaves it unmarked.
+      expect(t.change).toBe('update');
+      expect(shopifySeoEntityFields(t.before?.absent === false ? t.before.value : null, t.after)).toEqual(['seo_title']);
+      expect(t).not.toHaveProperty('seoEntityFields');
+    } finally {
+      restore();
+    }
+  });
+
   it('a field the provider requires is sent unchanged, named as such, and a foreign change to it makes the undo a conflict', async () => {
     const s = shop();
     const restore = serve(s);
@@ -1345,13 +1597,41 @@ describe('the write verb and the one-target probe', () => {
         { target: url(0), after: { price: '1' } }, { target: url(1), after: { price: '1' } },
         { target: `https://${HOST}/contacts/1`, after: { note: 'y' } },
       ], c, 'PUT');
-      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: null },
+      });
       // Products only is not enough either.
       engineDb.getDb().prepare('DELETE FROM bulk_host_probes').run();
       seedProbe('PUT', '/products/');
-      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/contacts/', cause: 'none' }], step: null },
+      });
       seedProbe('PUT', '/contacts/');
       expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! }).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('names confirming as the step only until the run\'s probe is confirmed, also where another kind still lacks one', async () => {
+    const s = shop();
+    s.items.set('/contacts/1', { id: 1, name_1: 'Acme', note: 'x', updated_at: 't0' });
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [url(0), `https://${HOST}/contacts/1`]) });
+      const mixed = await previewedRun([{ target: url(0), after: { price: '1' } }, { target: `https://${HOST}/contacts/1`, after: { note: 'y' } }], c);
+      const checksum = ledger.computeChecksum(mixed)!;
+      expect(ledger.approve(mixed, { checksum, maxTargets: 1 }).ok).toBe(true);
+      await runBulkEffect(mixed, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.resume(mixed, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required',
+        probe: { missing: [{ kind: '/contacts/', cause: 'none' }, { kind: '/products/', cause: 'none' }], step: 'confirm' },
+      });
+      expect(ledger.confirmProbe(mixed)).toEqual({ ok: true });
+      // Confirmed: the products hold, the contacts do not, and confirming again would change nothing.
+      expect(ledger.resume(mixed, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/contacts/', cause: 'none' }], step: null },
+      });
     } finally {
       restore();
     }
@@ -1413,7 +1693,9 @@ describe('an unmeasured write form', () => {
       expect(ledger.approve(runId, { checksum, maxTargets: 1 })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
       expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: false })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
       // Confirmed, it is still one target first: no probe of its own yet.
-      expect(ledger.approve(runId, { checksum, maxTargets: 3, unmeasuredConfirmed: true })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(runId, { checksum, maxTargets: 3, unmeasuredConfirmed: true })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: null },
+      });
       expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
     } finally {
       restore();
@@ -1438,10 +1720,42 @@ describe('an unmeasured write form', () => {
       // is on record for them, and still the second run writes one target first.
       const second = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
-        .get(HOST, 'PATCH', 'unmeasured:/products/')).toEqual({ run_id: first });
+        .get(HOST, 'PATCH', `unmeasured:${first}:/products/`)).toEqual({ run_id: first });
       expect(ledger.getStatus(second)!.probeConfirmed).toBe(false);
       expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, maxTargets: 2, unmeasuredConfirmed: true }))
-        .toEqual({ ok: false, reason: 'probe_required' });
+        .toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'other_run' }], step: null } });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a probe found as planned after a send without a clear answer is filed for its own run only', async () => {
+    const s = shop();
+    s.special.set('PATCH /products/1', { status: 303 });
+    const restore = serve(s);
+    try {
+      const c = client();
+      const first = await previewedRun([1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const firstSum = ledger.computeChecksum(first)!;
+      expect(ledger.approve(first, { checksum: firstSum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(first, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.getStatus(first)).toMatchObject({ applied: 0, sentUnknown: 1 });
+      s.special.delete('PATCH /products/1');
+      s.items.get('/products/1')!['price'] = '15';
+      expect(ledger.resume(first, { checksum: firstSum }).ok).toBe(true);
+      await runBulkEffect(first, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.probeKey(first)).toBe(url(1));
+      expect(ledger.probeFound(first)).toBe(true);
+      expect(ledger.confirmProbe(first)).toEqual({ ok: true });
+      expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
+        .get(HOST, 'PATCH', `unmeasured:${first}:/products/`)).toEqual({ run_id: first });
+      // Confirmed once, nothing is left to confirm.
+      expect(ledger.probeKey(first)).toBeNull();
+      expect(ledger.getStatus(first)!.probeConfirmed).toBe(true);
+
+      const second = await previewedRun([0, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
+      expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, maxTargets: 2, unmeasuredConfirmed: true }))
+        .toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'other_run' }], step: null } });
     } finally {
       restore();
     }
@@ -1530,10 +1844,116 @@ describe('an unmeasured write form', () => {
       expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
       await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(s.items.get('/wp-json/wc/v3/products/7')!['price']).toBe('15.00');
+      expect(ledger.probeKey(runId)).toBe(woo('7'));
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+      // Confirmed under the plain kind: the page no longer offers a confirmation that changes nothing.
+      expect(ledger.probeKey(runId)).toBeNull();
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(false);
-      expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: WOO_KIND, cause: 'filed_measured' }], step: null },
+      });
       expect(s.items.get('/wp-json/wc/v3/products/batch')!['price']).toBe('12.00');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not call a confirmation filed plain on an unmeasured target a measured one, and offers to confirm again', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      // As a confirmation made before the write forms were told apart was filed: plain, on an
+      // unmeasured target.
+      engineDb.getDb().prepare(`INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, 'PATCH', '/products/', ?, NULL, '2026-09-01T00:00:00.000Z')`).run(HOST, runId);
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'confirm' },
+      });
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps a run\'s unchecked probe when a later run on the same host confirms one of the same kind', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const halted = async (ids: number[]): Promise<string> => {
+        const id = await previewedRun(ids.map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+        await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        return id;
+      };
+      const x = await halted([0, 1]);
+      const y = await halted([2, 3]);
+      expect(ledger.confirmProbe(x)).toEqual({ ok: true });
+      expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
+      expect(ledger.probeBlockFor(y)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
+      expect(ledger.probeKey(y)).toBe(url(2));
+      // Y's confirmation files a row of its own: both runs hold, and neither is offered it again.
+      expect(ledger.confirmProbe(y)).toEqual({ ok: true });
+      expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
+      expect([ledger.probeKey(y), ledger.probeBlockFor(y)]).toEqual([null, null]);
+      expect(ledger.resume(x, { checksum: ledger.computeChecksum(x)!, maxTargets: 2 }).ok).toBe(true);
+      const rows = engineDb.getDb().prepare('SELECT kind, run_id FROM bulk_host_probes WHERE host = ? AND method = ?').all(HOST, 'PATCH') as { kind: string; run_id: string }[];
+      expect(rows).toHaveLength(2);
+      expect(rows).toEqual(expect.arrayContaining([{ kind: `unmeasured:${x}:/products/`, run_id: x }, { kind: `unmeasured:${y}:/products/`, run_id: y }]));
+    } finally {
+      restore();
+    }
+  });
+
+  // A row confirmed before the kind carried its run: `unmeasured:<kind>`, read with its `run_id`.
+  it('reads an unchecked probe filed before rows carried their run as the run\'s own, and as another run\'s for the rest', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const halted = async (ids: number[]): Promise<string> => {
+        const id = await previewedRun(ids.map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+        await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        return id;
+      };
+      const x = await halted([0, 1]);
+      const y = await halted([2, 3]);
+      engineDb.getDb().prepare('INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, NULL, ?)')
+        .run(HOST, 'PATCH', 'unmeasured:/products/', x, new Date().toISOString());
+      expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
+      expect(ledger.resume(x, { checksum: ledger.computeChecksum(x)!, maxTargets: 2 }).ok).toBe(true);
+      expect(ledger.probeBlockFor(y)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
+      // Y confirms its own; the row from before stays X's.
+      expect(ledger.confirmProbe(y)).toEqual({ ok: true });
+      expect(ledger.probeBlockFor(y)).toBeNull();
+      expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
+        .get(HOST, 'PATCH', 'unmeasured:/products/')).toEqual({ run_id: x });
+    } finally {
+      restore();
+    }
+  });
+
+  it('names no step and offers no confirmation for a probe target whose key is not a URL, without throwing', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.probeBlockFor(runId)!.step).toBe('confirm');
+      engineDb.getDb().prepare('UPDATE bulk_targets SET target_key = ? WHERE run_id = ? AND applied_at IS NOT NULL').run('not a url', runId);
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'own_missing' }], step: null });
+      expect(ledger.probeKey(runId)).toBeNull();
+      // A direct confirmation answers as for any target that is not a probe, and files nothing.
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_host_probes').get()).toEqual({ n: 0 });
     } finally {
       restore();
     }
@@ -1555,7 +1975,9 @@ describe('an unmeasured write form', () => {
       formFixture.measured = true;
       const measured = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(ledger.getStatus(measured)).toMatchObject({ writeForm: 'measured', probeConfirmed: false });
-      expect(ledger.approve(measured, { checksum: ledger.computeChecksum(measured)!, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(measured, { checksum: ledger.computeChecksum(measured)!, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: null },
+      });
     } finally {
       restore();
     }
@@ -1581,7 +2003,9 @@ describe('an unmeasured write form', () => {
       const checksum = ledger.computeChecksum(runId)!;
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}batch`);
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(false);
-      expect(ledger.approve(runId, { checksum, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(runId, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: WOO_KIND, cause: 'wrong_form' }], step: null },
+      });
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(true);
       expect(ledger.approve(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
@@ -1706,7 +2130,9 @@ describe('an unmeasured write form', () => {
       // The probe stops holding (here: the one on record turns out to be on an unmeasured path).
       ledger.halt(runId, BULK_HALT_REASONS.expired);
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}batch`);
-      expect(ledger.resume(runId, { checksum })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.resume(runId, { checksum })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: WOO_KIND, cause: 'wrong_form' }], step: 'write_one' },
+      });
       expect(ledger.resume(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
     } finally {
       restore();
@@ -1735,6 +2161,9 @@ describe('an unmeasured write form', () => {
       const out = await runBulkEffect(wide, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(client({ contract: mintBulkContract(HOST, [woo('3'), woo('4')]) })) });
       expect(out.status).toBe('halted');
       expect(ledger.getStatus(wide)!.haltReason).toBe(BULK_HALT_REASONS.probeRequired);
+      // Why, read now: the probe on record is not a measured write of this kind, and the one
+      // target this run wrote is a probe the owner can confirm.
+      expect(ledger.probeBlockFor(wide)).toEqual({ missing: [{ kind: WOO_KIND, cause: 'wrong_form' }], step: 'confirm' });
       // Approved for two, held to one because the probe stopped holding: not the approval's
       // bound, so not a planned halt.
       expect(out.planned).toBeUndefined();
@@ -2122,6 +2551,8 @@ describe('the connection and grant of each bulk target (A7)', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       await loop.tick();
@@ -2194,3 +2625,429 @@ describe('the connection and grant of each bulk target (A7)', () => {
   });
 });
 
+
+// A chat that plans a store change through a bulk run stays outside containment because the
+// model sees nothing the store holds: the planning chat learns of a run only through bulk_status
+// and the run's summary. This holds a run through every phase it can reach — planned, previewed,
+// approved, halted by a host that refused a write with a text of its own — with a marker in a
+// value the host holds, in a planned value and in the host's refusal.
+describe('what the model sees of an external run', () => {
+  it('bulk_status and the run summary name no stored value, no planned value and no host error text', async () => {
+    const IN_HOST = 'ZXQ-HOST-VALUE';
+    const IN_AFTER = 'ZXQ-PLANNED-VALUE';
+    const IN_ERROR = 'ZXQ-HOST-ERROR';
+    const s = shop();
+    s.items.set('/products/1', { id: 1, title: `${IN_HOST} title`, price: '12.00', updated_at: 't0' });
+    s.special.set('PATCH /products/2', { status: 422, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ errors: { title: [`${IN_ERROR} is not allowed`] } }) });
+    const restore = serve(s);
+    try {
+      const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
+      const seen: string[] = [];
+      const look = async (runId: string): Promise<void> => {
+        seen.push(await bulkStatusTool.handler({ run_id: runId }, agent));
+        seen.push(await bulkStatusTool.handler({}, agent));
+      };
+      const rows = [0, 1, 2].map((i) => ({ target: url(i), after: { title: `${IN_AFTER} ${String(i)}` } }));
+      const targets = planExternal(rows, HOST, detectSecretInContent);
+      const planned = ledger.recordExternalPlan({
+        createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, targets, contract: mintBulkContract(HOST, targets.map((t) => t.key), 'PATCH'),
+      });
+      if (!planned.ok) throw new Error(planned.reason);
+      const runId = planned.status.id;
+      await look(runId);
+      expect(ledger.resumePreview(runId).ok).toBe(true);
+      const c = client();
+      expect((await runBulkPreview(runId, { ledger, clientFor: () => c, budget: new BulkHostBudget(10_000, 0), sleep: noSleep })).status).toBe('done');
+      await look(runId);
+      seedProbe('PATCH');
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+      await look(runId);
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      seen.push(out.summary);
+      await look(runId);
+
+      // Positive control: the markers are really there — in the ledger, and in what the host
+      // answered — so their absence below is not the absence of anything to leak.
+      const preview = JSON.stringify(ledger.getPreview(runId));
+      expect(preview).toContain(IN_HOST);
+      expect(preview).toContain(IN_AFTER);
+      expect(s.requests.some((r) => r.method === 'PATCH' && r.path === '/products/2')).toBe(true);
+      expect(ledger.getStatus(runId)!.failed).toBe(1);
+      expect(seen.some((t) => t.includes('failed 1'))).toBe(true);
+
+      for (const text of seen) {
+        for (const mark of [IN_HOST, IN_AFTER, IN_ERROR]) expect(text, text.slice(0, 200)).not.toContain(mark);
+      }
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('a send without a clear answer is not sent again', () => {
+  // Five targets: under twenty, so the first failure halts the pass (`bulkFailureLimit` 0).
+  const FIVE = [0, 1, 2, 3, 4];
+  const rows = () => FIVE.map((i) => ({ target: url(i), after: { price: '15.00' } }));
+  const patches = (s: Shop): string[] => s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path);
+  const run = (runId: string, c: ExternalClient, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply') =>
+    runBulkEffect(runId, effect, { ledger, trailFor: () => null, writerFor: writerFor(c) });
+  const resume = (runId: string): void => {
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+  };
+  const fiveShop = (): Shop => {
+    const s = shop();
+    s.items.set('/products/4', { id: 4, title: 'Item 4', price: '12.00', updated_at: 't0' });
+    return s;
+  };
+  /** A run whose first write got a 502 and did not land, resumed once: target 0 stands unknown. */
+  async function unknownFirst(s: Shop, c: ExternalClient): Promise<string> {
+    s.special.set('PATCH /products/0', { status: 502 });
+    const runId = await approvedRun(rows(), c);
+    expect((await run(runId, c)).status).toBe('halted');
+    // Unclear from the halt on, when the owner decides whether to resume: failed, and not
+    // among the targets the resume sends to.
+    expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 1, sentUnknown: 1 });
+    s.special.delete('PATCH /products/0');
+    resume(runId);
+    return runId;
+  }
+
+  it('a 5xx after the send: the resume does not send it again, writes the rest and does not halt on it', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await unknownFirst(s, c);
+      const second = await run(runId, c);
+      expect(second.status).toBe('done');
+      expect(second.summary).toContain('1 unclear: sent without a clear answer, not sent again.');
+      expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(s.items.get('/products/0')!['price']).toBe('12.00');
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, failed: 0, failedOnce: 1, sentUnknown: 1 });
+      expect(targetErrors(runId)).toEqual(['sent_unknown']);
+      // The model reads it too, so it does not plan the run as if that target were open.
+      const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
+      expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Unclear: 1 target got a send without a clear answer;');
+    } finally {
+      restore();
+    }
+  });
+
+  it('a write that landed although it got a 5xx is found written on the resume, and not sent again', async () => {
+    const s = fiveShop();
+    s.landThenFail = new Set(['/products/0']);
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      s.landThenFail.clear();
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 5, sentUnknown: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a broken connection after the send is not sent again, whatever the host would answer now', async () => {
+    const s = fiveShop();
+    s.dropAfter = new Set(['PATCH /products/0']);
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      s.dropAfter.clear();
+      s.special.set('PATCH /products/0', { status: 422 });
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a 408 to a write is not a refusal: the resume does not send it again, while a 404 is', async () => {
+    for (const status of [408, 404]) {
+      const s = fiveShop();
+      s.special.set('PATCH /products/0', { status });
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+        const runId = await approvedRun(rows(), c);
+        expect((await run(runId, c)).status).toBe('halted');
+        s.special.delete('PATCH /products/0');
+        resume(runId);
+        expect((await run(runId, c)).status).toBe('done');
+        expect(patches(s).filter((p) => p === '/products/0').length, String(status)).toBe(status === 408 ? 1 : 2);
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it('a 429 that is retried and then breaks off leaves the target unknown', async () => {
+    const s = fiveShop();
+    s.sequence = new Map([['PATCH /products/0', [429, 0]]]);
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a 429 that is retried and then refused is sent again on the resume: each refusal clears its own send', async () => {
+    const s = fiveShop();
+    s.sequence = new Map([['PATCH /products/0', [429, 422]]]);
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/0', '/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 5, sentUnknown: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a send refused with 401 halts, and the resume sends it again', async () => {
+    const s = fiveShop();
+    s.special.set('PATCH /products/0', { status: 401 });
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.unauthorized, sentUnknown: 0 });
+      s.special.delete('PATCH /products/0');
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 5, sentUnknown: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a send a dead loop marked and never answered is not sent again', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      // What a loop that died while its requests were out leaves behind: the sends, no answer.
+      // Three in a row, which as failures would halt the pass.
+      for (const seq of [0, 1, 2]) ledger.markSent(runId, seq);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, sentUnknown: 3 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a target a loop holds is not counted unclear while its send is out, and is once the claim is given back', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect(ledger.claimTarget(runId, 0)).toBe(true);
+      ledger.markSent(runId, 0);
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(0);
+      ledger.releaseClaim(runId, 0);
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  describe('counted unclear on every way a pass stops', () => {
+    const SIXTY = Array.from({ length: 60 }, (_, i) => i);
+    const sixtyShop = (): Shop => {
+      const s = shop();
+      for (let i = 4; i < 60; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+      return s;
+    };
+    const sixty = async (s: Shop, c: ExternalClient): Promise<string> =>
+      approvedRun(SIXTY.map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+
+    it('three in a row', async () => {
+      const s = sixtyShop();
+      for (const i of [0, 1, 2]) s.special.set(`PATCH /products/${String(i)}`, { status: 502 });
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, SIXTY.map(url)) });
+        const runId = await sixty(s, c);
+        expect((await run(runId, c)).status).toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.consecutiveFailures, sentUnknown: 3 });
+      } finally {
+        restore();
+      }
+    });
+
+    it('the time budget', async () => {
+      const s = sixtyShop();
+      s.special.set('PATCH /products/0', { status: 502 });
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, SIXTY.map(url)) });
+        const runId = await sixty(s, c);
+        // The clock runs out once the first write went out.
+        const out = await runBulkEffect(runId, 'bulk_apply', {
+          ledger, trailFor: () => null, writerFor: writerFor(c), now: () => (patches(s).length > 0 ? 1e13 : 0),
+        });
+        expect(out.status).toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.timeBudget, sentUnknown: 1 });
+      } finally {
+        restore();
+      }
+    });
+
+    it("the owner's stop", async () => {
+      const s = sixtyShop();
+      s.special.set('PATCH /products/0', { status: 502 });
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, SIXTY.map(url)) });
+        const runId = await sixty(s, c);
+        const stop = new AbortController();
+        stop.abort();
+        // The stop is read between targets: it takes effect once the first write went out.
+        const out = await runBulkEffect(runId, 'bulk_apply', {
+          ledger, trailFor: () => null, writerFor: writerFor(c), signal: stop.signal, ownerStopped: () => patches(s).length > 0,
+        });
+        expect(out.status).not.toBe('done');
+        expect(patches(s)).toEqual(['/products/0']);
+        expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  it('a target another loop wrote is not counted unclear, whatever a loop that lost its claim recorded on it', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await unknownFirst(s, c);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+      // The loop that took the target over writes it after the first recorded it unclear.
+      const forApply = ledger.getRunForApply(runId)!;
+      ledger.recordApplied(forApply, 0, 'written');
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 5, sentUnknown: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('an unclear target takes nothing from the failure limit of the pass', async () => {
+    const s = shop();
+    for (let i = 4; i < 40; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+    s.special.set('PATCH /products/2', { status: 422 });
+    const restore = serve(s);
+    try {
+      const keys = Array.from({ length: 40 }, (_, i) => url(i));
+      const c = client({ contract: mintBulkContract(HOST, keys) });
+      const runId = await approvedRun(keys.map((target) => ({ target, after: { price: '15.00' } })), c);
+      // Forty targets may fail twice in a pass. Two unclear ones and one refusal stay under it.
+      ledger.markSent(runId, 0);
+      ledger.markSent(runId, 1);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(ledger.getStatus(runId)).toMatchObject({ failureLimit: 2, applied: 37, failed: 1, sentUnknown: 2 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('after a later resume the target counts as written once the change shows, and as a conflict once something else does', async () => {
+    for (const later of ['15.00', '13.00'] as const) {
+      const s = fiveShop();
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+        const runId = await unknownFirst(s, c);
+        // The second pass halts on a refusal of its own, with target 0 still unknown.
+        s.special.set('PATCH /products/2', { status: 422 });
+        expect((await run(runId, c)).status).toBe('halted');
+        expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+        s.special.delete('PATCH /products/2');
+        s.items.get('/products/0')!['price'] = later;
+        resume(runId);
+        expect((await run(runId, c)).status).toBe('done');
+        expect(patches(s).filter((p) => p === '/products/0')).toEqual(['/products/0']);
+        expect(ledger.getStatus(runId)).toMatchObject(later === '15.00'
+          ? { applied: 5, sentUnknown: 0, conflicts: 0 }
+          : { applied: 4, sentUnknown: 0, conflicts: 1 });
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it('an undo whose send gets no clear answer is not sent again on its resume', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('done');
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      s.requests.length = 0;
+      s.special.set('PATCH /products/0', { status: 502 });
+      expect((await run(undo.status.id, c, 'bulk_undo')).status).toBe('halted');
+      s.special.delete('PATCH /products/0');
+      resume(undo.status.id);
+      expect((await run(undo.status.id, c, 'bulk_undo')).status).toBe('done');
+      // An undo writes newest first; each target once.
+      expect([...patches(s)].sort()).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(undo.status.id)!.sentUnknown).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('an undo finds an unknown write that never landed as already taken back, and takes back one that landed', async () => {
+    for (const landed of [false, true]) {
+      const s = fiveShop();
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+        const runId = await unknownFirst(s, c);
+        expect((await run(runId, c)).status).toBe('done');
+        if (landed) s.items.get('/products/0')!['price'] = '15.00';
+        const undo = ledger.planUndo(runId);
+        if (!undo.ok) throw new Error(undo.reason);
+        expect(undo.status.total).toBe(5);
+        expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+        s.requests.length = 0;
+        expect((await run(undo.status.id, c, 'bulk_undo')).status).toBe('done');
+        expect(patches(s).includes('/products/0')).toBe(landed);
+        expect(s.items.get('/products/0')!['price']).toBe('12.00');
+        // Taken back either way, so the run no longer counts it unclear, and counts it undone
+        // although it was never recorded as applied: an external undo sent to it.
+        expect(ledger.getStatus(runId)!.sentUnknown).toBe(0);
+        expect(ledger.getStatus(runId)!.undone).toBe(5);
+      } finally {
+        restore();
+      }
+    }
+  });
+});

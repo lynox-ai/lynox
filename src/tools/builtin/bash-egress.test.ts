@@ -76,11 +76,15 @@ async function proxyAdmin(secret = SECRET): Promise<string> {
   return `http://127.0.0.1:${String(addr.port)}`;
 }
 
+/** The sidecar's socket for the next agent: the process is in sidecar mode through the mode object (`shell-isolation.ts`). */
+let socketPath = '';
+
 function agent(policy: 'allow-all' | 'guarded' | 'allow-list' | 'deny-all' | undefined, opts: {
   hosts?: string[]; wildcards?: string[]; acks?: string[]; envVars?: Record<string, string>;
 } = {}): never {
   return {
     toolContext: {
+      shellIsolation: { kind: 'sidecar', socket: socketPath, root: {} },
       networkPolicy: policy,
       allowedHosts: opts.hosts ? new Set(opts.hosts) : undefined,
       allowedWildcards: opts.wildcards ?? [],
@@ -97,7 +101,7 @@ async function failure(p: Promise<unknown>): Promise<unknown> {
 }
 
 async function configured(plan: DaemonPlan, secret = SECRET): Promise<void> {
-  vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', await daemon(plan));
+  socketPath = await daemon(plan);
   vi.stubEnv('LYNOX_EGRESS_PROXY_URL', await proxyAdmin(secret));
   vi.stubEnv('LYNOX_EGRESS_PROXY_SECRET', SECRET);
   vi.stubEnv('LYNOX_EGRESS_SHELL_PROXY', 'proxy:3128');
@@ -223,7 +227,7 @@ describe('bash with the egress proxy', () => {
   });
 
   it('an unreachable proxy gives the call no proxy, and says so', async () => {
-    vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', await daemon({ code: 0 }));
+    socketPath = await daemon({ code: 0 });
     vi.stubEnv('LYNOX_EGRESS_PROXY_SECRET', SECRET);
     vi.stubEnv('LYNOX_EGRESS_PROXY_URL', 'http://127.0.0.1:1');
     const result = await bashTool.handler({ command: 'true' }, agent('allow-all'));
@@ -239,7 +243,7 @@ describe('bash with the egress proxy', () => {
   });
 
   it('without an egress proxy configured, nothing is registered and the result is as before', async () => {
-    vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', await daemon({ code: 0, out: () => 'hi\n' }));
+    socketPath = await daemon({ code: 0, out: () => 'hi\n' });
     vi.stubEnv('LYNOX_EGRESS_PROXY_URL', await proxyAdmin());
     const result = await bashTool.handler({ command: 'echo hi' }, agent('allow-all', { envVars: { HTTPS_PROXY: 'http://elsewhere:1' } }));
     expect(result).toBe('hi\n');

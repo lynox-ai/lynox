@@ -54,3 +54,16 @@ export function suppressSessionExpiredBanner(): void {
 	_redirectPending = true;
 	_sessionExpired = false;
 }
+
+// A delegated access the instance refuses while it runs without durable knowledge: `off` when
+// it is turned off, `missing` when it is on but its store did not load. Not dismissable, and not
+// the expired banner: signing in again changes nothing, the instance has to change.
+let _mandateMemoryBlocked = $state<'off' | 'missing' | null>(null);
+
+export function mandateMemoryBlocked(): 'off' | 'missing' | null {
+	return _mandateMemoryBlocked;
+}
+
+export function markMandateMemoryBlocked(reason: 'off' | 'missing'): void {
+	_mandateMemoryBlocked = reason;
+}

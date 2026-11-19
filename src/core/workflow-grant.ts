@@ -44,9 +44,10 @@ export interface GrantChecksumInput {
  * A value as the database holds it, in canonical JSON. The acceptance may hash an
  * in-memory workflow (the pipeline cache) whose steps carry keys set to `undefined`; the
  * run hashes the blob read back, where `JSON.stringify` dropped them. Hashing the stored
- * form on both sides keeps the two computations over the same bytes.
+ * form on both sides keeps the two computations over the same bytes. The workflow stamp
+ * (`workflow-stamp.ts`) hashes the same way.
  */
-function storedForm(value: unknown): string {
+export function storedForm(value: unknown): string {
   return canonicalJson(JSON.parse(JSON.stringify(value ?? null)) as unknown);
 }
 
@@ -91,11 +92,20 @@ export type GrantRunOrigin =
    * auth origin, a channel label like `ReviewedGrantStamp.by` (`local`, `bearer:user`,
    * `cookie:<tag>`), never a name.
    */
-  | { kind: 'library'; by: string };
+  | { kind: 'library'; by: string }
+  /**
+   * A provider's verified event started it (an inbound webhook). Its values are a third
+   * party's, so it never runs under a write grant.
+   */
+  | { kind: 'webhook'; triggerId: string; eventId: string };
+
+/** The kinds a grant may be handed to. An allowlist: a kind added later is refused until listed here. */
+const GRANT_ORIGINS: ReadonlySet<GrantRunOrigin['kind']> = new Set(['schedule', 'library']);
 
 /** How a run under a grant was started, as `pipeline_runs.started_via` records it. */
 export function startedVia(origin: GrantRunOrigin): string {
   if (origin.kind === 'library') return `library:${origin.by}`;
+  if (origin.kind === 'webhook') return `webhook:${origin.triggerId}`;
   return `${origin.byHand === true ? 'schedule-hand' : 'schedule'}:${origin.triggerId}`;
 }
 
@@ -201,6 +211,9 @@ export function decideRunGrant(
   const contract = planned.capabilityContract;
   if (contract === undefined) return { contract: undefined, note: null };
   const withheld = (why: string): GrantDecision => ({ contract: undefined, note: `Ran without its write grant: ${why}` });
+  if (!GRANT_ORIGINS.has(origin.kind)) {
+    return withheld(origin.kind === 'webhook' ? 'a webhook run never carries a write grant.' : 'a grant is handed only to a run its schedule or the library started.');
+  }
   if (contract.origin !== 'reviewed') return withheld('the grant was never reviewed by a person.');
   const stamp: ReviewedGrantStamp | undefined = planned.reviewedGrant;
   if (stamp === undefined) return withheld('the grant has no record of its acceptance.');
@@ -343,7 +356,7 @@ export function grantName(raw: unknown): string | undefined {
 /** What the acceptance needs from the stores; the scheduling route passes the engine's. */
 export interface GrantAcceptStores {
   history: {
-    acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string): boolean;
+    acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string, seen: PlannedPipeline): boolean;
     deleteTrigger(id: string): boolean;
   };
   taskManager: {
@@ -414,7 +427,7 @@ export function acceptWorkflowGrant<T extends { id: string }>(
       triggerId: task.id,
       afterUntrusted: prepared.afterUntrusted,
       grantId,
-    }, now);
+    }, now, planned);
   } catch {
     written = false;
   }

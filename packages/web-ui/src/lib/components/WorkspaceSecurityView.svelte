@@ -9,6 +9,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface ConfigResponse { managed?: string }
 
@@ -16,6 +17,8 @@
 	let managed = $state(false);
 
 	let vaultConfigured = $state(false);
+	// The owner-only keyless field (see StatusBar); absent for a mandate and when nothing was found.
+	let vaultKeyState = $state<'missing_over_encrypted_data' | 'unknown' | null>(null);
 	let vaultRevealed = $state(false);
 	let vaultKey = $state<string | null>(null);
 
@@ -24,16 +27,19 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const [configRes, vaultRes] = await Promise.all([
 				fetch(`${getApiBase()}/config`),
 				fetch(`${getApiBase()}/vault/key?reveal=false`),
 			]);
 			if (!configRes.ok) throw new Error(`HTTP ${configRes.status}`);
 			const body = (await configRes.json()) as ConfigResponse;
+			noteViewer(body);
 			managed = cpSuppliesLLMKey(body.managed);
 			if (vaultRes.ok) {
-				const vaultBody = (await vaultRes.json()) as { configured: boolean };
+				const vaultBody = (await vaultRes.json()) as { configured: boolean; vault_key?: unknown };
 				vaultConfigured = vaultBody.configured;
+				vaultKeyState = vaultBody.vault_key === 'missing_over_encrypted_data' || vaultBody.vault_key === 'unknown' ? vaultBody.vault_key : null;
 			}
 			loaded = true;
 		} catch (e) {
@@ -81,12 +87,20 @@
 		</section>
 	{:else if !loaded}
 		<p class="text-sm text-text-muted">{t('system.loading')}</p>
+	{:else if isMandateSession()}
+		<!-- A mandate's session (ux U-104): the vault key and the access token are secrets, so the
+		     page has nothing to show and is left out of the settings index and the palette. Reached by
+		     its address, it shows its heading only; the server refuses both reveals to a mandate. -->
 	{:else}
 		<!-- Vault key -->
 		<section class="border-t border-border pt-6 space-y-2">
 			<h2 class="text-lg font-medium">{t('system.vault_heading')}</h2>
 			<p class="text-xs text-text-muted">{t('system.vault_subtitle')}</p>
-			{#if !vaultConfigured}
+			{#if vaultKeyState !== null}
+				<!-- "generates one on first save" is not true here: a key existed, and the data it wrote is still there. -->
+				<p role="alert" class="text-sm text-warning">{t(vaultKeyState === 'unknown' ? 'status.vault_key_unknown' : 'status.vault_key_missing')}</p>
+				<p class="text-sm text-text-muted">{t('system.vault_key_missing_hint')}</p>
+			{:else if !vaultConfigured}
 				<p class="text-sm italic text-text-muted">{t('system.vault_not_configured')}</p>
 			{:else if vaultRevealed && vaultKey}
 				<pre class="font-mono text-xs px-2 py-1 bg-bg-muted rounded select-all overflow-x-auto">{vaultKey}</pre>

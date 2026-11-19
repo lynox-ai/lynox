@@ -4,7 +4,8 @@ import { getErrorMessage } from '../../core/utils.js';
 import { channels } from '../../core/observability.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
-import { rowStampOf } from '../../core/data-store.js';
+import { newCollectionId, rowStampOf } from '../../core/data-store.js';
+import { ifCounts, ifRemovedIds, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 // DataStore accessed via agent.toolContext.dataStore
 
@@ -92,25 +93,33 @@ export const dataStoreCreateTool: ToolEntry<CreateInput> = {
         ...(c.role === 'occurred_at' ? { role: 'occurred_at' as const } : {}),
       }));
 
-      const info = storeRef.createCollection({
-        name: input.name,
-        scope,
-        columns,
-        uniqueKey: input.unique_key,
-      });
+      // Decided once, here: the row names this id and the store writes exactly it, or fails to
+      // create the table. Without the column (an older file before its boot migration), or when
+      // that cannot be told, the row names the kind only and the store decides on its own.
+      let collectionId: string | undefined;
+      try { if (storeRef.hasCollectionIdColumn()) collectionId = newCollectionId(); } catch { collectionId = undefined; }
+      return withInstanceWrite(agent, { site: 'data_store_create#create', kind: 'create', store: 'data_store', target: () => [['collection', collectionId]], main: ['create'] }, (w) => {
+        const info = w.run('create', () => storeRef.createCollection({
+          name: input.name,
+          scope,
+          columns,
+          uniqueKey: input.unique_key,
+          collectionId,
+        }), ifReturned);
 
-      // Publish for Knowledge Graph bridge (collection registration)
-      channels.dataStoreInsert.publish({
-        event: 'collection_created',
-        collection: input.name,
-        columns,
-        scopeType: scope.type,
-        scopeId: scope.id,
-      });
+        // Publish for Knowledge Graph bridge (collection registration)
+        channels.dataStoreInsert.publish({
+          event: 'collection_created',
+          collection: input.name,
+          columns,
+          scopeType: scope.type,
+          scopeId: scope.id,
+        });
 
-      const colDesc = info.columns.map(c => `${c.name} (${c.type}${c.unique ? ', unique' : ''})`).join(', ');
-      const ukDesc = info.uniqueKey ? ` | Unique key: [${info.uniqueKey.join(', ')}]` : '';
-      return `Created collection "${info.name}" with columns: ${colDesc}${ukDesc}. Scope: ${info.scopeType}${info.scopeId ? ':' + info.scopeId : ''}. Entities will be automatically linked for cross-referencing.`;
+        const colDesc = info.columns.map(c => `${c.name} (${c.type}${c.unique ? ', unique' : ''})`).join(', ');
+        const ukDesc = info.uniqueKey ? ` | Unique key: [${info.uniqueKey.join(', ')}]` : '';
+        return `Created collection "${info.name}" with columns: ${colDesc}${ukDesc}. Scope: ${info.scopeType}${info.scopeId ? ':' + info.scopeId : ''}. Entities will be automatically linked for cross-referencing.`;
+      });
     } catch (err) {
       return `Error working with data table: ${getErrorMessage(err)}`;
     }
@@ -148,32 +157,34 @@ export const dataStoreInsertTool: ToolEntry<InsertInput> = {
     if (!storeRef) return 'DataStore not available.';
 
     try {
-      const result = storeRef.insertRecords({
-        collection: input.collection,
-        records: input.records,
-        stamp: rowStampOf(agent),
-      });
-
-      // Publish for Knowledge Graph bridge (entity extraction from records)
-      if (result.inserted > 0 || result.updated > 0) {
-        channels.dataStoreInsert.publish({
-          event: 'records_inserted',
+      return withInstanceWrite(agent, { site: 'data_store_insert#save', kind: 'save', store: 'data_store', target: () => [['collection', storeRef.collectionIdOf(input.collection)]], main: ['insert'] }, (w) => {
+        const result = w.run('insert', () => storeRef.insertRecords({
           collection: input.collection,
           records: input.records,
-        });
-      }
+          stamp: rowStampOf(agent),
+        }), ifCounts);
 
-      const parts: string[] = [];
-      if (result.inserted > 0) parts.push(`Inserted ${result.inserted}`);
-      if (result.updated > 0) parts.push(`updated ${result.updated}`);
-      const summary = parts.length > 0
-        ? `${parts.join(', ')} record(s) into ${input.collection}.`
-        : `No records changed in ${input.collection}.`;
+        // Publish for Knowledge Graph bridge (entity extraction from records)
+        if (result.inserted > 0 || result.updated > 0) {
+          channels.dataStoreInsert.publish({
+            event: 'records_inserted',
+            collection: input.collection,
+            records: input.records,
+          });
+        }
 
-      if (result.errors.length > 0) {
-        return `${summary}\nWarnings:\n${result.errors.join('\n')}`;
-      }
-      return summary;
+        const parts: string[] = [];
+        if (result.inserted > 0) parts.push(`Inserted ${result.inserted}`);
+        if (result.updated > 0) parts.push(`updated ${result.updated}`);
+        const summary = parts.length > 0
+          ? `${parts.join(', ')} record(s) into ${input.collection}.`
+          : `No records changed in ${input.collection}.`;
+
+        if (result.errors.length > 0) {
+          return `${summary}\nWarnings:\n${result.errors.join('\n')}`;
+        }
+        return summary;
+      });
     } catch (err) {
       return `Error working with data table: ${getErrorMessage(err)}`;
     }
@@ -403,22 +414,24 @@ export const dataStoreDeleteTool: ToolEntry<DeleteInput> = {
     if (!storeRef) return 'DataStore not available.';
 
     try {
-      const deleted = storeRef.deleteRecords({
-        collection: input.collection,
-        filter: input.filter,
-      });
-
-      if (deleted > 0) {
-        channels.dataStoreInsert.publish({
-          event: 'records_deleted',
+      return withInstanceWrite(agent, { site: 'data_store_delete#delete', kind: 'delete', store: 'data_store', target: () => [['collection', storeRef.collectionIdOf(input.collection)]], main: ['delete'] }, (w) => {
+        const { deleted } = w.run('delete', () => storeRef.deleteRecordsReturningIds({
           collection: input.collection,
-          deletedCount: deleted,
-        });
-      }
+          filter: input.filter,
+        }), ifRemovedIds, (v) => ({ noun: 'records', ids: v.ids }));
 
-      return deleted > 0
-        ? `Deleted ${deleted} record(s) from ${input.collection}.`
-        : `No records matched the filter in ${input.collection}.`;
+        if (deleted > 0) {
+          channels.dataStoreInsert.publish({
+            event: 'records_deleted',
+            collection: input.collection,
+            deletedCount: deleted,
+          });
+        }
+
+        return deleted > 0
+          ? `Deleted ${deleted} record(s) from ${input.collection}.`
+          : `No records matched the filter in ${input.collection}.`;
+      });
     } catch (err) {
       return `Error working with data table: ${getErrorMessage(err)}`;
     }
@@ -451,15 +464,17 @@ export const dataStoreDropTool: ToolEntry<DropInput> = {
     if (!storeRef) return 'DataStore not available.';
 
     try {
-      const dropped = storeRef.dropCollection(input.collection);
-      if (dropped) {
-        channels.dataStoreInsert.publish({
-          event: 'collection_dropped',
-          collection: input.collection,
-        });
-        return `Dropped collection "${input.collection}" and all its records.`;
-      }
-      return `Collection "${input.collection}" not found.`;
+      return withInstanceWrite(agent, { site: 'data_store_drop#delete', kind: 'delete', store: 'data_store', target: () => [['collection', storeRef.collectionIdOf(input.collection)]], main: ['drop'] }, (w) => {
+        const dropped = w.run('drop', () => storeRef.dropCollection(input.collection), ifTrue);
+        if (dropped) {
+          channels.dataStoreInsert.publish({
+            event: 'collection_dropped',
+            collection: input.collection,
+          });
+          return `Dropped collection "${input.collection}" and all its records.`;
+        }
+        return `Collection "${input.collection}" not found.`;
+      });
     } catch (err) {
       return `Error dropping collection: ${getErrorMessage(err)}`;
     }

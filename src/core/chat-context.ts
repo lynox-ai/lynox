@@ -1,8 +1,16 @@
 import type { RunHistory } from './run-history.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
-import { wrapChannelMessage } from './data-boundary.js';
+import { detectInjectionAcross, wrapChannelMessage, wrapUntrustedData } from './data-boundary.js';
 import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Containment } from './containment.js';
 import type { ThreadStore } from './thread-store.js';
+import { stripUntrustedSeparators } from './sanitize.js';
+import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
+import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
+import { stripHidden, stripHiddenInName } from './hidden-text.js';
+import { isStepIdShape, shownRunStepId, shownStepId, stepRunNames, storedSteps } from '../orchestrator/step-id.js';
+import { detectSensitiveContent } from '../integrations/inbox/sensitive-content.js';
+
+const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
 /**
  * The chat a context is loaded into, and the stores that contain it: a run started from a
@@ -13,7 +21,12 @@ export interface ChatContextReader {
   readonly threadId: string | undefined;
   readonly containment: Containment | null;
   readonly threadStore: Pick<ThreadStore, 'getThread' | 'updateThread'> | null;
+  /** What a chat opened from a contained one may promise (`kind: 'contained-origin'`). */
+  readonly wayOut?: ContainedWayOutState | undefined;
 }
+
+/** The state assumed when the caller gives none: nothing on, and support as the way. */
+const CLOSED_WAY_OUT: ContainedWayOutState = { bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: false, managed: true };
 
 /**
  * A typed reference to an object a chat is opened ON — the payload of the
@@ -27,10 +40,12 @@ export interface ChatContextReader {
  * to in chat ("💬 Im Chat beantworten") — the agent drafts + sends via the
  * mail_reply tool instead of a bespoke composer; `mail-batch` = N bulk-selected
  * inbox items to work through in one chat ("💬 N im Chat"), carrying the id
- * list instead of a single id.
+ * list instead of a single id; `approval` = a mail a run filed for approval that
+ * the owner moved to chat to change ("Im Chat ändern") — the agent sends the
+ * changed version through the interactive confirm.
  */
 export type ChatContextRef =
-  | { kind: 'workflow' | 'run' | 'mail'; id: string }
+  | { kind: 'workflow' | 'run' | 'mail' | 'approval' | 'contained-origin'; id: string }
   | { kind: 'mail-batch'; ids: string[] };
 
 /**
@@ -62,6 +77,8 @@ export const CHAT_CONTEXT_KIND_SET = {
   run: true,
   mail: true,
   'mail-batch': true,
+  approval: true,
+  'contained-origin': true,
 } as const satisfies Record<ChatContextRef['kind'], true>;
 
 export const CHAT_CONTEXT_KINDS = Object.keys(
@@ -79,7 +96,9 @@ export const CHAT_CONTEXT_KINDS = Object.keys(
  * by the interpolated fields: the untrusted FREE-TEXT ones (mail from/subject/
  * body, workflow + step names, run error) all pass {@link oneLine}, which
  * collapses newlines, and the remaining fields (ids, status, mode) are
- * server-generated ids / enums with no newlines. Two consumers strip on it: the
+ * server-generated ids / enums with no newlines. The one exception is the
+ * `approval` kind's draft text, which keeps its lines: there a line that reads as
+ * the sentinel is escaped instead (`draftText`). Two consumers strip on it: the
  * server-side title derivation ({@link stripLoadedContext}, used by session
  * `generateThreadTitle`) and the web-ui bubble render (its own mirror of
  * `stripLoadedContext`, packages/web-ui/src/lib/utils/now-marker.ts).
@@ -131,6 +150,130 @@ export interface ChatInboxReader {
   /** Resolve the IMAP uid+folder for a stored message-id, or null if unknown
    *  (old/moved mail) — the caller then instructs a mail_search fallback. */
   getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null;
+  /** The thread's stored messages, newest first (`InboxStateDb.listThreadMessages`). */
+  listThreadMessages(
+    accountId: string,
+    threadKey: string,
+    opts: { tenantId?: string | undefined; limit?: number | undefined },
+  ): ReadonlyArray<ChatThreadMessage>;
+  /** The item's audit, oldest first (`InboxStateDb.listAuditForItem`). */
+  listAuditForItem(itemId: string, tenantId?: string): ReadonlyArray<{ action: string; payloadJson: string }>;
+}
+
+/** What "Reply in chat" reads of a stored thread message. */
+export interface ChatThreadMessage {
+  messageId: string;
+  fromAddress: string;
+  fromName?: string | undefined;
+  subject: string;
+  bodyMd?: string | undefined;
+  snippet?: string | undefined;
+  mailDate?: Date | undefined;
+  direction: string;
+  /** true = automatic reply, false = checked and not one, undefined = not checked. */
+  autoReply?: boolean | undefined;
+}
+
+/**
+ * The message "Reply in chat" answers when it is not the item's own mail: the newest inbound
+ * message of the thread that is not older than the item's own mail and is known not to be an
+ * automatic reply — checked and not one, or the message that reopened or raised the item when
+ * the check could not tell (its audit names it; a known automatic reply is not taken either way). An out-of-office note is stored in
+ * the thread too, and answering it would answer "I am away until …". Any other message never
+ * checked (stored before the check existed) is not taken, so such an item answers its first
+ * mail, as before.
+ */
+export function followUpToAnswer(reader: ChatInboxReader, item: InboxItem): ChatThreadMessage | null {
+  const messages = reader.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit: 50 });
+  const own = item.messageId !== undefined ? messages.find((m) => m.messageId === item.messageId) : undefined;
+  const since = own?.mailDate?.getTime();
+  const reopenedBy = new Set<string>();
+  for (const a of reader.listAuditForItem(item.id, item.tenantId)) {
+    if (a.action !== 'reopened_on_reply' && a.action !== 'raised_on_sensitive_follow_up') continue;
+    try {
+      const id = (JSON.parse(a.payloadJson) as { message_id?: unknown }).message_id;
+      if (typeof id === 'string') reopenedBy.add(id);
+    } catch {
+      // An unreadable payload names no message.
+    }
+  }
+  return messages.find((m) =>
+    m.messageId !== item.messageId
+    && m.direction === 'inbound'
+    && (m.autoReply === false || (m.autoReply === undefined && reopenedBy.has(m.messageId)))
+    && !(since !== undefined && m.mailDate !== undefined && m.mailDate.getTime() < since),
+  ) ?? null;
+}
+
+/**
+ * What a chat opened from a contained one may promise for a change to the store: whether this
+ * instance runs a bulk run that reads a Shopify store, and if not, who can turn on what is missing.
+ * Read by the run route when it resolves a `contained-origin` reference.
+ */
+export interface ContainedWayOutState {
+  /** Bulk runs run on this instance (`core/bulk-switch.ts › bulkRunsOn`). */
+  readonly bulkRuns: boolean;
+  /** Who can turn bulk runs on here: the owner through the config, also on a pool tier the
+   *  control plane has opened them on, or the control plane (`bulkRunsTurnedOnBy`). */
+  readonly bulkRunsBy: 'config' | 'control-plane';
+  /** A bulk run may read a Shopify store (`core/bulk-shopify.ts › shopifyBulkReadEnabled`). */
+  readonly shopifyBulk: boolean;
+  /** A managed instance: a billing tier is set, and what the owner cannot turn on goes to support. */
+  readonly managed: boolean;
+}
+
+/** Whether a store change can go to a bulk run here: both switches on. */
+export function storeChangeByBulkRun(state: ContainedWayOutState): boolean {
+  return state.bulkRuns && state.shopifyBulk;
+}
+
+const ORIGIN_HEAD = '[Loaded context: opened from a read-only chat]\n'
+  + 'Unlike the chat it was opened from, this chat is not limited to reading a store; keep it that way: '
+  + 'do not read the store with http_request here. ';
+const ORIGIN_STORE_BY_BULK_RUN =
+  'If the user wants to change the store, plan it as a bulk run (bulk_plan), which reads the store itself and shows a preview. ';
+const ORIGIN_OTHER_SERVICE = 'If the user wants a request to another service, run it here; if it needs details from the store, such as product names or a product type, '
+  + 'ask the user for them instead of reading the store.';
+
+/**
+ * What the model reads in a chat opened from a contained one where a store change can go to a bulk
+ * run: a fixed text, no content of that chat. It says this chat is not read-only, so the model does
+ * not tell the user it is. A change to the store goes to a bulk run, which reads the store itself;
+ * a request to another service runs here, with store details asked of the user. Either way this
+ * chat does not read the store first and become read-only in turn.
+ */
+export const CONTAINED_ORIGIN_CONTEXT = ORIGIN_HEAD + ORIGIN_STORE_BY_BULK_RUN + ORIGIN_OTHER_SERVICE;
+
+/** What is missing and who can turn it on, as clauses after „Tell the user … that“: the Shopify
+ *  read first, then bulk runs, each with the one who can turn it on where there is a way, and
+ *  support once. Bulk runs the owner can turn on get a clause that names no place: the line above
+ *  the input names the settings switch (`contained-way-out.ts › originLineKeys`). */
+function enableClauses(state: ContainedWayOutState): string[] {
+  const clauses: string[] = [];
+  const support = 'they can write to support@lynox.ai to have them enabled';
+  if (!state.shopifyBulk) {
+    clauses.push(state.managed ? support
+      : 'they enable bulk changes to Shopify stores with LYNOX_FEATURE_SHOPIFY_BULK_READ in their instance\'s configuration');
+  }
+  if (!state.bulkRuns) {
+    if (state.bulkRunsBy === 'config') clauses.push('bulk runs are turned off on this instance');
+    else if (!clauses.includes(support)) clauses.push(support);
+  }
+  return clauses;
+}
+
+/**
+ * The text for a chat opened from a contained one, as this instance stands: where a store change
+ * cannot go to a bulk run, the store part says so and who can turn on what is missing, and offers
+ * drafts the user copies into the store; the rest is {@link CONTAINED_ORIGIN_CONTEXT}'s.
+ */
+export function containedOriginContext(state: ContainedWayOutState): string {
+  if (storeChangeByBulkRun(state)) return CONTAINED_ORIGIN_CONTEXT;
+  const store = 'If the user wants to change the store: bulk changes to Shopify stores are not enabled on this instance, '
+    + 'so the store cannot be changed from here. Begin your answer with one sentence that says so and that '
+    + enableClauses(state).join(', and that ')
+    + '; only then offer to draft the new texts here from what the user gives you, for them to copy into Shopify themselves. ';
+  return ORIGIN_HEAD + store + ORIGIN_OTHER_SERVICE;
 }
 
 const MAX_STEP_TASK_CHARS = 280;
@@ -141,6 +284,27 @@ const MAX_MAIL_BODY_CHARS = 800;
 const MAX_MAIL_SNIPPET_CHARS = 200;
 const MAX_FOLDER_CHARS = 80;
 const MAX_BATCH_ITEMS = 20;
+const MAX_DRAFT_BODY_CHARS = 20_000;
+const MAX_RECIPIENTS = 50;
+
+/**
+ * The narrow read surface an `approval` context needs: the entry, and whose entries the reading
+ * session may load. `scope` is the request principal's ({@link ApprovalScope}); null loads none.
+ */
+export interface ChatApprovalReader {
+  get(id: string): ApprovalEntry | null;
+  readonly scope: ApprovalScope | null;
+  /**
+   * Whether a mail account is connected here and its uids name the same mail across a restart —
+   * an IMAP mailbox. Gmail and Microsoft 365 number their mails per running instance, from 1, so
+   * after a restart a stored uid can name another mail without any error; a reply is pointed at
+   * its original by uid only where this holds.
+   */
+  accountUidsStable(accountId: string): boolean;
+  /** Whether the entry's content is still the one its checksum was taken over when it was filed —
+   *  the store's own check, which the decision and the executor use. */
+  checksumMatches(id: string): boolean;
+}
 
 /**
  * Collapse control characters (incl. newlines/tabs) to spaces and clamp the
@@ -160,6 +324,26 @@ const MAX_BATCH_ITEMS = 20;
 function oneLine(s: string, max: number): string {
   const flat = s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** {@link oneLine} for a stored workflow's or run's text (name, step id, task, error), without the
+ *  characters that render as nothing (`hidden-text.ts`): text saved before the save refused them
+ *  would otherwise carry an instruction no one sees into the chat. Not for mail fields, whose
+ *  values the model echoes back to the mail tools. */
+function storedLine(s: string, max: number): string {
+  return oneLine(stripHidden(s), max);
+}
+
+/** {@link storedLine} for a stored name or step id, which takes none of the places running text may
+ *  carry such a character: a ZWNJ an old step id holds between letters goes too. */
+function storedName(s: string, max: number): string {
+  return oneLine(stripHiddenInName(s), max);
+}
+
+/** A stored step id in the preamble: itself in the allowed shape, otherwise its position in the
+ *  workflow (`step-id.ts`) with the name its runs use, or the note alone where no position is known. */
+function storedStepId(id: string, index: number | undefined, runName?: string): string {
+  return isStepIdShape(id) ? storedName(id, MAX_STEP_ID_CHARS) : shownStepId(id, index === -1 ? undefined : index, runName);
 }
 
 /**
@@ -210,7 +394,10 @@ export function resolveChatContext(
   ref: ChatContextRef,
   inboxState?: ChatInboxReader | null,
   reader?: ChatContextReader,
+  approvals?: ChatApprovalReader | null,
 ): string | null {
+  if (ref.kind === 'approval') return resolveApprovalContext(ref.id, approvals ?? null);
+
   if (ref.kind === 'mail') {
     // An inbox item the user wants to answer in chat. The agent drafts + sends
     // via mail_reply (which has its own send-confirm) instead of a composer.
@@ -226,7 +413,8 @@ export function resolveChatContext(
     //      start its own pseudo-directive line, and (the part that is easy to
     //      drop by accident) keeps the `[/loaded-context]` sentinel unforgeable.
     //      Both http-api.ts and the web-ui strip rest on the interpolated fields
-    //      being newline-free; removing it here silently invalidates them.
+    //      being newline-free (or, for the `approval` kind's multi-line draft
+    //      text, on its sentinel escape); removing it here silently invalidates them.
     //  (2) wrapChannelMessage() — the SAME boundary `mail_read` puts the same
     //      body behind (`integrations/mail/tools/mail-read.ts:78`): the
     //      `<untrusted_data source=…>` frame, the injection scan, the ⚠ warning
@@ -255,33 +443,50 @@ export function resolveChatContext(
     //     is.
     // And the baseline is not "the old scan": before this, the scan did not run
     // on this path at all, so it is 19 of 21 where it was 0 of 21.
-    const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
-    const from = item.fromName
-      ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
+    // A follow-up in the thread (a customer writing again) is what the user answers now, so its
+    // sender, subject, text and Message-ID take the place of the first mail's.
+    const followUp = followUpToAnswer(inboxState, item);
+    const mail = followUp ?? item;
+    const fromAddr = oneLine(mail.fromAddress, MAX_NAME_CHARS);
+    const from = mail.fromName
+      ? `${oneLine(mail.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
       : fromAddr;
     // The cached body can be an EMPTY string (body-refresh persists '' for an
     // all-markup/redacted mail), so `??` would leave a blank Message line — fall
     // back to the snippet on empty, not just on null/undefined.
-    const cachedBody = inboxState.getItemBody(ref.id)?.bodyMd;
-    const bodyMd = cachedBody && cachedBody.length > 0 ? cachedBody : (item.snippet ?? '');
+    const cachedBody = followUp ? followUp.bodyMd : inboxState.getItemBody(ref.id)?.bodyMd;
+    const bodyMd = cachedBody && cachedBody.length > 0 ? cachedBody : (mail.snippet ?? '');
+    // A follow-up was not judged by the intake check the item's own mail passed, so it is checked
+    // here, as `inbox_read` checks a thread message: a hit withholds its text and the sender's
+    // name, said outside the block. Its locator stays, so the reply still answers it.
+    const withheld = followUp
+      ? detectSensitiveContent({ subject: '', body: [followUp.subject, followUp.fromName ?? '', bodyMd].join('\n') }).categories
+      : [];
+    const hidden = withheld.length > 0;
+    // A follow-up's row holds no text when the inbox kept none (a mail held as sensitive on
+    // `skip`), and only an excerpt otherwise: neither is the whole message, and the framing says
+    // which, so the model does not take an excerpt for the mail or an absence for an empty one.
+    const followUpText = followUp && !hidden
+      ? (bodyMd.length === 0 ? ' — the inbox stored no text of it' : cachedBody && cachedBody.length > 0 ? '' : ' — Message is an excerpt')
+      : '';
     // The IMAP uid is account-SPECIFIC, so the reply MUST go from this item's
     // account — name it so mail_reply resolves the uid against the right mailbox.
     const acct = oneLine(item.accountId, MAX_NAME_CHARS);
     // Resolve the IMAP uid mail_reply needs (data in processed_mail_messages).
     // Absent for old/moved mail → fall back to a mail_search instruction.
-    const uidRow = item.messageId
-      ? inboxState.getUidByMessageId(item.accountId, item.messageId)
+    const uidRow = mail.messageId
+      ? inboxState.getUidByMessageId(item.accountId, mail.messageId)
       : null;
     // Rendered ONCE and reused, so the prose below and the field cannot disagree:
     // gating the sentence on the raw `item.messageId` while the field renders the
     // `oneLine`d value lets a whitespace-only header point the model at a line
     // that was skipped as empty.
-    const msgId = item.messageId ? oneLine(item.messageId, MAX_NAME_CHARS) : '';
+    const msgId = mail.messageId ? oneLine(mail.messageId, MAX_NAME_CHARS) : '';
     const replyLine = uidRow
       ? `To reply, call mail_reply with uid: ${uidRow.uid}, account: "${acct}"` +
         `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}. `
       : `To reply, first locate this message with mail_search ` +
-        `(by the sender, the subject${msgId ? `, or the Message-ID shown above` : ''}) ` +
+        `(by the sender${hidden ? '' : ', the subject'}${msgId ? `, or the Message-ID shown above` : ''}) ` +
         `on account "${acct}", then mail_reply with its uid and account: "${acct}". `;
     // What stays OUTSIDE the boundary is engine-generated operational metadata —
     // the item id, the account, the IMAP uid/folder — the same split mail_read makes.
@@ -302,21 +507,37 @@ export function resolveChatContext(
     // Keys are the field LABELS lowercased, so the note and the block name the same
     // things: "no subject, message" points at `Subject:` and `Message:`, not at
     // internal variable names the model never sees.
-    const absent = missingFieldNote({ from: from, subject: oneLine(item.subject, MAX_NAME_CHARS), message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS) });
+    const subject = hidden ? '' : oneLine(mail.subject, MAX_NAME_CHARS);
+    const message = hidden ? '' : oneLine(bodyMd, MAX_MAIL_BODY_CHARS);
+    const absent = hidden
+      ? ` — sender name, subject and message withheld: sensitive content (${[...new Set(withheld)].join(', ')})`
+      : followUp && bodyMd.length === 0
+        ? missingFieldNote({ from: from, subject })
+        : missingFieldNote({ from: from, subject, message });
+    const which = followUp ? ' — the newest message of its thread, a follow-up to the mail the inbox took in' : '';
     return (
-      `[Loaded mail for reply — item: ${item.id}${absent}]\n` +
+      `[Loaded mail for reply — item: ${item.id}${which}${followUpText}${absent}]\n` +
       `${wrapChannelMessage({
         source: `mail:${acct}:inbox:${item.id}`,
         fields: {
-          From: from,
-          Subject: oneLine(item.subject, MAX_NAME_CHARS),
+          From: hidden ? fromAddr : from,
+          Subject: subject,
           ...(uidRow || !msgId ? {} : { 'Message-ID': msgId }),
-          Message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS),
+          Message: message,
         },
       })}\n\n` +
       replyLine +
       `Draft a reply, confirm the send with the user, then send it.`
     );
+  }
+
+  if (ref.kind === 'contained-origin') {
+    // A chat opened by "Plan in a new chat" from a chat that read a store and now only reads
+    // (`containment.ts`). The id names that chat for the view; it is not read here, and nothing of
+    // that chat reaches this one: the user's own words come as the message, and a reader of the
+    // old chat's content goes through `containThreadFrom` like every other. Without the instance's
+    // state the text promises no bulk run: one it cannot keep is the failure this guards.
+    return containedOriginContext(reader?.wayOut ?? CLOSED_WAY_OUT);
   }
 
   if (ref.kind === 'mail-batch') {
@@ -408,12 +629,13 @@ export function resolveChatContext(
       return null;
     }
     if (wf.template !== true) return null; // only saved workflows are editable
+    const runNames = stepRunNames(wf.steps ?? []);
     const steps = (wf.steps ?? [])
-      .map((s, i) => `  ${i + 1}. [${oneLine(s.id, MAX_STEP_ID_CHARS)}] ${oneLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
+      .map((s, i) => `  ${i + 1}. [${storedStepId(s.id, i, runNames.get(s.id))}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
       .join('\n');
     return (
       `[Loaded saved workflow for editing — id: ${wf.id}]\n` +
-      `Name: "${oneLine(wf.name, MAX_NAME_CHARS)}"\n` +
+      `Name: "${storedName(wf.name, MAX_NAME_CHARS)}"\n` +
       `Mode: ${wf.mode ?? 'autonomous'}${contractNote(wf.capabilityContract)}\n` +
       `Steps:\n${steps}\n\n` +
       `To change it, call update_workflow_steps with workflow_id "${wf.id}". ` +
@@ -437,8 +659,10 @@ export function resolveChatContext(
     }
   }
   const stepResults = runHistory.getPipelineStepResults(run.id);
+  // A run names a step stored outside the shape by its run name: shown with its position and the bridge.
+  const stored = storedSteps(run.workflow_id ? runHistory.getPlannedPipeline(run.workflow_id) : undefined);
   const trace = stepResults
-    .map(s => `  [${s.status}] ${oneLine(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${oneLine(s.error, MAX_ERR_CHARS)}` : ''}`)
+    .map(s => `  [${s.status}] ${isStepIdShape(s.step_id) && !stored?.length ? storedName(s.step_id, MAX_STEP_ID_CHARS) : shownRunStepId(s.step_id, stored)}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
     .join('\n');
   const hasFailure = run.status === 'failed' || stepResults.some(s => s.status === 'failed' || s.error);
   // Only point at the editable workflow if it still exists — a run can outlive a
@@ -449,8 +673,8 @@ export function resolveChatContext(
   const readerContained = reader?.threadId !== undefined && reader.threadId !== '' && threadIsContained(reader.containment, reader.threadId);
   return (
     `[Loaded workflow run — id: ${run.id}]\n` +
-    `Workflow: "${oneLine(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
-    `Status: ${run.status}${run.error ? `\nError: ${oneLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
+    `Workflow: "${storedName(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
+    `Status: ${run.status}${run.error ? `\nError: ${storedLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
     (trace ? `Steps:\n${trace}\n` : '') +
     (hasFailure
       ? readerContained
@@ -458,5 +682,274 @@ export function resolveChatContext(
         : `\nDiagnose with diagnose_workflow_run (run_id "${run.id}")` +
           (wfExists ? `, fix with update_workflow_steps (workflow_id "${run.workflow_id}"), then re-run with run_workflow.` : '.')
       : '')
+  );
+}
+
+/** Whether a scope may load an entry: the owner every one, a mandate only those filed under its
+ *  own grant — matched by grant id, never by tag, so an owner's entry (no grant) is none of its. */
+function approvalInScope(entry: ApprovalEntry, scope: ApprovalScope): boolean {
+  if (scope.viewer === 'owner') return true;
+  return entry.mandateId !== null && entry.mandateId === scope.mandateId;
+}
+
+/**
+ * Why an entry's draft may load into a chat, or null: the owner, or its own grant, moved it there;
+ * or it was approved and not sent for a reason that proves nothing went out
+ * ({@link APPROVAL_REWRITABLE_OUTCOMES}), and it still holds what was filed. The second is the
+ * owner's only — a mandate's grant may end, and the owner decides what it sends again.
+ */
+function approvalLoadable(
+  entry: ApprovalEntry,
+  scope: ApprovalScope,
+  checksumMatches: (id: string) => boolean,
+): { as: 'moved' } | { as: 'not_sent'; reason: ApprovalOutcome } | null {
+  if (!approvalInScope(entry, scope)) return null;
+  if (entry.status === 'rejected' && entry.decidedReason === 'moved_to_chat') return { as: 'moved' };
+  if (entry.status !== 'failed' || scope.viewer !== 'owner') return null;
+  const reason = approvalOutcome(entry);
+  if (reason === null || !REWRITABLE.has(reason)) return null;
+  // The reason is the last attempt's; a matching mail that went out before an earlier one still counts.
+  if (approvalResultSawDedup(entry.resultJson)) return null;
+  return checksumMatches(entry.id) ? { as: 'not_sent', reason } : null;
+}
+
+/**
+ * What a chat opened on an approval entry reads when its draft does not load: the entry was sent,
+ * closed, purged or changed since, the queue is off, or this session may not load it — the same
+ * words for each, so it tells a session nothing about an entry it may not see. Without it the
+ * chat's first line ("write this email again") would reach the model with no draft to go by.
+ */
+export const APPROVAL_DRAFT_UNAVAILABLE =
+  '[Loaded draft — not available]\n' +
+  'The draft from the approval queue that this chat was opened on cannot be loaded here. ' +
+  'Tell the user it is not available. Do not write the email from memory or look for it elsewhere; ask the user what they want to send.';
+
+/** How the block of a draft that DID load opens, one per way it loads ({@link approvalLoadable}). */
+const APPROVAL_DRAFT_MOVED_OPENER = '[Loaded draft moved from the approval queue — entry: ';
+const APPROVAL_DRAFT_NOT_SENT_OPENER = '[Loaded draft of an approved email that was not sent — entry: ';
+
+/**
+ * Whether a composed first message carries the loaded draft of an approval entry: a whole
+ * loaded-context block that opens as one of the two loaded-draft blocks. A draft that did not
+ * load ({@link APPROVAL_DRAFT_UNAVAILABLE}) does not count, and neither does a user who only
+ * types the opening line: without the closing sentinel there is no block. Read by the thread
+ * title (`approval-chat-title.ts`), which must not take the draft's subject.
+ */
+export function opensLoadedApprovalDraft(text: string): boolean {
+  return LOADED_CONTEXT_AT_START.test(text)
+    && (text.startsWith(APPROVAL_DRAFT_MOVED_OPENER) || text.startsWith(APPROVAL_DRAFT_NOT_SENT_OPENER));
+}
+
+/** Recipients as one line, at most {@link MAX_RECIPIENTS} of them, and how many were left out:
+ *  that count is the engine's statement, so it goes into the framing, not beside the addresses. */
+function addressLine(list: ReadonlyArray<StoredAddress>): { line: string; left: number } {
+  const line = list.slice(0, MAX_RECIPIENTS).map((a) => {
+    const address = oneLine(a.address, MAX_NAME_CHARS);
+    return a.name !== undefined && a.name.trim() !== '' ? `${oneLine(a.name, MAX_NAME_CHARS)} <${address}>` : address;
+  }).join(', ');
+  return { line, left: Math.max(0, list.length - MAX_RECIPIENTS) };
+}
+
+/** A sender-written line that reads as the loaded context's end, with its bracket escaped. */
+const FORGED_CONTEXT_END = /^([ \t]*)\[(\/loaded-context\])/gm;
+
+/**
+ * A draft's text as the chat gets it: its lines kept, CR and CRLF made `\n`, the other
+ * separators and control characters made spaces ({@link stripUntrustedSeparators}) — U+2028,
+ * U+2029 and NEL included, so `\n` is the only line break left. A line that would read as the
+ * end of the loaded context has its bracket escaped: `wrapUntrustedData` already deadens its own
+ * closing tag, but not this sentinel, and both the title and the chat bubble cut the preamble at
+ * the first such line. That escape, not a one-line value, is what keeps this kind's preamble
+ * whole. Cut at {@link MAX_DRAFT_BODY_CHARS} code points, never inside one; the caller says so
+ * outside the block.
+ */
+function draftText(text: string): { text: string; length: number; cut: boolean } {
+  const lines = stripUntrustedSeparators(text.replace(/\r\n?/g, '\n')).replace(FORGED_CONTEXT_END, '$1&#91;$2');
+  const points = Array.from(lines);
+  const cut = points.length > MAX_DRAFT_BODY_CHARS;
+  return { text: cut ? points.slice(0, MAX_DRAFT_BODY_CHARS).join('') : lines, length: points.length, cut };
+}
+
+/** The day of a stored ISO date, or '' when it is none. */
+function isoDay(v: string): string {
+  return /^\d{4}-\d{2}-\d{2}T/.test(v) ? v.slice(0, 10) : '';
+}
+
+/**
+ * The draft of an approval entry the owner moved to chat, or null. It loads only while the queue
+ * is on, only for a scope that may read the entry, and only once the entry was moved to chat —
+ * a waiting entry is still the card's to send, and loading it here as well would let the chat and
+ * the card both send it. It loads as often as it is asked: opening the chat again is the way back
+ * when the first turn did not go through.
+ *
+ * The draft was written by a model, often after it read foreign content, so every field of it
+ * is inside an untrusted block — two of them: the header fields, and the text on its own. The
+ * text keeps its lines, so in a block with the fields a line of it could pass for a field (a
+ * `Bcc:` the draft does not have); in a block of its own no line of it can. The preamble is built
+ * field by field from an allowlist: the draft (sending account, recipients, subject, text, a
+ * requested follow-up), for a reply the mail it answers, and where the entry came from. Who
+ * filed, set up or decided it — tags, mandate addresses, display names — is not on the list, so a
+ * column added to the entry later does not reach the chat.
+ *
+ * A reply is pointed at the original by the account it was read through (`readAccountId`), its
+ * uid and its folder — a uid names a mail only within one mailbox, and with smart reply-from the
+ * sending account is another one. Only an IMAP account's uids hold across a restart, so only an
+ * entry read through a connected IMAP account is pointed at by uid. Every other one — filed before
+ * that account was stored, read through an account no longer connected or one whose provider
+ * numbers its mails afresh per run — has the original looked up again by search, from what the
+ * block shows of it; and so does a reply whose uid the provider no longer resolves.
+ */
+/** `<folder>:<uid>` as the reply was filed with, or null when it does not read. The folder may
+ *  hold a colon; the uid cannot. */
+function folderUidOf(v: string): { folder: string; uid: number } | null {
+  const at = v.lastIndexOf(':');
+  if (at <= 0) return null;
+  const uid = Number(v.slice(at + 1));
+  return Number.isInteger(uid) && uid >= 0 ? { folder: v.slice(0, at), uid } : null;
+}
+
+/**
+ * How the chat finds the original of a moved reply: by the account it was read through, its uid
+ * and folder when that account is connected and its uids hold across a restart, and the folder is
+ * shown whole; else by search. Every value the sentence uses
+ * that came from a mail or a model — sender, subject, date, folder — it names by its field in the
+ * header block and never repeats. The folder is among them: some providers keep the folder a call
+ * named rather than one they looked up.
+ */
+function replyRoute(
+  r: { readAccountId?: string | undefined; originalFolderUid: string },
+  shown: { sender: boolean; subject: boolean; date: boolean; folder: boolean },
+  acct: string,
+  accountUidsStable: (id: string) => boolean,
+): string {
+  const at = folderUidOf(r.originalFolderUid);
+  const search = (() => {
+    const by = [
+      ...(shown.sender ? ['from set to its sender'] : []),
+      ...(shown.subject ? ['subject set to its subject'] : []),
+    ];
+    if (by.length === 0) return `Neither its sender nor its subject can be searched for: ask the user which mail this replies to. `;
+    const also = [
+      ...(shown.folder ? ['folder set to its folder'] : []),
+      ...(shown.date ? ['since set to the day before its date'] : []),
+    ];
+    return `Find the original with mail_search, using what the first block shows under "In reply to": ${[...by, ...also].join(', ')} — ` +
+      `first in account "${acct}", then with account omitted, which searches every account. ` +
+      (shown.date
+        ? `If it finds several, take the earliest dated on or after the original's date; if that does not single one out, ask the user. `
+        : `If it finds several, ask the user which one. `) +
+      `If it finds none, ask the user. ` +
+      // Without its folder the search looks in the inbox, where a later mail of the same thread
+      // matches the same sender and subject.
+      (at !== null && !shown.folder
+        ? `Its folder cannot be named here, so what it finds may be a later mail of the same thread: before replying, show the user the sender, subject and date of the mail found and ask whether it is the one. `
+        : '') +
+      `Then reply with mail_reply using the account and uid of the mail it found` +
+      `${shown.folder ? ' and that folder' : ''}. `;
+  })();
+  const read = r.readAccountId;
+  if (read !== undefined && read !== '' && at !== null && shown.folder && accountUidsStable(read)) {
+    return `To send a changed reply, call mail_reply with account: "${oneLine(read, MAX_NAME_CHARS)}", uid: ${String(at.uid)}` +
+      `, folder: the folder shown under "In reply to" in the first block. ` +
+      `If mail_reply cannot find that mail, search for it instead. ${search}`;
+  }
+  return `To send a changed reply: ${search}`;
+}
+
+function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null): string | null {
+  if (!approvalQueueEnabled() || approvals === null || approvals.scope === null) return null;
+  const entry = approvals.get(id);
+  if (entry === null) return null;
+  const loadable = approvalLoadable(entry, approvals.scope, (e) => approvals.checksumMatches(e));
+  if (loadable === null) return null;
+  const filing = entry.filing;
+  if (filing === null) return null;
+  const p = filing.payload;
+  const acct = oneLine(p.accountId, MAX_NAME_CHARS);
+  const subject = oneLine(p.subject, MAX_NAME_CHARS);
+  const body = draftText(p.bodyText);
+  const to = addressLine(p.to);
+  const cc = addressLine(p.cc);
+  const bcc = filing.kind === 'mail_send' ? addressLine(filing.payload.bcc) : { line: '', left: 0 };
+  const original = filing.kind === 'mail_reply' ? filing.payload.original : null;
+  const followup = filing.kind === 'mail_send' ? filing.payload.trackFollowup : null;
+  const source = entry.origin === null ? 'unknown' : entry.origin.source;
+  const afterUntrusted = entry.origin?.afterUntrusted === true ? ' · filed after the run read content it did not write' : '';
+  const leftCounts = ([['To', to.left], ['Cc', cc.left], ['Bcc', bcc.left]] as const).filter(([, k]) => k > 0);
+  const left = leftCounts.map(([label, k]) => ` · ${label}: ${String(k)} more not shown`).join('');
+  const cutNote = body.cut ? ` · message cut at ${String(MAX_DRAFT_BODY_CHARS)} of ${String(body.length)} characters` : '';
+  const absent = missingFieldNote({ to: to.line, subject, message: body.text.trim() });
+  // The original's subject is only searchable whole: a cut one is not shown, and not searched by.
+  const origSubject = original === null ? '' : oneLine(original.subject, MAX_NAME_CHARS);
+  const origSubjectWhole = original !== null && !origSubject.endsWith('…') && origSubject !== '';
+  const origSender = original === null ? '' : oneLine(plainAddresses(original.from)[0] ?? '', MAX_NAME_CHARS);
+  const origDate = original === null ? '' : isoDay(original.date);
+  const origAt = filing.kind === 'mail_reply' ? folderUidOf(filing.payload.originalFolderUid) : null;
+  // A folder the block cannot show as it is — cut, or with its spacing collapsed — is treated like
+  // a cut subject: not shown, not searched in, and no uid pointed at in it. IMAP uids hold per
+  // folder, and a folder named a little differently may exist too.
+  const origFolderLine = origAt === null ? '' : oneLine(origAt.folder, MAX_FOLDER_CHARS);
+  const origFolder = origAt !== null && origFolderLine === origAt.folder ? origFolderLine : '';
+  // One scan over both blocks, handed to each, so a hit in either is announced in both; the
+  // header block publishes the event. The one-line fields are read raw and as the block shows
+  // them: the one-line form turns control characters into spaces, and a pattern split by one of
+  // them only matches once it is a space. The folder is shown only as stored, so raw covers it.
+  const injection = detectInjectionAcross([
+    p.fromAddress, to.line, cc.line, bcc.line, p.subject, followup?.reason ?? '',
+    original?.from ?? '', original?.subject ?? '', origAt?.folder ?? '', body.text,
+    oneLine(p.fromAddress, MAX_NAME_CHARS), subject, followup === null ? '' : oneLine(followup.reason, MAX_NAME_CHARS),
+    origSender, origSubject,
+  ]);
+  // The reason is a code from a fixed list, never the stored result's text: a provider's error
+  // message is someone else's words.
+  const head = loadable.as === 'moved'
+    ? `${APPROVAL_DRAFT_MOVED_OPENER}${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`
+    : `${APPROVAL_DRAFT_NOT_SENT_OPENER}${entry.id} · ${filing.kind} · reason: ${loadable.reason} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
+  const fields = wrapChannelMessage({
+    source: `approval:${entry.id}`,
+    injection,
+    fields: {
+      From: oneLine(p.fromAddress, MAX_NAME_CHARS),
+      To: to.line,
+      Cc: cc.line,
+      Bcc: bcc.line,
+      Subject: subject,
+      ...(followup !== null ? { 'Follow-up reason': oneLine(followup.reason, MAX_NAME_CHARS) } : {}),
+      ...(original !== null ? {
+        'In reply to, sender': origSender,
+        'In reply to, subject': origSubjectWhole ? origSubject : '',
+        'In reply to, date': origDate,
+        'In reply to, folder': origFolder,
+      } : {}),
+    },
+  });
+  const message = wrapUntrustedData(body.text.trim() === '' ? '' : `Message: ${body.text}`, `approval:${entry.id}:message`, { injection, publishEvent: false });
+  let send: string;
+  if (filing.kind === 'mail_reply') {
+    // The date is the original's UTC day, a mail server's SINCE goes by its own: a day earlier
+    // keeps a mail from near midnight in the search.
+    send = replyRoute(filing.payload, {
+      sender: origSender !== '', subject: origSubjectWhole, date: origDate !== '', folder: origFolder !== '',
+    }, acct, (a) => approvals.accountUidsStable(a)) +
+      `Pass to and cc as in the draft unless the user changes them. `;
+  } else {
+    send = `To send a changed version, call mail_send from account "${acct}" with to, cc and bcc as in the draft unless the user changes them. ` +
+      (followup !== null
+        ? `The draft asked for a follow-up reminder in ${String(followup.reminder_in_days)} days` +
+          `${followup.type !== undefined ? ` (type ${followup.type})` : ''} with the reason in the first block: pass it as track_followup unless the user changes it. `
+        : '');
+  }
+  return (
+    `${head}${fields}\n${message}\n\n` +
+    `The draft's recipients are exactly those in the first block; the second block is only the message text. ` +
+    (loadable.as === 'moved'
+      ? `This draft was not sent from the approval queue. It may have been sent from a chat since it was moved — before sending, ask the user whether it already went out. `
+      : `This draft was approved, and the approval queue did not send it (reason in the first line); it will not send it later either. ` +
+        `It may have been sent another way since — before sending, ask the user whether it already went out. ` +
+        `Depending on the reason, sending it unchanged may fail again: tell the user the reason and ask what to change. `) +
+    (leftCounts.length > 0 ? `Not every recipient is shown: ask the user how to handle the recipients not shown. ` : '') +
+    (body.cut ? `Its message is cut here: ask the user before sending a shortened version. ` : '') +
+    send +
+    `Ask what to change, show the changed mail, and confirm the send with the user.`
   );
 }

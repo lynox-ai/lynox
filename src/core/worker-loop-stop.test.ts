@@ -28,7 +28,7 @@ import { PromptStore } from './prompt-store.js';
 import { TaskManager } from './task-manager.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter } from './notification-router.js';
+import type { DeliverySummary, NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/index.js';
 import { stopHandleOf, keepsQuestionForNextProcess } from './worker-loop.js';
 import type { ActiveTask } from './worker-loop.js';
@@ -140,10 +140,15 @@ function makeHarness(opts?: {
   lastRunStop?: { cause: string; pendingToolCount: number } | undefined;
   /** A run that loops in the past and is now short: the execution deadline, in ms. */
   taskTimeoutMs?: number | undefined;
+  /** Whether the run's container reads as contained (a store pass was minted in it). */
+  contained?: boolean | undefined;
 }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
+  // A workflow here counts as stamped when it carries `confirmedAt`, as before the stamp bound its
+  // steps (`workflow-stamp.ts`); the stamp's own tests are in workflow-stamp.test.ts.
+  vi.spyOn(history, 'workflowStampState').mockImplementation((p) => (p.confirmedAt ? 'holds' : 'unconfirmed'));
   const engineDb = new EngineDb(join(dir, 'engine.db'));
   history.setVerbGraph(engineDb);
   closers.push(() => { try { history.close(); } catch { /* twice is fine */ } });
@@ -248,9 +253,13 @@ function makeHarness(opts?: {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
-    // A failed run's push asks whether its thread is contained; no store here, as on an
-    // instance that never connected one.
-    getToolContext: () => ({ containment: null }),
+    // A task's question hands its delivery here; no hooks on this engine.
+    escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
+    // A run's push asks whether its thread is contained; no store here, as on an instance
+    // that never connected one, unless the test says the run is contained.
+    getToolContext: () => ({ containment: opts?.contained === true ? { isContained: () => true } : null }),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
 
   // ⚠ `hasChannels` decides whether the loop even composes a notification, so a
@@ -633,6 +642,8 @@ function makeClassHarness(opts: {
   failAfterRelease?: boolean;
   /** The execution deadline, in ms — short for the case where IT aborts the controller. */
   taskTimeoutMs?: number;
+  /** Bulk runs are switched off: the live ledger is null, the switched-off one answers. */
+  switchedOff?: boolean;
 }): ClassHarness {
   const g = gate();
   releases.push(g.open);
@@ -706,6 +717,22 @@ function makeClassHarness(opts: {
   };
   const sessions: number[] = [];
   let escalations = 0;
+  // The ledger of the bulk handlers: live, or switched off (`switchedOff`).
+  const bulkLedgerFake = (): unknown => (opts.pauseAt === 'bulkClient'
+    ? {
+      getRunForApply: () => ({ targetSystem: 'http://example.test' }),
+      // `undefined` keeps `runBulkPreview` out (it refuses an unknown run); the ready
+      // variant is what carries a test INTO it, which is where the stop is decided.
+      getRunForPreview: () => (opts.previewReady === true ? previewRun : undefined),
+      // A run whose targets were given, not listed.
+      getListRun: () => null,
+      listUnread: () => [1],
+      // A run without the judge's context C.
+      judgeContextOf: () => [],
+      getStatus: () => undefined,
+      haltPreview: (_id: string, reason: string) => { halts.push(reason); },
+    }
+    : null);
   const engine = {
     getTaskManager: () => manager,
     getRunHistory: () => ({
@@ -713,10 +740,13 @@ function makeClassHarness(opts: {
       updateTrigger: (_id: string, patch: unknown) => { reArms.push(patch); },
       // The owner saved the workflow: no mandate it depends on.
       getWorkflowAuthorship: () => ({ createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-01-01 00:00:00' }),
+      // Stamped when it carries `confirmedAt`, as before the stamp bound its steps (`workflow-stamp.ts`).
+      workflowStampState: (p: { confirmedAt?: string }) => (p.confirmedAt ? 'holds' : 'unconfirmed'),
     }),
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => { escalations++; return null; },
+    escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
     getPromptStore: () => null,
     getSecretStore: () => null,
     getDataStore: () => null,
@@ -725,25 +755,16 @@ function makeClassHarness(opts: {
     getBackupManager: () => (opts.pauseAt === 'backup'
       ? { createBackup: () => hold({ success: true, path: '/tmp/none.db', duration_ms: 1 }), pruneBackups: () => { /* noop */ } }
       : null),
-    getBulkLedger: () => (opts.pauseAt === 'bulkClient'
-      ? {
-        getRunForApply: () => ({ targetSystem: 'http://example.test' }),
-        // `undefined` keeps `runBulkPreview` out (it refuses an unknown run); the ready
-        // variant is what carries a test INTO it, which is where the stop is decided.
-        getRunForPreview: () => (opts.previewReady === true ? previewRun : undefined),
-        // A run whose targets were given, not listed.
-        getListRun: () => null,
-        listUnread: () => [1],
-        getStatus: () => undefined,
-        haltPreview: (_id: string, reason: string) => { halts.push(reason); },
-      }
-      : null),
+    getBulkLedger: () => (opts.switchedOff === true ? null : bulkLedgerFake()),
+    getBulkLedgerSwitchedOff: () => (opts.switchedOff === true ? bulkLedgerFake() : null),
     // A WITNESS, not a stub: every effect in this harness is claimed to create no
     // session, so a creation here is the claim failing rather than the test needing one.
     createSession: () => {
       sessions.push(1);
       return { run: () => hold('unexpected'), abort: () => { /* noop */ }, _recreateAgent: () => { /* noop */ } } as unknown as Session;
     },
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
 
   const router = {
@@ -1061,6 +1082,19 @@ describe('the recorded word for a run that returns rather than throws', () => {
     expect(note.body, 'the ceiling is still reported').toContain('cost ceiling');
   });
 
+  it('stopped while parked in a CONTAINED run: the stop is told, and the run\'s text is not', async () => {
+    const { CONTAINED_RESULT_PUSH } = await import('./worker-loop.js');
+    const h = makeHarness({ park: true, withChannels: true, contained: true });
+    await h.parked;
+    h.loop.stopTask('trg-stop');
+    await waitUntil('the stop to be recorded', () => lastStatus(h) !== null);
+    const parkNotices = 1;
+    await waitUntil('the owner to be told', () => h.notifications().length > parkNotices);
+    const note = h.notifications().at(-1)!;
+    expect(note.title.startsWith('\u23f9')).toBe(true);
+    expect(note.body).toBe(`Stopped on your instruction.\n\n${CONTAINED_RESULT_PUSH}`);
+  });
+
   it('on its ceiling with no stop: failed, and the notice is a cross at high priority', async () => {
     const h = makeHarness({ withChannels: true, lastRunStop: { cause: 'budget_cap', pendingToolCount: 2 } });
     await h.running;
@@ -1094,6 +1128,7 @@ describe('the recorded word for a run that returns rather than throws', () => {
     await waitUntil('the run to be recorded', () => lastStatus(h) !== null);
     expect(lastStatus(h)).toBe('stopped');
     expect(h.prompts.getPending('thread-stop'), 'nothing left to re-arm it').toBeUndefined();
+    expect(h.history.getDb().prepare("SELECT closed_reason FROM pending_prompts WHERE session_id = 'thread-stop'").all(), 'and a late answer hears the run was stopped').toEqual([{ closed_reason: 'run_stopped' }]);
     expect(h.history.getTrigger('trg-stop')?.status).not.toBe('waiting');
   });
 
@@ -1171,5 +1206,55 @@ describe('a run whose starter\'s grant has ended', () => {
     entryOf(h).starter = OWNER_PRINCIPAL;
     expect(h.loop.stopEndedStarters(() => false)).toEqual([]);
     expect(h.abortCalls()).toBe(0);
+  });
+});
+
+describe('bulk runs turned off — stopBulkTasks', () => {
+  it('stops a running BULK WRITE as its owner would', async () => {
+    const h = makeClassHarness({ effect: 'bulk_apply', pauseAt: 'bulkClient', record: { bulk_run_id: 'bulk-1' } });
+    await h.running;
+    expect(h.loop.stopBulkTasks()).toEqual(['trg-class']);
+  });
+
+  it('the stop REACHES the run: a bulk read ends as its owner\'s stop, not as a success', async () => {
+    // Driven into the real handler, as the stopped-preview case above: what is asserted is the
+    // run's outcome, so a stopBulkTasks that only reported an id would fail here.
+    const h = makeClassHarness({
+      effect: 'bulk_preview', pauseAt: 'bulkClient', previewReady: true,
+      record: { bulk_run_id: 'bulk-1' },
+    });
+    await h.running;
+    expect(h.loop.stopBulkTasks()).toEqual(['trg-class']);
+    h.release();
+    await waitUntil('the preview to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('stopped');
+    expect(h.halts()).toEqual(['the owner stopped the run']);
+  });
+
+  it('leaves every other run alone — a saved workflow keeps running', async () => {
+    const h = makeClassHarness({ effect: 'run_workflow', pauseAt: 'workflow', record: { pipeline_id: 'wf-1' } });
+    await h.running;
+    const runOptions = wf.calls[0]![3] as { stopSignal?: AbortSignal };
+    expect(runOptions.stopSignal).toBeInstanceOf(AbortSignal);
+    expect(h.loop.stopBulkTasks()).toEqual([]);
+    expect(runOptions.stopSignal!.aborted, 'the workflow was not stopped').toBe(false);
+    // Positive control on the same machinery: the owner's own stop does reach it.
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
+    expect(runOptions.stopSignal!.aborted).toBe(true);
+  });
+});
+
+describe('bulk runs switched off while a read waits between ticks', () => {
+  it('its next tick halts the read as stopped — not a success, not re-armed', async () => {
+    const h = makeClassHarness({
+      effect: 'bulk_preview', pauseAt: 'bulkClient', previewReady: true, switchedOff: true,
+      record: { bulk_run_id: 'bulk-1' },
+    });
+    await h.running;
+    h.release();
+    await waitUntil('the preview to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('stopped');
+    expect(h.halts()).toEqual(['the owner stopped the run']);
+    expect(h.reArms(), 'nothing re-armed').toHaveLength(0);
   });
 });

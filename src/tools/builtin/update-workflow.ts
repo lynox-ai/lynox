@@ -1,14 +1,18 @@
 import type { ToolEntry, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
-import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
+import { applyModifications, quotedId, type StepModification } from '../../orchestrator/workflow-edit.js';
+import { isStepIdShape, OUTSIDE_SHAPE, runStepIds, STEP_ID_MAX } from '../../orchestrator/step-id.js';
 import { getPipeline, forgetPipeline, buildManifest } from './pipeline.js';
 import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
 import { validateContractAgainstSteps } from '../../orchestrator/contract-validation.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { findHiddenChar, findHiddenInName } from '../../core/hidden-text.js';
+import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface UpdateWorkflowInput {
   workflow_id?: string | undefined;
   modifications?: StepModification[] | undefined;
+  goal?: string | undefined;
   confirm?: boolean | undefined;
 }
 
@@ -31,6 +35,7 @@ interface UpdateWorkflowInput {
  */
 export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
   undo: 'restorable',
+  secretRefs: 'verbatim',
   definition: {
     name: 'update_workflow_steps',
     description:
@@ -46,18 +51,19 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
           items: {
             type: 'object',
             properties: {
-              action: { type: 'string', enum: ['remove', 'update_task', 'add_step'] },
-              step_id: { type: 'string', description: 'Target step id; the new id for add_step.' },
-              value: { type: 'string', description: 'New task text (update_task / add_step).' },
-              input_from: { type: 'array', items: { type: 'string' }, description: 'add_step: dependency step ids.' },
+              action: { type: 'string', enum: ['remove', 'update_task', 'add_step', 'rename_step', 'set_input_from'] },
+              step_id: { type: 'string', description: 'Target step id or "#2" (position); new id for add_step.' },
+              value: { type: 'string', description: 'New task text, or new id for rename_step.' },
+              input_from: { type: 'array', items: { type: 'string' }, description: 'Step ids it reads (add_step; set_input_from replaces the list).' },
               after: { type: 'string', description: 'add_step: insert after this step id (default: append).' },
             },
             required: ['action', 'step_id'],
           },
         },
+        goal: { type: 'string' },
         confirm: { type: 'boolean', description: 'Proceed when the workflow is scheduled.' },
       },
-      required: ['workflow_id', 'modifications'],
+      required: ['workflow_id'],
     },
   },
   destructive: { mode: 'data' },
@@ -67,9 +73,11 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       return 'Error: Run history is not available — editing a saved workflow requires persistence.';
     }
     if (!input.workflow_id) return 'Error: workflow_id is required.';
-    if (!input.modifications || input.modifications.length === 0) {
-      return 'Error: At least one modification is required.';
+    const modifications = input.modifications ?? [];
+    if (modifications.length === 0 && input.goal === undefined) {
+      return 'Error: At least one modification, or a new goal, is required.';
     }
+    if (input.goal !== undefined && (typeof input.goal !== 'string' || input.goal.trim() === '')) return 'Error: "goal" must be non-empty text.';
 
     const planned = getPipeline(input.workflow_id, runHistory);
     if (!planned) {
@@ -104,7 +112,8 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       ...s,
       ...(s.input_from ? { input_from: [...s.input_from] } : {}),
     }));
-    const modErr = applyModifications(steps, input.modifications);
+    const notes: string[] = [];
+    const modErr = applyModifications(steps, modifications, notes);
     if (modErr) return modErr;
 
     if (steps.length === 0) {
@@ -113,27 +122,76 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     if (steps.length > MAX_STEPS) {
       return `Error: The edit exceeds the maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
     }
+    // Re-infer the interaction mode: adding an ask_user step flips an autonomous
+    // (cron-eligible) workflow to interactive, which can no longer run headless.
+    // Text stored before the save refused characters that render as nothing: the save below would
+    // refuse it again, so name the way out for each place instead of the save's general sentence.
+    // What this tool cannot change comes first; the rest goes in one answer, so one call fixes all.
+    if (findHiddenChar(planned.name) !== null) {
+      return 'Error: The workflow\'s name was saved with a character that does not show, which a save now refuses. Nothing was saved. Ask the user to rename the workflow in the library, then edit it again.';
+    }
+    if (findHiddenChar((planned as { parameters?: unknown }).parameters) !== null) {
+      return 'Error: One of the workflow\'s parameters was saved with a character that does not show, which a save now refuses. Nothing was saved, and this tool cannot change parameters: tell the user the workflow has to be saved anew.';
+    }
+    if (input.goal !== undefined && findHiddenChar(input.goal) !== null) {
+      return 'Error: The new goal contains a character that renders as nothing. Nothing was saved. Type the goal again in your own words.';
+    }
+    const goal = input.goal ?? planned.goal;
+    const fixes: string[] = [];
+    const named = new Set<number>();
+    let outsideShape = false;
+    const shapeFix = new Map<number, string>();
+    let hiddenText = false;
+    steps.forEach((s, i) => {
+      // An id with a character that does not show is outside the shape too: named by its position alone.
+      if (findHiddenInName(s.id, 'id') !== null) { named.add(i); hiddenText = true; fixes.push(`rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id in that form, for example fetch_orders; the steps that read it follow`); }
+      // An id stored before step ids had a shape (`step-id.ts`): named by its position, never its text.
+      else if (!isStepIdShape(s.id)) { named.add(i); outsideShape = true; shapeFix.set(i, `rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id in that form, for example fetch_orders; the steps that read it follow`); fixes.push(shapeFix.get(i)!); }
+      if (findHiddenChar(s.task) !== null) { named.add(i); hiddenText = true; fixes.push(`update_task for step #${i + 1}: step_id "#${i + 1}", value its task typed again in your own words`); }
+    });
+    // A step stored with the id `#<n>` is what `#<n>` names (`stepIndex`): each one that takes a
+    // position named above is renamed first, once, so that the position means the step again.
+    const clears = [...named].flatMap((i) => {
+      const j = steps.findIndex((s, k) => k !== i && s.id === `#${i + 1}`);
+      return j === -1 ? [] : [`first, rename_step for step #${j + 1}, stored with the id "#${i + 1}": step_id "#${i + 1}", value a new id you type`];
+    });
+    // A step renamed first above is not named a second time for its shape.
+    for (const [i, fix] of shapeFix) {
+      if (clears.some(c => c.startsWith(`first, rename_step for step #${i + 1},`))) fixes.splice(fixes.indexOf(fix), 1);
+    }
+    fixes.unshift(...clears);
+    if (findHiddenChar(goal) !== null) { hiddenText = true; fixes.push('a new "goal", written in your own words'); }
+    if (fixes.length > 0) {
+      const why = [
+        ...(hiddenText ? ['text saved with a character that does not show'] : []),
+        ...(outsideShape ? [`a step id saved before step ids were limited to 1 to ${String(STEP_ID_MAX)} characters (lowercase a-z, digits 0-9, _ or -)`] : []),
+      ].join(', and ');
+      return `Error: This workflow holds ${why}, which a save now refuses. Nothing was saved. Call again with this call's modifications and, after them:\n${fixes.map(f => `- ${f}`).join('\n')}`;
+    }
+
     const seen = new Set<string>();
     for (const s of steps) {
-      if (seen.has(s.id)) return `Error: Duplicate step id "${s.id}" after the edit.`;
+      // An id the edit kept may be stored text from before the save refused hidden characters.
+      if (seen.has(s.id)) return `Error: Duplicate step id ${quotedId(s.id)} after the edit.`;
       seen.add(s.id);
     }
 
+    // After the stored text above: these refusals quote ids, so every id here is in the shape.
     // Graph parity with every RUN path: validate the edited steps as a manifest
     // (zod shape + dependency-graph check — no dangling input_from, no cycle)
     // BEFORE persisting, so a structurally broken edit is rejected here at save
     // rather than deferred to a failed cron run. The run-volatile path validates
     // the same way (executePipelineById → buildManifest → validateManifest).
+    // Every id is in the shape here, but a stored `input_from` entry outside it that names no step
+    // is not: the check sees it as `unknown-step-<j>`, so its refusal does not quote it.
     try {
-      validateManifest(buildManifest(planned.name, steps, planned.on_failure ?? 'stop'));
+      validateManifest(buildManifest(planned.name, runStepIds(steps), planned.on_failure ?? 'stop'));
     } catch (err: unknown) {
       return `Error: The edit produces an invalid workflow: ${getErrorMessage(err)}`;
     }
 
-    // Re-infer the interaction mode: adding an ask_user step flips an autonomous
-    // (cron-eligible) workflow to interactive, which can no longer run headless.
     const newMode = inferPipelineMode(steps);
-    const updated: PlannedPipeline = { ...planned, steps, mode: newMode };
+    const updated: PlannedPipeline = { ...planned, goal, steps, mode: newMode };
 
     // Re-validate the capability contract against the edited steps: an edit that
     // routes a new {{params.x}} the contract doesn't constrain into a tool call
@@ -172,7 +230,10 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     // fail-closed contract validation at the chokepoint as a backstop — then
     // evict the in-memory cache so the next getPipeline re-reads the edited row.
     try {
-      runHistory.insertPlannedPipeline(updated, agent.principal);
+      const workflowId = planned.id;
+      withInstanceWrite(agent, { site: 'update_workflow_steps#change', kind: 'change', store: 'workflows', target: () => [['workflow', workflowId]], main: ['pipeline'] }, (w) => {
+        w.run('pipeline', () => runHistory.insertPlannedPipeline(updated, agent.principal), ifReturned);
+      });
     } catch (err: unknown) {
       return `Error: Could not save the edited workflow: ${getErrorMessage(err)}`;
     }
@@ -195,6 +256,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       ? ' Its first-run-confirm was reset — re-confirm before the next scheduled run.'
       : '';
     const stepList = steps.map((s, i) => `${i + 1}. ${s.id}: ${s.task}`).join('\n');
-    return `✓ Updated workflow "${planned.name}" (${steps.length} step${steps.length === 1 ? '' : 's'}).${modeNote}${confirmNote}\n\n${stepList}`;
+    const goalNote = input.goal !== undefined ? ' Its goal was replaced.' : '';
+    return `✓ Updated workflow "${planned.name}" (${steps.length} step${steps.length === 1 ? '' : 's'}).${goalNote}${modeNote}${confirmNote}${notes.length > 0 ? `\n${notes.join('\n')}` : ''}\n\n${stepList}`;
   },
 };

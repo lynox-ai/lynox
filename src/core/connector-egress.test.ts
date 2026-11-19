@@ -85,6 +85,19 @@ describe('connector surface under `guarded`', () => {
     )).not.toThrow();
   });
 
+  it('admits an exact floor host, and no name built around it', () => {
+    // Mutation: match the floor's exact hosts with `endsWith`, a dot-anchored
+    // `endsWith` (subdomains) or `startsWith` → one of the refusals must fail.
+    // A floor entry can be an apex domain, and anyone can buy a name that ends
+    // with it. Subdomains are what `allowedWildcards` is for.
+    const floor = policy('guarded', ['example.org']);
+    const check = (url: string): void => assertHostPolicy(url, { surface: 'connector', hosts: GOOGLE_API_HOSTS }, floor);
+    expect(() => check('https://example.org/x')).not.toThrow();
+    for (const url of ['https://evilexample.org/x', 'https://sub.example.org/x', 'https://example.org.evil.example/x']) {
+      expect(() => check(url)).toThrow(/not permitted under guarded/);
+    }
+  });
+
   it('re-checks the policy on a REDIRECT HOP, not only on the first URL', async () => {
     // The connector's licence to pass under `guarded` rests on "the URL is a
     // module constant". A 302 breaks that premise, so the check has to run per
@@ -622,7 +635,7 @@ describe('source: every authenticated Google call goes through the helper', () =
     expect(offenders).toEqual([]);
   });
 
-  it('all 16 Google sites and all 5 control-plane sites are accounted for', () => {
+  it('all 16 Google sites and all 6 control-plane sites are accounted for', () => {
     // The count is the PRD's, re-measured here rather than trusted: 12 in
     // `integrations/google/`, 3 Gmail-API fetches in `mail/`, 1 in
     // `core/backup-upload-gdrive.ts`. Plus the control-plane calls, which
@@ -638,10 +651,12 @@ describe('source: every authenticated Google call goes through the helper', () =
     // 4 → 5 with the Microsoft refresh POST (`integrations/microsoft/
     // microsoft-auth.ts`): Microsoft is brokered only, so its refresh is a CP
     // call like Google's, under the same policy.
+    // 5 → 6 with the claim preview POST (`POST /api/google/claim-managed/preview`):
+    // the dialog asks which account a parked claim belongs to before claiming it.
     const count = (re: RegExp): number => callers
       .reduce((n, f) => n + (f.code.match(re)?.length ?? 0), 0);
     expect(count(/\bgoogleFetch\s*\(/g)).toBe(16);
-    expect(count(/\bcpFetch\s*\(/g)).toBe(5);
+    expect(count(/\bcpFetch\s*\(/g)).toBe(6);
     // One Graph site: the mail provider's request helper (`oauth-graph.ts`).
     expect(count(/\bgraphFetch\s*\(/g)).toBe(1);
   });

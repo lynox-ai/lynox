@@ -99,6 +99,17 @@ export interface AgentConfig {
    * A spawned child carries its parent's.
    */
   principal?:          import('../core/request-principal.js').RequestPrincipal | undefined;
+  /** Who this agent's writes are recorded as (`IAgent.writeAuthor`). Absent: unknown. */
+  writeAuthor?:        string | null | undefined;
+  /**
+   * A workflow step's own `fail_step` tool (runtime-adapter.ts, `createFailStepTool`), when this
+   * agent runs a step. Matched by IDENTITY of this entry, never by its name: it passes the
+   * mandate lock (it has no effect beyond ending its own step), it runs alone in the model
+   * response that calls it (the other calls of that response are skipped, not run), and it is
+   * not handed on to children (`getAvailableTools`). A different tool that happens to carry the
+   * same name gets none of the three. Absent for every agent that is not a step agent.
+   */
+  stepFailTool?:       import('./tools.js').ToolEntry | undefined;
   /**
    * Sink for this agent's own tool calls — the ONE owner of tool-call
    * persistence. The agent calls it with the run id it is currently working
@@ -123,11 +134,19 @@ export interface AgentConfig {
    *  add `unknown` to {@link conversationGrants}; a step or sub-agent turn is built from what
    *  the root already took in. */
   conversationRoot?: boolean | undefined;
+  /** True when {@link onStream} adds each `turn_end` event's usage into the run's own usage,
+   *  which the run's cost line and debit are priced from (the Session's handler does). A model
+   *  call ended after its `turn_end` then books no estimate on top. Default false: a consumer
+   *  that drops `turn_end` (a spawned child's stream) leaves that usage on no line. */
+  turnEndUsageCounted?: boolean | undefined;
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
   /** The `<secrets>` listing of the vault, given with the briefing but only to an owner's turn:
    *  the principal is per run, and a mandate reaches no owner secret by name (`agent.ts`). */
   secretsBriefing?:    string | undefined;
+  /** The blocks the engine wrapped while it built {@link briefing} (`collectOwnBlocks`), so the
+   *  briefing's scan does not read their closers as a boundary escape. */
+  briefingOwnBlocks?:  readonly string[] | undefined;
   autonomy?:           AutonomyLevel | undefined;
   /**
    * Capability contract authorising headless outbound writes. RESERVED SEAM
@@ -234,6 +253,8 @@ export interface ChangesetManagerLike {
   /** `false` when nothing could be saved because the workspace could not be reached: then do not
    *  write. Any other result (also none) lets the write go ahead. */
   backupBeforeWrite(filePath: string): boolean | void;
+  /** Whether the last `backupBeforeWrite` returned `false` because the file is too large to save. */
+  readonly refusedTooLarge?: boolean;
   /** After a write returned: which file the run left at the path. A manager without it records
    *  nothing, and its rollback decides alone. */
   recordWritten?(filePath: string): void;
@@ -246,11 +267,16 @@ export interface ChangesetWriter {
   readonly active: true;
   /** False when nothing could be saved: then do not write. */
   backupBeforeWrite(filePath: string): boolean;
+  /** Whether the last `backupBeforeWrite` returned false because the file is too large to save. */
+  readonly refusedTooLarge: boolean;
   /** After a write returned: which file the run left at the path. */
   recordWritten(filePath: string): void;
   /** Whether nothing is backed up yet. */
   isEmpty(): boolean;
 }
+
+/** Max chars of a single tool result before the agent cuts it to its start (`max_tool_result_chars`). */
+export const DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;
 
 // === 4.7 Beta Headers ===
 
@@ -792,8 +818,8 @@ export interface LynoxUserConfig {
   background_model?: TierSlot | null | undefined;
   /**
    * LLM mode for managed instances. 'standard' (default) uses Claude Sonnet 4.6 via Anthropic Direct.
-   * 'eu-sovereign' switches the main LLM to Mistral Large 3 via the OpenAI adapter (Paris) — full
-   * EU data sovereignty, no CLOUD Act exposure. Toggleable in the Web UI under Settings → LLM Mode.
+   * 'eu-sovereign' switches the main LLM to Mistral Large 3 via the OpenAI adapter on
+   * Mistral's EU regional endpoint. Toggleable in the Web UI under Settings → LLM Mode.
    * Engine.init() reads this and overrides provider/api_key/api_base_url at runtime.
    */
   llm_mode?: 'standard' | 'eu-sovereign' | undefined;

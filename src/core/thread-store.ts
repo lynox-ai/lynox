@@ -47,6 +47,13 @@ export interface ThreadMessageRecord {
    *  rendered in the UI but excluded from the model's API context. 0 = an
    *  ordinary API message. See migration v32. */
   display_only: number;
+  /** Who wrote this message (v73): the `runAuthorTag` of the run whose typed turn it is. NULL
+   *  for every row the engine writes itself and for every row from before the column, and NULL
+   *  is unknown, never the owner. A trigger's turn carries `trigger:<id>`, never `owner`.
+   *  `owner` names who sent the row, not who wrote every word in it: the row holds the whole
+   *  user content, so a context preamble (an opened mail, a run's result) and uploaded files
+   *  stand in it too. A reader that needs the owner's own words separates them structurally. */
+  author: string | null;
   created_at: string;
 }
 
@@ -258,7 +265,8 @@ export class ThreadStore {
     /** Slice A: set (string) or clear (null) the thread's anchor subject.
      *  `undefined` leaves it unchanged (whitelist semantics — null is a real clear). */
     primary_subject_id?: string | null | undefined;
-  }): void {
+  }): boolean {
+    // `true` when a row matched: `updated_at` is set on every update, so a match is a write.
     const sets: string[] = [];
     const params: unknown[] = [];
 
@@ -277,11 +285,11 @@ export class ThreadStore {
     // null is a real value here (clear the anchor); only `undefined` means "skip".
     if (updates.primary_subject_id !== undefined) { sets.push('primary_subject_id = ?'); params.push(updates.primary_subject_id); }
 
-    if (sets.length === 0) return;
+    if (sets.length === 0) return false;
 
     sets.push("updated_at = datetime('now')");
     params.push(id);
-    this.db.prepare(`UPDATE threads SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+    return this.db.prepare(`UPDATE threads SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0;
   }
 
   /** Slice B3: clear the unread flag (the user opened the escalated thread).
@@ -328,14 +336,18 @@ export class ThreadStore {
 
   // ── Message Persistence ──
 
+  /**
+   * `author` is recorded on every message of this call (see `ThreadMessageRecord.author`). Only
+   * the run's own typed turn passes one; every other writer leaves it out, and the rows are NULL.
+   */
   appendMessages(threadId: string, messages: BetaMessageParam[], startSeq: number, threadUpdates?: {
     message_count?: number | undefined;
     total_tokens?: number | undefined;
     total_cost_usd?: number | undefined;
-  }): void {
+  }, author?: string | undefined): void {
     const insert = this.db.prepare(`
-      INSERT INTO thread_messages (thread_id, seq, role, content_json)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO thread_messages (thread_id, seq, role, content_json, author)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
     // Share one transaction (and one fsync under WAL) between the insert
@@ -350,6 +362,7 @@ export class ThreadStore {
           start + i,
           msg.role,
           JSON.stringify(msg.content),
+          author ?? null,
         );
       }
       if (threadUpdates) this.updateThread(threadId, threadUpdates);

@@ -1,6 +1,10 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { SaveRefused, shownReason, throwIfRefused } from '../api/save-refusal.js';
+	import { t, tf } from '../i18n.svelte.js';
+	import { addToast } from '../stores/toast.svelte.js';
+	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface FileEntry { name: string; isDirectory: boolean; size: number; }
 
@@ -9,6 +13,10 @@
 	let loading = $state(true);
 	let error = $state('');
 	let showHidden = $state(false);
+	// Deleting a file is the owner's (the route refuses a mandate): the button shows only once the
+	// server said the session is the owner's. Browsing and downloading stay for every reader.
+	const ownerActs = $derived(isOwnerSession());
+	void loadSettingsViewer();
 
 	// Preview state
 	let previewFile = $state<string | null>(null);
@@ -84,15 +92,25 @@
 		a.click();
 	}
 
+	// Deleting cannot be undone, so it asks first, like removing a contact. A refusal or a network
+	// error is said in a toast with the server's reason and what to do; the folder is reloaded
+	// either way (which also closes the preview), so a file that is already gone disappears from
+	// the list. While one delete is in flight the buttons are off, so a second click cannot send a
+	// second DELETE that would report "not found" for a file that was in fact deleted.
+	let deleting = $state(false);
+
 	async function deleteFile(name: string) {
+		if (!confirm(tf('files.delete_confirm', { name }))) return;
+		deleting = true;
 		const path = filePath(name);
 		try {
 			const res = await fetch(`${getApiBase()}/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
-			if (res.ok) {
-				if (previewFile === name) previewFile = null;
-				await loadDir(currentPath);
-			}
-		} catch { /* ignore */ }
+			await throwIfRefused(res);
+		} catch (e) {
+			const reason = e instanceof SaveRefused && e.reason !== null ? ` (${shownReason(e.reason)})` : '';
+			addToast(`${tf('files.delete_failed', { name })}${reason}`, 'error', 6000);
+		}
+		try { await loadDir(currentPath); } finally { deleting = false; }
 	}
 
 	function formatSize(bytes: number): string {
@@ -106,6 +124,7 @@
 </script>
 
 <div class="p-6 max-w-5xl mx-auto">
+	<ViewerUnavailableNotice />
 	<div class="flex items-center justify-between mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('files.title')}</h1>
 		<button
@@ -175,12 +194,14 @@
 							{#if !entry.isDirectory}
 								<span class="text-xs text-text-subtle font-mono pr-2">{formatSize(entry.size)}</span>
 								<div class="flex items-center gap-1 pr-3 opacity-0 group-hover:opacity-100 transition-opacity">
-									<button onclick={() => downloadFile(entry.name)} class="p-1 rounded hover:bg-bg-muted text-text-subtle hover:text-text" title="Download">
+									<button onclick={() => downloadFile(entry.name)} class="p-1 rounded hover:bg-bg-muted text-text-subtle hover:text-text" title={t('files.download')} aria-label={tf('files.download_named', { name: entry.name })}>
 										<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
 									</button>
-									<button onclick={() => deleteFile(entry.name)} class="p-1 rounded hover:bg-danger/10 text-text-subtle hover:text-danger" title="Delete">
+									{#if ownerActs}
+									<button onclick={() => deleteFile(entry.name)} disabled={deleting} class="p-1 rounded hover:bg-danger/10 text-text-subtle hover:text-danger" title={t('files.delete')} aria-label={tf('files.delete_named', { name: entry.name })}>
 										<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
 									</button>
+									{/if}
 								</div>
 							{/if}
 						</div>

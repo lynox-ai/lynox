@@ -1,5 +1,6 @@
 // Runs in the browser-compile project (vitest.config.ts): Svelte state behaves as in the browser.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { t } from '../i18n.svelte.js';
 
 // A turn whose start fails before the server answers (no connection, a request cut off) is
 // marked failed and reported, the chat is free again, and the queue moves on. Nothing sends such
@@ -82,6 +83,69 @@ describe('a turn that cannot start', () => {
 		serve((url) => (url.endsWith('/sessions') ? offline() : undefined));
 		await expect(store.sendMessage('go')).resolves.toBeUndefined();
 		expectFailedAndFree('go');
+		expect(runPosts()).toBe(0);
+	});
+
+	it('when the server refuses the session (a rate limit): no run goes to a session it did not name', async () => {
+		// The proxy's rate limit answers in plain text, not JSON.
+		serve((url) => (url.endsWith('/sessions') ? new Response('Too many requests', { status: 429 }) : undefined));
+		await expect(store.sendMessage('go')).resolves.toBeUndefined();
+		expectFailedAndFree('go');
+		expect(calls.filter((u) => u.includes('/sessions/'))).toEqual([]);
+		expect(store.getSessionId()).toBeNull();
+		// The server answered: the reason is the rate limit, not a lost connection.
+		expect(store.getChatError()).toBe(t('chat.error_rate_limit'));
+	});
+
+	it('when the session answer names no session: nothing is sent to it', async () => {
+		serve((url) => (url.endsWith('/sessions') ? json({}) : undefined));
+		await expect(store.sendMessage('go')).resolves.toBeUndefined();
+		expectFailedAndFree('go');
+		expect(calls.filter((u) => u.includes('/sessions/'))).toEqual([]);
+	});
+
+	it('control: a session the server opens takes the run', async () => {
+		serve(() => undefined);
+		const s = sseStream();
+		serve((url) => (url.endsWith('/run') ? sse(s) : undefined));
+		void store.sendMessage('go');
+		await settle();
+		expect(calls.filter((u) => u.endsWith('/sessions/t1/run'))).toHaveLength(1);
+		s.send('done', {});
+		s.close();
+		await settle();
+	});
+
+	it('sent again with a tap, the failed message is the one that goes: it is not added a second time', async () => {
+		serve((url, n) => (url.endsWith('/sessions') && n === 1 ? json({ error: 'Too many requests' }, 429) : undefined));
+		await store.sendMessage('go');
+		const failed = store.getMessages().find((m) => m.role === 'user' && m.content === 'go')!;
+		expect(failed.failed).toBe(true);
+		const s = sseStream();
+		serve((url) => (url.endsWith('/run') ? sse(s) : undefined));
+		void store.retryFailedTurn(failed, 'go');
+		await settle();
+		const users = store.getMessages().filter((m) => m.role === 'user');
+		expect(users.map((m) => m.content)).toEqual(['go']);
+		expect(users[0]!.failed).toBeFalsy();
+		expect(users[0]!.queued).toBeFalsy();
+		expect(calls.filter((u) => u.endsWith('/sessions/t1/run'))).toHaveLength(1);
+		s.send('done', {});
+		s.close();
+		await settle();
+	});
+
+	it('sent again with a tap while offline, the failed message stays failed, not queued with nothing to send it', async () => {
+		serve((url, n) => (url.endsWith('/sessions') && n === 1 ? new Response('Too many requests', { status: 429 }) : undefined));
+		await store.sendMessage('go');
+		const failed = store.getMessages().find((m) => m.role === 'user' && m.content === 'go')!;
+		vi.stubGlobal('navigator', { onLine: false });
+		await store.retryFailedTurn(failed, 'go');
+		await settle();
+		const users = store.getMessages().filter((m) => m.role === 'user');
+		expect(users).toHaveLength(1);
+		expect(users[0]!.failed).toBe(true);
+		expect(users[0]!.queued).toBeFalsy();
 		expect(runPosts()).toBe(0);
 	});
 
@@ -313,6 +377,75 @@ describe('sending a failed turn again', () => {
 		expect(runPosts()).toBe(0);
 		expect(calls.some((u) => u.includes('/runs/r1/stream'))).toBe(true);
 		expect(toasts).toEqual([expect.objectContaining({ type: 'info' })]);
+		running.close();
+		await settle();
+	});
+
+	// ux U-032: a run that waits for the user's answer is not "still running"; the way on is to answer.
+	it('names a waiting question, not a running turn, when the run awaits the user', async () => {
+		await failOnce();
+		serve((url) => (url.endsWith('/runs/active')
+			? json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }] })
+			: undefined));
+		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
+		// No card known here, so the sentence that names no card (and no X).
+		expect(toasts).toEqual([{ message: t('chat.question_waiting_plain'), type: 'info' }]);
+		await settle();
+		expect(runPosts()).toBe(0);
+	});
+
+	// A scheduled run's question has no stream: the toast says to answer it, and its card is there.
+	it('brings back the card of a scheduled run\'s question and attaches to nothing', async () => {
+		await failOnce();
+		serve((url) => {
+			if (url.endsWith('/runs/active')) {
+				return json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0, attachable: false }] });
+			}
+			if (url.endsWith('/pending-prompt')) {
+				return json({ pending: true, promptType: 'ask_user', promptId: 'q1', question: 'Which file?', options: ['a', 'b'] });
+			}
+			return undefined;
+		});
+		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
+		expect(toasts).toEqual([{ message: t('chat.question_waiting'), type: 'info' }]);
+		await settle();
+		expect(runPosts()).toBe(0);
+		expect(calls.some((u) => u.includes('/runs/q1'))).toBe(false);
+		expect(store.getPendingPermission()).toEqual(expect.objectContaining({ promptId: 'q1', question: 'Which file?' }));
+		expect(lastUser()!.failed).toBe(true);
+	});
+
+	// A turn that failed to start asks before it is sent again on reconnect too: attaching to the
+	// question's id would find no stream, and the reconcile after that could replace the failed
+	// message with the server's transcript.
+	it('on reconnect asks first as well: a scheduled run\'s question is not attached to, the failed turn keeps its mark', async () => {
+		await failOnce();
+		serve((url) => {
+			if (url.endsWith('/runs/active')) {
+				return json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0, attachable: false }] });
+			}
+			if (url.endsWith('/run')) return offline();
+			return undefined;
+		});
+		listeners['online']!();
+		await settle();
+		await wait(600);
+		expect(calls.some((u) => u.endsWith('/runs/active'))).toBe(true);
+		expect(calls.some((u) => u.includes('/runs/q1'))).toBe(false);
+		expect(lastUser()!.content).toBe('go');
+		expect(lastUser()!.failed).toBe(true);
+	});
+
+	it('names a running turn when the run is working', async () => {
+		await failOnce();
+		const running = sseStream();
+		serve((url) => {
+			if (url.endsWith('/runs/active')) return json({ runs: [{ runId: 'r1', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] });
+			if (url.includes('/runs/r1/stream')) return sse(running);
+			return undefined;
+		});
+		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
+		expect(toasts).toEqual([{ message: t('chat.still_running'), type: 'info' }]);
 		running.close();
 		await settle();
 	});

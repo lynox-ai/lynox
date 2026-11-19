@@ -41,7 +41,7 @@ describe('Engine boot — the judged runs\' retention sweep', () => {
     // one whose start replaced it — one started run per instance. The replaced one still holds
     // before-images a model saw, so it is deleted on its own start's clock.
     const seedDb = new EngineDb(join(dir, 'engine.db'));
-    const seed = new BulkLedger(seedDb);
+    const seed = new BulkLedger(seedDb, null);
     const rule = normalizeJudgeRule({ rule: 'Write a short title.', schema: { title: { type: 'string', maxLength: 40 } } });
     const startedRun = (startedAt: number, supersedes?: string): string => {
       const id = seed.recordDryRun({

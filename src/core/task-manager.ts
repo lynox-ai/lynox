@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { UntrustedCause } from './untrusted-signals.js';
 import type { RunHistory } from './run-history.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
@@ -12,6 +13,9 @@ import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from '
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
+import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
+import { stripHidden } from './hidden-text.js';
+import { EngineLessRefused } from './engine-less-refusal.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -53,6 +57,14 @@ export class TriggerTierUnsupportedError extends Error {
   constructor(effect: string) {
     super(`A model tier applies only to agent tasks and watches; this trigger's runs (${effect}) do not use it.`);
     this.name = 'TriggerTierUnsupportedError';
+  }
+}
+
+/** Thrown when a due date is not in the form YYYY-MM-DD, on create and on update alike. */
+export class InvalidDueDateError extends Error {
+  constructor(value: string) {
+    super(`Invalid due_date format: ${value}. Use YYYY-MM-DD.`);
+    this.name = 'InvalidDueDateError';
   }
 }
 
@@ -194,6 +206,9 @@ export interface TaskUpdateParams {
    *  string or null clears the choice. Only a `run_agent` trigger takes one (see
    *  {@link TriggerTierUnsupportedError}); a TODO has no runs, so it ignores this. */
   modelTier?: ModelTier | '' | null | undefined;
+  /** What the editing turn had taken in (`describeTurnUntrusted`). On a trigger whose title or
+   *  description this changes, anything but `none` is recorded as its mark; it never clears one. */
+  untrusted?: UntrustedCause | undefined;
 }
 
 /** Whether a trigger with this effect starts an agent session, the only kind of run a
@@ -248,6 +263,26 @@ export function createsTrigger(params: Pick<TaskCreateParams, 'assignee' | 'next
 export class TaskManager {
   constructor(private history: RunHistory) {}
 
+  /** Set by an engine that started without engine.db: see {@link refuseTaskChangesWithoutStore}. */
+  private changesRefused = false;
+
+  /**
+   * Called by an engine that started without engine.db. A to-do is then written to history.db
+   * only. With the subject graph on, the next boot with engine.db reads its to-dos from engine.db,
+   * and the copy that would put the change there runs once per engine.db; with it off, the change
+   * is read, but missing from engine.db once the graph is switched on. So a change from here on is
+   * refused with a plain reason (`EngineLessRefused`) instead, whichever the flag. Triggers
+   * refuse on their own: their store is engine.db. A manager never told this writes as before.
+   */
+  refuseTaskChangesWithoutStore(): void {
+    this.changesRefused = true;
+  }
+
+  /** Throws the refusal when this manager refuses to-do changes; before anything is written. */
+  private refuseIfEngineLess(): void {
+    if (this.changesRefused) throw new EngineLessRefused('task');
+  }
+
   /**
    * Look up a USER-TODO by id (or id-prefix, for UX convenience). The optional
    * `scopeFilter` folds the ownership check into the same SQL read used by
@@ -265,6 +300,7 @@ export class TaskManager {
   }
 
   create(params: TaskCreateParams): TaskRecord | TriggerRecord {
+    if (!createsTrigger(params)) this.refuseIfEngineLess();
     const id = randomUUID().slice(0, 8);
 
     if (params.parentTaskId) {
@@ -285,7 +321,7 @@ export class TaskManager {
     }
 
     if (params.dueDate && !/^\d{4}-\d{2}-\d{2}/.test(params.dueDate)) {
-      throw new Error(`Invalid due_date format: ${params.dueDate}. Use YYYY-MM-DD.`);
+      throw new InvalidDueDateError(params.dueDate);
     }
 
     // Auto-trigger: if assigned to lynox with no explicit schedule/watch,
@@ -460,6 +496,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
     refuseForeignTodo(task, by, 'complete');
 
     const now = new Date().toISOString();
@@ -494,6 +531,7 @@ export class TaskManager {
    * legacy row is gone.
    */
   deleteTodo(id: string, by?: RequestPrincipal): boolean {
+    this.refuseIfEngineLess();
     if (by === undefined || isOwnerPrincipal(by)) return this.history.deleteTask(id);
     const { task, descendants } = this.history.getTaskDeleteSet(id);
     if (task === undefined) return false;
@@ -517,6 +555,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
 
     this.history.updateTask(task.id, { status: 'open', completedAt: '' }, scopeOpts);
     return this.history.getTask(task.id, scopeOpts);
@@ -573,8 +612,10 @@ export class TaskManager {
         nextRunAt?: string | null | undefined;
         scheduleCron?: string | null | undefined;
         modelTier?: ModelTier | null | undefined;
+        editedUntrusted?: string | null | undefined;
       } = {};
       if (params.title !== undefined) triggerUpdate.title = params.title;
+      if (params.untrusted !== undefined && params.untrusted !== 'none') triggerUpdate.editedUntrusted = params.untrusted;
       if (params.modelTier !== undefined) {
         // Clearing is allowed on any trigger; setting only where a run would read it.
         if (params.modelTier && !triggerTakesModelTier(trigger.effect)) throw new TriggerTierUnsupportedError(trigger.effect);
@@ -617,6 +658,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
     refuseForeignTodo(task, by, 'change');
 
     const updateParams: {
@@ -635,6 +677,9 @@ export class TaskManager {
     if (params.status !== undefined) updateParams.status = params.status;
     if (params.priority !== undefined) updateParams.priority = params.priority;
     if (params.assignee !== undefined) updateParams.assignee = params.assignee;
+    if (params.dueDate && !/^\d{4}-\d{2}-\d{2}/.test(params.dueDate)) {
+      throw new InvalidDueDateError(params.dueDate);
+    }
     if (params.dueDate !== undefined) updateParams.dueDate = params.dueDate ? params.dueDate.slice(0, 10) : '';
     if (params.tags !== undefined) updateParams.tags = params.tags ? JSON.stringify(params.tags) : '';
 
@@ -659,10 +704,11 @@ export class TaskManager {
   }
 
   /** List AGENT-TRIGGERs (the WorkerLoop-fired rows: cron/watch/pipeline/etc). */
-  listTriggers(opts?: { status?: TriggerStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined }): TriggerRecord[] {
+  listTriggers(opts?: { status?: TriggerStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined; paused?: boolean | undefined }): TriggerRecord[] {
     return this.history.getTriggers({
       status: opts?.status,
       taskType: opts?.taskType,
+      paused: opts?.paused,
       scopeType: opts?.scope?.type,
       scopeId: opts?.scope?.id,
     });
@@ -742,10 +788,13 @@ export class TaskManager {
     if (lynoxTasks.length > 0) counts.push(`${lynoxTasks.length} assigned to you`);
     parts.push(counts.join(', ') + '.');
 
+    // Every session reads this, the unattended run of a plan too, and a plan's text may have been
+    // written by someone else: without the characters that render as nothing (`hidden-text.ts`).
+    // The model's write tools refuse them, but a plan saved before, or through another path, carries them.
     for (const t of summary.overdue) {
-      const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${t.scope_id})`;
-      const assignee = t.assignee ? ` [${t.assignee}]` : '';
-      parts.push(`Overdue: "${t.title}"${scope}, due ${t.due_date}, ${t.priority.toUpperCase()}${assignee}`);
+      const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
+      const assignee = t.assignee ? ` [${stripHidden(t.assignee)}]` : '';
+      parts.push(`Overdue: "${stripHidden(t.title)}"${scope}, due ${stripHidden(t.due_date ?? '')}, ${t.priority.toUpperCase()}${assignee}`);
     }
 
     // Highlight tasks assigned to lynox that aren't already shown as overdue
@@ -756,8 +805,9 @@ export class TaskManager {
       for (const t of pendingLynox) {
         // These are AGENT-TRIGGERs — no `due_date` column; surface the next
         // scheduled fire instead when present.
-        const next = t.next_run_at ? `, next run ${t.next_run_at}` : '';
-        parts.push(`  - "${t.title}" [${t.status}]${next}`);
+        // A paused plan says so instead of a next run that will not come (`plan-pause.ts`).
+        const next = isPaused(t) ? `, ${PAUSED_MODEL_TEXT}` : t.next_run_at ? `, next run ${t.next_run_at}` : '';
+        parts.push(`  - "${stripHidden(t.title)}" [${t.status}]${next}`);
       }
     }
 
@@ -1052,12 +1102,17 @@ export class TaskManager {
    *   non-owner started by hand (PRD customer-granted-operator-access §3.12 point 6, "once
    *   per request"). A retry carries no request, so it would run as the schedule's run, not
    *   the request's.
+   * @param opts.keepSchedule Record the run and leave the schedule as it is: no status, no next
+   *   run, no retry. For a run the plan's pause ended (`plan-pause.ts`): a paused plan keeps
+   *   its due time for when it is taken over, and is not in `getDue` meanwhile. And for a
+   *   one-shot whose workflow waits for the owner's stamp, switched off with its time kept
+   *   (`worker-loop.ts`), so switching it on again makes it due.
    * @returns Whether this scheduled a retry of the run. The caller reports a failure only
    *   when it did not, so this is the one place that decides — a second copy of the retry
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
@@ -1083,7 +1138,11 @@ export class TaskManager {
     // run, no retry. A one-shot recorded `completed` or `failed` would never fire after the
     // owner stamps it. (The wait sweep, outside any run, decides on the row and records a
     // proposal's expired test question through the same scope.)
-    if (isHandRunOf(task.id)) {
+    // A webhook trigger is the same case for another reason: its work comes from the events its
+    // provider sends, one ledger row each. It has no cron, so
+    // the branches below would read it as a one-shot and set it `completed` or `failed` — and a
+    // trigger in either state accepts no further delivery.
+    if (isHandRunOf(task.id) || task.source === 'webhook' || opts?.keepSchedule === true) {
       this.history.updateTriggerRunResult(id, {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,
@@ -1191,9 +1250,13 @@ export class TaskManager {
     // parked row that is answered later runs again, but as the resume of its question,
     // not as this retry. The confirmation gates in `getDue` are not repeated here: a row
     // that loses its confirmation mid-run still reads as retrying.
+    // A paused plan is not in `getDue` either, so a retry of it would not run.
     return retrying && task.status !== 'completed' && task.status !== 'stopped'
-      && task.status !== 'waiting' && task.status !== 'failed' && task.enabled !== 0;
+      && task.status !== 'waiting' && task.status !== 'failed' && task.enabled !== 0 && !isPaused(task);
   }
 }
 
 const MAX_RUN_RESULT_CHARS = 10_000;
+
+/** After "its address" or "watch_url": why an address a server may run as a write is not watched (`readAddressWrites`). */
+export const WATCH_OVERRIDE_REFUSAL = 'carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page.';

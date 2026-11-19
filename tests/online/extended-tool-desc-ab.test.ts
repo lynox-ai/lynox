@@ -152,7 +152,7 @@ describe.skipIf(!hasApiKey())('Online A/B: extended-tool-descriptions — Anthro
       tools: TOOLS,
       toolContext: createToolContext({}),
       promptUser: async () => 'ok',
-      promptSecret: async () => ({ status: 'canceled' }),
+      promptSecret: async () => 'canceled' as const,
     }), c);
   }, 60_000);
 });
@@ -173,7 +173,7 @@ describe.skipIf(!MISTRAL_KEY)('Online A/B: extended-tool-descriptions — Mistra
       tools: TOOLS,
       toolContext: createToolContext({}),
       promptUser: async () => 'ok',
-      promptSecret: async () => ({ status: 'canceled' }),
+      promptSecret: async () => 'canceled' as const,
     }), c);
   }, 60_000);
 });

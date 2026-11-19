@@ -15,14 +15,24 @@
 import { singleLine } from './prompt-value.js';
 import { normalizeApprovalHost } from './untrusted-epoch.js';
 
-/** The two methods this engine reads with; everything else may change something. */
-function isRead(method: string): boolean {
+/**
+ * The two methods this engine reads with; everything else may change something. The one
+ * answer to "does this request only read?": every outbound gate calls it, and
+ * `tests/read-method-one-source.test.ts` lists each remaining line that compares a method with GET or HEAD
+ * with the other question it asks.
+ *
+ * An exact match, on purpose: no trim, no case fold. Each caller normalises the way its own
+ * question needs (the effective method, the upper-cased input, or the raw one the exfiltration
+ * check reads), and folding here would change what those callers decide. `null` and
+ * `undefined` (an override that is not a method, no method at all) are not reads.
+ */
+export function isReadMethod(method: string | null | undefined): method is 'GET' | 'HEAD' {
   return method === 'GET' || method === 'HEAD';
 }
 
 /** DELETE over every other write over the two reads. */
 function rank(method: string): number {
-  if (isRead(method)) return 0;
+  if (isReadMethod(method)) return 0;
   return method === 'DELETE' ? 2 : 1;
 }
 
@@ -42,6 +52,7 @@ function headerKey(raw: string): string {
  * What an override may say: a method name from the registered set (RFC 9110 and the WebDAV
  * family). A shape check is not enough — `my-secret-value` is a valid token — and a value
  * that passes is shown in the question and the refusals. Anything else is refused, never shown.
+ * Which of them only read is answered by `isReadMethod` above, never by this set.
  */
 const KNOWN_METHODS = new Set([
   'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT',
@@ -269,13 +280,19 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
   for (const [name, value] of Object.entries(headers)) {
     if (OVERRIDE_HEADERS.has(headerKey(name))) candidates.push(value);
   }
-  try {
-    for (const [name, value] of new URL(url).searchParams) {
-      if (isOverrideFieldName(name)) candidates.push(value);
+  // Every query a receiving server may read (`urlQueryStrings`: a `%3F` in the path that a proxy
+  // decodes included), each split every way a server may split it (`queryReadings`): one that
+  // also splits on `;` reads `?x=1;_method=DELETE` as an override, where `searchParams` sees a
+  // single field `x`. An unparsable URL gives none, and is refused before it is sent.
+  for (const search of urlQueryStrings(url)) {
+    for (const params of queryReadings(search)) {
+      for (const [name, value] of params) {
+        if (isOverrideFieldName(name)) candidates.push(value);
+      }
     }
-  } catch { /* an unparsable URL is refused before it is sent */ }
+  }
   // A GET or HEAD sends no body, so nothing in one can override it.
-  if (body !== undefined && !isRead(method.trim().toUpperCase())) {
+  if (body !== undefined && !isReadMethod(method.trim().toUpperCase())) {
     for (const reading of typeof body === 'string' ? [body] : body) {
       const fromBody = bodyOverrides(reading, headers);
       candidates.push(...fromBody.declared);
@@ -396,11 +413,12 @@ export function normalizeWritePath(pathname: string): { path: string; ambiguous:
  * GraphQL API on another path (`/api`, `/v2`) is not recognised and is handled as any POST is.
  */
 /**
- * A path segment a server routes to its GraphQL endpoint: `graphql`, with a format suffix a
- * router strips or matches on (`graphql.json`, Rails' `(.:format)`), and with trailing dots, which
- * IIS drops. Read from the decoded, lower-cased segment.
+ * A path segment a server routes to its GraphQL endpoint: `graphql`, with format suffixes a
+ * router strips or matches on (`graphql.json`, Rails' `(.:format)`, `graphql.tar.gz`, Spring's
+ * `graphql..json`), and with trailing dots, which IIS drops. Read from the decoded, lower-cased
+ * segment.
  */
-const GRAPHQL_SEGMENT = /^graphql(?:\.[a-z0-9]*)?\.*$/i;
+const GRAPHQL_SEGMENT = /^graphql(?:\.[a-z0-9]*)*$/i;
 
 export function isGraphqlEndpoint(url: string): boolean {
   let parsed: URL;
@@ -410,12 +428,40 @@ export function isGraphqlEndpoint(url: string): boolean {
     return true;
   }
   if (parsed.hostname.toLowerCase().split('.').some((label) => label.startsWith('graphql'))) return true;
+  // WPGraphQL answers on any path that carries the query key `graphql` (`/?graphql`,
+  // `/index.php?graphql`), with or without a value; PHP reads `graphql[]` and ` graphql` (leading
+  // spaces dropped) as the same key.
+  if (urlQueryStrings(url).some((search) => queryReadings(search).some((params) => [...params.keys()].some((key) => queryKeyName(key) === 'graphql')))) return true;
   const { path, ambiguous } = normalizeWritePath(parsed.pathname);
   // A path whose routing is not known here (a double encoding, an escape that does not decode,
   // a character a router may strip) is read every way a server may decode it, and any reading
   // that names `graphql` anywhere counts. Not every such path: an encoded space is a REST path.
   if (ambiguous) return [parsed.pathname, ...serverReadings(parsed.pathname)].some((reading) => reading.toLowerCase().includes('graphql'));
-  return path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment));
+  // A decoded `?` or `#` in a segment (`/graphql%3Fquery=…`) is where a proxy that splits the
+  // URL again ends the path, so the segment is read up to it as well.
+  return path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment) || GRAPHQL_SEGMENT.test(segment.split(/[?#]/)[0]!));
+}
+
+/**
+ * The query strings a server may read from a URL: its own, and the rest after each `?` that a
+ * reading of the path decodes (`/graphql%3Fquery=…`), which a proxy that splits the URL again
+ * hands on as a query string. Each without its `?`; a URL that does not parse gives none. The
+ * readings are taken only for a path with an escape in it: a `?` decodes only from one, and the
+ * escapes that assemble one (`%%33F`, `%3%46`) cannot be listed.
+ */
+export function urlQueryStrings(url: string): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [];
+  }
+  const out = [parsed.search.slice(1)];
+  if (!parsed.pathname.includes('%')) return out;
+  for (const reading of serverReadings(parsed.pathname)) {
+    for (let at = reading.indexOf('?'); at !== -1; at = reading.indexOf('?', at + 1)) out.push(reading.slice(at + 1).split('#')[0]!);
+  }
+  return out;
 }
 
 /** An operation that writes: `mutation` or `subscription` as a GraphQL name anywhere in the document. */
@@ -472,6 +518,25 @@ function jsonRepeatsAKey(text: string): boolean {
  * `operationName: "B"` runs B. A false hit (the word in a string or a field name) only means the
  * write is asked again.
  */
+/**
+ * Whether a body is one JSON object that cannot be a GraphQL request: none of the keys a GraphQL
+ * request sends (`query`, `operationName`, `variables`, `extensions`) and no key a persisted
+ * query names its document by (`id`, `documentId`, `doc_id`, `queryId`). A write to a file whose name reads as a GraphQL path sends such a body; it is
+ * refused all the same, with a note of its own.
+ */
+export function jsonObjectNotGraphql(body: unknown): boolean {
+  if (typeof body !== 'string') return false;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
+    // Keys compared without case: some servers bind the body to their fields that way.
+    const named = new Set([...GRAPHQL_BODY_KEYS, 'id', 'documentId', 'doc_id', 'queryId'].map((key) => key.toLowerCase()));
+    return !Object.keys(parsed).some((key) => named.has(key.toLowerCase()));
+  } catch {
+    return false;
+  }
+}
+
 export function graphqlWrite(headers: Readonly<Record<string, string>>, body: unknown): { refusal: string } | { mutates: boolean } {
   const types = Object.entries(headers).filter(([name]) => name.trim().toLowerCase() === 'content-type');
   if (types.length !== 1 || !GRAPHQL_CONTENT_TYPE.test(types[0]![1])) {
@@ -502,14 +567,177 @@ export function graphqlWrite(headers: Readonly<Record<string, string>>, body: un
 /**
  * Whether a request that is not a write carries a GraphQL write in its URL: any `query`
  * parameter that names `mutation` or `subscription`. Some servers run a document sent this way;
- * the question could not show it, so such a request is refused rather than asked.
+ * the question could not show it, so such a request is refused rather than asked. Each query
+ * string is read every way a server may (`queryReadings`), and each key as a server may name it
+ * (`queryKeyName`).
  */
 export function graphqlUrlWrites(url: string): boolean {
   try {
-    return new URL(url).searchParams.getAll('query').some((query) => GRAPHQL_WRITE_OPERATION.test(query));
+    new URL(url);
+    return urlQueryStrings(url).some((search) => queryReadings(search).some((params) => [...params].some(([key, value]) => queryKeyName(key) === 'query' && GRAPHQL_WRITE_OPERATION.test(value))));
   } catch {
     return true;
   }
+}
+
+/**
+ * Whether a text names a GraphQL operation that writes, read as its grammar has it: `mutation` or
+ * `subscription`, an optional name, and then `(`, `{` or `@`, with blanks, commas, a byte-order
+ * mark and `#` comments between them (blanks read as JavaScript's `\s`, wider than GraphQL's).
+ * Narrower than `GRAPHQL_WRITE_OPERATION`, so a REST body with the word in it
+ * (`{"subscription":"premium"}`) is no hit; a miss of this one fails open, so it is used only where
+ * the endpoint is not known to speak GraphQL.
+ *
+ * Read from each occurrence of the word on its own, comments in place and not stripped first: a
+ * `#` inside a string (`query{a(s:"#")} mutation{b}`) would otherwise hide the mutation. A loop, not
+ * a pattern: a comment is skipped by a jump to the end of its line, so each run of ignored text is
+ * walked by at most the two words before it, and the time is linear in the text. (A pattern took
+ * quadratic time on `mutation#` repeated with no line break.)
+ */
+export function namesGraphqlWrite(text: string): boolean {
+  let lineEnds: Int32Array | undefined;
+  const lineEnd = (from: number): number => {
+    if (lineEnds === undefined) {
+      lineEnds = new Int32Array(text.length + 1);
+      let next = text.length;
+      lineEnds[text.length] = next;
+      for (let i = text.length - 1; i >= 0; i--) {
+        if (text[i] === '\n' || text[i] === '\r') next = i;
+        lineEnds[i] = next;
+      }
+    }
+    return lineEnds[from]!;
+  };
+  const skipIgnored = (from: number): number => {
+    let i = from;
+    while (i < text.length) {
+      const c = text[i]!;
+      if (c === '#') i = lineEnd(i);
+      else if (/[\s,\uFEFF]/.test(c)) i++;
+      else break;
+    }
+    return i;
+  };
+  const keyword = /\b(?:mutation|subscription)\b/gi;
+  const name = /[_A-Za-z]\w*/y;
+  for (let m = keyword.exec(text); m !== null; m = keyword.exec(text)) {
+    let i = skipIgnored(m.index + m[0].length);
+    name.lastIndex = i;
+    if (name.exec(text) !== null) i = skipIgnored(name.lastIndex);
+    if (i < text.length && '({@'.includes(text[i]!)) return true;
+  }
+  return false;
+}
+
+/** Keys a persisted query names its stored document by; the server runs that document, which the request does not show. */
+const PERSISTED_QUERY_KEYS = new Set(['documentid', 'doc_id', 'queryid', 'persistedquery']);
+
+/**
+ * Whether a request body may carry a GraphQL write to an API whose URL does not say it speaks
+ * GraphQL (`api.monday.com/v2`, `/api`, `/query`), read as such a server reads it:
+ *  - every body as form pairs (`queryReadings`, `queryKeyName`): a `query` that names a write, or a
+ *    key that names a persisted query. Whatever else the body parses as: a server that takes the
+ *    form media type reads `{"a":"&query=mutation{x}&"}` as a form;
+ *  - a body that parses as JSON: the value of a `query` key at any depth (a batch included) that
+ *    names a write, a key that names a persisted query, or a key named twice in one object
+ *    (`jsonRepeatsAKey`: a server may keep the first). A `query` that is an object (a search API's)
+ *    is no GraphQL document;
+ *  - a body that does not parse as JSON but may be read as JSON by a server more lenient than
+ *    `JSON.parse` (a byte-order mark before it, a value after it, a JSON media type): refused, as no
+ *    reading here can tell what that server runs;
+ *  - any other body as a whole, as a document (`application/graphql`);
+ *  - a multipart body with an `operations` part, the GraphQL upload form, whose escapes no reading
+ *    here undoes.
+ * Other fields of a JSON body are not read: a description that says „Mutation (…)" is no request a
+ * server runs. A body that is not a string, or that throws while it is read, counts as one.
+ *
+ * For grants, not for questions: a question shows the body; a grant lets it go unseen.
+ */
+export function bodyMayWriteGraphql(body: unknown, headers: Readonly<Record<string, string>> | undefined): boolean {
+  if (body === undefined || body === '') return false;
+  if (typeof body !== 'string') return true;
+  try {
+    const contentType = Object.entries(headers ?? {}).filter(([name]) => name.trim().toLowerCase() === 'content-type').map(([, value]) => value).join(',');
+    if (/multipart/i.test(contentType) && /\boperations\b/i.test(body)) return true;
+    for (const params of queryReadings(body)) {
+      for (const [key, value] of params) {
+        const name = queryKeyName(key);
+        if (PERSISTED_QUERY_KEYS.has(name)) return true;
+        if (name === 'query' && namesGraphqlWrite(value)) return true;
+      }
+    }
+    let parsed: unknown;
+    let json = true;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      json = false;
+    }
+    if (!json) return /json/i.test(contentType) || /^[\s\uFEFF]*[[{]/.test(body) || namesGraphqlWrite(body);
+    if (jsonRepeatsAKey(body)) return true;
+    // A loop, not a recursion: a deeply nested body costs no stack.
+    const pending: unknown[] = [parsed];
+    while (pending.length > 0) {
+      const node = pending.pop();
+      if (Array.isArray(node)) {
+        for (const item of node) pending.push(item);
+      } else if (typeof node === 'object' && node !== null) {
+        for (const [key, value] of Object.entries(node)) {
+          const name = key.trim().toLowerCase();
+          if (PERSISTED_QUERY_KEYS.has(name)) return true;
+          if (name === 'query' && typeof value === 'string' && namesGraphqlWrite(value)) return true;
+          pending.push(value);
+        }
+      }
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether a URL's query strings carry what a GraphQL server on any path may run: a `query` that
+ * names a write, or a key that names a persisted query, read every way a server may
+ * (`urlQueryStrings`, `queryReadings`, `queryKeyName`). Some servers read `query` from the URL
+ * before the body (express-graphql, graphene-django). For grants, as `bodyMayWriteGraphql`.
+ */
+export function urlMayWriteGraphql(url: string): boolean {
+  try {
+    return urlQueryStrings(url).some((search) => queryReadings(search).some((params) => [...params].some(([key, value]) => {
+      const name = queryKeyName(key);
+      return PERSISTED_QUERY_KEYS.has(name) || (name === 'query' && namesGraphqlWrite(value));
+    })));
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * A query key as the servers that may receive it name it: PHP ends a key at a NUL, drops leading
+ * spaces and reads `name[...]` as `name` (a newline inside the brackets included), ASP.NET compares
+ * keys without case. So ` query`, `QUERY`, `query[]` and `query%00x` are all `query`.
+ */
+export function queryKeyName(key: string): string {
+  return key.split('\0')[0]!.trimStart().toLowerCase().replace(/\[[\s\S]*$/, '');
+}
+
+/**
+ * A query string as the servers that may receive it parse it: split on `&` alone, and on `;` as
+ * well (Rack before 3, Python's `parse_qs` before 3.9.2, Java servlet containers on request);
+ * each with `%uXXXX` decoded, as IIS/System.Web does, and without. A reading that cannot decode a
+ * `%u` escape (a lone surrogate) keeps it as U+FFFD, which names nothing.
+ */
+export function queryReadings(search: string): URLSearchParams[] {
+  const separated = [search, search.replace(/;/g, '&')];
+  const decoded = separated.map((text) => text.replace(/%u([0-9a-f]{4})/gi, (_, hex: string) => {
+    try {
+      return encodeURIComponent(String.fromCharCode(parseInt(hex, 16)));
+    } catch {
+      return '%EF%BF%BD';
+    }
+  }));
+  return [...new Set([...separated, ...decoded])].map((text) => new URLSearchParams(text));
 }
 
 /**
@@ -544,7 +772,7 @@ export const OUTBOUND_EFFECT_PATHS: readonly { readonly host: string; readonly s
 
 /** Whether a write to `url` with `method` is one the table names. A read never is. */
 export function isOutboundEffectWrite(url: string, method: string): boolean {
-  if (isRead(method.toUpperCase())) return false;
+  if (isReadMethod(method.toUpperCase())) return false;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return false; }
   const host = normalizeApprovalHost(parsed.hostname);
@@ -1060,3 +1288,14 @@ export function queryForQuestion(search: string, mask: (text: string) => string)
 
 /** The form media type alone, parameters allowed; a list of two types is not one form. */
 const FORM_CONTENT_TYPE = /^\s*application\/x-www-form-urlencoded\s*(?:;[^,]*)?$/i;
+
+/**
+ * Whether a server may run a GET of this address as a write, for an address read with no one
+ * asked (a watch, a calendar feed): a method override in it as every write gate reads it
+ * (`effectiveWriteMethod`; a value that is no method counts), or, at an address that parses as a
+ * GraphQL endpoint, a mutation in its query (`graphqlUrlWrites`).
+ */
+export function readAddressWrites(url: string): boolean {
+  if (!isReadMethod(effectiveWriteMethod('GET', {}, url))) return true;
+  return URL.canParse(url) && isGraphqlEndpoint(url) && graphqlUrlWrites(url);
+}

@@ -1,10 +1,11 @@
-import { fstatSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, fstatSync, readFileSync, realpathSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { getLynoxDir } from './config.js';
 import { getWorkspaceDir } from './workspace.js';
 import { workspaceAccess, type WorkspaceAccess } from './workspace-access.js';
 import { closeAnchor, openAnchor, openSubAnchor, splitRel, type WorkspaceAnchor } from './workspace-fd.js';
-import { resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, unsafeRoot, WorkspaceRootError } from './workspace-root.js';
+import { shellIsolation } from './shell-isolation.js';
+import { namesSidecarLabel, resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, unsafeRoot, WorkspaceRootError } from './workspace-root.js';
 
 /**
  * The model-facing half of the workspace's fd access: a path a tool receives is mapped onto a
@@ -38,6 +39,7 @@ export class WorkspacePathRefused extends Error {
 }
 
 function realOr(path: string): string {
+  if (namesSidecarLabel(path)) return path;
   try { return realpathSync(path); } catch { return path; }
 }
 
@@ -112,10 +114,14 @@ function isLive(anchor: WorkspaceAnchor): boolean {
  */
 export function workspaceBase(): { readonly ws: string; readonly anchor: WorkspaceAnchor } | null {
   const ws = getWorkspaceDir();
+  const sidecar = shellIsolation().kind === 'sidecar';
   if (ws === null) {
     dropBase();
+    // Null would send every caller to its path by name; in sidecar mode there is none (D3).
+    if (sidecar) throw new WorkspaceRootError('In shell sidecar mode no context workspace is set, and the workspace is not reached by name.');
     return null;
   }
+  if (sidecar) return sidecarBase(ws);
   const wsPath = resolve(ws);
   const rootPath = resolve(resolveWorkspaceRoot().path);
   const rootReal = realOr(rootPath);
@@ -164,6 +170,25 @@ export function workspaceBase(): { readonly ws: string; readonly anchor: Workspa
   return base;
 }
 
+/**
+ * The context workspace in shell sidecar mode: `ws` is its label below `/workspace`, and the
+ * directory is reached from fd 3 one component at a time. Decided on the label's string alone;
+ * nothing is resolved or opened by name (PRD shell-sidecar-activation D3).
+ */
+function sidecarBase(ws: string): Base {
+  const from = workspaceAccess();
+  const label = from.root.path;
+  const wsPath = resolve(ws);
+  if (wsPath === label || !isPathWithin(wsPath, label)) {
+    throw new WorkspaceRootError(`In shell sidecar mode the workspace ${ws} must be a directory below ${label}.`);
+  }
+  if (base !== null && base.ws === ws && base.from === from && isLive(base.anchor)) return base;
+  dropBase();
+  const anchor = openSubAnchor(from.anchor, relative(label, wsPath));
+  base = { ws, from, anchor };
+  return base;
+}
+
 /** Close the held workspace directory (engine shutdown; tests). */
 export function closeWorkspaceBase(): void {
   dropBase();
@@ -181,4 +206,13 @@ export function processUmask(): number {
     if (m?.[1] !== undefined) return parseInt(m[1], 8);
   } catch { /* fall through */ }
   return 0o077;
+}
+
+/**
+ * The umask a write by name would apply, for files a tool creates outside the workspace's open
+ * directory. `processUmask` assumes 077 without /proc, which would make every new file private on
+ * macOS; there the process's own umask is read instead (in the main thread, where the tools run).
+ */
+export function creatingUmask(): number {
+  return existsSync('/proc/self/status') ? processUmask() : process.umask();
 }

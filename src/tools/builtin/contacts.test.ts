@@ -8,8 +8,10 @@ import { createToolContext } from '../../core/tool-context.js';
 import { InboxContactResolver } from '../../integrations/inbox/contact-resolver.js';
 import { contactsSaveTool, contactsSearchTool } from './contacts.js';
 import type { IAgent } from '../../types/index.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 const mockAgent = {
+  principal: OWNER_PRINCIPAL,
   toolContext: createToolContext({}),
 } as unknown as IAgent;
 
@@ -104,6 +106,7 @@ describe('contacts tools', () => {
       // The row you look at twice: lead research writes contacts off pages the agent read,
       // not out of a conversation the operator had.
       const tainted = {
+        principal: OWNER_PRINCIPAL,
         toolContext: mockAgent.toolContext,
         sawExternalContentTool: true,
       } as unknown as IAgent;

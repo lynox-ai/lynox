@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { runTaskTitle } from './run-task-turn.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -30,8 +31,9 @@ import { effectiveContextWindow, profileNamed } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } from './agent.js';
 import { isInputRequired } from './input-required.js';
+import { loopGuardStopReason } from './loop-guard-stop.js';
 import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -66,9 +68,11 @@ import {
   withCurrentTimePrefix, languageOverrideSuffix } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
 import { isFeatureEnabled } from './features.js';
-import { stripLoadedContext } from './chat-context.js';
+import { opensLoadedApprovalDraft, stripLoadedContext } from './chat-context.js';
+import { approvalChatTitle } from './approval-chat-title.js';
+import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
-import { setupHistorySubscriptions } from './engine-init.js';
+import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
@@ -86,7 +90,7 @@ import type { DataStore } from './data-store.js';
 import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
-import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, principalTag, runAuthorTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { ConversationGrants } from './conversation-grants.js';
 
@@ -156,8 +160,10 @@ const DEFAULT_COMPACTION_MODEL: ModelTier = 'fast';
  */
 export function classifyRunFailure(err: unknown): { noteCode: string; report: boolean } {
   if (isInputRequired(err)) return { noteCode: 'input_required', report: false };
+  if (err instanceof ThinkingOnlyLoopError) return { noteCode: 'thinking_loop', report: true };
   if (err instanceof ContinuationLoopError) return { noteCode: 'continuation_loop', report: true };
   if (err instanceof ToolLoopBreakError) return { noteCode: 'tool_loop_break', report: true };
+  if (err instanceof ToolCallImitationError) return { noteCode: 'tool_call_imitation', report: true };
   if (err instanceof RunAbortedError) return { noteCode: 'run_interrupted', report: true };
   return { noteCode: 'provider_error', report: true };
 }
@@ -196,6 +202,9 @@ export interface RunOptions {
    *  this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension from
    *  `run_type`; observability only, never gates money. */
   triggerOrigin?: string | undefined;
+  /** The trigger this run is a run of, for the author its typed turn is recorded with
+   *  (`runAuthorTag`): a trigger's turn is never recorded as the owner's. */
+  triggerId?: string | undefined;
   /** Who started this run (PRD customer-granted-operator-access D1, §3.13): a mandate's run
    *  gets the mandate's tool lock. ABSENT MEANS "THE SAME AS BEFORE", never "the owner": the
    *  compaction summary run this session starts on its own passes none, and must not lift
@@ -212,6 +221,42 @@ export interface RunOptions {
    *  the group of the run that started it. Must match `RUN_GROUP_ID_FORMAT`; a run passed any
    *  other form is refused before it starts. */
   runGroupId?: string | undefined;
+}
+
+/**
+ * Whether a thread may hold turns of someone other than the owner, for the owner's taint (PRD
+ * customer-granted-operator-access B6): its row names a creator other than the owner. A mandate
+ * reaches only threads it created (`ownedBy`), so a thread a mandate's turns are in carries its
+ * tag — the live session and a resume read the same row. Fail-closed where the row cannot be
+ * read: a store that throws, or a tag this does not know, count as foreign. Only `null` (a row
+ * from before tags) and the owner's tag are the owner's.
+ *
+ * No store, and no row, are NOT foreign. A route admits a mandate only to a row that records it
+ * (`ownedBy`: a missing row belongs to no mandate), so a thread without a row, or an engine without
+ * a store (its history failed to open, `engine.ts`), can hold a helper's turns only from a run in
+ * this live session, which `Session._foreignRunHere` covers. Counting them foreign would send the
+ * owner's writes to review wherever the row write failed, and protect nothing more.
+ *
+ * Row and history go together, so "no row" also means "no helper's turns on disk": a restore brings
+ * back `threads` and `thread_messages` as one file (both in `history.db`, run-history.ts:718, :735);
+ * `ThreadStore.deleteThread` (thread-store.ts:323) removes the row and its messages with it
+ * (`ON DELETE CASCADE`, `foreign_keys = ON` at run-history.ts:1804); and a resume loads messages
+ * only for a thread that has a row (session-store.ts:126). A session opened before a delete keeps
+ * the history in memory: it read the row as it opened (the constructor) and keeps the mark.
+ */
+export function threadHoldsForeignTurns(
+  store: Pick<import('./thread-store.js').ThreadStore, 'getThread'> | null,
+  threadId: string,
+): boolean {
+  if (store === null) return false;
+  let row: { readonly created_by: string | null } | undefined;
+  try {
+    row = store.getThread(threadId);
+  } catch {
+    return true;
+  }
+  if (row === undefined) return false;
+  return !(row.created_by === null || row.created_by === principalTag(OWNER_PRINCIPAL));
 }
 
 export interface SessionOptions {
@@ -273,6 +318,14 @@ export interface RunUsageSummary {
    *  tooltip — before this, a delegated turn under-reported by whatever the
    *  children spent (measured: $0.38 shown, $0.45 actually billed). */
   spawnCostUsd?: number;
+  /** The requests to APIs with a cost that this run and its sub-agents sent, from their rows
+   *  (`RunHistory.getApiCallsOfRun`), never from what the model wrote. Absent when there were
+   *  none. `apiCostUsd` sums the amounts known; `apiCostEstimated` when any is a profile rate;
+   *  `apiCallsUnpriced` how many had no amount. */
+  apiCalls?: number;
+  apiCostUsd?: number;
+  apiCostEstimated?: boolean;
+  apiCallsUnpriced?: number;
   /** Diagnostics (opt-in UI panel): the run's id for log/Bugsink correlation
    *  and its wall-to-wall agent duration. Persisted via setMessageUsage so the
    *  diagnostics detail survives a thread resume. */
@@ -356,6 +409,8 @@ export class Session {
   } = {};
   readonly sessionId: string;
   private briefing: string | undefined;
+  /** The blocks the engine wrapped into its briefing (`Engine.getBriefingOwnBlocks`). */
+  private briefingOwnBlocks: readonly string[] | undefined;
   /** The vault's `<secrets>` listing, consumed with the briefing; the agent gives it to an owner's
    *  turn only, since the principal is per run and this is per session. */
   private secretsBriefing: string | undefined;
@@ -365,9 +420,16 @@ export class Session {
    * The principal of the run in flight, or of the last one. Kept between runs on purpose:
    * the agent can be rebuilt outside a run (`setModel`, `reloadUserConfig`, the restore
    * after a compaction), and a session a mandate drove must not come back unlocked from
-   * such a rebuild. The next run that names a principal replaces it.
+   * such a rebuild. The next run that names a principal replaces it. The owner before any is the
+   * library's default; the engine's own places name theirs (principal-sites.test.ts).
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
+  /** The tag this session's current (or last) run writes with (`runAuthorTag`). Null before the
+   *  first run: nothing is written as anyone's then. */
+  private _runAuthor: string | null = null;
+  /** A run of someone other than the owner happened in this session, or its thread's row named
+   *  another creator when it opened (PRD B6, see `_run`). Never reset. */
+  private _foreignRunHere = false;
 
   /** Who ran here last — the run in flight, or the one before it (PRD
    *  customer-granted-operator-access §3.13 E7). Stopping, reviewing or compacting a session
@@ -546,12 +608,16 @@ export class Session {
     this.briefing = rawBriefing && rawBriefing.length > 8000
       ? rawBriefing.slice(0, 8000) + '\n[...truncated]'
       : rawBriefing;
+    // A caller's own briefing holds none of the engine's blocks. A block the cut below splits is
+    // not found whole, so it is simply scanned with the rest; its closer is cut off with it, so it
+    // cannot warn either. Keep the match exact: exempting a cut prefix would exempt forged text.
+    this.briefingOwnBlocks = opts?.briefing === undefined ? engine.getBriefingOwnBlocks?.() : undefined;
     // Only on the default path, as before: a caller's own briefing never carried the listing.
     // `?.()` on the method: several suites hand Session a partial engine double.
     const rawSecrets = opts?.briefing === undefined ? engine.getSecretsBriefing?.() : undefined;
-    this.secretsBriefing = rawSecrets && rawSecrets.length > 8000
-      ? rawSecrets.slice(0, 8000) + '\n[...truncated]'
-      : rawSecrets;
+    // Bounded like the briefing, but on an entry boundary and with its closing tag kept: the wire
+    // capture redacts the listing only inside a whole `<secrets>` frame.
+    this.secretsBriefing = rawSecrets === undefined ? undefined : capSecretsListing(rawSecrets, 8000);
     this.onStream = opts?.onStream ?? null;
     this._promptUser = opts?.promptUser ?? null;
     this._promptTabs = opts?.promptTabs ?? null;
@@ -635,6 +701,7 @@ export class Session {
             contract: call.contract,
             lift: call.grant,
             filed: call.filed,
+            apiCost: call.apiCost,
           });
         } catch {
           // Fire-and-forget
@@ -660,6 +727,10 @@ export class Session {
           ...(opts?.principal ? { created_by: principalTag(opts.principal) } : {}),
         });
       } catch { /* best-effort */ }
+      // Who the thread is by, read once as the session opens with its history (PRD B6): a row
+      // deleted later (`ThreadStore.deleteThread`, thread-store.ts:323) takes its tag along while a
+      // session opened before keeps the helper's turns in memory, and `_run` would find no row.
+      if (threadHoldsForeignTurns(threadStore, this.sessionId)) this._foreignRunHere = true;
     }
 
     if (opts?.messages) {
@@ -794,6 +865,12 @@ export class Session {
     // Before anything that could rebuild the agent below, so every rebuild of this run is
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
     if (runOptions?.principal !== undefined) this._principal = runOptions.principal;
+    // Sticky for this session: someone other than the owner has run here (B6 below). Not left to
+    // the thread row alone, which depends on the route refusing a mandate on another's thread.
+    if (this._principal.kind !== 'owner') this._foreignRunHere = true;
+    // Who this run writes as, set before any rebuild like the principal. An internal run
+    // (compaction) keeps the author of the run it serves.
+    if (runOptions?.internal !== true) this._runAuthor = runAuthorTag(this._principal, runOptions);
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
     // Before anything that could rebuild the agent below, like the principal: every rebuild
     // of this run marks its agent by what this run's client said, never by an earlier run.
@@ -1141,6 +1218,8 @@ export class Session {
     // mandate's run reuses. `_createAgent` also builds every new agent with it, which is
     // what carries it across a rebuild in the middle of this run.
     this.agent.principal = this._principal;
+    // Who this run's writes are recorded as, on the agent that will send, for the same reason.
+    this.agent.writeAuthor = this._runAuthor;
 
     const usageBefore = { ...this.usage };
 
@@ -1239,12 +1318,23 @@ export class Session {
           [{ role: 'user', content: userContent as BetaMessageParam['content'] }],
           runStartSeq,
           { message_count: totalBefore + 1 },
+          this._runAuthor ?? undefined,
         );
         userTurnPrePersisted = true;
       } catch {
         // Fire-and-forget — eager-persist still covers the happy path; never
         // block the run on a persistence hiccup.
       }
+    }
+
+    // PRD customer-granted-operator-access B6: the owner's turn in a thread a mandate's turns are
+    // in is tainted before the model hears it. The helper's messages are user turns there with no
+    // mark, so the history scan finds nothing; without this, a helper's text the model follows
+    // would be written as the owner's trusted memory. Here, after every rebuild of this run's
+    // prologue: later rebuilds and compactions carry the latch on (`restoreConversationTaint`).
+    // Only the owner's turn: a mandate's own turns are bounded by its tool lock, not by this.
+    if (this._principal.kind === 'owner' && (this._foreignRunHere || threadHoldsForeignTurns(threadStore, this.sessionId))) {
+      this.agent.restoreConversationTaint();
     }
 
     // ⛔ CAPTURED BEFORE THE SEND, and the stop is read off THIS object rather than
@@ -1309,13 +1399,16 @@ export class Session {
       });
 
       // In-run helper calls (the follow-up-chip recovery) spend on the pool key without
-      // producing tokens in `this.usage`, so the deltas above cannot see them.
+      // producing tokens in `this.usage`, so the deltas above cannot see them. Aborted helper
+      // calls and a main-model call ended mid-stream (by the stream guard, or by a stop of the
+      // run after the provider answered) add an estimate here too (and an upper bound to the
+      // cost caps); those reach no tenant debit at all.
       //
       // ⚠ This is a DISPLAY term and must never reach `onAfterRun`. `costUsd` above is the
-      // value the managed hook DEBITS, and the helper already debited itself through its own
-      // `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`) under a fresh
-      // run id. `managed-hook.ts` dedups per run id, so adding the same dollars to `costUsd`
-      // bills the tenant twice — which a first version of this did, on the belief that the
+      // value the managed hook DEBITS, and a helper call that finished already debited itself
+      // through its own `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`)
+      // under a fresh run id. `managed-hook.ts` dedups per run id, so adding the same dollars
+      // to `costUsd` bills the tenant twice — which a first version of this did, on the belief that the
       // CP figure was the one missing them. It was the other way round: the CP was right and
       // the numbers the CUSTOMER reads were short.
       //
@@ -1332,9 +1425,12 @@ export class Session {
       // this line the figure is complete. Best-effort — a cost line must never
       // be the reason a turn fails.
       let spawnCostUsd = 0;
+      let apiCalls: ReturnType<RunHistory['getApiCallsOfRun']> | undefined;
       if (runHistory && this.currentRunId) {
         try { spawnCostUsd = runHistory.getDescendantCostUsd(this.currentRunId); }
         catch { spawnCostUsd = 0; }
+        try { apiCalls = runHistory.getApiCallsOfRun(this.currentRunId); }
+        catch { apiCalls = undefined; }
       }
 
       // Snapshot this run's usage in the UI footer's convention (tokensIn =
@@ -1349,6 +1445,9 @@ export class Session {
         costUsd: displayCostUsd,
         model,
         ...(spawnCostUsd > 0 ? { spawnCostUsd } : {}),
+        ...(apiCalls !== undefined && apiCalls.calls > 0
+          ? { apiCalls: apiCalls.calls, apiCostUsd: apiCalls.usd, apiCostEstimated: apiCalls.estimated, apiCallsUnpriced: apiCalls.unpriced }
+          : {}),
         ...(this.currentRunId ? { runId: this.currentRunId } : {}),
         durationMs,
       };
@@ -1428,7 +1527,9 @@ export class Session {
               total_cost_usd: rollupCost,
             });
           }
-          if (startMessageCount === 0) {
+          // An internal run (a summary in a session of its own) has no user words to title, and
+          // its prompt is another thread's history: it would go to a second model call.
+          if (startMessageCount === 0 && !agent.isInternalRun) {
             // Derive the title from the user's OWN words, not the engine framing:
             // a context-opened chat (💬 mail-reply / fix / workflow-edit) carries a
             // `[Loaded …]\n[/loaded-context]\n\n` preamble on its first message that
@@ -1436,14 +1537,17 @@ export class Session {
             // web-ui strip can't reach). generateThreadTitle self-strips the
             // preamble; strip it for the LLM-title path too. Both are no-ops when
             // there is no preamble.
-            const title = generateThreadTitle(taskText);
+            // A chat on a loaded approval draft is titled by the engine alone ({@link firstThreadTitle}).
+            const { title, llmUpgrade } = firstThreadTitle(taskText, {
+              language: noticeLanguage(this.engine.config.language), at: new Date(), timeZone: this._userTimezone,
+            });
             threadStore.updateThread(this.sessionId, { title });
             // Upgrade to an LLM-written title on the `fast` tier (a cheap inline
             // background consumer, like memory extraction). Async + best-effort:
             // never blocks the run, skipped in private mode, and never clobbers a
             // manual rename (the method re-checks the title before writing).
-            if (taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
-              void this._generateLLMTitle(stripLoadedContext(taskText), title);
+            if (llmUpgrade && taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
+              void this._generateLLMTitle(llmTitleSource(taskText), title);
             }
           }
           // Stamp this run's token/cost totals onto its final assistant
@@ -1549,6 +1653,7 @@ export class Session {
       // path. Record it distinctly as 'aborted' (not the scary 'failed') and
       // surface a calm interruption note instead of a provider-error banner.
       const isAbort = err instanceof RunAbortedError;
+      const guardStop = loopGuardStopReason(err);
       // The note code and whether it is reported: a hard loop break and a continuation
       // loop each get their own calm note naming WHY, a question nobody could be asked
       // gets one naming the question (`classifyRunFailure`).
@@ -1622,6 +1727,8 @@ export class Session {
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: isAbort ? 'aborted' : 'failed',
+            // A loop guard's stop is an abort too; the reason tells it from a stop by the user.
+            ...(guardStop !== null ? { stopReason: guardStop } : {}),
             errorText: secretStore ? secretStore.maskSecrets(errorDetail) : errorDetail,
           });
         } catch {
@@ -2380,12 +2487,11 @@ export class Session {
       // Gate this pool-key call through the managed credit lifecycle: on a
       // credit-exhausted (or fail-closed) managed tenant, skip the LLM title and
       // keep the heuristic placeholder — the title is best-effort enrichment, not
-      // worth spending against an empty balance. No-op on self-host/BYOK.
+      // worth spending against an empty balance. The gate also checks the
+      // instance's spending caps, which this run already passed at its start.
       const titleGate = await fireBeforeRunGate(this.engine, 'fast');
       if (titleGate.blockedReason !== null) return;
-      const prompt =
-        'Write a concise 3-6 word title in Title Case for a conversation that begins ' +
-        'with the message below. No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
+      const prompt = LLM_TITLE_PROMPT;
       const stream = titleClient.beta.messages.stream({
         model: fastSnap.modelId,
         max_tokens: 64,
@@ -2742,6 +2848,8 @@ export class Session {
       // of the last run: a rebuild in the middle of a mandate's run (compaction, a tier
       // override, a registry change) must not hand the model the tools the lock withholds.
       principal: this._principal,
+      // Who the rebuilt agent writes as: the run in flight's author, as the principal above.
+      writeAuthor: this._runAuthor,
       // ⛔ CARRIED ACROSS THE REBUILD. Without this line every rebuild mints a fresh,
       // empty scope and orphans whatever is registered — a later `abort()` then reaches
       // nothing. `_createAgent` is reached from the ctor, `addTool` and every rebuild that
@@ -2772,6 +2880,9 @@ export class Session {
       durableMemoryEnabled: userConfig.durable_memory_enabled === true,
       costGuard: this.agentOverrides.costGuard,
       onStream: streamHandler,
+      // The handler adds each `turn_end` usage into `this.usage` (above), which the run's cost
+      // line and debit are priced from.
+      turnEndUsageCounted: true,
       // F-Eager-Persist (2026-05-18): Persist messages to the ThreadStore at
       // each stable point in the agent loop (after assistant reply, after
       // tool_results). Without this the end-of-run persist (line 506-526)
@@ -2857,6 +2968,7 @@ export class Session {
       // model looks Anthropic; a cross-provider slot pins it to the slot model.
       openaiModelId: slotCfg.crossProviderSlot ? slotCfg.openaiModelId : (this._profileOverride?.model_id ?? userConfig.openai_model_id),
       briefing: this._briefingConsumed ? undefined : this.briefing,
+      briefingOwnBlocks: this._briefingConsumed ? undefined : this.briefingOwnBlocks,
       secretsBriefing: this._briefingConsumed ? undefined : this.secretsBriefing,
       autonomy: this.agentOverrides.autonomy,
       secretStore: engine.getSecretStore() ?? undefined,
@@ -2969,10 +3081,31 @@ export class Session {
   }
 }
 
+/**
+ * The title a thread gets from its first message, and whether the LLM may upgrade it. A chat
+ * opened on an approval entry whose draft loaded is titled by the engine alone
+ * (`approval-chat-title.ts`): its first line is the same for every entry, and the draft's
+ * subject must not become a title. No LLM upgrade there either — it would read that same first
+ * line and name every such chat alike again. Exported so the dictation test drives the same
+ * derivation the run does.
+ */
+export function firstThreadTitle(
+  taskText: string,
+  opts: { language: NoticeLanguage; at: Date; timeZone?: string | null | undefined },
+): { title: string; llmUpgrade: boolean } {
+  if (opensLoadedApprovalDraft(taskText)) {
+    return { title: approvalChatTitle(opts.language, opts.at, opts.timeZone), llmUpgrade: false };
+  }
+  return { title: generateThreadTitle(taskText), llmUpgrade: true };
+}
+
 /** Generate a short thread title from the first user message. Exported for
  *  unit-testing the framing-strip (a context-chat's `[Loaded …]` preamble must
  *  not become the nav title). */
 export function generateThreadTitle(taskText: string): string {
+  // A scheduled run's opening turn is named by its task, never by the engine's lead above it.
+  const runTask = runTaskTitle(taskText);
+  if (runTask !== null) taskText = runTask;
   // Strip engine framing that isn't the user's words: the loaded-context preamble
   // (context-opened chats) and onboarding prompts. stripLoadedContext no-ops when
   // there is no preamble.
@@ -2996,6 +3129,26 @@ export function generateThreadTitle(taskText: string): string {
 
   return title || 'New Chat';
 }
+
+/**
+ * The text the fast model titles. A scheduled run's opening turn starts with the engine's English
+ * lead (`run-task-turn.ts`); the title follows the language of the message, so the model gets the
+ * task's own words, as the heuristic title does. Other chats lose only the loaded-context preamble.
+ */
+export function llmTitleSource(taskText: string): string {
+  return runTaskTitle(taskText) ?? stripLoadedContext(taskText);
+}
+
+/**
+ * What the fast model is asked for a thread's title. The title is in the language of the first
+ * message: a German conversation listed under an English title reads as someone else's. Title
+ * Case is an English rule, so it is asked only for an English title. Exported for the test that
+ * pins it.
+ */
+export const LLM_TITLE_PROMPT =
+  'Write a concise 3-6 word title for a conversation that begins with the message below. ' +
+  'Write it in the language of that message; use Title Case only for an English title. ' +
+  'No quotes, no trailing punctuation. Reply with ONLY the title.\n\n';
 
 /**
  * Clean a raw LLM title response into a usable thread title: take the first

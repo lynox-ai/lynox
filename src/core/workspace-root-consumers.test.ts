@@ -48,9 +48,9 @@ describe('consumers of the workspace root (D3, D7)', () => {
   });
 
   it('the context directory is under the root, for the server and the CLI', () => {
-    const server = resolveContext({ context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' } } as never);
+    const server = resolveContext({ context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' } } as never, { kind: 'local' });
     expect(server.workspaceDir).toBe(join(volume, 'http-api'));
-    expect(resolveContext({} as never).workspaceDir.startsWith(volume + '/')).toBe(true);
+    expect(resolveContext({} as never, { kind: 'local' }).workspaceDir.startsWith(volume + '/')).toBe(true);
   });
 
   it('the file area falls back to the root', () => {

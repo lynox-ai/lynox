@@ -13,14 +13,17 @@ export interface Toast {
 let toasts = $state<Toast[]>([]);
 let nextId = 0;
 
+/** `durationMs` null keeps the toast until the person closes it: for a message they have to act
+ *  on. (Not `Infinity`: `setTimeout` takes that as 1 ms.) */
 export function addToast(
 	message: string,
 	type: Toast['type'] = 'info',
-	durationMs = 3000,
+	durationMs: number | null = 3000,
 	action?: ToastAction,
 ): void {
 	const id = nextId++;
 	toasts.push(action ? { id, message, type, action } : { id, message, type });
+	if (durationMs === null) return;
 	setTimeout(() => {
 		toasts = toasts.filter((t) => t.id !== id);
 	}, durationMs);

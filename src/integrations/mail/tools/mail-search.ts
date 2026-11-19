@@ -7,8 +7,9 @@ import type { IAgent, ToolEntry } from '../../../types/index.js';
 import { getErrorMessage } from '../../../core/utils.js';
 import { MailError, type MailEnvelope, type MailSearchOptions, type MailSearchQuery } from '../provider.js';
 import { renderTriageList } from '../triage/envelope.js';
-import { resolveProviders, type MailRegistry } from './registry.js';
-import { namedTarget } from '../../../core/audit-log.js';
+import { resolveProviders, type MailRegistry, accountForRow } from './registry.js';
+import { accountsNotReadBy, leftOutRefusal } from '../../inbox/disabled-accounts.js';
+import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 
 interface MailSearchInput {
   account?: string | undefined;
@@ -28,7 +29,7 @@ interface MailSearchInput {
 export function createMailSearchTool(registry: MailRegistry): ToolEntry<MailSearchInput> {
   return {
     // That a mailbox was searched, never what for: the terms can name a customer.
-    outwardRead: (input) => ['search', namedTarget([['account', input.account], ['folder', input.folder]])].filter((s) => s !== '').join(' '),
+    outwardRead: (input) => ['search', namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)]])].filter((s) => s !== '').join(' '),
     definition: {
       name: 'mail_search',
       description:
@@ -52,9 +53,13 @@ export function createMailSearchTool(registry: MailRegistry): ToolEntry<MailSear
         required: [],
       },
     },
-    handler: async (input: MailSearchInput, _agent: IAgent): Promise<string> => {
+    handler: async (input: MailSearchInput, agent: IAgent): Promise<string> => {
       try {
-        const providers = resolveProviders(registry, input.account);
+        const resolved = resolveProviders(registry, input.account);
+        // A run nobody watches does not read the mailboxes the inbox leaves out (F6).
+        const leftOut = accountsNotReadBy(agent);
+        const providers = resolved.filter((p) => !leftOut.has(p.accountId));
+        if (providers.length === 0 && resolved.length > 0) return leftOutRefusal('mail_search');
 
         const query: MailSearchQuery = {};
         if (input.text) query.text = input.text;
@@ -93,11 +98,15 @@ export function createMailSearchTool(registry: MailRegistry): ToolEntry<MailSear
           }
         }));
 
+        const skipped = resolved.length - providers.length;
+        const skippedNote = skipped > 0
+          ? `\n${String(skipped)} more account(s) not searched: a run nobody watches does not read the mailboxes the owner left out of the inbox.`
+          : '';
         if (tagged.length === 0 && perAccountErrors.length === 0) {
-          return 'No messages found.';
+          return 'No messages found.' + skippedNote;
         }
 
-        return renderFanoutResult('search', providers.length, tagged, perAccountErrors);
+        return renderFanoutResult('search', providers.length, tagged, perAccountErrors) + skippedNote;
       } catch (err: unknown) {
         if (err instanceof MailError) return `mail_search error (${err.code}): ${err.message}`;
         return `mail_search error: ${getErrorMessage(err)}`;

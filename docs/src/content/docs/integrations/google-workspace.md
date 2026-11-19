@@ -7,6 +7,42 @@ sidebar:
 
 lynox integrates with Google Workspace to read and write your business data. Once connected, you can ask lynox to check your email, create calendar events, analyze spreadsheets, and more.
 
+## Workspace admin approval
+
+This section is for the admin of a company's Google Workspace. It applies when someone in your organization connects lynox on lynox.cloud with the **Connect with Google** button, which uses lynox's own Google client.
+
+Whether you need to do anything depends on your organization's app access settings. If they restrict which third-party apps people may use, Google blocks the connection until you configure lynox, and the person connecting sees an error from Google.
+
+**What lynox asks for:**
+
+| | |
+|---|---|
+| OAuth client ID | `554097075249-lcpcoqjhjef3aum3olhffshtvr0k94k5.apps.googleusercontent.com` |
+| Scopes | `openid`, `https://www.googleapis.com/auth/userinfo.email`, `https://www.googleapis.com/auth/calendar.events`, `https://www.googleapis.com/auth/calendar.freebusy`, `https://www.googleapis.com/auth/drive.file` |
+
+`calendar.events` and `calendar.freebusy` cover the calendar. `drive.file` is per file: it reaches only files lynox created or that the person opened or shared with lynox, not the rest of their Drive. lynox does not ask for Gmail with this client.
+
+**Where to configure it** (Google Admin console, needs the *Service Settings* admin privilege):
+
+1. **Security** → **Access and data control** → **API controls**
+2. **Manage App Access** → **Configure new app**
+3. Search for the client ID above, select lynox, and choose an access setting.
+
+**What the access settings mean** (Google's names):
+
+| Setting | Effect |
+|---|---|
+| Trusted | The app can access all Google services, restricted and unrestricted. |
+| Limited | The app can access only unrestricted Google services. |
+| Specific Google data | The app can use only the scopes you select. |
+| Blocked | The app can't access any Google service. |
+
+If you have set a service such as Calendar or Drive to **Restricted**, only apps configured as *Trusted* or with *Specific Google data* can reach it; an app on *Limited* cannot. Which setting fits is your organization's decision.
+
+Google's own description: [Control which third-party & internal apps access Google Workspace data](https://knowledge.workspace.google.com/admin/apps/control-which-apps-access-google-workspace-data).
+
+If your organization brings its own Google client instead (see **Setup** below), configure that client's ID the same way.
+
 ## Setup
 
 You need a Google Cloud project with OAuth 2.0 credentials. This takes about 5 minutes.
@@ -176,9 +212,8 @@ headers-only mailbox scope is *restricted*.
 | **Standard** (default) | Your identity and email address, calendar events, free/busy, and the Drive files lynox creates (`drive.file`) | App verification. **No CASA assessment** — nothing in this set is restricted. |
 | **Full** | Standard, plus Sheets, Docs, Calendar and Gmail-send, plus Gmail reading and full Drive | Verification **and** an annual CASA security assessment, because it includes restricted scopes. |
 
-**What Standard does not include, so nothing here is a surprise later:** no Gmail access of any kind, no
-access to spreadsheets or documents you did not create through lynox, and no access to Drive files lynox
-did not create. Asking lynox to read an existing spreadsheet on a Standard connection is refused with the
+**What Standard does not include, so nothing here is a surprise later:** no Gmail access of any kind, and no
+access to Drive files lynox did not create. Asking lynox to read an existing spreadsheet on a Standard connection is refused with the
 scope it would need, not attempted and failed.
 
 **Choosing Full changes where your mail comes from.** Full includes a Gmail read scope, and lynox then

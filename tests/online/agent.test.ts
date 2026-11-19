@@ -84,18 +84,20 @@ describe.skipIf(SKIP)('Online: Agent', () => {
       maxIterations: 3,
       tools: [
         {
-          name: 'get_weather',
-          description: 'Get the current weather for a city.',
-          input_schema: {
-            type: 'object' as const,
-            properties: {
-              city: { type: 'string' as const, description: 'City name' },
+          definition: {
+            name: 'get_weather',
+            description: 'Get the current weather for a city.',
+            input_schema: {
+              type: 'object' as const,
+              properties: {
+                city: { type: 'string' as const, description: 'City name' },
+              },
+              required: ['city'],
             },
-            required: ['city'],
           },
-          handler: async (input: Record<string, unknown>) => {
+          handler: async (input: unknown) => {
             toolCalled.called = true;
-            toolCalled.input = input['city'] as string;
+            toolCalled.input = (input as Record<string, unknown>)['city'] as string;
             return 'Sunny, 22°C';
           },
         },
@@ -123,9 +125,11 @@ describe.skipIf(SKIP)('Online: Agent', () => {
       maxIterations: 2,
       tools: [
         {
-          name: 'count',
-          description: 'Increment a counter. Always call this tool.',
-          input_schema: { type: 'object' as const, properties: {} },
+          definition: {
+            name: 'count',
+            description: 'Increment a counter. Always call this tool.',
+            input_schema: { type: 'object' as const, properties: {} },
+          },
           handler: async () => {
             callCount++;
             return `Count is ${callCount}. Call this tool again.`;

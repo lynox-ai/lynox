@@ -13,9 +13,10 @@ import { getErrorMessage } from '../../../core/utils.js';
 import { detectInjectionAcross, wrapChannelMessage, wrapUntrustedData } from '../../../core/data-boundary.js';
 import { MailError } from '../provider.js';
 import { cleanBody } from '../triage/body-clean.js';
-import { resolveProvider, type MailRegistry } from './registry.js';
+import { resolveProvider, type MailRegistry, accountForRow } from './registry.js';
+import { accountsNotReadBy, leftOutRefusal } from '../../inbox/disabled-accounts.js';
 import { oneBlockLine } from '../block-line.js';
-import { namedTarget } from '../../../core/audit-log.js';
+import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 
 interface MailReadInput {
   account?: string | undefined;
@@ -33,7 +34,7 @@ interface MailReadInput {
 export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadInput> {
   return {
     // Which message of which mailbox, never what it says.
-    outwardRead: (input) => namedTarget([['account', input.account], ['folder', input.folder], ['uid', input.uid]]),
+    outwardRead: (input) => namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)], ['uid', input.uid]]),
     definition: {
       name: 'mail_read',
       description:
@@ -50,12 +51,14 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
         required: ['uid'],
       },
     },
-    handler: async (input: MailReadInput, _agent: IAgent): Promise<string> => {
+    handler: async (input: MailReadInput, agent: IAgent): Promise<string> => {
       try {
         if (typeof input.uid !== 'number' || !Number.isFinite(input.uid)) {
           return 'mail_read error: "uid" must be a number';
         }
         const provider = resolveProvider(registry, input.account);
+        // A run nobody watches does not read the mailboxes the inbox leaves out (F6).
+        if (accountsNotReadBy(agent).has(provider.accountId)) return leftOutRefusal('mail_read');
 
         const fetchOpts: { uid: number; folder?: string; includeHtml?: boolean } = { uid: input.uid };
         if (input.folder) fetchOpts.folder = input.folder;

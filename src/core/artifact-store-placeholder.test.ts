@@ -6,6 +6,7 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 import { ArtifactStore, ArtifactPlaceholderError } from './artifact-store.js';
 import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from './artifact-eviction.js';
 import { artifactRestoreTool } from '../tools/builtin/artifact.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 // The store refuses content that holds only the engine's placeholder for an already saved
 // document, by the same test as the "lost on save" mark, whichever way the save comes:
@@ -46,7 +47,7 @@ afterEach(() => {
 });
 
 const restore = (id: string, version: number): Promise<string> =>
-  artifactRestoreTool.handler({ id, version } as never, { toolContext: { artifactStore: store } } as never) as Promise<string>;
+  artifactRestoreTool.handler({ id, version } as never, { principal: OWNER_PRINCIPAL, toolContext: { artifactStore: store } } as never) as Promise<string>;
 
 describe('ArtifactStore.save refuses the placeholder', () => {
   it('as a new artifact: nothing is stored', () => {
@@ -108,7 +109,7 @@ describe('a restore of a version that holds the placeholder', () => {
 
   it('control: any other error of the restore still reaches the caller', async () => {
     const failing = { restore: () => { throw new Error('disk full'); } };
-    await expect(artifactRestoreTool.handler({ id: 'ab12cd34', version: 1 } as never, { toolContext: { artifactStore: failing } } as never)).rejects.toThrow('disk full');
+    await expect(artifactRestoreTool.handler({ id: 'ab12cd34', version: 1 } as never, { principal: OWNER_PRINCIPAL, toolContext: { artifactStore: failing } } as never)).rejects.toThrow('disk full');
   });
 
   it('control: a version with a larger document that quotes the placeholder is restored', async () => {

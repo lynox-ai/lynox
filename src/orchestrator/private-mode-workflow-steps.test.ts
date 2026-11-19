@@ -1,3 +1,4 @@
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { IAgent, IMemory, LynoxUserConfig, ToolEntry } from '../types/index.js';
 import type { ThreadStore } from '../core/thread-store.js';
@@ -174,6 +175,7 @@ function makeParent(opts: { threadId: string; privateMode: boolean; memory: IMem
   ctx.threadStore = makeThreadStore();
   return {
     toolContext: ctx,
+    principal: OWNER_PRINCIPAL,
     getAvailableTools: () => ctx.tools,
     memory: opts.memory,
     currentThreadId: opts.threadId,

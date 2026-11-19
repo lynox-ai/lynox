@@ -4,12 +4,24 @@ set -e
 # ── Pre-flight: verify volume mount ──────────────────────────
 # Without a volume mount, the vault key and all data are lost on restart.
 PREFLIGHT_FILE="$HOME/.lynox/.volume-check"
-if printf 'ok' > "$PREFLIGHT_FILE" 2>/dev/null && [ -f "$PREFLIGHT_FILE" ]; then
+if (printf 'ok' > "$PREFLIGHT_FILE") 2>/dev/null && [ -f "$PREFLIGHT_FILE" ]; then
   rm -f "$PREFLIGHT_FILE"
 else
   echo "" >&2
   echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
   echo "  WARNING: Volume mount not detected or not writable!" >&2
+  # The folder exists but cannot be written. The usual cause is another owner (data written
+  # under another uid); name it, so the warning does not only guess at a missing mount.
+  if [ -d "$HOME/.lynox" ]; then
+    DIR_OWNER=$(stat -c '%u' "$HOME/.lynox" 2>/dev/null || echo unknown)
+    if [ "$DIR_OWNER" != "$(id -u)" ]; then
+      echo "  $HOME/.lynox belongs to uid $DIR_OWNER; this container runs as uid $(id -u)," >&2
+      echo "  which cannot write it." >&2
+    else
+      echo "  $HOME/.lynox belongs to this container's uid but cannot be written" >&2
+      echo "  (a read-only mount, or a folder mode without write access?)." >&2
+    fi
+  fi
   echo "  Data will be LOST when this container restarts." >&2
   echo "" >&2
   echo "  Add to your docker run command:" >&2
@@ -22,6 +34,15 @@ else
   echo "" >&2
 fi
 
+# Where the vault key comes from, for the engine to report (`LYNOX_VAULT_KEY_SOURCE`, read in
+# src/core/vault-key-source.ts): env | volume-env | minted | none. Set here whatever the
+# environment said, so a value from outside cannot claim a source.
+if [ -n "${LYNOX_VAULT_KEY:-}" ]; then
+  KEY_SOURCE=env
+else
+  KEY_SOURCE=none
+fi
+
 # Load vault key from .env if it exists
 ENV_FILE="$HOME/.lynox/.env"
 if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; then
@@ -31,6 +52,7 @@ if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; 
       VAULT_KEY=$(grep '^LYNOX_VAULT_KEY=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
       if [ -n "$VAULT_KEY" ]; then
         export LYNOX_VAULT_KEY="$VAULT_KEY"
+        KEY_SOURCE=volume-env
       fi
       ;;
   esac
@@ -38,10 +60,34 @@ fi
 
 # Auto-generate access token if not set
 TOKEN_FILE="$HOME/.lynox/.access-token"
+
+# The token file is there but this uid cannot use it: say whose it is and what to check, then
+# stop. Without this, `set -e` ends the script on the bare `Permission denied` of the read or
+# write, before the ownership warning further down that names this case.
+token_unusable() {
+  UNUSABLE_OWNER=$(stat -c '%u' "$2" 2>/dev/null || echo unknown)
+  echo "" >&2
+  echo "  ERROR: cannot $1 the access token file $TOKEN_FILE." >&2
+  if [ "$UNUSABLE_OWNER" != "$(id -u)" ]; then
+    echo "  $2 belongs to uid $UNUSABLE_OWNER; this container runs as uid $(id -u)." >&2
+    echo "  This happens when the data was written under another uid, e.g. by an older setup as" >&2
+    echo "  uid 1001 and the container now runs as your own uid (LYNOX_UID). Either leave LYNOX_UID" >&2
+    echo "  unset and run as the uid that owns the data, or change the owner of the data folder on" >&2
+    echo "  the host to the uid the container runs as. See https://docs.lynox.ai/setup/docker/" >&2
+  else
+    echo "  $2 belongs to this container's uid, so the owner is not the cause. Check that the" >&2
+    echo "  file's mode lets this uid read and write it, that the volume is not mounted read-only," >&2
+    echo "  that the disk is not full, and that $TOKEN_FILE is a regular file, not a folder or a" >&2
+    echo "  broken link." >&2
+  fi
+  echo "  lynox does not start, and the file was not changed." >&2
+  exit 1
+}
+
 if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   # Reuse persisted token from previous run (survives container restarts)
   if [ -f "$TOKEN_FILE" ]; then
-    LYNOX_HTTP_SECRET=$(cat "$TOKEN_FILE")
+    LYNOX_HTTP_SECRET=$(cat "$TOKEN_FILE" 2>/dev/null) || token_unusable read "$TOKEN_FILE"
     export LYNOX_HTTP_SECRET
     echo "  Access token loaded from volume (not shown in logs)." >&2
     echo "  Retrieve: cat ~/.lynox/.access-token (on the host)" >&2
@@ -52,10 +98,13 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
     export LYNOX_HTTP_SECRET
     # Persist to volume so it survives container restarts
     mkdir -p "$HOME/.lynox"
-    printf '%s' "$LYNOX_HTTP_SECRET" > "$TOKEN_FILE"
+    # A folder this uid cannot enter hides an existing file from `[ -f ]` above, so a failed
+    # write can mean either; name the folder's owner. A folder or a broken link at the token
+    # path, a read-only mount or a full disk fail here too.
+    (printf '%s' "$LYNOX_HTTP_SECRET" > "$TOKEN_FILE") 2>/dev/null || token_unusable write "$HOME/.lynox"
     chmod 600 "$TOKEN_FILE"
-    # POSIX-compatible 8-char preview — entrypoint runs under BusyBox `sh` in
-    # the lynox image, which does not support bash's ${VAR:0:8} substring
+    # POSIX-compatible 8-char preview — entrypoint runs under dash (`/bin/sh` of the
+    # node:22-slim image), which does not support bash's ${VAR:0:8} substring
     # expansion (was emitting `Bad substitution` on every fresh boot, leaving
     # users with no token preview at all — pre-HN-launch P0 fix).
     TOKEN_PREVIEW=$(printf '%s' "$LYNOX_HTTP_SECRET" | head -c 8)
@@ -72,13 +121,68 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   fi
 fi
 
-# Auto-generate vault key if not set (persist to volume)
-if [ -z "${LYNOX_VAULT_KEY:-}" ]; then
+# Auto-generate vault key if not set (persist to volume). A new key is generated only where
+# it cannot replace or sit beside one that data was encrypted under:
+# - not when the data dir already holds a vault. The engine then decides as it does without
+#   this script: it reads the key from $ENV_FILE if it can, then the data dir's vault.key, and
+#   never generates a key over an existing vault (`ensureVaultKey`).
+# - not into a .env that is not a regular file with mode 600, or that names LYNOX_VAULT_KEY
+#   outside a comment line although the reader above took no key from it (an empty value, an
+#   indented line, a byte-order mark, a space before `=`). The start stops instead. A second key line would split the readers: the installer reads the first key line
+#   and takes an empty one for "no key" (`readVaultKeyFromRecoveryFile`), so it would write a
+#   new key over the one appended here.
+# - the key is appended, so other lines in the file stay.
+# The data dir follows the engine's rule (`lynoxDirFor`): LYNOX_DATA_DIR, then LYNOX_DIR, an
+# empty value counting as unset.
+DATA_DIR="${LYNOX_DATA_DIR:-${LYNOX_DIR:-$HOME/.lynox}}"
+if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -e "$DATA_DIR/vault.db" ]; then
+  if [ ! -e "$DATA_DIR/vault.key" ]; then
+    echo "" >&2
+    echo "  WARNING: this start found no vault key, and $DATA_DIR/vault.db already exists." >&2
+    echo "  No new key was generated: it could not open what is encrypted there." >&2
+    echo "  If lynox then logs \"Encrypted vault found but LYNOX_VAULT_KEY is not set\" or" >&2
+    echo "  \"History: encrypted data found but no encryption key set\", or your chats, saved" >&2
+    echo "  connections and API keys are missing, set LYNOX_VAULT_KEY to the key this install was" >&2
+    echo "  created with (docker run -e, or the compose .env), or put it in $ENV_FILE with mode 600." >&2
+    echo "" >&2
+  fi
+elif [ -z "${LYNOX_VAULT_KEY:-}" ]; then
+  ENV_REFUSED=""
+  if [ -L "$ENV_FILE" ]; then
+    ENV_REFUSED="it is a symbolic link"
+  elif [ -e "$ENV_FILE" ] && [ ! -f "$ENV_FILE" ]; then
+    ENV_REFUSED="it is not a regular file"
+  elif [ -e "$ENV_FILE" ]; then
+    case "$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo unknown)" in
+      600)
+        # Any mention outside a comment counts, not only the shapes a reader takes a key from:
+        # the three readers (this script, the engine, the installer) differ in what they trim.
+        # -a: a NUL byte anywhere would make grep treat the file as binary and print nothing.
+        if grep -a -v '^[[:space:]]*#' "$ENV_FILE" 2>/dev/null | grep -a -q 'LYNOX_VAULT_KEY'; then
+          ENV_REFUSED="it names LYNOX_VAULT_KEY in a line this start cannot read a key from"
+        fi
+        ;;
+      400) ENV_REFUSED="it is read-only (mode 400), and this start read no key from it" ;;
+      *) ENV_REFUSED="its mode is not 600 or 400, so it was not read" ;;
+    esac
+  fi
+  if [ -n "$ENV_REFUSED" ]; then
+    echo "" >&2
+    echo "  ERROR: no vault key is set, and no new key can be written to $ENV_FILE: $ENV_REFUSED." >&2
+    echo "  A new key there could replace or sit beside the one your data is encrypted under, so" >&2
+    echo "  lynox does not start. Set LYNOX_VAULT_KEY, or make the file a regular file with mode 600" >&2
+    echo "  (chmod 600) that holds the key on one line: LYNOX_VAULT_KEY=<key>." >&2
+    echo "" >&2
+    exit 1
+  fi
   LYNOX_VAULT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64'))")
   export LYNOX_VAULT_KEY
+  KEY_SOURCE=minted
   mkdir -p "$HOME/.lynox"
-  printf 'LYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" > "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
+  # A new file is created with mode 600; an existing one is appended to only at mode 600.
+  # The leading newline keeps the key off a last line that has none (`FOO=bar` would become
+  # `FOO=barLYNOX_VAULT_KEY=…`, which no reader takes a key from).
+  (umask 077 && printf '\nLYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" >> "$ENV_FILE")
   echo "  Vault key generated and saved to volume."
   echo "  Save it to a password manager: Settings → Config → Security"
   echo ""
@@ -121,7 +225,10 @@ done
 # rewrites inside it return EACCES. Surface the diagnosis so the operator
 # knows the one-liner fix instead of debugging "refine doesn't work".
 CURRENT_UID=$(id -u)
-CURRENT_USER=$(id -un)
+# The container may run as any host uid (the installer sets `user:` to the host user's), and most
+# have no name in the image. `id -un` then fails, and under `set -e` a failed command substitution
+# in an assignment ends the script: the container restarted in a loop before the engine started.
+CURRENT_USER=$(id -un 2>/dev/null) || CURRENT_USER="(no name)"
 if [ -d "$HOME/.lynox" ]; then
   # Limit to the first few mismatched paths so the log stays readable; the
   # operator only needs to know *that* there are wrong-owned files, not the
@@ -156,6 +263,8 @@ if [ -z "${ORIGIN:-}" ]; then
     export ORIGIN="http://localhost:${LYNOX_HTTP_PORT:-3000}"
   fi
 fi
+
+export LYNOX_VAULT_KEY_SOURCE="$KEY_SOURCE"
 
 # Single process: Engine auto-loads Web UI handler from /app/web-ui/handler.js
 echo "Starting lynox on port ${LYNOX_HTTP_PORT:-3000}..."

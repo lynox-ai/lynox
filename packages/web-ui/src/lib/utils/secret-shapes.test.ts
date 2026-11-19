@@ -13,6 +13,8 @@ describe('looksLikeSecret — chat input guard', () => {
     ['Slack token', 'xox' + 'b-' + '1234567890-' + 'F'.repeat(12)],
     ['AWS key', 'AKIA' + 'G'.repeat(16)],
     ['Google OAuth token', 'ya29.' + 'Z'.repeat(24)],
+    ['Shopify refresh token', 'shp' + 'rt_' + 'zZ9'.repeat(11)],
+    ['Shopify token with a body that is not hex', 'shp' + 'at_' + 'Qx7'.repeat(11)],
     ['private key block', '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'],
     ['JWT', 'eyJ' + 'hbGciOiJIUzI1NiJ9' + '.eyJ' + 'zdWIiOiIxMjM0NTY3ODkwIn0' + '.' + 'H'.repeat(20)],
     // A key followed directly by a word character is still a key.

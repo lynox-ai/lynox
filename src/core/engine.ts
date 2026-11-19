@@ -3,7 +3,9 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider, getActiveProvider } from './llm-client.js';
 import type { RunFailure } from './provider-failure.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
-import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds } from './llm/provider-keys.js';
+import { pinTlsFloor } from './tls-floor.js';
+import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds, poolSuppliesLLMKeys } from './llm/provider-keys.js';
+import { resolveInboxMistralKey } from '../integrations/inbox/mistral-key.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
   LynoxConfig,
@@ -14,7 +16,7 @@ import type {
   ModelTier,
   ContextSource,
 } from '../types/index.js';
-import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier } from '../types/index.js';
+import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier, mistralCommitsEuInference } from '../types/index.js';
 import { setTierSetResolver, resolveDefaultChatTier, resolveAgentModel } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
@@ -26,15 +28,20 @@ import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, approvalQueueEnabled } from './approval-store.js';
 import { ApprovalExecutor, type TickResult } from './approval-executor.js';
+import { createApprovalNotifier } from './approval-notice.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
 import { Containment } from './containment.js';
+import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncContainmentMirror, syncExactMarker } from './history-markers.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
-import { AuditLog } from './audit-log.js';
+import { AuditLog, recordMandateRevoked } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
+import { pauseEndedPlans } from './plan-pause.js';
+import { processErrorText } from './error-egress.js';
+import { fireBeforeRunGate } from './metered-request.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenAllowed } from './profile-secret-view.js';
+import { connectionTokenHolders, resolveGuardAllows } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -49,7 +56,8 @@ import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
-import { compose, engineText, renderFence } from '../core/data-boundary.js';
+import { legacyMemoryReason, type LegacyMemoryReason } from './memory-tool-set.js';
+import { collectOwnBlocks, compose, engineText, renderFence } from '../core/data-boundary.js';
 
 import {
   bashTool,
@@ -116,6 +124,7 @@ import {
   applyEgressSettings,
   generateInitBriefing,
   initSecrets,
+  renderSecretsBriefing,
   ensureVaultKey,
   initScopes,
   initMemoryInstance,
@@ -129,6 +138,7 @@ import { CRM_COLLECTIONS } from './crm-schema.js';
 import { PluginManager } from './plugins.js';
 import { BUILTIN_TOOL_NAMES } from './builtin-tool-names.js';
 import { isFeatureEnabled } from './features.js';
+import { bulkRunsOn } from './bulk-switch.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
 import { NotificationRouter, type DeliverySummary } from './notification-router.js';
@@ -139,6 +149,8 @@ import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
 import { DEFAULT_PER_JOB_TIMEOUT_MS } from '../integrations/inbox/classifier/queue.js';
+import { inboxDisabledAccounts } from '../integrations/inbox/disabled-accounts.js';
+import { InboundMailDeferred } from '../integrations/mail/inbound-deferred.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -219,6 +231,29 @@ export const RESTORE_HOOKS_BOUND_MS = 50_000;
 export const SHUTDOWN_INBOX_CLASSIFY_MS = 5_000;
 export const SHUTDOWN_INBOX_CUTOFF_MS = 8_000;
 
+/**
+ * The inbox rebootstrap on a region switch (`_rebootstrapInboxOnProviderSwitch`) lets the old
+ * runtime drain for at most `REBOOTSTRAP_INBOX_DRAIN_MS`, twice the classifier's per-job timeout,
+ * while new mail is held back. Then the new runtime takes over: the old one's waiting jobs go to
+ * it at once, and its running jobs get `REBOOTSTRAP_INBOX_HANDOVER_MS` more before they are cut
+ * off and go to it too. After both, nothing is classified in the old region any more.
+ */
+export const REBOOTSTRAP_INBOX_DRAIN_MS = 2 * DEFAULT_PER_JOB_TIMEOUT_MS;
+export const REBOOTSTRAP_INBOX_HANDOVER_MS = 5_000;
+
+/** Await `work` for at most `ms`; true when it settled in time. */
+async function settlesWithinMs(work: Promise<void>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // run-group-starter: a single timeout, cleared below whichever way this ends; its callback
+  // only settles a local promise and reports no spend.
+  const timedOut = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), ms); });
+  try {
+    return await Promise.race([work.then(() => true as const), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Await `work` for at most `ms`; running out of time throws. */
 async function settleWithin(work: Promise<void>, ms: number, what: string): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -237,14 +272,16 @@ async function settleWithin(work: Promise<void>, ms: number, what: string): Prom
  * Default the inbox classifier's LLM region from the user's main provider
  * choice. Env override `LYNOX_INBOX_LLM_REGION` always wins (explicit
  * override path for managed-EU tenants who want hard-pinning regardless
- * of UI). When the user picked Mistral in Settings (api.mistral.ai), the
+ * of UI). When the user picked Mistral in Settings (api.eu.mistral.ai), the
  * classifier inherits 'eu' automatically — pre-this-fix the classifier
  * always defaulted to 'us' (Anthropic) regardless of the UI choice,
  * leaking mail snippets + reply-draft bodies to Anthropic-US.
  *
- * Hostname-strict match (URL().hostname === 'api.mistral.ai') — a naive
- * substring would let an attacker-controlled `api.mistral.ai.evil.com`
- * misclassify as EU residency.
+ * 'eu' only for the endpoint Mistral commits to EU/EFTA inference for
+ * (`mistralCommitsEuInference`, exact hostname `api.eu.mistral.ai`). The global
+ * `api.mistral.ai` commits to no location, so it counts as 'us': the warning and
+ * the production gate stay on. A substring match would also let
+ * `api.eu.mistral.ai.evil.com` pass as EU.
  */
 export function resolveInboxLlmRegion(opts: {
   envOverride: string | undefined;
@@ -254,13 +291,7 @@ export function resolveInboxLlmRegion(opts: {
   if (opts.envOverride === 'eu') return 'eu';
   if (opts.envOverride === 'us') return 'us';
   if (opts.provider !== 'openai' || !opts.apiBaseURL) return 'us';
-  let hostname: string;
-  try {
-    hostname = new URL(opts.apiBaseURL).hostname.toLowerCase();
-  } catch {
-    return 'us';
-  }
-  return hostname === 'api.mistral.ai' ? 'eu' : 'us';
+  return mistralCommitsEuInference(opts.apiBaseURL) ? 'eu' : 'us';
 }
 
 /**
@@ -310,6 +341,8 @@ export class Engine {
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
   private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
+  /** The blocks wrapped into {@link briefing} as it was built; see `collectOwnBlocks`. */
+  private readonly briefingOwnBlocks: string[] = [];
   /** The vault's `<secrets>` listing at boot, apart from the briefing: an owner's turn only. */
   private secretsBriefing: string | undefined = undefined;
   private currentManifest: Map<string, number> | null = null;
@@ -406,10 +439,27 @@ export class Engine {
    * GDPR Art. 44+ transfer if the user explicitly switched to EU
    * residency. Suspension flips on BEFORE the shutdown await and clears
    * AFTER the new runtime is wired (or in the `finally` on bootstrap
-   * failure). Mail server keeps mails unread so the next polling cycle
-   * picks them up via the NEW runtime.
+   * failure). While it is on, the hook throws `InboundMailDeferred`, so the
+   * watcher leaves the mail unseen and the next polling cycle hands it to the
+   * NEW runtime. (Returning instead would count as handled: the watcher would
+   * mark the mail seen, and it would never be classified.)
    */
   private _inboxClassifierSuspended: boolean = false;
+  /**
+   * Provider switches waiting for a running rebootstrap (`_propagateProviderSwitch`). While one
+   * waits, new mail is held back as under the suspension: the region it leaves is the one the
+   * live runtime classifies in. The waiting run counts itself off when it starts, in the same
+   * turn in which it sets the suspension.
+   */
+  private _inboxSwitchesWaiting = 0;
+  /** Set when `shutdown` begins, never cleared: a rebootstrap that starts afterwards does nothing. */
+  private _inboxShutdownBegun = false;
+  /**
+   * Set when a migration restore's shutdown begins, never cleared: the process ends next. From
+   * then on every inbound mail is deferred, so a rebootstrap still finishing behind a restore
+   * that gave up on it cannot hand a mail to a runtime the exit then kills.
+   */
+  private _inboxIntakeClosed: boolean = false;
   private _lastBatchParentId: string | null = null;
   private runCount = 0;
   private _notificationRouter = new NotificationRouter();
@@ -427,12 +477,16 @@ export class Engine {
     driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
   } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
+  /** Set once every stored API profile is loaded; until then {@link resolveGuard} cannot tell which vault names hold a connection's token. */
+  private _profilesKnown = false;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _subjectStore: import('./subject-store.js').SubjectStore | null = null;
   /** Durable Knowledge Substrate (DK.1) — the user-owned Know store. Null unless
    *  `durable_memory_enabled` is on (+ engine.db present). */
   private _knowledgeStore: import('./knowledge-store.js').KnowledgeStore | null = null;
+  /** Read by the mandate lock; until the tools are registered it refuses, as `dk_off` would. */
+  private _legacyMemory: LegacyMemoryReason | null = 'dk_off';
   /** Onboarding Wave 1 — the server-side onboarding-flag store. Present whenever
    *  engine.db is (unconditional, NOT DK-gated); null only when engine.db failed to
    *  open (→ HTTP/flow layer fails open: onboarding counts as done, AC-1.7). */
@@ -442,6 +496,13 @@ export class Engine {
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private _bulkSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** The bulk ledger, built at boot whenever engine.db is on, whether bulk runs are on or not:
+   *  `_applyBulkSwitch` hands it to the tool context when they go on. */
+  private _bulkLedgerIfOn: BulkLedger | null = null;
+  /** history.db's copy of the thread containment (`history-markers.ts`); `null` without history.db. */
+  private _containmentMirror: ContainmentMirror | null = null;
+  /** The bulk sweep (ended mandates, judged-run retention), run again when bulk runs go on. */
+  private _bulkSweep: (() => void) | null = null;
   private _erasureSweepTimer: ReturnType<typeof setInterval> | null = null;
   private _runSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** The approval queue's sweep and executor ticks; see `_startApprovalQueue`. */
@@ -608,6 +669,9 @@ export class Engine {
     // `network_policy`, host floor or `enforce_https` changed at runtime is stored and
     // reported back while the tools keep enforcing the boot value until a restart.
     applyEgressSettings(this.userConfig, this._toolContext);
+    // Bulk runs follow the config live: no restart, and a run under way when they go
+    // off is stopped as by its owner.
+    this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
     const newProvider = this.userConfig.provider;
     // Re-sync the provider resolvers (openai tier-map + the hybrid tier_set) on
     // EVERY reload — a routing_mode/tier_set-only change carries no credential
@@ -673,6 +737,9 @@ export class Engine {
     // This path installs a freshly loaded config as well, so the tools must read its egress
     // settings too (see `reloadUserConfig`).
     applyEgressSettings(this.userConfig, this._toolContext);
+    // The fresh config may switch bulk runs too (a config.json edited by hand, then a secret
+    // written): the tools and the ledger follow it here as in `reloadUserConfig`.
+    this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
     if (this.userConfig.provider && this.userConfig.provider !== 'anthropic') {
       await initLLMProvider(this.userConfig.provider);
     }
@@ -818,11 +885,57 @@ export class Engine {
     // path (constructor's _recreateClient via _initContextAndIdentity) is a
     // no-op. Once initialised, defer to the async helper so the await chain
     // doesn't leak into this sync method's signature.
-    if (this._inboxRuntime) {
-      this._inboxRebootstrapInflight = this
-        ._rebootstrapInboxOnProviderSwitch()
-        .finally(() => { this._inboxRebootstrapInflight = null; });
+    // One rebootstrap at a time: a switch while one runs (its drain, or its handover, when the new
+    // runtime is already live) waits for it and then reads the region again. Two at once would
+    // each lift the suspension and clear the in-flight mark the other still needs.
+    const prev = this._inboxRebootstrapInflight;
+    if (this._inboxRuntime || prev) {
+      if (prev) this._inboxSwitchesWaiting += 1;
+      const run = prev
+        ? prev.catch(() => { /* logged by the rebootstrap */ }).then(() => {
+          this._inboxSwitchesWaiting -= 1;
+          return this._rebootstrapInboxOnProviderSwitch();
+        })
+        : this._rebootstrapInboxOnProviderSwitch();
+      // run-group-starter: only clears the in-flight mark and reports no spend; the classifier
+      // jobs a rebootstrap starts run outside any group (`ClassifierQueue._tryStart`).
+      const inflight: Promise<void> = run.finally(() => {
+        if (this._inboxRebootstrapInflight === inflight) this._inboxRebootstrapInflight = null;
+      });
+      this._inboxRebootstrapInflight = inflight;
     }
+  }
+
+  /**
+   * The inbox classifier's Mistral key, and whether its spend is debited to the instance, for
+   * the cold boot and the rebootstrap alike. The managed credit gate and debit apply to the
+   * pool's spend only: on a pool tier, the US classifier (the pool's Anthropic client) and the
+   * EU one on the pool's Mistral key. A classifier on the user's own key is not debited, as the
+   * user already pays the provider for it and would pay twice.
+   *
+   * And the instance's language, for the reminder poller's title (`notice-language.ts`): set here
+   * so the cold boot and the rebootstrap cannot hand the inbox different ones.
+   */
+  /**
+   * What the inbox reads through the mail registry. `confirmAutoReply`: an envelope from Graph's
+   * watch carries no headers, so for every follow-up from someone else the hook asks for the full
+   * message, whose envelope reads Auto-Submitted. Looked up at call time, so a provider
+   * added or replaced later is the one asked. No provider: throw, and the hook reopens.
+   */
+  private _applyInboxMailLookups(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
+    bootOpts.confirmAutoReply = async (accountId, env) => {
+      const provider = this._mailContext?.registry.get(accountId);
+      if (!provider) throw new Error(`no mail provider for ${accountId}`);
+      const message = await provider.fetch({ uid: env.uid, folder: env.folder });
+      return message.envelope.isAutoReply;
+    };
+  }
+
+  private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
+    const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
+    if (key !== undefined) bootOpts.mistralApiKey = key;
+    if (poolSuppliesLLMKeys() && (bootOpts.llmRegion !== 'eu' || poolPays)) bootOpts.meteredHost = this;
+    bootOpts.language = () => this.config.language;
   }
 
   /**
@@ -839,7 +952,27 @@ export class Engine {
    * runtime rather than crashing the whole engine — matching the
    * `_initIntegrations` posture for the cold-boot path.
    */
+  /**
+   * The inbound-mail hook around an inbox runtime. While a rebootstrap has the classifier
+   * suspended, or a restore has closed the intake, it defers the mail instead of handing it to
+   * the runtime (`InboundMailDeferred`): the watcher leaves it unseen for the next tick.
+   */
+  private _inboundMailHook(
+    runtime: import('../integrations/inbox/bootstrap.js').InboxRuntime,
+  ): (accountId: string, envelope: import('../integrations/mail/provider.js').MailEnvelope) => Promise<void> {
+    return async (accountId, envelope) => {
+      if (this._inboxIntakeClosed) throw new InboundMailDeferred('the engine is shutting down for a restore');
+      if (this._inboxClassifierSuspended || this._inboxSwitchesWaiting > 0) throw new InboundMailDeferred('the inbox classifier is switching regions');
+      // Discard the hook's outcome — the MailContext contract is
+      // Promise<void>; only the inbox-internal cold-start path reads it.
+      await runtime.hook(accountId, envelope);
+    };
+  }
+
   private async _rebootstrapInboxOnProviderSwitch(): Promise<void> {
+    // A switch that waited for an earlier rebootstrap can start after a shutdown began: the
+    // shutdown drains what it found, and a new runtime now would outlive it.
+    if (this._inboxShutdownBegun) return;
     if (!this._inboxRuntime || !this._mailStateDb) return;
     const newRegion = resolveInboxLlmRegion({
       envOverride: process.env['LYNOX_INBOX_LLM_REGION'],
@@ -850,42 +983,41 @@ export class Engine {
     // Privacy guard: suspend classification BEFORE we touch the old
     // runtime so any mail that lands during `await old.shutdown()` is
     // not fired into the US-bound closure. The wrapper installed below
-    // (and in `_initIntegrations`) honors this flag — mail stays unread
-    // on the server and gets picked up by the next polling cycle via
-    // the NEW EU-bound runtime.
+    // (and in `_initIntegrations`) honors this flag by deferring the mail:
+    // it stays unseen and the next polling cycle hands it to the NEW
+    // EU-bound runtime.
     this._inboxClassifierSuspended = true;
+    const old = this._inboxRuntime;
+    // Whether the old runtime finished its drain within `REBOOTSTRAP_INBOX_DRAIN_MS`. If not, what
+    // it still holds goes to the new runtime once that is wired (`_retireInboxRuntime`).
+    let drained = false;
     try {
-      const old = this._inboxRuntime;
       // Detach the live runtime first so any concurrent mail arrival
       // doesn't see a half-disposed instance.
       this._inboxRuntime = null;
       this._inboxRetiringRuntime = old;
-      try { await old.shutdown(); } catch { /* best-effort drain */ }
-      this._inboxRetiringRuntime = null;
+      drained = await settlesWithinMs(old.shutdown().catch(() => { /* best-effort drain */ }), REBOOTSTRAP_INBOX_DRAIN_MS);
+      if (drained) this._inboxRetiringRuntime = null;
       // Re-wire the MailContext hook (only present when a vault exists)
       // — without this, the watcher would keep firing into the disposed
       // runtime's hook closure. exactOptionalPropertyTypes forbids `=
       // undefined`, so `delete` is the correct idiom here.
+      // The inbound hook is not removed but replaced by one that defers: without any hook the
+      // watcher would count a mail arriving now as handled and mark it seen.
       if (this._mailContext) {
-        delete this._mailContext.hooks.onInboundMail;
+        this._mailContext.hooks.onInboundMail = async () => {
+          throw new InboundMailDeferred('the inbox classifier is being replaced');
+        };
         delete this._mailContext.hooks.onAccountAdded;
       }
       const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
       const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
       const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
-      const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
-        ?? this.secretStore?.resolve('MISTRAL_API_KEY')
-        ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
-        ?? process.env['MISTRAL_API_KEY']
-        ?? undefined;
       const folderBlacklistRaw = process.env['LYNOX_INBOX_FOLDER_BLACKLIST'] ?? '';
       const folderBlacklist = new Set(
         folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
       );
-      const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-      const disabledAccounts = new Set(
-        disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-      );
+      const disabledAccounts = inboxDisabledAccounts();
       const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
         mailStateDb: this._mailStateDb,
         anthropicClient: this.client,
@@ -895,39 +1027,44 @@ export class Engine {
         requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
         privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
       };
-      if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
       if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
       if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
       bootOpts.notificationRouter = this._notificationRouter;
       const runHistoryForInbox = this.getRunHistory();
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
-      // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
-      bootOpts.meteredHost = this;
+      this._applyInboxKeyAndMeter(bootOpts);
+      this._applyInboxMailLookups(bootOpts);
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
-        // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
-        // true (e.g. during a future drain window) the hook short-
-        // circuits without touching the runtime closure. Preserves the
-        // `Promise<void>` return type the MailContext awaits.
-        this._mailContext.hooks.onInboundMail = async (accountId, envelope) => {
-          if (this._inboxClassifierSuspended) return;
-          // Discard the hook's outcome — the MailContext contract is
-          // Promise<void>; only the inbox-internal cold-start path reads it.
-          await runtime.hook(accountId, envelope);
-        };
+        this._mailContext.hooks.onInboundMail = this._inboundMailHook(runtime);
         this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
         // Mark an inbox item `replied` when the user answers it in chat.
         this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+        // What the classifier made of each mail, for mail_triage.
+        this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+        // The store as the inbox view reads it, for inbox_read.
+        this._mailContext.hooks.inboxReader = runtime.inboxReader;
+        // Waiting rules for inbox_rule_propose.
+        this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
+      // New mail goes to the new runtime from here on; what the old one still holds follows it.
+      this._inboxClassifierSuspended = false;
+      if (!drained) await this._retireInboxRuntime(old, (payload) => runtime.queue.enqueue(payload));
     } catch (err) {
-      // Same posture as the cold-boot path — surface but don't crash.
+      // Same posture as the cold-boot path — surface but don't crash. Without a runtime there is
+      // no hook, as on a cold boot whose inbox failed: the deferring one would hold the mail back
+      // until the next restart.
+      if (this._mailContext) delete this._mailContext.hooks.onInboundMail;
       console.error(
         '[lynox] Inbox classifier rebootstrap on provider-switch failed — '
         + 'classifier disabled until next restart:',
-        err,
+        processErrorText(err, true),
       );
+      // No runtime to hand over to: what the old one still holds is surfaced as a failed
+      // classification, still within the bound.
+      if (!drained) await this._retireInboxRuntime(old, () => false);
     } finally {
       // Always clear: a mid-flight bootstrap failure must not leave the
       // engine with suspension stuck on (mail would silently pile up).
@@ -935,8 +1072,27 @@ export class Engine {
     }
   }
 
+  /**
+   * End a runtime the rebootstrap replaced that did not finish its drain in time: its waiting jobs
+   * go to `handOver` at once, its running jobs get `REBOOTSTRAP_INBOX_HANDOVER_MS` and are then
+   * cut off and go there too (`HandedOverError`). A shutdown meanwhile finds it as the retiring
+   * runtime and drains it its own way.
+   */
+  private async _retireInboxRuntime(
+    old: import('../integrations/inbox/bootstrap.js').InboxRuntime,
+    handOver: (payload: import('../integrations/inbox/runner.js').InboxQueuePayload) => boolean,
+  ): Promise<void> {
+    const now = Date.now();
+    try {
+      await old.shutdown({ within: { classifyUntil: now, cutOffAt: now + REBOOTSTRAP_INBOX_HANDOVER_MS }, handOver });
+    } catch { /* best-effort */ }
+    if (this._inboxRetiringRuntime === old) this._inboxRetiringRuntime = null;
+  }
+
   async init(): Promise<this> {
     this._startedAt = Date.now();
+    // Before anything opens a connection: no launch flag may lower the TLS floor (tls-floor.ts).
+    pinTlsFloor();
     await this._initBootstrap();
     await this._initPersistence();
     await this._initContextAndIdentity();
@@ -1229,18 +1385,31 @@ export class Engine {
     // The exact (Shopify) clearance: asked of the control plane once per boot, recorded in
     // engine.db's marker (v38). Not provisioned (no managed env) means it never clears.
     // Its debug paths close for good at the first set and, on every later boot, here (S3, E4).
+    // Both markers are kept in history.db as well (cut S3-E, `history-markers.ts`), with the
+    // threads, so an engine.db set aside on corruption or older than history.db does not open
+    // what it held. The exact copy only on a provisioned instance: on a self-hosted one the
+    // marker is never set, and a copy found there came from elsewhere. With the control-plane env
+    // incomplete this boot it is read (any row holds) and not written.
+    const historyDb = this.runHistory?.getDb() ?? null;
+    const containmentMirror = historyDb ? new ContainmentMirror(historyDb) : null;
+    this._containmentMirror = containmentMirror;
+    const controlPlane = controlPlaneFromEnv();
+    const exactMirror = historyDb && isProvisionedInstance() ? new ExactMirror(historyDb, controlPlane?.instanceId ?? null) : null;
     if (this.engineDb) {
       const db = this.engineDb;
-      const marker = { isSet: () => db.exactMarkerSet(), set: () => { db.setExactMarker(); } };
-      this._toolContext.exactClearance = new ExactClearance(controlPlaneFromEnv(), marker, { onMarkerSet: () => { refuseDebug(); } });
+      syncExactMarker(db, exactMirror);
+      const marker = exactMarkerOf(db, exactMirror);
+      this._toolContext.exactClearance = new ExactClearance(controlPlane, marker, { onMarkerSet: () => { refuseDebug(); } });
       this._toolContext.storeBindingDigest = (id, origin, value) => db.storeBindingDigest(id, origin, value);
       // And which threads and bulk runs a store connection was attached for (v40).
-      this._toolContext.containment = new Containment(db.getDb());
-      if (isExactHeld(marker)) refuseDebug();
+      syncContainmentMirror(containmentMirror, db.getDb());
+      this._toolContext.containment = new Containment(db.getDb(), containmentMirror);
+      if (exactHeldAtBoot(isExactHeld(marker), exactMirror)) refuseDebug();
     } else {
       this._toolContext.exactClearance = null;
       this._toolContext.storeBindingDigest = null;
-      this._toolContext.containment = null;
+      // Reads only: without engine.db nothing can be contained, but history.db's copy still answers.
+      this._toolContext.containment = containmentMirror ? new Containment(null, containmentMirror) : null;
       // No engine.db, no readable marker: fail-closed.
       if (isExactHeld(null)) refuseDebug();
     }
@@ -1309,6 +1478,17 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] workflow content-schema migration failed: ${err instanceof Error ? err.message : String(err)} — retry next boot\n`);
       }
+
+      // The workflow stamps from before the digest get theirs, once per engine.db (marker v69),
+      // AFTER the backfill and the content migration so it sees the definitions as they run.
+      // A failure leaves the marker at 0 and every stamp without a digest not holding: those
+      // workflows wait for the owner (fail closed) until a later boot passes.
+      try {
+        const stamped = this.runHistory.stampExistingWorkflows();
+        if (stamped !== null && stamped > 0) process.stderr.write(`[lynox] workflow stamps: ${stamped} definition(s) bound to their steps\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] workflow stamp pass failed: ${processErrorText(err)} — retry next boot\n`);
+      }
     }
 
     // Initialize thread store (shares DB connection with RunHistory)
@@ -1367,7 +1547,7 @@ export class Engine {
           try {
             promptStore.expireEndedMandates(mandateLive);
           } catch (err: unknown) {
-            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${processErrorText(err)}\n`);
           }
         };
         sweepEnded();
@@ -1492,7 +1672,29 @@ export class Engine {
     // started or whose question it answered, and the run tails it follows. Every 5 minutes for a
     // grant that ran out, at once when a revoke is recorded. Nothing runs at boot, so there is no
     // boot sweep. Each part fails on its own and is tried again on the next sweep.
+    // A plan with a proven ended member pauses (`plan-pause.ts`) — at boot as well, before the
+    // worker starts and before the server listens, so a plan from before the upgrade whose mandate
+    // ended meanwhile is paused before anything can start it. And inside the login that extends an
+    // ended grant, before that login commits: otherwise the extension would make the plan live again.
+    this.pausePlansOfEndedMandates();
+    this._mandateEnds?.onExtendAfterEnd((mandateId, before, nowS, email) => {
+      const db = this.engineDb?.getDb();
+      if (db === undefined) return;
+      pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, onlyMandateEmail: email, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+      // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
+      // member live again and its connections open to it. So the parts that end runs follow at
+      // once, outside the login's transaction, as on a revoke. They read what was committed: when
+      // the login's transaction fails, the pause is gone with it and so is the reason to stop.
+      // Outside any run group, as the sweeps are: ending runs belongs to no run.
+      runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
+    });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
+    // The revoke in the revoked person's trail. A throw is logged by `MandateEnds.revoke` and
+    // undoes nothing: the end is already written and every later request is refused by it.
+    this._mandateEnds?.onRevoke((mandateId) => {
+      const log = this.getAuditLog();
+      if (log !== null) recordMandateRevoked(log, mandateId);
+    });
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
     this._runSweepTimer.unref?.();
 
@@ -1509,8 +1711,9 @@ export class Engine {
     }
 
     // Configure persistent budget caps, HTTP rate limits and the egress policy.
-    // Called with or without RunHistory: the limits that count against it are
-    // skipped when it failed to open, the egress policy is applied regardless.
+    // Called with or without RunHistory. Without it the daily/monthly caps cannot be
+    // checked and refuse every run (session-budget.ts), and the send-rate limits that
+    // count against it refuse rather than send uncounted; the egress policy is applied regardless.
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
     configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
   }
@@ -1519,7 +1722,8 @@ export class Engine {
   private async _initContextAndIdentity(): Promise<void> {
 
     // Resolve context (CLI: project detection, others: explicit)
-    this.context = resolveContext(this.config);
+    // In sidecar mode the context's workspace is the label (D0); the mode was built with the tool context.
+    this.context = resolveContext(this.config, this._toolContext.shellIsolation);
 
     // Non-CLI sources always get isolated workspace. A root or context directory the engine
     // cannot use stops the boot here, naming the path, instead of every upload quietly falling
@@ -1544,6 +1748,10 @@ export class Engine {
     const secretResult = initSecrets(this.userConfig);
     this.secretVault = secretResult.vault;
     this.secretStore = secretResult.store;
+    // From the moment the store exists, a token of a connection whose mandate has ended is not
+    // handed out, to anyone. Set here, not after the profiles load: a guard set at the end of that
+    // block is never set when the block throws.
+    this.secretStore?.setResolveGuard((name) => this.resolveGuard(name));
     this.secretsBriefing = secretResult.secretsBriefing;
     for (const part of secretResult.briefingParts) {
       this.briefing = compose(
@@ -1614,6 +1822,9 @@ export class Engine {
       this.context?.id ?? '',
       // Read per write, not captured: the store and the flag can change after boot.
       (threadId) => this._threadStore?.getThread(threadId)?.skip_extraction === 1,
+      // The log a mandate's derived entry is recorded in (660a-3); read per write, like the
+      // flag above.
+      () => this._toolContext.auditLog,
     );
 
     // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the
@@ -1681,6 +1892,14 @@ export class Engine {
         // estimate that said "the store is already on the engine" was measuring
         // a reachability that did not exist.
         this._connectionStore = connStore;
+        // Every API profile row without its opaque id gets one, on every boot (660a-1c S-2): the
+        // migration ran once, and a row an older binary wrote after a pin back has none. In its own
+        // catch: a failure costs a row's id, never the profiles or engine.db.
+        try {
+          connStore.fillApiTrailIds();
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox] API profile id fill failed: ${processErrorText(err)}\n`);
+        }
         this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
         loaded = this._apiStore.loadFromConnections(connStore);
         this._apiStore.setConnectionStore(connStore);
@@ -1724,6 +1943,9 @@ export class Engine {
         // Degraded (engine.db unavailable): fall back to the flat-JSON directory,
         // exactly as before S4b.
         loaded = this._apiStore.loadFromDirectory(apisDir);
+        // What a person changes from here on would land only in those files, which the next boot
+        // with engine.db does not read: refused with a plain reason instead.
+        this._apiStore.refuseChangesWithoutStore();
       }
       // Wire the in-memory store into tool context unconditionally — otherwise
       // a fresh install (zero profiles) leaves toolContext.apiStore undefined, so
@@ -1731,6 +1953,12 @@ export class Engine {
       // memory, and GET /api/api-profiles keeps returning [] until the next
       // engine restart re-projects it.
       this._toolContext.apiStore = this._apiStore;
+      // The `<secrets>` briefing was rendered before any profile was known; now that they are,
+      // the names that hold a connection's token are listed apart, as used through their profile.
+      if (this.secretStore && this.secretsBriefing !== undefined) {
+        const apiStore = this._apiStore;
+        this.secretsBriefing = renderSecretsBriefing(this.secretStore, (n) => connectionTokenHolders(apiStore, n));
+      }
       // Once per database, after every stored profile is known: each vault secret whose profiles
       // agree on where it goes is bound there. A failure leaves the names unbound, which refuses
       // their sends rather than letting them go anywhere, and the next boot tries again.
@@ -1742,10 +1970,15 @@ export class Engine {
           process.stderr.write(`[lynox:vault-bindings] Migration failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }
-      // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
-      this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
+      // The stored profiles are loaded: the guard set with the secret store answers by them, and by
+      // the entries it could not read (`resolveGuardAllows`).
+      this._profilesKnown = true;
+      // The LLM client was built before this, when the guard handed out only the environment's and
+      // the platform's names: a Vertex project id kept in the vault is read now.
+      if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();
       if (loaded > 0) {
-        const apiContext = this._apiStore.formatForSystemPrompt();
+        const store = this._apiStore;
+        const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
         this.briefing = this.briefing ? `${this.briefing}\n\n${apiContext}` : apiContext;
       }
       // Inject the curated "bootstrap-suggestion" catalog regardless of how
@@ -1766,8 +1999,11 @@ export class Engine {
       if (suggestedContext) {
         this.briefing = this.briefing ? `${this.briefing}\n\n${suggestedContext}` : suggestedContext;
       }
-    } catch {
+    } catch (err: unknown) {
       this._apiStore = null;
+      // From here on the guard hands out no vault name that could hold a connection's token: say so,
+      // or the owner's own secrets look missing with no cause anywhere.
+      process.stderr.write(`[lynox:api-store] API profiles could not be loaded; until the next start only the environment's and the platform's own secrets are handed out: ${processErrorText(err)}\n`);
     }
 
     // Register builtin tools
@@ -1797,27 +2033,25 @@ export class Engine {
       this.registry.register(calendarReadTool);
     }
 
-    // Bulk runs' dry run, behind `bulk_runs_enabled` — registered conditionally for the
+    // Bulk runs' dry run, behind `bulkRunsOn` — registered conditionally for the
     // same byte-identical-when-OFF reason. Gated on the engine.db handle as well: the
     // ledger lives there, and a registered tool with no ledger would only ever refuse.
-    const bulkOn = this.userConfig.bulk_runs_enabled === true;
+    // The switch can move at runtime (`reloadUserConfig` → `_applyBulkSwitch`), so nothing
+    // below keeps a copy of it: the sweep asks the tool context on every pass.
     if (this.engineDb) {
-      const ledger = new BulkLedger(this.engineDb);
-      if (bulkOn) {
-        this._toolContext.bulkLedger = ledger;
-        this.registry.register(bulkPlanTool).register(bulkStatusTool);
-      }
+      const ledger = new BulkLedger(this.engineDb, this._containmentMirror);
+      this._bulkLedgerIfOn = ledger;
+      this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
       // every 5 minutes, and when a revoke is recorded. Fails on its own, like the prompt sweep.
       // The same sweep ends a started judged run nobody approved within its retention (PRD
       // bulk-loop §3.1): its before-images went to a model, and the prune keeps it from a
       // newer plan — so it must not depend on a plan being made to end. Nor on the flag: a run
       // started before the flag went off is deleted on time all the same.
-      const own = bulkOn ? this.getBulkOwnership() : null;
       const sweep = (): void => {
-        if (own) {
+        if (this._toolContext.bulkLedger !== null) {
           try {
-            ledger.expireEndedPlanners(own);
+            ledger.expireEndedPlanners(this.getBulkOwnership());
           } catch (err: unknown) {
             process.stderr.write(`[lynox] ending bulk runs of ended mandates failed: ${err instanceof Error ? err.message : String(err)}\n`);
           }
@@ -1828,8 +2062,9 @@ export class Engine {
           process.stderr.write(`[lynox] ending judged bulk runs past their retention failed: ${err instanceof Error ? err.name : 'error'}\n`);
         }
       };
+      this._bulkSweep = sweep;
       sweep();
-      if (bulkOn) this._mandateEnds?.onRevoke(sweep);
+      this._mandateEnds?.onRevoke(sweep);
       this._bulkSweepTimer = setInterval(sweep, 5 * 60_000);
       this._bulkSweepTimer.unref?.();
       this._startApprovalQueue();
@@ -1855,7 +2090,12 @@ export class Engine {
     // was carried as dormant. The CP default flipped ON (pro migration 0048), so it is now the
     // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
     // silent downgrade over the alternative — the alternative was silence with nothing working.
-    if (this.userConfig.durable_memory_enabled === true && this._knowledgeStore) {
+    this._legacyMemory = legacyMemoryReason(this.userConfig.durable_memory_enabled, this._knowledgeStore);
+    // The old tools here stand in for the durable ones, whose next boot with engine.db does not read
+    // what these write: a change is refused with a plain reason instead. With durable memory off the
+    // files are the memory, and they are written as before.
+    if (this._legacyMemory === 'store_missing' && this.engineDb === null) this.memory?.refuseChangesWithoutStore();
+    if (this._legacyMemory === null) {
       this.registry
         .register(rememberTool)
         .register(recallTool)
@@ -1878,6 +2118,9 @@ export class Engine {
       const { TaskManager, setPipelineModeLookup } = await import('./task-manager.js');
       this._taskManager = new TaskManager(this.runHistory);
       this._toolContext.taskManager = this._taskManager;
+      // Without engine.db a to-do lands in history.db only, which the next boot with engine.db may
+      // not read: refused with a plain reason instead (`refuseTaskChangesWithoutStore`).
+      if (this.engineDb === null) this._taskManager.refuseTaskChangesWithoutStore();
       // Wire the pipeline-mode lookup so TaskManager can refuse to schedule
       // pipelines it may not run. Lazy-imported to avoid a tools→core cycle.
       // Fail-closed: if the import or wiring fails, install a lookup that
@@ -1924,6 +2167,19 @@ export class Engine {
       }
       if (sourceColumns.missing.length > 0) {
         process.stderr.write(`[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
+      }
+      // The opaque id a mandate's row in the instance trail names a table by. Every boot, so a
+      // table created without one (by an older build on this file) gets it here. Never thrown:
+      // a table without an id is named by its kind only.
+      const collectionIds = this._dataStore.ensureCollectionIds();
+      if (collectionIds.failed !== null) {
+        process.stderr.write(`[lynox] DataStore: tables could not get their ids; a mandate's rows name them by their kind only until a restart assigns them: ${collectionIds.failed}\n`);
+      }
+      if (collectionIds.indexFailed !== null) {
+        process.stderr.write(`[lynox] DataStore: the unique index on table ids could not be created: ${collectionIds.indexFailed}\n`);
+      }
+      for (const r of collectionIds.renumbered) {
+        process.stderr.write(`[lynox] DataStore: ${r.name === null ? 'a table with an invalid name' : `table "${r.name}"`} shared its id with another and got a new one: ${r.from} -> ${r.to}\n`);
       }
       // Registered as soon as the store exists — all six, unconditionally. This
       // used to wait for `listCollections().length > 0`, which an instance with
@@ -2141,8 +2397,8 @@ export class Engine {
         // EU residency: default the inbox classifier provider from the
         // user's chosen main provider. When the user picked Mistral in
         // Settings (`userConfig.provider === 'openai'` against
-        // api.mistral.ai), the classifier inherits that choice and uses
-        // Mistral (EU-resident) automatically — no env var required.
+        // api.eu.mistral.ai), the classifier inherits that choice and uses
+        // Mistral's EU endpoint automatically — no env var required.
         //
         // `LYNOX_INBOX_LLM_REGION` remains an explicit override (e.g.
         // managed-EU tenants who want hard-pinning regardless of the UI
@@ -2164,11 +2420,6 @@ export class Engine {
         // the runtime — without this, switching the main provider to Mistral
         // would leave the classifier on Anthropic-US (the H-012 leak).
         this._inboxLlmRegion = llmRegion;
-        const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
-          ?? this.secretStore?.resolve('MISTRAL_API_KEY')
-          ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
-          ?? process.env['MISTRAL_API_KEY']
-          ?? undefined;
         // Folder blacklist: comma-separated env, case-insensitive match.
         // Use case: "Banking, Privat, Healthcare" — those folders' mails
         // never reach the inbox classifier path at all.
@@ -2177,10 +2428,7 @@ export class Engine {
           folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
         );
         // Per-account opt-out: comma-separated mail_account ids.
-        const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-        const disabledAccounts = new Set(
-          disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-        );
+        const disabledAccounts = inboxDisabledAccounts();
         const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
           mailStateDb,
           anthropicClient: this.client,
@@ -2190,7 +2438,6 @@ export class Engine {
           requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
           privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
         };
-        if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
         if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
         if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
         // Wire the notification router so the reminder poller can fire
@@ -2201,30 +2448,28 @@ export class Engine {
         // in the dashboard.
         const runHistoryForInbox = this.getRunHistory();
         if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
-        // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
-        bootOpts.meteredHost = this;
+        this._applyInboxKeyAndMeter(bootOpts);
+        this._applyInboxMailLookups(bootOpts);
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured
         // the MailContext is null — the runtime is still alive and the
         // hook can be invoked manually by other inbound-channel adapters.
         if (this._mailContext) {
-          // Suspension-aware wrapper — symmetric with the rebootstrap
-          // path. The flag is only set during cross-region rebootstrap;
-          // on the cold-boot path it is permanently false, so the
-          // wrapper is a zero-cost passthrough until the first switch.
-          this._mailContext.hooks.onInboundMail = async (accountId, envelope) => {
-            if (this._inboxClassifierSuspended) return;
-            // Discard the hook's outcome — the MailContext contract is
-            // Promise<void>; only the inbox-internal cold-start path reads it.
-            await runtime.hook(accountId, envelope);
-          };
+          // Suspension-aware wrapper, the same one the rebootstrap installs.
+          this._mailContext.hooks.onInboundMail = this._inboundMailHook(runtime);
           // Auto-trigger backfill on account-connect. The adapter gates
           // re-runs via `state.hasAnyItemForAccount`, so a re-credential
           // does not pull provider.list() again.
           this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
           // Mark an inbox item `replied` when the user answers it in chat.
           this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+          // What the classifier made of each mail, for mail_triage.
+          this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+          // The store as the inbox view reads it, for inbox_read.
+          this._mailContext.hooks.inboxReader = runtime.inboxReader;
+          // Waiting rules for inbox_rule_propose.
+          this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —
@@ -2248,7 +2493,7 @@ export class Engine {
       } catch (err) {
         // Surface the failure so a silently-disabled feature does not
         // become a debugging black hole. Mail integration still works.
-        console.error('[lynox] Inbox bootstrap failed — feature disabled:', err);
+        console.error('[lynox] Inbox bootstrap failed — feature disabled:', processErrorText(err, true));
       }
     }
 
@@ -2424,7 +2669,8 @@ export class Engine {
           if (result.success) {
             process.stderr.write(`[lynox] Pre-update backup created: ${result.path}\n`);
           } else {
-            process.stderr.write(`[lynox] Pre-update backup failed: ${result.error ?? 'unknown'}\n`);
+            const { backupFailureDetail } = await import('./backup.js');
+            process.stderr.write(`[lynox] Pre-update backup failed${backupFailureDetail(result.error, 'unknown')}\n`);
           }
         }
 
@@ -2635,7 +2881,12 @@ export class Engine {
    *  first use and kept, so every run files into the same handle. */
   getApprovalStore(): ApprovalStore | null {
     if (this.engineDb === null) return null;
-    if (this._approvalStore === null) this._approvalStore = new ApprovalStore(this.engineDb);
+    if (this._approvalStore === null) {
+      // Every filed entry tells the owner, whichever run filed it.
+      this._approvalStore = new ApprovalStore(this.engineDb, {
+        onFiled: createApprovalNotifier({ router: this._notificationRouter, enabled: approvalQueueEnabled, language: () => this.config.language }),
+      });
+    }
     return this._approvalStore;
   }
   private _approvalExecutor: ApprovalExecutor | null = null;
@@ -2696,10 +2947,43 @@ export class Engine {
   /** When each mandate ends (mandate-ends.ts), or null when engine.db is unavailable. */
   getMandateEnds(): MandateEnds | null { return this._mandateEnds; }
 
+  /** Whether the plan's latest question was closed because a mandate ended. */
+  private closedPromptOf(triggerId: string): boolean {
+    try {
+      return this._promptStore?.getLatestForTrigger(triggerId)?.closed_reason === 'mandate_ended';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Pauses every plan with a proven ended member (`plan-pause.ts`), then closes the open question
+   * of every paused plan. The pause is written first and holds even when closing the question
+   * fails; that is tried again on the next sweep for as long as the plan is paused and its
+   * question open. Never throws.
+   */
+  private pausePlansOfEndedMandates(): void {
+    const db = this.engineDb?.getDb();
+    const ends = this._mandateEnds;
+    // Switched off, `pauseEndedPlans` returns before it reads or closes anything.
+    if (db === undefined || ends === null) return;
+    const prompts = this._promptStore;
+    try {
+      pauseEndedPlans({
+        db, endOf: (id) => ends.endRow(id), closedPromptOf: (id) => this.closedPromptOf(id),
+        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id, 'plan_paused'); } } : {}),
+      });
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${processErrorText(err)}\n`);
+    }
+  }
+
   /** Ends what mandates whose grant has ended are running (§3.13 B8). See the sweep in `init`. */
   private endEndedMandateRuns(): void {
     const isLive = (mandateId: string): boolean => this._mandateEnds?.isLive(mandateId) ?? false;
     const parts: ReadonlyArray<readonly [string, () => unknown]> = [
+      // First, so a run of a plan paused now is stopped by the part after it.
+      ['plan pauses', () => this.pausePlansOfEndedMandates()],
       ['chat runs', () => this._runExecutor?.abortEnded(isLive)],
       ['worker runs', () => this._workerLoop?.stopEndedStarters(isLive)],
       ['run tails', () => this._runBufferManager?.closeEndedTails(isLive)],
@@ -2708,7 +2992,7 @@ export class Engine {
       try {
         end();
       } catch (err: unknown) {
-        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${processErrorText(err)}\n`);
       }
     }
   }
@@ -2719,6 +3003,7 @@ export class Engine {
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
+  getBriefingOwnBlocks(): readonly string[] { return [...this.briefingOwnBlocks]; }
   getSecretsBriefing(): string | undefined { return this.secretsBriefing; }
   /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
    *  no LLM. Called per-Session so the overview is current, not frozen at engine boot.
@@ -2738,8 +3023,20 @@ export class Engine {
   getKnowledgeLayer(): KnowledgeLayer | null { return this.knowledgeLayer; }
   /** Durable Knowledge Substrate (DK.1) store, or null when `durable_memory_enabled` is off. */
   getKnowledgeStore(): import('./knowledge-store.js').KnowledgeStore | null { return this._knowledgeStore; }
+  /** Why the legacy memory tools are registered, or `null` for the durable ones; set where they are registered. */
+  getLegacyMemoryReason(): LegacyMemoryReason | null { return this._legacyMemory; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
+
+  /** The secret store's resolve guard: {@link resolveGuardAllows} over this engine's state. */
+  private resolveGuard(name: string): boolean {
+    return resolveGuardAllows({
+      profilesKnown: this._profilesKnown,
+      apiStore: this._apiStore,
+      ends: this._mandateEnds,
+      fromEnvironment: (n) => this.secretStore?.isEnvironmentSecret(n) === true,
+    }, name);
+  }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 
   /**
@@ -3026,6 +3323,40 @@ export class Engine {
   getDataStore(): DataStore | null { return this._dataStore; }
   /** The bulk-run ledger — null unless `bulk_runs_enabled` and engine.db are both on. */
   getBulkLedger(): BulkLedger | null { return this._toolContext.bulkLedger; }
+  /** The bulk ledger while bulk runs are OFF, and null while they are on or without engine.db.
+   *  Only for the worker: a bulk trigger that fires while they are off ends its run on it as
+   *  the owner's stop would (`WorkerLoop`), instead of skipping and leaving the run unhalted. */
+  getBulkLedgerSwitchedOff(): BulkLedger | null {
+    return this._toolContext.bulkLedger === null ? this._bulkLedgerIfOn : null;
+  }
+
+  /**
+   * Turn bulk runs on or off for this engine: the tool context's ledger, the two bulk tools in
+   * the registry (so the model's tool list follows on the session's next turn, through the
+   * registry's version), and on OFF every bulk task under way. Those are stopped through the
+   * owner's stop (`WorkerLoop.stopBulkTasks`), so a run is never left half written: an atomic one
+   * rolls back, any other halts where it stood and can be resumed once bulk runs are on again.
+   * A no-op when nothing changes, and without engine.db, where bulk runs cannot be on.
+   */
+  private _applyBulkSwitch(on: boolean): void {
+    const ledger = this._bulkLedgerIfOn;
+    // Without engine.db (or before boot built the ledger) there is nothing to switch.
+    if (ledger === null) return;
+    const next = on;
+    if (next === (this._toolContext.bulkLedger !== null)) return;
+    if (next) {
+      this._toolContext.bulkLedger = ledger;
+      this.registry.register(bulkPlanTool).register(bulkStatusTool);
+      // While off the sweep skipped the runs of ended mandates; end them now, not up to five
+      // minutes after the tools are back.
+      this._bulkSweep?.();
+      return;
+    }
+    this._toolContext.bulkLedger = null;
+    this.registry.unregister(bulkPlanTool.definition.name);
+    this.registry.unregister(bulkStatusTool.definition.name);
+    this._workerLoop?.stopBulkTasks();
+  }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
   getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; gcpProjectId?: string | undefined; gcpRegion?: string | undefined; openaiModelId?: string | undefined } {
     return {
@@ -3109,10 +3440,15 @@ export class Engine {
   // ── Batch ──
 
   async batch(reqs: BatchRequest[], sessionConfig?: { systemPromptSuffix?: string | undefined }): Promise<string> {
+    const modelTier = this.config.model ?? 'deep';
+    // A batch is a paid model call outside `Session.run()`: the same admission as
+    // every other one — the daily and monthly spending caps, then the hooks.
+    const gate = await fireBeforeRunGate(this, modelTier);
+    if (gate.blockedReason !== null) throw new Error(gate.blockedReason);
     const result = await submitBatch(
       this.client, reqs,
       {
-        modelTier: this.config.model ?? 'deep',
+        modelTier,
         maxTokens: this.config.maxTokens ?? 8192,
         systemPrompt: this.config.systemPrompt,
         systemPromptSuffix: sessionConfig?.systemPromptSuffix,
@@ -3213,6 +3549,7 @@ export class Engine {
    */
   async shutdown(options: { inboxBacklog?: 'classify' | 'dead-letter' | 'bounded' | undefined } = {}): Promise<void> {
     const forRestore = options.inboxBacklog === 'dead-letter';
+    this._inboxShutdownBegun = true;
     const startedAt = Date.now();
     const within = options.inboxBacklog === 'bounded'
       ? { classifyUntil: startedAt + SHUTDOWN_INBOX_CLASSIFY_MS, cutOffAt: startedAt + SHUTDOWN_INBOX_CUTOFF_MS }
@@ -3231,6 +3568,9 @@ export class Engine {
     // provider-switch) so we don't dispose a runtime that is about to be
     // replaced and then forgotten.
     if (forRestore) {
+      // A mail arriving from here on is not handed to a runtime the exit then kills. It stays
+      // unseen, but only IMAP lists it again after the restart; Gmail and Graph do not.
+      this._inboxIntakeClosed = true;
       try {
         await settleWithin(this._drainInboxForRestore(), RESTORE_INBOX_BOUND_MS, 'inbox shutdown');
       } catch (err: unknown) {

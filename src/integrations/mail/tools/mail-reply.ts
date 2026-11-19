@@ -16,18 +16,19 @@ import {
   type MailSendResult,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
+import { mailTargets } from '../../../core/send-target.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
-import { resolveProvider, type MailRegistry } from './registry.js';
+import { resolveProvider, type MailRegistry, accountForRow } from './registry.js';
 import {
   checkMailRateLimit,
   checkRecipientDedup,
   recordMailSend,
 } from './rate-limit.js';
 import { isInputRequired } from '../../../core/input-required.js';
-import { namedTarget } from '../../../core/audit-log.js';
+import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 import { currentCallFiling } from '../../../core/call-connection.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import type { MailReplyPayload, StoredAddress } from '../../../core/approval-store.js';
@@ -53,7 +54,13 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
   return {
     outwardWrite: () => 'reply',
     // A reply reads the mail it answers before it writes: that read is a row of its own.
-    outwardRead: (input) => namedTarget([['account', input.account], ['folder', input.folder], ['uid', input.uid]]),
+    outwardRead: (input) => namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)], ['uid', input.uid]]),
+    // Only the recipients the call names: the `to` and `cc` overrides, parsed with this tool's
+    // own parser. The default recipients (the original sender, and everyone on reply_all) come
+    // from the mail being answered, which the input does not hold.
+    sendTargets: (input) => mailTargets(
+      [input.to, input.cc].flatMap((field) => parseAddressList(field).map((a) => a.address)),
+    ),
     definition: {
       name: 'mail_reply',
       description:
@@ -319,10 +326,15 @@ ${bodyPreview}`;
     originalThreadKey,
     ...(origMessageId ? { originalMessageId: origMessageId } : {}),
     originalFolderUid: `${original.envelope.folder}:${String(original.envelope.uid)}`,
+    // The provider the original was fetched through, resolved from whatever the call named: the
+    // uid above is this mailbox's.
+    readAccountId: readProvider.accountId,
     original: {
       from: original.envelope.from.map(a => a.address).join(', '),
       to: original.envelope.to.map(a => a.address),
       cc: original.envelope.cc.map(a => a.address),
+      // A reply goes to the Reply-To by default, so the card counts it as named by the original.
+      replyTo: original.envelope.replyTo.map(a => a.address),
       subject: original.envelope.subject,
       date: original.envelope.date instanceof Date && !Number.isNaN(original.envelope.date.getTime()) ? original.envelope.date.toISOString() : '',
     },
@@ -351,9 +363,14 @@ ${bodyPreview}`;
 
 /**
  * The reply's last step, after consent: send exactly what {@link prepareReply} fixed, count
- * it, and reconcile the inbox.
+ * it, write it to the sent log, and reconcile the inbox.
  */
-export async function commitReply(sendProvider: MailProvider, c: ReplyCommit, ctx: MailContext | undefined): Promise<string> {
+export async function commitReply(
+  sendProvider: MailProvider,
+  c: ReplyCommit,
+  ctx: MailContext | undefined,
+  opts: { originOwnerKnown?: boolean | undefined } = {},
+): Promise<string> {
   const sendInput: MailSendInput = {
     to: c.to,
     subject: c.subject,
@@ -370,6 +387,20 @@ export async function commitReply(sendProvider: MailProvider, c: ReplyCommit, ct
 
   const result: MailSendResult = await sendProvider.send(sendInput);
   recordMailSend([...c.to, ...c.cc], c.subject);
+  // The sent log, as `sendMail` writes it: the outbound history and the export list replies too.
+  // A reply's default recipients come from the original mail, not from the owner, so the row counts
+  // them as owner-named only when the caller checked every recipient and says so (`originOwnerKnown`,
+  // default false). An approval on a card is not that check.
+  writeSentLog(ctx, {
+    accountId: sendProvider.accountId,
+    messageId: result.messageId || `local-${String(Date.now())}`,
+    to: c.to,
+    ...(c.cc.length > 0 ? { cc: c.cc } : {}),
+    subject: c.subject,
+    bodyChars: sendInput.text.length,
+    ...(c.inReplyTo ? { inReplyTo: c.inReplyTo } : {}),
+    originOwnerKnown: opts.originOwnerKnown === true,
+  });
   // The reply HAS been sent. Reconcile the inbox (mark the open item
   // answered — its own source of truth) as a best-effort, fully isolated
   // step: an absent hook method (a minimal ctx) or a throwing reconcile

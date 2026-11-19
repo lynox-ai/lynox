@@ -15,7 +15,7 @@ import { createHash, randomUUID, randomBytes } from 'node:crypto';
 
 import { getLynoxDir } from './config.js';
 import { newToolUseId } from './tool-use-id.js';
-import { modelCapability } from '../types/models.js';
+import { modelCapability, MISTRAL_EU_HOST, toMistralEuBase } from '../types/models.js';
 
 import type {
   BetaRawMessageStreamEvent,
@@ -39,7 +39,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 // Fallback for read-only-FS: in-memory crypto.randomBytes (still
 // cross-tenant-safe, just loses cache benefit across restarts).
 //
-// Salt only appears in outgoing request bodies to api.mistral.ai —
+// Salt only appears in outgoing request bodies to api.eu.mistral.ai —
 // no console.log/debug-trace prints it.
 
 // Module-scoped salt: one process = one tenant = one salt
@@ -380,6 +380,12 @@ function extractDeltaText(content: unknown): string {
   return '';
 }
 
+/** Whether a stream chunk carries a provider error (`{"error": …}`) instead of, or next to, choices. */
+function hasErrorField(chunk: unknown): boolean {
+  const err = (chunk as { error?: unknown } | undefined)?.error;
+  return err !== undefined && err !== null;
+}
+
 async function* translateStream(
   response: Response,
 ): AsyncIterable<BetaRawMessageStreamEvent> {
@@ -434,6 +440,42 @@ async function* translateStream(
   // 0/0 tokens for those providers. Mistral attaches usage to the finish
   // chunk itself; both shapes are covered by deferring the emission.
   let finishStopReason: string | null = null;
+  // Whether the provider sent its `[DONE]`. Some send `finish_reason: null` on every chunk and end
+  // with `[DONE]` only (seen via OpenRouter); that is a complete reply. A stream with neither
+  // `[DONE]` nor a `finish_reason` was cut off and gets no terminal events.
+  let sawDone = false;
+  // Whether the provider sent an error chunk (`{"error": …}`, e.g. vLLM before its `[DONE]`). The
+  // reply it broke off is not complete, so a later `[DONE]` does not end it as one.
+  let sawError = false;
+
+  // Close the open blocks (text, reasoning, every tool call) at the end of the reply.
+  function* closeOpenBlocks(): Generator<BetaRawMessageStreamEvent> {
+    if (activeTextBlock) {
+      yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+      blockIndex++;
+      activeTextBlock = false;
+    }
+    // A reasoning-only turn (model spent the whole budget thinking and
+    // emitted no content) ends here with the thinking block still open.
+    if (activeThinkingBlock) {
+      yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+      blockIndex++;
+      activeThinkingBlock = false;
+    }
+    for (const [, bi] of toolBlockMap) {
+      yield { type: 'content_block_stop', index: bi } as BetaRawMessageStreamEvent;
+    }
+  }
+
+  // OpenAI/Mistral/Ollama spec uses 'length' for max-tokens-hit; the
+  // Anthropic stream-event spec uses 'max_tokens'. Without this map
+  // the downstream StreamProcessor treats 'length' as an unknown
+  // stop_reason and the calling Agent loop silently drops the
+  // truncated turn (no continuation, no user-visible error). T2-P1.
+  const translateFinish = (reason: string): string => (reason === 'tool_calls' ? 'tool_use'
+    : reason === 'stop' ? 'end_turn'
+    : reason === 'length' ? 'max_tokens'
+    : reason);
 
   try {
     while (true) {
@@ -447,10 +489,11 @@ async function* translateStream(
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
+        if (data === '[DONE]') { sawDone = true; continue; }
 
         let chunk: OpenAIStreamChunk;
         try { chunk = JSON.parse(data) as OpenAIStreamChunk; } catch { continue; }
+        if (hasErrorField(chunk)) sawError = true;
 
         // Track usage from streaming chunks
         if (chunk.usage) {
@@ -613,32 +656,8 @@ async function* translateStream(
 
         // Finish
         if (choice.finish_reason) {
-          // Close any active blocks
-          if (activeTextBlock) {
-            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
-            blockIndex++;
-            activeTextBlock = false;
-          }
-          // A reasoning-only turn (model spent the whole budget thinking and
-          // emitted no content) ends here with the thinking block still open.
-          if (activeThinkingBlock) {
-            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
-            blockIndex++;
-            activeThinkingBlock = false;
-          }
-          for (const [, bi] of toolBlockMap) {
-            yield { type: 'content_block_stop', index: bi } as BetaRawMessageStreamEvent;
-          }
-
-          // OpenAI/Mistral/Ollama spec uses 'length' for max-tokens-hit; the
-          // Anthropic stream-event spec uses 'max_tokens'. Without this map
-          // the downstream StreamProcessor treats 'length' as an unknown
-          // stop_reason and the calling Agent loop silently drops the
-          // truncated turn (no continuation, no user-visible error). T2-P1.
-          finishStopReason = choice.finish_reason === 'tool_calls' ? 'tool_use'
-            : choice.finish_reason === 'stop' ? 'end_turn'
-            : choice.finish_reason === 'length' ? 'max_tokens'
-            : choice.finish_reason;
+          yield* closeOpenBlocks();
+          finishStopReason = translateFinish(choice.finish_reason);
         }
       }
     }
@@ -646,20 +665,36 @@ async function* translateStream(
     // A final `data:` frame with no trailing newline stays in `buffer` after
     // the read loop — for providers that end the stream right after the
     // trailing usage frame, that IS the usage. Flush it through the same
-    // usage parse (choices/content in a torn final frame are not recoverable).
+    // usage parse, and read its `finish_reason` (or a final `[DONE]`) so the reply is not taken
+    // for a cut-off one (its content deltas are not recovered).
     const tail = (buffer + decoder.decode()).trim();
     if (tail.startsWith('data: ')) {
       const data = tail.slice(6).trim();
-      if (data !== '[DONE]') {
-        try {
-          const chunk = JSON.parse(data) as OpenAIStreamChunk;
-          if (chunk.usage) {
-            totalInputTokens = chunk.usage.prompt_tokens ?? totalInputTokens;
-            totalOutputTokens = chunk.usage.completion_tokens ?? totalOutputTokens;
-            totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
-          }
-        } catch { /* torn frame — keep accumulated totals */ }
+      if (data === '[DONE]') {
+        sawDone = true;
+      } else {
+        let chunk: OpenAIStreamChunk | undefined;
+        try { chunk = JSON.parse(data) as OpenAIStreamChunk; } catch { /* torn frame — keep accumulated totals */ }
+        if (hasErrorField(chunk)) sawError = true;
+        if (chunk?.usage) {
+          totalInputTokens = chunk.usage.prompt_tokens ?? totalInputTokens;
+          totalOutputTokens = chunk.usage.completion_tokens ?? totalOutputTokens;
+          totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
+        }
+        const tailFinish = Array.isArray(chunk?.choices) ? chunk.choices[0]?.finish_reason : undefined;
+        if (tailFinish && finishStopReason === null) {
+          yield* closeOpenBlocks();
+          finishStopReason = translateFinish(tailFinish);
+        }
       }
+    }
+
+    // `[DONE]` without any `finish_reason`: a complete reply whose provider never names a stop
+    // reason. It ended on a tool call if one was opened, else as a turn. Not after an error chunk:
+    // that reply was broken off, and gets no terminal events.
+    if (finishStopReason === null && sawDone && !sawError) {
+      yield* closeOpenBlocks();
+      finishStopReason = toolBlockMap.size > 0 ? 'tool_use' : 'end_turn';
     }
 
     // Terminal events, deferred until all chunks (incl. a trailing usage-only
@@ -734,7 +769,7 @@ export class OpenAIAdapter {
   // Precomputed once at construction — Mistral is the only OpenAI-compat
   // endpoint we forward `prompt_cache_key` to. Hostname-gate is case-
   // insensitive (DNS is); exact-match prevents subdomain attacks like
-  // `api.mistral.ai.evil.com` which would otherwise pass a `.endsWith` check.
+  // `api.eu.mistral.ai.evil.com` which would otherwise pass a `.endsWith` check.
   private readonly _isMistralHost: boolean;
   // Fireworks gets its documented `prompt_cache_isolation_key`, derived per
   // instance (see `fireworksCacheIsolationKey`). Same exact-match hostname gate
@@ -742,12 +777,14 @@ export class OpenAIAdapter {
   private readonly _isFireworksHost: boolean;
 
   constructor(opts: { baseURL: string; apiKey: ApiKeyProvider; modelId: string }) {
-    this.baseURL = opts.baseURL.replace(/\/+$/, '');
+    // A stored URL on Mistral's global endpoint goes to the EU regional one, the only one
+    // Mistral commits to an inference location for (EU/EFTA).
+    this.baseURL = toMistralEuBase(opts.baseURL).replace(/\/+$/, '');
     this.apiKeyProvider = opts.apiKey;
     this.modelId = opts.modelId;
     let host = '';
     try { host = new URL(this.baseURL).hostname.toLowerCase(); } catch { /* malformed baseURL → gates stay closed */ }
-    this._isMistralHost = host === 'api.mistral.ai';
+    this._isMistralHost = host === MISTRAL_EU_HOST;
     this._isFireworksHost = host === 'api.fireworks.ai';
   }
 
@@ -824,8 +861,9 @@ export class OpenAIAdapter {
               }
             }
 
-            // `message_delta` is emitted only once a finish_reason arrives, and it carries the
-            // token totals. A stream that ends without one is a TRUNCATED response — but it
+            // `message_delta` is emitted only once the reply ended — a finish_reason, or `[DONE]`
+            // with no error chunk before it — and it carries the token totals (0/0 when the
+            // provider sent no usage). A stream that ends without one is a TRUNCATED response — but it
             // assembles into a message that looks entirely ordinary: partial content,
             // `stop_reason: 'end_turn'`, and usage 0/0. `process-capture.ts` then debits zero
             // for a real call and records it as a success. Throwing is the right way to be
@@ -1070,7 +1108,7 @@ export class OpenAIAdapter {
     }
 
     // Mistral-native prompt cache: forward prompt_cache_key when caller sets
-    // it AND outgoing endpoint is api.mistral.ai. Hostname-gate keeps the
+    // it AND outgoing endpoint is api.eu.mistral.ai. Hostname-gate keeps the
     // Mistral-shaped key from leaking into other OpenAI-compat endpoints
     // (future PRD-OPENAI-NATIVE native cells, etc.). Salt-prefix ensures
     // cross-tenant safety on shared MISTRAL_MANAGED_API_KEY.

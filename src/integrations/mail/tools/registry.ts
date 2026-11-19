@@ -8,6 +8,7 @@
 // instantiate, but the interface stays the same.
 
 import { MailError, type MailProvider } from '../provider.js';
+import { ADDRESS_PLACEHOLDER } from '../../../core/audit-log.js';
 
 export interface MailRegistry {
   /** Look up a provider by account id. Returns null if not registered. */
@@ -96,6 +97,24 @@ function findRequested(registry: MailRegistry, requested: string): MailProvider 
     throw new MailError('not_found', `More than one mail account has the address "${requested}": ${byAddress.map(describeAccount).join(', ')}. Name the account by its id.`);
   }
   throw new MailError('not_found', `No mail account "${requested}" configured. Available: ${providers.map(describeAccount).join(', ') || '(none)'}`);
+}
+
+/**
+ * The mailbox a read row names (`account=`): the account's address, or its id when it has none,
+ * when the requested value resolves to an account of this instance; `<address>` when it does
+ * not. The value is the model's, and the row is written before the read, so a value that names
+ * no account here (an address of anyone) never reaches the row as written. The instance's own
+ * mailbox is neither a recipient nor content: which one was read is what the owner checks.
+ */
+export function accountForRow(registry: MailRegistry, requested: string | undefined): string | undefined {
+  if (requested === undefined || requested === '') return undefined;
+  let provider: MailProvider;
+  try {
+    provider = findRequested(registry, requested);
+  } catch {
+    return ADDRESS_PLACEHOLDER;
+  }
+  return typeof provider.address === 'string' && provider.address !== '' ? provider.address : provider.accountId;
 }
 
 function describeAccount(p: MailProvider): string {

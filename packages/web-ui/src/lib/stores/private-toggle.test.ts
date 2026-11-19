@@ -32,6 +32,21 @@ describe('privateToggleFailure — the page shows the state the server holds', (
 			messageKey: 'threads.error_contained',
 			contained: true,
 		});
+		// A record the engine could not read: the same refusal, and where to look.
+		for (const unknown of ['provisioned', 'self-hosted'] as const) {
+			expect(privateToggleFailure(true, { error: 'x', code: 'contained', contained_unknown: unknown })).toEqual({
+				skip: true,
+				messageKey: 'threads.error_contained',
+				contained: true,
+				unknown,
+			});
+		}
+		// A value the page does not know is a known record, as before.
+		expect(privateToggleFailure(true, { error: 'x', code: 'contained', contained_unknown: 'other' })).toEqual({
+			skip: true,
+			messageKey: 'threads.error_contained',
+			contained: true,
+		});
 		// Another refusal is not read as one.
 		expect(privateToggleFailure(true, { error: 'x', code: 'other' })).toEqual({ skip: true, messageKey: 'threads.error_extraction' });
 	});
@@ -40,6 +55,8 @@ describe('privateToggleFailure — the page shows the state the server holds', (
 		const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
 		for (const store of ['./chat.svelte.ts', './threads.svelte.ts']) {
 			expect(read(store)).toMatch(/privateToggleFailure\(/);
+			// The refusal's toast says what the engine could tell: read store data, or could not check.
+			expect(read(store)).toContain("containedTextKeys('error', failure.unknown ?? null).map((k) => t(k)).join(' ')");
 		}
 		const i18n = read('../i18n.svelte.ts');
 		for (const key of ['threads.private_purge_incomplete', 'threads.error_extraction', 'threads.error_contained']) {

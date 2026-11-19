@@ -38,12 +38,17 @@ const GOOD = '<h1>Pitch</h1><p>Three budget options.</p>';
 
 let data: string;
 let artifacts: string;
+// Without isolation batch_files changes files only under the workspace root and in the artifacts
+// directory, as edit_file does; the sources and other destinations sit in the root.
+let ws: string;
 let prevDataDir: string | undefined;
 
 beforeEach(() => {
   data = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-batch-art-')));
   artifacts = join(data, 'artifacts');
   mkdirSync(artifacts);
+  ws = join(data, 'workspace');
+  mkdirSync(ws);
   prevDataDir = process.env['LYNOX_DATA_DIR'];
   process.env['LYNOX_DATA_DIR'] = data;
 });
@@ -66,7 +71,7 @@ describe('batch_files refuses the eviction placeholder into the artifacts direct
 
   it('move: a file holding the placeholder does not land there, and stays where it was', async () => {
     for (const [form, placeholder] of placeholders()) {
-      const src = join(data, `drafts-${form.replace(/\W/g, '')}`);
+      const src = join(ws, `drafts-${form.replace(/\W/g, '')}`);
       mkdirSync(src);
       writeFileSync(join(src, 'ab12cd34.html'), placeholder);
       const out = await run({ pattern: '*.html', directory: src, operation: 'move', destination: artifacts });
@@ -78,17 +83,17 @@ describe('batch_files refuses the eviction placeholder into the artifacts direct
 
   it('move: a destination that is a link to the artifacts directory is judged where it lands', async () => {
     const [, placeholder] = placeholders()[0]!;
-    const src = join(data, 'drafts');
+    const src = join(ws, 'drafts');
     mkdirSync(src);
     writeFileSync(join(src, 'ab12cd34.html'), placeholder);
-    symlinkSync(artifacts, join(data, 'out'));
-    const out = await run({ pattern: '*.html', directory: src, operation: 'move', destination: join(data, 'out') });
+    symlinkSync(artifacts, join(ws, 'out'));
+    const out = await run({ pattern: '*.html', directory: src, operation: 'move', destination: join(ws, 'out') });
     expect(out).toMatch(/Error moving .*ab12cd34\.html: refused[\s\S]*placeholder/);
     expect(existsSync(join(artifacts, 'ab12cd34.html'))).toBe(false);
   });
 
   it('move: a file too large to check is not moved in', async () => {
-    const src = join(data, 'drafts');
+    const src = join(ws, 'drafts');
     mkdirSync(src);
     writeFileSync(join(src, 'big.html'), 'x'.repeat(MAX_BUFFER_BYTES + 1));
     const out = await run({ pattern: '*.html', directory: src, operation: 'move', destination: artifacts });
@@ -97,7 +102,7 @@ describe('batch_files refuses the eviction placeholder into the artifacts direct
   });
 
   it('move: a file with real content still lands there', async () => {
-    const src = join(data, 'drafts');
+    const src = join(ws, 'drafts');
     mkdirSync(src);
     writeFileSync(join(src, 'ab12cd34.html'), GOOD);
     const out = await run({ pattern: '*.html', directory: src, operation: 'move', destination: artifacts });
@@ -168,8 +173,8 @@ describe('batch_files refuses the eviction placeholder into the artifacts direct
   });
 
   it('outside the artifacts directory, a file too large to check still moves', async () => {
-    const src = join(data, 'notes');
-    const dst = join(data, 'archive');
+    const src = join(ws, 'notes');
+    const dst = join(ws, 'archive');
     mkdirSync(src);
     writeFileSync(join(src, 'big.log'), 'x'.repeat(MAX_BUFFER_BYTES + 1));
     const out = await run({ pattern: '*.log', directory: src, operation: 'move', destination: dst });
@@ -179,8 +184,8 @@ describe('batch_files refuses the eviction placeholder into the artifacts direct
 
   it('outside the artifacts directory, a placeholder file still moves (the check is scoped there)', async () => {
     const [, placeholder] = placeholders()[0]!;
-    const src = join(data, 'notes');
-    const dst = join(data, 'archive');
+    const src = join(ws, 'notes');
+    const dst = join(ws, 'archive');
     mkdirSync(src);
     writeFileSync(join(src, 'about-eviction.md'), placeholder);
     const out = await run({ pattern: '*.md', directory: src, operation: 'move', destination: dst });

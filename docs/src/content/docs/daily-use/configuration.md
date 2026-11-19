@@ -36,7 +36,7 @@ Project configs cannot override security-sensitive fields like API keys or vault
 
 Only **anthropic** and **openai with the Mistral endpoint** are exercised on every release. The other paths work in principle but are not regularly tested — see [LLM Providers](/setup/llm-providers/) for full details.
 
-> Prefer pinned model IDs (`mistral-medium-2604`) over floating tags like `mistral-medium-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu) for the rationale.
+> Prefer pinned model IDs (`mistral-medium-2604`) over floating tags like `mistral-medium-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu-endpoint--natively-supported) for the rationale.
 
 ### Model & Intelligence
 
@@ -268,7 +268,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 |----------|---------|
 | `LYNOX_VAULT_KEY` | Encryption key for the secret vault |
 | `LYNOX_DATA_DIR` | Override data directory (default: `~/.lynox`) |
-| `LYNOX_WORKSPACE` | CLI only: an existing directory that bash starts in and that the file tools are limited to (besides `/tmp` and the artifacts directory; reads also from `/app`); a path that does not exist is ignored; unset, file writes go to the workspace root. The server ignores it and uses `<workspace root>/http-api` |
+| `LYNOX_WORKSPACE` | CLI only: an existing directory that bash starts in and that the file tools are limited to (besides `/tmp` and the artifacts directory; reads also from `/app`); a path that does not exist is ignored; unset, `write_file` writes only under the workspace root, `edit_file` and `batch_files` only there and in the artifacts directory, while `read_file` also reads files outside them, as `bash` does. The server ignores it and uses `<workspace root>/http-api` |
 | `LYNOX_WORKSPACE_ROOT` | Directory that holds the workspaces (default: `<data dir>/workspace`). Another directory must be one of its own: the engine refuses a root whose path is the data directory, contains it, or lies inside it. If bind mounts make the two overlap anyway, the data erasure refuses either way, and backup and export refuse when the data directory ends up inside the root. Backup, export and the data erasure reach the workspaces there |
 | `LYNOX_BUGSINK_DSN` | Error reporting DSN (self-hosted, opt-in) |
 

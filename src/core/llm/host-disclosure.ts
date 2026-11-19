@@ -128,11 +128,15 @@ export const HOST_DISCLOSURES: Record<string, HostDisclosure> = buildDisclosures
     confirmedPosture: 'US · 30-day retention · SOC2',
     postureConfirmed: true,
   },
-  'api.mistral.ai': {
-    host: 'api.mistral.ai',
+  // The EU regional endpoint, the one lynox calls: Mistral commits to EU/EFTA inference for it.
+  // The global `api.mistral.ai` commits to no location and has no entry, so nothing here
+  // claims EU for it. Mistral's control plane (account, keys, billing) is not regional either,
+  // so the posture names the inference, not the whole account.
+  'api.eu.mistral.ai': {
+    host: 'api.eu.mistral.ai',
     residency: 'EU',
     transferBasis: null,
-    confirmedPosture: 'EU-resident (France)',
+    confirmedPosture: 'EU/EFTA inference (regional endpoint)',
     postureConfirmed: true,
   },
   'api.fireworks.ai': {

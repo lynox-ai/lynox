@@ -95,6 +95,13 @@ vi.mock('./agent.js', () => {
     RunAbortedError: MockRunAbortedError,
     ToolLoopBreakError: MockToolLoopBreakError,
     ContinuationLoopError: MockContinuationLoopError,
+    ThinkingOnlyLoopError: class MockThinkingOnlyLoopError extends MockContinuationLoopError {},
+    ToolCallImitationError: class MockToolCallImitationError extends MockRunAbortedError {
+      constructor() {
+        super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+        this.name = 'ToolCallImitationError';
+      }
+    },
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;
@@ -380,6 +387,8 @@ vi.mock('./data-store.js', () => ({
     this.dropEmptyCrmOverlaps = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.ensureSourceColumns = vi.fn().mockReturnValue({ migrated: [], missing: [], invalid: [], failed: [] });
+    // @ts-expect-error mock constructor
+    this.ensureCollectionIds = vi.fn().mockReturnValue({ assigned: 0, renumbered: [], failed: null, indexFailed: null });
   }),
 }));
 
@@ -409,6 +418,7 @@ const mockInsertWireSnapshot = vi.fn();
 /** Sub-agent spend rollup (session.ts run-end). Defaults to 0 = the turn
  *  delegated nothing; individual tests override it. */
 const mockGetDescendantCostUsd = vi.fn().mockReturnValue(0);
+const mockGetApiCallsOfRun = vi.fn().mockReturnValue({ calls: 0, usd: 0, estimated: false, unpriced: 0 });
 
 vi.mock('./run-history.js', () => ({
   RunHistory: vi.fn().mockImplementation(function () {
@@ -436,6 +446,10 @@ vi.mock('./run-history.js', () => ({
     this.insertToolCall = vi.fn();
     // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
     this.getDescendantCostUsd = mockGetDescendantCostUsd;
+    // @ts-expect-error mock constructor — the cost record the daily/monthly caps read. A
+    // history without it is treated as no cost record, and every run is refused.
+    this.getCostByDay = vi.fn().mockReturnValue([]);
+    this.getApiCallsOfRun = mockGetApiCallsOfRun;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
@@ -458,7 +472,8 @@ vi.mock('./run-history.js', () => ({
     this.sweepStuckRuns = vi.fn().mockReturnValue(0);
     // @ts-expect-error mock constructor
     this.getDb = vi.fn().mockReturnValue({
-      prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
+      // `run` answers as better-sqlite3 does: a write's RunResult.
+      prepare: vi.fn().mockReturnValue({ run: vi.fn().mockReturnValue({ changes: 1, lastInsertRowid: 0 }), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
       exec: vi.fn(),
       transaction: vi.fn().mockImplementation((fn: unknown) => fn),
     });
@@ -477,6 +492,8 @@ import { setTierSetResolver, resolveTierModel, snapshotForSlot } from './tier-re
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver, getBetasForProvider } from '../types/index.js';
 import { InputRequiredError } from './input-required.js';
 import { reportMeteredCost } from './metered-request.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from './chat-context.js';
+import { approvalChatTitle } from './approval-chat-title.js';
 import { ChangesetManager } from './changeset.js';
 import { setTenantWorkspace } from './workspace.js';
 import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace } from 'node:fs';
@@ -856,6 +873,27 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockSend).toHaveBeenCalledTimes(1);
     });
 
+    it('a run a loop guard stopped is recorded aborted with the guard as the reason and its message; a stop has neither', async () => {
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } = await import('./agent.js');
+      const cases: Array<[Error, string | undefined]> = [
+        [new ToolCallImitationError('http_request'), 'tool_call_imitation'],
+        [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
+        [new ContinuationLoopError('prefix'), 'continuation_loop'],
+        [new (ThinkingOnlyLoopError as unknown as new (p: string) => Error)(''), 'thinking_loop'],
+        [new RunAbortedError(), undefined],
+      ];
+      for (const [err, reason] of cases) {
+        const { engine, session } = await createEngineAndSession();
+        mockSend.mockRejectedValueOnce(err);
+        await expect(session.run('go')).rejects.toBe(err);
+        const calls = (engine.getRunHistory()!.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+        const update = calls.find((c) => (c[1] as { status?: string })?.status === 'aborted')?.[1] as { stopReason?: string; errorText?: string } | undefined;
+        expect(update, err.name).toBeDefined();
+        expect(update!.stopReason, err.name).toBe(reason);
+        expect(update!.errorText, err.name).toContain(err.message);
+      }
+    });
+
     it('an aborted run is recorded status:"aborted" (not "completed"/"failed") and re-throws', async () => {
       const { engine, session } = await createEngineAndSession();
       // agent.send() throws RunAbortedError when the run is interrupted (stop
@@ -1094,6 +1132,22 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(plain!.connectionId).toBeUndefined();
       expect(plain!.connectionCreatedAt).toBeUndefined();
       expect(plain!.grantId).toBeUndefined();
+    });
+
+    it('passes the API request a call sent, and its cost, through to the ledger row (v71)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: false, apiCost: { usd: 0.09, source: 'response' } });
+        agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('stop after two calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('stop after two calls');
+
+      const rows = vi.mocked(engine.getRunHistory()!.insertToolCall).mock.calls.map(c => c[0]);
+      expect(rows.find(p => p.toolName === 'http_request')!.apiCost).toEqual({ usd: 0.09, source: 'response' });
+      expect(rows.find(p => p.toolName === 'read_file')!.apiCost).toBeUndefined();
     });
 
     it('passes the call\'s outcome, contract, lift and filing through to the ledger row (PRD 3f-1b-α)', async () => {
@@ -1512,6 +1566,21 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(agent.setSecretsBriefing).toHaveBeenCalledWith(undefined);
     });
 
+    // The session bounds a long listing; the wire capture redacts it only inside a whole frame.
+    it('hands the agent a long listing cut on an entry, with its closing tag', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const entries = Array.from({ length: 400 }, (_, i) => `secret:CUSTOMER_KEY_${String(i).padStart(4, '0')} (***wxyz)`);
+      vi.spyOn(engine, 'getSecretsBriefing').mockReturnValue(`<secrets>\n${entries.join(', ')}\n</secrets>`);
+      vi.mocked(Agent).mockClear();
+      engine.createSession();
+      const config = vi.mocked(Agent).mock.calls.at(-1)![0] as { secretsBriefing?: string };
+      expect(config.secretsBriefing!.length).toBeLessThanOrEqual(8000);
+      expect(config.secretsBriefing!.endsWith('\n[...truncated]\n</secrets>')).toBe(true);
+      // The last entry kept is whole.
+      expect(config.secretsBriefing!.slice(0, -'\n[...truncated]\n</secrets>'.length).endsWith(' (***wxyz)')).toBe(true);
+    });
+
     it('keeps the main agent on the configured tier — no per-turn auto-downgrade', async () => {
       // Regression: the removed _isSimpleTask heuristic downgraded the main
       // agent to Haiku for any task text < 25 chars. "gemini und search"
@@ -1601,6 +1670,30 @@ describe('Engine + Session (Orchestrator)', () => {
       await session.run('no delegation here');
 
       expect(session.getLastRunUsage()).not.toHaveProperty('spawnCostUsd');
+    });
+
+    // The footer's API calls come from the run's rows, the same way: without this wiring the
+    // count could be deleted from `Session.run` with the SQL and the formatter still green.
+    it('puts the API calls of THIS run and its sub-agents into the run usage', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetApiCallsOfRun.mockClear().mockReturnValue({ calls: 4, usd: 0.36, estimated: false, unpriced: 0 });
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('look up keywords');
+
+      expect(mockGetApiCallsOfRun).toHaveBeenCalledWith('run-123');
+      expect(session.getLastRunUsage()).toMatchObject({ apiCalls: 4, apiCostUsd: 0.36, apiCostEstimated: false, apiCallsUnpriced: 0 });
+    });
+
+    it('omits the API calls when the run sent none', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetApiCallsOfRun.mockClear().mockReturnValue({ calls: 0, usd: 0, estimated: false, unpriced: 0 });
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('no API here');
+
+      expect(session.getLastRunUsage()).not.toHaveProperty('apiCalls');
+      expect(session.getLastRunUsage()).not.toHaveProperty('apiCostUsd');
     });
   });
 
@@ -2318,6 +2411,39 @@ describe('Engine + Session (Orchestrator)', () => {
         expect(vi.mocked(Agent).mock.calls.at(-1)![0].model).toBe(admitted.modelId);
       });
 
+      it('on an instance connected to a Shopify store the control plane\'s Mistral worker profile is dropped at boot: the worker runs on Anthropic', async () => {
+        vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+        vi.stubEnv('LYNOX_WORKER_PROFILE', 'worker');
+        vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({ worker: MISTRAL_PROFILE }));
+        // loadConfig() memoises: read the env this test sets, and drop it again after.
+        const { reloadConfig } = await import('./config.js');
+        reloadConfig();
+        try {
+          const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+          await engine.init();
+          expect(engine.getUserConfig().worker_profile).toBeUndefined();
+          expect(engine.resolveWorkerRunModel('standard').provider).toBe('anthropic');
+        } finally {
+          vi.unstubAllEnvs();
+          reloadConfig();
+        }
+      });
+
+      it('without the switch the same boot runs the worker on the Mistral profile', async () => {
+        vi.stubEnv('LYNOX_WORKER_PROFILE', 'worker');
+        vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({ worker: MISTRAL_PROFILE }));
+        const { reloadConfig } = await import('./config.js');
+        reloadConfig();
+        try {
+          const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+          await engine.init();
+          expect(engine.resolveWorkerRunModel('standard')).toEqual({ modelId: MISTRAL_PROFILE.model_id, provider: 'openai' });
+        } finally {
+          vi.unstubAllEnvs();
+          reloadConfig();
+        }
+      });
+
       it('an empty worker profile name: the standard run fails on it, the watch analysis skips it — the admission follows each', async () => {
         const engine = new Engine({} as import('../types/index.js').LynoxConfig);
         await engine.init();
@@ -2599,6 +2725,40 @@ describe('Engine + Session (Orchestrator)', () => {
         'default',
         expect.any(String),
       );
+    });
+
+    it('rejects with the cap reason and submits nothing when the daily cap is reached (no host)', async () => {
+      const { engine } = await createEngineAndSession();
+      mockBatchCreate.mockClear();
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        await expect(engine.batch([{ id: 'r1', task: 'hello' }]))
+          .rejects.toThrow('Daily spending cap ($5) reached. Today: $5.00.');
+        expect(mockBatchCreate).not.toHaveBeenCalled();
+      } finally {
+        resetPersistentBudget();
+      }
+    });
+
+    it('submits the batch when spend is under the cap (no host)', async () => {
+      const { engine } = await createEngineAndSession();
+      mockBatchCreate.mockClear();
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 4.99, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        const batchId = await engine.batch([{ id: 'r1', task: 'hello' }]);
+        expect(mockBatchCreate).toHaveBeenCalledOnce();
+        expect(batchId).toBe('batch-abc');
+      } finally {
+        resetPersistentBudget();
+      }
     });
 
     it('inserts promptHash on child runs', async () => {
@@ -3623,6 +3783,69 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(groupOf(after, 'run-a')).toBe('run-a');
       expect(groupOf(after, 'helper-a')).toBe('run-a');
       expect((title()![2] as Ctx).runGroupId).toBe('run-a');
+    });
+
+    // A summary of another thread runs as an internal run in a session of its own. Its prompt is
+    // that thread's history, so it gets no title, and no second model call for one.
+    it('an internal run in a fresh session gets no title (control: a first user turn does)', async () => {
+      const { engine } = await createEngineAndSession();
+      stubTitleStream(engine);
+      const summary = engine.createSession();
+      const llmTitle = vi.spyOn(Object.getPrototypeOf(summary) as { _generateLLMTitle: () => Promise<void> }, '_generateLLMTitle');
+      const updates = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      mockSend.mockResolvedValueOnce('summary text');
+      // The run completes, so it reached the point where a first turn is titled.
+      expect(await summary.run('Summarize this conversation concisely.\n\nuser: the price of Bergtee', { noTools: true, internal: true })).toBe('summary text');
+      expect(llmTitle).not.toHaveBeenCalled();
+      // Nor a title derived from its prompt.
+      expect(updates.mock.calls.some(([id, u]) => id === summary.sessionId && 'title' in (u as object))).toBe(false);
+      updates.mockRestore();
+      const chat = engine.createSession();
+      mockSend.mockResolvedValueOnce('ok');
+      await chat.run('Plan the Q3 budget');
+      expect(llmTitle).toHaveBeenCalledTimes(1);
+      expect(llmTitle.mock.calls[0]?.[0]).toBe('Plan the Q3 budget');
+      llmTitle.mockRestore();
+    });
+
+    // The run titles a chat on a loaded approval draft through `firstThreadTitle`: the engine's
+    // phrase in the configured language, never the draft, and no LLM upgrade. What that title
+    // does in other chats' dictation is tested in `transcribe/session-context.test.ts`.
+    it('a chat on a loaded approval draft is titled by the engine, without an LLM upgrade (control: a draft that did not load keeps its first line)', async () => {
+      const { engine } = await createEngineAndSession({ language: 'de' });
+      const llmTitle = vi.spyOn(Object.getPrototypeOf(engine.createSession()) as { _generateLLMTitle: () => Promise<void> }, '_generateLLMTitle')
+        .mockResolvedValue(undefined);
+      const updates = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      const titleOf = (id: string): unknown => updates.mock.calls.find(([t, u]) => t === id && 'title' in (u as object))?.[1]?.title;
+      const MARK = 'Quittenmarmelade';
+      const firstLine = 'Ich möchte diesen Entwurf ändern, bevor er rausgeht.';
+      const draft = closeLoadedContext(
+        '[Loaded draft moved from the approval queue — entry: e1 · mail_send · from a task run]\n'
+        + `<untrusted_data source="approval:e1">\nSubject: ${MARK}\n</untrusted_data>`,
+      );
+      try {
+        const chat = engine.createSession();
+        // UTC+14 all year: no engine's own zone gives the same wall clock, so the user's zone
+        // is shown to reach the title. Read before and after, for a minute that turns mid-run.
+        chat.userTimezone = 'Pacific/Kiritimati';
+        mockSend.mockResolvedValueOnce('ok');
+        const before = approvalChatTitle('de', new Date(), 'Pacific/Kiritimati');
+        await chat.run(`${draft}${firstLine}`);
+        const after = approvalChatTitle('de', new Date(), 'Pacific/Kiritimati');
+        expect([before, after]).toContain(titleOf(chat.sessionId));
+        expect(titleOf(chat.sessionId)).toMatch(/^Entwurf überarbeiten · \d{1,2}\. \S+, \d{2}:\d{2}$/);
+        expect(String(titleOf(chat.sessionId))).not.toContain(MARK);
+        expect(llmTitle).not.toHaveBeenCalled();
+
+        const missing = engine.createSession();
+        mockSend.mockResolvedValueOnce('ok');
+        await missing.run(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}${firstLine}`);
+        expect(titleOf(missing.sessionId)).toBe(firstLine);
+        expect(llmTitle).toHaveBeenCalledTimes(1);
+      } finally {
+        llmTitle.mockRestore();
+        updates.mockRestore();
+      }
     });
 
     it('two runs are two groups, also when the second is started from inside the first', async () => {

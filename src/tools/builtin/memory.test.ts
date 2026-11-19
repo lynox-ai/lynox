@@ -3,6 +3,7 @@ import { memoryStoreTool, memoryRecallTool, memoryDeleteTool, memoryUpdateTool, 
 import type { IAgent, IKnowledgeLayer } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { currentRunGroup, openRunGroup } from '../../core/run-group.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 /** A KG stub exposing only the two delete-path methods the memory tools call. */
 function makeKg(overrides: Partial<Pick<IKnowledgeLayer, 'eraseByPattern' | 'deactivateByPattern'>> = {}): IKnowledgeLayer {
@@ -13,16 +14,18 @@ function makeKg(overrides: Partial<Pick<IKnowledgeLayer, 'eraseByPattern' | 'dea
   } as unknown as IKnowledgeLayer;
 }
 
-vi.mock('../../core/observability.js', () => ({
-  channels: {
+vi.mock('../../core/observability.js', () => {
+  const channels = {
     memoryStore: { publish: vi.fn() },
     // B1 KG-backed tests need these channels — they are checked by the
     // production KnowledgeLayer / AgentMemoryDb store path. hasSubscribers
     // is read in a hot path, so it must be a plain false for the no-op tests.
     knowledgeGraph: { publish: vi.fn(), hasSubscribers: false },
     knowledgeEntity: { publish: vi.fn(), hasSubscribers: false },
-  },
-}));
+  };
+  // The tools publish through the typed helper (660a-3); it is the channel's publish.
+  return { channels, publishMemoryStore: (msg: unknown) => channels.memoryStore.publish(msg) };
+});
 
 function makeAgent(memory: IAgent['memory'] = null): IAgent {
   return {
@@ -31,6 +34,7 @@ function makeAgent(memory: IAgent['memory'] = null): IAgent {
     memory,
     tools: [],
     onStream: null,
+    principal: OWNER_PRINCIPAL,
     toolContext: createToolContext({}),
   };
 }
@@ -75,6 +79,8 @@ describe('memoryStoreTool', () => {
       // A clean write (no untrusted signal) is now an explicit `false`, not absent —
       // the tool derives it from the full write-trust union, which floors to false.
       sourceUntrusted: false,
+      // Who acts, read from the agent at the publish (660a-3); the owner's act has no row.
+      actor: { principal: OWNER_PRINCIPAL, runId: undefined },
     });
   });
 
@@ -137,6 +143,7 @@ describe('memoryStoreTool', () => {
       isExpired: () => false,
     };
     const agent: IAgent = {
+      principal: OWNER_PRINCIPAL,
       name: 'test',
       model: 'test-model',
       memory: makeMockMemory(),
@@ -166,6 +173,7 @@ describe('memoryStoreTool', () => {
     };
     const append = vi.fn().mockResolvedValue(undefined);
     const agent: IAgent = {
+      principal: OWNER_PRINCIPAL,
       name: 'test',
       model: 'test-model',
       memory: makeMockMemory({ append }),
@@ -282,7 +290,7 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
     const { kg, updateMemoryText } = kgWithUpdate();
     const agent: IAgent = {
       ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), { sawExternalContentTool: true }),
-      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+      principal: OWNER_PRINCIPAL, toolContext: { ...createToolContext({}), knowledgeLayer: kg },
     };
     await memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent);
     expect(updateMemoryText).not.toHaveBeenCalled();
@@ -292,7 +300,7 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
     const { kg, updateMemoryText } = kgWithUpdate();
     const agent: IAgent = {
       ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), {}),
-      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+      principal: OWNER_PRINCIPAL, toolContext: { ...createToolContext({}), knowledgeLayer: kg },
     };
     await memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent);
     expect(updateMemoryText).toHaveBeenCalled();
@@ -309,7 +317,7 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
     const kg = { ...makeKg(), updateMemoryText } as unknown as IKnowledgeLayer;
     const agent: IAgent = {
       ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), {}),
-      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+      principal: OWNER_PRINCIPAL, toolContext: { ...createToolContext({}), knowledgeLayer: kg },
     };
     await openRunGroup('run-a', () =>
       memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent));
@@ -920,7 +928,63 @@ describe('memoryPromoteTool', () => {
       scopeId: 'proj1',
       sourceChannel: 'agent',
       sourceUntrusted: false,
+      actor: { principal: OWNER_PRINCIPAL, runId: undefined },
     });
+  });
+
+  it('with a knowledge graph, retires the original at its scope and hands its ids to the copy', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const deactivateByPattern = vi.fn().mockResolvedValue(1);
+    const retireForMove = vi.fn().mockResolvedValue(['m-1']);
+    const base = makeAgent(makeMockMemory({
+      loadScoped: vi.fn().mockResolvedValue('[2026-10-01] User pattern B'),
+      appendScoped: vi.fn().mockResolvedValue(undefined),
+      deleteScoped: vi.fn().mockResolvedValue(1),
+    }));
+    const agent: IAgent = {
+      ...base,
+      activeScopes: allScopes,
+      toolContext: { ...base.toolContext, knowledgeLayer: { deactivateByPattern, retireForMove } as unknown as NonNullable<IAgent['toolContext']['knowledgeLayer']> },
+    };
+    await memoryPromoteTool.handler(
+      { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+      agent,
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({
+      content: '[2026-10-01] User pattern B', scopeType: 'context', scopeId: 'proj1',
+      replaces: { ids: ['m-1'] },
+    }));
+    expect(retireForMove).toHaveBeenCalledWith('User pattern B', 'methods', { type: 'user', id: 'alex' });
+    // The line leaves the source first, then its graph twin is retired, then the copy is stored.
+    const deleteScoped = vi.mocked(agent.memory.deleteScoped);
+    expect(deleteScoped.mock.invocationCallOrder[0]!).toBeLessThan(retireForMove.mock.invocationCallOrder[0]!);
+    expect(retireForMove.mock.invocationCallOrder[0]!).toBeLessThan(vi.mocked(channels.memoryStore.publish).mock.invocationCallOrder[0]!);
+    // A move, not a removal: never the plain deactivation.
+    expect(deactivateByPattern).not.toHaveBeenCalled();
+  });
+
+  it('a failed retire still promotes, without handing ids to the copy', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const publish = vi.mocked(channels.memoryStore.publish);
+    publish.mockClear();
+    const base = makeAgent(makeMockMemory({
+      loadScoped: vi.fn().mockResolvedValue('User pattern B'),
+      appendScoped: vi.fn().mockResolvedValue(undefined),
+      deleteScoped: vi.fn().mockResolvedValue(1),
+    }));
+    const retireForMove = vi.fn().mockRejectedValue(new Error('database is locked'));
+    const agent: IAgent = {
+      ...base,
+      activeScopes: allScopes,
+      toolContext: { ...base.toolContext, knowledgeLayer: { retireForMove } as unknown as NonNullable<IAgent['toolContext']['knowledgeLayer']> },
+    };
+    const result = await memoryPromoteTool.handler(
+      { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+      agent,
+    );
+    expect(result).toContain('Promoted entry');
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish.mock.calls[0]![0]).not.toHaveProperty('replaces');
   });
 
   it('F4: promotes ONE line but does not substring-delete sibling matches from the source', async () => {

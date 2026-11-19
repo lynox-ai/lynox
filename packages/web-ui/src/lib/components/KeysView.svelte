@@ -3,6 +3,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
 	import { secretWriteRefusal } from '../utils/secret-write-refusal.js';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// Only the client secret of a built-in provider gets its own advice here; every other
 	// refusal keeps the generic message this view always showed.
@@ -26,7 +27,11 @@
 		loading = true;
 		error = '';
 		try {
+			// Asked alongside the list: a mandate's session is refused the list and shows nothing.
+			const viewerRead = loadSettingsViewer();
 			const res = await fetch(`${getApiBase()}/secrets`);
+			await viewerRead;
+			if (isMandateSession()) { loading = false; return; }
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { names: string[] };
 			names = data.names;
@@ -119,6 +124,11 @@
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-4 mt-2">{t('keys.title')}</h1>
 
+	{#if isMandateSession()}
+		<!-- A mandate's session (ux U-109): listing the secrets is the owner's (`GET /api/secrets` is
+		     owner-only), so the page has nothing to show and is left out of the navigation. -->
+	{:else}
+
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
 	{/if}
@@ -208,4 +218,5 @@
 			{saving ? t('settings.saving') : t('settings.save')}
 		</button>
 	</div>
+	{/if}
 </div>

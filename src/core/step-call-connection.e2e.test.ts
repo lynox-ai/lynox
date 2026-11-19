@@ -162,6 +162,7 @@ describe('a pipeline step call carries the connection and grant it resolved to',
       getSecretStore: () => null,
       getPromptStore: () => null,
       escalateToUser: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
   }
 

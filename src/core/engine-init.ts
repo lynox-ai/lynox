@@ -3,6 +3,8 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
+import { VAULT_KEY_PATTERN, recordVaultKeySource, sourceOfEnvKey } from './vault-key-source.js';
+import { processErrorText } from './error-egress.js';
 import { existsSync, readFileSync, writeFileSync, lstatSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
@@ -26,8 +28,15 @@ import { resolveProviderApiKey, migrateLegacyEndpointKey, poolSuppliesLLMKeys } 
 import { SecretVault } from './secret-vault.js';
 import { SecretStore } from './secret-store.js';
 import { setVaultApiKeyExists, anthropicKeyMayHoldApiKey } from './config.js';
-import { channels } from './observability.js';
-import { configurePersistentBudget } from './session-budget.js';
+import { channels, type MemoryStoreMessage } from './observability.js';
+import type { AuditLog } from './audit-log.js';
+import { runOutsideCallSlot } from './call-connection.js';
+import { ifReturned, ifStored, InstanceWriteUnrecorded, withInstanceWriteAs, type InstanceTargetPairs } from './instance-trail.js';
+import { ALL_NAMESPACES } from '../types/index.js';
+import { INSTANCE_WRITE_SITES } from './mandate-tool-lock.js';
+import type { KnowledgeStoreResult } from '../types/index.js';
+import { configurePersistentBudget, isPersistentBudgetUnverifiable, describeSetCaps } from './session-budget.js';
+import { describeConnectionTokens } from './profile-secret-view.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
 import { configureMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
@@ -56,7 +65,9 @@ import type { Containment } from './containment.js';
  * Apply the cost, rate and egress settings to the ToolContext at boot.
  *
  * The HTTP/mail rate limits and the daily/monthly caps count against
- * RunHistory, so they need it. The session cap and the egress settings
+ * RunHistory. Without it the daily/monthly caps refuse every run (fail-closed, see
+ * `configurePersistentBudget`); the rate limits are still set, and the send paths
+ * refuse what they cannot count. The session cap and the egress settings
  * (`enforce_https`, `network_policy`, the operator host floor) do not, and are
  * applied whether or not RunHistory opened: an engine that boots without its
  * history must still enforce the limits it was configured with. Of these, only
@@ -74,7 +85,12 @@ export function configureBudgetAndRateLimits(
     dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
     monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
   });
-  if (runHistory) configureHistoryBackedLimits(runHistory, userConfig, toolContext);
+  // Said at boot, not only at the first refused run: whoever reads the startup log sees
+  // that nothing will run, next to the line that says why the history did not open.
+  if (isPersistentBudgetUnverifiable()) {
+    process.stderr.write(`[lynox] Spending caps (${describeSetCaps()}) cannot be checked without the history database: the agent does not run, not even for a chat, until lynox restarts with it open.\n`);
+  }
+  configureHistoryBackedLimits(runHistory, userConfig, toolContext);
   configureEgressPolicy(userConfig, toolContext);
 }
 
@@ -89,8 +105,13 @@ function envInt(key: string): number | undefined {
   return Number.isFinite(v) && v > 0 ? v : undefined;
 }
 
+/**
+ * The send-rate limits for HTTP and mail, counted from RunHistory's tool-call tally. Set
+ * whether or not RunHistory opened: without it a set limit cannot be counted, and the
+ * send paths refuse instead of sending uncounted.
+ */
 function configureHistoryBackedLimits(
-  runHistory: RunHistory,
+  runHistory: RunHistory | null,
   userConfig: LynoxUserConfig,
   toolContext: ToolContext,
 ): void {
@@ -106,6 +127,9 @@ function configureHistoryBackedLimits(
   const dedupSec = Number.isFinite(dedupEnvNum) && dedupEnvNum >= 0
     ? dedupEnvNum
     : userConfig.mail_dedup_window_sec;
+  if (runHistory === null) {
+    process.stderr.write('[lynox] The history database did not open, so send limits cannot be counted: no mail goes out, approved mails included, and no request through the http_request tool while an HTTP limit is set. This lasts until lynox restarts and can open the history database; approved mails go out then unless they expired, 72 hours after they were submitted.\n');
+  }
   configureMailRateLimits({
     provider: runHistory,
     hourlyLimit: envInt('LYNOX_MAX_MAIL_SENDS_PER_HOUR') ?? userConfig.max_mail_sends_per_hour,
@@ -345,7 +369,6 @@ export function ensureHttpSecret(): void {
   }
 }
 
-const VAULT_KEY_PATTERN = /^[A-Za-z0-9+/=]{32,128}$/;
 
 /**
  * Load `LYNOX_VAULT_KEY` from `~/.lynox/.env` into `process.env` if not already
@@ -395,6 +418,7 @@ export function loadVaultKeyFromDotEnv(): void {
         return;
       }
       process.env['LYNOX_VAULT_KEY'] = value;
+      recordVaultKeySource('volume-env');
       return;
     }
   } catch {
@@ -415,7 +439,10 @@ export function loadVaultKeyFromDotEnv(): void {
  * + idempotent so `Engine.init()` can hoist it ahead of persistence.
  */
 export function ensureVaultKey(): void {
-  if (process.env['LYNOX_VAULT_KEY']) return;
+  if (process.env['LYNOX_VAULT_KEY']) {
+    recordVaultKeySource(sourceOfEnvKey());
+    return;
+  }
 
   const lynoxDir = getLynoxDir();
   const keyFilePath = join(lynoxDir, 'vault.key');
@@ -427,23 +454,83 @@ export function ensureVaultKey(): void {
       const key = readFileSync(keyFilePath, 'utf-8').trim();
       if (key) {
         process.env['LYNOX_VAULT_KEY'] = key;
+        recordVaultKeySource('vault-key');
         return;
       }
     } catch { /* fall through */ }
   }
 
   // vault.db exists but no key anywhere → user lost their key, don't overwrite
-  if (existsSync(vaultDbPath)) return;
+  if (existsSync(vaultDbPath)) {
+    recordVaultKeySource('none');
+    return;
+  }
 
   // First run: generate key and persist
   const key = randomBytes(48).toString('base64');
   try {
     writeFileSync(keyFilePath, key + '\n', { mode: FILE_MODE_PRIVATE });
     process.env['LYNOX_VAULT_KEY'] = key;
+    recordVaultKeySource('minted');
     process.stderr.write(`Generated vault key → ${keyFilePath}\n`);
   } catch {
+    recordVaultKeySource('none');
     process.stderr.write('⚠ Could not write vault key file. Secrets will not be persisted.\n');
   }
+}
+
+/**
+ * The `<secrets>` listing: every agent-visible name as a `secret:` reference, with its masked
+ * value, except a name that holds a connection's token. Those are used through their API profile
+ * and are counted per profile, not named (`describeConnectionTokens`). Left out entirely, the
+ * briefing reads as if the vault had no access for the profile, and a model asks the owner for it
+ * again under a new name (tests/online/ask-secret-token-slot-eval.test.ts). `tokenHolders` answers the
+ * profiles that hold a name, empty for a free one. The boot renders the listing before the API
+ * profiles are loaded, with no holders; the engine renders it again once they are.
+ */
+export function renderSecretsBriefing(
+  store: Pick<SecretStore, 'listAgentVisibleNames' | 'getMasked'>,
+  tokenHolders: (name: string) => readonly { id?: unknown; name: unknown }[] = () => [],
+): string | undefined {
+  const free: string[] = [];
+  const tokens: (readonly { id?: unknown; name: unknown }[])[] = [];
+  for (const n of store.listAgentVisibleNames()) {
+    const holders = tokenHolders(n);
+    if (holders.length === 0) free.push(`secret:${n} (${store.getMasked(n)})`);
+    else tokens.push(holders);
+  }
+  const tokenLine = describeConnectionTokens(tokens);
+  if (free.length === 0 && tokenLine === undefined) return undefined;
+  const lines: string[] = [];
+  if (free.length > 0) lines.push(free.join(', '));
+  if (tokenLine !== undefined) lines.push(tokenLine);
+  return compose([renderFence('secrets', lines.join('\n'))]);
+}
+
+const SECRETS_CLOSER = '\n</secrets>';
+const SECRETS_CUT_NOTE = '\n[...truncated]';
+
+/**
+ * Bound a rendered `<secrets>` listing to `max` characters without losing its closing tag. The
+ * wire capture blanks names and masks only between `<secrets>` and `</secrets>`
+ * (`redactWireUserMessage`), so a plain slice that cut the closer off left every name in the
+ * capture. The cut falls on an entry boundary, so no name is left half written: between two
+ * `secret:` references on the line of free names, else at a line break, which drops the cut line
+ * whole. The line of connection tokens is never cut inside, since a profile name it quotes may hold
+ * `, `. One entry longer than the whole bound leaves the frame empty.
+ */
+export function capSecretsListing(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const body = text.endsWith(SECRETS_CLOSER) ? text.slice(0, -SECRETS_CLOSER.length) : text;
+  const open = body.indexOf('>') + 1;
+  const budget = max - SECRETS_CLOSER.length - SECRETS_CUT_NOTE.length;
+  const head = body.slice(0, Math.max(open, budget));
+  const lineStart = Math.max(head.lastIndexOf('\n'), open - 1);
+  const line = head.slice(lineStart + 1);
+  const entry = line.startsWith('secret:') ? line.lastIndexOf(', secret:') : -1;
+  const cut = entry >= 0 ? lineStart + 1 + entry : lineStart;
+  const kept = body.slice(0, Math.max(cut, open));
+  return `${kept}${SECRETS_CUT_NOTE}${SECRETS_CLOSER}`;
 }
 
 export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
@@ -460,13 +547,27 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   try {
     try {
       vault = new SecretVault();
-      const migrated = vault.migrateFromFile();
-      if (migrated > 0) {
-        parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
-      }
+      // The two migrations below write plaintext secrets into the vault and then delete their
+      // source. Under a key the vault was not written with, the copies would not decrypt once
+      // the right key is back, and the plaintext would be gone. So while any stored entry does
+      // not decrypt under the loaded key, neither runs: the plaintext stays where it is, and
+      // they run on the next boot whose key opens every entry. A vault with a corrupt entry
+      // holds them back as well; that keeps plaintext on disk, it loses nothing.
+      const undecryptable = vault.undecryptableCount();
+      if (undecryptable > 0) {
+        process.stderr.write(
+          `⚠ Vault: ${undecryptable} stored secret(s) do not decrypt with the current LYNOX_VAULT_KEY — ` +
+          `not moving secrets from secrets.json or config.json into the vault on this boot.\n`,
+        );
+      } else {
+        const migrated = vault.migrateFromFile();
+        if (migrated > 0) {
+          parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
+        }
 
-      // Migrate secrets from plaintext config to vault
-      _migrateConfigSecretsToVault(vault, userConfig);
+        // Migrate secrets from plaintext config to vault
+        _migrateConfigSecretsToVault(vault, userConfig);
+      }
 
       // Load secrets from vault — vault wins over config.json, but explicit env vars
       // always override vault (so users can fix stale vault entries without Web UI).
@@ -551,11 +652,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
     // Only advertise agent-visible secrets — infrastructure secrets (mail
     // account / OAuth / SMTP/IMAP / engine-internal) are excluded so their
     // names never enter the model context (and cannot be referenced for exfil).
-    const visibleNames = store.listAgentVisibleNames();
-    if (visibleNames.length > 0) {
-      const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(', ');
-      secretsBriefing = compose([renderFence('secrets', names)]);
-    }
+    secretsBriefing = renderSecretsBriefing(store);
   } catch {
     store = null;
   }
@@ -824,6 +921,39 @@ export async function initKnowledgeLayer(
 
 // ── Memory Store Subscription ───────────────────────────────────
 
+/**
+ * What the outcome row of a derived knowledge write says: how many entities, edges and subjects
+ * the store created, and whether it found the text already stored. Counts only — a name the
+ * extraction found is content.
+ */
+export function derivedStoreCounts(r: KnowledgeStoreResult): InstanceTargetPairs {
+  return [
+    ['new_entities', r.created.entities], ['new_relations', r.created.relations], ['new_subjects', r.created.subjects],
+    ['dedup', r.deduplicated ? 1 : undefined],
+  ];
+}
+
+/** The shape `newCorrelationId()` gives a row's correlation id: a lowercase uuid. */
+const CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The act a derived row names, as far as it can be believed: the message comes off a process-wide
+ * channel anyone in the process can publish on, untyped at the subscriber. A site that is not on
+ * `INSTANCE_WRITE_SITES`, or a ref not shaped like a correlation id, is dropped — the row is still
+ * written, without that pair, rather than carrying a value a publisher made up.
+ */
+export function derivedActPairs(trail: unknown): InstanceTargetPairs {
+  const t = (typeof trail === 'object' && trail !== null ? trail : {}) as { site?: unknown; correlationId?: unknown };
+  const site = typeof t.site === 'string' && (INSTANCE_WRITE_SITES as readonly string[]).includes(t.site) ? t.site : undefined;
+  const ref = typeof t.correlationId === 'string' && CORRELATION_ID.test(t.correlationId) ? t.correlationId : undefined;
+  return [['from', site], ['ref', ref]];
+}
+
+/** A namespace as the trail may name it: one of the fixed ones, or `other`. */
+function namespaceLabel(ns: unknown): string {
+  return typeof ns === 'string' && (ALL_NAMESPACES as readonly string[]).includes(ns) ? ns : 'other';
+}
+
 export function setupMemoryStoreSubscription(
   knowledgeLayer: KnowledgeLayer | null,
   _embeddingProvider: EmbeddingProvider | null,
@@ -835,6 +965,12 @@ export function setupMemoryStoreSubscription(
    * extraction was out must not land after the switch's purge.
    */
   isThreadPrivate: (threadId: string) => boolean,
+  /**
+   * The log a mandate's derived write is recorded in (660a-3), read per message: the engine
+   * builds it after this subscription. Absent, a mandate's derived write is refused, the owner's
+   * runs as before.
+   */
+  auditLogOf?: (() => AuditLog | null | undefined) | undefined,
 ): void {
   if (!knowledgeLayer) return;
 
@@ -842,17 +978,15 @@ export function setupMemoryStoreSubscription(
   const activeEmbeddings = new Set<Promise<void>>();
 
   channels.memoryStore.subscribe((msg: unknown) => {
-    const data = msg as {
-      namespace: string; content: string;
-      scopeType?: string | undefined; scopeId?: string | undefined;
-      sourceThreadId?: string | undefined;
-      // Wave 1: publishers carry EVIDENCE. `sourceRunId` is captured by value at the
-      // publish call site (§1.1 — the engine-level subscription cannot read a session's
-      // run), `sourceChannel` + `sourceUntrusted` are the derivation inputs (§1.2/§3).
-      sourceRunId?: string | undefined;
-      sourceChannel?: string | undefined; sourceUntrusted?: boolean | undefined;
-      sourceToolName?: string | undefined;
-    };
+    // Wave 1: publishers carry EVIDENCE. `sourceRunId` is captured by value at the publish call
+    // site (§1.1 — the engine-level subscription cannot read a session's run), `sourceChannel` +
+    // `sourceUntrusted` are the derivation inputs (§1.2/§3). A move (`memory_promote`) carries
+    // `replaces`: the ids of the original, retired at the source scope when the move ran; once
+    // this copy is stored it is named as their successor. `actor` and `trail` say who acts and
+    // which act this follows from (660a-3). Typed as possibly missing: a raw publish (a test, a
+    // publisher the source scan has not met yet) reaches this subscriber all the same.
+    const data = msg as Omit<MemoryStoreMessage, 'actor'> & { actor?: MemoryStoreMessage['actor'] | undefined };
+    const actor = data.actor ?? null;
 
     const run = async (): Promise<void> => {
       if (activeEmbeddings.size >= MAX_EMBEDDING_CONCURRENCY) {
@@ -867,31 +1001,67 @@ export function setupMemoryStoreSubscription(
         : undefined;
       if (cancelled?.()) return;
 
+      const scope: MemoryScopeRef = data.scopeType && data.scopeId
+        ? { type: data.scopeType as MemoryScopeType, id: data.scopeId }
+        : { type: 'context', id: contextId };
+      const store = (): Promise<KnowledgeStoreResult> => knowledgeLayer.store(
+        data.content,
+        data.namespace as MemoryNamespace,
+        scope,
+        {
+          // §1.1: the run id rides the message (captured by value at publish time),
+          // not an engine-level getter that would always be null here.
+          sourceRunId: data.sourceRunId,
+          sourceThreadId: data.sourceThreadId,
+          // §1.3: the tier is DERIVED at the store boundary from this evidence — the
+          // subscriber no longer forwards a self-declared tier. A publisher that omits
+          // a channel floors to external_unverified (rule 5), not a silent agent_inferred.
+          sourceChannel: data.sourceChannel,
+          sourceUntrusted: data.sourceUntrusted,
+          sourceToolName: data.sourceToolName,
+          cancelled,
+        },
+      );
+      const moveFailed = (err: unknown): void => {
+        process.stderr.write(`[lynox:embedding] Failed to link a moved memory to its copy in ${data.namespace}: ${processErrorText(err)}\n`);
+      };
+
       const embedTask = (async () => {
         try {
-          const scope: MemoryScopeRef = data.scopeType && data.scopeId
-            ? { type: data.scopeType as MemoryScopeType, id: data.scopeId }
-            : { type: 'context', id: contextId };
-          await knowledgeLayer.store(
-            data.content,
-            data.namespace as MemoryNamespace,
-            scope,
-            {
-              // §1.1: the run id rides the message (captured by value at publish time),
-              // not an engine-level getter that would always be null here.
-              sourceRunId: data.sourceRunId,
-              sourceThreadId: data.sourceThreadId,
-              // §1.3: the tier is DERIVED at the store boundary from this evidence — the
-              // subscriber no longer forwards a self-declared tier. A publisher that omits
-              // a channel floors to external_unverified (rule 5), not a silent agent_inferred.
-              sourceChannel: data.sourceChannel,
-              sourceUntrusted: data.sourceUntrusted,
-              sourceToolName: data.sourceToolName,
-              cancelled,
-            },
-          );
+          if (actor === null) {
+            // No actor on the message: the entry is written as before, not refused (the cut's
+            // decision), and the gap is said where an operator sees it. The source scan keeps
+            // this the exception: every publisher in the engine names its actor.
+            process.stderr.write(`[lynox:trail] derived knowledge write without an actor (${namespaceLabel(data.namespace)})\n`);
+            const result = await store();
+            if (data.replaces && result.memoryId) {
+              try { knowledgeLayer.markMoved(data.replaces.ids, result.memoryId); } catch (err: unknown) { moveFailed(err); }
+            }
+            return;
+          }
+          // The row comes before `store`'s first change, and a row that cannot be written keeps
+          // `store` from running. Its own trail, from the actor on the message: the call that
+          // published is done or answers for itself, and this runs outside its slot (below).
+          const trail = data.trail;
+          await withInstanceWriteAs(actor, auditLogOf?.() ?? null, {
+            site: 'derived#memory', kind: 'create', store: 'knowledge',
+            target: () => derivedActPairs(trail), main: ['store'],
+          }, async (w) => {
+            const result = await w.run('store', () => store(), ifStored);
+            w.counts(derivedStoreCounts(result));
+            if (data.replaces && result.memoryId) {
+              // The same block: naming the copy the successor is part of the move's derived write.
+              try { w.run('moved', () => knowledgeLayer.markMoved(data.replaces!.ids, result.memoryId), ifReturned); } catch (err: unknown) { moveFailed(err); }
+            }
+          });
         } catch (err: unknown) {
-          process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${getErrorMessage(err)}\n`);
+          if (err instanceof InstanceWriteUnrecorded) {
+            process.stderr.write(`[lynox:trail] derived knowledge write refused: its row could not be written (${namespaceLabel(data.namespace)})\n`);
+            return;
+          }
+          // The store runs entity extraction over the memory; a malformed stored alias list fails its JSON.parse with a
+          // SyntaxError that quotes entity names taken from run memory.
+          process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${processErrorText(err)}\n`);
         }
       })();
 
@@ -899,7 +1069,10 @@ export function setupMemoryStoreSubscription(
       void embedTask.finally(() => { activeEmbeddings.delete(embedTask); });
     };
 
-    void run();
+    // `diagnostics_channel` calls this synchronously inside the publisher's call slot, and
+    // `run` reaches `store` (and the row before it) before its first await. Outside the slot,
+    // a refused derived row cannot poison the publishing call, whose own entry has landed.
+    runOutsideCallSlot(() => { void run(); });
   });
 }
 

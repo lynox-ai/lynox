@@ -225,3 +225,5 @@ export {
   isSupported,
   isIosWithoutPwa,
 } from './stores/notifications.svelte.js';
+// The owner's view of what people with delegated access did (all tiers, owner only).
+export { default as AccessTrailView } from './components/AccessTrailView.svelte';

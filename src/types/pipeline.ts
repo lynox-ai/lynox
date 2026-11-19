@@ -99,6 +99,13 @@ export interface PipelineResult {
   steps: PipelineStepResult[];
   totalDurationMs: number;
   totalCostUsd: number;
+  /** Why the run ended before its next step, in lynox's own words, when it was not a step's
+   *  failure: today only that an access the workflow depends on ended during the run (1100). */
+  endedBecause?: string | undefined;
+  /** When a step's reported failure ended the run (`on_failure: stop`, where the step has no entry
+   *  in `steps`): lynox's fixed sentence naming that step and where its reason is shown. The reason
+   *  itself is the step agent's text and never goes here (U-192 1b). */
+  reportedFailure?: string | undefined;
 }
 
 /**
@@ -399,4 +406,19 @@ export interface TriggerRecord {
    *  trigger reads), from `condition_json.run_id`. Set only by the bulk approval route
    *  and, for a preview, the external bulk plan. */
   bulk_run_id?: string | undefined;
+  /** When the plan was paused because a mandate it depends on provably ended (unix seconds,
+   *  `plan-pause.ts`); absent when it is not paused. Only the takeover clears it. */
+  paused_at?: number | undefined;
+  /** The `next_run_at` the plan had when it was paused, for display. */
+  paused_due_at?: string | undefined;
+  /** The mandate marks the owner took over (`plan-takeover.ts`), as they stood: creator and last
+   *  mandate editor, each as tag, grant id and time. Absent when nothing was taken over. */
+  covered_created_by?: string | undefined;
+  covered_created_id?: string | undefined;
+  covered_created_at?: string | undefined;
+  covered_edited_by?: string | undefined;
+  covered_edited_id?: string | undefined;
+  covered_edited_at?: string | undefined;
+  /** Who ended, as stored: a JSON list read by `pausedForOf` (`plan-pause.ts`). */
+  paused_for?: string | undefined;
 }

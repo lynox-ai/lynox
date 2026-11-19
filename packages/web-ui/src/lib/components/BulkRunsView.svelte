@@ -15,7 +15,9 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import BulkRunDetail from './BulkRunDetail.svelte';
-	import { bulkHaltSuffixKey, bulkLabel, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
+	import { bulkHaltSuffixKey, bulkLabel, bulkPhaseHasSuffix, bulkPhaseKey, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
 	let merges = $state<BulkMerge[]>([]);
@@ -28,6 +30,11 @@
 	let mergeBusy = $state(false);
 
 	const selectedRun = $derived($page.url.searchParams.get('run'));
+	// Taking a merge back is the owner's (the route refuses a mandate): the button shows only once
+	// the server said the session is the owner's. The intro names the owner to a mandate.
+	const ownerActs = $derived(isOwnerSession());
+	const mandate = $derived(isMandateSession());
+	void loadSettingsViewer();
 
 	function openRun(id: string | null): void {
 		const url = new URL($page.url);
@@ -102,9 +109,10 @@
 	<BulkRunDetail runId={selectedRun} onBack={() => openRun(null)} onOpen={(id) => openRun(id)} />
 {:else}
 	<div class="p-6 max-w-4xl mx-auto space-y-6">
+		<ViewerUnavailableNotice />
 		<section>
 			<h1 class="text-xl font-light tracking-tight mb-2">{t('bulk.title')}</h1>
-			<p class="text-sm text-text-muted mb-4">{t('bulk.intro')}</p>
+			<p class="text-sm text-text-muted mb-4">{t(mandate ? 'bulk.intro_mandate' : 'bulk.intro')}</p>
 
 			{#if error}
 				<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
@@ -131,12 +139,12 @@
 								<tr class="border-b border-border hover:bg-bg-muted cursor-pointer" onclick={() => openRun(run.id)}>
 									<td class="py-2 pr-3">
 										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkLabel(run, i18n)}</button>
-										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden"> · {bulkSystemName(run.targetSystem, i18n)}</span></div>
+										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden">{` · ${bulkSystemName(run.targetSystem, i18n)}`}</span></div>
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">
 										<span class="{chipClass} whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && !bulkWaitsForStart(run) ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">
-											{t(`bulk.phase.${run.phase}`)}{run.haltReason && !bulkWaitsForStart(run) ? ` ${t(bulkHaltSuffixKey(run))}` : ''}
+											{t(bulkPhaseKey(run))}{bulkPhaseHasSuffix(run) && !bulkWaitsForStart(run) ? ` ${t(bulkHaltSuffixKey(run))}` : ''}
 										</span>
 										{#if run.writeForm === 'unmeasured'}
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>
@@ -179,7 +187,7 @@
 									</td>
 									<td class="py-2 pr-2 sm:pr-3 hidden sm:table-cell text-xs text-text-muted">{tf('bulk.merges.linked', { n: String(merge.dataStoreRows), m: String(merge.threadRows) })}</td>
 									<td class="py-2 text-right">
-										{#if bulkMergeTakeable(merge)}
+										{#if bulkMergeTakeable(merge) && ownerActs}
 											{#if confirmingMerge === merge.id}
 												<div class="space-y-2 text-left">
 													<p class="text-xs">{tf('bulk.merges.confirm', { dup: bulkVisibleText(merge.dupName), canonical: bulkVisibleText(merge.canonicalName) })}</p>

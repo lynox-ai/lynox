@@ -22,6 +22,8 @@ describe('exec protocol: request', () => {
     expect(capTimeout(Number.POSITIVE_INFINITY)).toBe(DEFAULT_BASH_TIMEOUT_MS);
     expect(capTimeout(MAX_EXEC_TIMEOUT_MS + 1)).toBe(MAX_EXEC_TIMEOUT_MS);
     expect(capTimeout(1234.9)).toBe(1234);
+    // A fraction below 1 ms would floor to 0 and end the call at once.
+    expect(capTimeout(0.5)).toBe(DEFAULT_BASH_TIMEOUT_MS);
   });
 
   it('refuses unknown fields, a cwd among them', () => {
@@ -192,6 +194,12 @@ describe('releasing a uid', () => {
 
   it('quarantines when root still sees residue after the sweep', async () => {
     const { ops } = fakeOps([0], { residue: ['shm 7'] });
-    expect(await releaseUid(20000, ops)).toEqual({ ok: false, reason: 'uid 20000: residue after the sweep: shm 7' });
+    expect(await releaseUid(20000, ops)).toEqual({ ok: false, reason: 'uid 20000: residue after the sweep: 1 entry (shm 1)' });
+  });
+
+  it('counts residue a call left per place and names none of it: the call chose the names, and the reason reaches the log', async () => {
+    const { ops } = fakeOps([0], { residue: ['/dev/shm/name-a-call-chose', '/dev/shm/other', '/tmp/calls/x (unreadable)', 'sem 3'] });
+    const result = await releaseUid(20000, ops);
+    expect(result).toEqual({ ok: false, reason: 'uid 20000: residue after the sweep: 4 entries (/dev/shm 2, /tmp/calls 1, sem 1)' });
   });
 });

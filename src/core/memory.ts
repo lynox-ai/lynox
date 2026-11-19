@@ -3,7 +3,9 @@ import type { IMemory, MemoryNamespace, MemoryScopeRef } from '../types/index.js
 import { ALL_NAMESPACES } from '../types/index.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
-import { channels } from './observability.js';
+import { channels, publishMemoryStore } from './observability.js';
+import type { AuditLog } from './audit-log.js';
+import { ifTrue, InstanceWriteUnrecorded, withInstanceWriteAs, type InstanceActor } from './instance-trail.js';
 import { classifyScope } from './scope-classifier.js';
 import * as fs from 'node:fs/promises';
 import { mkdirSync, rmSync } from 'node:fs';
@@ -16,6 +18,7 @@ import { ensureDir } from './atomic-write.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
 import { calculateCost } from './pricing.js';
+import { engineLessStoreText, type EngineLessReader } from './engine-less-refusal.js';
 
 const DEFAULT_DIR = 'memory';
 const CONTEXT_TTL_DAYS = 30;
@@ -196,6 +199,14 @@ export async function exportMemoryDir(baseDir: string): Promise<MemoryDirExport>
   return { scopes, mayBeIncomplete };
 }
 
+/** What a failure is, without its message: `code` when it has one (`ENOSPC`), else its name. */
+function errorKind(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,40}$/.test(code)) return code;
+  const name = err instanceof Error ? err.name : '';
+  return /^[A-Za-z]{1,40}$/.test(name) ? name : 'error';
+}
+
 export class Memory implements IMemory {
   private client: Anthropic;
   private readonly cache = new Map<string, string>();
@@ -246,6 +257,23 @@ export class Memory implements IMemory {
    */
   setMeteredHost(host: HookHost | null): void {
     this.meteredHost = host;
+  }
+
+  /** Set by an engine that started without engine.db: see {@link refuseChangesWithoutStore}. */
+  private _changesRefused = false;
+
+  /**
+   * Called by an engine that started without engine.db while durable memory is on. It then serves
+   * these files through the old memory tools, and the next boot with engine.db does not read them
+   * the same way (`engine-less-refusal.ts`), so a change from the model or a person is refused with
+   * a plain reason instead. A memory never told this writes as before.
+   */
+  refuseChangesWithoutStore(): void {
+    this._changesRefused = true;
+  }
+
+  engineLessRefusal(reader: EngineLessReader): string | null {
+    return this._changesRefused ? engineLessStoreText('memory', reader) : null;
   }
 
   /**
@@ -313,7 +341,7 @@ export class Memory implements IMemory {
     this.cache.set(this._cacheKey(scope.type, scope.id, ns), trimmed);
   }
 
-  async append(ns: MemoryNamespace, text: string): Promise<void> {
+  async append(ns: MemoryNamespace, text: string): Promise<boolean> {
     return this.appendScoped(ns, text, this._defaultScope());
   }
 
@@ -486,14 +514,15 @@ export class Memory implements IMemory {
     return path.join(this._scopeDir(scope), `${ns}.txt`);
   }
 
-  async appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef): Promise<void> {
+  /** `true` only when the text reached the scope's file: a cache-only write and a text already held are not proven writes. */
+  async appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef): Promise<boolean> {
     const safeText = this.maskFn ? this.maskFn(text) : text;
     // Add date prefix for context entries to enable TTL
     const entry = ns === 'status' && !safeText.startsWith('[20')
       ? `[${new Date().toISOString().slice(0, 10)}] ${safeText}`
       : safeText;
     const content = await this.loadScoped(ns, scope);
-    if (content?.includes(safeText)) return;
+    if (content?.includes(safeText)) return false;
 
     const raw = content ? `${content}\n${entry}` : entry;
     const updated = trimMemoryContent(raw);
@@ -505,6 +534,7 @@ export class Memory implements IMemory {
 
     // Update unified cache for this scope
     this.cache.set(this._cacheKey(scope.type, scope.id, ns), updated);
+    return this._flatFileEnabled;
   }
 
   async loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef): Promise<string | null> {
@@ -578,7 +608,7 @@ export class Memory implements IMemory {
     return true;
   }
 
-  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined): Promise<void> {
+  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined, actor?: InstanceActor | undefined, auditLog?: AuditLog | null | undefined): Promise<void> {
     try {
       if (!finalAnswer || finalAnswer.length < 50) return;
 
@@ -610,12 +640,12 @@ export class Memory implements IMemory {
         ? finalAnswer.slice(0, extractionLimit)
         : finalAnswer;
 
-      // Route the auto-extraction pool-key spend through the managed gate: when
-      // the tenant's balance is exhausted the onBeforeRun hook throws →
-      // blockedReason is set → skip the extraction entirely (fail-closed),
-      // matching the KnowledgeLayer extractor. No-op on self-host (no hooks).
-      const extractGate = this.meteredHost ? await fireBeforeRunGate(this.meteredHost, 'fast') : null;
-      if (extractGate && extractGate.blockedReason !== null) return;
+      // Admit the extraction like any model call outside a run: the spending caps on
+      // every instance, then the managed gate (a tenant whose balance is exhausted →
+      // the onBeforeRun hook throws). Blocked → skip the extraction entirely
+      // (fail-closed), matching the KnowledgeLayer extractor.
+      const extractGate = await fireBeforeRunGate(this.meteredHost, 'fast');
+      if (extractGate.blockedReason !== null) return;
 
       const fast = resolveTierModel('fast', getActiveProvider());
       const fastClient = clientForTierSnapshot(fast, this.client, getActiveProvider());
@@ -633,7 +663,7 @@ export class Memory implements IMemory {
       // Debit the spend BEFORE any early return so an empty extraction still
       // bills the tenant (mirrors the KG extractor). reportMeteredCost no-ops on
       // zero/undefined cost, so a usage-less response is a clean skip.
-      if (extractGate && this.meteredHost) {
+      if (this.meteredHost) {
         const u = response.usage;
         const costUsd = u
           ? calculateCost(fast.modelId, {
@@ -699,39 +729,68 @@ export class Memory implements IMemory {
       if (cancelled?.()) return;
 
       const useAutoScope = this._autoScope && this._activeScopes.length > 1;
-
-      // Scope classification: synchronous heuristic (no API call)
-      if (useAutoScope) {
-        await Promise.all(
-          entries.map(async ([ns, text]) => {
-            const classification = classifyScope(text, ns, this._activeScopes);
-            await this.appendScoped(ns as MemoryNamespace, text, classification.scope);
-            channels.memoryStore.publish({
-              namespace: ns,
-              content: text,
-              scopeType: classification.scope.type,
-              scopeId: classification.scope.id,
-              sourceThreadId,
-              sourceRunId,
-              // Auto-extraction from the agent's own final answer — the `agent` channel
-              // (Wave 1.3 derives agent_inferred from it). The turn is clean by construction:
-              // the extraction call is gated off on an untrusted turn (Wave 1.5 abstinence).
-              sourceChannel: 'agent',
-            });
-          }),
-        );
-      } else {
-        await Promise.all(
-          entries.map(async ([ns, text]) => {
-            await this.append(ns as MemoryNamespace, text);
-            // Auto-extraction (no tool call) → `agent` channel → agent_inferred (Wave 1.3).
-            channels.memoryStore.publish({ namespace: ns, content: text, sourceThreadId, sourceRunId, sourceChannel: 'agent' });
-          }),
-        );
+      if (actor === undefined) {
+        // No actor handed in: written as before, unrecorded, and said. The agent always hands
+        // one; this is a caller outside the turn (a test, a later caller that forgot it).
+        process.stderr.write('[lynox:trail] auto extraction without an actor: written without a row\n');
       }
 
-      if (channels.memoryExtraction.hasSubscribers) {
-        channels.memoryExtraction.publish({ status: 'success', entries: entries.length });
+      // One namespace = one write = one row (`capture#extract`, 660a-3): the row before its
+      // append, under the actor the turn held, `auto=1` because no tool call made it. A
+      // namespace whose row cannot be written is not written; the others are.
+      const writeNamespace = async ([ns, text]: [string, string]): Promise<void> => {
+        // Scope classification: synchronous heuristic (no API call)
+        const scope = useAutoScope ? classifyScope(text, ns, this._activeScopes).scope : undefined;
+        const append = (): Promise<boolean | void> => (scope ? this.appendScoped(ns as MemoryNamespace, text, scope) : this.append(ns as MemoryNamespace, text));
+        if (actor === undefined) {
+          await append();
+          // Auto-extraction (no tool call) → `agent` channel → agent_inferred (Wave 1.3).
+          publishMemoryStore({ namespace: ns, content: text, ...(scope ? { scopeType: scope.type, scopeId: scope.id } : {}), sourceThreadId, sourceRunId, sourceChannel: 'agent', actor: null });
+          return;
+        }
+        await withInstanceWriteAs(actor, auditLog, {
+          site: 'capture#extract', kind: 'create', store: 'memory',
+          target: () => [['ns', ns], ['auto', 1]], main: ['append'],
+        }, async (w) => {
+          await w.run('append', () => append(), ifTrue);
+          publishMemoryStore({
+            namespace: ns,
+            content: text,
+            ...(scope ? { scopeType: scope.type, scopeId: scope.id } : {}),
+            sourceThreadId,
+            sourceRunId,
+            // Auto-extraction from the agent's own final answer — the `agent` channel
+            // (Wave 1.3 derives agent_inferred from it). The turn is clean by construction:
+            // the extraction call is gated off on an untrusted turn (Wave 1.5 abstinence).
+            sourceChannel: 'agent',
+            // The subscriber's derived row names this row as its act.
+            actor,
+            trail: w.correlationId === undefined ? undefined : { site: 'capture#extract', correlationId: w.correlationId },
+          });
+        });
+      };
+      // Settled one by one: a refused namespace must not keep the others from landing, nor
+      // turn the extraction into an error when every write that ran succeeded.
+      const settled = await Promise.allSettled(entries.map(writeNamespace));
+      let failure: { readonly reason: unknown } | undefined;
+      let landed = 0;
+      settled.forEach((r, i) => {
+        if (r.status === 'fulfilled') { landed++; return; }
+        const ns = entries[i]![0];
+        if (r.reason instanceof InstanceWriteUnrecorded) {
+          process.stderr.write(`[lynox:trail] auto extraction for ${ns} refused: its row could not be written\n`);
+          return;
+        }
+        // The code or the name, never the message: an fs error's message carries the scope's
+        // path, and a user scope's directory is named after a user-chosen id.
+        process.stderr.write(`[lynox:memory] auto extraction for ${ns} failed: ${errorKind(r.reason)}\n`);
+        failure ??= { reason: r.reason };
+      });
+      // A real failure reports as it did before the split; a refusal alone is no error.
+      if (failure !== undefined) throw failure.reason;
+
+      if (landed > 0 && channels.memoryExtraction.hasSubscribers) {
+        channels.memoryExtraction.publish({ status: 'success', entries: landed });
       }
     } catch (err: unknown) {
       if (channels.memoryExtraction.hasSubscribers) {

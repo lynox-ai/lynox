@@ -29,6 +29,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { runInCallSlot } from '../../core/call-connection.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -72,6 +73,8 @@ const SAMPLE_PROFILE: ApiProfile = {
   avoid: ['No GET for mutations'],
 };
 
+const EMPTY_VAULT = { listNames: (): string[] => [], resolve: (): null => null };
+
 function createMockAgent(
   apiStore?: ApiStore | null,
   secretStore?: unknown,
@@ -92,6 +95,8 @@ function createMockAgent(
     // (a non-allowlisted egress host cannot be saved without a real human).
     promptUser,
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       apiStore: apiStore ?? null,
       vaultNameBindings: bindingsAsMigrated(apiStore),
       dataStore: null,
@@ -806,18 +811,62 @@ describe('api_setup tool', () => {
     });
   });
 
+  // A profile with a pasted token on a store: while the store exchange is off it is saved (and
+  // every request through it gets the closed text); once it is on, it is pointed at the preset.
+  describe('a profile of its own on a Shopify store', () => {
+    const pasted: ApiProfile = {
+      ...SAMPLE_PROFILE,
+      id: 'shop-pasted', name: 'Shop', base_url: 'https://acme.myshopify.com/admin/api/2026-04', description: 'The admin API of one store',
+      auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+    };
+    const save = (store: ApiStore): Promise<string> =>
+      apiSetupTool.handler({ action: 'create', profile: pasted }, createMockAgent(store, undefined, async () => 'Allow')) as Promise<string>;
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it('is refused and pointed at the preset while the store exchange is on', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+      const store = new ApiStore();
+      expect(await save(store)).toBe('Validation error: Invalid profile: the API of Shopify is connected only through this engine\'s built-in "shopify" provider, which shows the user what lynox may do there before a write access and asks every write with what it sends. '
+        + 'A profile with another sign-in, a pasted token included, would reach the same account past both. Use auth.type "oauth2" with auth.oauth.preset_id "shopify" and auth.oauth.preset_params '
+        + '{"shop": "<shop>"} (shop: the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case), then api_setup action "connect".');
+      expect(store.get('shop-pasted')).toBeUndefined();
+    });
+
+    it('is saved as before while the store exchange is off', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '0');
+      const store = new ApiStore();
+      const result = await save(store);
+      expect(result).not.toContain('built-in "shopify" provider');
+      expect(store.get('shop-pasted')?.auth?.type).toBe('bearer');
+    });
+
+    // Saved while the exchange was off, refined once it is on: it is pointed at the preset, and
+    // told that nothing goes through it, since every request to a store needs the connection.
+    it('is not refined once the store exchange is on, and is told that no request goes through it', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '0');
+      const store = new ApiStore();
+      await save(store);
+      expect(store.get('shop-pasted')).toBeDefined();
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+      const out = await apiSetupTool.handler({ action: 'refine', id: 'shop-pasted', refine: { addNotes: ['x'] } }, createMockAgent(store, undefined, async () => 'Allow')) as string;
+      expect(out).toContain('Error: the stored profile "shop-pasted" cannot be refined: the API of Shopify is connected only through this engine\'s built-in "shopify" provider');
+      expect(out).toContain('Change this profile with api_setup action="update"; every request through it is refused until then.');
+    });
+  });
+
   // A built-in provider's app lives under the names its id derives, and the owner enters it in
   // the profile's connection form, which writes only those. A save fills them in or refuses others.
   describe('the app names of a built-in provider', () => {
     const shopify = (oauth: Record<string, unknown> = {}): ApiProfile => ({
       id: 'shop-admin',
       name: 'Shop admin',
-      base_url: 'https://acme.myshopify.com/admin/api/2026-04',
+      base_url: 'https://acme.myshopify.com/admin/api/2026-10',
       description: 'The admin API of one store',
       auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, ...oauth } },
     });
     const save = (store: ApiStore, profile: ApiProfile): Promise<string> =>
-      apiSetupTool.handler({ action: 'create', profile }, createMockAgent(store, undefined, async () => 'Allow')) as Promise<string>;
+      // An empty vault the slot check can read: a step without one is refused a built-in provider's profile.
+      apiSetupTool.handler({ action: 'create', profile }, createMockAgent(store, EMPTY_VAULT, async () => 'Allow')) as Promise<string>;
 
     it.each([
       ['client_secret_key', 'MY_SECRET'],
@@ -839,6 +888,28 @@ describe('api_setup tool', () => {
       expect(result).toContain('Created API profile');
       expect(store.get('shop-admin')?.auth?.oauth?.client_id_key).toBe('SHOPIFY_CLIENT_ID');
       expect(store.get('shop-admin')?.auth?.oauth?.client_secret_key).toBe('SHOPIFY_CLIENT_SECRET');
+    });
+
+    it('stores a store name typed in capitals as the lower-case store it is', async () => {
+      const store = new ApiStore();
+      const result = await save(store, shopify({ preset_params: { shop: 'Acme' } }));
+      expect(result).toContain('Created API profile');
+      expect(store.get('shop-admin')?.auth?.oauth?.preset_params).toEqual({ shop: 'acme' });
+    });
+
+    it('still refuses a vault reference as the store, though lower case would hide its name', async () => {
+      const store = new ApiStore();
+      const result = await save(store, shopify({ preset_params: { shop: 'secret:SHOP_KEY' } }));
+      expect(result).toContain('a vault reference cannot be a provider parameter');
+      expect(store.get('shop-admin')).toBeUndefined();
+    });
+
+    it('stores it in lower case on an update too', async () => {
+      const store = new ApiStore();
+      expect(await save(store, shopify())).toContain('Created API profile');
+      const result = await apiSetupTool.handler({ action: 'update', profile: shopify({ preset_params: { shop: 'ACME' } }) }, createMockAgent(store, EMPTY_VAULT, async () => 'Allow')) as string;
+      expect(result).not.toContain('Error');
+      expect(store.get('shop-admin')?.auth?.oauth?.preset_params).toEqual({ shop: 'acme' });
     });
 
     it('control: an oauth2 profile without a built-in provider keeps names of its own', async () => {
@@ -1179,6 +1250,100 @@ describe('api_setup tool', () => {
         );
         expect(result).toContain('unsupported spec version (openapi: "<unprintable>")');
         expect(result).not.toContain('Ignore the user');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // A server that honours a method override runs `GET …?_method=DELETE` as a DELETE. A spec
+    // read is never a write: the address is refused before it is requested.
+    it('does not request a spec address that carries a method override', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json?x=1;_method=DELETE' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the address carries a method override');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('does not request a spec address that carries a GraphQL mutation', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://api.example.com/graphql?query=mutation%7BdeleteAll%7D' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the address is a GraphQL endpoint whose query names a mutation');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('CONTROL: names an address without a scheme as unparsable, not as a GraphQL mutation', async () => {
+      const result = await apiSetupTool.handler(
+        { action: 'bootstrap', openapi_url: 'api.example.com/openapi.json' },
+        createMockAgent(new ApiStore()),
+      );
+      expect(result).not.toContain('GraphQL');
+      expect(result).toContain('the request failed');
+    });
+
+    it('does not request a docs address that carries a method override', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com/api?_method=DELETE' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the address carries a method override');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('does not follow a redirect whose target carries a method override, and says the first request was sent', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: 'https://example.com/items/5?_method=DELETE' } }),
+      );
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the server answered with a redirect to an address that carries a method override');
+        expect(result).toContain('the first request was sent and answered; ask the user for the spec as a file or for another address of it');
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // The guard's sentences are matched whole: a host that holds the word of another refusal
+    // (`enforce_https.…`) is not read as that refusal, and a hop's refusal does not say that
+    // nothing was sent.
+    it.each([
+      ['enforce_https.example.com', 'plain HTTP'],
+      ['network_policy=deny-all.example.com', 'network access is denied'],
+    ])('does not read a refused hop to %s as another refusal', async (host, wrong) => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 302, headers: { location: `https://${host}/graphql?query=mutation%7Bx%7D` } }),
+      );
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('blocked: the server answered with a redirect that was refused, so it was not followed; the first request was sent and answered; ask the user for the spec as a file or for another address of it');
+        expect(result).not.toContain(wrong);
+        expect(result).not.toContain('refused before it was sent');
+        expect(result).not.toContain(host);
       } finally {
         fetchSpy.mockRestore();
       }
@@ -1684,6 +1849,18 @@ describe('api_setup tool', () => {
         agent,
       );
       expect(result).toContain('cost.output_ratio');
+    });
+
+    it('takes a cost.response_field that is a dot path, and rejects any other', async () => {
+      for (const field of ['cost', 'tasks.0.cost', 'data.billing.total_usd']) {
+        const store = new ApiStore();
+        const result = await apiSetupTool.handler({ action: 'create', profile: withV2({ cost: { model: 'per_call', rate_usd: 0.001, response_field: field } }) }, createMockAgent(store));
+        expect(result).not.toContain('cost.response_field');
+      }
+      for (const field of ['', 'cost.', '.cost', 'a..b', 'tasks[0].cost', '$.cost', 'a b', 7, 'a.b.c.d.e.f.g.h.i']) {
+        const result = await apiSetupTool.handler({ action: 'create', profile: withV2({ cost: { model: 'per_call', rate_usd: 0.001, response_field: field as never } }) }, createMockAgent(new ApiStore()));
+        expect(result).toContain('Invalid cost.response_field');
+      }
     });
 
     it('rejects unknown provenance.source', async () => {
@@ -2809,6 +2986,26 @@ describe('api_setup tool', () => {
       }
     });
 
+    // The docs page chooses its links: one that carries a method override is not requested.
+    it('does not request a linked section whose address carries a method override', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === 'https://docs.example.com/api') {
+          return new Response('<html><body><a href="/v3/rate-limits?_method=DELETE">Rate limits</a><a href="/v3/pricing">Pricing details</a></body></html>', { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } });
+        }
+        return new Response('SECTION', { status: 200, statusText: 'OK' });
+      });
+      stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+      try {
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/api' }, createMockAgent(new ApiStore()));
+        const fetchedUrls = fetchSpy.mock.calls.map(c => String(c[0]));
+        expect(fetchedUrls).toContain('https://docs.example.com/v3/pricing');
+        expect(fetchedUrls.some(u => u.includes('_method'))).toBe(false);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('fans out 1-2 same-host linked sections (rate-limits / auth / pricing) into the Haiku prompt', async () => {
       const landingHtml = `
         <html><body>
@@ -3426,10 +3623,16 @@ describe('api_setup tool', () => {
       // Simulate a session that has already spent its HTTP budget.
       (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const rateSpy = vi.spyOn(store, 'checkRateLimit');
 
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+      // Refused before the token host's rate bucket is consumed (row 1005); the call below the
+      // limit in 'reserves fetch_token's POST before it goes out' shows the bucket is consumed there.
+      expect(rateSpy).not.toHaveBeenCalled();
+      rateSpy.mockRestore();
 
-      expect(result).toMatch(/session HTTP request limit/i);
+      // ux U-010 for fetch_token, written out: the profile is stored, so the way on is to continue it.
+      expect(result).toBe('Blocked: this conversation or run has reached its limit of 100 HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.');
       expect(fetchSpy).not.toHaveBeenCalled(); // blocked BEFORE the client_secret POST
     });
 
@@ -3827,6 +4030,29 @@ describe('api_setup tool', () => {
       expect(result).toMatch(/Token exchange OK/i);
       expect(fetchSpy).toHaveBeenCalled();
       fetchSpy.mockRestore();
+    });
+
+    // Row 1005: reserved before the POST, as http_request does, so an exchange that fails after it
+    // went out still counts against the budget.
+    it('reserves fetch_token\'s POST before it goes out, so a failed exchange stays charged', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({ OAUTH_ID: 'id', OAUTH_SECRET: 'sec' }));
+      store.register({
+        id: 'allowlisted_oauth', name: 'Allowlisted OAuth', base_url: 'https://api.openai.com/v1', description: 'Allowlisted OAuth profile.',
+        auth: { type: 'oauth2', vault_keys: ['OAUTH_ID', 'OAUTH_SECRET'], oauth: { token_url: 'https://api.anthropic.com/oauth/token', grant_type: 'client_credentials', client_id_key: 'OAUTH_ID', client_secret_key: 'OAUTH_SECRET', body_format: 'json' } },
+        endpoints: [{ method: 'POST', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('socket hang up'));
+      const rateSpy = vi.spyOn(store, 'checkRateLimit');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'allowlisted_oauth' }, agent);
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(result).toContain('failed');
+      expect((agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests).toBe(1);
+      expect(rateSpy).toHaveBeenCalledTimes(1);
+      fetchSpy.mockRestore();
+      rateSpy.mockRestore();
     });
 
     it('does the token exchange and stores the access_token in the vault', async () => {

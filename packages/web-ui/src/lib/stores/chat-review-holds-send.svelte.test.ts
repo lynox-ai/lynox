@@ -7,9 +7,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 type Store = typeof import('./chat.svelte.js');
 
-const toasts: Array<{ message: string; type: string }> = [];
+const toasts: Array<{ message: string; type: string; durationMs?: number | null }> = [];
 vi.mock('./toast.svelte.js', () => ({
-	addToast: (message: string, type: string) => { toasts.push({ message, type }); return 1; },
+	addToast: (message: string, type: string, durationMs?: number | null) => { toasts.push({ message, type, ...(durationMs === null ? { durationMs } : {}) }); return 1; },
 }));
 
 const json = (body: unknown, status = 200): Response =>
@@ -21,6 +21,8 @@ let calls: string[];
 let reviewBodies: unknown[];
 let runBodies: Array<Record<string, unknown>>;
 let reviewStatus: number | 'network' = 200;
+/** The files an applied rollback answers it left as they are. */
+let reviewNotRestored: string[] | undefined;
 let servedRunId = 'run-7';
 let listeners: Record<string, () => void>;
 let threadMessages: unknown = { messages: [], activeRun: null };
@@ -35,7 +37,7 @@ function serve(changedFiles: Array<{ file: string; status: string; diff: string 
 		if (url.endsWith('/changeset/review')) {
 			reviewBodies.push(JSON.parse(String(init?.body)));
 			if (reviewStatus === 'network') throw new TypeError('Failed to fetch');
-			return json({ ok: reviewStatus === 200 }, reviewStatus);
+			return json({ ok: reviewStatus === 200, ...(reviewNotRestored !== undefined ? { notRestored: reviewNotRestored } : {}) }, reviewStatus);
 		}
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
 		if (url.endsWith('/runs/active')) {
@@ -81,6 +83,7 @@ beforeEach(async () => {
 	reviewBodies = [];
 	runBodies = [];
 	reviewStatus = 200;
+	reviewNotRestored = undefined;
 	servedRunId = 'run-7';
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -218,6 +221,34 @@ describe('an open changeset review holds the next send', () => {
 			expect(toasts).toEqual([]);
 		});
 	}
+
+	// A rollback that left files as they are (replaced or linked since the review) says which:
+	// the review promised the original back.
+	it('a rollback that could not restore a file names it, until the person closes the message', async () => {
+		const { tf } = await import('../i18n.svelte.js');
+		await reviewOpen();
+		reviewNotRestored = ['notes.md', 'b.txt'];
+		await store.submitChangesetReview('rollback');
+		expect(toasts).toEqual([{ message: tf('changeset.not_restored', { files: 'notes.md, b.txt' }), type: 'error', durationMs: null }]);
+		expect(store.getPendingChangeset()).toBeNull();
+	});
+
+	it('a rollback that left more than five files names five and counts the rest', async () => {
+		const { tf } = await import('../i18n.svelte.js');
+		await reviewOpen();
+		reviewNotRestored = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+		await store.submitChangesetReview('rollback');
+		const files = tf('changeset.not_restored_more', { files: 'a, b, c, d, e', n: '2' });
+		expect(files, 'precondition: the count is filled in').toMatch(/a, b, c, d, e (and|und) 2/);
+		expect(toasts.map((x) => x.message)).toEqual([tf('changeset.not_restored', { files })]);
+	});
+
+	it('a rollback that restored everything says nothing (control)', async () => {
+		await reviewOpen();
+		reviewNotRestored = [];
+		await store.submitChangesetReview('rollback');
+		expect(toasts).toEqual([]);
+	});
 
 	// A refused answer did nothing. Closing the review without a word would read as done.
 	it('an answer to an earlier run\'s review says so, shows what is pending now, and answers that', async () => {

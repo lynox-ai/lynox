@@ -49,6 +49,8 @@ describe('RunExecutor', () => {
     ex.acquire('r1', 't1', abortFn, OWNER_PRINCIPAL);
     expect(ex.abort('r1')).toBe(true);
     expect(abortFn).toHaveBeenCalledOnce();
+    // A question the run left open tells a late answer that the run was stopped.
+    expect(abortFn).toHaveBeenCalledWith('run_stopped');
     expect(ex.abort('does-not-exist')).toBe(false);
   });
 
@@ -92,6 +94,8 @@ describe('RunExecutor', () => {
       ex.acquire('r-owner', 't1', owners, OWNER_PRINCIPAL);
       expect(ex.abortEnded((id) => id === 'grant-2')).toBe(1);
       expect(ended).toHaveBeenCalledOnce();
+      // ...and that the access it was asked under ended.
+      expect(ended).toHaveBeenCalledWith('mandate_ended');
       expect(renewed).not.toHaveBeenCalled();
       expect(owners).not.toHaveBeenCalled();
     });

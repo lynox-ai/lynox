@@ -18,12 +18,30 @@ describe('resolveInboxLlmRegion — EU residency from user provider choice', () 
     })).toBe('us');
   });
 
-  it('defaults Mistral users to EU (no env override needed) — fixes leak', () => {
+  it('defaults Mistral users on the EU regional endpoint to EU (no env override needed) — fixes leak', () => {
+    expect(resolveInboxLlmRegion({
+      envOverride: undefined,
+      provider: 'openai',
+      apiBaseURL: 'https://api.eu.mistral.ai/v1',
+    })).toBe('eu');
+  });
+
+  // Mistral commits to no inference location for its global endpoint, so it must not switch off
+  // the warning and the production gate that 'us' carries.
+  it('treats Mistral\'s global endpoint as US: no location is committed there', () => {
     expect(resolveInboxLlmRegion({
       envOverride: undefined,
       provider: 'openai',
       apiBaseURL: 'https://api.mistral.ai/v1',
-    })).toBe('eu');
+    })).toBe('us');
+  });
+
+  it('treats another mistral.ai subdomain as US', () => {
+    expect(resolveInboxLlmRegion({
+      envOverride: undefined,
+      provider: 'openai',
+      apiBaseURL: 'https://api.us.mistral.ai/v1',
+    })).toBe('us');
   });
 
   it('defaults Anthropic users to US', () => {
@@ -76,6 +94,11 @@ describe('resolveInboxLlmRegion — EU residency from user provider choice', () 
       envOverride: undefined,
       provider: 'openai',
       apiBaseURL: 'https://api.mistral.ai.attacker.com/v1',
+    })).toBe('us');
+    expect(resolveInboxLlmRegion({
+      envOverride: undefined,
+      provider: 'openai',
+      apiBaseURL: 'https://api.eu.mistral.ai.attacker.com/v1',
     })).toBe('us');
   });
 

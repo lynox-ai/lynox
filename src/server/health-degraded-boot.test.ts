@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LynoxHTTPApi } from './http-api.js';
+import { reloadConfig } from '../core/config.js';
 
 /**
  * `/api/health` after a boot in which engine.db or history.db could not be opened.
@@ -39,15 +40,18 @@ afterEach(async () => {
     rmSync(dir, { recursive: true, force: true });
   }
   vi.unstubAllEnvs();
+  reloadConfig(); // and leak none of it into the next test
 });
 
-async function bootAndProbe(broken: 'engine.db' | 'history.db' | null): Promise<{ body: Record<string, unknown>; text: string; status: number }> {
+async function bootAndProbe(broken: 'engine.db' | 'history.db' | null, durable?: 'true' | 'false'): Promise<{ body: Record<string, unknown>; text: string; status: number }> {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-health-degraded-'));
   if (broken !== null) mkdirSync(join(dir, broken));
   vi.stubEnv('LYNOX_DATA_DIR', dir);
   vi.stubEnv('LYNOX_HTTP_SECRET', SECRET);
   vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
   vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', undefined);
+  vi.stubEnv('LYNOX_DURABLE_MEMORY_ENABLED', durable);
+  reloadConfig(); // loadConfig() memoizes: read the env just set
 
   const api = new LynoxHTTPApi();
   booted = { api, dir };
@@ -78,5 +82,28 @@ describe('/api/health after the boot', () => {
     expect(Object.keys(r.body).sort()).toEqual(CONTRACT_KEYS);
     expect(r.text).not.toContain(broken);
     expect(r.text).not.toMatch(/history|engine\.db|run.?history|engine.?db/i);
+  }, 60_000);
+});
+
+/**
+ * `engine.durable_memory`: the one word the control plane reads
+ * to tell an owner, before a grant, that a mandate login will be refused here. Real boots, so the
+ * word comes from what the boot actually wired, not from a stub.
+ */
+describe('/api/health names whether durable knowledge runs', () => {
+  const word = (body: Record<string, unknown>): unknown => (body['engine'] as Record<string, unknown>)['durable_memory'];
+
+  it('says on when it is switched on and its store loaded', async () => {
+    expect(word((await bootAndProbe(null, 'true')).body)).toBe('on');
+  }, 60_000);
+
+  it('says off when it is switched off', async () => {
+    expect(word((await bootAndProbe(null, 'false')).body)).toBe('off');
+  }, 60_000);
+
+  it('says not_loaded when it is switched on but engine.db could not be opened, and nothing more', async () => {
+    const r = await bootAndProbe('engine.db', 'true');
+    expect(word(r.body)).toBe('not_loaded');
+    expect(r.text).not.toMatch(/engine\.db|EngineDb|wiring/i);
   }, 60_000);
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createHmac } from 'node:crypto';
 import {
+  spendProfileOAuthState,
   signProfileOAuthState,
   verifyProfileOAuthState,
   PROFILE_OAUTH_STATE_TTL_SEC,
@@ -11,9 +12,11 @@ const NOW = 1_700_000_000;
 const VERIFIER = 'a'.repeat(43);
 const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
 
-const good = { state: STATE, profileId: 'bexio', verifier: VERIFIER, by: { tag: 'owner' } } as const;
+const good = { state: STATE, profileId: 'bexio', verifier: VERIFIER, by: { tag: 'owner' }, asked: [] as string[] } as const;
 /** The `by` field `good` signs, as the payload carries it. */
 const BY = Buffer.from(JSON.stringify({ tag: 'owner' })).toString('base64url');
+/** The `asked` field `good` signs: no scope. */
+const ASKED = Buffer.from(JSON.stringify([])).toString('base64url');
 
 describe('the round-trip', () => {
   it('returns exactly what was signed', () => {
@@ -62,7 +65,7 @@ describe('the derivation purpose separates this flow from the Google one', () =>
   // properties that a later edit can collapse. This asserts the separation
   // that survives such an edit.
   it('refuses a payload signed with the Google flow purpose', () => {
-    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${String(NOW)}`;
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${ASKED}.none.${String(NOW)}`;
     const googleKey = createHmac('sha256', 'lynox-oauth-state').update(SECRET).digest();
     const googleSig = createHmac('sha256', googleKey).update(payload).digest('hex');
     expect(verifyProfileOAuthState(`${payload}.${googleSig}`, SECRET, NOW)).toBeNull();
@@ -107,7 +110,7 @@ describe('the shape is refused before anything is trusted', () => {
     ['too few fields', `${STATE}.bexio.${VERIFIER}.${BY}.${String(NOW)}`],
     ['too many fields', `${STATE}.bexio.${VERIFIER}.${BY}.${String(NOW)}.deadbeef.extra`],
     ['empty string', ''],
-    ['an empty field', `.bexio.${VERIFIER}.${BY}.${String(NOW)}.deadbeef`],
+    ['an empty field', `.bexio.${VERIFIER}.${BY}.${ASKED}.${String(NOW)}.deadbeef`],
   ])('refuses %s', (_label, raw) => {
     expect(verifyProfileOAuthState(raw, SECRET, NOW)).toBeNull();
   });
@@ -118,7 +121,7 @@ describe('the shape is refused before anything is trusted', () => {
     // length guard this input is an exception, not a refusal.
     const cookie = signProfileOAuthState(good, SECRET, NOW) ?? '';
     const parts = cookie.split('.');
-    const tampered = [...parts.slice(0, 5), 'zzzz'].join('.');
+    const tampered = [...parts.slice(0, 7), 'zzzz'].join('.');
     expect(() => verifyProfileOAuthState(tampered, SECRET, NOW)).not.toThrow();
     expect(verifyProfileOAuthState(tampered, SECRET, NOW)).toBeNull();
   });
@@ -126,7 +129,7 @@ describe('the shape is refused before anything is trusted', () => {
   it('refuses a truncated signature without throwing', () => {
     const cookie = signProfileOAuthState(good, SECRET, NOW) ?? '';
     const parts = cookie.split('.');
-    const tampered = [...parts.slice(0, 5), (parts[5] ?? '').slice(0, 10)].join('.');
+    const tampered = [...parts.slice(0, 7), (parts[7] ?? '').slice(0, 10)].join('.');
     expect(() => verifyProfileOAuthState(tampered, SECRET, NOW)).not.toThrow();
     expect(verifyProfileOAuthState(tampered, SECRET, NOW)).toBeNull();
   });
@@ -185,7 +188,7 @@ describe('who started the connection rides inside the signature (PRD §3.13)', (
 
   it('carries a mandate with its id across, an address with dots included', () => {
     const cookie = signProfileOAuthState({ ...good, by: MANDATE }, SECRET, NOW) ?? '';
-    expect(cookie.split('.')).toHaveLength(6);
+    expect(cookie.split('.')).toHaveLength(8);
     expect(verifyProfileOAuthState(cookie, SECRET, NOW)).toEqual({ ...good, by: MANDATE });
   });
 
@@ -239,5 +242,135 @@ describe('who started the connection rides inside the signature (PRD §3.13)', (
       const payload = `${STATE}.bexio.${VERIFIER}.${field}.${String(NOW)}`;
       expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
     }
+  });
+});
+
+describe('a state is spent once', () => {
+  it('the first callback spends it, a second is refused while its cookie could verify, and a spent state is forgotten only after that', () => {
+    const now = 1_800_000_000;
+    expect(spendProfileOAuthState('spent-once', now)).toBe(true);
+    expect(spendProfileOAuthState('spent-once', now)).toBe(false);
+    expect(spendProfileOAuthState('spent-once', now + PROFILE_OAUTH_STATE_TTL_SEC)).toBe(false);
+    // Another state is its own.
+    expect(spendProfileOAuthState('spent-other', now)).toBe(true);
+    // Past the cookie's life the entry goes: no cookie for it verifies any more.
+    expect(spendProfileOAuthState('spent-once', now + PROFILE_OAUTH_STATE_TTL_SEC + 1)).toBe(true);
+  });
+});
+
+// What the link asked for rides inside the signature: the callback records it as the grant's
+// asked scopes, so what counts as asked is what the person confirmed, not a later profile read.
+describe('the asked scopes ride inside the signature', () => {
+  const ourSig = (payload: string): string => {
+    const key = createHmac('sha256', 'lynox-profile-oauth-state').update(SECRET).digest();
+    return createHmac('sha256', key).update(payload).digest('hex');
+  };
+  const enc = (v: unknown): string => Buffer.from(JSON.stringify(v)).toString('base64url');
+  const ASKED_LIST = ['read_products', 'write_files', 'https://www.googleapis.com/auth/gmail.readonly'];
+
+  it('carries them across, a scope with dots and slashes included', () => {
+    const cookie = signProfileOAuthState({ ...good, asked: ASKED_LIST }, SECRET, NOW) ?? '';
+    expect(cookie.split('.')).toHaveLength(8);
+    expect(verifyProfileOAuthState(cookie, SECRET, NOW)).toEqual({ ...good, asked: ASKED_LIST });
+  });
+
+  it('reads none asked back as an empty list, never as absent', () => {
+    const { asked: _a, ...without } = good;
+    const cookie = signProfileOAuthState(without, SECRET, NOW) ?? '';
+    expect(verifyProfileOAuthState(cookie, SECRET, NOW)?.asked).toEqual([]);
+  });
+
+  it('refuses a cookie whose asked scopes were swapped for more', () => {
+    const cookie = signProfileOAuthState({ ...good, asked: ['read_products'] }, SECRET, NOW) ?? '';
+    const parts = cookie.split('.');
+    const swapped = [...parts.slice(0, 4), enc(['read_products', 'write_files']), ...parts.slice(5)].join('.');
+    expect(swapped).not.toBe(cookie);
+    expect(verifyProfileOAuthState(swapped, SECRET, NOW)).toBeNull();
+  });
+
+  it('refuses a cookie from before the asked scopes were carried, though its signature is good', () => {
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  // Signed by this engine and still not a list of scopes: refused, never read as "unknown, so any".
+  it.each([
+    ['a string', enc('write_files')],
+    ['a list with a number', enc(['write_files', 1])],
+    ['an object', enc({ scopes: ['write_files'] })],
+    ['a scope with a space', enc(['read_products write_files'])],
+    ['no JSON', Buffer.from('[write_files').toString('base64url')],
+  ])('refuses a well-signed asked field that is %s', (_what, field) => {
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${field}.none.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  // The control for the case above: the same payload with a good field is read.
+  it('reads a well-signed asked field that is a list of scopes', () => {
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${enc(['write_files'])}.none.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)?.asked).toEqual(['write_files']);
+  });
+
+  // The browser drops a cookie over about 4 KB without a word, after the person consented.
+  it('does not sign a value longer than a browser keeps, though each field is within its cap', () => {
+    const long = Array.from({ length: 35 }, (_, i) => `https://www.googleapis.com/auth/a-rather-long-scope-name-for-a-test-${String(i).padStart(3, '0')}.readonly`);
+    expect(signProfileOAuthState({ ...good, asked: long }, SECRET, NOW)).toBeNull();
+    const fits = long.slice(0, 10);
+    expect(verifyProfileOAuthState(signProfileOAuthState({ ...good, asked: fits }, SECRET, NOW) ?? '', SECRET, NOW)?.asked).toEqual(fits);
+  });
+
+  it.each([
+    ['a scope with a space', ['read_products write_files']],
+    ['an empty scope', ['']],
+    ['more scopes than a link asks for', Array.from({ length: 65 }, (_, i) => `scope_${String(i)}`)],
+  ])('does not sign %s', (_what, asked) => {
+    expect(signProfileOAuthState({ ...good, asked }, SECRET, NOW)).toBeNull();
+  });
+});
+
+// Which customer text the page showed rides inside the signature: the callback records it as the
+// grant's consent version, so a connection reads as confirmed under the text the person read.
+describe('the version of the customer text rides inside the signature', () => {
+  const ourSig = (payload: string): string => {
+    const key = createHmac('sha256', 'lynox-profile-oauth-state').update(SECRET).digest();
+    return createHmac('sha256', key).update(payload).digest('hex');
+  };
+  const V = '0123456789abcdef';
+
+  it('carries it across, and reads a start without a text back without one', () => {
+    const cookie = signProfileOAuthState({ ...good, consent: V }, SECRET, NOW) ?? '';
+    expect(cookie.split('.')).toHaveLength(8);
+    expect(verifyProfileOAuthState(cookie, SECRET, NOW)).toEqual({ ...good, consent: V });
+    const none = verifyProfileOAuthState(signProfileOAuthState(good, SECRET, NOW) ?? '', SECRET, NOW);
+    expect(none).toEqual(good);
+    expect(none !== null && 'consent' in none).toBe(false);
+  });
+
+  it('refuses a cookie whose version was swapped, or added to a start that showed none', () => {
+    const cookie = signProfileOAuthState({ ...good, consent: V }, SECRET, NOW) ?? '';
+    const parts = cookie.split('.');
+    const swapped = [...parts.slice(0, 5), 'fedcba9876543210', ...parts.slice(6)].join('.');
+    expect(verifyProfileOAuthState(swapped, SECRET, NOW)).toBeNull();
+    const plain = (signProfileOAuthState(good, SECRET, NOW) ?? '').split('.');
+    expect(plain[5]).toBe('none');
+    const added = [...plain.slice(0, 5), V, ...plain.slice(6)].join('.');
+    expect(verifyProfileOAuthState(added, SECRET, NOW)).toBeNull();
+  });
+
+  it('refuses a cookie from before the version was carried, though its signature is good', () => {
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${ASKED}.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  it.each([['upper case', '0123456789ABCDEF'], ['too short', '0123'], ['a word', 'anything'], ['empty', '']])(
+    'neither signs nor reads a version that is %s', (_what, consent) => {
+      expect(signProfileOAuthState({ ...good, consent }, SECRET, NOW)).toBeNull();
+      const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${ASKED}.${consent}.${String(NOW)}`;
+      expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+    });
+
+  it('reads a well-signed version field', () => {
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${ASKED}.${V}.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)?.consent).toBe(V);
   });
 });

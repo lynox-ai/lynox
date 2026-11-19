@@ -7,16 +7,30 @@
  * All operations are designed to be safe during concurrent lynox operation.
  */
 
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
-import { createHash } from 'node:crypto';
-import Database from 'better-sqlite3';
+import { createHash, randomBytes } from 'node:crypto';
+import { snapshotSqlite } from './sqlite-snapshot.js';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
-import { deriveBackupKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
+import { canonicalMac, canonicalMacMatches, deriveBackupKey, deriveListProofKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
-import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
+import { BACKUP_LIST_PROOF_FILE, BACKUP_LIST_PROOF_TMP, BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
-import { copyOut, removeStaleStages, stageIn, type StageEntry, type StagedWrite } from './workspace-fd.js';
+import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
+import { OMITTED_SIDECAR, restoreRefusal } from './sidecar-refusals.js';
+import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
+
+/**
+ * `: <reason>` for a log line about a failed backup or upload, or nothing while the process
+ * reduces error text (an exact connection is held). The reason can quote a workspace file name
+ * and, for an upload, Google's answer.
+ */
+export function backupFailureDetail(reason: string | undefined, fallback: string): string {
+  return isErrorTextReducedForProcess() ? '' : `: ${reason ?? fallback}`;
+}
+
+export { OMITTED_SIDECAR };
+import { closeAnchor, copyOut, FOLD_PROBE_NAME, isStageName, listDir, namesFoldAt, openAnchor, removeStaleStages, stageIn, statEntry, unlinkAt, WorkspaceAccessError, type StageEntry, type StagedWrite, type WorkspaceAnchor } from './workspace-fd.js';
 
 /**
  * The inventory row the workspace root serves. The root may live outside the data dir, so it is
@@ -81,6 +95,13 @@ export interface BackupManifest {
   files: BackupFileEntry[];
   checksum: string;
   /**
+   * What the backup left out by design. `workspace: 'omitted-sidecar'`: made in shell sidecar
+   * mode, where the engine does not walk the shared workspace tree (`copyWorkspaceOut`). Absent
+   * means everything was covered, as in every backup made before this field existed. Covered by
+   * the MAC like every field but `auth`, so it is authenticated only when `auth` is present.
+   */
+  coverage?: { workspace: typeof OMITTED_SIDECAR } | undefined;
+  /**
    * Proof of origin: an HMAC over the rest of the manifest, keyed from the vault key. Written by
    * every engine that has a vault key, encrypted backup or not. The manifest carries every file's
    * checksum, so the MAC covers the files' bytes as well as their list and the `encrypted` flag.
@@ -95,6 +116,56 @@ export interface BackupManifest {
  * `no-key`: this engine has no vault key to check with.
  */
 export type BackupProvenance = 'verified' | 'none' | 'mismatch' | 'no-key';
+
+/**
+ * A backup as `listBackups` shows it (`GET /api/backups` leaves `files` out unless `?files=1` asks).
+ * `file_count` and `total_bytes` sum up the manifest's `files`, so a reader that needs only the
+ * totals does not have to walk the list.
+ */
+export type BackupListEntry = BackupManifest & {
+  backup_id: string;
+  provenance: BackupProvenance;
+  file_count: number;
+  total_bytes: number;
+};
+
+/** The list's file of kept answers is read only below this size; a larger one is not trusted to be ours. */
+const LIST_PROOF_MAX_BYTES = 1024 * 1024;
+
+type KeptProvenance = { digest: string; provenance: BackupProvenance };
+
+/**
+ * The entries of the list's file of kept answers, or null when the file is not one this vault key
+ * wrote: wrong shape, other version, or a MAC that does not match. An entry of a shape this code
+ * does not write is left out. `no-key` is never kept (without a key nothing is), so it is refused.
+ */
+function readListProof(value: unknown, key: Buffer): Map<string, KeptProvenance> | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { v, entries, mac } = value as { v?: unknown; entries?: unknown; mac?: unknown };
+  if (v !== 1 || typeof mac !== 'string' || !/^[0-9a-f]{64}$/.test(mac)) return null;
+  if (typeof entries !== 'object' || entries === null || Array.isArray(entries)) return null;
+  if (!canonicalMacMatches({ v, entries }, mac, key)) return null;
+  const out = new Map<string, KeptProvenance>();
+  for (const [name, entry] of Object.entries(entries as Record<string, unknown>)) {
+    const { digest, provenance } = (typeof entry === 'object' && entry !== null ? entry : {}) as { digest?: unknown; provenance?: unknown };
+    // A digest is only ever compared for equality with a sha256 the list just computed.
+    if (typeof digest !== 'string') continue;
+    if (provenance !== 'verified' && provenance !== 'none' && provenance !== 'mismatch') continue;
+    out.set(name, { digest, provenance });
+  }
+  return out;
+}
+
+/** The totals of a manifest's `files`; an entry without a usable size counts as 0 bytes. */
+function fileTotals(files: unknown): { file_count: number; total_bytes: number } {
+  if (!Array.isArray(files)) return { file_count: 0, total_bytes: 0 };
+  let total = 0;
+  for (const f of files as unknown[]) {
+    const size = typeof f === 'object' && f !== null ? (f as { size_bytes?: unknown }).size_bytes : undefined;
+    if (typeof size === 'number' && Number.isFinite(size) && size > 0) total += size;
+  }
+  return { file_count: files.length, total_bytes: total };
+}
 
 export interface RestoreOptions {
   /**
@@ -123,6 +194,8 @@ export interface BackupResult {
    * `workspace/...`. Empty when everything was copied.
    */
   skipped?: string[] | undefined;
+  /** Set when the workspace was left out because the engine runs in shell sidecar mode; the manifest's `coverage` says the same. */
+  workspace?: typeof OMITTED_SIDECAR | undefined;
 }
 
 export interface RestoreResult {
@@ -131,9 +204,19 @@ export interface RestoreResult {
   files_restored: number;
   duration_ms: number;
   error?: string | undefined;
-  /** Set when the restore was refused because the backup's origin is not shown; confirm with `allowUnverified`. */
-  code?: 'unverified_backup' | undefined;
+  /**
+   * `unverified_backup`: refused because the backup's origin is not shown; confirm with `allowUnverified`.
+   * `workspace_sidecar_mode`: refused because the backup holds workspace files and the engine runs in shell sidecar mode.
+   */
+  code?: 'unverified_backup' | 'workspace_sidecar_mode' | 'restore_in_progress' | undefined;
   provenance?: BackupProvenance | undefined;
+  /**
+   * Entries the restore did not write: a name outside the inventory, or one renamed since the
+   * backup was made. Archive paths. Empty when every entry was restored. A restore temp that a
+   * crashed restore left in a backed-up directory (`STAGING_TEMP`) is neither written nor named
+   * here: it is nobody's file.
+   */
+  skipped?: string[] | undefined;
 }
 
 export interface BackupConfig {
@@ -161,6 +244,288 @@ const SQLITE_DBS = BACKUP_SQLITE_DBS;
 const COPY_DIRS = BACKUP_COPY_DIRS;
 const COPY_FILES = BACKUP_COPY_FILES;
 
+/**
+ * The temp an earlier restore staged a data-dir entry to, by name, beside its target:
+ * `<name>.<16 hex>.restore-staging`. Restores now stage through `stageIn` (`.lynox-stage-…`); this
+ * shape is still swept, since a crashed restore of an earlier version may have left one, and still
+ * kept out of what a restore writes. Only this exact shape is reserved: a user's own
+ * `notes.restore-staging` is restored like any other file.
+ */
+const STAGING_TEMP = /\.[0-9a-f]{16}\.restore-staging$/;
+
+/**
+ * A temp of a write in flight or a crashed one: the older restore temp, or the fd module's stage
+ * (`.lynox-stage-<24 hex>`, which the artifact store and the restore both write). A backup taken
+ * while one was in flight holds it; it is nobody's file, so it is neither written back nor named.
+ */
+function isTempName(path: string): boolean {
+  return STAGING_TEMP.test(path) || isStageName(path.slice(path.lastIndexOf('/') + 1));
+}
+
+/**
+ * Whether a restore writes this entry: only where `createBackup` writes, a database or file of the
+ * inventory under its own name, or a path inside one of its directories. A path that is plain but
+ * lands anywhere else (`http-secret`, `vault.key`, `plugins/…`) is what the inventory keeps OUT of
+ * a backup, and a manifest anyone with write access to the backup can extend would otherwise bring
+ * it back. Exact case on purpose: on a filesystem that folds case, `Workspace/x` would reach the
+ * workspace by name, past its root's anchor. A name ending in the staging suffix would collide with
+ * the temp of its neighbour.
+ */
+function isBackedUpEntryPath(path: string): boolean {
+  if (isTempName(path)) return false;
+  const slash = path.indexOf('/');
+  if (slash === -1) return SQLITE_DBS.includes(path) || COPY_FILES.includes(path);
+  return COPY_DIRS.includes(path.slice(0, slash));
+}
+
+/**
+ * The first path the manifest names twice. Both copies pass the check of the archive, and the second
+ * staging deletes the first one's temp, so the swap failed halfway, after earlier files were already
+ * replaced. Compared as strings.
+ */
+function duplicateEntry(paths: readonly string[]): string | null {
+  const seen = new Set<string>();
+  for (const path of paths) {
+    if (seen.has(path)) return path;
+    seen.add(path);
+  }
+  return null;
+}
+
+/**
+ * Every pair of paths that a filesystem folding case or the Unicode form would make collide:
+ * two names for one file (`memory/X` and `memory/x`, NFC `é` and NFD `é`), and a file one entry
+ * names where another needs a folder (`memory/A` beside `memory/a/b`: staging the second makes the
+ * folder, and the swap's rename onto it fails after earlier files were replaced). On a filesystem
+ * that does not fold, each is a path of its own. The first path of a pair is the one whose folder
+ * decides. (The same string as a file and as a folder cannot both be in an archive.)
+ */
+function foldedPairs(paths: readonly string[]): Array<[string, string]> {
+  const fold = (p: string): string => p.normalize('NFC').toUpperCase().toLowerCase();
+  const files = new Map<string, string>();
+  const pairs: Array<[string, string]> = [];
+  for (const path of paths) {
+    const other = files.get(fold(path));
+    if (other !== undefined && other !== path) pairs.push([other, path]);
+    else files.set(fold(path), path);
+  }
+  for (const path of paths) {
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const file = files.get(fold(parts.slice(0, i).join('/')));
+      if (file !== undefined) pairs.push([file, path]);
+    }
+  }
+  return pairs;
+}
+
+/**
+ * The folder whose filesystem decides for `relDir`: itself, or the nearest one above it that exists
+ * (a folder the restore creates inherits how its parent treats names). Never above `root`.
+ */
+function nearestExistingDir(root: string, relDir: string): string {
+  let dir = join(root, relDir);
+  while (dir !== root && dir.startsWith(root + '/')) {
+    try { if (lstatSync(dir).isDirectory()) return dir; } catch { /* not there yet: one up */ }
+    dir = dirname(dir);
+  }
+  return root;
+}
+
+/**
+ * Whether the filesystem holding `dir` folds names: one file written under a lower-case name with an
+ * accent in NFC form, then looked up in upper case and in NFD form. Either lookup that finds it folds.
+ */
+export function filesystemFoldsNames(dir: string, exists: (path: string) => boolean = existsSync): boolean {
+  const base = `.lynox-fold-probe-${randomBytes(6).toString('hex')}-\u00e9a`;
+  const probe = join(dir, base);
+  writeFileSync(probe, '', { flag: 'wx', mode: 0o600 });
+  try {
+    return exists(join(dir, base.toUpperCase())) || exists(join(dir, base.normalize('NFD')));
+  } finally {
+    rmSync(probe, { force: true });
+  }
+}
+
+/**
+ * Why a live path cannot take an entry, checked before anything is staged: a symbolic link on the
+ * way inside the data directory (writing through it would land outside), or a directory where the
+ * backup has a file (the swap's rename would fail after earlier files were already replaced).
+ */
+/**
+ * Remove what a crashed restore of an earlier version left in the folder `relDir` below the anchor,
+ * without following a link: files and links of exactly `STAGING_TEMP`'s or the fold probe's shape.
+ * Not recursive. Not the fd module's `.lynox-stage-` temps: the artifact store writes those in
+ * `artifacts/` while it runs, and a restore's own are removed by `stageIn` when it fails. A folder
+ * that is not there yet, or whose parent is not, holds nothing to remove.
+ */
+function removeStagingTemps(anchor: WorkspaceAnchor, relDir: string): void {
+  if (relDir !== '') {
+    let type: string | undefined;
+    try {
+      type = statEntry(anchor, relDir)?.type;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    if (type !== 'dir') return;
+  }
+  for (const e of listDir(anchor, relDir)) {
+    if (e.type === 'dir') continue;
+    if (!STAGING_TEMP.test(e.name) && !FOLD_PROBE_NAME.test(e.name)) continue;
+    try {
+      unlinkAt(anchor, relDir === '' ? e.name : `${relDir}/${e.name}`);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+}
+
+/**
+ * The first pair of `paths` (relative to one root) that the filesystem takes for one name, asked in
+ * the folder of each pair (a filesystem can fold per folder: ext4 `chattr +F`, per-directory case
+ * sensitivity on NTFS). `folds(relDir)` answers for the nearest folder that exists; when it throws,
+ * the pair comes back with the error's code. Null when no pair folds.
+ */
+function foldedPairOn(
+  paths: readonly string[],
+  nearest: (relDir: string) => string,
+  folds: (dir: string) => boolean,
+): { a: string; b: string; code?: string | null } | null {
+  const seen = new Map<string, boolean>();
+  for (const [a, b] of foldedPairs(paths)) {
+    let foldsHere: boolean;
+    try {
+      const dir = nearest(dirname(a) === '.' ? '' : dirname(a));
+      const known = seen.get(dir);
+      foldsHere = known ?? folds(dir);
+      seen.set(dir, foldsHere);
+    } catch (err: unknown) {
+      const code = (err as { code?: unknown } | null)?.code;
+      return { a, b, code: typeof code === 'string' ? code : null };
+    }
+    if (foldsHere) return { a, b };
+  }
+  return null;
+}
+
+/** The refusal for a pair `foldedPairOn` found: the filesystem folds them, or it could not be asked. */
+function foldRefusal(pair: { a: string; b: string; code?: string | null }): string {
+  const a = JSON.stringify(pair.a);
+  const b = JSON.stringify(pair.b);
+  if (pair.code !== undefined) {
+    return `Could not check whether this machine's filesystem tells ${a} and ${b} apart${pair.code !== null ? ` (${pair.code})` : ''}, so the restore was refused; nothing was replaced. ` +
+      `Check that lynox can create a file in the folder of ${a} (a full disk or a missing permission are the usual causes), then start the restore again.`;
+  }
+  return `This backup holds ${a} and ${b}, and this machine's filesystem takes them for one name: it does not tell upper from lower case, or two ways of writing the same letter, apart. ` +
+    'Restoring would fail halfway, so the restore was refused; nothing was replaced. ' +
+    'To restore this backup, use a machine whose filesystem tells these names apart (Linux usually does), or rename one of the two where the backup was made and back up again.';
+}
+
+/**
+ * Stage `source` below `root` by name, where the platform has no fd-relative open (Windows): what a
+ * restore did before it wrote through an anchor. Each file to a fresh temp beside its target
+ * (exclusive), renamed over it on commit. A link set after the checks is followed here.
+ */
+function stageByName(root: string, source: Iterable<StageEntry>): StagedWrite {
+  const staged: Array<{ tmp: string; dest: string }> = [];
+  const removeTemps = (from: number): void => {
+    for (const { tmp } of staged.slice(from)) { try { rmSync(tmp, { force: true }); } catch { /* best-effort */ } }
+  };
+  let bytes = 0;
+  // Each folder is swept once, before this restore writes a temp into it: its own temps have the
+  // shape the sweep removes.
+  const swept = new Set<string>();
+  try {
+    for (const entry of source) {
+      const dest = join(root, entry.rel);
+      mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+      if (!swept.has(dirname(dest))) {
+        swept.add(dirname(dest));
+        for (const name of readdirSync(dirname(dest))) {
+          if (STAGING_TEMP.test(name) && !lstatSync(join(dirname(dest), name)).isDirectory()) rmSync(join(dirname(dest), name), { force: true });
+        }
+      }
+      const tmp = `${dest}.${randomBytes(8).toString('hex')}.restore-staging`;
+      writeFileSync(tmp, entry.data, { mode: 0o600, flag: 'wx' });
+      staged.push({ tmp, dest });
+      bytes += entry.data.length;
+    }
+  } catch (err) {
+    removeTemps(0);
+    throw err;
+  }
+  let settled = false;
+  return {
+    files: staged.length,
+    bytes,
+    commit(): void {
+      if (settled) throw new Error('staged write already committed or aborted');
+      settled = true;
+      for (let i = 0; i < staged.length; i++) {
+        const { tmp, dest } = staged[i] as { tmp: string; dest: string };
+        try {
+          renameSync(tmp, dest);
+        } catch (err) {
+          removeTemps(i);
+          throw err;
+        }
+      }
+    },
+    abort(): void {
+      if (settled) return;
+      settled = true;
+      removeTemps(0);
+    },
+  };
+}
+
+/** An error's text without the fd paths the anchored writes go through: the user reads it, and they name no file. */
+function withoutFdPaths(message: string): string {
+  return message.replace(/\/(?:proc\/(?:self|thread-self|\d+)|dev)\/fd\/\d+(?:\/|(?=['"\s)]|$))/g, '');
+}
+
+/** The nearest folder below the anchor that exists, from `relDir` up; '' is the anchor itself. */
+function nearestExistingRel(anchor: WorkspaceAnchor, relDir: string): string {
+  let rel = relDir;
+  while (rel !== '' && rel !== '.') {
+    let type: string | undefined;
+    try {
+      type = statEntry(anchor, rel)?.type;
+    } catch (err) {
+      // A folder further up is missing too: one up.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    if (type === 'dir') return rel;
+    const up = dirname(rel);
+    rel = up === '.' ? '' : up;
+  }
+  return '';
+}
+
+/** The text of a restore refused because another one is running. */
+export const RESTORE_RUNNING = 'A restore is already running, so this one was not started. Wait for the running restore: when it succeeds, the instance restarts. ' +
+  'If the instance does not restart, the running restore did not succeed, and you can start a restore again.';
+
+function liveTargetProblem(lynoxDir: string, entryPath: string): string | null {
+  const parts = entryPath.split('/');
+  let at = lynoxDir;
+  for (let i = 0; i < parts.length; i++) {
+    at = join(at, parts[i] as string);
+    let st;
+    try {
+      st = lstatSync(at);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+    const last = i === parts.length - 1;
+    if (!last && st.isSymbolicLink()) return `${parts.slice(0, i + 1).join('/')} is a link on this machine; the restore does not write through it`;
+    if (!last && !st.isDirectory()) return `${parts.slice(0, i + 1).join('/')} is a file on this machine, the backup has a folder there`;
+    if (last && st.isDirectory()) return `${entryPath} is a folder on this machine, the backup has a file there`;
+  }
+  return null;
+}
+
 export class BackupManager {
   private readonly lynoxDir: string;
   private readonly backupDir: string;
@@ -171,6 +536,31 @@ export class BackupManager {
   private readonly _uploadAllowed: () => boolean;
   /** Backups and restores running now; read by the Art. 17 erasure, which refuses while one is. */
   private _running = 0;
+  /**
+   * Whether a restore is running. A second one is refused, not queued: it would take a second safety
+   * backup of a data dir the first is about to replace, then replace it again, and the first one's
+   * restart would cut it off. (Staging and swapping run without an await, so two restores in one
+   * process do not interleave there; another process is not covered.)
+   */
+  private _restoring = false;
+  /**
+   * The list's provenance per backup, so `listBackups` does not canonicalize and MAC every manifest
+   * on every call. Keyed by the backup's folder name; valid while the manifest's bytes hash to the
+   * digest they were checked under. Bound to the content, not to the file's times: a write through
+   * `mmap` into a page already dirty, or a write in the same tick of a coarse clock, changes
+   * neither mtime nor ctime. Only the list reads it: a restore checks the manifest it is about to
+   * act on afresh.
+   */
+  private readonly _listProvenance = new Map<string, KeptProvenance>();
+  /**
+   * The same answers kept across restarts, in `BACKUP_LIST_PROOF_FILE` at the backup dir's root,
+   * MACed under a key from the vault key: the first list after a start checks only what changed.
+   * Read once per manager; written after a list that changed what is kept. A file this key did not
+   * write, or none, means every manifest is checked afresh. Not in any backup's folder, so a Drive
+   * upload of a backup does not carry it.
+   */
+  private _listProofRead = false;
+  private _listProofChanged = false;
 
   constructor(lynoxDir: string, config: BackupConfig, vaultKey: string | null) {
     this.lynoxDir = lynoxDir;
@@ -253,6 +643,7 @@ export class BackupManager {
     const tmpDir = join(this.backupDir, `${timestamp}.tmp`);
     const files: BackupFileEntry[] = [];
     const skipped: string[] = [];
+    let workspace: typeof OMITTED_SIDECAR | undefined;
 
     try {
       mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
@@ -270,7 +661,9 @@ export class BackupManager {
       // 2. Memory + Sessions — recursive copy
       for (const dirName of COPY_DIRS) {
         if (dirName === WORKSPACE) {
-          skipped.push(...this.copyWorkspaceOut(tmpDir, files));
+          const copied = this.copyWorkspaceOut(tmpDir, files);
+          if (copied === OMITTED_SIDECAR) workspace = OMITTED_SIDECAR;
+          else skipped.push(...copied);
           continue;
         }
         const srcDir = join(this.lynoxDir, dirName);
@@ -337,6 +730,7 @@ export class BackupManager {
         encrypted: this.encrypt,
         files,
         checksum,
+        ...(workspace !== undefined ? { coverage: { workspace } } : {}),
       };
       // Truthy, not `!== null`, as in the constructor: an empty string is not key material.
       if (this.vaultKey) {
@@ -435,14 +829,11 @@ export class BackupManager {
           try {
             const result = await this._gdriveUploader.upload(finalDir, manifest);
             if (!result.success) {
-              process.stderr.write(
-                `[lynox:backup] Google Drive upload failed — local backup is intact: ${result.error ?? 'unknown error'}\n`,
-              );
+              process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact${backupFailureDetail(result.error, 'unknown error')}\n`);
             }
           } catch (err: unknown) {
             // A throw is the unexpected path; the uploader reports refusals by return value.
-            const msg = err instanceof Error ? err.message : String(err);
-            process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${msg}\n`);
+            process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${processErrorText(err)}\n`);
           } finally {
             this._uploading--;
           }
@@ -452,7 +843,14 @@ export class BackupManager {
       if (skipped.length > 0) {
         process.stderr.write(`[lynox:backup] ${String(skipped.length)} workspace entries are not in this backup (links, special files or names that are not UTF-8): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}\n`);
       }
-      return { success: true, path: finalDir, manifest, duration_ms: Date.now() - start, ...(skipped.length > 0 ? { skipped } : {}) };
+      if (workspace !== undefined) {
+        process.stderr.write('[lynox:backup] The workspace files are not in this backup: in shell sidecar mode lynox does not read the shared workspace tree. Back them up where the workspace is managed.\n');
+      }
+      return {
+        success: true, path: finalDir, manifest, duration_ms: Date.now() - start,
+        ...(skipped.length > 0 ? { skipped } : {}),
+        ...(workspace !== undefined ? { workspace } : {}),
+      };
     } catch (err: unknown) {
       // Cleanup temp dir on failure
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
@@ -469,13 +867,28 @@ export class BackupManager {
 
   // ── Restore ──
 
+  /** Whether the filesystem holding `dir` folds names (`filesystemFoldsNames`); a seam for tests on one that does not. */
+  protected namesFold(dir: string): boolean {
+    return filesystemFoldsNames(dir);
+  }
+
   async restoreBackup(backupPath: string, options: RestoreOptions = {}): Promise<RestoreResult> {
+    if (this._restoring) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: 0, code: 'restore_in_progress', error: RESTORE_RUNNING };
+    }
+    this._restoring = true;
     this._running++;
     try {
       return await this._restoreBackup(backupPath, options);
     } finally {
       this._running--;
+      this._restoring = false;
     }
+  }
+
+  /** Whether the filesystem holding the workspace folder `relDir` folds names (`namesFoldAt`); a seam for tests. */
+  protected workspaceNamesFold(anchor: WorkspaceAnchor, relDir: string): boolean {
+    return namesFoldAt(anchor, relDir);
   }
 
   private async _restoreBackup(backupPath: string, options: RestoreOptions): Promise<RestoreResult> {
@@ -505,6 +918,17 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path outside the backup — refusing to restore: ${unrestorable}` };
     }
 
+    // Written only where `isBackedUpEntryPath` allows. The rest is named in the result, not refused: a
+    // backup holding a name the inventory has since renamed must stay restorable.
+    const isWritten = (entry: BackupFileEntry): boolean => entry.type !== 'directory' && isBackedUpEntryPath(entry.path);
+    const written = manifest.files.filter(isWritten);
+    // A restore temp left in a backed-up directory is nobody's file: not written, not named.
+    const skipped = manifest.files.filter(entry => entry.type !== 'directory' && !isWritten(entry) && !isTempName(entry.path)).map(entry => entry.path);
+    const duplicate = duplicateEntry(written.map(entry => entry.path));
+    if (duplicate !== null) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path twice — refusing to restore: ${JSON.stringify(duplicate)}` };
+    }
+
     // The manifest decides what is written and whether it is decrypted, and anyone who can write
     // into the backup (or the Drive folder it came from) can write the manifest. Without a MAC
     // under this vault key, the restore needs the caller's explicit word.
@@ -514,6 +938,17 @@ export class BackupManager {
         success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start,
         code: 'unverified_backup', provenance,
         error: `${UNVERIFIED_REASON[provenance]} Restore it only if you know where it came from, and confirm the restore without proof of origin.`,
+      };
+    }
+
+    // In shell sidecar mode nothing is staged into the shared tree (PRD D7, walker 4). Decided by
+    // CONTENT, on the manifest whose origin was just checked: a backup made in this mode holds no
+    // workspace entries (walker 1) and stays restorable. Entries outside the manifest are never
+    // staged, so a backup cannot hide workspace files from this check.
+    if (shellIsolation().kind === 'sidecar' && written.some(entry => entry.path.startsWith(WORKSPACE_PREFIX))) {
+      return {
+        success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start,
+        code: 'workspace_sidecar_mode', error: restoreRefusal(),
       };
     }
 
@@ -558,6 +993,50 @@ export class BackupManager {
       }
     }
 
+    // Before the safety backup and before anything is staged: a target the swap could not take
+    // would fail it halfway, after earlier files were already replaced. Both sets: `stageIn`
+    // compares its paths as written.
+    const dataDirEntries = written.filter(entry => !entry.path.startsWith(WORKSPACE_PREFIX));
+    const workspaceEntries = written.filter(entry => entry.path.startsWith(WORKSPACE_PREFIX));
+    const dataPair = foldedPairOn(
+      dataDirEntries.map(entry => entry.path),
+      relDir => nearestExistingDir(this.lynoxDir, relDir),
+      dir => this.namesFold(dir),
+    );
+    if (dataPair !== null) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: foldRefusal(dataPair) };
+    }
+    // The workspace set is asked inside its root, through the root's anchor: the root may live
+    // outside the data dir, on another filesystem. Only when a pair exists is the root made.
+    const workspaceRels = workspaceEntries.map(entry => entry.path.slice(WORKSPACE_PREFIX.length));
+    if (foldedPairs(workspaceRels).length > 0) {
+      let workspacePair: ReturnType<typeof foldedPairOn>;
+      try {
+        const lease = leaseWorkspaceFor(this.lynoxDir, { create: true });
+        if (lease === null) throw new Error('the workspace root could not be made');
+        try {
+          const anchor = lease.access.anchor;
+          workspacePair = foldedPairOn(workspaceRels, relDir => nearestExistingRel(anchor, relDir), relDir => this.workspaceNamesFold(anchor, relDir));
+        } finally {
+          lease.release();
+        }
+      } catch (err: unknown) {
+        const [a, b] = foldedPairs(workspaceRels)[0] as [string, string];
+        const code = (err as { code?: unknown } | null)?.code;
+        workspacePair = { a, b, code: typeof code === 'string' ? code : null };
+      }
+      if (workspacePair !== null) {
+        const named = { ...workspacePair, a: `${WORKSPACE_PREFIX}${workspacePair.a}`, b: `${WORKSPACE_PREFIX}${workspacePair.b}` };
+        return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: foldRefusal(named) };
+      }
+    }
+    for (const entry of dataDirEntries) {
+      const problem = liveTargetProblem(this.lynoxDir, entry.path);
+      if (problem !== null) {
+        return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Refusing to restore: ${problem}. Nothing was replaced.` };
+      }
+    }
+
     // Safety: attempt backup of current state before restore (best-effort, don't block restore on failure)
     let safetyPath = '';
     try {
@@ -583,55 +1062,62 @@ export class BackupManager {
       // crash between two renames could leave the SET half old / half new, but
       // every file stays individually consistent and the safety backup covers a
       // full recovery.
-      const staged: Array<{ tmp: string; dest: string }> = [];
+      // The data-dir set is written through a handle on the data dir, every folder on the way and
+      // every file opened without following a link (`stageIn`), so a link set after the checks
+      // above is refused, not written through. The handle is the data dir as resolved now.
+      let dataStaged: StagedWrite | null = null;
       let workspaceStaged: { staged: StagedWrite; release: () => void } | null = null;
+      let dataAnchor: WorkspaceAnchor | null;
       try {
-        const workspaceEntries: BackupFileEntry[] = [];
-        for (const entry of manifest.files) {
-          if (entry.type === 'directory') continue;
-          // The workspace set is staged through the root's anchor below, never by name: the
-          // root may live outside the data dir.
-          if (entry.path.startsWith(WORKSPACE_PREFIX)) { workspaceEntries.push(entry); continue; }
-
-          const srcFile = join(backupPath, entry.path);
-          const destFile = join(this.lynoxDir, entry.path);
-
-          // Ensure parent directory exists
-          const destDir = join(destFile, '..');
-          mkdirSync(destDir, { recursive: true, mode: 0o700 });
-
-          const tmpFile = `${destFile}.restore-staging`;
-          const raw = readEntryBytes(srcFile, entry, manifest.encrypted === true);
-          // A leftover temp would keep its own mode through the rename; start from none.
-          rmSync(tmpFile, { force: true });
-          writeFileSync(tmpFile, key !== null ? decryptBuffer(raw, key, entry.path) : raw, { mode: 0o600, flag: 'wx' });
-          staged.push({ tmp: tmpFile, dest: destFile });
-        }
-        // Staged only once the data-dir set is, and committed only after it is swapped: a
-        // failure in staging EITHER set leaves every live file as it was.
-        if (workspaceEntries.length > 0) workspaceStaged = this.stageWorkspaceIn(backupPath, workspaceEntries, key);
-      } catch (stageErr) {
-        // Staging failed before any live file was touched — drop the partial
-        // temps and rethrow so the whole restore aborts cleanly. (`stageIn` removes its own.)
-        for (const { tmp } of staged) {
-          try { rmSync(tmp, { force: true }); } catch { /* best-effort */ }
-        }
-        throw stageErr;
+        dataAnchor = openAnchor(realpathSync(this.lynoxDir));
+      } catch (err) {
+        if (!(err instanceof WorkspaceAccessError && err.code === 'UNSUPPORTED')) throw err;
+        dataAnchor = null;
       }
-
-      // Swap phase: atomic per-file rename over the live files. All bytes are
-      // already staged on the same filesystem, so each rename is atomic and does
-      // no decrypt/copy work — the window for a partial apply is minimal.
       try {
-        for (const { tmp, dest } of staged) {
-          renameSync(tmp, dest);
-          filesRestored++;
+        try {
+          // Checked again here: the safety backup ran in between, and so may anything else.
+          for (const entry of dataDirEntries) {
+            const problem = liveTargetProblem(this.lynoxDir, entry.path);
+            if (problem !== null) throw new Error(`Refusing to restore: ${problem}. Nothing was replaced.`);
+          }
+          const swept = new Set<string>();
+          for (const entry of dataDirEntries) {
+            const relDir = dirname(entry.path) === '.' ? '' : dirname(entry.path);
+            if (dataAnchor !== null && !swept.has(relDir)) { removeStagingTemps(dataAnchor, relDir); swept.add(relDir); }
+          }
+          const source = function* (): Iterable<StageEntry> {
+            for (const entry of dataDirEntries) {
+              const raw = readEntryBytes(join(backupPath, entry.path), entry, manifest.encrypted === true);
+              yield { rel: entry.path, data: key !== null ? decryptBuffer(raw, key, entry.path) : raw };
+            }
+          };
+          dataStaged = dataAnchor !== null
+            ? stageIn(dataAnchor, '', source(), { fileMode: 0o600, dirMode: 0o700 })
+            : stageByName(this.lynoxDir, source());
+          // Staged only once the data-dir set is, and committed only after it is swapped: a
+          // failure in staging EITHER set leaves every live file as it was.
+          if (workspaceEntries.length > 0) workspaceStaged = this.stageWorkspaceIn(backupPath, workspaceEntries, key);
+        } catch (stageErr) {
+          // Staging failed before any live file was touched: drop the data-dir set's temps
+          // (`stageIn` removes its own when it fails) and abort the whole restore.
+          dataStaged?.abort();
+          throw stageErr;
         }
-      } catch (swapErr) {
-        // The workspace set was never committed: its temps go, its live files stay.
-        workspaceStaged?.staged.abort();
-        workspaceStaged?.release();
-        throw swapErr;
+
+        // Swap phase: one rename per file over the live files, in their folders' handles. All
+        // bytes are already staged on the same filesystem, so each rename is atomic.
+        try {
+          dataStaged.commit();
+          filesRestored += dataStaged.files;
+        } catch (swapErr) {
+          // The workspace set was never committed: its temps go, its live files stay.
+          workspaceStaged?.staged.abort();
+          workspaceStaged?.release();
+          throw swapErr;
+        }
+      } finally {
+        if (dataAnchor !== null) closeAnchor(dataAnchor);
       }
       if (workspaceStaged !== null) {
         try {
@@ -642,11 +1128,16 @@ export class BackupManager {
         }
       }
 
+      // The view shows these once; a reload loses them, so they are also in the log.
+      if (skipped.length > 0) {
+        process.stderr.write(`[lynox:backup] restore did not write back ${String(skipped.length)} of the backup's entries (no current area matches their name; they stay in the backup): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}\n`);
+      }
       return {
         success: true,
         pre_restore_backup_path: safetyPath,
         files_restored: filesRestored,
         duration_ms: Date.now() - start,
+        skipped,
       };
     } catch (err: unknown) {
       return {
@@ -654,8 +1145,76 @@ export class BackupManager {
         pre_restore_backup_path: safetyPath,
         files_restored: 0,
         duration_ms: Date.now() - start,
-        error: err instanceof Error ? err.message : String(err),
+        error: withoutFdPaths(err instanceof Error ? err.message : String(err)),
       };
+    }
+  }
+
+  /**
+   * The provenance the list shows for one backup: from the cache while the manifest's bytes hash to
+   * `digest`, the digest they were checked under; checked afresh and kept otherwise. The digest and
+   * the manifest come from the same read.
+   */
+  private listProvenance(name: string, digest: string, manifest: BackupManifest): BackupProvenance {
+    const cached = this._listProvenance.get(name);
+    if (cached !== undefined && cached.digest === digest) return cached.provenance;
+    const provenance = this.provenanceOf(manifest);
+    this._listProvenance.set(name, { digest, provenance });
+    this._listProofChanged = true;
+    return provenance;
+  }
+
+  /** Take the kept answers from the file into the cache, once per manager; see `_listProofRead`. */
+  private readListProofFile(vaultKey: string): void {
+    this._listProofRead = true;
+    const path = join(this.backupDir, BACKUP_LIST_PROOF_FILE);
+    let fd: number | null = null;
+    try {
+      // One descriptor for the check and the read: a symlink is refused at open, a FIFO is not
+      // waited on, and the bound holds on the bytes read, also for a file that grows meanwhile.
+      fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      if (!fstatSync(fd).isFile()) return;
+      const buf = Buffer.alloc(LIST_PROOF_MAX_BYTES + 1);
+      let length = 0;
+      for (let n = 1; n > 0 && length < buf.length; length += n) n = readSync(fd, buf, length, buf.length - length, null);
+      if (length > LIST_PROOF_MAX_BYTES) return;
+      const kept = readListProof(JSON.parse(buf.subarray(0, length).toString('utf-8')) as unknown, deriveListProofKey(vaultKey));
+      if (kept === null) return;
+      for (const [name, entry] of kept) if (!this._listProvenance.has(name)) this._listProvenance.set(name, entry);
+    } catch {
+      // No file, or one that cannot be read: every manifest is checked afresh.
+    } finally {
+      if (fd !== null) try { closeSync(fd); } catch { /* the answers are already taken or not */ }
+    }
+  }
+
+  /**
+   * Write the kept answers to the file. A write that fails leaves the old file or none, and the
+   * next start checks afresh what the file does not hold; it never fails the list.
+   */
+  private writeListProofFile(vaultKey: string): void {
+    this._listProofChanged = false;
+    // `Object.fromEntries` defines each name as an own property, `__proto__` included.
+    const entries = Object.fromEntries([...this._listProvenance].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+    const body = { v: 1, entries };
+    const text = JSON.stringify({ ...body, mac: canonicalMac(body, deriveListProofKey(vaultKey)) });
+    if (Buffer.byteLength(text) > LIST_PROOF_MAX_BYTES) return;
+    const path = join(this.backupDir, BACKUP_LIST_PROOF_FILE);
+    // A write cut off by a crash leaves its temporary file; the next write takes it away. One of
+    // another process mid-write goes too, and that process's rename then fails like any write here.
+    try {
+      for (const name of readdirSync(this.backupDir)) {
+        if (!BACKUP_LIST_PROOF_TMP.test(name)) continue;
+        // One entry that cannot go (a directory of that name, say) does not stop the rest.
+        try { rmSync(join(this.backupDir, name), { force: true }); } catch { /* it stays */ }
+      }
+    } catch { /* a leftover stays until the next write */ }
+    const tmp = `${path}.${String(process.pid)}.${randomBytes(6).toString('hex')}.tmp`;
+    try {
+      writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
+      renameSync(tmp, path);
+    } catch {
+      try { rmSync(tmp, { force: true }); } catch { /* nothing more to do */ }
     }
   }
 
@@ -670,11 +1229,18 @@ export class BackupManager {
 
   // ── List ──
 
-  listBackups(): Array<BackupManifest & { backup_id: string }> {
+  /**
+   * Every backup's manifest, newest first, with its `provenance`: the same check a restore makes,
+   * so the list can say whether a backup's `coverage` (or its absence) is shown at all. An unsigned
+   * manifest's `coverage` is whatever its writer put there.
+   */
+  listBackups(): BackupListEntry[] {
     if (!existsSync(this.backupDir)) return [];
 
     const entries = readdirSync(this.backupDir, { withFileTypes: true });
-    const manifests: Array<BackupManifest & { backup_id: string }> = [];
+    const manifests: BackupListEntry[] = [];
+    const seen = new Set<string>();
+    if (this.vaultKey && !this._listProofRead) this.readListProofFile(this.vaultKey);
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -682,12 +1248,25 @@ export class BackupManager {
       const manifestPath = join(this.backupDir, entry.name, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
-        manifests.push({ ...manifest, backup_id: entry.name });
+        const raw = readFileSync(manifestPath);
+        const manifest = JSON.parse(raw.toString('utf-8')) as BackupManifest;
+        seen.add(entry.name);
+        // Without a vault key there is no MAC to check (`no-key`), so nothing to keep or to hash.
+        const provenance = this.vaultKey
+          ? this.listProvenance(entry.name, createHash('sha256').update(raw).digest('hex'), manifest)
+          : this.provenanceOf(manifest);
+        manifests.push({ ...manifest, backup_id: entry.name, provenance, ...fileTotals(manifest.files) });
       } catch {
         // Skip corrupt manifests
       }
     }
+    // A backup that is gone takes its cached answer with it.
+    for (const name of this._listProvenance.keys()) {
+      if (seen.has(name)) continue;
+      this._listProvenance.delete(name);
+      this._listProofChanged = true;
+    }
+    if (this.vaultKey && this._listProofChanged) this.writeListProofFile(this.vaultKey);
 
     // Sort newest first
     manifests.sort((a, b) => b.created_at.localeCompare(a.created_at));
@@ -784,16 +1363,7 @@ export class BackupManager {
    * Creates a consistent snapshot even during concurrent writes (WAL mode).
    */
   private vacuumInto(srcPath: string, destPath: string): void {
-    let db: InstanceType<typeof Database> | null = null;
-    try {
-      db = new Database(srcPath, { readonly: true });
-      // VACUUM INTO creates a complete, defragmented copy
-      // Escape single quotes in path to prevent SQL injection
-      const safePath = destPath.replace(/'/g, "''");
-      db.exec(`VACUUM INTO '${safePath}'`);
-    } finally {
-      try { db?.close(); } catch { /* ignore */ }
-    }
+    snapshotSqlite(srcPath, destPath);
   }
 
   /** Recursive directory copy preserving structure. */
@@ -838,8 +1408,14 @@ export class BackupManager {
    * Copy the workspace root into `<tmpDir>/workspace` through its anchor, appending the manifest
    * entries. Returns what was not copied (archive paths). A mount below the root or a file that
    * cannot be read fails the backup: it must not be silently incomplete.
+   *
+   * In shell sidecar mode it walks nothing and returns `OMITTED_SIDECAR` (PRD D7, walker 1): the
+   * tree is shared with the pool uids, and the walk throws on the first directory one of them
+   * closed, which would fail the data dir's backup with it. It never throws for the mode, so the
+   * pre-update backup and the worker-loop tasks go on with the rest; the caller records it.
    */
-  private copyWorkspaceOut(tmpDir: string, files: BackupFileEntry[]): string[] {
+  private copyWorkspaceOut(tmpDir: string, files: BackupFileEntry[], isolation: ShellIsolation = shellIsolation()): string[] | typeof OMITTED_SIDECAR {
+    if (isolation.kind === 'sidecar') return OMITTED_SIDECAR;
     const lease = leaseWorkspaceFor(this.lynoxDir);
     if (lease === null) return [];
     try {
@@ -864,7 +1440,10 @@ export class BackupManager {
    * Phase 1 of restoring the workspace set: every file is written as a temp beside its target
    * inside the root, nothing replaced yet. Stale temps of a crashed restore are removed first.
    */
-  private stageWorkspaceIn(backupPath: string, entries: readonly BackupFileEntry[], key: Buffer | null): { staged: StagedWrite; release: () => void } {
+  private stageWorkspaceIn(backupPath: string, entries: readonly BackupFileEntry[], key: Buffer | null, isolation: ShellIsolation = shellIsolation()): { staged: StagedWrite; release: () => void } {
+    // Defence in depth behind the check in `_restoreBackup`: in sidecar mode nothing is staged
+    // into the shared tree. Thrown in the staging phase, so no live file is touched.
+    if (isolation.kind === 'sidecar') throw new Error(restoreRefusal());
     const lease = leaseWorkspaceFor(this.lynoxDir, { create: true });
     if (lease === null) throw new Error('the workspace root could not be made');
     const anchor = lease.access.anchor;

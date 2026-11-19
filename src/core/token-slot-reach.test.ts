@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { runCollectingMemberNotes } from './member-connection-notes.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -67,6 +68,7 @@ import { ApiStore, type ApiProfile } from './api-store.js';
 import { EngineDb } from './engine-db.js';
 import { ConnectionStore } from './connection-store.js';
 import { createToolContext } from './tool-context.js';
+import { ExactClearance } from './exact-clearance.js';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
@@ -209,9 +211,10 @@ async function agentCall(
   store: ApiStore,
   vault: Record<string, string>,
   call: { name: string; input: unknown },
-  opts: { promptUser?: ReturnType<typeof vi.fn>; tools?: ToolEntry[] } = {},
+  opts: { promptUser?: ReturnType<typeof vi.fn>; tools?: ToolEntry[]; ctx?: (c: ReturnType<typeof createToolContext>) => void } = {},
 ): Promise<string> {
   const ctx = createToolContext({});
+  opts.ctx?.(ctx);
   (ctx as { apiStore: unknown }).apiStore = store;
   ctx.vaultNameBindings = bindingsAsMigrated(store, ownerConfirmed);
   mockProcess.mockReset();
@@ -734,6 +737,95 @@ describe('the hint for a secret: name the vault does not have', () => {
     const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
     expect(result).toContain('did you mean secret:SHOP_API_ACCESS_TOKEN?');
   });
+
+  // The hint asks the gate's own check: what the gate refuses as not belonging where the call
+  // goes is not offered; what it refuses for the call itself, or for want of an approval, is.
+  const bound = () => storeOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['REPORTER_KEY'] }));
+
+  it('does not offer a name bound to another address', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('https://collector.example/c', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:REPORTER_KEY');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('control: the gate refuses that name for that address', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('https://collector.example/c', 'REPORTER_KEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('REPORTER_KEY is not allowed to go to https://collector.example');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers a name bound to the address the request goes to', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+  });
+
+  // Two profiles send SPARE_KEY to different places and no binding settles which one it belongs
+  // to, so where it may go is not settled: a request refuses it to any address.
+  const spare = (id: string): ApiProfile => ({ id, name: id, base_url: `https://${id}.example/v1`, description: id, auth: { type: 'bearer', vault_keys: ['SPARE_KEY'] } });
+  const SPARE_VAULT = { ...OWNER_VAULT, SPARE_KEY: value('spare', 'shared', 'key') };
+
+  it('does not offer a name whose destination is not settled', async () => {
+    const result = await agentCall(storeOf(spare('one'), spare('two')), SPARE_VAULT, call('https://collector.example/c', 'SPAREKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SPARE_KEY');
+  });
+
+  it('control: the gate refuses that name as not settled', async () => {
+    const result = await agentCall(storeOf(spare('one'), spare('two')), SPARE_VAULT, call('https://collector.example/c', 'SPARE_KEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('SPARE_KEY is used by profiles that send it to different addresses');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers a name that only waits for an approval no one can give here', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'REPORTERKEY'));
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('control: without anyone to ask, the gate refuses that name only for the approval', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'REPORTER_KEY'));
+    expect(result).toContain('there is no one to approve it');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('does not offer another profile\'s token slot when the call itself is refused either', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('not a url', 'SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+  });
+
+  // A reference in the userinfo refuses the whole call, while the URL is still the connection's
+  // own base: there the grant would let the token through, so only the member's check leaves it out.
+  const inUserinfo = (ref: string) => ({ name: 'http_request', input: { url: `https://u:secret:${ref}@api.shop.example/v1/x`, method: 'GET' } });
+
+  it('does not offer a member\'s token when the call itself is refused at that connection\'s base', async () => {
+    const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const result = await agentCall(storeOf(members), OWNER_VAULT, inUserinfo('SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+  });
+
+  it('control: the owner\'s own token is offered there', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, inUserinfo('SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:SHOP_API_ACCESS_TOKEN?');
+  });
+
+  it('notes the refusal of a member\'s token for the run, as the request tool does', async () => {
+    const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const run = runCollectingMemberNotes(() => agentCall(storeOf(members), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOP_API_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') }));
+    await run.done;
+    expect([...run.notes]).toEqual([expect.stringMatching(/^Connection not used: setup@example\.org set up this connection/)]);
+    // The gate notes the owner's German with it (UX-065): the owner's own run, outside a plan,
+    // and this fixture's grant is not live, so the takeover.
+    expect([...run.said.values()]).toEqual(['setup@example.org hat diese Verbindung (api.shop.example, Profil "shop-api" (id shop-api)) mit eigenem Login eingerichtet. Damit lynox sie für dich nutzt, übernimm sie: Bitte im Chat darum, die Verbindung "shop-api" (id shop-api) zu übernehmen, und bestätige mit „Erlauben“.']);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers a name when the call itself is refused, for the call that follows', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('not a url', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+  });
 });
 
 describe('W7: the 401 hint does not recommend a name the engine would refuse', () => {
@@ -913,18 +1005,58 @@ describe('a secret: reference in a request to a Shopify store', () => {
     'https://shop.MYSHOPIFY.com./admin/api/2026-10/shop.json',
     'https://shop.myshopify.com:8443/admin/api/2026-10/shop.json',
   ])('to %s is refused without a question and nothing is sent', async (url) => {
-    const { SHOPIFY_UNAVAILABLE } = await import('./shopify-host.js');
+    const { SHOPIFY_SELF_HOSTED } = await import('./shopify-host.js');
     const promptUser = vi.fn().mockResolvedValue('Allow');
     const result = await agentCall(storeOf(), { STORE_KEY: value('store', 'key') }, call(url), { promptUser });
-    expect(result).toContain(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
+    expect(result).toContain(`Blocked: ${SHOPIFY_SELF_HOSTED}`);
     expect(promptUser).not.toHaveBeenCalled();
     expect(sent).toHaveLength(0);
+  });
+
+  // On a managed instance where a store pass is possible, the reference is the model's own fault:
+  // it is told to send the request again without it. Where no pass is possible, the instance's
+  // cause is named instead, since sending again would not help.
+  describe('on a managed instance', () => {
+    const managed = (answer: () => Promise<Response>) => (c: ReturnType<typeof createToolContext>) => {
+      c.shellIsolation = { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as never;
+      c.storeBindingDigest = () => 'digest';
+      c.exactClearance = new ExactClearance({ url: 'https://cp.example.invalid', instanceId: 'inst-1', secret: 's' }, { isSet: () => false, set: () => undefined }, { fetch: answer as unknown as typeof fetch });
+    };
+    beforeEach(() => {
+      vi.stubEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'https://cp.example.invalid');
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-1');
+      vi.stubEnv('LYNOX_HTTP_SECRET', 's');
+    });
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it('with a pass possible: refused with the credential sentence, never with the outage one', async () => {
+      const { SHOPIFY_CREDENTIAL_REFERENCE } = await import('./shopify-host.js');
+      const promptUser = vi.fn().mockResolvedValue('Allow');
+      const header = { name: 'http_request', input: { url: 'https://shop.myshopify.com/admin/api/2026-10/shop.json', method: 'GET', headers: { 'X-Shopify-Access-Token': 'secret:STORE_KEY' } } };
+      const result = await agentCall(storeOf(), { STORE_KEY: value('store', 'key') }, header, { promptUser, ctx: managed(async () => new Response('{"ok":true}')) });
+      expect(result).toContain(`Blocked: ${SHOPIFY_CREDENTIAL_REFERENCE}`);
+      expect(result).not.toMatch(/temporarily unavailable|only on an instance that lynox runs/);
+      expect(promptUser).not.toHaveBeenCalled();
+      expect(sent).toHaveLength(0);
+    });
+
+    it('with the control plane\'s refusal holding: refused with that cause instead', async () => {
+      const { SHOPIFY_NOT_CLEARED } = await import('./shopify-host.js');
+      const probe = createToolContext({});
+      managed(async () => new Response('{"ok":false,"reason":"below_floor"}', { status: 409 }))(probe);
+      const clearance = probe.exactClearance!;
+      expect(await clearance.ensure()).toEqual({ ok: false, reason: 'below_floor' });
+      const header = { name: 'http_request', input: { url: 'https://shop.myshopify.com/admin/api/2026-10/shop.json', method: 'GET', headers: { 'X-Data': 'secret:STORE_KEY' } } };
+      const result = await agentCall(storeOf(), { STORE_KEY: value('store', 'key') }, header, { ctx: (c) => { managed(async () => new Response('{}'))(c); c.exactClearance = clearance; } });
+      expect(result).toContain(`Blocked: ${SHOPIFY_NOT_CLEARED}`);
+      expect(sent).toHaveLength(0);
+    });
   });
 
   it('control: to another host it is asked about, and sent once allowed', async () => {
     const promptUser = vi.fn().mockResolvedValue('Allow');
     const result = await agentCall(storeOf(), { STORE_KEY: value('store', 'key') }, call('https://shop.commerce.example/admin/api/2026-10/shop.json'), { promptUser });
-    expect(result).not.toContain('Shopify is temporarily unavailable');
+    expect(result).not.toContain('Shopify');
     expect(promptUser).toHaveBeenCalledTimes(1);
     expect(sent).toHaveLength(1);
   });

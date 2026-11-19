@@ -51,7 +51,7 @@ beforeEach(() => {
   captured.length = 0;
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-judge-worker-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
   store = new DataStore(join(dir, 'datastore.db'));
   store.createCollection({ name: 'products', scope, uniqueKey: ['sku'], columns: [{ name: 'sku', type: 'string' }, { name: 'title', type: 'string' }] });
   store.insertRecords({ collection: 'products', records: [{ sku: 'A', title: `${MARK}-title` }], stamp: TEST_STAMP });
@@ -63,11 +63,11 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function startedRun(): string {
+function startedRun(targets = 1): string {
   const rule = normalizeJudgeRule({ rule: 'Write a short title.', schema: { title: { type: 'string', maxLength: 40 } } });
   const id = ledger.recordDryRun({
     createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
-    targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: `${MARK}-title` } }, after: judgeTemplate(rule) }],
+    targets: ['A', 'B', 'C'].slice(0, targets).map((sku) => ({ key: sku, before: { absent: false, value: { sku, title: `${MARK}-title` } }, after: judgeTemplate(rule) })),
     judge: rule,
   }).id;
   const out = ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
@@ -75,7 +75,7 @@ function startedRun(): string {
   return id;
 }
 
-async function tick(runId: string, hooks: unknown[] = []): Promise<{ records: string[]; notes: string[] }> {
+async function tick(runId: string, hooks: unknown[] = [], language?: string): Promise<{ records: string[]; notes: string[] }> {
   const records: string[] = [];
   const notes: string[] = [];
   const task = {
@@ -99,7 +99,7 @@ async function tick(runId: string, hooks: unknown[] = []): Promise<{ records: st
     .mockImplementation(async () => () => null);
   const engine = {
     getTaskManager: () => manager,
-    getRunHistory: () => ({ getTrigger: () => task, updateTrigger: () => { /* none */ }, recordBulkJudgeCost: () => { /* none */ } }),
+    getRunHistory: () => ({ getTrigger: () => task, updateTrigger: () => { /* none */ }, recordBulkJudgeCost: () => undefined, settleBulkJudgeCost: () => { /* none */ } }),
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
@@ -113,6 +113,9 @@ async function tick(runId: string, hooks: unknown[] = []): Promise<{ records: st
     getHooks: () => hooks,
     getContext: () => null,
     client: {},
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
+    config: { language },
   } as unknown as Engine;
   const router = {
     hasChannels: () => true,
@@ -129,6 +132,56 @@ async function tick(runId: string, hooks: unknown[] = []): Promise<{ records: st
   }
   return { records, notes };
 }
+
+describe('bulk_judge through the worker: the language of its outcome (966)', () => {
+  it('records and pushes a judged run in German on an instance set to German', async () => {
+    model.create = async () => ({
+      id: 'm', type: 'message', role: 'assistant', model: 'claude-haiku-4-5', stop_reason: 'tool_use', stop_sequence: null,
+      content: [{ type: 'tool_use', id: 't', name: 'extract', input: { title: 'Kurzer Titel' } }],
+      usage: { input_tokens: 100, output_tokens: 20 },
+    });
+    const { records, notes } = await tick(startedRun(), [], 'de');
+    // The stub's verdict does not meet the run's schema, so the target counts as invalid; the
+    // sentence around the counts is what this test is about.
+    expect(records).toEqual(['Beurteilung fertig. Der Massenlauf wartet auf deine Prüfung. Beurteilt 0, ungültig 1, ohne Urteil 0 von 1 Zielen.']);
+    // The push titles the stage and its end, not the trigger's title (a run on the data store has no host).
+    expect(notes).toEqual([`\u2713 Beurteilung fertig\n${records[0]!}`]);
+  });
+});
+
+describe('bulk_judge through the worker: a run that is no longer its own', () => {
+  it('a run replaced while it was judged: stopped, in the sentence of its replacement, not a failure (U-324)', async () => {
+    const id = startedRun(2);
+    model.create = async () => {
+      // A later judged run takes its place while the model answers its first target.
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted', halt_reason = ? WHERE id = ?`).run(BULK_HALT_REASONS.superseded, id);
+      return {
+        id: 'm', type: 'message', role: 'assistant', model: 'claude-haiku-4-5', stop_reason: 'tool_use', stop_sequence: null,
+        content: [{ type: 'tool_use', id: 't', name: 'extract', input: { title: 'Kurzer Titel' } }],
+        usage: { input_tokens: 100, output_tokens: 20 },
+      };
+    };
+    const { records, notes } = await tick(id, [], 'de');
+    const de = 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.';
+    expect(records).toEqual([de]);
+    expect(notes).toEqual([`\u23F9 Beurteilung gestoppt\n${de}`]);
+  });
+});
+
+describe('bulk_judge through the worker: a halt that did not take', () => {
+  it('a run the owner discarded while its model failed: told as discarded, not as its own halt', async () => {
+    const id = startedRun();
+    model.create = async () => {
+      ledger.discardRun(id);
+      throw Object.assign(new Error('400 invalid_request'), { status: 400 });
+    };
+    const { records, notes } = await tick(id, [], 'de');
+    const de = 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.';
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.discarded);
+    expect(records).toEqual([de]);
+    expect(notes).toEqual([`\u23F9 Beurteilung verworfen\n${de}`]);
+  });
+});
 
 describe('bulk_judge through the worker: what leaves as an error', () => {
   it('a schema refusal carrying the target\'s text: the target is invalid, and the text is nowhere', async () => {
@@ -178,11 +231,24 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
     const { records, notes } = await tick(id);
     // The handler's own sentence: the throw reached its catch, not the loop's.
-    expect(records).toEqual([`Bulk judge halted: ${BULK_HALT_REASONS.unavailable}.`]);
+    expect(records).toEqual(['AI model or target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, try again later.']);
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
     await vi.waitFor(() => { if (captured.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
     expect(captured.map((e) => e.message)).toEqual(['bulk_judge call failed: Error']);
     for (const text of [...records, ...notes]) expect(text).not.toContain(MARK);
+  });
+
+  it('a throw before the judge begins, told to a German owner: the halt in German, the stored reason as it is (ux Rest-P E13)', async () => {
+    model.create = async () => ({});
+    const id = startedRun();
+    vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
+    const { records, notes } = await tick(id, [], 'de');
+    const de = 'KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.';
+    expect(records).toEqual([de]);
+    expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual([de]);
+    // Its run is held halted: the title says so, the mark that it was a failure (U-324).
+    expect(notes.map((n) => n.slice(0, n.indexOf('\n')).split(' · ')[0])).toEqual(['\u2717 Beurteilung angehalten']);
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
   });
 
   it('a halt that throws in the catch still lets the class reach the tracker', async () => {

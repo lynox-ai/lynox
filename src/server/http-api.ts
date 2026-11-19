@@ -19,6 +19,7 @@ import { createHash, createHmac, timingSafeEqual, randomUUID, randomBytes } from
 import {
   signProfileOAuthState,
   verifyProfileOAuthState,
+  spendProfileOAuthState,
   PROFILE_OAUTH_STATE_TTL_SEC,
 } from '../core/oauth-state-cookie.js';
 import { createPkcePair } from '../core/oauth-pkce.js';
@@ -26,17 +27,21 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
-import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
+import { consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
+import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
 import type { StorePass } from '../core/store-pass.js';
-import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
-import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { connectionShown, mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
+import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
+import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
+import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
+import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
+import { scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
+import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
@@ -51,13 +56,17 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
-import { loadConfig, describePinForDisplay, admitBackgroundModel } from '../core/config.js';
+import { getLynoxDir, loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
+import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js';
+import { billingTierSet, eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
-import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
-import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
+import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
+import { shopifyBulkReadEnabled, shopifyConsentBlock } from '../core/bulk-shopify.js';
+import { containedThreadStates, containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
@@ -68,6 +77,7 @@ import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import type { Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
+import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { isOnboardingFlag } from '../core/onboarding-flag-store.js';
@@ -76,29 +86,42 @@ import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onb
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
-import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
-import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
+import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
+import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
+import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
+import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
+import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
-import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord } from '../types/index.js';
+import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord, PlannedPipeline } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
+import { acquireSlot, readSlot, sweepSlot, type HeldSlot } from '../core/export-slot.js';
+import { sweepStaleExports } from '../core/export-archive.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded , toMistralEuBase } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
-import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
+import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
+import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
+import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orchestrator/run-source.js';
+import { runAsPlanOf } from '../core/plan-run-context.js';
+import { MEMBER_CONNECTION_PREFIX } from '../core/member-connection-notes.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
+import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
   PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
   type PersonErasureDeps, type PersonErasurePreview, type PersonErasureRefusal, type PersonErasureResult,
 } from '../core/person-erasure.js';
+import { durableMemoryState } from '../core/memory-tool-set.js';
+import { migrationCeiling } from '../core/migration-ceiling.js';
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
   HealthBody,
   UsageSummaryResponse,
+  OAuthClaimPreviewRequest,
+  OAuthClaimPreviewResponse,
   OAuthClaimRequest,
   OAuthClaimResponse,
   OAuthDeclineCode,
@@ -107,19 +130,25 @@ import type {
 import { readMandateRevocation, MANDATE_REVOCATION_MAX } from '../contract/http.js';
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
+import { awaitsOwnQuestion } from './own-question.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
-import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl } from '../core/bulk-list.js';
+import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
+import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
-import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
+import { WorkflowStore, type WorkflowAuthorship } from '../core/workflow-store.js';
 import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
-import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
-import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './webhook-receiver.js';
+import { requestLogUrl } from './request-log-url.js';
+import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
+import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
+import { EngineLessRefused } from '../core/engine-less-refusal.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -132,7 +161,8 @@ import type { WorkspaceAccess } from '../core/workspace-access.js';
 import type { StagedArchive, WorkspaceManifest } from '../core/workspace-export.js';
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
-import { ArtifactPlaceholderError } from '../core/artifact-store.js';
+import { ArtifactFileRefusedError, ArtifactPlaceholderError } from '../core/artifact-store.js';
+import { findHiddenChar } from '../core/hidden-text.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -159,7 +189,8 @@ type RouteHandler = (
  * - `own`: a mandate may act only on what it set up or last changed itself; the handler
  *   checks that.
  * - `free`: a mandate may, for the reason given.
- * - `reads`: a GET that only reads. Allowed on GET alone. Filling an in-process cache or
+ * - `reads`: a GET that only reads. Allowed on GET alone. One about a chat names it
+ *   (`readsThread`), and the dispatcher then keeps a contained chat to its owner and its starter. Filling an in-process cache or
  *   touching an in-memory last-used time counts as reading. A GET with any other effect
  *   (disk, database, cookie, token, a call that leaves state elsewhere) declares one of the
  *   four above instead, with the effect in its reason.
@@ -172,16 +203,44 @@ export type MandateStance =
   | { readonly kind: 'mark' }
   | { readonly kind: 'own' }
   | { readonly kind: 'free'; readonly why: string }
-  | { readonly kind: 'reads' };
+  | { readonly kind: 'reads'; readonly thread?: ThreadNamer };
+
+/**
+ * The chat a read is about, as the request names it (register 1112): a thread by id, a live run
+ * (by the run registry), a recorded run (by the run history), or a workflow run (by the chat that
+ * started it). `null` when this request names none — a list, which then filters by itself.
+ */
+export type ThreadNamed = { readonly thread: string } | { readonly liveRun: string } | { readonly historyRun: string } | { readonly pipelineRun: string } | null;
+type ThreadNamer = (params: Readonly<Record<string, string>>, query: URLSearchParams) => ThreadNamed;
+
+/**
+ * A GET that only reads, about one chat (`ThreadNamer`). The dispatcher refuses anyone but the
+ * owner and whoever started the chat when the chat is contained, before the handler runs: a
+ * route is covered by declaring it, and a test holds every GET that names a chat to declaring it.
+ */
+const readsThread = (thread: ThreadNamer): MandateStance => ({ kind: 'reads', thread });
 
 /** A mandate may not; `what` completes "Only the owner of this instance can …". */
 const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
+/** Rows one page of the access trail reads at most. */
+const ACCESS_TRAIL_MAX_ROWS = 500;
 /** A mandate may; the handler marks the act. */
 const MARK: MandateStance = { kind: 'mark' };
 /** A mandate may act on what it set up or last changed itself; the handler checks it. */
 const OWN: MandateStance = { kind: 'own' };
 /** The connect route, which the consent page posts its confirmation to (see the dispatch). */
 const CONNECT_CONFIRM_PATH = /^\/api\/oauth\/connect\/[^/]+$/;
+/**
+ * Whether `principal` may start the consent of `profile`. A session under a mandate connects a
+ * profile it set up itself, and nothing else (PRD §3.13): the consent is recorded as its own, and
+ * an account the owner, or another mandate, prepared is theirs to connect. The connect start
+ * refuses on it, and the profile list tells the page, so the page offers the link only where the
+ * start goes through.
+ */
+function mayStartConnect(principal: RequestPrincipal, profile: ApiProfile | undefined): boolean {
+  if (principal.kind !== 'mandate') return true;
+  return profile !== undefined && profile.created_by === principalTag(principal) && principal.mandateId !== undefined;
+}
 /** A mandate may, for this reason. */
 const free = (why: string): MandateStance => ({ kind: 'free', why });
 /** A GET that only reads. */
@@ -245,6 +304,67 @@ export function mayStopRun(principal: RequestPrincipal, starterTag: string, plan
     || (planTag !== undefined && ownedBy({ created_by: planTag }, principal));
 }
 
+/** How the takeover's refusals are answered. "The plan stays paused" only where the plan is paused. */
+export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' | 'unrecorded', { readonly status: number; readonly message: string }> = {
+  not_available: { status: 409, message: 'Taking over a plan is not available yet.' },
+  bulk: { status: 409, message: "You don't need to take over a bulk run: no helper set it up." },
+  nothing_to_take_over: { status: 409, message: 'This plan does not need to be taken over any more.' },
+  unreadable: { status: 409, message: 'lynox cannot read who set up the workflow of this plan, so it cannot take the plan over. You can complete or delete it. The plan stays paused.' },
+  // Also a run of another plan on the same workflow that the takeover would release (one text for both, ux).
+  running: { status: 409, message: 'A run of this plan, or of another plan that uses the same workflow, has not finished yet. Try again in a few minutes. The plan stays paused.' },
+  changed: { status: 409, message: 'The plan changed while you were looking at it. Look at it again, then take it over. The plan stays paused.' },
+  prompts: { status: 503, message: "lynox cannot close the plan's open questions right now, so it did not take the plan over. It stays paused. Try again in a few minutes." },
+  unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so lynox did not take the plan over; it stays paused. Try again in a few minutes.' },
+};
+
+/**
+ * A trigger as a route answers it, with its pause (`plan-pause.ts`) as the view may see it: the
+ * stored columns never leave, off or on, since `paused_for` says when whose access ended. With the
+ * pause on, `paused`, and for the owner only `paused_who`, the emails of the members whose end
+ * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
+ * the push had to shorten the name.
+ */
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, ...stored } = trigger;
+  // Whether a wakeup reached the owner, and the step to take when it did not (their push
+  // subscription), are the owner's: a mandate reading them would be told about the owner's
+  // devices as if they were its own, and could act on neither. An absent value leaves the JSON.
+  const rest = isOwnerPrincipal(principal)
+    ? { ...stored, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome }
+    : { ...stored, last_escalation_at: undefined, last_escalation_outcome: undefined };
+  if (!planPauseOn()) return rest;
+  const paused = isPaused(trigger);
+  if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
+  const entries = pausedForOf(pausedFor).entries;
+  return {
+    ...rest,
+    paused,
+    paused_who: entries.map((e) => e.email),
+    paused_ended: entries.map((e) => ({ email: e.email, reason: e.reason, ends_at: new Date(e.endsAt * 1000).toISOString(), warned: e.warned === true })),
+  };
+}
+
+/** One ended access behind a paused plan, as the owner's view reads it. */
+export interface PausedEnded {
+  email: string;
+  reason: 'expired' | 'revoked';
+  ends_at: string;
+  /** Whether the advance notice before this end was sent (641c-2b); the view says when none was. */
+  warned: boolean;
+}
+
+/**
+ * {@link triggerForRoute} for a route that answers a task or a trigger: a trigger is shaped, a
+ * task goes out as it is. A trigger is told by its `effect`, which a task does not have, and not
+ * by its pause columns: those are left off a row that is not paused, and such a row carries the
+ * owner's escalation fields too.
+ */
+export function rowForRoute<T extends object>(row: T, principal: RequestPrincipal): object {
+  return 'effect' in row || 'paused_at' in row || 'paused_due_at' in row || 'paused_for' in row
+    ? triggerForRoute(row as unknown as TriggerRecord, principal)
+    : row;
+}
+
 /** What a delete did to a run of the schedule it deleted. */
 export type RunOnDelete =
   /** The run was stopped with the delete. */
@@ -279,13 +399,15 @@ const STOPPED_BY_DELETE: ReadonlySet<string> = new Set(['run_workflow', 'run_age
  * would be an uncaught exception.
  */
 export function withdrawPromptOnAbort(
-  store: { expirePrompt(id: string): boolean },
+  store: { expirePrompt(id: string, reason: PromptClosedReason): boolean },
   promptId: string,
   signal: AbortSignal | undefined,
+  /** Why the run ended, read when it does: a takeover says so before it aborts. */
+  reason: () => PromptClosedReason = () => 'run_stopped',
 ): () => void {
   if (!signal) return () => undefined;
   const withdraw = (): void => {
-    try { store.expirePrompt(promptId); } catch { /* the row stays pending until its TTL — no worse than before */ }
+    try { store.expirePrompt(promptId, reason()); } catch { /* the row stays pending until its TTL — no worse than before */ }
   };
   if (signal.aborted) { withdraw(); return () => undefined; }
   signal.addEventListener('abort', withdraw, { once: true });
@@ -294,6 +416,89 @@ export function withdrawPromptOnAbort(
   // longer pending).
   return () => { signal.removeEventListener('abort', withdraw); };
 }
+
+/**
+ * {@link containedFields} for workflow runs, from the chat each was started from: a run's outputs
+ * carry what that chat read. A run no chat started (a plan, the library) carries nothing here.
+ */
+function runContainedFields(
+  containment: Containment | null,
+  origins: ReadonlyMap<string, string>,
+): (runId: string) => { contained?: true; contained_unknown?: 'provisioned' | 'self-hosted' } {
+  const threads = [...new Set(origins.values())];
+  const states = containedThreadStates(containment, threads);
+  return (runId) => {
+    const origin = origins.get(runId);
+    if (origin === undefined) return {};
+    const f = containedFields(states, origin);
+    if (!f.contained) return {};
+    return f.contained_unknown !== undefined ? { contained: true, contained_unknown: f.contained_unknown } : { contained: true };
+  };
+}
+
+/**
+ * A thread's read-only state as the owner sees it. `contained` is what enforcement holds: also
+ * true when the record could not be read. `contained_unknown` says that it could not, and so
+ * that the chat may never have read store data: `provisioned` on an instance the control plane
+ * set up (its support can look), `self-hosted` otherwise (its own logs say why).
+ */
+function containedFields(states: { contained: Set<string>; unknown: Set<string> }, id: string): { contained: boolean; contained_unknown?: 'provisioned' | 'self-hosted' } {
+  if (states.contained.has(id)) return { contained: true };
+  if (states.unknown.has(id)) return { contained: true, contained_unknown: isProvisionedInstance() ? 'provisioned' : 'self-hosted' };
+  return { contained: false };
+}
+
+/** What a chat opened from a contained one may promise for a store change, as this instance runs
+ *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
+ *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
+function containedWayOutOf(engine: Engine): ContainedWayOutState {
+  const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
+  return {
+    bulkRuns: engine.getBulkLedger() !== null,
+    bulkRunsBy: bulkRunsTurnedOnBy(tier, engine.getEngineDb() !== null),
+    shopifyBulk: shopifyBulkReadEnabled(),
+    managed: tier !== undefined && tier !== '',
+  };
+}
+
+/** What a chat may read of the approval queue for this principal: the entries its scope covers,
+ *  and none while the store is unavailable. Whether the queue is on is the resolver's check. An
+ *  account's uids count as stable only while the mail registry has it and its provider is IMAP
+ *  (`MailProvider.authType`); without a registry, no account's do. */
+function approvalChatReaderOf(
+  store: ApprovalStore | null,
+  principal: RequestPrincipal,
+  mail: { readonly registry: { get(accountId: string): { readonly authType: string } | null } } | null,
+): ChatApprovalReader | null {
+  return store === null ? null : {
+    get: (id) => store.get(id),
+    scope: approvalScopeOf(principal),
+    accountUidsStable: (accountId) => mail !== null && mail.registry.get(accountId)?.authType === 'imap',
+    checksumMatches: (id) => store.checksumMatches(id),
+  };
+}
+
+/**
+ * Why a task's text from a request may not be saved: it holds a character that renders as nothing
+ * (`hidden-text.ts`), which the model's own write tools refuse too. A person, a helper included,
+ * writes these fields here, and the plan's text reaches the model later. `null` when it may be saved.
+ */
+function hiddenInTaskText(b: Record<string, unknown>): string | null {
+  for (const [key, field] of [['title', 'The title'], ['description', 'The description'], ['assignee', 'The assignee'], ['tags', 'A tag']] as const) {
+    const hit = findHiddenChar(b[key]);
+    if (hit !== null) return hiddenRefusal(field, hit.codePoint);
+  }
+  return null;
+}
+
+/** The 400 a person reads for text with a character that renders as nothing: the field and the
+ *  character, never the text. Answered with {@link HIDDEN_CHAR_CODE}, which a client tells it by. */
+function hiddenRefusal(field: string, codePoint: string): string {
+  return `${field} holds a character that does not show as text (${codePoint}). Nothing was saved. Enter it again by typing it rather than pasting it.`;
+}
+
+/** The `code` of that 400: the web UI shows its own sentence for it, and `save_failed` for any other. */
+export const HIDDEN_CHAR_CODE = 'hidden_char';
 
 function isValidMailPort(n: number): boolean {
   return Number.isInteger(n) && n >= 1 && n <= 65535;
@@ -349,8 +554,11 @@ function resolveRunWallClockMs(): number {
 }
 /** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
 const SPEAK_MAX_TEXT_CHARS = 10_000;
-/** Mistral Voxtral TTS rate (2026-04): $0.016 per 1 000 characters. No usage headers exposed — billed client-side. */
-const SPEAK_USD_PER_CHAR = 0.016 / 1000;
+/**
+ * Mistral's list price for Voxtral TTS 3 (`voxtral-mini-tts-3-0`): $13 per million characters,
+ * docs.mistral.ai/inference/pricing, read 2026-11-08. No usage headers exposed — billed client-side.
+ */
+const SPEAK_USD_PER_CHAR = 13 / 1_000_000;
 /** Usage Dashboard summary cache: 30 s per (period, windowStart). Long enough to dedupe tab re-opens, short enough to feel live. */
 const USAGE_SUMMARY_TTL_MS = 30_000;
 /**
@@ -592,6 +800,10 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // off the curated allowlist (never silent-strip); the loader then hardens the
   // expanded tier_set the same way it does a raw one.
   'tier_preset',
+  // Bulk runs' on/off. On a managed pool tier the control plane opens them per instance
+  // (`LYNOX_FEATURE_BULK_RUNS`, `core/bulk-switch.ts`); the owner's `true` opens nothing
+  // without it, so the field can only take bulk runs AWAY from the owner's own instance.
+  'bulk_runs_enabled',
   // Not here: `background_model`. On a managed pool tier a tenant cannot set or change
   // it: it is not tenant-writable until the published description of the operator's
   // worker routing covers a tenant's own choice. Self-host and BYOK are not behind this
@@ -602,7 +814,7 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
  * On Managed, `provider` is constrained to a curated set so a customer
  * cannot point the engine at a free-text endpoint we'd then proxy traffic to.
  * Anthropic: always allowed (CP-pinned default). `openai` provider is allowed
- * ONLY when paired with the Mistral preset (`api_base_url ==='https://api.mistral.ai/v1'`).
+ * ONLY when paired with the Mistral preset (`api_base_url ==='https://api.eu.mistral.ai/v1'`).
  * `custom` / `vertex` are blocked on Managed (free-text or GCP-OAuth surfaces
  * the CP doesn't manage). Returns null when accepted, a 403-reason string
  * otherwise.
@@ -614,10 +826,7 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
 // curated set is { Anthropic, Mistral }. There is no path to actual OpenAI
 // or any other free-text endpoint on Managed.
 const MANAGED_CURATED_PROVIDERS = new Set<string>(['anthropic', 'openai']);
-const MANAGED_OPENAI_MISTRAL_HOSTS = new Set<string>([
-  'https://api.mistral.ai/v1',
-  'https://api.mistral.ai',
-]);
+const MANAGED_OPENAI_MISTRAL_HOSTS: ReadonlySet<string> = POOL_MISTRAL_ENDPOINTS;
 // Every api_base_url a managed tenant may set: the curated Mistral preset hosts
 // (for the openai-compat protocol slot) PLUS Anthropic's canonical host (the
 // Anthropic provider default — normally sent empty/unset). Any other non-empty
@@ -625,8 +834,41 @@ const MANAGED_OPENAI_MISTRAL_HOSTS = new Set<string>([
 // allowlist for EVERY provider, not just openai.
 const MANAGED_CURATED_HOSTS = new Set<string>([
   ...MANAGED_OPENAI_MISTRAL_HOSTS,
-  'https://api.anthropic.com',
+  POOL_ANTHROPIC_ENDPOINT,
 ]);
+
+/** Rewrites a config update's Mistral global-endpoint URLs (top level and tier slots) to the EU one. */
+export function moveMistralEndpointsToEu(update: {
+  api_base_url?: string | undefined;
+  tier_set?: Partial<Record<string, { api_base_url?: string | undefined } | undefined>> | undefined;
+}): void {
+  if (update.api_base_url) update.api_base_url = toMistralEuBase(update.api_base_url);
+  for (const slot of Object.values(update.tier_set ?? {})) {
+    if (slot?.api_base_url) slot.api_base_url = toMistralEuBase(slot.api_base_url);
+  }
+}
+
+/**
+ * An endpoint as a refusal may quote it: scheme, host and path, never credentials, a query or a
+ * fragment. A value the URL parser reads with a host is rebuilt from what it parsed, so an `@` in
+ * the query or path stays where it belongs. Anything else (a tier slot's `api_base_url` is any
+ * string) is cut by hand: first everything between the scheme and the last `@` (or `%40`, or a
+ * full-width or small `@`, which a reader takes for one), so a `?` or `#` inside a password cannot shield it;
+ * then everything from the first `?` or `#`. A path holding an `@` loses its host there as well:
+ * that cuts too much, never too little. Control and line-separator characters are dropped.
+ */
+export function endpointForMessage(value: string): string {
+  const clean = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+  if (URL.canParse(value)) {
+    const url = new URL(value);
+    if (url.host !== '') return clean(`${url.protocol}//${url.host}${url.pathname}`);
+  }
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(value)?.[0] ?? '';
+  const rest = value.slice(scheme.length);
+  let cut = 0;
+  for (const m of rest.matchAll(/[@\uFF20\uFE6B]|%40/gi)) cut = m.index + m[0].length;
+  return clean(`${scheme}${rest.slice(cut).replace(/[?#][^]*$/, '')}`);
+}
 
 function enforceManagedProviderConstraints(
   update: Record<string, unknown>,
@@ -635,6 +877,8 @@ function enforceManagedProviderConstraints(
   // (write-accept ⟺ load-keep ⟺ resolve): a slot naming a blocked model gets
   // an honest 403 here, never a 200 followed by a silent load-time reroute.
   blockedModelIds: readonly string[],
+  // The provider and endpoint the config file holds now, as `GET /api/config` returns them.
+  stored: { provider?: string | undefined; api_base_url?: string | undefined },
 ): string | null {
   // Effective curated HYBRID-SLOT hosts (model-presets W3): the Fireworks host
   // joins the allowlist for tier_set/tier_preset slots ONLY when the operator opts
@@ -657,7 +901,7 @@ function enforceManagedProviderConstraints(
     if (provider === 'openai') {
       const baseUrl = update['api_base_url'];
       if (typeof baseUrl !== 'string' || !MANAGED_OPENAI_MISTRAL_HOSTS.has(baseUrl)) {
-        return `Managed instance: provider 'openai' is only allowed with the curated Mistral preset api_base_url; got '${String(baseUrl)}'.`;
+        return `Managed instance: provider 'openai' is only allowed with the curated Mistral preset api_base_url; got '${typeof baseUrl === 'string' ? endpointForMessage(baseUrl) : String(baseUrl)}'.`;
       }
     }
   }
@@ -670,7 +914,15 @@ function enforceManagedProviderConstraints(
   if ('api_base_url' in update) {
     const baseUrl = update['api_base_url'];
     if (typeof baseUrl === 'string' && baseUrl.length > 0 && !MANAGED_CURATED_HOSTS.has(baseUrl)) {
-      return `Managed instance: cannot set api_base_url to '${baseUrl}' — only the curated Anthropic/Mistral endpoints are allowed.`;
+      return `Managed instance: cannot set api_base_url to '${endpointForMessage(baseUrl)}' — only the curated Anthropic/Mistral endpoints are allowed.`;
+    }
+    // The pair counts, not the host alone: a Mistral URL beside the Anthropic provider would
+    // send the pool's Anthropic key to Mistral, and the reverse. Checked against the provider
+    // the save leaves in place. A value resent as stored passes: the Web UI resends every field
+    // on each save, and the loader already drops an unpaired one (`poolEndpointFor`).
+    const provider = typeof update['provider'] === 'string' ? update['provider'] : stored.provider;
+    if (typeof baseUrl === 'string' && baseUrl.length > 0 && baseUrl !== stored.api_base_url && poolEndpointFor(provider, baseUrl) !== baseUrl) {
+      return `Managed instance: api_base_url '${endpointForMessage(baseUrl)}' does not belong to provider '${provider ?? 'anthropic'}'.`;
     }
   }
   // 3. tier_set (hybrid routing) carries a per-slot api_base_url — the SAME
@@ -686,7 +938,7 @@ function enforceManagedProviderConstraints(
       if (!slot || typeof slot !== 'object') continue;
       const slotUrl = (slot as Record<string, unknown>)['api_base_url'];
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
-        return `Managed instance: tier_set slot '${tier}' api_base_url '${slotUrl}' is not a curated Anthropic/Mistral endpoint.`;
+        return `Managed instance: tier_set slot '${tier}' api_base_url '${endpointForMessage(slotUrl)}' is not a curated Anthropic/Mistral endpoint.`;
       }
       // Model blocklist: reject a slot naming a blocked model honestly at write
       // time — the loader would drop it in-memory and silently reroute the tier
@@ -724,7 +976,7 @@ function enforceManagedProviderConstraints(
     for (const [tier, slot] of Object.entries(expanded.tier_set)) {
       const slotUrl = slot?.api_base_url;
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
-        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${slotUrl}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
+        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${endpointForMessage(slotUrl)}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
       }
       // Model blocklist: a preset whose expanded slot names a blocked model is
       // rejected honestly (never advertised, then silently rerouted at load).
@@ -910,6 +1162,17 @@ function refuseContainedSource(res: ServerResponse, body: unknown, containment: 
   return false;
 }
 
+/**
+ * Why a helper does not read a chat that holds data from a connected store (register 1112): what
+ * the chat holds stays with the owner and with whoever started it. Says who may read it.
+ */
+export const CONTAINED_THREAD_READ_REFUSAL = 'This chat was marked as holding data from a connected shop, so only the owner of this instance and the person who started it can read it. To work on the task yourself, start a new chat.';
+/** The `code` beside {@link CONTAINED_THREAD_READ_REFUSAL}, which the Web UI shows in its own language (ux U-091). */
+export const CONTAINED_THREAD_CODE = 'contained_thread';
+/** Why a live run that names no chat is not streamed to anyone but the owner: its chat cannot be checked (ux U-091). */
+export const RUN_CHAT_UNKNOWN_REFUSAL = 'lynox could not read which chat this run belongs to, so only the owner of this instance can follow it live. If the run belongs to a chat of yours, open that chat from the chat list.';
+export const RUN_CHAT_UNKNOWN_CODE = 'run_chat_unknown';
+
 /** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
 function noStoreJson(res: ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body);
@@ -1038,16 +1301,26 @@ function maskForClient(text: string, opts?: { includeGeneric?: boolean }): strin
  * prose. For a message that is entirely uncontrolled the caller asks for more —
  * see the SSE error path, which also caps the length.
  */
-/** The answer to an answer that came too late: 410. A question the boot or shutdown sweep closed
- *  (`closed_reason`, prompt-store v59) says that the run which asked is gone and has to be
- *  started again; every other closed question keeps the bare "expired". */
+/** The answer to an answer that came too late: 410, with why the question was closed as its
+ *  `code` (`closed_reason`), so the page can say what happened and what to do instead. A row
+ *  closed before the reasons were written keeps the bare "expired". */
 function refuseClosedPrompt(res: ServerResponse, row: Pick<PendingPromptRow, 'closed_reason'>): void {
-  if (row.closed_reason === 'process_restarted') {
-    errorResponse(res, 410, 'Prompt closed: the engine restarted, so the run that asked is no longer waiting. Start it again.', 'process_restarted');
-    return;
-  }
-  errorResponse(res, 410, 'Prompt expired');
+  if (row.closed_reason === null) { errorResponse(res, 410, 'Prompt expired'); return; }
+  errorResponse(res, 410, CLOSED_PROMPT_MESSAGE[row.closed_reason], row.closed_reason);
 }
+
+const CLOSED_PROMPT_MESSAGE: Readonly<Record<PromptClosedReason, string>> = {
+  process_restarted: 'Prompt closed: the engine restarted, so the run that asked is no longer waiting. Start it again.',
+  timed_out: 'Prompt closed: its time ran out.',
+  run_stopped: 'Prompt closed: the run that asked was stopped.',
+  run_taken_over: 'Prompt closed: a newer message in this chat took over the run that asked.',
+  thread_deleted: 'Prompt closed: the chat it was asked in was deleted.',
+  mandate_ended: 'Prompt closed: the access it was asked under has ended.',
+  plan_paused: 'Prompt closed: the plan that asked is paused.',
+  plan_taken_over: 'Prompt closed: the plan that asked was taken over.',
+  plan_ended: 'Prompt closed: the plan that asked is no longer waiting on it.',
+  superseded: 'Prompt closed: a newer question replaced it.',
+};
 
 /** Whether the request reached this server over TLS: its own socket, or a trusted proxy's `x-forwarded-proto`. */
 function requestIsTls(req: IncomingMessage, trustProxy: boolean): boolean {
@@ -1071,6 +1344,54 @@ export const BULK_PROBE_REQUIRED =
   'written to an unchecked target: it cannot get past its first target if it changes several kinds of entry, starts ' +
   'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes ' +
   'in a run of their own.';
+
+/** A workflow's authorship, or undefined when the read throws: no badge, and a run the runner refuses as unreadable. */
+function authorshipOrNone(read: () => WorkflowAuthorship | undefined): WorkflowAuthorship | undefined {
+  try { return read(); } catch { return undefined; }
+}
+
+/** The code beside `MANDATE_KEY_INPUT_REFUSAL`, read by the web UI. */
+export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
+
+/** The code beside the key check's refusal while the provider list applies, read by the web UI. */
+export const PROVIDER_LIST_KEY_CODE = 'provider_list_own_key';
+
+/** Upload size caps on the run route, as base64 length: 5 MB for an image, 10 MB for any other file. */
+const CHAT_IMAGE_B64_MAX = 5 * 1024 * 1024;
+const CHAT_FILE_B64_MAX = 10 * 1024 * 1024;
+
+/**
+ * Whether text a mandate's helper typed somewhere other than the chat reads as carrying a key — a
+ * conversation's title, a task's fields, a compaction's focus — and was refused for it (422, the
+ * fixed sentence). Every string in `value` is read, nested ones and object keys included; a value
+ * nested deeper than four levels is refused unread. The owner is not checked.
+ */
+function refusedMandateKeyIn(principal: RequestPrincipal, res: ServerResponse, value: unknown): boolean {
+  if (isOwnerPrincipal(principal)) return false;
+  const texts: string[] = [];
+  let tooDeep = false;
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === 'string') { texts.push(v); return; }
+    if (v === null || typeof v !== 'object') return;
+    if (depth >= 4) { tooDeep = true; return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, depth + 1); return; }
+    for (const [k, x] of Object.entries(v)) { texts.push(k); walk(x, depth + 1); }
+  };
+  walk(value, 0);
+  if (!tooDeep && !texts.some((t) => mandateCredentialInput(t) !== null)) return false;
+  errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+  return true;
+}
+
+/** A mandate's typed answer refused for reading as a key (`MandateKeyInputError`): 422, fixed sentence. */
+function keyInputRefused(res: ServerResponse, err: unknown): boolean {
+  if (!(err instanceof MandateKeyInputError)) return false;
+  errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+  return true;
+}
+
+/** How the destination's importer starts its refusal of a second handshake while a session runs. */
+const MIGRATION_SESSION_ACTIVE = 'Migration session already active';
 
 function errorResponse(
   res: ServerResponse,
@@ -1152,6 +1473,19 @@ function denyOnManagedInstance(res: ServerResponse, what: string): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * The full erase in shell sidecar mode (PRD D6): refused by the MODE, not the tier, so it holds on
+ * an instance without `LYNOX_BILLING_TIER` too. The engine does not walk the shared tree there
+ * (D7), so it cannot empty the workspace; erasing everything means deleting the instance. The way
+ * out depends on the reader (ux, 2026-10-27): on a managed instance, cancelling on the account
+ * page; without a tier, the workspace files are managed outside lynox.
+ */
+function refuseEraseInSidecarMode(res: ServerResponse, isolation: ShellIsolation): boolean {
+  if (isolation.kind !== 'sidecar') return false;
+  jsonResponse(res, 409, { error: eraseRefusal(), code: 'erasure_sidecar_mode' });
+  return true;
 }
 
 /**
@@ -1350,6 +1684,15 @@ function escapeHtml(v: string): string {
 }
 
 /**
+ * A control plane sets this id on every instance it runs, and its health monitor alerts on a degraded
+ * engine. The status bar and the OAuth pages of an engine without engine.db both ask here, so they
+ * name the same closing paragraph.
+ */
+function controlPlaneRunsThis(): boolean {
+  return (process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '') !== '';
+}
+
+/**
  * The one page both halves of the profile OAuth flow render.
  *
  * Plain HTML, no inline script: the engine API sends
@@ -1359,12 +1702,21 @@ function escapeHtml(v: string): string {
  * `no-store` because these pages are reached with a code or an error in the
  * query string, and a cached one would replay it from history.
  */
-function sendOAuthHtml(res: ServerResponse, status: number, message: string): void {
-  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(
-    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authorization</title></head>`
-    + `<body><p>${escapeHtml(message)}</p><p>You can close this tab.</p></body></html>`,
-  );
+function sendOAuthHtml(res: ServerResponse, status: number, text: OAuthText | readonly OAuthText[], back: OAuthBack): void {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': OAUTH_PAGE_CSP });
+  res.end(oauthResultHtml(oauthPageLang(), status, text, back));
+}
+
+/**
+ * The language of the result pages: the instance's configured one. A config that
+ * cannot be read is no reason to fail the page, so it falls back to English.
+ */
+function oauthPageLang(): OAuthLang {
+  try {
+    return oauthLangOf(loadConfig().language);
+  } catch {
+    return 'en';
+  }
 }
 
 /**
@@ -1375,9 +1727,9 @@ function sendOAuthHtml(res: ServerResponse, status: number, message: string): vo
  * scopes by the time it arrives (`shown_scopes`). Not cached, for the same reason as
  * the pages above.
  */
-function sendConsentPage(res: ServerResponse, consent: ConsentNotice, scopes: readonly string[]): void {
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(consentPageHtml(consent, scopes));
+function sendConsentPage(res: ServerResponse, consent: ConsentNotice | undefined, scopes: readonly string[], note?: ConnectNote): void {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': OAUTH_CONSENT_CSP });
+  res.end(consentPageHtml(consent, scopes, note));
 }
 
 /** A scope's readable name, or its id; own names only, so `toString` is not a name. */
@@ -1388,29 +1740,49 @@ function scopeNameOf(consent: ConsentNotice, scope: string): string {
 
 /**
  * The consent page itself. With the preset's `frame`, the whole page is in the text's language
- * and lists each write access by its readable name; without one, it keeps the English frame
- * and the raw ids, byte for byte as before the frame existed.
+ * and lists each write access by its readable name; without one, it gets a plain frame in the
+ * text's language and lists the raw ids. A provider's note, when there is one, stands right
+ * before the button, word for word, in the page's language.
  */
-export function consentPageHtml(consent: ConsentNotice, scopes: readonly string[]): string {
-  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}`;
-  const head = (lang: string, title: string): string =>
-    `<!DOCTYPE html><html lang="${escapeHtml(lang)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head><body>`;
+export function consentPageHtml(consent: ConsentNotice | undefined, scopes: readonly string[], note?: ConnectNote): string {
+  // The note's version travels with the confirmation, so a confirmation is refused when the
+  // provider's note is another one by the time it arrives (`shown_note`). So does the customer
+  // text's (`shown_consent`): the grant records the text the person read, not a later one.
+  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}${note ? `&shown_note=${note.version}` : ''}${consent ? `&shown_consent=${consentNoticeVersion(consent)}` : ''}`;
+  const noteIn = (lang: NoteLang): string =>
+    note ? `<p data-connect-note="${note.version}">${escapeHtml(noteText(note.version, lang, note.provider))}</p>` : '';
+  if (!consent) {
+    // Only a mandate's session reaches here: a connect without customer text has no page otherwise.
+    if (!note) return oauthPageHtml('en', 'Authorization', '');
+    const title = noteTitle(note.lang, note.provider);
+    return oauthPageHtml(note.lang, title,
+      `<h1>${escapeHtml(title)}</h1>`
+      + noteIn(note.lang)
+      + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${escapeHtml(noteButton(note.lang, note.provider))}</button></form>`);
+  }
   const frame = consent.frame;
   if (!frame) {
-    return head('en', 'Authorization')
+    // A text without its own frame gets a plain one: German for a German text,
+    // English otherwise, with the text marked in its own language.
+    const de = oauthLangOf(consent.lang) === 'de';
+    const title = note ? noteTitle(de ? 'de' : 'en', note.provider) : de ? 'Verbindung bestätigen' : 'Authorization';
+    return oauthPageHtml(de ? 'de' : 'en', title,
+      `<h1>${escapeHtml(title)}</h1>`
       + `<div lang="${escapeHtml(consent.lang)}">${consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')}</div>`
-      + `<p>Write access this connection asks for: ${escapeHtml(consent.writeScopes.join(', '))}</p>`
-      + `<form method="post" action="${escapeHtml(action)}"><button type="submit">Continue</button></form>`
-      + `</body></html>`;
+      + `<p>${de ? 'Schreibrechte, die diese Verbindung verlangt:' : 'Write access this connection asks for:'} ${escapeHtml(consent.writeScopes.join(', '))}</p>`
+      + noteIn(de ? 'de' : 'en')
+      + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${de ? 'Weiter' : 'Continue'}</button></form>`);
   }
-  return head(consent.lang, frame.title)
+  return oauthPageHtml(consent.lang, frame.title,
+    `<h1>${escapeHtml(frame.title)}</h1>`
     + consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')
     + `<p>${escapeHtml(frame.scopesIntro)}</p>`
     + `<ul>${consent.writeScopes.map((s) => `<li>${escapeHtml(scopeNameOf(consent, s))}</li>`).join('')}</ul>`
-    + `<p>${escapeHtml(frame.scopesNote)}</p>`
+    + `<p class="small">${escapeHtml(frame.scopesNote)}</p>`
+    // The customer text is in its own language; the note follows it, so the page reads in one.
+    + noteIn(consent.lang === 'de' ? 'de' : 'en')
     + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${escapeHtml(frame.button)}</button></form>`
-    + (frame.afterButton ? `<p>${escapeHtml(frame.afterButton)}</p>` : '')
-    + `</body></html>`;
+    + (frame.afterButton ? `<p class="small">${escapeHtml(frame.afterButton)}</p>` : ''));
 }
 
 /**
@@ -1501,7 +1873,7 @@ export const READ_IDENTIFIERS: ReadonlyMap<string, readonly string[]> = new Map(
   ['GET /api/knowledge/queue', ['threadId']],
   ['GET /api/knowledge/queue/count', ['thread']],
   ['GET /api/history/runs', ['sessionId', 'thread_id']],
-  ['GET /api/inbox/items', ['tenantId']],
+  ['GET /api/inbox/items', ['tenantId', 'ruleId']],
   ['GET /api/inbox/counts', ['tenantId']],
   ['GET /api/inbox/rules', ['accountId', 'tenantId']],
   ['GET /api/metrics', ['name']],
@@ -1520,6 +1892,8 @@ function parseDynamicRoute(scope: RouteScope, method: string, path: string, hand
 const ERASURE_IN_PROGRESS = 'All data is being erased; start the run again once that has finished';
 /** The 410 a chat run gets when an erasure ran while it was being prepared. */
 const ERASED_DURING_REQUEST = 'All data was erased while this message was being prepared; start a new conversation';
+/** A paused plan's refusal (`plan-pause.ts`); `code: 'paused'` is what the view switches on. */
+const PAUSED_REFUSAL = 'paused because an access ended; it needs to be taken over';
 /**
  * How long `DELETE /api/data` waits for the chat runs it stopped to release their
  * slots. Stopping is the same `takeover` the stale-run reclaim uses: a run parked on
@@ -1529,6 +1903,8 @@ const ERASED_DURING_REQUEST = 'All data was erased while this message was being 
  * answers 409 and erases nothing, and the caller tries again.
  */
 const ERASURE_RUN_DRAIN_MS = 5_000;
+/** When this process started, ms since the epoch: the export slot's boot sweep removes an HTTP-held slot taken before it. */
+const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
 /** Past this many unknown entries the erasure asks whether the data dir is set correctly. */
 const ERASURE_MANY_UNKNOWN = 20;
 
@@ -1544,7 +1920,11 @@ export class LynoxHTTPApi {
   // Per-session run tracking. `streamAlive=false` after the SSE connection
   // closes; if a pending prompt is then blocking the previous run, a fresh
   // /run can take it over instead of 409-looping forever (Bug 3).
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>();
+  /** `parked` says whether the run waits on a question it asked itself. The thread's one open
+   *  question can be a scheduled run's instead, asked beside a working chat run; reading it by
+   *  thread alone took that run over and let the scheduled run's question lapse. A slot without
+   *  `parked` is read by the thread's question, as before. */
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean }>();
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -1558,10 +1938,11 @@ export class LynoxHTTPApi {
   private erasureInProgress = false;
 
   /**
-   * One workspace export at a time: each stages a full copy of the workspace on disk, so two at
-   * once would double that, and a second request gets a 409 instead.
+   * One export at a time, and none beside an erasure: the slot is a lock file in the data
+   * directory (`export-slot.ts`), so it also holds against the export command running in another
+   * process. Each export stages a full copy on disk, so two at once would double that, and a
+   * second request gets a 409 instead.
    */
-  private workspaceExportInProgress = false;
 
   /**
    * How long a workspace download may sit without the client taking a byte before it is cut. A
@@ -1569,6 +1950,13 @@ export class LynoxHTTPApi {
    * the erasure's refusal for as long as the connection lives. A field so a test can shorten it.
    */
   private workspaceExportIdleMs = 120_000;
+
+  /**
+   * How often an export that holds the slot moves its time forward while it streams (the slot's
+   * heartbeat), so a download slower than the slot's TTL still holds the erasures off. A field so
+   * a test can shorten it.
+   */
+  private exportSlotHeartbeatMs = 60_000;
 
   /**
    * The first reason the erasure has to wait, or `null`. Each reason is something that
@@ -1653,11 +2041,16 @@ export class LynoxHTTPApi {
       };
     }
     // Its files are on their way out until the download ends; an erasure beside it would answer
-    // "deleted" while they still leave.
-    if (this.workspaceExportInProgress) {
+    // "deleted" while they still leave. Read from the slot file, so an export the export command
+    // holds in another process counts too; a holder streaming past the TTL keeps it live by its
+    // heartbeat.
+    // A staged copy whose holder is gone (free or stale slot: its heartbeat stopped) is an orphan,
+    // and the wipe removes `export-staging` with everything else.
+    const slot = readSlot(getLynoxDir());
+    if (slot !== null && slot.kind === 'export') {
       return {
         code: 'workspace_export_running',
-        error: 'A workspace export is running. Wait until its download has finished, then erase.',
+        error: 'An export is running. Wait until its download has finished, then erase.',
       };
     }
     return null;
@@ -1690,9 +2083,9 @@ export class LynoxHTTPApi {
    *     `insertAskUser` on this session hits the unique index. Strictly better
    *     than a wedged slot, not free.
    */
-  private reclaimRunSlot(sessionId: string): void {
+  private reclaimRunSlot(sessionId: string, reason: PromptClosedReason): void {
     try {
-      this.runningSessions.get(sessionId)?.takeover();
+      this.runningSessions.get(sessionId)?.takeover(reason);
     } catch { /* best-effort — the caller's teardown continues regardless */ }
   }
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
@@ -1732,6 +2125,9 @@ export class LynoxHTTPApi {
   private _captureReportCache: { report: Promise<import('../core/capture-telemetry-report.js').CaptureReport>; expiresAt: number } | null = null;
   /** Serialized model catalog + its ETag, computed once — the catalog is a frozen module constant. */
   private _catalogCache: { payload: string; etag: string } | null = null;
+  /** A keyless boot over encrypted data, as the check after listen found it; null = not found (or not checked). */
+  private _keyless: (KeylessState & { readonly since: string }) | null = null;
+  private _stopping = false;
   /** Test-only: drop cached usage summaries between tests so 30s TTL doesn't bleed mocks across cases. */
   public _clearUsageCache(): void { this._usageSummaryCache.clear(); }
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
@@ -1868,6 +2264,14 @@ export class LynoxHTTPApi {
    * intent.
    */
   private _lookupRouteScope(method: string, pathname: string): RouteScope | null {
+    return this._matchRoute(method, pathname)?.scope ?? null;
+  }
+
+  /**
+   * The route a request matches: its scope and its path as registered. One walk for both, so the
+   * scope check and the row that names a refused route never disagree on the route.
+   */
+  private _matchRoute(method: string, pathname: string): { readonly scope: RouteScope; readonly path: string } | null {
     const dispatchMethods = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
     const candidates: string[] = [pathname];
     if (pathname.endsWith('/') && pathname.length > 1) {
@@ -1877,10 +2281,10 @@ export class LynoxHTTPApi {
       const key = `${method} ${candidate}`;
       const staticScope = this.staticRouteScopes.get(key)
         ?? (method === 'HEAD' ? this.staticRouteScopes.get(`GET ${candidate}`) : undefined);
-      if (staticScope !== undefined) return staticScope;
+      if (staticScope !== undefined) return { scope: staticScope, path: candidate };
       for (const route of this.dynamicRoutes) {
         if (!dispatchMethods.includes(route.method)) continue;
-        if (route.pattern.test(candidate)) return route.scope;
+        if (route.pattern.test(candidate)) return { scope: route.scope, path: route.path };
       }
     }
     return null;
@@ -1915,6 +2319,10 @@ export class LynoxHTTPApi {
     // as one word, not which store or why: this endpoint answers without auth.
     const engine = this.engine;
     const bootStoreMissing = engine !== null && (engine.getEngineDb() === null || engine.getRunHistory() === null);
+    // The same one word for a second state: no vault key over stores that already hold encrypted
+    // values (`_checkKeyless`), so new data in them lands in plain. Which state, and why, stays in the
+    // boot log and in the owner's status field; `unknown` does not set it.
+    const keylessOverCiphertext = this._keyless?.state === 'missing_over_encrypted_data';
 
     // BUILD_SHA is baked into the production Dockerfile via --build-arg.
     // Empty in dev images and any locally-built container that didn't pass
@@ -1927,7 +2335,7 @@ export class LynoxHTTPApi {
     // non-null garbage SHA and force every rollout into the rollback path.
     const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
     const data: HealthBody = {
-      status: bootStoreMissing ? 'degraded' : 'ok',
+      status: bootStoreMissing || keylessOverCiphertext ? 'degraded' : 'ok',
       version: PKG_VERSION,
       build_sha: buildSha.length > 0 ? buildSha : null,
       uptime_s: Math.floor(process.uptime()),
@@ -1947,7 +2355,11 @@ export class LynoxHTTPApi {
       engine: {
         active_sessions: this.runningSessions.size,
         total_threads: threadCount,
+        ...(engine !== null ? { durable_memory: durableMemoryState(engine.getLegacyMemoryReason()) } : {}),
       },
+      // What a migration into this instance may hold in memory; a source reads it before it
+      // exports (src/core/migration-ceiling.ts).
+      migration: migrationCeiling(),
     };
 
     this.healthCache = { data, expiresAt: now + 10_000 };
@@ -1965,9 +2377,13 @@ export class LynoxHTTPApi {
     // Before any route can start an export: a process that died mid-export left its staged copy
     // of the workspace behind, and no request would ever remove it.
     try {
-      const { getLynoxDir } = await import('../core/config.js');
       const { sweepExportStaging } = await import('../core/workspace-export.js');
-      const removed = sweepExportStaging(getLynoxDir());
+      const { sweepStagedArchives } = await import('../core/export-archive.js');
+      const dataDir = getLynoxDir();
+      // The slot first: a slot this API held before this process started died with it, and the
+      // archive sweep below leaves a staged archive alone only while the export command holds it.
+      sweepSlot(dataDir, PROCESS_STARTED_AT);
+      const removed = sweepExportStaging(dataDir) + sweepStagedArchives(dataDir);
       if (removed > 0) process.stderr.write(`[lynox] export staging: removed ${String(removed)} leftover export(s)\n`);
     } catch (err: unknown) {
       process.stderr.write(`[lynox] export staging sweep failed: ${err instanceof Error ? err.name : 'error'}\n`);
@@ -2077,6 +2493,8 @@ export class LynoxHTTPApi {
 
   /** The principal a request's session cookie carried, set by the auth block. */
   private readonly _sessionPrincipal = new WeakMap<IncomingMessage, RequestPrincipal>();
+  /** The route a request was dispatched to, for a refusal's row in a mandate's trail. */
+  private readonly _dispatchRoute = new WeakMap<IncomingMessage, { readonly method: string; readonly routePath: string; readonly pathname: string }>();
 
   /** The requests the auth block admitted as the control plane's admin bearer (`cp-admin`). */
   private readonly _cpAdminRequests = new WeakSet<IncomingMessage>();
@@ -2141,18 +2559,105 @@ export class LynoxHTTPApi {
   }
 
   /**
+   * What the takeover reads and writes, or null with a 503 when engine.db is not there. The
+   * prompt store may be missing; the takeover then refuses, since it could not close the questions.
+   */
+  #takeoverDeps(res: ServerResponse): TakeoverDeps | null {
+    const deps = this.#takeoverDepsIfReady();
+    if (deps === null) errorResponse(res, 503, 'Taking over a plan is not available on this instance right now.');
+    return deps;
+  }
+
+  /** The takeover's reads and writes, or null when engine.db is not there; answers nothing. */
+  #takeoverDepsIfReady(): TakeoverDeps | null {
+    const engine = this.engine;
+    const engineDb = engine?.getEngineDb() ?? null;
+    if (engine === null || engine === undefined || engineDb === null) return null;
+    const ends = engine.getMandateEnds();
+    return {
+      db: engineDb.getDb(),
+      triggers: new TriggerStore(engineDb),
+      isLive: (mandateId) => ends?.isLive(mandateId) ?? false,
+      audit: engine.getAuditLog(),
+      prompts: engine.getPromptStore(),
+    };
+  }
+
+  /** The plan's exact id from a path that may carry a prefix; null with the answer sent when it names none or more than one. */
+  #takeoverId(res: ServerResponse, raw: string): string | null {
+    const history = this.engine?.getRunHistory() ?? null;
+    if (history?.isAmbiguousTriggerId(raw) === true) {
+      errorResponse(res, 409, 'That id matches more than one task. Use the full id.', 'ambiguous_id');
+      return null;
+    }
+    const trigger = history?.getTrigger(raw);
+    if (trigger === undefined) { errorResponse(res, 404, 'Trigger not found'); return null; }
+    return trigger.id;
+  }
+
+  /**
    * The connections a stamp of `trigger` lists now, with the workflow confirmation they go with:
    * those of the mandate its plan acts for (`planOfTrigger`, as the run determines it, but asked
    * before the stamp exists). Null when the plan acts for no mandate, is a bulk effect's, or its
    * workflow's authorship cannot be read: then a stamp lists none.
    */
   async #stampListFor(trigger: TriggerRecord): Promise<{ wf: string | null; entries: readonly StampEntry[] } | null> {
+    return (await this.#stampPlanOf(trigger)).listed;
+  }
+
+  /**
+   * {@link #stampListFor} with what the preview shows beside it, from the same reading of the
+   * plan: whom the plan acts for, and for a workflow schedule the workflow's name and whether it is
+   * confirmed — a schedule on an unconfirmed workflow is switched off by its first run, so the
+   * view offers no confirm there.
+   */
+  async #stampPlanOf(trigger: TriggerRecord): Promise<{
+    listed: { wf: string | null; entries: readonly StampEntry[] } | null;
+    by: string | null;
+    workflow: { name: string | null; confirmed: boolean } | null;
+  }> {
     const engine = this.engine;
     const apiStore = engine?.getApiStore();
-    if (!engine || !apiStore || trigger.effect.startsWith('bulk_')) return null;
+    if (!engine || !apiStore || !stampUsesConnections(trigger.effect)) return { listed: null, by: null, workflow: null };
     const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
+    const workflow = trigger.effect === 'run_workflow'
+      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null }
+      : null;
+    if (plan.unreadable || plan.of === undefined) return { listed: null, by: null, workflow };
+    return {
+      listed: { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) },
+      by: plan.of.email,
+      workflow,
+    };
+  }
+
+  /**
+   * B3 for one row of the owner's list: null unless the plan is confirmed, acts for a mandate,
+   * and has something to show ({@link stampListState}). Read with the workflow confirmation the
+   * run reads (`planOfTrigger`), so an entry shown as listed is one the run may use.
+   */
+  async #stampListShown(trigger: TriggerRecord): Promise<StampListShown | null> {
+    const engine = this.engine;
+    const apiStore = engine?.getApiStore();
+    const history = engine?.getRunHistory();
+    if (!engine || !apiStore || !history || !trigger.confirmed_at || !stampUsesConnections(trigger.effect)) return null;
+    const plan = await planOfTrigger(trigger, history);
     if (plan.unreadable || plan.of === undefined) return null;
-    return { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) };
+    const row = history.getTriggerStampConnections(trigger.id);
+    if (row === undefined) return null;
+    const ends = engine.getMandateEnds() ?? null;
+    const shown = stampListState(row.stampConnections, row.confirmedAt, plan.workflowConfirmedAt, plan.of, apiStore, ends);
+    if (shown === null) return null;
+    // The run is refused when ANY member ended (the worker's gate), not only the one it acts for.
+    // The way out the view names: with a mandate on the workflow's side, a new plan on the same
+    // workflow would still run for that mandate. `workflow` when that mandate ended (its workflow
+    // goes too); `workflow_other` when it is still live and another member ended — the note then
+    // leaves the live member's workflow alone and does not say the ended person wrote it.
+    const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
+    const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
+    const wf = plan.workflowMember;
+    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : principalHasEnded(wf, isLive) ? 'workflow' : 'workflow_other';
+    return { ...shown, ended: shown.ended || endedOn !== null, ended_on: endedOn };
   }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
@@ -2213,7 +2718,12 @@ export class LynoxHTTPApi {
     const phase = requestOutcomePhase(status);
     const note = this._requestTrailNotes.get(req);
     const closing: AuditEntry = { ...entry, phase, action: note === undefined ? entry.action : `${entry.action} ${note}` };
-    try { this.engine?.getAuditLog()?.record(closing); } catch { /* the attempt row stands alone */ }
+    try {
+      this.engine?.getAuditLog()?.record(closing);
+    } catch (err) {
+      // The attempt row stands alone; say so, so a missing outcome is not silent.
+      process.stderr.write(`[lynox] the outcome of a mandate's change could not be recorded: ${processErrorText(err)}\n`);
+    }
   }
 
   /**
@@ -2228,6 +2738,14 @@ export class LynoxHTTPApi {
     if (method === 'GET' || method === 'HEAD') return true;
     const principal = this._principalOf(req);
     if (!writesMandateTrail(principal)) return true;
+    // Asked again here, not only at sign-in: a revoke can land while the body is still arriving,
+    // and a change that has not begun by the revoke must not begin. One already begun is not
+    // stopped here; its attempt row stands before the revoke row. Closed like every revoke check:
+    // a mandate without a grant id, or without a store to ask, counts as ended.
+    if (principalHasEnded(principal, (id) => this._mandateLive(id))) {
+      errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
+      return false;
+    }
     if (this._openTrail(req, principal, `${method} ${routePath}`, requestPathTarget(pathname))) return true;
     errorResponse(res, 503, 'This change cannot be recorded in the instance log right now, so it was not made.');
     return false;
@@ -2239,23 +2757,36 @@ export class LynoxHTTPApi {
    * being registered. The action is the route as registered, the target the path; never the
    * query or the answer. The owner's reads leave no row. `false` when the row cannot be
    * written: the dispatcher has answered 503 and the read is not answered, as a write is not.
+   *
+   * A read about a chat (`readsThread`) is also refused here, after its row, when the chat is
+   * contained and not the reader's ({@link _containedReadRefusal}); `false` then too.
    */
-  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string, query: URLSearchParams): boolean {
+  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string, query: URLSearchParams, stance: MandateStance | undefined, params: Readonly<Record<string, string>>): boolean {
     // No scope test: an `admin` route refuses a mandate before dispatch (D6), so every read a
     // mandate reaches here is a `user` route's.
     if (method !== 'GET' && method !== 'HEAD') return true;
     const principal = this._principalOf(req);
-    if (!writesMandateTrail(principal)) return true;
-    try {
-      const log = this.engine?.getAuditLog() ?? null;
-      if (log === null) throw new Error('no audit log');
-      const identifiers = (READ_IDENTIFIERS.get(`GET ${routePath}`) ?? [])
-                // As sent, an empty value too: a route may read it as "no filter" and so read more.
-        .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null ? [] : [[name, v]]; });
-      log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname, identifiers), phase: 'read', correlationId: newCorrelationId() });
-    } catch {
-      errorResponse(res, 503, 'This read cannot be recorded in the instance log right now, so it was not answered.');
-      return false;
+    if (writesMandateTrail(principal)) {
+      try {
+        const log = this.engine?.getAuditLog() ?? null;
+        if (log === null) throw new Error('no audit log');
+        const identifiers = (READ_IDENTIFIERS.get(`GET ${routePath}`) ?? [])
+          // As sent, an empty value too: a route may read it as "no filter" and so read more.
+          .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null ? [] : [[name, v]]; });
+        log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname, identifiers), phase: 'read', correlationId: newCorrelationId() });
+      } catch {
+        errorResponse(res, 503, 'This read cannot be recorded in the instance log right now, so it was not answered.');
+        return false;
+      }
+    }
+    // After the row: a read that cannot be recorded is not answered at all, and a refused one is
+    // in the trail as the attempt it was.
+    if (stance?.kind === 'reads' && stance.thread !== undefined) {
+      const refusal = this._containedReadRefusal(principal, stance.thread(params, query));
+      if (refusal !== null) {
+        errorResponse(res, refusal.status, refusal.error, refusal.code);
+        return false;
+      }
     }
     return true;
   }
@@ -2328,11 +2859,47 @@ export class LynoxHTTPApi {
     return loop.stopTask(id).kind === 'requested' ? 'stopped' : 'unstoppable_now';
   }
 
-  /** The 403 a mandate gets for an act only the owner may perform. */
-  private _refuseUnlessOwner(req: IncomingMessage, res: ServerResponse, what: string): boolean {
-    if (isOwnerPrincipal(this._principalOf(req))) return false;
+  /**
+   * The 403 a mandate gets for an act only the owner may perform. A mandate's refusal is a row in
+   * its trail ({@link _recordMandateRefusal}); `target` names what was asked for where the path
+   * alone does not (a reveal of a secret, whose route answers a mandate a plain status too).
+   */
+  private _refuseUnlessOwner(req: IncomingMessage, res: ServerResponse, what: string, target?: string): boolean {
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return false;
+    this._recordMandateRefusal(req, principal, target);
     errorResponse(res, 403, `Only the owner of this instance can ${what}.`);
     return true;
+  }
+
+  /**
+   * A `refused` row for an act only the owner may perform, so the owner sees the attempt: the
+   * route as registered, the path as sent (or `target`). Its own correlation id: the refusal is
+   * the whole act. A write refused inside its handler already has its attempt row, and the
+   * dispatcher closes that pair as refused, so it gets no second row here. The refusal stands
+   * whether or not the row is written, as it grants nothing; a row that cannot be written is logged.
+   */
+  private _recordMandateRefusal(req: IncomingMessage, principal: RequestPrincipal, target?: string): void {
+    if (!writesMandateTrail(principal) || this._openTrails.has(req)) return;
+    const route = this._dispatchRoute.get(req);
+    if (route === undefined) return;
+    try {
+      const log = this.engine?.getAuditLog() ?? null;
+      if (log === null) throw new Error('no audit log');
+      log.record({ principal, action: `${route.method} ${route.routePath}`, target: target ?? requestPathTarget(route.pathname), phase: 'refused', correlationId: newCorrelationId() });
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] a mandate's refused attempt could not be recorded: ${processErrorText(err)}\n`);
+    }
+  }
+
+  /** What the browser attached on its own, for `_refusedAsAmbientCrossSite`. */
+  private _ambientOf(req: IncomingMessage, secret: string | undefined): 'none' | 'no-secret' | 'cookie' {
+    return !secret ? 'no-secret' : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
+  }
+
+  /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
+  private _routeTemplateOf(method: string, pathname: string): string | null {
+    return this._matchRoute(method, pathname)?.path ?? null;
   }
 
   /**
@@ -2355,9 +2922,74 @@ export class LynoxHTTPApi {
   }
 
   /**
+   * Register 1112: whether `principal` may read the chat a `readsThread` route names. The text of a
+   * contained chat (`threadIsContained`, which reads an unknown state as contained) goes to the
+   * owner and to whoever started the chat (`ownedBy`; the owner owns every row). A chat whose row
+   * is missing is no one's, so anyone else is refused on a contained id even then. A live run that
+   * names no chat cannot be checked and is refused; a recorded run that names none answers as not
+   * found. `null` when the read may go on.
+   */
+  private _containedReadRefusal(principal: RequestPrincipal, named: ThreadNamed): { status: number; error: string; code?: string } | null {
+    if (named === null || isOwnerPrincipal(principal)) return null;
+    const engine = this.engine;
+    let threadId: string | undefined;
+    if ('thread' in named) threadId = named.thread;
+    else if ('pipelineRun' in named) {
+      // As the handlers read it: `/:id` by prefix (`getPipelineRun`), `/:id/steps` by the exact id.
+      const history = engine?.getRunHistory();
+      const exact = history?.getPipelineRunOrigin(named.pipelineRun);
+      const origin = exact !== undefined ? exact : history?.getPipelineRunOrigin(history.getPipelineRun(named.pipelineRun)?.id ?? named.pipelineRun);
+      // No such run is the handler's 404; a run no chat started holds no chat's text.
+      if (origin === undefined || origin === null) return null;
+      threadId = origin;
+    } else if ('liveRun' in named) {
+      threadId = engine?.getRunRegistry()?.getByRunId(named.liveRun)?.thread_id || undefined;
+      if (threadId === undefined) return { status: 403, error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE };
+    } else {
+      threadId = engine?.getRunHistory()?.getRun(named.historyRun)?.session_id || undefined;
+      if (threadId === undefined) return { status: 404, error: 'Run not found' };
+    }
+    // A workflow step's run names its workflow run, not a chat: the chat is the one that started it.
+    threadId = this._chatsOf([threadId]).get(threadId) ?? threadId;
+    if (ownedBy(engine?.getThreadStore()?.getThread(threadId) ?? undefined, principal)) return null;
+    if (!threadIsContained(engine?.getToolContext().containment ?? null, threadId)) return null;
+    return { status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE };
+  }
+
+  /**
+   * Register 1112, for lists: which of `threadIds` name a chat `principal` may not read (contained
+   * and not theirs, as {@link _containedReadRefusal} has it). A list keeps such an entry without
+   * its text, or leaves it out. Empty for the owner.
+   */
+  private _unreadableChats(principal: RequestPrincipal, threadIds: readonly string[]): Set<string> {
+    if (isOwnerPrincipal(principal) || threadIds.length === 0) return new Set();
+    const engine = this.engine;
+    const ids = [...new Set(threadIds)];
+    const chatOf = this._chatsOf(ids);
+    const chats = [...new Set(ids.map((id) => chatOf.get(id) ?? id))];
+    const contained = containedThreads(engine?.getToolContext().containment ?? null, chats);
+    const store = engine?.getThreadStore();
+    const unreadable = new Set([...contained].filter((id) => !ownedBy(store?.getThread(id) ?? undefined, principal)));
+    // A run that names no chat (`session_id` empty: a batch or inbox run, or a sub-agent recorded
+    // before its run named the chat it ran for) cannot be checked, so it is not read: fail-closed.
+    // Its detail route answers 404 likewise.
+    return new Set(ids.filter((id) => id === '' || unreadable.has(chatOf.get(id) ?? id)));
+  }
+
+  /**
+   * The chat each id stands for, where it is a workflow run's (register 1112): a workflow step
+   * records its run under the workflow run's id, and the workflow run names the chat that started
+   * it. An id not in the map is a chat's own, or a workflow run no chat started.
+   */
+  private _chatsOf(ids: readonly string[]): ReadonlyMap<string, string> {
+    return this.engine?.getRunHistory()?.getPipelineRunOrigins(ids) ?? new Map();
+  }
+
+  /**
    * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
-   * could answer is checked — the one named by id and the one pending on the session, which the
-   * route falls back to — so no fallback reaches a question the check did not see. The question
+   * could answer is checked — the one named by id and the one pending on the session, which a
+   * body without an id answers — so no request reaches a question the check did not see. Both are
+   * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
    * answers its own 404.
@@ -2429,7 +3061,8 @@ export class LynoxHTTPApi {
       if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
       if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
       if (!recorded(promptId)) return;
-      if (!settle(promptId)) { errorResponse(res, 410, 'Prompt expired'); return; }
+      // Pending a moment ago, so it is its time that ran out.
+      if (!settle(promptId)) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
       jsonResponse(res, 200, { ok: true });
       return;
     }
@@ -2482,10 +3115,28 @@ export class LynoxHTTPApi {
     return false;
   }
 
+  /**
+   * Refuses a change to a paused plan (`plan-pause.ts`), before anything marks it: a mandate
+   * changes nothing on one, the owner may switch it, complete it or delete it but not edit or
+   * stamp it, since only the takeover lets it run again. True when it answered the request.
+   */
+  private _refusePaused(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string, action: 'edit' | 'enable' | 'complete' | 'delete' | 'confirm'): boolean {
+    // Off, nothing is read for it: the routes are main's.
+    if (!planPauseOn()) return false;
+    const trigger = taskManager.getTrigger(id);
+    if (trigger === undefined || !isPaused(trigger)) return false;
+    const ownerMay = action === 'enable' || action === 'complete' || action === 'delete';
+    if (isOwnerPrincipal(this._principalOf(req)) && ownerMay) return false;
+    errorResponse(res, 409, PAUSED_REFUSAL, 'paused');
+    return true;
+  }
+
   /** Answers a `TaskManager` refusal of a mandate's to-do write; false for any other error. */
   private _answerTodoRefusal(res: ServerResponse, err: unknown): boolean {
     if (err instanceof ForeignTodoError) { errorResponse(res, 403, err.message); return true; }
     if (err instanceof TodoHasForeignSubtasksError) { errorResponse(res, 409, err.message); return true; }
+    // An engine without engine.db: the client's sentence, not the model's (`EngineLessRefused`).
+    if (err instanceof EngineLessRefused) { errorResponse(res, 409, err.client, 'engine_less'); return true; }
     return false;
   }
 
@@ -2969,11 +3620,12 @@ export class LynoxHTTPApi {
     let budgetCents: number;
     if (cpSummary?.managed) {
       // Budget stays CP-driven (Stripe tier amount is the canonical truth);
-      // `used_cents` is always recomputed from local `daily` below so it
-      // stays consistent with the rest of the response shape (`by_kind`,
-      // `daily`, and the StatusBar footer all read the same engine SQLite).
-      // The CP-supplied `used_cents` was a separate counter that drifted to
-      // 0 on staging — see commit message for the regression details.
+      // `used_cents` is recomputed from local `daily` below so it stays
+      // consistent with the rest of the response shape (`by_kind`, `daily`,
+      // and the StatusBar footer all read the same engine SQLite). The
+      // CP-supplied `used_cents` can only lift it, and only over the billing
+      // period it was counted for (`managedUsedCents`): as a separate counter
+      // it once drifted to 0 on staging.
       budgetCents = cpSummary.budget_cents ?? 0;
     } else if (isManagedTier) {
       budgetCents = 0;
@@ -2998,17 +3650,13 @@ export class LynoxHTTPApi {
     // we re-derive here defensively in case a future caller mocks
     // `summary.used_cents` out of sync with `daily`).
     //
-    // Managed-tier floor: if the CP supplied its own `used_cents` (Stripe-
-    // canonical for the current billing window), take the MAX of local-sum
-    // and CP-sum. Prevents under-reporting against Stripe when the engine
-    // SQLite is younger than the Stripe billing cycle — post-migration,
-    // post-restore, or any tenant whose engine was provisioned mid-cycle.
-    // Self-hosted tenants have `cpSummary = null`, so this is a no-op for
-    // the OSS path.
+    // Managed-tier floor: the CP's `used_cents` lifts the local sum only when it
+    // comes with the billing period it was counted over (`managedUsedCents`).
+    // Self-hosted tenants have `cpSummary = null`, so this is a no-op for the
+    // OSS path.
     const localUsedCents = summary.daily.reduce((sum, d) => sum + d.cost_cents, 0);
-    const usedCents = cpSummary?.managed
-      ? Math.max(localUsedCents, cpSummary.used_cents ?? 0)
-      : localUsedCents;
+    const { managedUsedCents } = await import('../core/managed-usage-summary.js');
+    const usedCents = managedUsedCents(localUsedCents, cpSummary);
     const projection = this._projectExhaust(summary.daily, usedCents, availableCents, endIso);
     const hardLimits = isManagedTier
       ? { tier: 'managed', contact_for_quotas: true }
@@ -3124,8 +3772,9 @@ export class LynoxHTTPApi {
         // error goes out as class and status (`error-egress.ts`).
         process.stderr.write(`HTTP API error: ${processErrorText(err)}\n`);
       }
-      // A webhook route token selects a trigger and is never logged.
-      const url = redactWebhookPath(req.url ?? '/');
+      // A webhook route token selects a trigger and is never logged, and no query value is
+      // (`request-log-url.ts`): the line keeps the path and the parameter names.
+      const url = requestLogUrl(req.url ?? '/');
       const status = res.statusCode;
       const ms = Date.now() - start;
       process.stderr.write(`${method} ${url} ${status} ${ms}ms\n`);
@@ -3205,10 +3854,81 @@ export class LynoxHTTPApi {
     this.sessionStore.startEviction();
 
     await listening;
+    void this._checkKeyless();
+  }
+
+  /**
+   * After listen, and only without a vault key: do the stores already hold encrypted values? Reads
+   * through the stores' own connections in bounded steps (`vault-key-detect.ts`), writes nothing,
+   * never throws. The result goes to the boot log, the owner's status field and `degraded`.
+   */
+  private async _checkKeyless(): Promise<void> {
+    if (process.env['LYNOX_VAULT_KEY']) return;
+    const engine = this.engine;
+    const stores: Array<{ name: KeylessStore; db: import('better-sqlite3').Database }> = [];
+    // Runs unawaited after listen, so getting a connection must not reject. The production getters
+    // return a field and do not throw (a closed handle fails later, in the check, as `unknown`);
+    // an engine stand-in without them skips that store only, and the other is still checked.
+    const reach = (name: KeylessStore, get: () => { getDb(): import('better-sqlite3').Database } | null | undefined): void => {
+      try {
+        const store = get();
+        if (store) stores.push({ name, db: store.getDb() });
+      } catch { /* not reachable: not checked */ }
+    };
+    reach('engine.db', () => engine?.getEngineDb());
+    reach('history.db', () => engine?.getRunHistory());
+    if (stores.length === 0) return;
+    const found = await checkKeylessOverCiphertext(stores);
+    if (found === null || this._stopping) return;
+    this._keyless = { ...found, since: new Date().toISOString() };
+    // A health body cached before the check ended would say `ok` for up to ten more seconds.
+    this.healthCache = null;
+    process.stderr.write(found.state === 'unknown'
+      ? '⚠ No vault key is set, and whether the stores already hold encrypted values could not be checked. If they do, new data in them is being stored unencrypted.\n'
+      : `⚠ No vault key is set, but ${found.stores.join(' and ')} already ${found.stores.length === 1 ? 'holds' : 'hold'} encrypted values. New data in them is being stored unencrypted. Restore LYNOX_VAULT_KEY (env, ~/.lynox/.env or vault.key in the data dir).\n`);
+  }
+
+  /**
+   * The boot stores that did not open, for the owner's status field; absent for anyone else and when
+   * both opened. The engine runs on without such a store until a restart opens it, and `/api/health`
+   * says only `degraded` (it answers without auth); the owner learns here which one, the log says why.
+   */
+  private _bootStoreField(req: IncomingMessage): Record<string, unknown> {
+    const engine = this.engine;
+    if (engine === null || !isOwnerPrincipal(this._principalOf(req))) return {};
+    const missing = [
+      ...(engine.getEngineDb() === null ? ['engine.db'] : []),
+      ...(engine.getRunHistory() === null ? ['history.db'] : []),
+    ];
+    if (missing.length === 0) return {};
+    // A control plane sets this id on every instance it runs, and its health monitor alerts on a
+    // degraded engine: the UI then says the team is told, not "read the log".
+    const alerted = controlPlaneRunsThis();
+    // Durable memory was switched on and did not load because engine.db is missing: the engine runs
+    // on the old memory files, and a mandate cannot sign in. With durable memory off both are the
+    // normal state, so the UI says neither. The engine.db check matters only if the knowledge store
+    // failed for another reason with engine.db open; then memory is not an old copy of engine.db.
+    const memoryOld = engine.getEngineDb() === null && engine.getLegacyMemoryReason() === 'store_missing';
+    return {
+      boot_stores_missing: missing,
+      ...(alerted ? { boot_stores_alerted: true } : {}),
+      ...(memoryOld ? { boot_store_memory_old: true } : {}),
+    };
+  }
+
+  /** The keyless state for the owner's status field; absent for anyone else and when nothing was found. */
+  private _keylessField(req: IncomingMessage): Record<string, unknown> {
+    if (this._keyless === null || !isOwnerPrincipal(this._principalOf(req))) return {};
+    return {
+      vault_key: this._keyless.state,
+      vault_key_since: this._keyless.since,
+      ...(this._keyless.state === 'missing_over_encrypted_data' ? { vault_key_stores: this._keyless.stores } : {}),
+    };
   }
 
   /** @param options.inboxBacklog passed to `Engine.shutdown`; a signal handler passes `'bounded'`. */
   async shutdown(options: { inboxBacklog?: 'classify' | 'bounded' | undefined } = {}): Promise<void> {
+    this._stopping = true;
     if (this.rateGcTimer) clearInterval(this.rateGcTimer);
     this.sessionStore.stopEviction();
     // Expire pending prompts in SQLite on shutdown — except a trigger's parked
@@ -3443,6 +4163,16 @@ export class LynoxHTTPApi {
               errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
               return;
             }
+            // An engine on the legacy memory tools lets the model change memory by a pattern,
+            // and a mandate's row could not name what that hit (memory-tool-set.ts). Checked on
+            // every request, not at the grant: the access works once the durable tools are back.
+            const legacy = this.engine ? this.engine.getLegacyMemoryReason() : 'dk_off'; // no engine: closed, like `_mandateLive`
+            if (legacy !== null) {
+              errorResponse(res, 403, legacy === 'dk_off'
+                ? 'This access cannot sign in here: durable knowledge is turned off on this instance.'
+                : 'This access cannot sign in here: durable knowledge is on, but its store did not load.', legacy === 'dk_off' ? 'mandate_memory_off' : 'mandate_memory_missing');
+              return;
+            }
           }
           const cookie = /(?:^|;\s*)lynox_session=([^;]+)/.exec(req.headers['cookie'] ?? '')?.[1] ?? '';
           this._authOrigin.set(req, `cookie:${createHash('sha256').update(cookie).digest('hex').slice(0, 16)}`);
@@ -3478,6 +4208,17 @@ export class LynoxHTTPApi {
           return;
         }
       } else if (routeScope === 'admin' && authScope !== 'admin') {
+        // A mandate is `user`, so an owner's admin route refuses it here (D6): its attempt too,
+        // with the two checks the dispatch puts before every row of a mandate's: charged first, so
+        // a session that keeps asking is stopped before it writes rows, and refused when another
+        // site sent it, so no site can write an attempt into the trail the person never made.
+        const routePath = this._routeTemplateOf(method, pathname);
+        if (routePath !== null && writesMandateTrail(this._principalOf(req))) {
+          if (this._rateLimit(req, res, clientIp)) return;
+          if (this._refusedAsAmbientCrossSite(req, res, method, undefined, this._ambientOf(req, secret), trustProxy)) return;
+          this._dispatchRoute.set(req, { method, routePath, pathname });
+          this._recordMandateRefusal(req, this._principalOf(req));
+        }
         errorResponse(res, 403, 'Admin scope required');
         return;
       }
@@ -3530,10 +4271,7 @@ export class LynoxHTTPApi {
       }
     }
 
-    // What the browser attached on its own, for `_refusedAsAmbientCrossSite`.
-    const ambient: 'none' | 'no-secret' | 'cookie' = !secret
-      ? 'no-secret'
-      : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
+    const ambient = this._ambientOf(req, secret);
 
     if (!this._beginCpTrail(req, res, method, pathname, authScope, body)) return;
 
@@ -3547,10 +4285,11 @@ export class LynoxHTTPApi {
       if (staticHandler) {
         const stanceKey = this.staticRoutes.has(routeKey) ? routeKey : `GET ${pathname}`;
         const stance = this.staticRouteStances.get(stanceKey);
+        const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
+        this._dispatchRoute.set(req, { method, routePath, pathname });
         if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, stance)) return;
-        const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
-        if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams)) return;
+        if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams, stance, {})) return;
         if (!this._beganMandateChange(req, res, method, routePath, pathname)) return;
         try { await staticHandler(req, res, {}, body); } finally { this._closeTrail(req, res); }
         return;
@@ -3569,9 +4308,10 @@ export class LynoxHTTPApi {
               params[name] = value;
             }
           }
+          this._dispatchRoute.set(req, { method, routePath: route.path, pathname });
           if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
           if (this._refusedByStance(req, res, route.stance)) return;
-          if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;
+          if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams, route.stance, params)) return;
           if (!this._beganMandateChange(req, res, method, route.path, pathname)) return;
           try { await route.handler(req, res, params, body); } finally { this._closeTrail(req, res); }
           return;
@@ -3783,6 +4523,11 @@ export class LynoxHTTPApi {
     // up to 60s stale, and a seed for a provider whose name is not the one
     // being printed would suppress that provider's own slot.
     const seen = new Set<string>([this.providerStatusCache?.identityKey ?? '']);
+    // On an instance connected to a Shopify store a provider off the list is never reached, so
+    // the footer does not name it as a fallback or a tier slot (`contained-providers.ts`). The
+    // primary is named as configured, refused or not.
+    const { providerListApplies, refusedSnapshotClass } = await import('../core/contained-providers.js');
+    const listApplies = providerListApplies();
 
     // At most ONE run query for the whole response, and only if something
     // actually needs it. `getRecentRuns` is `SELECT * FROM runs … LIMIT 50`
@@ -3827,6 +4572,7 @@ export class LynoxHTTPApi {
         // identify as that endpoint — otherwise it appears as a phantom second
         // provider next to the primary it actually IS.
         const baseUrl = slot.api_base_url ?? cfg.api_base_url;
+        if (listApplies && refusedSnapshotClass({ provider, apiBaseURL: baseUrl }) !== null) continue;
         push(providerIdentity(provider, baseUrl), (id) => id === modelId);
       }
     }
@@ -3834,7 +4580,7 @@ export class LynoxHTTPApi {
     // Mistral is reachable WITHOUT a tier_set slot too: standard mode keeps it
     // as the engine-level fallback/worker whenever MISTRAL_API_KEY is set. The
     // `seen` set suppresses it when Mistral is already listed.
-    if (process.env['MISTRAL_API_KEY']?.length) {
+    if (process.env['MISTRAL_API_KEY']?.length && !listApplies) {
       push(providerIdentity('mistral'), (id) => id.toLowerCase().startsWith('mistral'));
     }
 
@@ -3925,6 +4671,11 @@ export class LynoxHTTPApi {
           errorResponse(res, 403, 'Only the owner of this instance, or the person who started it, can continue this conversation.');
           return;
         }
+        // A contained chat says why, with its code, so the page can show the way out (register 1112,
+        // ux U-091): opening a chat goes through here before any read of it.
+        // A deleted chat keeps the answer it had: its row is gone, so it would read as no one's.
+        const contained = engine.getThreadStore()?.isDeleted(threadId) === true ? null : this._containedReadRefusal(principal, { thread: threadId });
+        if (contained !== null) { errorResponse(res, contained.status, contained.error, contained.code); return; }
         if (this._refuseUnlessOwns(_req, res, 'continue this conversation', () => [this._threadRow(threadId)])) return;
       }
       // A deleted conversation stays deleted. A tab still showing it, or a link into it, would
@@ -3994,7 +4745,7 @@ export class LynoxHTTPApi {
       // A parked run ignores abort() and would keep both the slot and its
       // run-executor reservation after the Session is dropped below — with no
       // handle left to reach it.
-      this.reclaimRunSlot(params['id']!);
+      this.reclaimRunSlot(params['id']!, 'run_stopped');
       this.sessionStore.reset(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
@@ -4007,6 +4758,57 @@ export class LynoxHTTPApi {
       // A mandate runs only in a conversation it started (§3.13 E1, N2). Read on the thread
       // row, not on the session object: the session's principal is whoever ran last.
       if (this._refuseUnlessOwns(req, res, 'run this conversation', () => [this._threadRow(sessionId)])) return;
+      // A mandate's helper takes no key in this chat: a message that reads as carrying one is
+      // refused here, before the thread, the run history, the title, a log or the model see any of
+      // it, and before a busy or full queue (409, 429) or a takeover could answer instead — those
+      // keep the message in the helper's browser as failed and resendable. Not masked as for the
+      // owner below: what a mask leaves (a key's last characters) would still reach the owner's
+      // thread. The refusal is a fixed sentence and names no part of the text.
+      {
+        const typed = (body as Record<string, unknown> | null)?.['task'];
+        if (typeof typed === 'string' && !isOwnerPrincipal(this._principalOf(req)) && mandateCredentialInput(typed) !== null) {
+          errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+          return;
+        }
+      }
+      // An attached file is no way around it: every file is read here, before a takeover could end a
+      // parked run and before the file loop below writes any of them to the file area, so a refused
+      // upload changes nothing. The name gets the check a typed message gets; the content only the
+      // credential forms (`mandateDocumentCredential`), read both as text and, for a PDF or Word
+      // file, as what the extraction below gives. An image block is stored and sent as the `data`
+      // string came, so for a file declared as an image that string is read, and its bytes as text
+      // too (the type is the sender's word, and bytes after a valid header are still stored). The
+      // string must be plain base64: a decoder stops at a `=` inside it, and what follows would be
+      // stored unread. A real image's pixels are not read.
+      const attached = (body as Record<string, unknown> | null)?.['files'];
+      if (Array.isArray(attached) && !isOwnerPrincipal(this._principalOf(req))) {
+        for (const file of attached as { name?: unknown; type?: unknown; data?: unknown }[]) {
+          const rawName = typeof file.name === 'string' ? file.name : 'unknown';
+          if (mandateCredentialInput(rawName) !== null) {
+            errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
+          }
+          const rawType = typeof file.type === 'string' ? file.type : '';
+          // Past its size limit the loop below refuses this file (413) before it is stored.
+          if (typeof file.data !== 'string' || file.data.length > (rawType.startsWith('image/') ? CHAT_IMAGE_B64_MAX : CHAT_FILE_B64_MAX)) continue;
+          const buf = Buffer.from(file.data, 'base64');
+          const readings: string[] = [];
+          if (rawType.startsWith('image/')) {
+            if (!/^[A-Za-z0-9+/]*={0,2}$/.test(file.data)) {
+              errorResponse(res, 400, `Invalid file: ${sanitizeUploadFilename(rawName)}`); return;
+            }
+            readings.push(file.data, buf.toString('utf-8'));
+          } else {
+            readings.push(buf.toString('utf-8'));
+            try {
+              const extracted = await extractDocumentText(buf, sanitizeUploadFilename(rawName));
+              if (extracted) readings.push(extracted.text);
+            } catch { /* the loop below answers an unreadable document */ }
+          }
+          if (readings.some((t) => mandateDocumentCredential(t) !== null)) {
+            errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
+          }
+        }
+      }
       // Which erasure this request started under; see `erasureGeneration`.
       const erasureGenAtEntry = this.erasureGeneration;
       const erasedSinceEntry = (): boolean => this.erasureGeneration !== erasureGenAtEntry;
@@ -4028,13 +4830,15 @@ export class LynoxHTTPApi {
       const promptStoreEarly = this.engine?.getPromptStore();
       const existingSlot = this.runningSessions.get(sessionId);
       if (existingSlot && !existingSlot.streamAlive) {
-        const hasPrompt = !!promptStoreEarly?.getPending(sessionId);
+        // Only a run parked on its OWN question: a scheduled run's question in this thread does
+        // not make a working run stuck.
+        const hasPrompt = (existingSlot.parked?.() ?? true) && !!promptStoreEarly?.getPending(sessionId);
         const stale = Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
         if (hasPrompt || stale) {
           // Taking over ends the parked run and lets its question lapse: only that run's
           // principal (or the owner) may, even in the mandate's own conversation (§3.13 E7).
           if (this._refuseUnlessOwns(req, res, 'take over a run of this conversation', () => [this._lastRunRow(session)])) return;
-          existingSlot.takeover();
+          existingSlot.takeover('run_taken_over');
           // Wait for the previous handler's `finally` to clear the slot.
           // Realistic drain after takeover() is sub-100 ms (one tick to
           // resolve waitForSettled, then session.run unwinds); the 1 s cap
@@ -4078,7 +4882,9 @@ export class LynoxHTTPApi {
       // message — the reusable injection point, so any future "discuss this X"
       // entry passes the same shape and the server owns how each kind renders.
       // Best-effort: an unknown/foreign id yields no preamble and the chat still
-      // runs. Single-tenant container ⇒ the id is always the tenant's own.
+      // runs — except an approval entry, whose chat is told its draft is not
+      // available (APPROVAL_DRAFT_UNAVAILABLE). Single-tenant container ⇒ the id is always the tenant's own; an
+      // approval entry is the one kind also read by whose grant filed it.
       let contextPreamble = '';
       const rawCtx = b?.['context'];
       if (rawCtx && typeof rawCtx === 'object' && !Array.isArray(rawCtx)) {
@@ -4086,7 +4892,7 @@ export class LynoxHTTPApi {
         const ctxKind = c['kind'];
         let ref: ChatContextRef | null = null;
         if (
-          (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail') &&
+          (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail' || ctxKind === 'approval' || ctxKind === 'contained-origin') &&
           typeof c['id'] === 'string' &&
           c['id'].length > 0
         ) {
@@ -4102,7 +4908,13 @@ export class LynoxHTTPApi {
             engine.getRunHistory(),
             ref,
             engine.getInboxRuntime()?.state ?? null,
-            { threadId: sessionId, containment: engine.getToolContext().containment, threadStore: engine.getThreadStore() },
+            {
+              threadId: sessionId, containment: engine.getToolContext().containment, threadStore: engine.getThreadStore(),
+              wayOut: ref.kind === 'contained-origin' ? containedWayOutOf(engine) : undefined,
+            },
+            // An approval entry loads for the owner, or for a mandate only when its own grant
+            // filed it — unlike the other kinds, which are the tenant's whoever reads them.
+            ref.kind === 'approval' ? approvalChatReaderOf(engine.getApprovalStore(), this._principalOf(req), engine.getMailContext()) : null,
           );
           // Close the loaded-context block with an explicit boundary sentinel
           // before the user's own text (closeLoadedContext, the single source of
@@ -4113,10 +4925,13 @@ export class LynoxHTTPApi {
           // bubble on resume (the [Now:] marker shares this store-as-sent /
           // strip-at-render contract). The sentinel can't be forged on its own
           // line by the interpolated FREE-TEXT fields — they pass
-          // chat-context.oneLine(), which collapses newlines — and the id fields
-          // are internally-generated (single-tenant). Keep in sync with the
+          // chat-context.oneLine(), which collapses newlines, except an approval
+          // draft's text, which keeps its lines and has a sentinel line escaped
+          // instead — and the id fields are internally-generated (single-tenant). Keep in sync with the
           // web-ui stripLoadedContext() matcher (packages/web-ui now-marker.ts).
-          if (preamble) contextPreamble = closeLoadedContext(preamble);
+          // An approval draft that does not load is said to be missing, never passed over in silence.
+          const loaded = preamble ?? (ref.kind === 'approval' ? APPROVAL_DRAFT_UNAVAILABLE : null);
+          if (loaded) contextPreamble = closeLoadedContext(loaded);
         }
       }
       // Defense-in-depth: the client sanitises chat-over-bespoke framings, but
@@ -4141,24 +4956,43 @@ export class LynoxHTTPApi {
       const preflightStore = engine.getSecretStore();
       const preflightCfg = engine.getUserConfig();
       const preflightProvider = preflightCfg.provider ?? 'anthropic';
-      let preflightKeyOk: boolean;
+      // What the provider still lacks, in the order the settings page asks for it. `key` is the
+      // API key; the others are the settings fields without which no call can be made.
+      const preflightMissing: Array<'key' | 'gcp_project_id' | 'api_base_url' | 'model_id'> = [];
+      const preflightKey = (): string | undefined => preflightStore
+        ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg })
+        : undefined;
       if (preflightProvider === 'vertex') {
-        preflightKeyOk = !!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
+        if (!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID'])) preflightMissing.push('gcp_project_id');
       } else if (preflightProvider === 'custom') {
-        const base = preflightCfg.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!base && !!key;
+        if (!preflightKey()) preflightMissing.push('key');
+        if (!(preflightCfg.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL'))) preflightMissing.push('api_base_url');
       } else if (preflightProvider === 'openai') {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!preflightCfg.api_base_url
-          && (!endpointNeedsCredential(preflightProvider, preflightCfg.api_base_url) || !!key)
-          && !!preflightCfg.openai_model_id;
-      } else {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!key;
+        // Whether the endpoint needs a key is known only once there is an endpoint.
+        if (preflightCfg.api_base_url && endpointNeedsCredential(preflightProvider, preflightCfg.api_base_url) && !preflightKey()) preflightMissing.push('key');
+        if (!preflightCfg.api_base_url) preflightMissing.push('api_base_url');
+        if (!preflightCfg.openai_model_id) preflightMissing.push('model_id');
+      } else if (!preflightKey()) {
+        preflightMissing.push('key');
       }
-      if (!preflightKeyOk) {
-        errorResponse(res, 400, `No ${preflightProvider} API key configured. Open Settings → Providers and add one.`);
+      if (preflightMissing.length > 0) {
+        // `code` is what the web UI translates. Who may set it up decides the
+        // sentence: the provider settings are owner-only, so a mandate is told to ask the owner,
+        // not sent to a page it cannot use. `provider` is the display name the status bar
+        // shows, never the config key, and goes only to the one who can act on it, with what
+        // is missing: without a key nothing else helps, so a missing key is named alone.
+        if (!isOwnerPrincipal(this._principalOf(req))) {
+          errorResponse(res, 400, 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.',
+            'llm_not_configured', { may_configure: false });
+        } else {
+          const providerName = providerIdentity(preflightProvider, preflightCfg.api_base_url).label;
+          const missing = preflightMissing.includes('key') ? ['key'] : preflightMissing;
+          const fieldNames: Record<string, string> = { gcp_project_id: 'the GCP project ID', api_base_url: 'the base URL', model_id: 'the model ID' };
+          errorResponse(res, 400, missing[0] === 'key'
+            ? `No key is stored for ${providerName} yet. Open Settings → Configuration and add one.`
+            : `${providerName} is missing ${missing.map((m) => fieldNames[m]).join(' and ')}. Open Settings → Configuration and fill it in.`,
+            'llm_not_configured', { may_configure: true, provider: providerName, missing });
+        }
         return;
       }
 
@@ -4178,7 +5012,8 @@ export class LynoxHTTPApi {
         : undefined;
       // Always an object so the Tier-2 eager-persist checkpoint hook can be
       // attached below (once runId + buffer exist). effort/thinking stay optional.
-      const runOptions: import('../core/session.js').RunOptions = {
+      // `principal` required here (1173): the census reads by type whom this run is for.
+      const runOptions: import('../core/session.js').RunOptions & { principal: import('../core/request-principal.js').RequestPrincipal } = {
         ...(runEffort ? { effort: runEffort } : {}),
         ...(runThinking ? { thinking: runThinking } : {}),
         // Always named, the owner included: the session keeps the last run's principal
@@ -4212,8 +5047,8 @@ export class LynoxHTTPApi {
         // earlier with a typed error so the user sees a friendly message instead
         // of a raw provider 400. The frontend downscales to 1568px first, so a
         // real photo/screenshot lands far under this on any provider.
-        const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
-        const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
+        const MAX_IMAGE_B64_BYTES = CHAT_IMAGE_B64_MAX;
+        const MAX_FILE_B64_BYTES = CHAT_FILE_B64_MAX;
         const MAX_TEXT_FILE_DECODED_CHARS = 200_000;
         // Above this the upload becomes a real file in the tenant's file area
         // instead of message content.
@@ -4332,7 +5167,9 @@ export class LynoxHTTPApi {
                 // dropped from a turn it had already survived. Found by a route test whose
                 // engine stub lacked `getActiveScopes`, which is exactly the shape of the
                 // production failure (a method absent or throwing).
-                // Deferred until the run is accepted (see `deferredIngests`).
+                // Deferred until the run is accepted (see `deferredIngests`). Who uploaded is read
+                // now, with the request.
+                const uploadPrincipal = this._principalOf(req);
                 deferredIngests.push(() => {
                   try {
                     const kl = this.engine?.getKnowledgeLayer();
@@ -4349,6 +5186,8 @@ export class LynoxHTTPApi {
                         // can be flipped while the chunks embed.
                         isPrivate: () => this.engine?.getThreadStore()?.getThread(session.sessionId)?.skip_extraction === 1,
                         cutAtExtraction: extracted.truncated,
+                        // A mandate's upload archives nothing (660a-3).
+                        principal: uploadPrincipal,
                       }).catch(() => { /* best-effort */ });
                     }
                   } catch (ingestErr) {
@@ -4541,6 +5380,8 @@ export class LynoxHTTPApi {
       const promptStore = this.engine?.getPromptStore();
       // AbortController for the session — used to cancel prompt polling on disconnect
       const sessionAbortController = new AbortController();
+      // Why this run's open question closes if the run ends while it waits: a stop, unless whoever takes the run over says otherwise.
+      let endedBy: PromptClosedReason = 'run_stopped';
       let hasActivePendingPrompt = false;
 
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
@@ -4563,7 +5404,7 @@ export class LynoxHTTPApi {
         const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
-        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
         // Best-effort SSE notification (client may not be connected). A question
         // withdrawn at birth (its run already stopped) is never announced.
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -4602,7 +5443,7 @@ export class LynoxHTTPApi {
           // Same rule as `promptUser` above: an empty answer list would be answers nobody gave.
           if (!promptStore) throw new InputRequiredError(questions.map(q => q.question).join(' / '));
           const promptId = promptStore.insertAskUserTabs(sessionId, questions, promptOriginOf(meta), askStamp);
-          const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+          const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
           hasActivePendingPrompt = true;
           pauseWallClock(); // parked on a human — don't spend the compute budget
           if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -4672,7 +5513,7 @@ export class LynoxHTTPApi {
         }
 
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType, promptOriginOf(meta), askStamp);
-        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -4715,7 +5556,7 @@ export class LynoxHTTPApi {
           promptOriginOf(meta),
           askStamp,
         );
-        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -4827,7 +5668,7 @@ export class LynoxHTTPApi {
         setTimeout(() => {
           const liveSlot = this.runningSessions.get(sessionId);
           if (liveSlot && !liveSlot.streamAlive && promptStore?.getPending(sessionId)) {
-            liveSlot.takeover();
+            liveSlot.takeover('run_stopped');
           }
         }, ORPHAN_PROMPT_WATCHDOG_MS);
         if (hasActivePendingPrompt) {
@@ -4854,17 +5695,22 @@ export class LynoxHTTPApi {
       // Run
       // Takeover hook: a future /run for this session can call this to free
       // the slot when our SSE stream is dead and we're stuck on a prompt.
-      const takeover = (): void => {
+      const takeover = (reason: PromptClosedReason): void => {
         // Unwind BEFORE the bookkeeping. `waitForSettled` resolves on the signal
         // alone, so aborting first means a throw from the prompt store (closed
         // db, SQLITE_BUSY) can no longer leave the run parked — which is the
         // exact failure this handle exists to prevent.
+        endedBy = reason;
         sessionAbortController.abort();
         session.abort();
+        // Only the run's own question lapses with it. The thread holds one open question, so
+        // while this run waits on its own, the thread's question is that one; otherwise it is a
+        // scheduled run's, which waits on for its own answer.
+        if (!hasActivePendingPrompt) return;
         const pending = promptStore?.getPending(sessionId);
-        if (pending) promptStore?.expirePrompt(pending.id);
+        if (pending) promptStore?.expirePrompt(pending.id, reason);
       };
-      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt });
       try {
         // Reserve a concurrency slot + register the abort handle so the run can
         // be aborted by id from any connection (DELETE /api/runs/:runId) —
@@ -4927,7 +5773,10 @@ export class LynoxHTTPApi {
           // reading `fatal` would see `undefined` here — falsy, i.e. "keep
           // waiting" — and the fix for the ambiguous channel would have created
           // a worse bug than the one it closes.
-          res.write(`event: error\ndata: ${JSON.stringify({ error: msg, fatal: true })}\n\n`);
+          // `code` names a failure the client words itself (the text above stays the detail): a
+          // reply the provider cut off on every attempt.
+          const code = err instanceof StreamIncompleteError ? StreamIncompleteError.CODE : undefined;
+          res.write(`event: error\ndata: ${JSON.stringify({ error: msg, fatal: true, ...(code !== undefined ? { code } : {}) })}\n\n`);
           res.end();
         }
       } finally {
@@ -4963,7 +5812,8 @@ export class LynoxHTTPApi {
       if (!registry) { jsonResponse(res, 200, { runs: [] }); return; }
       const promptStoreForRuns = this.engine?.getPromptStore();
       const runs = registry.getActive().map((r) => {
-        const awaiting = r.status === 'running' && !!promptStoreForRuns?.getPending(r.thread_id);
+        // Only the run's own question: a scheduled run's, asked before it started, is not.
+        const awaiting = awaitsOwnQuestion(r, promptStoreForRuns?.getPending(r.thread_id));
         return {
           runId: r.run_id,
           threadId: r.thread_id,
@@ -4973,8 +5823,34 @@ export class LynoxHTTPApi {
           // Durable replay boundary — the client re-attaches with `?since=` this
           // to GET /runs/:runId/stream after a reload (Tier 2).
           lastPersistedSeq: r.last_persisted_seq,
+          // A registry row is a chat run: while it is live, its stream can be re-attached.
+          attachable: true,
         };
       });
+      // A scheduled run's question (a task's, a workflow's) waits in its run's thread, and the
+      // worker loop writes no registry row: its run would be swept to `interrupted` at boot
+      // while a task's question outlives the restart. So the wait is derived here from the
+      // question itself, for every thread with a pending question and no live registry row.
+      // An `interrupted` row is a run that ended, so a question waiting in its thread is
+      // listed after it, and the nav marks the thread with the question. The run id is the question's id, and
+      // there is no stream behind it: `attachable: false` tells the client not to re-attach.
+      // A workflow's question is closed at boot, so its mark goes with it rather than turning
+      // into an `interrupted` banner. A thread with a live chat run lists that run only, also
+      // when the question is a scheduled run's: the client reads a thread with both as having a
+      // question, and would then hold back a turn that is running.
+      const live = new Set(runs.filter((r) => r.status !== 'interrupted').map((r) => r.threadId));
+      for (const p of promptStoreForRuns?.listPendingSessions() ?? []) {
+        if (live.has(p.session_id)) continue;
+        runs.push({
+          runId: p.id,
+          threadId: p.session_id,
+          status: 'awaiting_input',
+          startedAt: p.created_at,
+          lastActivity: p.created_at,
+          lastPersistedSeq: 0,
+          attachable: false,
+        });
+      }
       jsonResponse(res, 200, { runs });
     }, READS));
 
@@ -5080,7 +5956,7 @@ export class LynoxHTTPApi {
         clearInterval(keepalive);
         unsub();
       });
-    }, READS));
+    }, readsThread((p) => ({ liveRun: p['runId'] ?? '' }))));
 
     // GET /sessions/:id/pending-prompt — client checks for resumable prompts on reconnect
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/sessions/:id/pending-prompt', async (_req, res, params) => {
@@ -5143,7 +6019,7 @@ export class LynoxHTTPApi {
         timeoutMs: PROMPT_TIMEOUT_MS,
         createdAt: row.created_at,
       });
-    }, READS));
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/reply', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
@@ -5157,28 +6033,36 @@ export class LynoxHTTPApi {
       // Who answers, from the request: recorded beside the answer.
       const by = this._principalOf(_req);
 
-      // Idempotency: if the client retries with the same promptId after a
-      // successful answer (network blip), return 200 so the client can move
-      // on instead of seeing 404 and wedging. Stale/unknown promptId → 404;
-      // expired → 410. Cross-session IDs → 409.
+      // A promptId names exactly one question, as at `_settleNamedPrompt`: only that question is
+      // answered, and one that is unknown, belongs to another session, is of another kind or is no
+      // longer open is reported as such — never replaced by whatever question the session has open
+      // now. Idempotency: a retry with the same promptId after a successful answer (network blip)
+      // gets 200, so the client can move on instead of wedging.
       if (promptId) {
         const existing = ps.getById(promptId);
-        if (existing) {
-          if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
-          if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
-          if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
-          // Only a question that exists gets a row: an unknown id falls through to the legacy path,
-          // which records the question it does answer.
-          if (!this._answerRecorded(_req, res, by, promptId)) return;
-          if (ps.answerUser(promptId, answer, by)) { jsonResponse(res, 200, { ok: true }); return; }
-        }
+        if (!existing) { errorResponse(res, 404, 'No pending prompt'); return; }
+        if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
+        if (existing.prompt_type !== 'ask_user' || existing.questions_json) { errorResponse(res, 409, 'Prompt is a different kind of question'); return; }
+        if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
+        if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
+        if (!this._answerRecorded(_req, res, by, promptId)) return;
+        // Pending, yet not answered: its time ran out before the sweep marked it. Nothing between
+        // the read above and this write yields, so another answer cannot settle it in between
+        // today; should that change, this still names only this question.
+        let answered: boolean;
+        try { answered = ps.answerUser(promptId, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
+        if (!answered) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
+        jsonResponse(res, 200, { ok: true });
+        return;
       }
 
-      // Fallback for clients that didn't echo the promptId (legacy path).
+      // Only a body without a promptId answers the session's open question (legacy clients).
       const pending = ps.getPending(params['id']!);
       if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
         if (!this._answerRecorded(_req, res, by, pending.id)) return;
-        if (ps.answerUser(pending.id, answer, by)) { jsonResponse(res, 200, { ok: true }); return; }
+        let answered: boolean;
+        try { answered = ps.answerUser(pending.id, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
+        if (answered) { jsonResponse(res, 200, { ok: true }); return; }
       }
 
       errorResponse(res, 404, 'No pending prompt');
@@ -5219,7 +6103,9 @@ export class LynoxHTTPApi {
 
       const by = this._principalOf(_req);
       if (!this._answerRecorded(_req, res, by, promptId)) return;
-      if (ps.answerUserTabs(promptId, answers, by)) { jsonResponse(res, 200, { ok: true }); return; }
+      let answered: boolean;
+      try { answered = ps.answerUserTabs(promptId, answers, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
+      if (answered) { jsonResponse(res, 200, { ok: true }); return; }
       errorResponse(res, 404, 'No pending prompt');
     }, OWN));
 
@@ -5244,7 +6130,7 @@ export class LynoxHTTPApi {
       if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
       if (existing.status !== 'pending') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
 
-      ps.setPartialAnswers(promptId, partial as (string | null)[]);
+      try { ps.setPartialAnswers(promptId, partial as (string | null)[], this._principalOf(_req)); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 
@@ -5322,7 +6208,7 @@ export class LynoxHTTPApi {
       // anything is reclaimed: the live session's last run, else the registry's row for the
       // thread, when there is one.
       if (this._refuseUnlessOwns(_req, res, 'stop this run', () => [this._threadRow(sessionId), ...this._liveRunRows(sessionId)])) return;
-      this.reclaimRunSlot(sessionId);
+      this.reclaimRunSlot(sessionId, 'run_stopped');
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
@@ -5347,10 +6233,11 @@ export class LynoxHTTPApi {
           if (line.startsWith('+') && !line.startsWith('+++')) added++;
           else if (line.startsWith('-') && !line.startsWith('---')) removed++;
         }
-        return { file: c.file, status: c.status, diff: c.diff, added, removed };
+        // `compared: false`: the diff is a note, and its zero counts must not read as "nothing changed".
+        return { file: c.file, status: c.status, diff: c.diff, added, removed, compared: c.compared };
       });
       jsonResponse(res, 200, { hasChanges: true, runId: csm.runId, files });
-    }, READS));
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
       const session = this.sessionStore.get(params['id']!);
@@ -5367,7 +6254,10 @@ export class LynoxHTTPApi {
         return;
       }
       const csm = session.getChangesetManager();
-      if (!csm || !csm.hasChanges()) {
+      // Not `hasChanges()`: a file replaced by a link since the review drops out of the changes,
+      // and a review whose every file did so must still be answered, so the rollback can name them.
+      // An answered review is cleaned up and empty, so a second answer is still refused.
+      if (!csm || csm.isEmpty()) {
         errorResponse(res, 400, 'No changeset to review');
         return;
       }
@@ -5389,36 +6279,50 @@ export class LynoxHTTPApi {
       const changes = csm.getChanges();
       let accepted = 0;
       let rolledBack = 0;
+      // Every tracked file by the name the review shows: a file replaced by a link since the review
+      // is no longer among `changes`, but the answer still names it, and the rollback names it back.
+      const absByName = csm.reviewNames();
+      const nameByAbs = new Map([...absByName].map(([name, abs]) => [abs, name]));
+      // The files the rollback left as they are (replaced or linked since, or not writable).
+      let notRestored: string[] = [];
+      const nameOf = (abs: string): string => nameByAbs.get(abs) ?? abs;
+      // Rollback all: a file the review does not show now and the backup could not read is left
+      // out. Nothing was saved for it, so nothing was promised, and the reason the answer gives for
+      // it would be wrong. A file shown once and replaced by a link since cannot be told apart from
+      // it here; a partial answer names what the person chose, so there nothing is left out.
+      const shownNow = new Set(changes.map((c) => c.absolutePath));
+      const named = (left: string[]): string[] => left
+        .filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs))
+        .map(nameOf);
 
       if (action === 'accept') {
         accepted = changes.length;
         csm.acceptAll();
       } else if (action === 'rollback') {
-        rolledBack = changes.length;
-        csm.rollbackAll();
+        notRestored = named(csm.rollbackAll());
+        rolledBack = changes.filter((c) => !notRestored.includes(c.file)).length;
       } else {
         // Partial: validate rolledBackFiles against changeset entries
         const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
         // The paths the review showed, mapped back to the files they name. Not resolved
         // against `process.cwd()`: the review's paths are relative to the workspace.
-        const absByRel = new Map(changes.map(c => [c.file, c.absolutePath]));
         const toRollback: string[] = [];
 
         for (const f of clientFiles) {
           if (typeof f !== 'string') continue;
-          const abs = absByRel.get(f);
-          if (abs !== undefined) toRollback.push(abs);
+          const abs = absByName.get(f);
+          if (abs !== undefined && !toRollback.includes(abs)) toRollback.push(abs);
         }
 
         if (toRollback.length > 0) {
-          csm.rollbackFiles(toRollback);
+          notRestored = csm.rollbackFiles(toRollback).map(nameOf);
         }
-        rolledBack = toRollback.length;
-        accepted = changes.length - rolledBack;
+        rolledBack = toRollback.length - notRestored.length;
+        accepted = changes.filter((c) => !toRollback.includes(c.absolutePath)).length;
       }
 
       csm.cleanup();
-      jsonResponse(res, 200, { ok: true, accepted, rolledBack });
+      jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
     }, OWN));
 
     // ── Compact (context management) ──
@@ -5437,6 +6341,7 @@ export class LynoxHTTPApi {
       }
       const b = body as Record<string, unknown> | null;
       const focus = typeof b?.['focus'] === 'string' ? b['focus'] : undefined;
+      if (refusedMandateKeyIn(this._principalOf(_req), res, focus)) return;
       const result = await session.compact(focus);
       // The occupancy pair travels on the manual path too: this route is a
       // blocking request with no SSE, so without it the UI would have to show
@@ -5499,9 +6404,12 @@ export class LynoxHTTPApi {
       const threads = threadStore.listThreads({ limit, includeArchived });
       // `contained`: the chat read data through a store connection (`core/containment.ts`), so
       // private mode stays on and it can only read and explain. Fail-closed, like the refusals.
-      const contained = containedThreads(engine.getToolContext().containment, threads.map((t) => t.id));
-      jsonResponse(res, 200, { threads: threads.map((t) => ({ ...t, contained: contained.has(t.id) })) });
-    }, READS);
+      const states = containedThreadStates(engine.getToolContext().containment, threads.map((t) => t.id));
+      // Another person's contained chat stays in the list, marked, without its title and summary,
+      // which can carry what the store returned (register 1112).
+      const unreadable = this._unreadableChats(this._principalOf(req), threads.map((t) => t.id));
+      jsonResponse(res, 200, { threads: threads.map((t) => ({ ...t, ...(unreadable.has(t.id) ? { title: '', summary: null } : {}), ...containedFields(states, t.id) })) });
+    }, readsThread(() => null));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
@@ -5514,8 +6422,9 @@ export class LynoxHTTPApi {
       // "gone" from "exists" without the noise. PATCH/DELETE below keep their
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
-      jsonResponse(res, 200, { thread: { ...thread, contained: threadIsContained(engine.getToolContext().containment, thread.id) } });
-    }, READS));
+      const states = containedThreadStates(engine.getToolContext().containment, [thread.id]);
+      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id) } });
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
       const threadStore = engine.getThreadStore();
@@ -5524,15 +6433,19 @@ export class LynoxHTTPApi {
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       if (this._refuseUnlessOwns(_req, res, 'change this conversation', () => [thread])) return;
       const b = body as Record<string, unknown> | null;
+      if (refusedMandateKeyIn(this._principalOf(_req), res, b?.['title'])) return;
       const skipExtraction = typeof b?.['skip_extraction'] === 'boolean' ? b['skip_extraction'] : undefined;
       // A chat that read data through a store connection stays out of memory for its life
       // (`core/containment.ts`): private mode cannot be switched off there. Read from the
       // record, fail-closed — a record that cannot be read refuses. Refused before anything
       // else in the request is applied, so the answer is the whole truth.
       if (skipExtraction === false) {
-        const { threadIsContained } = await import('../core/containment.js');
-        if (threadIsContained(engine.getToolContext().containment, params['id']!)) {
-          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.', 'contained');
+        // One read decides and says which of the two, for the owner's text: a record that could
+        // not be read names where to look.
+        const { contained, contained_unknown } = containedFields(containedThreadStates(engine.getToolContext().containment, [params['id']!]), params['id']!);
+        if (contained) {
+          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.', 'contained',
+            contained_unknown !== undefined ? { contained_unknown } : undefined);
           return;
         }
       }
@@ -5614,7 +6527,7 @@ export class LynoxHTTPApi {
       // hatch, not a path any client walks. sessionId IS the threadId here
       // (POST /api/sessions returns `threadId: sessionId`), so this can only
       // ever reclaim this thread's own run.
-      this.reclaimRunSlot(params['id']!);
+      this.reclaimRunSlot(params['id']!, 'thread_deleted');
       this.sessionStore.reset(params['id']!);
       // What was learned in this chat stays; its source is marked as a deleted chat instead
       // of pointing at a transcript that is gone. Marked before the delete. Each store is
@@ -5673,8 +6586,16 @@ export class LynoxHTTPApi {
       const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
       // Apply render projection: merge tool-result carriers into preceding
       // tool-use blocks, strip safety wrappers for display, flatten into the
-      // UI-ready shape that mirrors the client's ChatMessage.
-      const messages = projectMessages(records);
+      // UI-ready shape that mirrors the client's ChatMessage. The ledger says which calls did not
+      // succeed although their stored result reads as a plain answer (a soft failure). A ledger
+      // that cannot be read marks nothing: the chat still opens, as it did before the marks.
+      let unsuccessfulToolUseIds: ReadonlySet<string> | undefined;
+      try {
+        unsuccessfulToolUseIds = engine.getRunHistory()?.getFailedToolUseIds(params['id']!);
+      } catch {
+        unsuccessfulToolUseIds = undefined;
+      }
+      const messages = projectMessages(records, { unsuccessfulToolUseIds });
       // Resumable re-attach (Tier 2, AC2/AC3): read this thread's live run
       // SYNCHRONOUSLY in the same tick as the transcript above. Two synchronous
       // reads can't be interleaved by an eager-persist checkpoint (which runs on
@@ -5687,7 +6608,7 @@ export class LynoxHTTPApi {
       if (registry) {
         const row = registry.getActive().find((r) => r.thread_id === params['id']);
         if (row) {
-          const awaiting = row.status === 'running' && !!this.engine?.getPromptStore()?.getPending(row.thread_id);
+          const awaiting = awaitsOwnQuestion(row, this.engine?.getPromptStore()?.getPending(row.thread_id));
           activeRun = {
             runId: row.run_id,
             status: awaiting ? 'awaiting_input' : row.status,
@@ -5696,7 +6617,7 @@ export class LynoxHTTPApi {
         }
       }
       jsonResponse(res, 200, { messages, activeRun });
-    }, READS));
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     // Comprehensive thread DEBUG-EXPORT. The thin client export (AppShell
     // exportThreadJson) carries only the thread record + rendered messages;
@@ -5709,7 +6630,7 @@ export class LynoxHTTPApi {
     // Tier 2 adds persisted cost data (per-run composition + cache-hit, raw
     // error detail, compaction events, thread cost rollup) captured by migrations
     // v36–v38 — they ride the bundle here via the run/compaction read paths.
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id/debug-export', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id/debug-export', async (req, res, params) => {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const id = params['id']!;
@@ -5978,11 +6899,22 @@ export class LynoxHTTPApi {
       // user-scoped own-thread data; the scrub is defense-in-depth for sharing.
       const scrubbed: unknown = JSON.parse(maskSecretPatterns(JSON.stringify(bundle)));
       jsonResponse(res, 200, scrubbed);
-    }, READS));
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     // ── Memory ──
     const VALID_MEMORY_NS = new Set(['knowledge', 'methods', 'status', 'learnings']);
     type MemoryNs = 'knowledge' | 'methods' | 'status' | 'learnings';
+    /**
+     * On an engine that started without engine.db a change to memory is refused with a plain
+     * reason (`Memory.refuseChangesWithoutStore`): 409 with the code `engine_less`, before anything in
+     * the body is looked at or written. Reading stays.
+     */
+    const refuseEngineLessMemory = (res: ServerResponse, memory: { engineLessRefusal?(reader: 'client'): string | null }): boolean => {
+      const refusal = memory.engineLessRefusal?.('client') ?? null;
+      if (refusal === null) return false;
+      errorResponse(res, 409, refusal, 'engine_less');
+      return true;
+    };
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/memory/:ns', async (_req, res, params) => {
       const memory = engine.getMemory();
@@ -5996,6 +6928,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
@@ -6008,6 +6941,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
@@ -6021,6 +6955,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/memory/:ns', async (req, res, params) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -6032,6 +6967,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       // Accept BOTH body contracts: the UI sends {old_content,new_content}; older/tool
@@ -6473,8 +7409,10 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { names });
     }, ownerOnly('list the secrets'));
 
-    // Category-level booleans — available to all authenticated users
-    this.addStatic('user', 'GET /api/secrets/status', async (_req, res) => {
+    // Category-level booleans — available to all authenticated users. `count` is the owner's
+    // only: it is the size of the owner's vault, and a mandate stores nothing there.
+    this.addStatic('user', 'GET /api/secrets/status', async (req, res) => {
+      const ownerAsks = isOwnerPrincipal(this._principalOf(req));
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const names = new Set(store.listNames());
@@ -6549,7 +7487,7 @@ export class LynoxHTTPApi {
           google: engine.getGoogleClientSource() !== null,
           bugsink: names.has('LYNOX_BUGSINK_DSN'),
         },
-        count: names.size,
+        ...(ownerAsks ? { count: names.size } : {}),
         searxng_url: searxngUrl ?? null,
       });
     }, READS);
@@ -6670,8 +7608,20 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const provider = b && typeof b['provider'] === 'string' ? b['provider'] : '';
       const key = b && typeof b['key'] === 'string' ? b['key'] : '';
-      const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? b['api_base_url'] : '';
+      // Mistral's global endpoint is checked where a model request would go: the EU one.
+      const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? toMistralEuBase(b['api_base_url']) : '';
       if (!provider || !key) { errorResponse(res, 400, 'Missing provider or key'); return; }
+      // On an instance connected to a Shopify store a request goes only where a model request may
+      // go (`contained-providers.ts`). The key checked here is always one the user typed, so the
+      // check is refused for any provider named, before anything is sent. `invalid` keeps the page from saving it, and
+      // the code lets the page say why in its own words (`setup-key-check.ts`).
+      {
+        const { providerListApplies, PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+        if (providerListApplies()) {
+          jsonResponse(res, 200, { state: 'invalid', error: PROVIDER_NOT_ON_LIST_REFUSAL, code: PROVIDER_LIST_KEY_CODE });
+          return;
+        }
+      }
       const { validateAnthropicKey, validateMistralKey, validateOpenAICompatKey } = await import('../cli/docker-installer.js');
       try {
         if (provider === 'anthropic') {
@@ -6729,13 +7679,40 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Blocked: cloud metadata endpoint');
         return;
       }
+      // On an instance the control plane provisions, a private address is the tenant host's
+      // network, not the owner's LAN: answering "reachable?" for any of them makes this route a
+      // probe into it. There the URL is either the search endpoint the control plane gave this
+      // instance (`SEARXNG_URL`, set for every provisioned instance), or a public address fetched
+      // through the guarded transport (each redirect hop re-checked, the resolved address
+      // pinned). The config file's `searxng_url` does not count: the owner writes it, so it
+      // would reopen the probe. A self-hosted owner keeps checking a LAN or Docker endpoint,
+      // which is what the route is for.
+      if (isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER'))) {
+        const provisioned = (process.env['SEARXNG_URL'] ?? '').replace(/\/+$/, '');
+        if (url !== provisioned) {
+          const { assertPublicUrl, fetchWithPublicRedirects } = await import('../core/network-guard.js');
+          try {
+            await assertPublicUrl(url);
+          } catch {
+            errorResponse(res, 400, 'On this instance, a search endpoint must be the configured one or a public address');
+            return;
+          }
+          try {
+            const response = await fetchWithPublicRedirects(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
+            jsonResponse(res, 200, { healthy: response.ok });
+          } catch {
+            jsonResponse(res, 200, { healthy: false });
+          }
+          return;
+        }
+      }
       try {
         const response = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
         jsonResponse(res, 200, { healthy: response.ok });
       } catch {
         jsonResponse(res, 200, { healthy: false });
       }
-    }, free('checks a search endpoint and stores nothing'));
+    }, ownerOnly('check a search endpoint'));
 
     // Search reranker capability probe — read-time provider snapshot so the
     // Settings → Search page can surface "Reranker is Anthropic-only" instead
@@ -6747,8 +7724,8 @@ export class LynoxHTTPApi {
     }, READS);
 
     // ── Config ──
-    this.addStatic('user', 'GET /api/config', async (_req, res) => {
-      const { readUserConfig, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
+    this.addStatic('user', 'GET /api/config', async (req, res) => {
+      const { readUserConfig, loadConfig: loadEffectiveConfig, replacedTierSlots } = await import('../core/config.js');
       const config = readUserConfig();
       // The loader's OWN output. `readUserConfig()` above is the raw file;
       // `loadConfig()` additionally merges the CP-pinned env layers and applies
@@ -6772,12 +7749,18 @@ export class LynoxHTTPApi {
         // re-synced. cpSuppliesLLMKey above already normalizes internally.
         redacted['managed'] = normalizeBillingTier(tier) ?? tier;
       }
+      // Any tier value at all, canonical or not: the switch the engine's refusals name their way
+      // out by (`sidecar-refusals.ts`). The Web UI's notices take theirs from this, not from
+      // `managed`, so both name the same one.
+      redacted['billing_tier_set'] = billingTierSet();
       // Capability probe: what this instance *can* do, independent of tier.
       // Drives capability-based gating in the Web UI so working features stop
       // being hidden by tier checks (see PRD-SETTINGS-REFACTOR Principle 6).
       const secretStore = engine.getSecretStore();
       const secretNames = secretStore ? new Set(secretStore.listNames()) : new Set<string>();
-      const mistralAvailable = secretNames.has('MISTRAL_API_KEY') || !!process.env['MISTRAL_API_KEY'];
+      // On a pool tier the Mistral key is the pool's, from the environment. A vault
+      // `MISTRAL_API_KEY` there is the user's own and no path uses it, so it does not count.
+      const mistralAvailable = !!process.env['MISTRAL_API_KEY'] || (!isManagedTier && secretNames.has('MISTRAL_API_KEY'));
       const [transcribeMod, speakMod, limitsMod] = await Promise.all([
         import('../core/transcribe.js'),
         import('../core/speak.js'),
@@ -6836,6 +7819,31 @@ export class LynoxHTTPApi {
           ? { tier: 'managed', contact_for_quotas: true }
           : limitsMod.getHardLimits(),
       };
+      // Whose session asks, as in `/api/approvals`. `PUT /api/config` is the owner's, so the
+      // settings pages show a mandate the values as text instead of fields it cannot save.
+      redacted['viewer'] = approvalScopeOf(this._principalOf(req))?.viewer ?? 'none';
+      // Bulk runs as the engine runs them right now, and who decides (`core/bulk-switch.ts`):
+      // on a managed pool tier the control plane opens them per instance and the owner can only
+      // turn them off; elsewhere the config alone decides. `allowed` is whether turning them ON
+      // here would take effect, so the settings page can grey the switch; `db` tells its two
+      // reasons apart (no engine database, or a pool tier lynox has not opened them on).
+      {
+        const { isFeatureEnabled } = await import('../core/features.js');
+        const source = bulkRunsSource(tier ?? undefined);
+        const db = engine.getEngineDb() !== null;
+        redacted['bulk_runs'] = {
+          on: engine.getBulkLedger() !== null,
+          source,
+          allowed: db && (source === 'config' || isFeatureEnabled('bulk-runs')),
+          db,
+          // Whether a bulk run may read a Shopify store: the second half of what a chat opened from
+          // a read-only one may promise (`chat-context.ts › storeChangeByBulkRun`).
+          shopify: shopifyBulkReadEnabled(),
+          // Whose session asks, as in `/api/approvals`: a mandate does not see the owner's switch,
+          // so the line of a chat opened from a read-only one says the owner turns it on.
+          viewer: approvalScopeOf(this._principalOf(req))?.viewer ?? 'none',
+        };
+      }
       // model-presets W4: the per-preset "Modell-Strategie" signal the settings
       // cards + header picker render from. Availability reuses the loader
       // hardening (applyManagedTierSetConstraints), so a card is disabled iff the
@@ -7096,6 +8104,11 @@ export class LynoxHTTPApi {
         debug_wire_capture: wireCaptureEnvOn || wireCaptureEnvOff,
         ...(pinIgnored ? { tier_preset_ignored: pinnedPreset } : {}),
       };
+      // A config.json `tier_set` slot whose model this engine does not know runs the strategy's
+      // model on the same provider instead (`config.ts`, the preset guard). Reported, like the
+      // ignored pin above, so the replacement does not read as the user's choice.
+      const replacedSlots = replacedTierSlots();
+      if (replacedSlots.length > 0) redacted['replaced_tier_slots'] = replacedSlots;
       if (wireCaptureEnvOn) {
         redacted['debug_wire_capture'] = true;
       } else if (wireCaptureEnvOff) {
@@ -7136,7 +8149,7 @@ export class LynoxHTTPApi {
     // Self-host: no admin secret → cookie users auto-promoted to admin scope
     // at the auth layer, so the allowlist branch is a no-op for them.
     this.addStatic('user', 'PUT /api/config', async (_req, res, _params, body) => {
-      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
+      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig, checkCandidateConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       // Wave 5d BYOK liability gate (server-side): `confirm_custom_endpoint` is
       // a control-plane signal, not a config field — it acts as a per-call
@@ -7155,6 +8168,10 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
+      // A page loaded before the Mistral move, or a stored value sent back unchanged, still names
+      // Mistral's global endpoint. It is saved as the EU regional one, which the gates below and
+      // every reader expect.
+      moveMistralEndpointsToEu(parsed.data);
       // Sonnet-variant selection: the schema admits any 1–64-char string
       // (`balanced_model` is intentionally NOT a z.enum — an unrecognised value
       // must degrade at the resolver, not null the whole `.strict()` config).
@@ -7169,15 +8186,6 @@ export class LynoxHTTPApi {
           errorResponse(res, 400, `Invalid balanced_model: must be one of ${[...SERVED_BALANCED_SONNET_IDS].join(', ')}`);
           return;
         }
-      }
-      // Bulk runs stay off: this route cannot turn them on, on any tier, and the whole
-      // save is refused rather than applied without the flag. This check does not refuse
-      // turning them off, leaving the key out, or sending back a value already stored. On
-      // the managed pool tiers the lock gate below keeps the field locked as before, so
-      // there it can be neither turned on nor off.
-      if (parsed.data.bulk_runs_enabled === true && readUserConfig().bulk_runs_enabled !== true) {
-        errorResponse(res, 403, 'bulk_runs_enabled cannot be turned on through the API.');
-        return;
       }
       // The background-task model: held to the user bounds at WRITE time, on every
       // tier, so a choice the loader would drop (and quietly replace with the worker
@@ -7240,7 +8248,8 @@ export class LynoxHTTPApi {
         // malformed save can't pollute downstream config-merge state. The
         // effective model blocklist (env-merged by loadConfig) rides along so
         // the gate can 403 a blocked tier_set/tier_preset model honestly.
-        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? []);
+        const storedConfig = readUserConfig();
+        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? [], { provider: storedConfig.provider, api_base_url: toMistralEuBase(storedConfig.api_base_url) });
         if (providerReason) {
           errorResponse(res, 403, providerReason);
           return;
@@ -7365,6 +8374,30 @@ export class LynoxHTTPApi {
           merged['accepted_custom_endpoints'] = [...prior, { host: acceptedHostToRecord, accepted_at: new Date().toISOString() }];
         }
       }
+      // Checked BEFORE the write, by the loader itself: a file the loader refuses would answer
+      // every later GET here with a 500 and stop the next boot, and on a managed instance every
+      // PUT too (its lock gate loads the stored file above), so only a hand edit in the container
+      // would bring it back. A slot whose model the loader would replace is refused too when this
+      // request sets that model, so a new choice is never stored only to be overridden. One
+      // already stored does not block saving the rest: the UI re-sends every field, without the
+      // slot keys GET redacts, which is why the model alone decides "sets".
+      const candidate = checkCandidateConfig(merged);
+      if (candidate.error !== undefined) {
+        // To the log, not the client: the first line only, masked like an error sent to a client,
+        // since a loader message may quote an environment value and operators read these logs.
+        if (candidate.unknownModel === undefined) process.stderr.write(`[lynox] PUT /api/config refused a configuration the loader rejects: ${maskForClient(candidate.error.split('\n')[0] ?? '', { includeGeneric: true })}\n`);
+        errorResponse(res, 400, candidate.unknownModel !== undefined
+          ? `A tier names the model '${candidate.unknownModel}', which this version does not know. Choose a listed model for that tier.`
+          : 'This configuration could not be loaded, so it was not saved.');
+        return;
+      }
+      const storedSlots = (existing['tier_set'] ?? {}) as Record<string, { model_id?: unknown } | undefined>;
+      const newlyReplaced = candidate.replacedSlots.filter((r) => storedSlots[r.tier]?.model_id !== r.model_id);
+      if (newlyReplaced.length > 0) {
+        const r = newlyReplaced[0]!;
+        errorResponse(res, 400, `A tier names the model '${r.model_id}', which this version does not know. Choose a listed model for that tier.`);
+        return;
+      }
       saveUserConfig(merged);
       reloadConfig();
       await engine.reloadUserConfig();
@@ -7405,7 +8438,9 @@ export class LynoxHTTPApi {
       const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
       if (q) {
         const runs = history.searchRuns(q, limit, offset);
-        jsonResponse(res, 200, { runs });
+        // A search reads run texts: another person's contained chat is left out (register 1112).
+        const unreadable = this._unreadableChats(this._principalOf(req), runs.map((r) => r.session_id));
+        jsonResponse(res, 200, { runs: runs.filter((r) => !unreadable.has(r.session_id)) });
       } else {
         const filters: { status?: string; model?: string; dateFrom?: string; dateTo?: string; sessionId?: string } = {};
         const status = url.searchParams.get('status');
@@ -7427,9 +8462,12 @@ export class LynoxHTTPApi {
         if (dateTo) filters.dateTo = dateTo;
         if (sessionId) filters.sessionId = sessionId;
         const runs = history.getRecentRuns(limit, offset, Object.keys(filters).length > 0 ? filters : undefined);
-        jsonResponse(res, 200, { runs });
+        // Unfiltered, the list holds every chat's runs: another person's contained chat is left
+        // out (register 1112). Filtered by one chat, the dispatcher has checked that chat already.
+        const unreadable = this._unreadableChats(this._principalOf(req), runs.map((r) => r.session_id));
+        jsonResponse(res, 200, { runs: runs.filter((r) => !unreadable.has(r.session_id)) });
       }
-    }, READS);
+    }, readsThread((_p, q) => { const id = q.get('q') ? null : (q.get('sessionId') ?? q.get('thread_id')); return id ? { thread: id } : null; }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/history/runs/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
@@ -7437,14 +8475,14 @@ export class LynoxHTTPApi {
       const run = history.getRun(params['id']!);
       if (!run) { errorResponse(res, 404, 'Run not found'); return; }
       jsonResponse(res, 200, run);
-    }, READS));
+    }, readsThread((p) => ({ historyRun: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/history/runs/:id/tool-calls', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const toolCalls = history.getRunToolCalls(params['id']!);
       jsonResponse(res, 200, { toolCalls });
-    }, READS));
+    }, readsThread((p) => ({ historyRun: p['id'] ?? '' }))));
 
     this.addStatic('user', 'GET /api/history/stats', async (_req, res) => {
       const history = engine.getRunHistory();
@@ -7488,41 +8526,52 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const runs = history.getRecentPipelineRuns(limit);
-      jsonResponse(res, 200, { runs });
-    }, READS);
+      const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins(runs.map((r) => r.id)));
+      // A run's plan carries what its chat wrote into it: another person's contained chat's runs
+      // are left out (register 1112).
+      const unreadable = this._unreadableChats(this._principalOf(req), runs.map((r) => r.id));
+      jsonResponse(res, 200, { runs: runs.filter((r) => !unreadable.has(r.id)).map((r) => ({ ...r, ...fieldsOf(r.id) })) });
+    }, readsThread(() => null));
 
     this.addStatic('user', 'GET /api/workflows/stats/steps', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
-      const stats = history.getPipelineStepStats(days);
+      // Names and step ids are the starting chat's words: another person's contained chat's runs
+      // are left out (register 1118).
+      const unreadable = this._unreadableChats(this._principalOf(req), history.getPipelineOriginChats());
+      const stats = history.getPipelineStepStats(days, [...unreadable]);
       jsonResponse(res, 200, { stats });
-    }, READS);
+    }, readsThread(() => null));
 
     this.addStatic('user', 'GET /api/workflows/stats/cost', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
-      const stats = history.getPipelineCostStats(days);
+      const unreadable = this._unreadableChats(this._principalOf(req), history.getPipelineOriginChats());
+      const stats = history.getPipelineCostStats(days, [...unreadable]);
       jsonResponse(res, 200, { stats });
-    }, READS);
+    }, readsThread(() => null));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const run = history.getPipelineRun(params['id']!);
       if (!run) { errorResponse(res, 404, 'Pipeline run not found'); return; }
-      jsonResponse(res, 200, run);
-    }, READS));
+      const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins([run.id]));
+      jsonResponse(res, 200, { ...run, ...fieldsOf(run.id) });
+    }, readsThread((p) => ({ pipelineRun: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/steps', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const steps = history.getPipelineStepResults(params['id']!);
-      jsonResponse(res, 200, { steps });
-    }, READS));
+      // The outputs themselves: marked as the run is, for a client that reads only these.
+      const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins([params['id']!]));
+      jsonResponse(res, 200, { steps, ...fieldsOf(params['id']!) });
+    }, readsThread((p) => ({ pipelineRun: p['id'] ?? '' }))));
 
     // ── Saved Workflows library (PRD §6.8 / D13) ──
     // A "saved workflow" = an engine.db workflow definition whose deserialized
@@ -7541,7 +8590,28 @@ export class LynoxHTTPApi {
       // library agrees with the schedule handler on cron-eligibility (otherwise a
       // legacy autonomous workflow with no stored mode hides its Schedule button).
       const { inferPipelineMode, stepsThatAsk } = await import('../orchestrator/human-in-the-loop.js');
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind; awaitsStamp: boolean }> = [];
+      // Whom the Run button runs each one as, for the owner only: a mandate's email is not another
+      // mandate's to read (1055, ux U-063). Absent for the owner's own workflows.
+      const viewer = this._principalOf(req);
+      const ownerViews = isOwnerPrincipal(viewer);
+      // For a workflow whose mandate has ended: how many of its paused plans would move it to the
+      // owner when taken over (ux U-079 (b), U-119). Read once, by the takeover's own decision, and
+      // only when a listed workflow's mandate has ended; a failed read counts none, which leaves the
+      // card with the sentence that holds either way.
+      let coveredByTakeover: Map<string, number> | undefined;
+      const coveredCount = (workflowId: string): number => {
+        if (coveredByTakeover === undefined) {
+          try {
+            const deps = this.#takeoverDepsIfReady();
+            coveredByTakeover = deps === null ? new Map<string, number>() : workflowsCoveredByTakeover(deps);
+          } catch {
+            coveredByTakeover = new Map<string, number>();
+          }
+        }
+        return coveredByTakeover.get(workflowId) ?? 0;
+      };
+      const { foreignWorkflowScheduleRefusalKind } = await import('../core/plan-stamp.js');
       for (const row of rows) {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
@@ -7596,11 +8666,27 @@ export class LynoxHTTPApi {
           askingSteps: mode === 'interactive' ? stepsThatAsk(fullSteps) : [],
           ...(typeof parsed.confirmedAt === 'string' ? { confirmedAt: parsed.confirmedAt } : {}),
           ...(parsed.capabilityContract !== undefined ? { capabilityContract: parsed.capabilityContract } : {}),
+          // A workflow a mandate shaped, or whose steps changed after its stamp, runs only after the
+          // owner stamped its steps as they are (`workflow-stamp.ts`): the same state the run and
+          // the trigger list read, so every surface that points here finds the stamp to give.
+          awaitsStamp: history.workflowStampState({ ...(parsed as object), id: row.id } as PlannedPipeline) === 'awaits_owner_stamp',
+          ...(() => {
+            if (!ownerViews) {
+              // A mandate learns that a workflow is not its to schedule (UX-058, ux U-085), never whose it is.
+              const refusal = foreignWorkflowScheduleRefusalKind(viewer, row.id, history);
+              return refusal === null ? {} : { schedule_refusal: refusal };
+            }
+            const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
+            if (runAs.kind !== 'mandate') return {};
+            const ended = principalHasEnded(runAs, (id) => this._mandateLive(id));
+            return { runs_as: { person: runAs.email, ended, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
+          })(),
         });
       }
       // Whether the schedule dialog may offer a write grant at all (the feature switch).
       const { workflowGrantEnabled } = await import('../core/workflow-grant.js');
-      jsonResponse(res, 200, { workflows: workflows.slice(0, limit), grantEnabled: workflowGrantEnabled() });
+      // Who reads: only the owner gets the button to the stamp view, whose routes are the owner's.
+      jsonResponse(res, 200, { workflows: workflows.slice(0, limit), grantEnabled: workflowGrantEnabled(), viewer: ownerViews ? 'owner' : 'mandate' });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params, body) => {
@@ -7657,7 +8743,7 @@ export class LynoxHTTPApi {
       // rather than headless-running arbitrary imported bash. (Resolve via
       // getPipeline so a prefix id + the post-confirm cache eviction are handled;
       // a not-found id falls through to runGuardedSavedWorkflow's 404.)
-      const { getPipeline } = await import('../tools/builtin/pipeline.js');
+      const { getPipeline, workflowRunTrail, WORKFLOW_RUN_UNRECORDED_RESULT } = await import('../tools/builtin/pipeline.js');
       const plannedForRun = getPipeline(params['id']!, history);
       // A workflow that asks its owner runs only on its schedule (PRD 3b-2 §4.3): this route has
       // no question channel, so a run started here would reach a question step with nobody to ask.
@@ -7667,7 +8753,16 @@ export class LynoxHTTPApi {
         errorResponse(res, 403, 'This workflow asks questions while it runs, so it runs only on its schedule.');
         return;
       }
-      if (plannedForRun && !plannedForRun.confirmedAt) {
+      // The owner's stamp is bound to the steps (`workflow-stamp.ts`): a workflow a mandate shaped,
+      // or whose steps changed after the stamp, waits for the owner to review them. The client
+      // opens that workflow's stamp view from the code and the id. The runner asks again on the
+      // copy it runs; this answer is the early one.
+      const stampState = plannedForRun ? history.workflowStampState(plannedForRun) : 'holds';
+      if (plannedForRun && stampState === 'awaits_owner_stamp') {
+        errorResponse(res, 409, workflowAwaitsStampResult(plannedForRun.id), 'workflow_awaits_stamp', { pipelineId: plannedForRun.id });
+        return;
+      }
+      if (plannedForRun && stampState === 'unconfirmed') {
         // The remedy depends on the MODE, because only a schedulable workflow can
         // reach the PRODUCT route the autonomous branch names: this same file's
         // `POST /api/tasks` refuses any other (`isSchedulableWorkflow`), and the
@@ -7693,6 +8788,19 @@ export class LynoxHTTPApi {
             ? 'This workflow uses ask_secret or another way to ask for more than an answer, so it cannot run unattended — an unattended run has no one to give it. Run it from a chat instead; scheduling is not offered for it.'
             : 'This workflow needs first-run confirmation before it can run unattended. Review its steps and schedule it (the consent step confirms it), or run it from a chat where each action asks for your approval.',
         );
+        return;
+      }
+      // Whom the run is for (1055, decision A): the mandate that made or last changed the
+      // workflow, as its schedule would run it, else the owner. The owner pressing Run does not
+      // lift a mandate's workflow out of that mandate's lock. Once that mandate's access ended,
+      // the run is refused here, before the claim, with `author_ended` and the person, so the
+      // view can name the way out: a new workflow from the chat, which belongs to the owner. The
+      // runner refuses the same run (`sourceRefusal`); this answer only adds the person.
+      // A read that throws gives the owner here and the run is refused by the runner as
+      // unreadable, before any step: the same answer as no row.
+      const runAs = workflowRunsAs(plannedForRun === undefined ? undefined : authorshipOrNone(() => history.getWorkflowAuthorship(plannedForRun.id)));
+      if (principalHasEnded(runAs, (id) => this._mandateLive(id))) {
+        errorResponse(res, 403, WORKFLOW_ENDED_REFUSAL, 'author_ended', { runs_as: runAs.kind === 'mandate' ? runAs.email : null });
         return;
       }
       // Loaded BEFORE the claim is taken, and that order is load-bearing: this was the one
@@ -7881,8 +8989,18 @@ export class LynoxHTTPApi {
         // request owns a claim. An earlier shape handed `undefined` for the whole object when
         // there was none, which would have dropped `origin` for every keyless call: the
         // cheapest way to lose a security decision is to make it the sibling of an optional one.
-        result = await runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
+        // A mandate's workflow runs as that mandate (decision A), and as a plan's run, not as
+        // that person's own session: under `runAsPlanOf` with no stamp, so the mandate's own
+        // connections read as unlisted and are refused (`planConnectionState`), and under a
+        // recorded run of its own (the `workflow:run` pair), whose key every row of its steps
+        // carries. A start that cannot be recorded does not run. The owner's run has neither.
+        const trail = workflowRunTrail(runAs, engine.getAuditLog() ?? null, { workflowId: claimWorkflowId, oneShot: false, retry: false, startedBy: 'library' });
+        const run = (): ReturnType<typeof runGuardedSavedWorkflow> => runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
           origin: { kind: 'library', by: this._authOrigin.get(_req) ?? 'unknown' },
+          principal: runAs,
+          // Asked on the workflow as the runner reads it: an edit after this route looked at it
+          // must not run under the principal it decided (`libraryRunCheck`).
+          checkWorkflow: libraryRunCheck(runAs, (id) => history.getWorkflowAuthorship(id)),
           ...(ownedRunId === undefined ? {} : {
             runId: ownedRunId,
             // The stamp that turns "nothing spent" into "spent". `runManifest` fires it before
@@ -7904,6 +9022,25 @@ export class LynoxHTTPApi {
             hooks: { onRunStart: () => { history.markWorkflowRunStarted(ownedRunId); } },
           }),
         });
+        let begun = trail === null;
+        if (trail !== null) { try { trail.begin(); begun = true; } catch { /* answered below */ } }
+        if (!begun) {
+          result = { ok: false, error: WORKFLOW_RUN_UNRECORDED_RESULT };
+        } else if (trail === null) {
+          result = await run();
+        } else {
+          let outcome: 'success' | 'failed' = 'failed';
+          try {
+            result = await runAsPlanOf(runAs, run, null, trail.key, /* the owner pressed Run */ true);
+            // A run that a refused member connection kept from the provider is no success in the
+            // log either (1100), as the worker ends such a run (`withMemberNotes`); the answer
+            // already lists the line under `writeNotes`.
+            const memberRefused = result.ok && (result.writeNotes ?? []).some((n) => n.startsWith(MEMBER_CONNECTION_PREFIX));
+            if (result.ok && result.status === 'completed' && !memberRefused) outcome = 'success';
+          } finally {
+            trail.end(outcome, false);
+          }
+        }
       } finally {
         // Release ONLY what spent nothing, and let SQL decide it: the method's WHERE
         // carries `run_id = ? AND started_at IS NULL`, so a read-then-delete here would
@@ -8004,6 +9141,10 @@ export class LynoxHTTPApi {
       if (name.trim().length > 200) {
         errorResponse(res, 400, 'name too long (max 200 characters)'); return;
       }
+      // The name reaches the model in every run and edit of the workflow; the save refuses such a
+      // character, and a rename does not pass through the save.
+      const hiddenName = findHiddenChar(name.trim());
+      if (hiddenName !== null) { errorResponse(res, 400, hiddenRefusal('The name', hiddenName.codePoint), HIDDEN_CHAR_CODE); return; }
       const renamed = history.renamePlannedPipeline(params['id']!, name.trim(), this._principalOf(req));
       if (!renamed) { errorResponse(res, 404, 'Workflow not found'); return; }
       // Evict the in-memory cache so a later run reflects the new name.
@@ -8024,6 +9165,83 @@ export class LynoxHTTPApi {
       forgetPipeline(params['id']!);
       jsonResponse(res, 200, { deleted: true });
     }, ownerOnly('delete a workflow')));
+
+    // The owner's own stamp on a workflow: the preview shows
+    // what a run of it does, step by step, with the digest of exactly that; the confirm stamps
+    // only that digest. Exact id only, read from the database: a prefix or a cached copy could
+    // show one definition and stamp another. A schedule's confirm never stamps its workflow.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/stamp-preview', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const planned = history.getWorkflowExact(params['id']!);
+      const expect = planned === undefined ? null : history.workflowStampDigest(planned);
+      if (planned === undefined || expect === null) { errorResponse(res, 404, 'Workflow not found'); return; }
+      const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
+      const { getRole } = await import('../core/roles.js');
+      const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
+        const r = name === undefined ? undefined : getRole(name);
+        return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
+      };
+      const state = history.workflowStampState(planned);
+      const shaped = history.workflowMandateShaped(planned.id);
+      const contract = planned.capabilityContract;
+      jsonResponse(res, 200, {
+        expect,
+        stampedAt: state === 'holds' ? planned.confirmedAt ?? null : null,
+        changedBy: shaped ? 'mandate' : 'owner',
+        awaitsStamp: state === 'awaits_owner_stamp',
+        mode: planned.mode,
+        onFailure: planned.on_failure ?? 'stop',
+        limits: planned.limits ?? null,
+        // What the contract lets the run write, as the grant's preview words it.
+        contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
+        parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
+        // Each step as it runs: a captured step's literal call beside its task, and the tools it
+        // gets, worked out the way the runtime does (a step that names none gets the pool).
+        // `secret:` references stay names; no value is resolved here.
+        // A role can widen the tools and change the model at run time: it is shown by name.
+        steps: (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
+          id: st.id,
+          task: st.task,
+          tool: st.tool ?? null,
+          inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
+          tools: [...inlineStepToolNames(st)],
+          model: st.model ?? null,
+          role: st.role ?? null,
+          // A role is built in (`roles.ts`), not stored: what it grants is shown beside its name.
+          roleGrant: roleGrantOf(st.role),
+          effort: st.effort ?? null,
+          thinking: st.thinking ?? null,
+          timeoutMs: st.timeout_ms ?? null,
+          inputFrom: st.input_from ?? null,
+        })),
+      });
+    }, ownerOnly('see what stamping a workflow would confirm')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/confirm', async (_req, res, params, body) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: stamp the workflow from its preview.', 'expect_required'); return; }
+      const id = params['id']!;
+      if (history.getWorkflowExact(id) === undefined) { errorResponse(res, 404, 'Workflow not found'); return; }
+      // Compared and written in one transaction (`WorkflowStore.stampCurrent`): what is stamped is
+      // what was compared. A stamp over the same steps moves nothing.
+      if (!history.setWorkflowConfirmedAt(id, new Date().toISOString(), expected)) {
+        errorResponse(res, 409, 'The steps of this workflow changed since you looked. Look at them again, then stamp.', 'steps_changed');
+        return;
+      }
+      const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
+      forgetPipeline(id);
+      const now = history.getWorkflowExact(id);
+      // Triggers of this workflow the wait switched off (`worker-loop.ts`: a one-shot, a webhook)
+      // and still off: they run once switched on again, which the stamp does not do for the owner.
+      // Counted so the page can say so; a schedule (cron, watch) stayed on and needs nothing.
+      const stillOff = (engine.getTaskManager()?.listTriggers?.() ?? [])
+        .filter((t) => t.pipeline_id === id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(id))).length;
+      jsonResponse(res, 200, { stampedAt: now?.confirmedAt ?? null, awaitsStamp: false, stillOff });
+    }, ownerOnly('stamp a workflow')));
 
     // ── Tasks ──
     this.addStatic('user', 'GET /api/tasks', async (req, res) => {
@@ -8056,17 +9274,69 @@ export class LynoxHTTPApi {
       // started a run is not added to the row either way.
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
-      const triggers = taskManager.listTriggers(status ? { status } : undefined)
+      const history = engine.getRunHistory();
+      // `paused` is no status value: it reads `paused_at` (`plan-pause.ts`).
+      const pausedFilter = (status as string | undefined) === 'paused';
+      const rows = pausedFilter
+        ? taskManager.listTriggers({ paused: true })
+        : taskManager.listTriggers(status ? { status } : undefined);
+      const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
+      const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
           const visible = starter !== undefined && mayStopRun(principal, starter, loop?.runningPlanTag(trigger.id));
+          // A workflow schedule whose workflow waits for the owner's stamp: it stays on and does
+          // not run (a webhook's is switched off), and the view says so instead of a next run.
+          // The same state the run refusal reads (`workflow-stamp.ts`).
+          const workflow = trigger.effect === 'run_workflow' && trigger.pipeline_id ? history?.getWorkflowExact(trigger.pipeline_id) : undefined;
+          // A bulk run's trigger is titled with its run id, for the model; the view names it by its
+          // stage and the host it works on instead (U-324). Null: no host (the data store,
+          // workspace files) or no run any more.
+          // One row whose run cannot be read must not cost the owner the whole list: it shows no host.
+          // A row stored without an effect is no bulk row, and does not cost the list either.
+          const isBulk = typeof trigger.effect === 'string' && trigger.effect.startsWith('bulk_');
+          let bulkSystem: string | undefined;
+          if (isBulk && trigger.bulk_run_id !== undefined) {
+            try { bulkSystem = bulkLedgerForList?.getRunForApply(trigger.bulk_run_id)?.targetSystem; } catch { bulkSystem = undefined; }
+          }
           return {
-            ...trigger,
+            ...triggerForRoute(trigger, principal),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
+            workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',
+            ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
           };
         });
-      jsonResponse(res, 200, { triggers });
+      // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
+      // owner only: the connections are a helper's, and only the owner decides on them.
+      const viewer = approvalScopeOf(principal)?.viewer ?? 'none';
+      const shown = viewer === 'owner'
+        ? await Promise.all(triggers.map(async (t, i) => {
+          // One row that cannot be read must not cost the owner the whole list. The list is display
+          // only (the run's gate reads the stamp itself), so the row just shows none.
+          let listed: StampListShown | null = null;
+          try {
+            listed = await this.#stampListShown(rows[i]!);
+          } catch (err: unknown) {
+            console.warn(`[lynox:http] stamp list of trigger ${t.id} not readable: ${processErrorText(err)}`);
+          }
+          return listed === null ? t : { ...t, stamp_listed: listed };
+        }))
+        : triggers;
+      // `viewer` as in `/api/approvals`: the page offers the owner's controls (the takeover) only
+      // to the owner's session. The routes check it again; this is what the page shows.
+      jsonResponse(res, 200, { triggers: shown, viewer });
+    }, READS);
+
+    // How many plans wait for the owner's takeover, for the dot at "Automation": the pause is told
+    // by push only, and an owner without a push subscription would otherwise not see it. The
+    // owner only, as the number covers plans other helpers set up; a helper's own list still says
+    // which of the rows it reads are paused, without whose access ended.
+    this.addStatic('user', 'GET /api/triggers/paused-count', async (req, res) => {
+      const viewer = approvalScopeOf(this._principalOf(req))?.viewer ?? 'none';
+      const engineDb = engine.getEngineDb();
+      if (viewer !== 'owner' || engineDb === null) { jsonResponse(res, 200, { viewer, count: null }); return; }
+      jsonResponse(res, 200, { viewer, count: new TriggerStore(engineDb).countPausedOpen() });
     }, READS);
 
     this.addStatic('user', 'POST /api/tasks', async (_req, res, _params, body) => {
@@ -8088,6 +9358,10 @@ export class LynoxHTTPApi {
       const runAt = typeof b['runAt'] === 'string' && b['runAt'].length > 0 ? b['runAt'] : undefined;
       const dueDate = typeof b['dueDate'] === 'string' && b['dueDate'].length > 0 ? b['dueDate'] : undefined;
       const pipelineId = typeof b['pipelineId'] === 'string' && b['pipelineId'].length > 0 ? b['pipelineId'] : undefined;
+      const hidden = hiddenInTaskText(b);
+      if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
+      // The fields a person types; not the ids, which a random-looking id would fail.
+      if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
 
       // Slice B2: schedule a saved workflow on cron — the promote-to-cron consent
       // action. Validates the workflow is autonomous, binds + constrains the
@@ -8109,9 +9383,30 @@ export class LynoxHTTPApi {
         }
         const { getPipeline, forgetPipeline } = await import('../tools/builtin/pipeline.js');
         const planned = getPipeline(pipelineId, history);
-        if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`); return; }
+        if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`, 'missing_workflow'); return; }
+        // A schedule on another mandate's workflow ties both mandates into one plan, so a mandate
+        // schedules only its own workflows and the owner's (`foreignWorkflowScheduleRefusal`).
+        const { foreignWorkflowScheduleRefusalKind, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL } = await import('../core/plan-stamp.js');
+        const refusalKind = foreignWorkflowScheduleRefusalKind(principal, planned.id, history);
+        if (refusalKind !== null) {
+          // The code lets the page word it in the reader's language (ux U-085); the text stays for every other client.
+          // One read decides both the text and the code.
+          if (refusalKind === 'foreign') errorResponse(res, 403, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, 'foreign_workflow');
+          else errorResponse(res, 403, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL, 'unreadable_workflow');
+          return;
+        }
         if (!isSchedulableWorkflow(planned)) {
           errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled — remove its ask_secret / ask_human steps first.`); return;
+        }
+        // A workflow that waits for the owner's stamp (a mandate shaped it, or its steps changed
+        // after its stamp) is not stamped by scheduling it: the owner stamps it in its own act,
+        // after seeing its steps (`POST /api/workflows/:id/confirm`). Until then neither a schedule
+        // nor a write grant is made on it, so no schedule shows a next run that never comes. The
+        // client opens the stamp view of `pipelineId`. Only the owner's own never-stamped workflow
+        // is stamped by scheduling, as before.
+        if (byOwner && history.workflowStampState(planned) === 'awaits_owner_stamp') {
+          errorResponse(res, 409, workflowAwaitsStampResult(planned.id), 'workflow_awaits_stamp', { pipelineId: planned.id });
+          return;
         }
         // The acceptance of a write grant, after its preview. Closed with the feature switch
         // like the preview: this is where the contract is written, and without a vault key
@@ -8159,7 +9454,13 @@ export class LynoxHTTPApi {
           // Only the owner's scheduling stamps the workflow. A mandate's schedule is
           // recorded with its creator and waits for the owner's stamp ON THE SCHEDULE,
           // even when the workflow itself is already stamped (the due query's mandate gate).
-          if (byOwner) history.setWorkflowConfirmedAt(planned.id, new Date().toISOString());
+          // Stamped only over the definition the checks above judged: a copy that changed in
+          // between is not stamped (`stampCurrent`), and no schedule is made on it.
+          if (byOwner && !history.setWorkflowConfirmedAt(planned.id, new Date().toISOString(), history.workflowStampDigest(planned) ?? undefined)) {
+            forgetPipeline(planned.id);
+            errorResponse(res, 409, 'The workflow\'s steps changed while it was being scheduled. Look at them again and schedule it once more.', 'steps_changed', { pipelineId: planned.id });
+            return;
+          }
           forgetPipeline(planned.id);
           const task = taskManager.createPipelineTask({
             title: title ?? `Scheduled: ${planned.name}`,
@@ -8201,6 +9502,7 @@ export class LynoxHTTPApi {
           : taskManager.create({ ...baseParams, ...(runAt ? { nextRunAt: runAt } : {}) });
         jsonResponse(res, 201, task);
       } catch (e) {
+        if (e instanceof EngineLessRefused) { errorResponse(res, 409, e.client, 'engine_less'); return; }
         errorResponse(res, 400, e instanceof Error ? e.message : 'Failed to create task');
       }
     }, MARK);
@@ -8210,6 +9512,11 @@ export class LynoxHTTPApi {
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
       const b = body as Record<string, unknown>;
+      // Before the mark below: a refused edit is no mandate's edit.
+      const hidden = hiddenInTaskText(b);
+      if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
+      // The fields a person types; not the ids, which a random-looking id would fail.
+      if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
       // Checked here rather than left to `update`, which throws: a thrown error answers
       // 500, and a refused request must not mark the trigger as a mandate's edit either.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {
@@ -8236,6 +9543,7 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Send enabled and modelTier in separate requests.');
         return;
       }
+      if (this._refusePaused(_req, res, taskManager, params['id']!, typeof b['enabled'] === 'boolean' ? 'enable' : 'edit')) return;
       if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
       if (typeof b['enabled'] === 'boolean') {
@@ -8251,20 +9559,25 @@ export class LynoxHTTPApi {
         // updated row back from there — getTask reads the `tasks` table and
         // would always miss, dropping the response to the {id, enabled} stub.
         const updated = engine.getRunHistory()?.getTrigger(params['id']!);
-        jsonResponse(res, 200, updated ?? { id: params['id'], enabled: b['enabled'] ? 1 : 0 });
+        // Switching a paused plan on starts nothing until it is taken over, and the answer says so.
+        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: PAUSED_REFUSAL } : {};
+        jsonResponse(res, 200, { ...(updated !== undefined ? triggerForRoute(updated, this._principalOf(_req)) : { id: params['id'], enabled: b['enabled'] ? 1 : 0 }), ...pausedNote });
         return;
       }
       let task;
       try {
-        task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        // `untrusted` is what the agent's turn had taken in (task_update reads it off the agent); a
+        // request does not get to say it, so it is dropped here rather than stored as sent.
+        const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
+        task = taskManager.update(params['id']!, edit as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
-        if (err instanceof TriggerTierUnsupportedError) { errorResponse(res, 400, err.message); return; }
+        if (err instanceof TriggerTierUnsupportedError || err instanceof InvalidDueDateError) { errorResponse(res, 400, err.message); return; }
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
-      jsonResponse(res, 200, task);
+      jsonResponse(res, 200, rowForRoute(task, this._principalOf(_req)));
     }, MARK));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/tasks/:id', async (_req, res, params) => {
@@ -8276,6 +9589,7 @@ export class LynoxHTTPApi {
       // A to-do it deletes only when it is its own, with no subtask of the owner's under it
       // (`TaskManager.deleteTodo`, checked on the row it deletes).
       const by = this._principalOf(_req);
+      if (this._refusePaused(_req, res, taskManager, params['id']!, 'delete')) return;
       // A row id lives in exactly one table after the v42 split — try the TODO
       // table first, then triggers, so deleting a scheduled trigger still works.
       let deleted: boolean;
@@ -8309,6 +9623,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/complete', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
+      if (this._refusePaused(_req, res, taskManager, params['id']!, 'complete')) return;
       if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       let task;
       try {
@@ -8319,7 +9634,7 @@ export class LynoxHTTPApi {
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
-      jsonResponse(res, 200, task);
+      jsonResponse(res, 200, rowForRoute(task, this._principalOf(_req)));
     }, MARK));
 
     // Stop a RUNNING task on its owner's explicit instruction. Pausing a SCHEDULE is
@@ -8427,7 +9742,8 @@ export class LynoxHTTPApi {
     // (an unconfirmed run_agent trigger is neither, closing the injection-
     // amplification hole). This user-scope HTTP action is the ONLY consent surface;
     // the agent `task_create` tool cannot reach it, so confirmation is always an
-    // explicit human step. Idempotent (re-confirming just re-stamps).
+    // explicit human step. A confirm of a confirmed schedule stamps it again: a new `confirmed_at`
+    // and the list the preview's `expect` was the digest of.
     // What the owner's stamp of this schedule would list: the connections the mandate its plan acts
     // for made with its own login (`plan-stamp.ts`). The confirm below writes the list only when
     // it is sent back the digest of exactly this list on exactly this schedule (`stampExpect`).
@@ -8435,12 +9751,20 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/tasks/:id/stamp-preview', async (_req, res, params) => {
       const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
-      const listed = await this.#stampListFor(trigger);
+      const { listed, by, workflow } = await this.#stampPlanOf(trigger);
       const entries = listed?.entries ?? [];
       const apiStore = engine.getApiStore();
       const profiles = apiStore ? stampProfiles(entries, apiStore) : [];
+      // `subject` is what `expect` is the digest of, field for field: the view shows the schedule
+      // from here, not from the list it polls, so the owner confirms what they read. The preview
+      // adds no mandate id of its own (`by` says whom the plan acts for); the digest holds them.
+      // (The list row carries the ids already, `triggerForRoute`; the preview does not repeat them.)
+      const { created_mandate_id: _created, mandate_editor_id: _editor, ...subject } = stampSubject(trigger, listed?.wf ?? null);
       jsonResponse(res, 200, {
         expect: stampExpect(trigger, listed?.wf ?? null, entries),
+        subject,
+        by,
+        workflow,
         connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
       });
     }, ownerOnly('see what a schedule would be confirmed with')));
@@ -8449,24 +9773,24 @@ export class LynoxHTTPApi {
       // Only the owner stamps (§3.12 point 2).
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
-      // `expect`: the digest from the preview. Without it the stamp lists no connection, which is
-      // what every confirm did before the list existed.
+      if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
+      // `expect`: the digest from the preview, required. The owner stamps the schedule they were
+      // shown, never whatever the trigger holds by the time the request arrives.
       const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
         ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm a schedule from its stamp preview (GET /api/tasks/:id/stamp-preview).', 'expect_required'); return; }
       let connections: { wf: string | null; entries: readonly StampEntry[] } | undefined;
-      if (expected !== undefined) {
-        const current = engine.getRunHistory()?.getTrigger(params['id']!);
-        if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
-        const listed = await this.#stampListFor(current);
-        // Read again after the await, and stamp with no await in between: what is compared is
-        // what is stamped.
-        const now = engine.getRunHistory()?.getTrigger(params['id']!);
-        if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
-          errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.');
-          return;
-        }
-        if (listed !== null && listed.entries.length > 0) connections = listed;
+      const current = engine.getRunHistory()?.getTrigger(params['id']!);
+      if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
+      const listed = await this.#stampListFor(current);
+      // Read again after the await, and stamp with no await in between: what is compared is
+      // what is stamped.
+      const now = engine.getRunHistory()?.getTrigger(params['id']!);
+      if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
+        errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
+        return;
       }
+      if (listed !== null && listed.entries.length > 0) connections = listed;
       let trigger;
       try {
         trigger = taskManager.confirmTrigger(params['id']!, undefined, principalTag(this._principalOf(_req)), connections);
@@ -8478,8 +9802,55 @@ export class LynoxHTTPApi {
       // The workflow a schedule names keeps its own stamp: confirming a schedule never
       // stamps it. A workflow is shared by every schedule that names it, so stamping it here
       // would also restart the owner's other schedules on steps the owner was not shown.
-      jsonResponse(res, 200, trigger);
+      jsonResponse(res, 200, triggerForRoute(trigger, this._principalOf(_req)));
     }, ownerOnly('confirm a schedule')));
+
+    // The owner's takeover of a paused plan (`plan-takeover.ts`): the preview says who it then
+    // runs for and what else changes, with the digest the takeover is held to. Registered whether
+    // or not the pause is on; off, both answer `not_available` before anything is read.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/triggers/:id/takeover-preview', async (_req, res, params) => {
+      if (!planPauseOn()) { errorResponse(res, 409, TAKEOVER_REFUSALS.not_available.message, 'not_available'); return; }
+      const deps = this.#takeoverDeps(res);
+      if (deps === null) return;
+      const id = this.#takeoverId(res, params['id']!);
+      if (id === null) return;
+      const out = takeoverPreview(deps, id);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (out.kind === 'refused') { jsonResponse(res, 200, { refusal: out.refusal, message: TAKEOVER_REFUSALS[out.refusal].message }); return; }
+      // The helper's connections as the stamp preview shows them: names, providers and account
+      // labels, no grant. Each stops counting for the plan once it is taken over.
+      // `by`: whose connection it is, by address (the owner sees the helper's address there by
+      // design); the grant ids stay in the engine.
+      const apiStore = engine.getApiStore();
+      const known = new Map((apiStore ? stampProfiles(out.preview.connections, apiStore) : []).map((p) => [p.id, p] as const));
+      const { connectionBy, ...preview } = out.preview;
+      const connections = out.preview.connections.flatMap((e, i) => {
+        const p = known.get(e.profile);
+        return p === undefined ? [] : [{ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null, by: connectionBy[i] ?? null }];
+      });
+      jsonResponse(res, 200, { ...preview, connections, refusal: null });
+    }, ownerOnly('see what taking over a plan would do')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/takeover', async (_req, res, params, body) => {
+      if (!planPauseOn()) { errorResponse(res, 409, TAKEOVER_REFUSALS.not_available.message, 'not_available'); return; }
+      // The digest from the preview is required: the takeover is the owner's consent to what the
+      // preview showed, and nothing else.
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: take the plan over from its preview.'); return; }
+      const deps = this.#takeoverDeps(res);
+      if (deps === null) return;
+      const id = this.#takeoverId(res, params['id']!);
+      if (id === null) return;
+      const out = takeOver(deps, id, expected);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (out.kind === 'refused') {
+        const r = TAKEOVER_REFUSALS[out.refusal];
+        errorResponse(res, r.status, r.message, out.refusal);
+        return;
+      }
+      jsonResponse(res, 200, { ...triggerForRoute(out.trigger, this._principalOf(_req)), runsAs: out.runsAs });
+    }, ownerOnly('take over a plan')));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
     // control). Delegates to the WorkerLoop so the manual run goes through the
@@ -8550,6 +9921,14 @@ export class LynoxHTTPApi {
           errorResponse(res, 409, 'This schedule was set up or changed by someone you let in — confirm it before it runs', 'awaits_owner_stamp');
           return;
         }
+        if (outcome.reason === 'runs_on_events') {
+          errorResponse(res, 409, 'This task starts when its service sends an event, so it cannot be started by hand', 'runs_on_events');
+          return;
+        }
+        if (outcome.reason === 'paused') {
+          errorResponse(res, 409, PAUSED_REFUSAL, 'paused');
+          return;
+        }
         errorResponse(res, 404, 'Trigger not found'); return;
       }
       jsonResponse(res, 202, { started: true });
@@ -8593,13 +9972,16 @@ export class LynoxHTTPApi {
       mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Send mail from the chat, where lynox asks before each email, and change a mail setting at the provider itself.'],
       probe_required: [409, BULK_PROBE_REQUIRED],
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
-      read_only: [409, 'This bulk run only reads: lynox cannot write its targets yet, so it cannot be approved or resumed to write.'],
+      shopify_off: [409, 'Bulk runs on a Shopify store are switched off on this instance, so this run cannot be approved or resumed.'],
       unmeasured_unconfirmed: [409, `lynox has not checked this kind of change with this provider. Approve it with "unmeasuredConfirmed": true — the statement "${BULK_UNMEASURED_CONFIRMATION}"`],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
       source_running: [409, 'The bulk run this undo takes back is still writing. Approve the undo once that run has stopped.'],
       undo_stale: [409, 'The bulk run this undo takes back has changed since the undo was planned. If it wrote more targets, plan the undo again. If another undo already took it back, nothing is left for this one to undo.'],
       cost_cap: [400, 'Starting a judged run needs "costCapUsd": the most it may spend on model calls, in US dollars, a whole number of cents above zero.'],
       not_at_this_start: [400, 'This start only reads the list. Give the spend limit and "supersedes" when you start the judging, once the list is read.'],
+      atomic_undo: [409, 'This undo restores all targets of the run or none of them, so you cannot take out a single target.'],
+      not_writing: [409, 'lynox does not change this target in this run, so there is nothing to take out. Reload the run to see its current state.'],
+      not_taken_out: [409, 'This target is not taken out of the run. Reload the run to see its current state.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
@@ -8612,6 +9994,10 @@ export class LynoxHTTPApi {
     };
     /** Which halt a run stands at, by name: the owner's page words its own sentences on the
      *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
+    const bulkConsentFieldsOf = (ledger: import('../core/bulk-ledger.js').BulkLedger, runId: string): string[] => {
+      const apply = ledger.shopifyApplyOf(runId);
+      return apply === null ? [] : shopifyConsentBlock(apply, undefined);
+    };
     const bulkHaltKey = (haltReason: string | null): string | null =>
       haltReason === null ? null : (Object.entries(BULK_HALT_REASONS).find(([, text]) => text === haltReason)?.[0] ?? null);
     const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed'; haltReason: string | null }>(status: T): T & { checksumNote?: string; haltKey: string | null } => {
@@ -8625,10 +10011,13 @@ export class LynoxHTTPApi {
       if (!loop) return null;
       return loop.resumesAt(bulkPreviewTriggerId(runId)) ?? loop.resumesAt(`bulk-${runId}`);
     };
-    /** The target a probe wrote and the fields it changed; null unless the run waits on its probe. */
-    const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[] } | null => {
+    /** The target a probe wrote and the fields it changed, and whether it was found so after a
+     *  send without a clear answer (`found`) rather than written; null unless the run waits on
+     *  its probe. */
+    const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[]; found: boolean } | null => {
       // Offered only where confirm-probe can succeed: a target found already holding its
-      // value was not written, and a run still writing has not stopped at its probe.
+      // value and never sent to by this run is no probe, and a run still writing has not
+      // stopped at its probe.
       if (status.probeConfirmed) return null;
       const key = ledger.probeKey(status.id);
       const written = key === null ? undefined : ledger.listAppliedDesc(status.id).find((t) => t.key === key);
@@ -8638,14 +10027,18 @@ export class LynoxHTTPApi {
       const before = fieldsOf(written.expected);
       const after = fieldsOf(written.after);
       const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
-      return { key: written.key, fields };
+      return { key: written.key, fields, found: ledger.probeFound(status.id) };
     };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
     const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
       const status = ledger.getStatus(runId);
       if (!status || !status.targetSystem.startsWith('http:')) return null;
-      const key = ledger.firstWritingKey(runId);
-      if (key === null) return null;
+      const first = ledger.firstWritingKey(runId);
+      if (first === null) return null;
+      // A Shopify run's targets are GIDs, not addresses: it writes to its store's endpoint.
+      const { shopifyGraphqlEndpoint } = await import('../core/shopify-graphql.js');
+      const key = ledger.shopifyApplyOf(runId) !== null ? shopifyGraphqlEndpoint(status.targetSystem.slice('http:'.length)) : first;
+      if (key === null) return 'This run\'s store has no endpoint lynox can write to.';
       const { attachStoredCredential } = await import('../tools/builtin/http.js');
       const { resolveGuardedAckHosts } = await import('../core/tool-context.js');
       const { assertHostPolicy } = await import('../core/network-guard.js');
@@ -8665,6 +10058,16 @@ export class LynoxHTTPApi {
     const refuse = (res: import('node:http').ServerResponse, reason: string): void => {
       const [code, msg] = BULK_REFUSALS[reason] ?? [400, 'Refused.'];
       errorResponse(res, code, msg);
+    };
+    /** A refusal for want of a probe, with the engine's reason: what each kind of entry lacks and
+     *  where the run stands, from the same check that refused it. */
+    const refuseOut = (res: import('node:http').ServerResponse, out: { reason: string; probe?: import('../core/bulk-ledger.js').BulkProbeBlock }): void => {
+      if (out.reason === 'probe_required' && out.probe !== undefined) {
+        const [code, msg] = BULK_REFUSALS['probe_required']!;
+        errorResponse(res, code, msg, 'probe_required', { probe: out.probe });
+        return;
+      }
+      refuse(res, out.reason);
     };
 
     this.addStatic('user', 'GET /api/bulk/runs', async (_req, res) => {
@@ -8701,17 +10104,41 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         ...withBinding(status),
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
+        // The targets that add hidden characters the page marks but does not otherwise show: a
+        // line wherever the run is approved or its probe confirmed.
+        ...(() => {
+          // One pass for both counts; a target with a field past the reading bounds is counted
+          // on its own, as not checked, never as one that adds.
+          const hidden = actionable ? ledger.hiddenCounts(params['id']!) : null;
+          return { hiddenAddsTargets: hidden?.adds ?? null, hiddenUncheckedTargets: hidden?.unchecked ?? null };
+        })(),
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
-        // the engine's own documents. It stands here so the owner sees where the read goes.
-        listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : listPageUrl(listRun.host, listRun.source, 1)) : null,
+        // the engine's own documents. It stands here so the owner sees where the read goes. A stored
+        // source with no address to build (a form without a spec, a filter holding a list) shows its
+        // host instead, as a Shopify list does; one whose path was withdrawn still shows its address.
+        listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : hasListPageUrl(listRun.source) ? listPageUrl(listRun.host, listRun.source, 1) : listRun.host) : null,
         listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
         listNote: status.list ? BULK_LIST_NOTE : null,
+        // A Shopify product list's filters ({} for every product): shown wherever the run is started or
+        // approved, so the owner sees which group and which statuses it reads (PRD shopify-preset §22.2 item 5).
+        listFilters: shopifyListFiltersOf(status.list === null ? null : ledger.getListRun(params['id']!)),
+        // The form a list run reads, as stored, and whether its judge decides an HTML field: the
+        // sentences under a target lynox leaves out and the halt's step are worded on them.
+        listForm: status.list === null ? null : ledger.getListRun(params['id']!)?.source.form ?? null,
+        judgesHtml: ledger.judgesHtml(params['id']!),
         // An unmeasured apply run writes one target first and is approved only with this
         // confirmation. An undo is neither: it restores what its source wrote, under the
         // source's confirmation, so the note's promise of one target first would not hold.
-        writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_NOTE : null,
+        // With one target to write (counted as the write counts them), that write is the whole run:
+        // the note keeps only its first two sentences.
+        writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply'
+          ? (ledger.countWriting(params['id']!) === 1 ? BULK_UNMEASURED_NOTE_ONE : BULK_UNMEASURED_NOTE) : null,
         writeFormConfirmation: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_CONFIRMATION : null,
-        judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier } : null,
+        // A probe this run confirmed stays a step it went through, after it holds.
+        probeOwn: ledger.probeOwn(params['id']!),
+        // The context C goes to the judge's provider with the record (PRD shopify-preset §20.2 item 7):
+        // the owner sees it before the start the hash binds, never only the fields it decides.
+        judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier, ...(judgeRule.context !== undefined ? { context: judgeRule.context } : {}) } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
         judgeModel,
         judgeServedBy,
@@ -8723,9 +10150,17 @@ export class LynoxHTTPApi {
         // The one target an external run wrote before its probe is confirmed: what the owner
         // opens at the provider, and the fields the write changed there.
         probe: bulkProbeOf(status, ledger),
+        // Why a run halted for want of a probe cannot go past one target, read now: the effect
+        // checks the probe again when it starts, so a resume the route let through can halt here.
+        probeBlock: bulkHaltKey(status.haltReason) === 'probeRequired' ? ledger.probeBlockFor(status.id) : null,
+        // The fields a connection confirmed under no or another text does not cover, for the halt's
+        // sentence: the same check the apply ran, read under no grant.
+        consentFields: bulkHaltKey(status.haltReason) === 'consentOutdated' ? bulkConsentFieldsOf(ledger, status.id) : null,
         // What an undo would take back now; for an external run that includes a failed write,
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
+        // An undone run names the undo that took it back and when, so its page says it is no longer live.
+        undoneBy: ledger.undoneBy(status.id),
       });
     }, READS));
 
@@ -8740,6 +10175,28 @@ export class LynoxHTTPApi {
       };
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
     }, READS));
+
+    // The owner's view of what people with delegated access did on this instance (the actor
+    // trail): entries grouped and given a status from their sources, never content. Owner only;
+    // whether a helper may read their own rows is not decided, so they may not.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/access-trail', async (req, res) => {
+      const engineDb = engine.getEngineDb();
+      if (!engineDb) { jsonResponse(res, 200, { entries: [], before: null, complete: true }); return; }
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      const limitParam = Number(url.searchParams.get('limit') ?? '');
+      const limit = Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, ACCESS_TRAIL_MAX_ROWS) : ACCESS_TRAIL_MAX_ROWS;
+      const beforeParam = Number(url.searchParams.get('before') ?? '');
+      const beforeId = Number.isInteger(beforeParam) && beforeParam > 0 ? beforeParam : undefined;
+      const { rows, before, complete } = readTrailPage(engineDb.getDb(), { limit, beforeId });
+      const entries = buildTrail(rows, trailSources(trailSourceDeps({
+        historyDb: engine.getRunHistory()?.getDb() ?? null,
+        worker: engine.getWorkerLoop(),
+        ledger: engine.getBulkLedger(),
+        approvals: engine.getApprovalStore(),
+      })), { complete });
+      // A page holds its entries whole (readTrailPage); the next one starts below its oldest row.
+      jsonResponse(res, 200, { entries, before, complete });
+    }, ownerOnly('read the access log')));
 
     // The approval queue: the owner sends or discards a mail
     // a run nobody watched filed. Approving arms a send no one watches, so it is an owner's act
@@ -8793,10 +10250,85 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { id, status: store.get(id)?.status ?? null });
     }, ownerOnly('decide on a mail waiting for approval')));
 
+    // The list the owner decides from, and its count. Unlike the other read routes, a mandate
+    // reads only the entries filed under its own grant (matched by grant id, never by tag), and
+    // a mandate whose login names no grant reads none. Off with the queue, as the decide route.
+    this.addStatic('user', 'GET /api/approvals', async (req, res) => {
+      const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
+      if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      const view = new URL(req.url ?? '/', 'http://localhost').searchParams.get('view') ?? 'open';
+      if (view !== 'open' && view !== 'all') { errorResponse(res, 400, 'Unknown "view" — one of open, all.'); return; }
+      const scope = approvalScopeOf(this._principalOf(req));
+      // `viewer` as in the count: the page words a card by whose session reads it. `retentionDays`:
+      // how long a completed entry stays listed, so the page names the store's own limit;
+      // `unclearStays`: whether an entry with an unclear outcome stays until it is closed.
+      const retentionDays = Math.round(APPROVAL_PURGE_AFTER_MS / 86_400_000);
+      const unclearStays = store.keepsUnclearEntries();
+      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0, viewer: 'none', retentionDays, unclearStays }); return; }
+      const listScope = listScopeOf(scope);
+      const entries = store.list({ view, scope: listScope });
+      const engineDb = this.engine?.getEngineDb() ?? null;
+      const triggers = engineDb === null ? null : new TriggerStore(engineDb);
+      const workflows = engineDb === null ? null : new WorkflowStore(engineDb);
+      const log = this.engine?.getAuditLog() ?? null;
+      // Read once per grant. Which grants a card may name this way is the card's to decide.
+      const names = new Map<string, string | null>();
+      const displayNameOf = (id: string): string | null => {
+        if (names.has(id)) return names.get(id) ?? null;
+        let display: string | null = null;
+        if (log !== null) { try { display = log.displayNameOf(id); } catch { /* the address stands in */ } }
+        names.set(id, display);
+        return display;
+      };
+      const threads = this.engine?.getThreadStore() ?? null;
+      const containment = this.engine?.getToolContext().containment ?? null;
+      const threadOf = (threadId: string): { createdBy: string | null; contained: boolean } | undefined => {
+        const thread = threads?.getThread(threadId);
+        return thread === undefined ? undefined : { createdBy: thread.created_by, contained: threadIsContained(containment, threadId) };
+      };
+      const now = Date.now();
+      const cards = entries.map((entry) => {
+        const triggerId = entry.origin?.triggerId;
+        const t = triggerId === undefined ? undefined : triggers?.getById(triggerId);
+        const trigger = t !== undefined && t.id === triggerId ? t : undefined;
+        const w = trigger?.pipeline_id === undefined ? undefined : workflows?.authorship(trigger.pipeline_id);
+        return approvalCard(entry, {
+          scope, now, displayNameOf, threadOf,
+          trigger: trigger === undefined ? undefined : {
+            createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
+            mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
+            creatorCovered: creatorCovered(planAuthorshipOf(trigger)), editorCovered: editorCovered(planAuthorshipOf(trigger)),
+          },
+          workflow: w === undefined ? undefined : {
+            createdBy: w.createdBy, createdMandateId: w.createdMandateId, mandateEditor: w.mandateEditor, mandateEditorId: w.mandateEditorId,
+            creatorCovered: creatorCovered(planAuthorshipOfWorkflow(w)), editorCovered: editorCovered(planAuthorshipOfWorkflow(w)),
+          },
+        });
+      });
+      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope), viewer: scope.viewer, retentionDays, unclearStays });
+    }, READS);
+
+    this.addStatic('user', 'GET /api/approvals/count', async (req, res) => {
+      const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
+      // Asked by the shell on every page, so a queue that is off is an answer, not a refusal: a
+      // 404 here is a failed request in every browser console while the queue is off.
+      if (store === null) { jsonResponse(res, 200, { enabled: false }); return; }
+      // `viewer` says whose session asked, so the client polls only while the answer names the
+      // owner: a session's principal can change under an open page (a login in another tab).
+      const scope = approvalScopeOf(this._principalOf(req));
+      if (scope === null) { jsonResponse(res, 200, { pending: 0, viewer: 'none' }); return; }
+      jsonResponse(res, 200, { pending: store.countPending(listScopeOf(scope)), viewer: scope.viewer });
+    }, READS);
+
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
       // An approval arms an unattended external write: an owner's act (PRD customer-granted-operator-access §3.13 E6).
       const ledger = bulkLedger(res);
       if (!ledger) return;
+      if ((body as Record<string, unknown> | null)?.['startDomains'] !== undefined) {
+        // Not ignored: a list sent here would look accepted and bind nothing.
+        errorResponse(res, 400, 'Link domains are given when you start the judging, not when you approve.', 'not_at_this_start');
+        return;
+      }
       const checksum = checksumOf(body);
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum" — approve what you were shown.'); return; }
       const rawMax = (body as Record<string, unknown>)['maxTargets'];
@@ -8815,9 +10347,52 @@ export class LynoxHTTPApi {
         checksum, maxTargets, unmeasuredConfirmed,
         approvedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown', ...(unmeasuredConfirmed ? { unmeasuredConfirmed: true } : {}) }),
       });
-      if (!out.ok) { refuse(res, out.reason); return; }
+      if (!out.ok) { refuseOut(res, out); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('approve a bulk run')));
+
+    // Discarding a run before its approval: the owner's act, like the approval it forgoes. A
+    // mandate asks the owner (U-324). Nothing was written, so nothing is told: the owner did it.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/discard', async (_req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const id = params['id']!;
+      if (ledger.getStatus(id) === null) { errorResponse(res, 404, 'No bulk run with this id.', 'not_found'); return; }
+      if (!ledger.discardRun(id)) {
+        errorResponse(res, 409, 'Only a run that is not yet approved can be discarded; an approved run is stopped instead.', 'not_discardable');
+        return;
+      }
+      jsonResponse(res, 200, withBinding(ledger.getStatus(id)!));
+    }, ownerOnly('discard a bulk run')));
+
+    // Taking one target out of a previewed run before approving it, or putting it back (PRD
+    // shopify-preset §20.2 item 4). An owner's act like the approval it changes; the checksum is
+    // the one the owner saw, and the answer carries the new one.
+    for (const [verb, selected] of [['deselect', false], ['reselect', true]] as const) {
+      this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', `/api/bulk/runs/:id/targets/:seq/${verb}`, async (_req, res, params, body) => {
+        const ledger = bulkLedger(res);
+        if (!ledger) return;
+        const checksum = checksumOf(body);
+        if (!checksum) { errorResponse(res, 400, 'The request does not say which version of the run you saw. Reload the run and try again.'); return; }
+        const seq = Number(params['seq']);
+        if (!Number.isSafeInteger(seq) || seq < 0) { errorResponse(res, 400, 'The target number must be a whole number.'); return; }
+        const out = selected
+          ? ledger.reselectTarget(params['id']!, seq, { checksum })
+          : ledger.deselectTarget(params['id']!, seq, { checksum });
+        if (!out.ok) {
+          // The owner's page words these by their code; the English text is the fallback.
+          const reason = out.reason === 'not_writing' && selected ? 'not_taken_out' : out.reason;
+          if (reason === 'atomic_undo' || reason === 'not_writing' || reason === 'not_taken_out') {
+            const [status, message] = BULK_REFUSALS[reason]!;
+            errorResponse(res, status, message, reason);
+            return;
+          }
+          refuse(res, reason);
+          return;
+        }
+        jsonResponse(res, 200, { checksum: out.checksum });
+      }, ownerOnly(selected ? 'put a target back into a bulk run' : 'take a target out of a bulk run')));
+    }
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/resume', async (_req, res, params, body) => {
       // Resuming re-arms the unattended write: an owner's act (§3.13 E6).
@@ -8850,7 +10425,23 @@ export class LynoxHTTPApi {
           // Anything but a number goes to the ledger as NaN, which its whole-cents check refuses.
           costCapUsd: rawCap === undefined ? undefined : typeof rawCap === 'number' ? rawCap : Number.NaN,
           supersedes: typeof rawSupersedes === 'string' && rawSupersedes.length > 0 ? rawSupersedes : undefined,
+          // The link domains the owner allows a judged run's verdicts to add (PRD shopify-preset
+          // §20.2 item 5, S20-4): only here, on the owner's route, written with the start itself.
+          startDomains: fields['startDomains'],
         });
+        // The texts are ux's.
+        if (!read.ok && read.reason === 'start_domains_invalid') {
+          errorResponse(res, 400, `"startDomains" must be a list of up to ${String(BULK_START_DOMAINS_MAX)} host names such as shop.example.ch, without wildcard, path or port, and not a shared suffix such as co.uk or myshopify.com on its own.`, 'start_domains_invalid');
+          return;
+        }
+        if (!read.ok && read.reason === 'start_domains_frozen') {
+          errorResponse(res, 409, 'The link domains of this run were fixed when its judging first started. Start it with the same list, or without one.', 'start_domains_frozen');
+          return;
+        }
+        if (!read.ok && read.reason === 'start_domains_not_here') {
+          errorResponse(res, 400, 'Link domains are given when you start the judging of a run with a judge, once its list is read.', 'not_at_this_start');
+          return;
+        }
         if (!read.ok && read.reason === 'supersede_required') {
           // Never replaced silently: the start names the run it replaces.
           errorResponse(res, 409, 'Another judged run is started and not yet approved. Starting this one ends it, keeping what it spent: start again with "supersedes" set to its id.', 'supersede_required', {
@@ -8868,6 +10459,11 @@ export class LynoxHTTPApi {
         jsonResponse(res, 200, withBinding(read.status));
         return;
       }
+      if ((body as Record<string, unknown> | null)?.['startDomains'] !== undefined) {
+        // Not ignored: a list sent here would look accepted and bind nothing.
+        errorResponse(res, 400, 'Link domains are given when you start the judging, not when you resume an approved run.', 'not_at_this_start');
+        return;
+      }
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum".'); return; }
       const rawResumeMax = (body as Record<string, unknown>)['maxTargets'];
       const resumeMax = rawResumeMax === undefined ? undefined : typeof rawResumeMax === 'number' ? rawResumeMax : Number.NaN;
@@ -8875,8 +10471,15 @@ export class LynoxHTTPApi {
       // not reach its host would only halt again on its first target.
       const reach = await bulkExternalReach(params['id']!, ledger);
       if (reach !== null) { errorResponse(res, 409, reach); return; }
+      // A run no one can be shown to have planned would write without a row in the instance's
+      // trail: it is not resumed (660b). It stays as it is; its approval was the owner's act.
+      // The text is ux's. No await between this and the resume.
+      if (ledger.resumeRefusedForPlanner(params['id']!, engine.getBulkOwnership())) {
+        errorResponse(res, 409, 'lynox cannot show who planned this run, so it does not continue it. Have it planned again in a chat.', 'planner_unknown');
+        return;
+      }
       const out = ledger.resume(params['id']!, { checksum, maxTargets: resumeMax });
-      if (!out.ok) { refuse(res, out.reason); return; }
+      if (!out.ok) { refuseOut(res, out); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('resume a bulk run')));
 
@@ -9045,6 +10648,10 @@ export class LynoxHTTPApi {
           ...(typeof b['id'] === 'string' ? { id: b['id'] } : {}),
         });
       } catch (err) {
+        if (err instanceof ArtifactFileRefusedError) {
+          errorResponse(res, 409, 'The artifact\'s file is a link or has more than one name (a hard link), so it was not written; nothing was saved. Send the save again without an id to keep the content as a new artifact.', 'artifact_file_refused');
+          return;
+        }
         if (!(err instanceof ArtifactPlaceholderError)) throw err;
         errorResponse(res, 422, 'This is the placeholder the assistant keeps for an already saved document, not the document. Nothing was saved.', 'artifact_placeholder');
         return;
@@ -9182,11 +10789,32 @@ export class LynoxHTTPApi {
       // After the last await: from here to the answer the route runs without yielding, so nothing
       // checked below can change before the erasure has run.
       if (this.erasureInProgress) { noStoreJson(res, 409, { error: 'An erasure is already running', code: 'erasure_in_progress' }); return; }
+      // An export on its way out holds the person until its staged copy is gone (also one the
+      // export command holds in another process): erasing beside it would answer "erased" while
+      // the data still leaves. A staged copy whose holder is gone is an orphan: removed first.
+      const personDataDir = getLynoxDir();
+      {
+        const slot = readSlot(personDataDir);
+        if (slot !== null && slot.kind === 'export') {
+          noStoreJson(res, 409, { error: 'An export is running, so nothing was erased; try again when its download has finished', code: 'export_running' });
+          return;
+        }
+      }
       // A running chat can write the person again right after the erasure (its extraction runs
       // when the turn ends), and the answer could not say so. Refused instead; stopping the chat
       // and trying again erases what it wrote too.
       if (this.runningSessions.size > 0) {
         noStoreJson(res, 409, { error: 'A chat is running, so nothing was erased; stop it or let it finish, then try again', code: 'runs_active' });
+        return;
+      }
+      // The shared slot around the erasure itself: in this process nothing yields until the
+      // answer, but the export command runs in another one and would otherwise snapshot the
+      // stores halfway. Taken after the checks above; held, it is an export that started between.
+      const personSlot = acquireSlot(personDataDir, 'erasure', 'http');
+      if (!personSlot.ok) {
+        noStoreJson(res, 409, personSlot.held.kind === 'export'
+          ? { error: 'An export is running, so nothing was erased; try again when its download has finished', code: 'export_running' }
+          : { error: 'An erasure is already running', code: 'erasure_in_progress' });
         return;
       }
       // The owner's trail: an attempt row before the first step, an outcome row after it, ids and
@@ -9195,6 +10823,7 @@ export class LynoxHTTPApi {
       const trail: { entry: AuditEntry | null } = { entry: null };
       let result: PersonErasureResult | PersonErasureRefusal;
       try {
+        sweepStaleExports(personDataDir);
         result = erasePerson(deps, {
           subjectId, plan, entryIds, memoryIds, entityIds,
           beforeErase: (planned) => {
@@ -9213,6 +10842,8 @@ export class LynoxHTTPApi {
           return;
         }
         throw err;
+      } finally {
+        personSlot.slot.release();
       }
       if ('refused' in result) { personErasureRefusal(res, result); return; }
       const opened = trail.entry;
@@ -9286,9 +10917,10 @@ export class LynoxHTTPApi {
     // configuration, not public data. The status bar polls it alongside
     // `/api/tasks` and `/api/history/cost/daily`, which are user-scoped too, so
     // it already carries credentials on this call.
-    this.addStatic('user', 'GET /api/providers/status', async (_req, res) => {
+    this.addStatic('user', 'GET /api/providers/status', async (req, res) => {
       const providers = await this.getProvidersStatus();
-      jsonResponse(res, 200, { providers });
+      // The status bar polls this on every page; the keyless and boot-store fields ride it for the owner only.
+      jsonResponse(res, 200, { providers, ...this._keylessField(req), ...this._bootStoreField(req) });
     }, READS);
 
     // ── LLM model catalog ──
@@ -9379,7 +11011,25 @@ export class LynoxHTTPApi {
         return;
       }
       const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
-      const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
+      // A page loaded before the move to Mistral's EU endpoint sends the global one: the probe goes
+      // where a model request would go, the EU endpoint, and pairs with the pool's endpoint.
+      const baseUrl = typeof b['base_url'] === 'string' ? toMistralEuBase(b['base_url']) : '';
+      // On an instance connected to a Shopify store a probe goes only where a model request may
+      // go (`contained-providers.ts`): a typed key is the user's, and another endpoint is refused
+      // before anything is sent. An empty key is the stored one, which on a pool tier is the pool's.
+      {
+        const { providerListApplies, refusedProviderClass, PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+        if (providerListApplies()) {
+          const wire = provider === 'vertex' ? 'vertex' : provider === 'openai' ? 'openai' : 'anthropic';
+          // The `anthropic` probe goes to api.anthropic.com whatever base is typed; `custom` is
+          // refused by its provider before its base is read.
+          const target = wire === 'anthropic' ? undefined : baseUrl;
+          if (refusedProviderClass({ wire, provider, baseURL: target, apiKey: bodyKey }) !== null) {
+            errorResponse(res, 200, PROVIDER_NOT_ON_LIST_REFUSAL);
+            return;
+          }
+        }
+      }
       // Vault fallback: when the user already saved the key earlier and now
       // hits "test connection" without re-typing, the form posts an empty body
       // key. Pre-1.5.2 the endpoint 400'd "API key required" even though the
@@ -9401,7 +11051,12 @@ export class LynoxHTTPApi {
       // LLM host. A free-text/unknown base_url with no typed key gets the pre-1.5.2
       // "API key required" — the user must supply it, never the shared pool key. A
       // body-supplied key is the caller's own credential and always passes through.
-      const apiKey = bodyKey || (mayFallBackToStoredKey(provider as LLMProvider, baseUrl)
+      // On a pool tier the stored key is the pool's, and a vetted host is not enough: it
+      // goes only to the endpoint that key belongs to (`poolEndpointFor`), never to another
+      // vendor's host the shared slot would otherwise be handed to.
+      const poolPaired = !requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))
+        || poolEndpointFor(provider, baseUrl || undefined) === (baseUrl || undefined);
+      const apiKey = bodyKey || (poolPaired && mayFallBackToStoredKey(provider as LLMProvider, baseUrl)
         ? (resolveProviderApiKey({
             provider: provider as LLMProvider,
             apiBaseURL: baseUrl || undefined,
@@ -9478,7 +11133,11 @@ export class LynoxHTTPApi {
         // server-side context.
         errorResponse(res, 200, msg.startsWith('Blocked:') ? msg : 'Probe failed: timeout or network error');
       }
-    }, free('sends one test request to the model provider and stores nothing'));
+      // The owner's only: the test belongs to setting the instance up, which is the owner's, and it
+      // spends a model call on the owner's key (or sends the stored key to a base the body names).
+      // The web UI shows a mandate no such button (ux U-104). Refused at the dispatch, before the
+      // rate window, so a mandate's attempts take no probe from the owner's minute either.
+    }, ownerOnly('test the model connection'));
 
     // ── Voice info (combined STT + TTS capabilities for the Web UI) ──
     // Drives the privacy hint + auto-speak toggle visibility + the
@@ -9491,21 +11150,26 @@ export class LynoxHTTPApi {
         import('../core/speak.js'),
       ]);
       const { readUserConfig } = await import('../core/config.js');
+      const { providerListApplies } = await import('../core/contained-providers.js');
       const sttProvider = transcribeMod.getActiveTranscribeProvider();
       const ttsProvider = speakMod.getActiveSpeakProvider();
       const userConfig = readUserConfig();
+      // On an instance connected to a Shopify store no text goes to a speech service: the
+      // Mistral options are not available and the settings say why (`speech_service_off`).
+      const speechServiceOff = providerListApplies();
 
       // Provider lists for the Settings picker. `available` reflects whether
       // the prerequisite (API key / local binary) is present; disabled options
       // still appear so users see which choices exist on upgrade.
+      // `auto` is a choice only where it resolves to something: with the switch on, only to whisper.cpp.
       const sttProviders = [
-        { id: 'auto',    name: 'Auto',                            available: true },
-        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: transcribeMod.mistralVoxtralProvider.isAvailable },
+        { id: 'auto',    name: 'Auto',                            available: !speechServiceOff || transcribeMod.hasTranscribeProvider() },
+        { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: !speechServiceOff && transcribeMod.mistralVoxtralProvider.isAvailable },
         { id: 'whisper', name: 'whisper.cpp (local)',             available: transcribeMod.whisperCppProvider.isAvailable },
       ];
       const ttsProviders = [
-        { id: 'auto',    name: 'Auto',                            available: true },
-        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: speakMod.mistralVoxtralTtsProvider.isAvailable },
+        { id: 'auto',    name: 'Auto',                            available: !speechServiceOff },
+        { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: !speechServiceOff && speakMod.mistralVoxtralTtsProvider.isAvailable },
       ];
 
       // Env-var overrides — when set, the Settings selector should display
@@ -9518,7 +11182,9 @@ export class LynoxHTTPApi {
       // Wrapped in try/catch as a belt + suspenders; listMistralVoices itself
       // already handles its own errors but we never want /voice/info to 5xx.
       let voices: Awaited<ReturnType<typeof speakMod.listMistralVoices>> = [];
-      try { voices = await speakMod.listMistralVoices(); } catch { /* keep empty */ }
+      if (!speechServiceOff) {
+        try { voices = await speakMod.listMistralVoices(); } catch { /* keep empty */ }
+      }
 
       // Whether the tenant may CHANGE the provider, decided by the same set the
       // write gate enforces (MANAGED_USER_WRITABLE_CONFIG) rather than by the UI
@@ -9532,6 +11198,7 @@ export class LynoxHTTPApi {
         !MANAGED_USER_WRITABLE_CONFIG.has(field);
 
       jsonResponse(res, 200, {
+        speech_service_off: speechServiceOff,
         stt: {
           available: transcribeMod.hasTranscribeProvider(),
           provider: sttProvider?.name ?? null,
@@ -9565,7 +11232,7 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
-      const { hasSpeakProvider, speakStream, isVoiceLanguageTag } = await import('../core/speak.js');
+      const { hasSpeakProvider, speakStream, isVoiceLanguageTag, VOXTRAL_TTS_MODEL } = await import('../core/speak.js');
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -9615,6 +11282,12 @@ export class LynoxHTTPApi {
         langHead === 'de' || langHead === 'en' ? langHead : langRaw?.toLowerCase() === 'auto' ? 'auto' : undefined;
       const voiceLanguage = tag;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
+      // The rate below is the pinned model's, so no other model may be asked for: one billed at
+      // this rate could cost Mistral more than it debits. No client of ours sends `model`.
+      if (model !== undefined && model !== VOXTRAL_TTS_MODEL) {
+        errorResponse(res, 400, `model must be ${VOXTRAL_TTS_MODEL} or left out`);
+        return;
+      }
       // Hard ceiling on one request to bound Mistral cost + latency. Phase 0
       // tested up to 2 687 chars; 10 k gives headroom for long replies without
       // a single call burning through a tenant's budget.
@@ -9627,9 +11300,10 @@ export class LynoxHTTPApi {
       // instances, so it must clear the same onBeforeRun gate as a chat run:
       // a credit-exhausted tenant (or one whose control plane is stale →
       // fail-closed) is blocked here BEFORE any provider spend, and before the
-      // 200 SSE head is written so the client gets a clean error status. No-op
-      // on self-host (no hooks registered). The matching debit fires after
-      // synthesis below, keyed on this run id.
+      // 200 SSE head is written so the client gets a clean error status. The
+      // gate checks the instance's daily and monthly spending caps first, on
+      // every instance. The matching debit fires after synthesis below, keyed on
+      // this run id.
       const gate = await fireBeforeRunGate(engine, 'fast');
       if (gate.blockedReason) {
         errorResponse(res, 402, gate.blockedReason);
@@ -9663,8 +11337,8 @@ export class LynoxHTTPApi {
       if (meta) {
         // Bill the post-prep character count to RunHistory so the Usage
         // Dashboard line-items voice TTS separately from chat runs. Mistral
-        // doesn't surface usage headers — $0.016/1 000 chars is the
-        // documented rate, applied after text-prep has stripped Markdown
+        // doesn't surface usage headers — the documented rate per character
+        // (`SPEAK_USD_PER_CHAR`) is applied after text-prep has stripped Markdown
         // noise. (TTS no longer increments the in-memory session-cost
         // counter — it isn't tied to a chat Session, and the dashboard's
         // daily/monthly caps still pick the cost up via RunHistory.)
@@ -9712,14 +11386,20 @@ export class LynoxHTTPApi {
     // ── Transcription (streaming via SSE) ──
     this.addStatic('user', 'POST /api/transcribe', async (_req, res, _params, body) => {
       const {
-        HAS_WHISPER,
+        hasTranscribeProvider,
         transcribeWithStream,
         extractSessionContext,
         getActiveTranscribeProvider,
         VOXTRAL_USD_PER_MIN,
       } = await import('../core/transcribe.js');
-      if (!HAS_WHISPER) {
-        errorResponse(res, 503, 'Transcription not available (set MISTRAL_API_KEY or install whisper.cpp + ffmpeg)');
+      // Asked per request, not the boot-time `HAS_WHISPER`: on an instance connected to a
+      // Shopify store a Mistral key does not make transcription available (`contained-providers.ts`).
+      if (!hasTranscribeProvider()) {
+        const { providerListApplies } = await import('../core/contained-providers.js');
+        errorResponse(res, 503, providerListApplies()
+          // ux U-074: a Mistral key does not help here, so the text does not suggest one.
+          ? 'On instances connected to Shopify, lynox sends no audio to a speech service, and speech recognition on the instance itself is not set up here.'
+          : 'Transcription not available (set MISTRAL_API_KEY or install whisper.cpp + ffmpeg)');
         return;
       }
       const b = body as Record<string, unknown> | null;
@@ -9732,12 +11412,16 @@ export class LynoxHTTPApi {
       if (!audioData) { errorResponse(res, 400, 'Missing audio (base64)'); return; }
       const buffer = Buffer.from(audioData, 'base64');
 
-      // Managed credit gate — STT shares the lynox-supplied pool key, so a
-      // credit-exhausted / fail-closed tenant is blocked here before any
-      // provider spend (same onBeforeRun gate as TTS + chat runs). No-op on
-      // self-host. The matching onAfterRun debit fires after transcription
-      // below, keyed on this run id, when Voxtral (pool key) was the backend.
-      const sttGate = await fireBeforeRunGate(engine, 'fast');
+      // Admission for a transcription that spends — Voxtral, on a provider key: the
+      // instance's daily and monthly spending caps, then the managed credit gate (a
+      // credit-exhausted / fail-closed tenant is blocked before any provider spend).
+      // Local whisper.cpp costs nothing and is not gated. The matching onAfterRun
+      // debit fires after transcription below, keyed on this run id, when Voxtral
+      // was the backend.
+      const sttSpends = getActiveTranscribeProvider()?.name !== 'whisper-cpp';
+      const sttGate = sttSpends
+        ? await fireBeforeRunGate(engine, 'fast')
+        : { runId: randomUUID(), blockedReason: null, capReached: null };
       if (sttGate.blockedReason) {
         errorResponse(res, 402, sttGate.blockedReason);
         return;
@@ -10382,7 +12066,10 @@ export class LynoxHTTPApi {
       }
 
       if (this.erasureInProgress) {
-        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+        // Refused before the control plane is asked: the nonce is unspent there, and `claim_kept`
+        // lets the page park it again. The refusal after the control plane answered (below) does
+        // not carry it: that nonce is spent.
+        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress', claim_kept: true });
         return;
       }
       // Counted as a pending grant for as long as the claim is out: one that started
@@ -10427,6 +12114,73 @@ export class LynoxHTTPApi {
       });
     }, ownerOnly('claim the managed Google connection'));
 
+    // Which Google account a parked claim belongs to, so the confirmation can
+    // name it before anything is claimed and the owner confirms a known account.
+    //
+    // It reads and never claims; the control plane answers from the same pending
+    // grant without consuming it. Only the address comes back, never a token.
+    //
+    // Three answers, and the difference between the last two is the point:
+    // - `{ email }`: the control plane named the account;
+    // - `{ unnamed: true }`: it answered, and the grant has no usable address.
+    //   Whoever runs the consent can arrange that (an account without a verified
+    //   address), so the dialog does not let this be confirmed at all;
+    // - `{}`: no answer to go by (an older control plane without the route, an
+    //   expired or unknown nonce, a network error). The dialog falls back to
+    //   saying it cannot name the account. That a live grant cannot be steered
+    //   here rests on the control plane: it mints the nonce only after storing the
+    //   grant, and its preview route must answer from the same row as the claim.
+    //
+    // An address counts only if it is not blank and has an `@` (after trimming): a
+    // blank one would show an empty name next to "Only confirm if this is your
+    // account". This is a sanity check, not validation. A 200 that does not parse
+    // is treated like a 200 without an address. What each answer lets the user do
+    // is decided in the dialog (`claimConfirmCopy`).
+    this.addStatic('user', 'POST /api/google/claim-managed/preview', async (_req, res, _params, body) => {
+      // Same gate and order as the claim: a preview on an instance that cannot
+      // claim would only name an account it could never connect.
+      const google = await engine.ensureGoogleAuth();
+      if (!requireService(res, google, 'Google auth')) return;
+
+      const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+      const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'];
+      const httpSecret = process.env['LYNOX_HTTP_SECRET'];
+      if (!controlPlaneUrl || !instanceId || !httpSecret) {
+        errorResponse(res, 400, 'Not a managed instance or missing control plane config');
+        return;
+      }
+
+      const parsed = body as Record<string, unknown> | undefined;
+      const claimNonce = typeof parsed?.['claim_nonce'] === 'string' ? parsed['claim_nonce'] : '';
+      if (!claimNonce) {
+        errorResponse(res, 400, 'Missing claim_nonce');
+        return;
+      }
+
+      let answer: { email: string } | { unnamed: true } | Record<string, never> = {};
+      try {
+        const previewRes = await cpFetch(controlPlaneUrl, '/internal/oauth/google/claim-preview', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-instance-secret': httpSecret,
+          },
+          body: JSON.stringify({
+            instance_id: instanceId,
+            claim_nonce: claimNonce,
+          } satisfies OAuthClaimPreviewRequest),
+        }, google.hostPolicy);
+        if (previewRes.ok) {
+          const data = (await previewRes.json().catch(() => null)) as OAuthClaimPreviewResponse | null;
+          const email = typeof data?.email === 'string' ? data.email.trim() : '';
+          answer = email.includes('@') ? { email } : { unnamed: true };
+        }
+      } catch {
+        // Unknown, not an error: the dialog still works without the address.
+      }
+      jsonResponse(res, 200, answer);
+    }, ownerOnly('see which Google account a pending connection belongs to'));
+
     // ── API-profile OAuth: the authorization-code round-trip (W1b) ────────
     //
     // The START half. Authenticated, because it is a click from the user's own
@@ -10447,7 +12201,9 @@ export class LynoxHTTPApi {
     // error to say so. Neither belongs here; only the first is an exploit.
     //
     // A link that asks for a write scope of a preset with a customer text (`consentNotice`) is
-    // answered with a page first: the text, the write access asked for, and a button. Only the
+    // answered with a page first: the text, the write access asked for, and a button. So is
+    // every link a mandate's session opens, with the note on what the owner sees
+    // (`connect-note.ts`). Only the
     // button's POST mints the state cookie and sends the person on. A GET never does, whatever
     // the link carries, because the model hands out the link and could add to it; a form POST
     // comes from this page in the person's browser, and one from another site is refused.
@@ -10455,7 +12211,7 @@ export class LynoxHTTPApi {
       const id = params['id'] ?? '';
       const httpSecret = process.env['LYNOX_HTTP_SECRET'] ?? '';
       if (confirmed && singleHeader(req.headers['sec-fetch-site']) !== 'same-origin') {
-        sendOAuthHtml(res, 403, 'This confirmation has to come from the page this instance showed. Open the link again and confirm there. Nothing was sent to the provider.');
+        sendOAuthHtml(res, 403, OAUTH_RESULT_TEXTS.confirmFromOwnPage, 'app');
         return;
       }
 
@@ -10472,15 +12228,19 @@ export class LynoxHTTPApi {
       //   - `authenticated` is passed as a fact rather than assumed inside
       //     `decideConnect`, because the same function answers for the tool,
       //     where there is no dispatch to have done it.
-      // A session under a mandate connects a profile it set up itself, and nothing else (PRD
-      // §3.13): the consent is recorded as its own, and an account the owner, or another
-      // mandate, prepared is theirs to connect. One answer whether the id exists or not, so the
-      // session learns nothing about which ids do.
+      // `mayStartConnect`. One answer whether the id exists or not, so the session learns nothing
+      // about which ids do.
+      // Without engine.db, before the profile is looked up (the answer is the same for every id)
+      // and before anything goes to the provider.
       const principal = this._principalOf(req);
+      const engineLessConnect = engine.getApiStore()?.engineLessRefusal('connect', 'client') ?? null;
+      if (engineLessConnect !== null) {
+        sendOAuthHtml(res, 409, engineLessPageText('connect', controlPlaneRunsThis(), isOwnerPrincipal(principal)), 'app');
+        return;
+      }
       const profile = engine.getApiStore()?.get(id);
-      if (principal.kind === 'mandate'
-        && (profile === undefined || profile.created_by !== principalTag(principal) || principal.mandateId === undefined)) {
-        sendOAuthHtml(res, 403, 'In this session you can connect only an API profile you set up yourself. Nothing was sent to the provider.');
+      if (!mayStartConnect(principal, profile)) {
+        sendOAuthHtml(res, 403, OAUTH_RESULT_TEXTS.ownProfileOnly, 'app');
         return;
       }
 
@@ -10497,7 +12257,11 @@ export class LynoxHTTPApi {
         // person standing in a browser, and none of the eleven kinds echoes a
         // value back — a profile id or a host in an error page is a disclosure
         // to whoever is looking at that screen.
-        sendOAuthHtml(res, decision.status, decision.message);
+        // Back to the profile list only once the request is known to be this person's own, for a
+        // profile that exists; the refusals before that lead to /app.
+        const beforeProfile = decision.kind === 'no-session' || decision.kind === 'no-fetch-metadata'
+          || decision.kind === 'cross-site' || decision.kind === 'not-a-document' || decision.kind === 'unknown-profile';
+        sendOAuthHtml(res, decision.status, { en: decision.message, de: decision.de }, beforeProfile ? 'app' : 'apis');
         return;
       }
 
@@ -10508,16 +12272,23 @@ export class LynoxHTTPApi {
       const slotApis = engine.getApiStore();
       if (principal.kind === 'mandate' && profile && slotApis
         && (!slotStore || !mandateMayConnect(slotStore, slotApis, principalTag(principal), profile, { principal, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() }))) {
-        sendOAuthHtml(res, 409, 'This connection would store its token under a name that is not this session\'s to fill. Nothing was sent to the provider.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.tokenSlotNotOwn, 'apis');
         return;
       }
 
       const { verifier, challenge, method } = createPkcePair();
       const state = randomUUID();
+      // The version of the customer text this start shows, and the confirmation below is checked
+      // against: the callback records it as the text the connection was confirmed under.
+      const consentVersion = decision.consent ? consentNoticeVersion(decision.consent) : undefined;
       const signed = signProfileOAuthState(
         {
           state, profileId: id, verifier,
           by: principal.kind === 'mandate' ? { tag: principalTag(principal), mandateId: principal.mandateId } : { tag: 'owner' },
+          // What the link asks for, from the same decision the confirmation is checked against
+          // below (`shown_scopes`) and the link is built from: the callback records it as asked.
+          asked: decision.scopes,
+          consent: consentVersion,
         },
         httpSecret,
         Math.floor(Date.now() / 1000),
@@ -10525,11 +12296,12 @@ export class LynoxHTTPApi {
       if (!signed) {
         // `decideConnect` has already established the secret and the profile, and
         // the id it saw is the id signed here. What still lands here is a value the
-        // format cannot carry: a mandate address with enough non-ASCII characters
-        // that its encoding exceeds what the reader accepts. Refused before the
-        // user is sent anywhere, and never asserted, because this is the one place
+        // format cannot carry: a mandate address whose encoding exceeds what the
+        // reader accepts, a list of asked scopes the format refuses, or a whole value
+        // longer than a browser keeps (`PROFILE_OAUTH_STATE_MAX_LEN`). Refused before
+        // the user is sent anywhere, and never asserted, because this is the one place
         // where a wrong value would mint a cookie that verifies as a DIFFERENT one.
-        sendOAuthHtml(res, 500, 'This engine could not start the authorization. Nothing was sent to the provider.');
+        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.startFailed, 'apis');
         return;
       }
 
@@ -10537,7 +12309,7 @@ export class LynoxHTTPApi {
       // The client id travels in the link, to the browser and on to the provider. A name some
       // profile reads as a credential would put that credential there instead.
       if (clientIdKey && slotApis && !mayServeAsClientId(slotApis, clientIdKey)) {
-        sendOAuthHtml(res, 409, 'The client id of this profile is stored under a name that also holds a credential, and a client id is sent in the link. Store the client id under its own name, then ask for a new link. Nothing was sent to the provider.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.clientIdBesideCredential, 'apis');
         return;
       }
       // Through the profile's view of the vault, as every other read for a profile: one a
@@ -10560,21 +12332,42 @@ export class LynoxHTTPApi {
         const withheld = !!(rawStore && profile && connectApis && clientIdKey
           && withheldFrom(rawStore, profile, connectApis, [clientIdKey], { principal, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() }).length > 0);
         sendOAuthHtml(res, 409, withheld
-          ? 'The owner has not released the client id of this profile to it. Nothing was sent to the provider.'
-          : 'The client id for this profile is no longer in the vault. Set it again, then ask for a new link.');
+          ? OAUTH_RESULT_TEXTS.clientIdWithheld
+          : OAUTH_RESULT_TEXTS.clientIdMissing, 'apis');
         return;
       }
 
+      // A mandate's session reads, before every connect, that the owner sees this connection
+      // (`connect-note.ts`). The owner's session never gets the note. `decideConnect` has
+      // established the preset, so a mandate's connect without one does not reach here.
+      const notePreset = principal.kind === 'mandate' ? OAUTH_PRESETS.get(profile?.auth?.oauth?.preset_id ?? '') : undefined;
+      const note = notePreset ? connectNoteFor(notePreset, noteLang(singleHeader(req.headers['accept-language']))) : undefined;
+      if (principal.kind === 'mandate' && !note) {
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.noteProviderUnknown, 'apis');
+        return;
+      }
       // Last, so the page appears only for a connect that would otherwise go ahead.
-      if (decision.consent && !confirmed) {
-        sendConsentPage(res, decision.consent, decision.scopes);
+      if ((decision.consent || note) && !confirmed) {
+        sendConsentPage(res, decision.consent, decision.scopes, note);
+        return;
+      }
+      // The confirmation holds for the note the page showed: a profile moved to another provider
+      // in between would otherwise send the person on under a note that no longer applies.
+      if (note && new URL(req.url ?? '', 'http://x').searchParams.get('shown_note') !== note.version) {
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.noteChanged, 'apis');
         return;
       }
       // The confirmation holds for the scopes the page showed. A profile changed in between
       // (an update that adds a write scope) would otherwise send the person to a grant the
       // page never named.
       if (decision.consent && new URL(req.url ?? '', 'http://x').searchParams.get('shown_scopes') !== decision.scopes.join(' ')) {
-        sendOAuthHtml(res, 409, 'This connection asks for other access than the page you confirmed showed. Open the link again and read the page. Nothing was sent to the provider.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.scopesChanged, 'apis');
+        return;
+      }
+      // The confirmation holds for the customer text the page showed. A page rendered by an engine
+      // before an upgrade that changed the text would otherwise record the new text as confirmed.
+      if (consentVersion !== undefined && new URL(req.url ?? '', 'http://x').searchParams.get('shown_consent') !== consentVersion) {
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.consentChanged, 'apis');
         return;
       }
 
@@ -10621,7 +12414,7 @@ export class LynoxHTTPApi {
       // A consent finished while the erasure runs must not store its tokens.
       if (this.erasureInProgress) {
         LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
-        sendOAuthHtml(res, 409, 'Your data is being erased right now. Connect this API again after it has finished. Nothing was stored.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.erasing, 'app');
         return;
       }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -10631,7 +12424,7 @@ export class LynoxHTTPApi {
         // interrupted one — leaving the cookie would let the next top-level
         // navigation to this path retry a flow the person just refused.
         LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
-        sendOAuthHtml(res, 400, 'The provider did not complete the authorization.');
+        sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.providerDeclined, 'app');
         return;
       }
 
@@ -10661,20 +12454,34 @@ export class LynoxHTTPApi {
         && timingSafeEqual(queryBuf, stateBuf);
       if (!signed || !code || !statesMatch) {
         LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
-        sendOAuthHtml(res, 400, 'This authorization link is no longer valid. Ask for a new one and try again.');
+        sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.linkExpired, 'app');
         return;
       }
 
       // Cleared BEFORE the exchange, not after. A browser that replays this URL
-      // then arrives without a cookie and is refused above — which does not
-      // stop somebody who kept the value, and is not claimed to.
+      // then arrives without a cookie and is refused above. Somebody who kept the
+      // value is refused here: the state is spent once, before anything is asked
+      // of the provider, with the same page as every other invalid round-trip.
       LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
+      if (!spendProfileOAuthState(signed.state, Math.floor(Date.now() / 1000))) {
+        sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.linkExpired, 'app');
+        return;
+      }
+
+      // Without engine.db the connect start refuses, so a callback here began before a restart.
+      // After the state check, so only the holder of a valid cookie learns why; before the code is
+      // spent at the provider, so no token is fetched or stored that the profile could not record.
+      const engineLessSave = engine.getApiStore()?.engineLessRefusal('save', 'client') ?? null;
+      if (engineLessSave !== null) {
+        sendOAuthHtml(res, 409, engineLessPageText('save', controlPlaneRunsThis(), isOwnerPrincipal(principalFromTag(signed.by.tag))), 'app');
+        return;
+      }
 
       const apiStore = engine.getApiStore();
       const profile = apiStore?.get(signed.profileId);
       const oauth = profile?.auth?.type === 'oauth2' ? profile.auth.oauth : undefined;
       if (!apiStore || !profile || !oauth) {
-        sendOAuthHtml(res, 409, 'That connection no longer exists on this engine. Nothing was changed.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.connectionGone, 'app');
         return;
       }
       // A mandate's consent lands only where the start allowed it: on a profile the mandate
@@ -10700,24 +12507,24 @@ export class LynoxHTTPApi {
           && mandateMayConnect(store, apiStore, by.tag, current, readCtx);
       };
       if (!mayStillConnect(profile)) {
-        sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was changed.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.otherSessionChanged, 'apis');
         return;
       }
 
       const endpoints = derivePresetEndpoints(oauth.preset_id ?? '', oauth.preset_params);
       if ('kind' in endpoints) {
-        sendOAuthHtml(res, 409, 'This connection can no longer be completed on this engine. Nothing was changed.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.notCompletableChanged, 'apis');
         return;
       }
       const vetting = vetTokenEndpoint(endpoints.tokenUrl, profile.custom_endpoint_ack);
       if (isTokenEndpointRefused(vetting)) {
-        sendOAuthHtml(res, 409, 'This connection points somewhere this engine may not send credentials. Nothing was changed.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialTargetRefused, 'apis');
         return;
       }
 
       // A token is never a client id or secret: asked on the names, before either is read.
       if ([oauth.client_id_key, oauth.client_secret_key].some((n) => typeof n === 'string' && !slotMayReach(apiStore, n, 'client', endpoints.tokenUrl, profile))) {
-        sendOAuthHtml(res, 409, 'This connection names an OAuth token as its client credentials, which this engine does not send. Nothing was changed.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.tokenAsClientCredential, 'apis');
         return;
       }
       // The client secret goes to this token endpoint only where it is bound to go, for a profile
@@ -10727,7 +12534,7 @@ export class LynoxHTTPApi {
       const bindCtx = { bindings: engine.getVaultNameBindings(), store: vaultNow, read: readCtx };
       const clientNames = [oauth.client_id_key, oauth.client_secret_key].filter((n): n is string => typeof n === 'string' && (vaultNow === null || withheldFrom(vaultNow, profile, apiStore, [n], readCtx).length === 0));
       if (unboundName(apiStore, clientNames, profile, endpoints.tokenUrl, 'client', bindCtx) !== undefined) {
-        sendOAuthHtml(res, 409, 'Nothing was changed. This connection would send a stored key to an address it is not allowed to go to. The owner of this instance can allow it: save the profile again in the chat and answer the question that appears.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.keyNotAllowedThere, 'apis');
         return;
       }
 
@@ -10740,10 +12547,10 @@ export class LynoxHTTPApi {
       if (!secretStore || !clientId || !clientSecret) {
         const pair = [oauth.client_id_key, oauth.client_secret_key].filter((k): k is string => typeof k === 'string');
         if (secretStore && withheldFrom(secretStore, profile, apiStore, pair, readCtx).length > 0) {
-          sendOAuthHtml(res, 409, 'The owner has not released the credentials of this profile to it. Nothing was changed.');
+          sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialsWithheld, 'apis');
           return;
         }
-        sendOAuthHtml(res, 409, 'The credentials for this connection are no longer in the vault. Set them again, then ask for a new link.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.credentialsMissing, 'apis');
         return;
       }
 
@@ -10754,9 +12561,11 @@ export class LynoxHTTPApi {
       // A provider on the host it derives mints a token for the store the profile's base names
       // and no other: a base on another store would carry this store's token there.
       if (preset?.apiOnDerivedHost === true && presetStoreHost(profile) === null) {
-        sendOAuthHtml(res, 409, 'This connection\'s address is not the store it authorizes. Nothing was changed.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.storeMismatch, 'apis');
         return;
       }
+      // The scopes the provider granted beyond what this connection asks for, said on the page.
+      let grantedBeyond: string[] = [];
       let exchangeCode = code;
       // The store the provider signed for: made here, after both checks, only, and asked again
       // before the token is stored.
@@ -10770,7 +12579,9 @@ export class LynoxHTTPApi {
         const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');
         const bound = bindShopifyCallback(rawQuery, clientSecret, Date.now(), profile.id, presetStoreHost(profile));
         if (!bound.ok) {
-          sendOAuthHtml(res, 400, 'The provider\'s signature on this authorization does not hold for this connection. Nothing was stored.');
+          // The page stays the same for every reason; which one it was goes to the log.
+          process.stderr.write(shopifyCallbackRefusalLine(bound.reason, profile.id, rawQuery));
+          sendOAuthHtml(res, 400, OAUTH_RESULT_TEXTS.signatureRefused, 'apis');
           return;
         }
         exchangeCode = bound.code;
@@ -10782,7 +12593,7 @@ export class LynoxHTTPApi {
       // code is not spent unrecorded. This route answers before dispatch, so it opens its trail
       // itself; the caller closes it.
       if (by.tag !== 'owner' && !this._openTrail(req, reader, `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, `profile:${signed.profileId}`)) {
-        sendOAuthHtml(res, 503, 'This connection cannot be recorded in the instance log right now. Nothing was stored.');
+        sendOAuthHtml(res, 503, OAUTH_RESULT_TEXTS.logUnavailable, 'apis');
         return;
       }
 
@@ -10813,7 +12624,7 @@ export class LynoxHTTPApi {
         // error body is the one place a client secret has been seen echoed back.
         // Nor is the exchange's own message: a redirect the loop refused says "Write possibly
         // landed" for the model, and here nothing landed that the person would have to check.
-        sendOAuthHtml(res, 502, 'The authorization could not be completed with the provider. Nothing was stored. You can start the connection again.');
+        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.exchangeFailed, 'apis');
         return;
       }
 
@@ -10821,12 +12632,12 @@ export class LynoxHTTPApi {
       try {
         parsed = JSON.parse(exchanged.text) as typeof parsed;
       } catch {
-        sendOAuthHtml(res, 502, 'The provider answered with something this engine could not read. Nothing was stored.');
+        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.unreadableAnswer, 'apis');
         return;
       }
       const accessToken = parsed.access_token;
       if (typeof accessToken !== 'string' || accessToken === '') {
-        sendOAuthHtml(res, 502, 'The provider answered without an access token. Nothing was stored.');
+        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.noAccessToken, 'apis');
         return;
       }
 
@@ -10835,7 +12646,7 @@ export class LynoxHTTPApi {
       const { getLynoxDir } = await import('../core/config.js');
       const current = apiStore.get(signed.profileId);
       if (by.tag !== 'owner' && (current === undefined || !mayStillConnect(current))) {
-        sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was stored.');
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.otherSessionStored, 'apis');
         return;
       }
       // The profile can be re-pointed while the exchange runs: a token minted for one store is
@@ -10843,7 +12654,7 @@ export class LynoxHTTPApi {
       // (A profile with no store host gives `https://null`, which no signed shop is.)
       if (storeCallback !== undefined) {
         if (current === undefined || `https://${presetStoreHost(current)}` !== storeCallback.origin) {
-          sendOAuthHtml(res, 409, 'This connection\'s address changed while it was being completed. Nothing was stored.');
+          sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.addressChanged, 'apis');
           return;
         }
       }
@@ -11011,8 +12822,30 @@ export class LynoxHTTPApi {
             connected_by: by.tag,
           };
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
+          // A deleted profile's slot stays lapsed through a new consent: the consent is this
+          // profile's, and a `refresh_token_key` still naming that slot must not take it over
+          // (register 685). The refusal names the way out, removing the key.
+          const lapsed = lapsedSlots(fresh);
+          if (lapsed.length > 0) grantNext.lapsed_slots = lapsed;
           // What the token can do, as the provider says: a narrower grant is recorded as granted.
-          if (typeof parsed.scope === 'string') grantNext.granted_scope = parsed.scope.split(/[\s,]+/).filter((s) => s !== '');
+          // A broader one is recorded too, and the page below names what it holds beyond the ask.
+          // What was asked is what the confirmed start signed, not the profile now: a save in
+          // between changes the next link, not this consent.
+          const asked = signed.asked ?? [];
+          grantNext.asked_scope = [...asked];
+          // Which customer text the person confirmed, from the same signed start: a start that
+          // showed none records none, so a connection reads as confirmed under no text. Only the
+          // owner's: the owner approves a bulk run against what the text promises, and a text a
+          // mandate confirmed is one the owner never read, so it opens no further field.
+          if (signed.consent !== undefined && by.tag === 'owner') {
+            grantNext.consent_version = signed.consent;
+            grantNext.consented_at = new Date().toISOString();
+          }
+          const grantedNow = scopesOfAnswer(parsed.scope);
+          if (grantedNow !== undefined) {
+            grantNext.granted_scope = grantedNow;
+            if (preset?.compareGrantedScope === true) grantedBeyond = scopesBeyondAsked(grantedNow, asked);
+          }
           // The account this consent signed in with, for the person to read: the store the
           // provider signed for, or the account an OpenID Connect preset's id_token names.
           // Nothing else is trusted for it, so any other provider records none.
@@ -11076,18 +12909,25 @@ export class LynoxHTTPApi {
           );
         }
       } catch {
-        sendOAuthHtml(res, 500, 'The authorization arrived but this engine could not finish storing it. The connection is incomplete — ask for a new link and try again.');
+        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.storeIncomplete, 'apis');
         return;
       }
       if (storeBindingFailed) {
-        sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not bind it to the store, so lynox will not use this connection. Ask for a new link and try again.');
+        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.bindFailed, 'apis');
         return;
       }
       if (revokedNotRecorded) {
-        sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not record the new connection, so the profile still counts as revoked and a deletion announced for it still stands. Reconnect again from the profile.');
+        sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.recordFailed, 'apis');
         return;
       }
-      sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');
+      if (grantedBeyond.length > 0) {
+        sendOAuthHtml(res, 200, connectedWithMoreText(grantedBeyond), 'apis');
+        return;
+      }
+      // The preset's own name (Shopify, bexio), else the profile's, which its owner chose.
+      const presetId: unknown = oauth.preset_id;
+      const providerLabel = (typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? profile.name;
+      sendOAuthHtml(res, 200, connectedText(providerLabel), 'apis');
     };
     this.addStatic('user', `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, async (req, res, params, body) => {
       this.profileGrantsPending++;
@@ -11096,7 +12936,7 @@ export class LynoxHTTPApi {
       } finally {
         this.profileGrantsPending--;
       }
-    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by GET /api/oauth/connect/:id, where a mandate connects only a profile it set up'));
+    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by /api/oauth/connect/:id (for a mandate only by the POST from the note page), where a mandate connects only a profile it set up'));
 
     // ── Knowledge Graph ──────────────────────────────────────────
 
@@ -11285,7 +13125,9 @@ export class LynoxHTTPApi {
       return null;
     };
 
-    // user scope: same mailbox-management surface as POST /api/mail/accounts.
+    // user scope. Free, unlike POST /api/mail/accounts beside it: it stores nothing, like
+    // POST /api/secrets/validate-key and POST /api/mail/autodiscover, and it spends nothing of the
+    // owner's: the login it tests is the one in the request. The rate limit above bounds the probe.
     this.addStatic('user', 'POST /api/mail/accounts/test', async (req, res, _params, body) => {
       const rateErr = mailTestRateCheck(req);
       if (rateErr) { errorResponse(res, 429, rateErr); return; }
@@ -11451,6 +13293,9 @@ export class LynoxHTTPApi {
       if (q !== null) query.q = q;
       const snoozedOnly = url.searchParams.get('snoozedOnly');
       if (snoozedOnly !== null) query.snoozedOnly = snoozedOnly;
+      // Names which rule's items are read, so a mandate's read row carries it (READ_IDENTIFIERS).
+      const ruleId = url.searchParams.get('ruleId');
+      if (ruleId !== null) query.ruleId = ruleId;
       sendInbox(res, handleListItems(deps!, query));
     }, READS);
 
@@ -11664,6 +13509,7 @@ export class LynoxHTTPApi {
         bucket: b['bucket'] as import('../integrations/inbox/api.js').CreateRuleBody['bucket'],
         action: b['action'] as import('../integrations/inbox/api.js').CreateRuleBody['action'],
         source: b['source'] as import('../integrations/inbox/api.js').CreateRuleBody['source'],
+        ...(typeof b['name'] === 'string' ? { name: b['name'] } : {}),
       };
       const finalRuleBody: import('../integrations/inbox/api.js').CreateRuleBody =
         typeof b['tenantId'] === 'string'
@@ -11678,6 +13524,15 @@ export class LynoxHTTPApi {
       const { handleDeleteRule } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleDeleteRule(deps!, params['id']!));
     }, ownerOnly('change inbox rules')));
+
+    // A rule the agent proposed applies only once the owner confirms it here.
+    // Owner-only: a mandate can neither propose (the tool is withheld) nor confirm.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/rules/:id/confirm', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleConfirmRule } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleConfirmRule(deps!, params['id']!));
+    }, ownerOnly('confirm an inbox rule')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/entities', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
@@ -11736,8 +13591,10 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const threadInsights = rh.getThreadAggregates(limit);
-      jsonResponse(res, 200, { threadInsights });
-    }, READS);
+      // The title of another person's contained chat is left out (register 1112).
+      const unreadable = this._unreadableChats(this._principalOf(req), threadInsights.map((t) => t.sessionId));
+      jsonResponse(res, 200, { threadInsights: threadInsights.map((t) => unreadable.has(t.sessionId) ? { ...t, title: '' } : t) });
+    }, readsThread(() => null));
 
     this.addStatic('user', 'GET /api/metrics', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
@@ -11825,10 +13682,15 @@ export class LynoxHTTPApi {
 
     // ── Backups ──────────────────────────────────────────────────
 
-    this.addStatic('user', 'GET /api/backups', async (_req, res) => {
+    // Each backup's `files` (one entry per file) is left out unless `?files=1` asks for it:
+    // across many large backups it is the bulk of the answer, and `file_count`/`total_bytes` carry
+    // what the list shows.
+    this.addStatic('user', 'GET /api/backups', async (req, res) => {
       const bm = engine.getBackupManager();
       if (!bm) { jsonResponse(res, 200, { backups: [] }); return; }
-      const backups = bm.listBackups();
+      const withFiles = new URL(req.url ?? '', 'http://localhost').searchParams.get('files') === '1';
+      const listed = bm.listBackups();
+      const backups = withFiles ? listed : listed.map(({ files: _files, ...entry }) => entry);
       jsonResponse(res, 200, { backups });
     }, READS);
 
@@ -11865,7 +13727,8 @@ export class LynoxHTTPApi {
         // asks before it sends this.
         const allowUnverified = (body as { allow_unverified?: unknown } | null)?.allow_unverified === true;
         const result = await bm.restoreBackup(backupPath, { allowUnverified });
-        jsonResponse(res, result.success ? 200 : result.code === 'unverified_backup' ? 409 : 500, result);
+        // `backup_path`: where an entry the restore left out (`skipped`) can still be taken from by hand.
+        jsonResponse(res, result.success ? 200 : result.code !== undefined ? 409 : 500, result.success ? { ...result, backup_path: backupPath } : result);
         // Auto-restart after successful restore so restored data takes effect
         if (result.success) {
           setTimeout(() => { process.exit(0); }, 500);
@@ -11877,21 +13740,24 @@ export class LynoxHTTPApi {
 
     // ── API Store ────────────────────────────────────────────────
 
-    this.addStatic('user', 'GET /api/api-profiles', async (_req, res) => {
+    this.addStatic('user', 'GET /api/api-profiles', async (req, res) => {
       const store = engine.getApiStore();
       if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
-      // Without the grant's credential fingerprints, which are the engine's bookkeeping; no
-      // reader of this route needs them. `importWaiting`: the files the import of the earlier
-      // profiles waits on, for the owner to repair or delete.
-      jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints), importWaiting: store.importWaitsOn() });
+      // As the reader may see them (`profileForReader`): without the grant's credential
+      // fingerprints, which are the engine's bookkeeping, and without the provider account of a
+      // connection somebody else made. `importWaiting`: the files the import of the earlier
+      // profiles waits on, for the owner to repair or delete. `reader_may_connect`: whether this
+      // reader's connect start goes through (`mayStartConnect`), so the page offers the link only there.
+      const reader = this._principalOf(req);
+      jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p) })), importWaiting: store.importWaitsOn() });
     }, READS);
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const profile = store.get(params['id']!);
       if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
-      jsonResponse(res, 200, { profile: withoutFingerprints(profile) });
+      jsonResponse(res, 200, { profile: profileForReader(profile, this._principalOf(req)) });
     }, READS));
 
     // The connection form of a profile on a built-in provider: the one place the owner enters the
@@ -12027,8 +13893,12 @@ export class LynoxHTTPApi {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const { getLynoxDir } = await import('../core/config.js');
-      const { ApiProfileUnlinkError, purgeRecordedTokens } = await import('../core/api-store.js');
+      const { ApiProfileUnlinkError, SaveRefused, purgeRecordedTokens } = await import('../core/api-store.js');
       const apisDir = join(getLynoxDir(), 'apis');
+      // Without engine.db, before the profile is read: the same answer whether it exists.
+      const engineLess = store.engineLessRefusal('remove', 'client');
+      // The code lets the settings page say it in its own language.
+      if (engineLess !== null) { errorResponse(res, 409, engineLess, 'engine_less'); return; }
       // Read before the delete: the tokens to purge are named on the profile, registered or held
       // back by the boot.
       const existing = store.storedProfile(params['id']!);
@@ -12040,6 +13910,8 @@ export class LynoxHTTPApi {
         const removed = store.remove(params['id']!, apisDir, { record: 'closing' });
         if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }
       } catch (err) {
+        // The store refuses a remove without engine.db by throwing; asked above, so not reached.
+        if (err instanceof SaveRefused) { errorResponse(res, 409, store.engineLessRefusal('remove', 'client') ?? err.reason, 'engine_less'); return; }
         if (err instanceof ApiProfileUnlinkError) {
           // The in-memory side already happened; report the partial state
           // so the operator sees a 500 instead of a misleading 404 + a
@@ -12064,15 +13936,14 @@ export class LynoxHTTPApi {
     }, ownerOnly('delete an API profile')));
 
     // The provider erasures the owner is told about on the profile they concern (an erasure a
-    // provider's revocation started, still to run, before its deadline, while the profile is
-    // revoked). Owner-only: the records are the owner's, and a mandate's
+    // provider's revocation started, still to run, before its deadline, of a grant of the profile
+    // stored now). Owner-only: the records are the owner's, and a mandate's
     // page shows no notice. Ids and times only.
     this.addStatic('user', 'GET /api/connections/records', async (_req, res) => {
       const db = engine.getEngineDb();
-      const store = engine.getApiStore();
-      if (!db || !store) { jsonResponse(res, 200, { notices: [] }); return; }
+      if (!db) { jsonResponse(res, 200, { notices: [] }); return; }
       const { providerNotices } = await import('../core/connection-erasure.js');
-      const notices = providerNotices(db.getDb(), new Date(), (id) => store.get(id)?.oauth_grant?.state === 'revoked');
+      const notices = providerNotices(db.getDb(), new Date());
       jsonResponse(res, 200, { notices });
     }, ownerOnly('read the erasure records'));
 
@@ -12089,10 +13960,7 @@ export class LynoxHTTPApi {
       const handle = db.getDb();
       const outcome = handle.transaction(() => {
         const result = cancelProviderRecord(handle, id, new Date());
-        if (result === 'cancelled') {
-          const row = handle.prepare('SELECT connection_id FROM connection_records WHERE id = ?').get(id) as { connection_id: string };
-          auditProviderCancels(audit, by, row.connection_id, [id], 'owner');
-        }
+        if (result === 'cancelled') auditProviderCancels(audit, handle, by, [id], 'owner');
         return result;
       })();
       if (outcome === 'not_found') { errorResponse(res, 404, 'Record not found'); return; }
@@ -12216,8 +14084,13 @@ export class LynoxHTTPApi {
           // a licence to assert it in a log.
           process.stderr.write(`⚠ /api/export: thread export hit the ${THREAD_CAP}-row cap — dump may be incomplete\n`);
         }
+        // Every thread, contained ones included: this is the owner's copy of their own data
+        // (Art. 15), and containment bounds what an agent or a helper carries out, not that.
+        // A contained thread says so, so the copy shows which chats held data from a store.
+        const containedStates = containedThreadStates(engine.getToolContext().containment ?? null, threads.map((t) => t.id));
         const threadsWithMessages = threads.map(t => ({
           ...t,
+          ...containedFields(containedStates, t.id),
           messages: threadStore.getMessages(t.id, { limit: 50000 }).map(m => ({
             seq: m.seq,
             role: m.role,
@@ -12231,10 +14104,16 @@ export class LynoxHTTPApi {
           })),
         }));
         exportData['threads_may_be_incomplete'] = threadsTruncated;
+        exportData['contained_threads'] = threadsWithMessages.filter((t) => t.contained).length;
+        // Of those, the ones marked only because their state could not be read: they may never
+        // have held store data, and the copy says so rather than counting them as if they had.
+        exportData['contained_unknown_threads'] = threadsWithMessages.filter((t) => t.contained_unknown !== undefined).length;
         exportData['threads'] = threadsWithMessages;
       } else {
         exportData['threads'] = [];
         exportData['threads_may_be_incomplete'] = false;
+        exportData['contained_threads'] = 0;
+        exportData['contained_unknown_threads'] = 0;
       }
 
       // Flat-file memory (all namespaces)
@@ -12290,12 +14169,16 @@ export class LynoxHTTPApi {
             process.stderr.write(`⚠ /api/export: entity export hit the ${MAX_PAGES * PAGE}-row cap — dump may be incomplete\n`);
           }
           const stats = await kg.stats();
-          // Collect all relations by iterating entity relations
+          // Collect all relations by iterating entity relations. Relations whose
+          // source memory was deleted are still stored, so they are exported too,
+          // marked `sourceDeleted` and explained in `relationships_note`.
           const relationSet = new Map<string, unknown>();
           for (const entity of entities) {
-            const relations = await kg.getEntityRelations(entity.id);
+            const relations = await kg.getEntityRelationsForExport(entity.id);
             for (const rel of relations) {
-              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}`;
+              // The source is part of the key: the legacy store keeps one row per
+              // assertion, and a deleted one must not stand in for a live one.
+              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}:${rel.sourceMemoryId}`;
               if (!relationSet.has(key)) {
                 relationSet.set(key, rel);
               }
@@ -12304,6 +14187,8 @@ export class LynoxHTTPApi {
           exportData['knowledge_graph'] = {
             entities,
             relationships: [...relationSet.values()],
+            relationships_note: 'sourceDeleted: the memory this relation was derived from was removed. '
+              + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
           };
         } catch {
@@ -12464,15 +14349,20 @@ export class LynoxHTTPApi {
       }
 
       // The workspace: the files themselves are too large for this one body, so it carries what
-      // is there and what could not be read, and names the route that streams the files.
+      // is there and what could not be read, and names the route that streams the files. In sidecar
+      // mode the workspace is left out and `workspace.omitted` names its source; no route here
+      // streams it then, so none is named.
+      let omitted = false;
       try {
         const { getLynoxDir } = await import('../core/config.js');
         const { describeWorkspace } = await import('../core/workspace-export.js');
-        exportData['workspace'] = describeWorkspace(getLynoxDir());
+        const described = describeWorkspace(getLynoxDir());
+        omitted = described.omitted !== undefined;
+        exportData['workspace'] = described;
       } catch (err: unknown) {
         exportData['workspace'] = { present: true, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [], may_be_incomplete: true, error: err instanceof Error ? err.name : 'error' };
       }
-      exportData['workspace_archive'] = '/api/export/workspace';
+      if (!omitted) exportData['workspace_archive'] = '/api/export/workspace';
 
       // For the control plane, the act is the handover: its `done` row is written before the
       // body leaves, so a connection that drops while it streams does not erase it — and after
@@ -12490,21 +14380,25 @@ export class LynoxHTTPApi {
     // An admin route, NOT on the control plane's positive list: the control plane does not call
     // it, and its bearer reaches only the routes it calls (`addCpAdminRoute`).
     this.addStatic('admin', 'GET /api/export/workspace', async (_req, res) => {
-      // Loaded before the checks: an await between a check and the flag would let an erasure start in it.
-      const { getLynoxDir } = await import('../core/config.js');
+      // Loaded before the checks: an await between a check and the slot would let an erasure start in it.
       const { archiveBound, describeWorkspace, ExportSpaceError, stageArchive, writeWorkspaceArchive } = await import('../core/workspace-export.js');
       const { WorkspaceAccessError } = await import('../core/workspace-fd.js');
       const { createReadStream, rmSync } = await import('node:fs');
       const { pipeline } = await import('node:stream/promises');
-      if (this.workspaceExportInProgress) {
-        errorResponse(res, 409, 'A workspace export is already running; try again when it has finished.', 'export_in_progress');
-        return;
-      }
       if (this.erasureInProgress) {
         errorResponse(res, 409, 'An erasure is running; export after it has finished.', 'erasure_in_progress');
         return;
       }
-      this.workspaceExportInProgress = true;
+      const taken = acquireSlot(getLynoxDir(), 'export', 'http');
+      if (!taken.ok) {
+        if (taken.held.kind === 'erasure') errorResponse(res, 409, 'An erasure is running; export after it has finished.', 'erasure_in_progress');
+        else errorResponse(res, 409, 'An export is already running; try again when it has finished.', 'export_in_progress');
+        return;
+      }
+      const heartbeat = setInterval(() => {
+        try { taken.slot.refresh(); } catch { /* the next beat tries again; the TTL is the bound */ }
+      }, this.exportSlotHeartbeatMs);
+      heartbeat.unref();
       let staged: StagedArchive | null = null;
       try {
         const dataDir = getLynoxDir();
@@ -12530,14 +14424,17 @@ export class LynoxHTTPApi {
           'X-Lynox-Workspace-Files': String(manifest.files.length),
           'X-Lynox-Workspace-Unreadable': String(manifest.unreadable.length),
           'X-Lynox-Workspace-Incomplete': manifest.may_be_incomplete ? 'true' : 'false',
+          // Sidecar mode: the archive holds only the manifest; this names where the files are.
+          ...(manifest.omitted !== undefined ? { 'X-Lynox-Workspace-Omitted': manifest.omitted.source } : {}),
         });
         // A client that leaves mid-download, or stops reading for too long, ends the pipeline; the
         // staged copy goes below either way.
         res.setTimeout(this.workspaceExportIdleMs, () => res.destroy());
         await pipeline(createReadStream(staged.path), res).catch(() => { /* nothing left to answer */ });
       } finally {
+        clearInterval(heartbeat);
         if (staged !== null) rmSync(staged.dir, { recursive: true, force: true });
-        this.workspaceExportInProgress = false;
+        taken.slot.release();
       }
     });
 
@@ -12547,6 +14444,8 @@ export class LynoxHTTPApi {
       // a mandate cannot erase the record of what it did. Checked before the tier, so it does
       // not depend on which instances a mandate exists on.
       if (this._refuseUnlessOwner(_req, res, 'delete all data')) return;
+      // By mode before the tier: a managed instance in sidecar mode gets the way out, not a bare 403.
+      if (refuseEraseInSidecarMode(res, shellIsolation())) return;
       if (denyOnManagedInstance(res, 'bulk data deletion')) return;
       const b = body as Record<string, unknown> | null;
       const confirm = b && typeof b['confirm'] === 'string' ? b['confirm'] : '';
@@ -12579,9 +14478,9 @@ export class LynoxHTTPApi {
       }
       this.erasureInProgress = true;
       let resumeLogs: (() => void) | null = null;
+      let erasureSlot: HeldSlot | null = null;
       try {
         // Before the synchronous stretch: the stores' files are looked up by name below.
-        const { getLynoxDir } = await import('../core/config.js');
         const dataDir = getLynoxDir();
         const { isAnchoredRoot, workspaceAccessIfPresent } = await import('../core/workspace-access.js');
         const { closeAnchor, emptyDir, ensureSubAnchor } = await import('../core/workspace-fd.js');
@@ -12590,7 +14489,7 @@ export class LynoxHTTPApi {
         const SqliteDatabase = (await import('better-sqlite3')).default;
         // Loaded lazily like every other inbox route, so a boot without the inbox never loads it.
         const { isBackfillRunning } = await import('../integrations/inbox/api.js');
-        for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id);
+        for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id, 'run_stopped');
         const drainStart = Date.now();
         while (this.runningSessions.size > 0 && Date.now() - drainStart < ERASURE_RUN_DRAIN_MS) {
           await new Promise<void>((r) => setTimeout(r, 25));
@@ -12615,6 +14514,18 @@ export class LynoxHTTPApi {
           jsonResponse(res, 409, { ...busy, error: `${busy.error} Nothing was erased.` });
           return;
         }
+        // The shared slot for the whole wipe, so the export command (another process, which does
+        // not see `erasureInProgress`) cannot start reading the stores half emptied. Taken after
+        // the checks above and before anything is deleted; held, it is an export that started in
+        // between.
+        const erasureTaken = acquireSlot(dataDir, 'erasure', 'http');
+        if (!erasureTaken.ok) {
+          jsonResponse(res, 409, erasureTaken.held.kind === 'export'
+            ? { code: 'workspace_export_running', error: 'An export is running. Wait until its download has finished, then erase. Nothing was erased.' }
+            : { code: 'erasure_in_progress', error: 'An erasure is already running. Nothing was erased.' });
+          return;
+        }
+        erasureSlot = erasureTaken.slot;
 
         // The data dir is scanned BEFORE anything is deleted. It is configurable and can be
         // a broad directory (`--data-dir .`, `LYNOX_DATA_DIR=$HOME`); an entry the inventory
@@ -12632,7 +14543,8 @@ export class LynoxHTTPApi {
           wsAccess = workspaceAccessIfPresent();
           wsWalk = wsAccess === null ? null : await this._workspaceWalk(wsAccess, dataDir);
         } catch (err) {
-          process.stderr.write(`⚠ /api/data: workspace root unavailable: ${err instanceof Error ? err.message : String(err)}\n`);
+          // The walk's errno messages name the workspace entry, and those names are chosen by the agent or the user.
+          process.stderr.write(`⚠ /api/data: workspace root unavailable: ${processErrorText(err)}\n`);
           jsonResponse(res, 500, { deleted: false, failed: ['workspace'], error: 'Erasure incomplete — the workspace could not be reached, so nothing was erased' });
           return;
         }
@@ -13133,6 +15045,7 @@ export class LynoxHTTPApi {
         jsonResponse(res, 200, { deleted: true, message: 'All user data has been permanently deleted' });
       } finally {
         resumeLogs?.();
+        erasureSlot?.release();
         this.erasureInProgress = false;
       }
     });
@@ -13148,14 +15061,15 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'GET /api/vault/key', async (req, res) => {
       const key = process.env['LYNOX_VAULT_KEY'];
       if (!key) {
-        jsonResponse(res, 200, { configured: false });
+        // A mandate keeps its 200 with `configured`; only the owner sees the keyless field.
+        jsonResponse(res, 200, { configured: false, ...this._keylessField(req) });
         return;
       }
       // Only return the actual key when explicitly requested (settings page reveal)
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
         // The key opens every stored secret: the owner's own session only.
-        if (this._refuseUnlessOwner(req, res, 'see the vault key')) return;
+        if (this._refuseUnlessOwner(req, res, 'see the vault key', requestPathTarget(url.pathname, [['reveal', 'true']]))) return;
         // Managed mode: never expose vault key to users
         if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: vault key is system-controlled');
@@ -13197,7 +15111,7 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
         // The token logs in as the owner: the owner's own session only.
-        if (this._refuseUnlessOwner(req, res, 'see the access token')) return;
+        if (this._refuseUnlessOwner(req, res, 'see the access token', requestPathTarget(url.pathname, [['reveal', 'true']]))) return;
         if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: access token is system-controlled');
           return;
@@ -13228,8 +15142,12 @@ export class LynoxHTTPApi {
         const { getFileAreaDir } = await import('../core/workspace.js');
         const { ensureDirSync: ensureDir } = await import('../core/atomic-write.js');
 
-        const base = getFileAreaDir();
-        try { await access(base); } catch { ensureDir(base); }
+        // In shell sidecar mode the area is reached only below, through fd 3: nothing is made by
+        // name (PRD shell-sidecar-activation D3).
+        if ((await import('../core/shell-isolation.js')).shellIsolation().kind !== 'sidecar') {
+          const base = getFileAreaDir();
+          try { await access(base); } catch { ensureDir(base); }
+        }
         // With isolation: through the workspace's open directory, links not followed.
         const area = await import('../core/file-area-anchor.js');
         try {
@@ -13275,7 +15193,8 @@ export class LynoxHTTPApi {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === 'ENOENT') { errorResponse(res, 404, 'Directory not found'); return; }
         if (code === 'ENOTDIR') { errorResponse(res, 400, 'Not a directory'); return; }
-        console.error(`[lynox] GET /api/files failed: ${code ?? (err instanceof Error ? err.message : String(err))}`);
+        // The code alone where there is one; a WorkspaceRootError has none and names the workspace path.
+        console.error(`[lynox] GET /api/files failed: ${code ?? processErrorText(err)}`);
         errorResponse(res, 500, 'Could not read the directory');
       }
     }, free('creates the workspace directory when it is missing, and only reads otherwise'));
@@ -13308,7 +15227,7 @@ export class LynoxHTTPApi {
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
         const { createReadStream } = await import('node:fs');
-        const { stat } = await import('node:fs/promises');
+        const { open, stat } = await import('node:fs/promises');
         const { basename } = await import('node:path');
         // With isolation: the file is opened once through the workspace's open directory, and its
         // size, its checks and the stream all come from that one open file.
@@ -13349,16 +15268,30 @@ export class LynoxHTTPApi {
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
         if (st.size > 100 * 1024 * 1024) { errorResponse(res, 413, 'File too large'); return; }
         const name = basename(resolved);
-        res.writeHead(200, {
-          'Content-Type': 'application/octet-stream',
-          'Content-Disposition': attachmentDisposition(name),
-          'Content-Length': st.size,
-        });
+        // Opened before the header goes out, so a file the server may not read is answered as a
+        // failed read instead of a 200 that breaks off.
+        const fh = await open(resolved, 'r');
+        try {
+          res.writeHead(200, {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': attachmentDisposition(name),
+            'Content-Length': st.size,
+          });
+        } catch (err) {
+          await fh.close();
+          throw err;
+        }
         // Bounded by the size answered in Content-Length, also when the file grows.
-        if (st.size === 0) { res.end(); return; }
-        await sendExactly(createReadStream(resolved, { start: 0, end: st.size - 1 }), res, st.size);
-      } catch {
-        errorResponse(res, 404, 'File not found');
+        if (st.size === 0) { await fh.close(); res.end(); return; }
+        await sendExactly(fh.createReadStream({ start: 0, end: st.size - 1 }), res, st.size);
+      } catch (err: unknown) {
+        // Only a missing file is "not found". Anything else (a permission error) means the file
+        // is there and could not be read.
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR') { errorResponse(res, 404, 'File not found'); return; }
+        // The error code only, never the error's text (it can carry a path).
+        console.error(`[lynox] GET /api/files/download failed: ${String(code ?? (err instanceof Error ? err.name : 'unknown'))}`);
+        errorResponse(res, 500, 'Could not read the file');
       }
     }, READS);
 
@@ -13386,8 +15319,13 @@ export class LynoxHTTPApi {
         if (st.size > 1024 * 1024) { errorResponse(res, 413, 'File too large for preview (max 1 MB)'); return; }
         const content = await readFile(resolved, 'utf-8');
         jsonResponse(res, 200, { content });
-      } catch {
-        errorResponse(res, 404, 'File not found');
+      } catch (err: unknown) {
+        // As for the download: only a missing file is "not found".
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR') { errorResponse(res, 404, 'File not found'); return; }
+        // The error code only, never the error's text (it can carry a path).
+        console.error(`[lynox] GET /api/files/read failed: ${String(code ?? (err instanceof Error ? err.name : 'unknown'))}`);
+        errorResponse(res, 500, 'Could not read the file');
       }
     }, READS);
 
@@ -13415,8 +15353,12 @@ export class LynoxHTTPApi {
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
         await unlink(resolved);
         jsonResponse(res, 200, { ok: true });
-      } catch {
-        errorResponse(res, 404, 'File not found');
+      } catch (err: unknown) {
+        // Only a missing file is "not found". Anything else (a permission error, a busy file)
+        // means the file is still there, and the client shows this reason next to its name.
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR') errorResponse(res, 404, 'File not found');
+        else errorResponse(res, 500, 'Could not delete the file');
       }
     }, ownerOnly('delete files'));
 
@@ -13482,9 +15424,43 @@ export class LynoxHTTPApi {
         res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       };
 
+      // From the first handshake request on, the target may hold a session: a stop says when to
+      // try again (the catch below adds it where a step did not), unless it asks to check the target.
+      let sessionMayBeHeld = false;
       try {
         const crypto = await import('../core/migration-crypto.js');
         const { MigrationExporter } = await import('../core/migration-export.js');
+        const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, askTarget, capText, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } = await import('../core/migration-target-reply.js');
+        // Why an answer of the target could not be used, in the user's words.
+        type Why = 'large' | 'format' | 'slow' | 'broken' | 'silent' | 'unreachable';
+        const why = (w: Why, cap: number, unread: string, waited: number = TARGET_BODY_TIMEOUT_MS): string =>
+          w === 'large' ? `its answer is over ${capText(cap)}${unread}`
+            : w === 'format' ? 'its answer is not in the expected format'
+              : w === 'slow' ? `it did not finish its answer within ${durationText(TARGET_BODY_TIMEOUT_MS)}`
+                : w === 'silent' ? `it did not answer within ${durationText(waited)}`
+                  : w === 'unreachable' ? 'it could not be reached'
+                    : 'the connection broke before its answer was complete';
+        // Nothing leaves the instance before the handshake is complete: the first request is this
+        // one, and the data goes only with the manifest and the chunks.
+        // After the first handshake request the target may hold a session for 30 minutes and turns
+        // a new attempt away until then; every stop from here says when to try again, except where
+        // the user has to check the target first.
+        const AGAIN = 'You can start the migration again in 30 minutes at the latest.';
+        const handshakeFailed = (w: Why): string =>
+          `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred. ${AGAIN}`;
+        /**
+         * A request to the target with its deadline for the answer to start. Past it, or when the
+         * connection fails, the step's own words (`words`); the transport's text never reaches the user.
+         */
+        const ask = async (path: string, init: RequestInit, ms: number, words: (w: 'silent' | 'unreachable') => string): Promise<Response> => {
+          try {
+            return await askTarget(fetchPinned, `${targetUrl}${path}`, init, ms);
+          } catch (err: unknown) {
+            if (err instanceof TargetDidNotAnswer) throw new Error(words('silent'));
+            if (isConnectionFailure(err)) throw new Error(words('unreachable'));
+            throw err;
+          }
+        };
 
         // 1. Preview
         sendEvent('progress', { phase: 'preview', message: 'Collecting data inventory...' });
@@ -13495,14 +15471,34 @@ export class LynoxHTTPApi {
         // 2. ECDH Handshake with target
         sendEvent('progress', { phase: 'handshake', message: 'Establishing secure connection...' });
 
-        const hsRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
+        const hsRes = await ask('/api/migration/handshake', {
           headers: { 'X-Migration-Token': migrationToken, 'Accept': 'application/json' },
-        });
+        }, TARGET_REQUEST_TIMEOUTS_MS.handshake, handshakeFailed);
         if (!hsRes.ok) {
-          const errText = await hsRes.text();
-          throw new Error(`Handshake failed: ${errText}`);
+          let errText: string | null;
+          try { errText = await readTargetBody(hsRes, TARGET_BODY_CAPS.handshake, TARGET_BODY_TIMEOUT_MS); } catch (err: unknown) {
+            throw new Error(handshakeFailed(err instanceof TargetAnswerTooSlow ? 'slow' : 'broken'));
+          }
+          if (errText === null) throw new Error(handshakeFailed('large'));
+          // A target still holding an earlier attempt: by its code, or by its text on an older one.
+          let refused: { error?: unknown; code?: unknown } | null = null;
+          try { refused = JSON.parse(errText) as { error?: unknown; code?: unknown }; } catch { /* not JSON */ }
+          if (refused?.code === 'migration_session_active' || (typeof refused?.error === 'string' && refused.error.startsWith(MIGRATION_SESSION_ACTIVE))) {
+            throw new Error(`The target instance is still holding an earlier migration attempt, so it did not accept a new one. Nothing was transferred. ${AGAIN}`);
+          }
+          // The target's own words, cleaned and cut; a refusal here starts no session on it.
+          const said = typeof refused?.error === 'string' ? refused.error : errText;
+          const words = relayedText(said).trim();
+          throw new Error(words === ''
+            ? 'The target instance did not accept the migration. Nothing was transferred.'
+            : `The target instance did not accept the migration. It says: ${words}${/[.!?…]$/.test(words) ? '' : '.'} Nothing was transferred.`);
         }
-        const handshake = await hsRes.json() as { serverPubKey: string; signature: string; challengeNonce: string };
+        // The target answered the handshake: from here it holds a session (a refusal above starts none).
+        sessionMayBeHeld = true;
+        const answer = await readTargetJson(hsRes, TARGET_BODY_CAPS.handshake, handshakeFailed, TARGET_BODY_TIMEOUT_MS);
+        const field = (k: string): unknown => (answer !== null && typeof answer === 'object' ? (answer as Record<string, unknown>)[k] : undefined);
+        if (!['serverPubKey', 'signature', 'challengeNonce'].every((k) => typeof field(k) === 'string')) throw new Error(handshakeFailed('format'));
+        const handshake = answer as { serverPubKey: string; signature: string; challengeNonce: string; acceptsPlainStores?: unknown };
 
         // Verify the server's signature over its public key — without this, a MITM
         // can substitute the responder's keypair and decrypt the entire transfer.
@@ -13516,14 +15512,18 @@ export class LynoxHTTPApi {
           crypto.zeroize(signingKey);
         }
         if (!handshakeValid) {
-          throw new Error('Handshake signature invalid — refusing to derive transfer key');
+          // Not passing: it fails the same way on every attempt (a wrong token or a foreign key).
+          throw new Error('Handshake signature invalid — refusing to derive transfer key. If this happens again, write to support@lynox.ai.');
         }
 
         // Client key agreement
         const clientKp = crypto.generateEphemeralKeypair();
-        const serverPub = crypto.deserializePublicKey(handshake.serverPubKey);
+        // A key or nonce the target sent that does not parse is its answer in the wrong format.
+        let serverPub: ReturnType<typeof crypto.deserializePublicKey>;
+        try { serverPub = crypto.deserializePublicKey(handshake.serverPubKey); } catch { throw new Error(handshakeFailed('format')); }
         const nonce = Buffer.from(handshake.challengeNonce, 'hex');
-        const transferKey = crypto.deriveTransferKey(clientKp.privateKey, serverPub, nonce);
+        let transferKey: Buffer;
+        try { transferKey = crypto.deriveTransferKey(clientKp.privateKey, serverPub, nonce); } catch { throw new Error(handshakeFailed('format')); }
 
         const migrationHeaders = {
           'Content-Type': 'application/json',
@@ -13531,32 +15531,64 @@ export class LynoxHTTPApi {
           'X-Migration-Token': migrationToken,
         };
 
-        const completeRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
-          method: 'POST',
-          headers: migrationHeaders,
-          body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
-        });
-        if (!completeRes.ok) throw new Error('Handshake completion failed');
+        // The transfer key is zeroized once the chunks are encrypted, and also when the handshake
+        // completion or the export fails or refuses (a bundle over the destination's bounds).
+        let exported: ReturnType<typeof exporter.export>;
+        try {
+          const completeRes = await ask('/api/migration/handshake', {
+            method: 'POST',
+            headers: migrationHeaders,
+            body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
+          }, TARGET_REQUEST_TIMEOUTS_MS.handshake, handshakeFailed);
+          await discardBody(completeRes);
+          if (!completeRes.ok) throw new Error(`Handshake completion failed. ${AGAIN}`);
 
-        sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
+          sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
 
-        // 3. Export + Encrypt
-        sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
-        const { manifest, chunks, skipped: exportSkipped } = exporter.export(transferKey, (p) => {
-          sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
-        });
+          // A destination that takes plaintext stores says so in its handshake; its numbers come
+          // from its health route. Anything short of both is the raw path, as for an older one.
+          const { plainOffer, readDestinationHealth } = await import('../core/migration-plain-source.js');
+          const ceiling = handshake.acceptsPlainStores === true
+            ? plainOffer(handshake, await readDestinationHealth(fetchPinned, targetUrl))
+            : null;
 
-        // Zeroize transfer key — no longer needed after encryption
-        crypto.zeroize(transferKey);
+          // 3. Export + Encrypt
+          sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
+          exported = exporter.export(transferKey, (p) => {
+            sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
+          }, ceiling ? { plain: { ceiling } } : undefined);
+        } finally {
+          crypto.zeroize(transferKey);
+        }
+        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace, plain: exportPlain } = exported;
+        // A refusal from the destination is shown as its own text, which is written for the
+        // person migrating; the raw response only when it carries none.
+        // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
+        // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
+        // The answer is read up to its cap, and the target's words lose control and bidi characters.
+        // `then` is what the user can do next: try again later, or, once the restore ran, check the target.
+        const refusal = async (r: Response, step: string, told: string, then: string = AGAIN): Promise<Error> => {
+          let text: string | null;
+          try { text = await readTargetBody(r, TARGET_BODY_CAPS.refusal, TARGET_BODY_TIMEOUT_MS); } catch (err: unknown) {
+            if (err instanceof TargetAnswerTooSlow) return new Error(`${told} It did not finish its answer within ${durationText(TARGET_BODY_TIMEOUT_MS)}. ${then}`);
+            return new Error(`${told} The connection broke before its answer was complete. ${then}`);
+          }
+          if (text === null) return new Error(`${told} Its answer is over ${capText(TARGET_BODY_CAPS.refusal)}, so lynox did not read it. ${then}`);
+          let message: unknown;
+          try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
+          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${relayedText(text)} ${then}`);
+          return new Error(`${told} It says: ${relayedText(message)} ${then}`);
+        };
 
         // 4. Send manifest
         sendEvent('progress', { phase: 'transferring', message: 'Sending manifest...' });
-        const mRes = await fetchPinned(`${targetUrl}/api/migration/manifest`, {
+        const mRes = await ask('/api/migration/manifest', {
           method: 'POST',
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
-        });
-        if (!mRes.ok) throw new Error(`Manifest rejected: ${await mRes.text()}`);
+        }, TARGET_REQUEST_TIMEOUTS_MS.manifest, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.manifest)}.` : 'lynox could not reach the target instance.'} lynox stopped before sending your data. ${AGAIN}`);
+        if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+        await discardBody(mRes);
 
         // 5. Send chunks
         for (let i = 0; i < chunks.length; i++) {
@@ -13567,27 +15599,62 @@ export class LynoxHTTPApi {
             total: chunks.length,
           });
 
-          const cRes = await fetchPinned(`${targetUrl}/api/migration/chunk`, {
+          const cRes = await ask('/api/migration/chunk', {
             method: 'POST',
             headers: migrationHeaders,
             body: JSON.stringify(chunks[i]),
-          });
-          if (!cRes.ok) throw new Error(`Chunk ${String(i)} rejected: ${await cRes.text()}`);
+          }, TARGET_REQUEST_TIMEOUTS_MS.chunk, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.chunk)} while receiving part ${String(i + 1)} of the data.` : `lynox lost the connection to the target instance while sending part ${String(i + 1)} of the data.`} lynox stopped; the target instance has not restored anything. ${AGAIN}`);
+          if (!cRes.ok) throw await refusal(cRes, `Chunk ${String(i)} rejected`, `The target instance refused part ${String(i + 1)} of the data.`);
+          await discardBody(cRes);
         }
 
         // 6. Restore
         sendEvent('progress', { phase: 'restoring', message: 'Restoring data on target...' });
-        const rRes = await fetchPinned(`${targetUrl}/api/migration/restore`, {
-          method: 'POST',
-          headers: migrationHeaders,
-        });
-        if (!rRes.ok) throw new Error(`Restore failed: ${await rRes.text()}`);
+        // From here the data has gone out: when the source cannot tell whether the restore ran, it
+        // says where to look instead of what failed inside.
+        const restoreUnknown = (w: Why): string =>
+          `The target instance's report on restoring the data could not be read: ${why(w, TARGET_BODY_CAPS.restore, '', TARGET_REQUEST_TIMEOUTS_MS.restore)}. Check on the target instance whether your data arrived before you migrate again.`;
+        let rRes: Response;
+        try {
+          rRes = await askTarget(fetchPinned, `${targetUrl}/api/migration/restore`, { method: 'POST', headers: migrationHeaders }, TARGET_REQUEST_TIMEOUTS_MS.restore);
+        } catch (err: unknown) {
+          if (err instanceof TargetDidNotAnswer) throw new Error(restoreUnknown('silent'));
+          if (isConnectionFailure(err)) throw new Error(restoreUnknown('broken'));
+          // The network guard refusing the address (it follows no redirects): nothing was sent, so a
+          // new attempt can get past it. Anything else: the user checks the target first.
+          const text = relayedText(err instanceof Error ? err.message : String(err)).trim();
+          if (text.startsWith('Blocked:')) {
+            const reason = text.slice('Blocked:'.length).trim().replace(/[.!?…]+$/, '');
+            throw new Error(`lynox did not send the request to restore the data${reason === '' ? '' : `: ${reason}`}. The target instance has not restored anything. ${AGAIN}`);
+          }
+          throw new Error(`${text === '' ? 'The request to restore the data ended unexpectedly' : text}${/[.!?…]$/.test(text) ? '' : '.'} Check on the target instance whether your data arrived before you migrate again.`);
+        }
+        // A 4xx is the target turning the restore down before it started (a missing chunk, sidecar
+        // mode); a 5xx is the restore failing on the way, which can leave part of it applied.
+        if (!rRes.ok) throw await refusal(rRes, 'Restore failed', 'The target instance could not restore the data.', rRes.status >= 500 ? 'Check on the target instance whether your data arrived before you migrate again.' : AGAIN);
 
-        const result = await rRes.json() as { success: boolean; verification: unknown };
-        // Files the export could not carry (a link, a name that cannot travel) are named in the result.
-        sendEvent('done', { success: true, verification: result.verification, ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}) });
+        const result = await readTargetJson(rRes, TARGET_BODY_CAPS.restore, restoreUnknown, TARGET_BODY_TIMEOUT_MS) as { success?: unknown; verification?: unknown } | null;
+        // Files the export could not carry (a link, a name that cannot travel) are named in the result,
+        // and so is a workspace left out in shell sidecar mode (PRD D7, walker 2).
+        sendEvent('done', {
+          // The report is the target's: shown, so its strings lose what would not display as itself.
+          success: true, verification: relayedReport(result?.verification),
+          ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}),
+          ...(exportWorkspace !== undefined ? { workspace: exportWorkspace } : {}),
+          // Per store the path it took and why a store took the raw path, for the report.
+          ...(exportPlain !== undefined ? { plain: exportPlain } : {}),
+        });
       } catch (err: unknown) {
-        sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
+        // Every text to the user goes through the same cleaning, the guard's and the exporter's too.
+        const { relayedText: clean } = await import('../core/migration-target-reply.js');
+        const message = clean(err instanceof Error ? err.message : '', 2000).trim()
+          || `The migration stopped for a reason lynox could not read.${sessionMayBeHeld ? '' : ' Nothing was transferred.'}`;
+        // A stop after the handshake that names no next step (a read failing on this instance) gets
+        // the retry sentence. A stop that names one (check the target, write to support) does not:
+        // there the same attempt fails again, and the sentence would send the user round in a loop.
+        const AGAIN_TEXT = 'You can start the migration again in 30 minutes at the latest.';
+        const said = message.includes(AGAIN_TEXT) || message.includes('Check on the target instance') || message.includes('support@lynox.ai');
+        sendEvent('error', { message: sessionMayBeHeld && !said ? `${message}${/[.!?…]$/.test(message) ? '' : '.'} ${AGAIN_TEXT}` : message });
       } finally {
         res.end();
       }
@@ -13638,7 +15705,9 @@ export class LynoxHTTPApi {
         const payload = importer.startHandshake(storedToken);
         jsonResponse(res, 200, payload);
       } catch (err: unknown) {
-        errorResponse(res, 400, err instanceof Error ? err.message : 'Handshake failed');
+        const message = err instanceof Error ? err.message : 'Handshake failed';
+        // The source words this refusal for the person migrating; the code lets it tell it apart.
+        errorResponse(res, 400, message, message.startsWith(MIGRATION_SESSION_ACTIVE) ? 'migration_session_active' : undefined);
       }
     });
 
@@ -13683,6 +15752,12 @@ export class LynoxHTTPApi {
         }
 
         const manifest = body as import('../core/migration-crypto.js').MigrationManifest;
+        // In shell sidecar mode a workspace is not taken over (PRD D7, walker 3): refused here,
+        // before any chunk is transferred. The deciding check runs on the assembled bundles.
+        if (shellIsolation().kind === 'sidecar' && importer.manifestCarriesWorkspace(manifest)) {
+          jsonResponse(res, 409, { error: importRefusal(), code: 'workspace_sidecar_mode' });
+          return;
+        }
         importer.setManifest(manifest);
         jsonResponse(res, 200, { accepted: true, totalChunks: manifest.totalChunks });
       } catch (err: unknown) {
@@ -13739,6 +15814,14 @@ export class LynoxHTTPApi {
         // A restore that cannot run anyway costs no shutdown.
         if (!importer.isComplete()) {
           errorResponse(res, 400, 'Cannot restore — not all chunks received.');
+          return;
+        }
+        // The deciding refusal for a workspace in shell sidecar mode (PRD D7, walker 3), on the
+        // decrypted bundles and before `_restoring`: after it, any throw ends the process.
+        if (shellIsolation().kind === 'sidecar' && importer.bundlesCarryWorkspace()) {
+          importer.cleanup();
+          this._migrationImporter = null;
+          jsonResponse(res, 409, { error: importRefusal(), code: 'workspace_sidecar_mode' });
           return;
         }
         this._restoring = true;

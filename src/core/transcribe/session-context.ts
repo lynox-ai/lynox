@@ -17,6 +17,8 @@
 
 import type { Engine } from './../engine.js';
 import type { TranscribeSessionContext } from './types.js';
+import { containedThreads } from '../containment.js';
+import { stripHidden } from '../hidden-text.js';
 
 export interface ExtractOptions {
   /** Max contacts to include. Default 80 — matches glossary cap. */
@@ -82,14 +84,23 @@ function readThreadTitles(engine: Engine, sessionId: string | null, recent: numb
   if (!store) return [];
   const titles: string[] = [];
   try {
-    // Current thread first, so it wins priority order in the glossary builder.
-    if (sessionId) {
-      const current = store.getThread(sessionId);
-      if (current?.title) titles.push(current.title);
-    }
+    // Titles as stored, without the characters that render as nothing (`hidden-text.ts`): a thread
+    // created before its title was stripped keeps what it was given, and a fuzzy replacement could
+    // carry it into the dictated text. Current thread first, so it wins priority order in the
+    // glossary builder.
+    const add = (title: string | null | undefined): void => {
+      const visible = title ? stripHidden(title) : '';
+      if (visible && !titles.includes(visible)) titles.push(visible);
+    };
+    if (sessionId) add(store.getThread(sessionId)?.title);
     const list = store.listThreads({ limit: recent });
+    // Another chat's title goes into this chat's transcript and on to its model. A contained
+    // chat's title stays in that chat: its own dictation has it from the lookup above. On a
+    // provisioned instance with no record to read, every chat counts as contained.
+    const contained = containedThreads(engine.getToolContext().containment, list.map((t) => t.id));
     for (const t of list) {
-      if (t.title && !titles.includes(t.title)) titles.push(t.title);
+      if (contained.has(t.id)) continue;
+      add(t.title);
     }
   } catch {
     // best-effort

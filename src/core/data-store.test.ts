@@ -972,6 +972,38 @@ describe('DataStore', () => {
 
   // === Collection Info & Listing ===
 
+  describe('deleteRecordsReturningIds (660a-2)', () => {
+    const seed = (): Array<{ _id: number; status: string }> => {
+      ds.createCollection({ name: 'leads', scope, columns: [{ name: 'status', type: 'string' }] });
+      ds.insertRecords({ collection: 'leads', records: [{ status: 'open' }, { status: 'lost' }, { status: 'lost' }, { status: 'open' }], stamp: TEST_STAMP });
+      return ds.queryRecords({ collection: 'leads' }).rows as Array<{ _id: number; status: string }>;
+    };
+
+    it('names exactly the records it removed, and the count matches', () => {
+      const before = seed();
+      const lost = before.filter(r => r.status === 'lost').map(r => r._id).sort((a, b) => a - b);
+      const res = ds.deleteRecordsReturningIds({ collection: 'leads', filter: { status: 'lost' } });
+      expect([...res.ids].sort((a, b) => a - b)).toEqual(lost);
+      expect(res.deleted).toBe(2);
+      const left = (ds.queryRecords({ collection: 'leads' }).rows as Array<{ _id: number }>).map(r => r._id);
+      expect(left.some(id => lost.includes(id))).toBe(false);
+      expect(left).toHaveLength(2);
+      expect(ds.getCollectionInfo('leads')?.recordCount).toBe(2);
+    });
+
+    it('names nothing and keeps the count when nothing matches', () => {
+      seed();
+      expect(ds.deleteRecordsReturningIds({ collection: 'leads', filter: { status: 'won' } })).toEqual({ deleted: 0, ids: [] });
+      expect(ds.getCollectionInfo('leads')?.recordCount).toBe(4);
+    });
+
+    it('deleteRecords still answers with the count alone', () => {
+      seed();
+      expect(ds.deleteRecords({ collection: 'leads', filter: { status: 'open' } })).toBe(2);
+      expect(ds.getCollectionInfo('leads')?.recordCount).toBe(2);
+    });
+  });
+
   describe('listCollections / getCollectionInfo', () => {
     it('lists all collections', () => {
       ds.createCollection({ name: 'a', scope, columns: [{ name: 'x', type: 'string' }] });
@@ -1122,15 +1154,16 @@ describe('DataStore', () => {
     it('pins the DDL createCollection emits for the CRM\'s shapes — a change here does not reach kept empty tables', () => {
       // A kept empty CRM collection keeps the DDL it was created with. If this snapshot
       // has to change, existing empty CRM tables will NOT get the new DDL from the boot
-      // drop any more (crm-schema.ts): ship a migration for them with the change.
+      // drop any more (crm-schema.ts): ship a migration for them with the change. The source
+      // columns are the exception: the boot adds any that are missing (`ensureSourceColumns`).
       for (const shape of CRM_COLLECTIONS) ds.createCollection(createParamsOf(shape));
       const ddl = (ds['db'] as Database.Database)
         .prepare("SELECT name, sql FROM sqlite_master WHERE tbl_name IN ('ds_contacts','ds_deals','ds_interactions') ORDER BY name")
         .all();
       expect(ddl).toEqual([
-        { name: 'ds_contacts', sql: 'CREATE TABLE "ds_contacts" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, "name" TEXT, "email" TEXT, "phone" TEXT, "company" TEXT, "type" TEXT, "source" TEXT, "channel_id" TEXT, "language" TEXT, "notes" TEXT, "tags" TEXT)' },
-        { name: 'ds_deals', sql: 'CREATE TABLE "ds_deals" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, "title" TEXT, "contact_name" TEXT, "value" REAL, "currency" TEXT, "stage" TEXT, "next_action" TEXT, "due_date" TEXT)' },
-        { name: 'ds_interactions', sql: 'CREATE TABLE "ds_interactions" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, "contact_name" TEXT, "type" TEXT, "channel" TEXT, "summary" TEXT, "date" TEXT)' },
+        { name: 'ds_contacts', sql: 'CREATE TABLE "ds_contacts" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, _written_by TEXT, _written_untrusted TEXT, "name" TEXT, "email" TEXT, "phone" TEXT, "company" TEXT, "type" TEXT, "source" TEXT, "channel_id" TEXT, "language" TEXT, "notes" TEXT, "tags" TEXT)' },
+        { name: 'ds_deals', sql: 'CREATE TABLE "ds_deals" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, _written_by TEXT, _written_untrusted TEXT, "title" TEXT, "contact_name" TEXT, "value" REAL, "currency" TEXT, "stage" TEXT, "next_action" TEXT, "due_date" TEXT)' },
+        { name: 'ds_interactions', sql: 'CREATE TABLE "ds_interactions" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, _written_by TEXT, _written_untrusted TEXT, "contact_name" TEXT, "type" TEXT, "channel" TEXT, "summary" TEXT, "date" TEXT)' },
         { name: 'idx_contacts_ukey', sql: 'CREATE UNIQUE INDEX "idx_contacts_ukey" ON "ds_contacts" ("email")' },
         { name: 'idx_deals_ukey', sql: 'CREATE UNIQUE INDEX "idx_deals_ukey" ON "ds_deals" ("title", "contact_name")' },
       ]);
