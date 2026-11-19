@@ -109,6 +109,8 @@ describe('a run that ended with lynox\'s own sentence', () => {
 			expect(reply()?.getAttribute('data-ai-generated')).toBe('false');
 			// The info style, not a failure.
 			expect(notice()?.querySelector('[role="status"]')?.className).toContain('border-border');
+			// No reply to copy under lynox's own note: no actions, as after a reload.
+			expect(reply()?.querySelector('button')).toBeNull();
 		});
 
 		it(`${locale}: a run a hook blocked names the check, says it was not sent, and keeps the reason in English`, async () => {
@@ -135,6 +137,8 @@ describe('control: the model\'s words keep the AI mark', () => {
 		expect(target.querySelector('.ai-badge')).not.toBeNull();
 		expect(reply()?.getAttribute('data-ai-generated')).toBe('true');
 		expect(text(reply())).toContain('Paris.');
+		// A model reply keeps its actions (copy).
+		expect(reply()?.querySelector('button')).not.toBeNull();
 	});
 
 	it('a notice the chat does not take (a question that may be the model\'s) is shown as before, with the mark', async () => {

@@ -3009,7 +3009,8 @@
 						     segment makes the same numbers repeat and clutters the
 						     thumb zone. Aggregate hasArtifact across the whole
 						     message content. -->
-						{#if msg.blocks?.length && msg.content}
+						<!-- A note of lynox's alone has no reply to copy: no actions, as after a reload. -->
+						{#if msg.blocks?.length && msg.content && !lynoxOnly}
 							{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
 							{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 						{/if}
