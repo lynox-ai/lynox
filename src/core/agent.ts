@@ -5141,7 +5141,7 @@ export class Agent implements IAgent {
     // empty one, a recipient field that yields none) refuses the whole call, in every session and
     // without a question: a yes to a target nobody can see would hold for anything.
     if (targetsUnread) {
-      const unreadNoun: TargetNoun = tc.name === 'http_request' || tc.name === 'web_research' ? 'host' : 'mail';
+      const unreadNoun: TargetNoun = tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
       try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
       if (guardRefuses) return {};
       const text = originUnreadable(unreadNoun);
@@ -5159,7 +5159,7 @@ export class Agent implements IAgent {
     const lookupFailed = foreign.some((v) => v.verdict === 'unreadable');
     const shownTargets = foreign.map((v) => v.target.value);
     const shown: OriginTargets = { values: shownTargets, unreadable: false };
-    const noun: TargetNoun = foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
+    const noun: TargetNoun = tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
     const origin = this.originOfTargets();
     const passed: CallTargetOrigin = { known, allKnown: false, unnamed: { targets: shownTargets, origin } };
     // The guard refuses this call without asking anyone, with its own text; the run's owner still
@@ -5179,7 +5179,7 @@ export class Agent implements IAgent {
     };
     const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
       try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
-      return refuse(lookupFailed ? originLookupFailedUnattended(shown) : originRefusedUnattended(shown, origin));
+      return refuse(lookupFailed ? originLookupFailedUnattended(shown, noun) : originRefusedUnattended(shown, origin, noun));
     };
     // Someone the owner let in answers this session's questions themselves: asking them would
     // protect nothing. A target the owner named goes out as it would for the owner.

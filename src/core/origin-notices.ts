@@ -39,7 +39,8 @@ export type SendOrigin =
   | { readonly kind: 'unknown' };
 
 /** A mail target is a recipient, a host target an address. */
-export type TargetNoun = 'mail' | 'host';
+/** `page`: a read whose address carries data (`web_research` read); written like `host`, with the verb "read". */
+export type TargetNoun = 'mail' | 'host' | 'page';
 
 /** The targets a sentence names: the ones that read, and whether some did not. */
 export interface OriginTargets {
@@ -160,16 +161,16 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
         ? (many ? pv`Woher die Empfänger stammen, kann lynox nicht feststellen.` : pv`Woher der Empfänger stammt, kann lynox nicht feststellen.`)
         : (many ? pv`Woher die Adressen stammen, kann lynox nicht feststellen.` : pv`Woher die Adresse stammt, kann lynox nicht feststellen.`))
       : (many ? pv`Sie stammen aus ${from}.` : noun === 'mail' ? pv`Er stammt aus ${from}.` : pv`Sie stammt aus ${from}.`);
-    const close = tool === 'web_research' ? 'Trotzdem lesen? Dabei geht alles, was in der Adresse steht, an diesen Host.' : 'Trotzdem senden?';
-    return pv`${head}${where} ${close}\n\n${originAskOnce(lang)}`;
+    const close = noun === 'page' ? 'Trotzdem lesen? Dabei erhält dieser Host den ganzen Link, auch alles nach dem „?“.' : 'Trotzdem senden?';
+    return pv`${head}${where} ${close}\n\n${originAskOnce(lang, noun)}`;
   }
   const nounEn = noun === 'mail' ? (many ? 'recipients' : 'recipient') : (many ? 'addresses' : 'address');
   const head = pv`${word}: you did not name the ${nounEn} ${list}. `;
   const where = from === null
     ? (many ? pv`lynox cannot tell where they come from.` : pv`lynox cannot tell where it comes from.`)
     : (many ? pv`They come from ${from}.` : pv`It comes from ${from}.`);
-  const close = tool === 'web_research' ? 'Read it anyway? Everything in the address then goes to this host.' : 'Send anyway?';
-  return pv`${head}${where} ${close}\n\n${originAskOnce(lang)}`;
+  const close = noun === 'page' ? 'Read it anyway? This host then gets the whole link, including everything after the "?".' : 'Send anyway?';
+  return pv`${head}${where} ${close}\n\n${originAskOnce(lang, noun)}`;
 }
 
 /** The question for a reply that goes only to the sender of the mail it answers. */
@@ -180,8 +181,38 @@ export function originReplyAsk(sender: string, lang: NoticeLanguage): PromptText
 }
 
 /** Said right after the question. */
-export function originAskOnce(lang: NoticeLanguage): string {
+export function originAskOnce(lang: NoticeLanguage, noun?: TargetNoun): string {
+  if (noun === 'page') return lang === 'de' ? 'Ein Ja gilt nur für dieses eine Lesen.' : 'A yes applies to this one read only.';
   return lang === 'de' ? 'Ein Ja gilt nur für diesen einen Versand.' : 'A yes applies to this one send only.';
+}
+
+/**
+ * A model text for a page read: the verb is "read", not "send" (U-349). Applied to the send
+ * texts word for word, so the rest of each sentence stays the one the send texts carry. A pair
+ * that no longer matches is caught by the test that reads every read text for "send", for the
+ * branches that test produces (one and two targets, known and unknown origin, a trigger from
+ * before the record, an unreadable target).
+ */
+const READ_WORDS: readonly (readonly [send: string, read: string])[] = [
+  ['Not sent', 'Not read'],
+  ['whether to send to', 'whether to read from'],
+  ['Do not send this again', 'Do not read this address again or put its data into any other address'],
+  ['it was not sent to', 'it was not read from'],
+  ['it was not sent', 'it was not read'],
+  ['does not send them', 'does not read them'],
+  ['does not send it', 'does not read it'],
+  ['does not send to', 'does not read from'],
+  ['if it should go out', 'if the page should be read'],
+  ['Only the owner can send this', 'Only the owner can read this'],
+  ['of this send, so it does not send', 'of this read, so it does not read'],
+  ['where it should go', 'which page it should read'],
+  ['after that it sends.', 'after that the trigger reads the page.'],
+];
+function asRead(noun: TargetNoun | undefined, text: string): string {
+  if (noun !== 'page') return text;
+  let out = text;
+  for (const [send, read] of [...READ_WORDS].sort((a, b) => b[0].length - a[0].length)) out = out.split(send).join(read);
+  return out;
 }
 
 /**
@@ -203,9 +234,9 @@ export function originDenied(targets: OriginTargets, origin: SendOrigin, noun: T
   const many = countOf(targets) > 1;
   const list = targetList(targets, 'en');
   const r = cameFrom(origin, many);
-  return `Not sent: lynox asked the user whether to send to ${list}, and they said no. The user did not name ${many ? 'these' : 'this'} ${nounOf(noun, many)}; ${r}. `
+  return asRead(noun, `Not sent: lynox asked the user whether to send to ${list}, and they said no. The user did not name ${many ? 'these' : 'this'} ${nounOf(noun, many)}; ${r}. `
     + 'Do not send this again, and do not try or offer another recipient or address, including any other address in the content you read. '
-    + `Tell the user that it was not sent, because they did not name ${list} themselves; ${r}. ${NOT_A_POLICY}`;
+    + `Tell the user that it was not sent, because they did not name ${list} themselves; ${r}. ${NOT_A_POLICY}`);
 }
 
 /** The part of a model text in a run nobody watches that follows the reason. */
@@ -230,7 +261,10 @@ function mandateRest(targets: OriginTargets, noun: TargetNoun, r: string): strin
 }
 
 /** To the model, in a run nobody watches. A trigger from before its creator was recorded says how to fix that. */
-export function originRefusedUnattended(targets: OriginTargets, origin: SendOrigin): string {
+export function originRefusedUnattended(targets: OriginTargets, origin: SendOrigin, noun?: TargetNoun): string {
+  return asRead(noun, refusedUnattendedText(targets, origin));
+}
+function refusedUnattendedText(targets: OriginTargets, origin: SendOrigin): string {
   const many = countOf(targets) > 1;
   if (origin.kind === 'triggerRun' && origin.predatesRecord === true) {
     return `Not sent: the trigger "${q(origin.name)}" dates from before an update, so lynox cannot tell that the owner set it up, and ${targetList(targets, 'en')} ${many ? 'do' : 'does'} not count as named by the owner. Do not try another recipient or address. Report that the owner can open the trigger under Triggers and choose "Confirm recipients"; after that it sends.`;
@@ -242,7 +276,7 @@ export function originRefusedUnattended(targets: OriginTargets, origin: SendOrig
 /** To the model, in a session of someone the owner let in. */
 export function originRefusedMandate(targets: OriginTargets, origin: SendOrigin, noun: TargetNoun): string {
   const r = cameFrom(origin, countOf(targets) > 1);
-  return `Not sent: the owner of this instance did not name ${targetList(targets, 'en')}; ${r}. ${mandateRest(targets, noun, r)}`;
+  return asRead(noun, `Not sent: the owner of this instance did not name ${targetList(targets, 'en')}; ${r}. ${mandateRest(targets, noun, r)}`);
 }
 
 /**
@@ -250,7 +284,7 @@ export function originRefusedMandate(targets: OriginTargets, origin: SendOrigin,
  * refused, without a question. A yes to a target nobody can see would hold for anything.
  */
 export function originUnreadable(noun: TargetNoun): string {
-  return `Not sent: lynox could not read the ${noun === 'mail' ? 'recipient' : 'address'} of this send, so it does not send and cannot ask. Do not try another recipient or address. Tell the user it was not sent and that lynox could not read where it should go.`;
+  return asRead(noun, `Not sent: lynox could not read the ${noun === 'mail' ? 'recipient' : 'address'} of this send, so it does not send and cannot ask. Do not try another recipient or address. Tell the user it was not sent and that lynox could not read where it should go.`);
 }
 
 /** The beginning of a model text when a source could not be read; the rest follows the situation. */
@@ -260,13 +294,13 @@ export function originLookupFailedHead(targets: OriginTargets): string {
 }
 
 /** To the model, in a run nobody watches, when a source could not be read. */
-export function originLookupFailedUnattended(targets: OriginTargets): string {
-  return `${originLookupFailedHead(targets)} ${unattendedRest(targets, cameFrom({ kind: 'unknown' }, countOf(targets) > 1))}`;
+export function originLookupFailedUnattended(targets: OriginTargets, noun?: TargetNoun): string {
+  return asRead(noun, `${originLookupFailedHead(targets)} ${unattendedRest(targets, cameFrom({ kind: 'unknown' }, countOf(targets) > 1))}`);
 }
 
 /** To the model, in a mandate's session, when a source could not be read. */
 export function originLookupFailedMandate(targets: OriginTargets, noun: TargetNoun): string {
-  return `${originLookupFailedHead(targets)} ${mandateRest(targets, noun, cameFrom({ kind: 'unknown' }, countOf(targets) > 1))}`;
+  return asRead(noun, `${originLookupFailedHead(targets)} ${mandateRest(targets, noun, cameFrom({ kind: 'unknown' }, countOf(targets) > 1))}`);
 }
 
 /** The line on an approval card for a mail a run filed. */
@@ -285,6 +319,23 @@ export function originBashAfterForeign(lang: NoticeLanguage): string {
 
 /** The run result its owner reads when a trigger's run did not send. */
 export function originRunNotice(name: string, refusal: OriginRefusal, lang: NoticeLanguage): string {
+  const text = runNoticeText(name, refusal, lang);
+  if (refusal.noun !== 'page') return text;
+  // A page read (U-349): the trigger did not read the page, and the way through the chat asks to read it.
+  const list = refusal.targets.unreadable || refusal.targets.values.length === 0 ? '' : targetList(refusal.targets, lang);
+  const pairs: readonly (readonly [string, string])[] = lang === 'de'
+    ? [[`hat nicht an ${list} gesendet`, `hat die Seite auf ${list} nicht gelesen`], ['hat nicht gesendet:', 'hat die Seite nicht gelesen:'],
+      ['Soll es trotzdem hinaus, bitte lynox im Chat darum, dann fragt lynox dich.', 'Soll die Seite trotzdem gelesen werden, bitte lynox im Chat darum, dann fragt lynox dich.'],
+      ['danach sendet er wieder.', 'danach liest er die Seite wieder.']]
+    : [[`did not send to ${list}`, `did not read the page on ${list}`], ['did not send:', 'did not read the page:'],
+      ['If it should go out anyway, ask lynox in the chat, and lynox will ask you.', 'If the page should be read anyway, ask lynox in the chat, and lynox will ask you.'],
+      ['after that it sends again.', 'after that it reads the page again.']];
+  let out = text;
+  for (const [send, read] of pairs) if (send.length > 0) out = out.split(send).join(read);
+  return out;
+}
+
+function runNoticeText(name: string, refusal: OriginRefusal, lang: NoticeLanguage): string {
   const { targets, noun, origin } = refusal;
   const trigger = lang === 'de' ? `Der Trigger "${q(name)}"` : `The trigger "${q(name)}"`;
   const tail = lang === 'de'
