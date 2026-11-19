@@ -248,19 +248,22 @@ describe('Agent Security Audit', () => {
       expect(resolved, 'a placeholder inside a step result must not be resolved').not.toContain('zz-not-resolved-9');
       expect(resolved).toContain('{{params.secret}}');
       const viaStep = resolveTaskTemplate('{{s1.result}}', { s1: { result: '{{s2.result}}' }, s2: { result: 'zz-not-resolved-8' } });
-      expect(viaStep, 'a step reference inside a step result must not be resolved').not.toContain('zz-not-resolved-8');
-      const inInput = resolveInputTemplate({ q: '{{s1.result}} x' }, { s1: { result: '{{params.k}}' }, params: { k: 'zz-not-resolved-7' } });
-      expect(JSON.stringify(inInput), 'an input template must not resolve a placeholder inside a step result').not.toContain('zz-not-resolved-7');
-      // The behaviour above covers the paths it calls. A second resolver written the usual ways
-      // on a path no test drives is caught here instead: no regex with an escaped or a bare brace
-      // pair (`\\{\\{`, `/{{`, `[{]`), no bare `'{{'` literal (a split or indexOf by hand), and
-      // the scanner called only where it is today (resolveTaskTemplate and substituteString
-      // replace, the whole-string test in substituteString). A brace spelled another way
-      // (`\\x7b`, a char code) is not caught; review covers that.
+      expect(viaStep, 'a step reference inside a step result must not be resolved').toBe('{{s2.result}}');
+      const inputCtx = { s1: { result: '{{params.k}}' }, params: { k: 'zz-not-resolved-7' } };
+      // Embedded in text and as the whole string: the two branches of an input-template string.
+      expect(resolveInputTemplate({ q: '{{s1.result}} x' }, inputCtx), 'an input template must not resolve a placeholder inside a step result').toEqual({ q: '{{params.k}} x' });
+      expect(resolveInputTemplate({ q: '{{s1.result}}' }, inputCtx), 'a whole-string input template must not resolve a placeholder inside a step result').toEqual({ q: '{{params.k}}' });
+      // The behaviour above covers the paths it calls. A second resolver on a path no test drives
+      // is caught here when it is written the usual ways: an escaped brace (`\\{`), a regex that
+      // opens with a bare pair (`/{{`), a brace class (`[{]`), or a bare `'{{'` literal (a split or
+      // indexOf by hand); and the scanner is called as often as today (twice replacePlaceholders,
+      // once solePlaceholder, never placeholders). A bare pair later in a regex, a brace spelled
+      // another way (`\\x7b`, a char code) or a moved call is not caught; review covers that.
       expect(contextContent, 'context.ts must not match {{ with a regex of its own').not.toMatch(/\\\{|\/\{\{|\[\{\]/);
       expect(contextContent, 'context.ts must not look for {{ by hand').not.toMatch(/(['"`])\{\{\1/);
       expect(contextContent.match(/\breplacePlaceholders\(/g)?.length, 'replacePlaceholders is called in exactly two places').toBe(2);
       expect(contextContent.match(/\bsolePlaceholder\(/g)?.length, 'solePlaceholder is called in exactly one place').toBe(1);
+      expect(contextContent.match(/\bplaceholders\(/g), 'context.ts must not walk placeholders by hand').toBeNull();
       // Ensure there is no recursive call or while loop for template resolution
       const fnMatch = contextContent.match(/function resolveTaskTemplate[\s\S]*?^}/m);
       expect(fnMatch, 'resolveTaskTemplate must be found as a function declaration').not.toBeNull();
