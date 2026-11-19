@@ -38,7 +38,8 @@ export function crossHostRedirectGuard(checkedUrl: string, checked: boolean, inn
   return (nextUrl, method, headers) => {
     const to = new URL(nextUrl).hostname;
     if (to !== from) {
-      throw new Error(`Blocked: the page redirects to another host (${maskedHost(to)}). After foreign content in this conversation, a read with a query follows no redirect to another host. Nothing was sent there; to read it, request that address itself.`);
+      const host = maskedHost(to);
+      throw new Error(`Blocked: the page forwards this read to another host (${host}), and lynox did not follow. Nothing was sent to that host. After content from outside in this conversation, a read with a query does not follow a redirect to another host. lynox does not show you the full address, so do not guess it. Tell the user that the page forwards to ${host} and that lynox did not follow it; if they want that page, they can give you its address.`);
     }
     inner?.(nextUrl, method, headers);
   };

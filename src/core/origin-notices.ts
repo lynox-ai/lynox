@@ -124,6 +124,7 @@ const TOOL_WORDS: Readonly<Record<string, readonly [de: string, en: string]>> = 
   mail_send: ['Mail senden', 'Send mail'],
   mail_reply: ['Antwort auf Mail', 'Reply to email'],
   http_request: ['API-Anfrage', 'API request'],
+  web_research: ['Seite lesen', 'Read page'],
   google_drive: ['Google Drive: Datei freigeben', 'Google Drive: share file'],
   'google_calendar:create': ['Google Calendar: Termin anlegen', 'Google Calendar: create event'],
   'google_calendar:update': ['Google Calendar: Termin ändern', 'Google Calendar: change event'],
@@ -159,14 +160,16 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
         ? (many ? pv`Woher die Empfänger stammen, kann lynox nicht feststellen.` : pv`Woher der Empfänger stammt, kann lynox nicht feststellen.`)
         : (many ? pv`Woher die Adressen stammen, kann lynox nicht feststellen.` : pv`Woher die Adresse stammt, kann lynox nicht feststellen.`))
       : (many ? pv`Sie stammen aus ${from}.` : noun === 'mail' ? pv`Er stammt aus ${from}.` : pv`Sie stammt aus ${from}.`);
-    return pv`${head}${where} Trotzdem senden?\n\n${originAskOnce(lang)}`;
+    const close = tool === 'web_research' ? 'Trotzdem lesen? Dabei geht alles, was in der Adresse steht, an diesen Host.' : 'Trotzdem senden?';
+    return pv`${head}${where} ${close}\n\n${originAskOnce(lang)}`;
   }
   const nounEn = noun === 'mail' ? (many ? 'recipients' : 'recipient') : (many ? 'addresses' : 'address');
   const head = pv`${word}: you did not name the ${nounEn} ${list}. `;
   const where = from === null
     ? (many ? pv`lynox cannot tell where they come from.` : pv`lynox cannot tell where it comes from.`)
     : (many ? pv`They come from ${from}.` : pv`It comes from ${from}.`);
-  return pv`${head}${where} Send anyway?\n\n${originAskOnce(lang)}`;
+  const close = tool === 'web_research' ? 'Read it anyway? Everything in the address then goes to this host.' : 'Send anyway?';
+  return pv`${head}${where} ${close}\n\n${originAskOnce(lang)}`;
 }
 
 /** The question for a reply that goes only to the sender of the mail it answers. */
