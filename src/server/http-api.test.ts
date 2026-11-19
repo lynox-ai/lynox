@@ -20519,6 +20519,52 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     }
   });
 
+  describe('the ask for an expiring token in the code exchange', () => {
+    /** Arranges the profile with or without a token in its vault slot, and the stamp it holds. */
+    async function arrangeHeld(held: { token: boolean; expiresAt?: number }): Promise<{ cookie: string }> {
+      const { accessTokenKey } = await vi.importActual<typeof import('../core/api-store.js')>('../core/api-store.js');
+      const out = await arrange(held.expiresAt === undefined ? {} : { oauthExtra: { token_expires_at: held.expiresAt } });
+      mockSecretResolve.mockImplementation((n: string) => {
+        if (n === accessTokenKey(PROFILE)) return held.token ? 'at-old' : null;
+        return n === 'SHOP_CLIENT_ID' ? 'id-1' : CLIENT_SECRET;
+      });
+      return out;
+    }
+    const sentParams = (): Record<string, string> =>
+      (mockExchangeToken.mock.calls[0]![0] as { params: Record<string, string> }).params;
+
+    it('asks a store with no token yet for an expiring one, in the body the exchange pass covers', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { serializeTokenBody } = await import('../core/oauth-token-exchange.js');
+      exchangePassFor.calls = [];
+      exchangePassFor.standIn = async () => ({ stand: 'in' });
+      try {
+        const { cookie } = await arrangeHeld({ token: false });
+        expect((await call(signed(good()), cookie)).status).toBe(200);
+        expect(sentParams()['expiring']).toBe('1');
+        const [, , body] = exchangePassFor.calls[0]! as [unknown, string, string];
+        expect(body).toBe(serializeTokenBody(sentParams(), 'form'));
+        expect(body).toContain('expiring=1');
+      } finally {
+        exchangePassFor.standIn = null;
+      }
+    });
+
+    it('does not ask a store connected with a token that does not expire, when it is connected again', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie } = await arrangeHeld({ token: true });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(sentParams()).not.toHaveProperty('expiring');
+    });
+
+    it('asks a store whose token already expires again when it is connected again', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie } = await arrangeHeld({ token: true, expiresAt: Date.now() + 3_600_000 });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(sentParams()['expiring']).toBe('1');
+    });
+  });
+
   it('shows a plain connection failure when the exchange was refused on a redirect, not the note the model reads', async () => {
     // The refusal says "Write possibly landed" and "Do not repeat the request". On this page
     // nothing landed that the person would have to check, and connecting again is the remedy.

@@ -223,3 +223,19 @@ describe('the Shopify customer text', () => {
     expect(consentNoticeVersion({ ...notice, writeScopes: ['write_products'] })).toBe(base);
   });
 });
+
+describe('codeExchangeExtraParams', () => {
+  it('asks for an expiring token for the Shopify preset, unless the profile holds a token that does not expire', async () => {
+    const { OAUTH_PRESETS, codeExchangeExtraParams } = await import('./oauth-presets.js');
+    const shopify = OAUTH_PRESETS.get('shopify');
+    expect(codeExchangeExtraParams(shopify, { hasAccessToken: false, tokenExpiresAt: undefined })).toEqual({ expiring: '1' });
+    expect(codeExchangeExtraParams(shopify, { hasAccessToken: true, tokenExpiresAt: 1 })).toEqual({ expiring: '1' });
+    expect(codeExchangeExtraParams(shopify, { hasAccessToken: true, tokenExpiresAt: undefined })).toEqual({});
+  });
+
+  it('adds nothing for a preset without the ask, or without a preset', async () => {
+    const { OAUTH_PRESETS, codeExchangeExtraParams } = await import('./oauth-presets.js');
+    expect(codeExchangeExtraParams(OAUTH_PRESETS.get('bexio'), { hasAccessToken: false, tokenExpiresAt: undefined })).toEqual({});
+    expect(codeExchangeExtraParams(undefined, { hasAccessToken: false, tokenExpiresAt: undefined })).toEqual({});
+  });
+});
