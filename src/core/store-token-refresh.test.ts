@@ -382,6 +382,56 @@ describe('the refresh of an expiring store connection', () => {
     expect(Object.entries(headers).find(([k]) => k.toLowerCase() === 'x-shopify-access-token')?.[1]).toBe('at-old');
   });
 
+  /** The attach a bulk run makes, with what it hands back. */
+  const bulkAttach = async (): Promise<{ attached: unknown; out: { reconnect?: string | undefined } }> => {
+    const { attachStoredCredential } = await import('../tools/builtin/http.js');
+    const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
+    const c = ctx();
+    const out: { reconnect?: 'ended' | 'client-misnamed' | undefined } = {};
+    const attached = await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, {
+      apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
+      exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
+      containment: { contain: () => undefined, holds: () => true, isContained: () => false } as never,
+      vaultNameBindings: bindingsAsMigrated(store), shellIsolation: c.toolContext.shellIsolation,
+    }, { bulkRunId: 'run-1' }, out);
+    return { attached, out };
+  };
+
+  it('a connection the store refused (invalid_grant) is refused with the reason a bulk run halts on', async () => {
+    hold.answer = async () => answer({ error: 'invalid_grant' }, 400);
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    const { attached, out } = await bulkAttach();
+    expect(attached).toBeNull();
+    expect(out.reconnect).toBe('ended');
+  });
+
+  it('a connection a refresh ended without a revocation (another scope) is refused with the same reason', async () => {
+    hold.answer = async () => answer({ ...RENEWED, scope: 'read_customers' });
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    resetStoreRefreshForTests();
+    const { attached, out } = await bulkAttach();
+    expect(attached).toBeNull();
+    expect(out.reconnect).toBe('ended');
+  });
+
+  it('a client under other names is refused with its own reason', async () => {
+    const p = profile();
+    expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, client_secret_key: 'OTHER_SECRET' } } } as ApiProfile).ok).toBe(true);
+    const { attached, out } = await bulkAttach();
+    expect(attached).toBeNull();
+    expect(out.reconnect).toBe('client-misnamed');
+  });
+
+  it('a store that never had an expiring connection gives no such reason', async () => {
+    const p = profile();
+    const { store_binding: _b, ...grant } = p.oauth_grant!;
+    const { token_expires_at: _t, ...oauth } = p.auth!.oauth!;
+    expect(store.save({ ...p, auth: { ...p.auth, oauth }, oauth_grant: grant } as ApiProfile).ok).toBe(true);
+    const { attached, out } = await bulkAttach();
+    expect(attached).toBeNull();
+    expect(out.reconnect).toBeUndefined();
+  });
+
   it('the attach hands back a renewal for exactly the connection it attached, which a 401 uses', async () => {
     const p = profile();
     expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, token_expires_at: Date.now() + 3_600_000 } } } as ApiProfile).ok).toBe(true);

@@ -120,14 +120,17 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<boolean> } = {}): ExternalClient {
+function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<boolean>; reconnect?: 'ended' | 'client-misnamed' } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
     attach: async (u, headers, method, out) => {
       opts.methods?.push(method);
-      if (opts.attach === false) return null;
+      if (opts.attach === false) {
+        if (opts.reconnect !== undefined && out !== undefined) out.reconnect = opts.reconnect;
+        return null;
+      }
       headers['authorization'] = `Bearer ${TOKEN}`;
       if (opts.renew !== undefined && out !== undefined) out.renew = () => opts.renew!(u);
       return opts.connection ? opts.connection(u, method) : { id: 'fixture', grantId: 'grant-1' };
@@ -692,6 +695,25 @@ describe('applying an external run', () => {
         restore();
       }
     });
+
+    for (const [why, reason] of [['ended', 'storeAccessEnded'], ['client-misnamed', 'storeClientMisnamed']] as const) {
+      it(`a store connection that has to be connected again (${why}) halts the run with its own reason, nothing sent, resumable`, async () => {
+        const s = shop();
+        const restore = serve(s);
+        try {
+          const ok = client();
+          const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), ok);
+          const c = client({ attach: false, reconnect: why });
+          const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+          expect(out.status).toBe('halted');
+          expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS[reason], applied: 0 });
+          expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(0);
+          expect(ledger.listPending(runId)).toEqual([0, 1]);
+        } finally {
+          restore();
+        }
+      });
+    }
 
     it('a 403 is not a token that ran out: no renewal, no second send', async () => {
       const s = shop();

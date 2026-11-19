@@ -1084,6 +1084,13 @@ interface AttachedAuth {
    */
   renew?: (() => Promise<boolean>) | undefined;
   /**
+   * With a refusal of a store connection whose token expires: why only connecting the store again
+   * helps. `ended`: the store refused the refresh, or the refresh ended the connection;
+   * `client-misnamed`: the app's client is not under the provider's vault names. A bulk run halts
+   * on it with a reason of its own.
+   */
+  reconnect?: 'ended' | 'client-misnamed' | undefined;
+  /**
    * The profile whose credential filled {@link slot}: set with it and only with it. For an
    * oauth2 profile it is read after the renewal, in the same synchronous stretch as the token
    * (a renewal can save the profile, and an exchange it makes can mint), so its grant is the one
@@ -2389,7 +2396,7 @@ async function attachEngineManagedAuth(
           refreshTokenKey(profile.id),
           profile.oauth_grant?.revoked_at,
           OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '') !== undefined,
-        ) };
+        ), reconnect: attachPreset?.expiringParam !== undefined && attachPreset.apiOnDerivedHost === true ? 'ended' : undefined };
       }
     }
     // Profile drives — the agent should NOT have to remember which vault key holds
@@ -2444,7 +2451,7 @@ async function attachEngineManagedAuth(
         const outcome = await refreshStoreToken(profile.id, 'due', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
         // Named, not silent: a token that cannot be renewed for this reason would fail on its own
         // within minutes, with nothing to say why.
-        if (outcome === 'client-misnamed') return { refusal: `Error: ${storeClientMisnamedText(profile.id)}` };
+        if (outcome === 'client-misnamed') return { refusal: `Error: ${storeClientMisnamedText(profile.id)}`, reconnect: 'client-misnamed' };
       } else {
         process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
       }
@@ -2531,7 +2538,9 @@ async function attachEngineManagedAuth(
       const bound = held.oauth_grant?.store_binding;
       const digest = origin === null ? null : toolContext?.storeBindingDigest?.(profile.id, origin, resolved) ?? null;
       if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
-        return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".` };
+        // An expiring connection whose binding a refresh took away ended there: a bulk run says so.
+        const ended = typeof bound !== 'string' && attachPreset?.expiringParam !== undefined && typeof held.auth?.oauth?.token_expires_at === 'number';
+        return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".`, reconnect: ended ? 'ended' : undefined };
       }
       // Step 6b, the containment and the pass: after every refusal above, so a request refused
       // there records nothing and contains nothing (`mintStorePassFor`). The pass's own checks
@@ -4552,7 +4561,7 @@ export async function attachStoredCredential(
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
   container: { bulkRunId: string },
   /** Receives the store pass minted for this request, which the caller hands to its send. */
-  out?: { pass?: StorePass | undefined; renew?: (() => Promise<boolean>) | undefined } | undefined,
+  out?: { pass?: StorePass | undefined; renew?: (() => Promise<boolean>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined } | undefined,
 ): Promise<ApiProfile | null> {
   const auth = await attachEngineManagedAuth(
     url,
@@ -4574,5 +4583,6 @@ export async function attachStoredCredential(
     out.pass = auth.pass;
     out.renew = auth.renew;
   }
+  if (out !== undefined && auth.refusal !== undefined) out.reconnect = auth.reconnect;
   return auth.slot !== undefined && auth.refusal === undefined ? auth.profile ?? null : null;
 }
