@@ -632,13 +632,9 @@ export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> 
  */
 export const FALLBACK_MARKER = '[erased on request]';
 
-/**
- * Which runs the fallback reaches: the runs of these threads, or of this period.
- * `keepPromotedProcesses` leaves a process the user promoted to a workflow as it is: deleting a
- * chat must not empty a workflow the user saved from it. An erasure on request does not set it.
- */
+/** Which runs the fallback reaches: the runs of these threads, or of this period. */
 export type FallbackScope =
-  | { readonly threadIds: readonly string[]; readonly keepPromotedProcesses?: boolean | undefined }
+  | { readonly threadIds: readonly string[] }
   | { readonly from: string; readonly to: string };
 
 /** How each table's rows are reached from the scoped runs (temp table `erase_runs`). */
@@ -661,7 +657,7 @@ const ROWS_OF: Readonly<Record<string, string>> = {
  * checkpoint: the blanking holds, but old values may remain in the file until the next scrub.
  */
 export function blankRunHistoryContent(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly scrub: 'done' | 'failed' } {
-  const rows = blankRunHistoryRows(historyDb, scope);
+  const { rows } = blankRunHistoryRows(historyDb, scope);
   try {
     scrubFreedPages(historyDb);
     return { rows, scrub: 'done' };
@@ -673,10 +669,12 @@ export function blankRunHistoryContent(historyDb: Database.Database, scope: Fall
 /**
  * The blanking of {@link blankRunHistoryContent} without the scrub, in one transaction that joins
  * the caller's when there is one: deleting a chat blanks its runs and deletes the chat together.
- * The scrub rewrites the whole file and is left out on purpose; the connection runs with
- * `secure_delete` on, as for every other routine delete. Returns the number of rows changed.
+ * The scrub rewrites the whole file and is left out on purpose, as for every other routine delete:
+ * the connection runs with `secure_delete` on, which overwrites what it frees, but older page
+ * images can stay in the WAL until a later checkpoint. Returns the number of rows changed and the
+ * workflows reached, whose questions a caller may have to close.
  */
-export function blankRunHistoryRows(historyDb: Database.Database, scope: FallbackScope): number {
+export function blankRunHistoryRows(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly pipelineIds: readonly string[] } {
   const byThread = 'threadIds' in scope;
   // A bound that does not read as a time would compare as text and reach nothing, which would
   // then be reported as a clean run.
@@ -721,15 +719,14 @@ export function blankRunHistoryRows(historyDb: Database.Database, scope: Fallbac
           ? `session_id IN (SELECT id FROM erase_pipelines)${threads.length === 0 ? '' : ` OR session_id IN (${threads.map((_t, i) => `@t${i}`).join(',')})`}`
           : 'created_at >= datetime(@from) AND created_at < datetime(@to)';
         params = byThread ? Object.fromEntries(threads.map((t, i) => [`t${i}`, t])) : { from: scope.from, to: scope.to };
-      } else if (table === 'processes' && byThread && scope.keepPromotedProcesses === true) {
-        where = `(${ROWS_OF[table]!}) AND promoted_to_pipeline_id IS NULL`;
       } else {
         where = ROWS_OF[table]!;
       }
       changed += historyDb.prepare(`UPDATE "${table}" SET ${set} WHERE ${where}`).run({ marker: FALLBACK_MARKER, ...params }).changes;
     }
+    const pipelineIds = (historyDb.prepare('SELECT id FROM erase_pipelines').all() as Array<{ id: string }>).map((r) => r.id);
     historyDb.exec('DELETE FROM erase_runs; DELETE FROM erase_pipelines;');
-    return changed;
+    return { rows: changed, pipelineIds };
   })();
 }
 

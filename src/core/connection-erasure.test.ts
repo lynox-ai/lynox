@@ -739,18 +739,11 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     expect(text(other)).toBe(`other ${MARK}`);
   });
 
-  it('an erasure blanks a process promoted to a workflow too; a chat delete keeps it', () => {
+  it('without the scrub, names every workflow it reached, nested ones included, and no other', () => {
     const db = history.getDb();
-    const steps = () => (db.prepare("SELECT steps_json AS s FROM processes WHERE id = 'saved'").get() as { s: string }).s;
-    const runId = history.insertRun({ sessionId: 'thread-a', taskText: 't', modelTier: 'sonnet', modelId: 'm' });
-    db.prepare(`INSERT INTO processes (id, name, description, source_run_id, steps_json, promoted_to_pipeline_id) VALUES ('saved', 'weekly', 'd', ?, ?, 'wf-saved')`)
-      .run(runId, `[{"q":"${MARK}"}]`);
-
-    blankRunHistoryRows(db, { threadIds: ['thread-a'], keepPromotedProcesses: true });
-    expect(steps()).toBe(`[{"q":"${MARK}"}]`);
-
-    blankRunHistoryContent(db, { threadIds: ['thread-a'] });
-    expect(steps()).toBe(FALLBACK_MARKER);
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES ('wf-a', 'wf', 'running', '{}', 'thread-a'), ('wf-b', 'wf', 'running', '{}', 'thread-b')`).run();
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, parent_run_id) VALUES ('wf-a-inner', 'wf2', 'running', '{}', 'wf-a')`).run();
+    expect([...blankRunHistoryRows(db, { threadIds: ['thread-a'] }).pipelineIds].sort()).toEqual(['wf-a', 'wf-a-inner']);
   });
 
   it('a period given in ISO form reaches exactly the runs inside it', () => {

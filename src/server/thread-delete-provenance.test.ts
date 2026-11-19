@@ -301,8 +301,8 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
   /**
    * One run of `threadId` with content in every store the chat's runs reach: its tool call, a
    * question asked in the chat, a workflow it started with a step result, a run it spawned, a
-   * process taken from it and one promoted to a workflow, a security event, a pre-approval and an
-   * advisor suggestion. Written in clear with raw SQL: the store encrypts what its own writers put
+   * process taken from it (one plain, one promoted to a workflow), a security event, a
+   * pre-approval and an advisor suggestion. Written in clear with raw SQL: the store encrypts what its own writers put
    * in, and a search for the mark would then find nothing whether the delete blanked it or not.
    */
   function seedRuns(threadId: string, mark: string): { runId: string; child: string } {
@@ -358,12 +358,11 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     wire_snapshots: ['user_message'],
   };
 
-  /** The seeded columns of `table` that still hold `mark`, outside a process promoted to a workflow. */
+  /** The seeded columns of `table` that still hold `mark`. */
   function columnsHolding(table: string, mark: string): string[] {
     const db = runHistory().getDb();
-    const notPromoted = table === 'processes' ? ' AND promoted_to_pipeline_id IS NULL' : '';
     return (SEEDED[table] ?? []).filter((c) =>
-      (db.prepare(`SELECT COUNT(*) AS n FROM "${table}" WHERE "${c}" LIKE ?${notPromoted}`).get(`%${mark}%`) as { n: number }).n > 0);
+      (db.prepare(`SELECT COUNT(*) AS n FROM "${table}" WHERE "${c}" LIKE ?`).get(`%${mark}%`) as { n: number }).n > 0);
   }
 
   describe('the content of the chat\'s runs goes with it; the rows and their costs stay', () => {
@@ -396,9 +395,9 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
       expect(row(seeded.child)?.t).toBe(FALLBACK_MARKER);
     });
 
-    it('keeps a process the user promoted to a workflow as it was', () => {
-      const proc = runHistory().getDb().prepare('SELECT description, steps_json FROM processes WHERE id = ?').get('promoted-t-runs-gone');
-      expect(proc).toEqual({ description: `saved ${MARK}`, steps_json: `[{"q":"saved ${MARK}"}]` });
+    it('blanks a process promoted to a workflow as well: it is lineage, the workflow lives elsewhere', () => {
+      const proc = runHistory().getDb().prepare('SELECT description, steps_json, promoted_to_pipeline_id AS p FROM processes WHERE id = ?').get('promoted-t-runs-gone');
+      expect(proc).toEqual({ description: FALLBACK_MARKER, steps_json: FALLBACK_MARKER, p: 'wf-saved' });
     });
 
     it('leaves another chat\'s runs as they were', () => {
@@ -437,6 +436,51 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(second.status).toBe(200);
     expect(ts.getThread('t-runs-retry')).toBeUndefined();
     for (const table of tables) expect(columnsHolding(table, mark), table).toEqual([]);
+  });
+
+  it('a failure after the chat is deleted answers 500 and undoes the delete and the blanking; deleting again finishes', async () => {
+    const { ts } = stores();
+    const mark = `late-${randomBytes(6).toString('hex')}`;
+    ts.createThread('t-runs-late', { title: 'fails after the delete' });
+    seedRuns('t-runs-late', mark);
+    const db = runHistory().getDb();
+    // The wire snapshots go last, after the chat's own row: only the outer transaction can take
+    // the delete and the blanking back when they fail.
+    db.exec(`CREATE TEMP TRIGGER fail_last BEFORE DELETE ON wire_snapshots BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;`);
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let first: { status: number; body: Record<string, unknown> };
+    try {
+      first = await deleteChat('t-runs-late');
+    } finally {
+      db.exec('DROP TRIGGER IF EXISTS fail_last');
+      spy.mockRestore();
+    }
+
+    expect(first.status).toBe(500);
+    expect(ts.getThread('t-runs-late'), 'the chat is still there').toBeDefined();
+    expect(ts.isDeleted('t-runs-late'), 'and not refused as deleted').toBe(false);
+    for (const table of Object.keys(SEEDED)) expect(columnsHolding(table, mark).length, table).toBeGreaterThan(0);
+
+    expect((await deleteChat('t-runs-late')).status).toBe(200);
+    expect(ts.getThread('t-runs-late')).toBeUndefined();
+    for (const table of Object.keys(SEEDED)) expect(columnsHolding(table, mark), table).toEqual([]);
+  });
+
+  it('a question a workflow started from the chat is waiting on is blanked and withdrawn, not left open', async () => {
+    const { ts } = stores();
+    const ps = promptStore();
+    const id = randomUUID();
+    const workflow = `wf-${id}`;
+    ts.createThread(id, { title: 'started a workflow' });
+    runHistory().getDb().prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES (?, 'wf', 'running', '{}', ?)`).run(workflow, id);
+    // A step of the workflow asks under the workflow's id, as its runs do.
+    const asked = ps.insertAskUser(workflow, 'Which list, A or B?', ['A', 'B']);
+    const other = ps.insertAskUser(`wf-${randomUUID()}`, 'Send it now?', ['Yes', 'No']);
+
+    expect((await deleteChat(id)).status).toBe(200);
+
+    expect(ps.getById(asked)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted', question: FALLBACK_MARKER });
+    expect(ps.getById(other)).toMatchObject({ status: 'pending', closed_reason: null });
   });
 
   it('a session built for a deleted id writes no thread row', () => {

@@ -6557,18 +6557,20 @@ export class LynoxHTTPApi {
         });
         return;
       }
-      // The chat's runs stay as rows, because they are the cost ledger, but their content goes with
-      // the chat: prompts, answers, tool inputs and outputs, step results, the questions asked in it
-      // and what runs it spawned or workflows it started wrote. A process the user promoted to a
-      // workflow keeps its steps. The blanking, the delete and the captured wire_snapshots share one
-      // transaction in history.db, so a failure leaves the chat and its runs as they were, and
-      // deleting again does all of it.
+      // The chat's runs stay as rows, because they are the cost ledger, but the content they hold
+      // when the chat is deleted goes with it: prompts, answers, tool inputs and outputs, step
+      // results, the questions asked in it, and what the runs it spawned and the workflows it
+      // started wrote. A run or workflow still going when the chat is deleted can write more after
+      // this; that is not reached here. The blanking, the delete and the captured wire_snapshots
+      // share one transaction in history.db, so a failure leaves the chat and its runs as they
+      // were, and deleting again does all of it.
       const runHistory = engine.getRunHistory();
+      let workflows: readonly string[] = [];
       try {
         if (runHistory) {
           const { blankRunHistoryRows } = await import('../core/connection-erasure.js');
           runHistory.getDb().transaction(() => {
-            blankRunHistoryRows(runHistory.getDb(), { threadIds: [id], keepPromotedProcesses: true });
+            workflows = blankRunHistoryRows(runHistory.getDb(), { threadIds: [id] }).pipelineIds;
             threadStore.deleteThread(id);
             runHistory.deleteWireSnapshotsForThread(id);
           })();
@@ -6576,15 +6578,20 @@ export class LynoxHTTPApi {
           threadStore.deleteThread(id);
         }
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:thread-delete] Not deleted, clearing the content of its runs failed for thread ${id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}\n`);
-        jsonResponse(res, 500, { error: 'The chat was not deleted: clearing the content of its runs ran into an error.' });
+        process.stderr.write(`[lynox:thread-delete] Not deleted, removing the chat and the content of its runs failed for thread ${id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}\n`);
+        jsonResponse(res, 500, { error: 'The chat was not deleted: removing it and the content of its runs ran into an error.' });
         return;
       }
       // A run still waiting on a question in this chat could only be answered here. Its question
       // is withdrawn now, so the run ends with that reason instead of waiting out the TTL. After
       // the delete: a delete that answered 500 above leaves the chat, and its questions with it.
-      try { engine.getPromptStore()?.withdrawForDeletedThread(id); } catch (err: unknown) {
-        process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      // A step of a workflow the chat started asks under the workflow's id; its question was just
+      // blanked, so it is withdrawn too, before anything can read it: no await since the commit.
+      const promptStore = engine.getPromptStore();
+      for (const session of [id, ...workflows]) {
+        try { promptStore?.withdrawForDeletedThread(session); } catch (err: unknown) {
+          process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       }
       jsonResponse(res, 200, { ok: true });
     }, OWN));
