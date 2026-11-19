@@ -144,7 +144,8 @@ describe('the workflow library shows each reader the contract it may read (real 
     const text = await res.text();
     for (const stored of ['"ch"', '"de"', '"min"', '"max"', 'paramConstraints', 'only-the-owner-reads-this']) expect(text).not.toContain(stored);
     // The hosts and paths it reads are those of the workflows it may schedule with a contract it can
-    // read (its own, the owner's, the owner's with an extra field): three of the six that hold one.
+    // read (its own, the owner's, the owner's with an extra field): three. The host is stored in six
+    // workflows (the malformed one holds it too), the path in five.
     expect(text.split('api.partner.example').length - 1).toBe(3);
     expect(text.split('/v1/invoices').length - 1).toBe(3);
   });
