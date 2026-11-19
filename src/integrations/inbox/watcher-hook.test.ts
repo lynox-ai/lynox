@@ -217,7 +217,7 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
     expect(items[0]).toMatchObject({
       bucket: 'auto_handled',
       confidence: 1,
-      reasonDe: 'Regel: from = mustermann@example.com',
+      reasonDe: 'Regel: Absender = mustermann@example.com',
       classifierVersion: expect.stringMatching(/^rule:rul_/),
     });
     const audit = inbox.listAuditForItem(items[0]!.id);
@@ -247,6 +247,8 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
     await hook(ACCOUNT.id, envelope({ subject: 'Your INVOICE INV-2026-0042' }));
     expect(queueCalls).toHaveLength(0);
     expect(inbox.listItems()).toHaveLength(1);
+    // The reason names the rule in words, not by its field name.
+    expect(inbox.listItems()[0]!.reasonDe).toBe('Regel: Betreff enthält invoice');
   });
 
   it('falls through to the queue when no rule matches', async () => {
@@ -691,7 +693,7 @@ describe('createInboxClassifierHook — prefilter rules', () => {
     });
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
     expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER, listId: LIST }))).toBe('rule_applied');
-    expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', reasonDe: `Regel: list_id = ${LIST}` });
+    expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', reasonDe: `Regel: Verteilerliste = ${LIST}` });
     expect(ruleOf('imap:thread-1'), 'the rule item records the prefilter rule too').toBe('newsletter_domain');
   });
 
@@ -721,7 +723,7 @@ describe('createInboxClassifierHook — prefilter rules', () => {
       const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: mode });
       const coded = { subject: 'Your verification code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' };
       expect(await hook(ACCOUNT.id, envelope({ listId: LIST, ...coded }))).toBe('rule_applied');
-      expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', reasonDe: `Regel: list_id = ${LIST}` });
+      expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', reasonDe: `Regel: Verteilerliste = ${LIST}` });
       expect(queue.enqueue).not.toHaveBeenCalled();
     });
   }
