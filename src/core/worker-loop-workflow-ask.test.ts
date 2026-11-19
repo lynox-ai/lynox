@@ -441,6 +441,26 @@ describe('a scheduled workflow that asks its owner', () => {
     expect(h.prompts.getPending(wf.calls[0]!.runId!)).toBeUndefined();
   });
 
+  it('a run that throws after a step refused a send records the refusal before the error', async () => {
+    const h = makeHarness();
+    const refusal = { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } };
+    wf.step = async () => ({ ok: false, error: 'Workflow execution failed: step two threw', originRefusals: [refusal] });
+    void h.loop.tick();
+    await waitUntil('the run to end', () => h.records.length > 0);
+    expect(h.records[0]![2]).toBe('failed');
+    expect(h.records[0]![1]).toMatch(/^The trigger "Weekly offer" did not send to "x@evil\.example": .*\n\n.*step two threw/s);
+  });
+
+  it('CONTROL: a run that throws without a refused send records only the error', async () => {
+    const h = makeHarness();
+    wf.step = async () => ({ ok: false, error: 'Workflow execution failed: step two threw' });
+    void h.loop.tick();
+    await waitUntil('the run to end', () => h.records.length > 0);
+    expect(h.records[0]![2]).toBe('failed');
+    expect(h.records[0]![1]).toContain('step two threw');
+    expect(h.records[0]![1]).not.toContain('did not send');
+  });
+
   it('a shutdown during the wait records nothing, escalates nothing, and keeps the lease', async () => {
     // In the order `LynoxHTTPApi.shutdown()` runs them: the prompt rows are closed first, then
     // the loop stops. Nothing between the two may make the wait read as a TTL.

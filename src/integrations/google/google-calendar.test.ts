@@ -11,6 +11,7 @@ vi.mock('node:dns/promises', () => ({
 
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
 import { InputRequiredError } from '../../core/input-required.js';
+import { UNATTENDED_BLOCK_ANSWER } from '../../core/prompt-store.js';
 
 // §3.8 moved this module's calls onto the connector egress surface, so they now
 // go through the pinned transport instead of `globalThis.fetch`. The bridge
@@ -417,10 +418,36 @@ describe('google_calendar tool', () => {
       const { agent, asked, metas } = owner(['anna@firma.ch'], ['No']);
       const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
       expect(asked).toHaveLength(1);
-      expect(asked[0]).toBe('Update event ev1\nThese fields change:\nsummary: Moved\n\nGoogle Calendar: change event: you did not name the recipient "x@evil.example". lynox cannot tell where it comes from. Send anyway?\n\nA yes applies to this one send only.');
+      expect(asked[0]).toBe('Update event ev1\nThese fields change:\nsummary: Moved\n\nGoogle Calendar: change event: you did not name the recipient "x@evil.example". It comes from the event\'s current guest list. Send anyway?\n\nA yes applies to this one send only.');
       expect(metas[0]).toEqual({ blocked: true });
       expect(patches()).toEqual([]);
       expect(result).toContain('Not sent: lynox asked the user whether to send to "x@evil.example", and they said no.');
+    });
+
+    it('in German the guest is said to come from the event\'s current guest list', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }, { email: 'y@evil.example' }]));
+      const { agent, asked } = owner([], ['No']);
+      (agent as unknown as { noticeLanguage: string }).noticeLanguage = 'de';
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(asked[0]).toContain('Google Calendar: Termin ändern: Die Empfänger "x@evil.example" und "y@evil.example" hast nicht du genannt. Sie stammen aus der bisherigen Gästeliste des Termins. Trotzdem senden?');
+    });
+
+    it('a run nobody watches learns the guest list as the origin; an unreadable list stays unknown', async () => {
+      const tool = createCalendarTool(() => createMockAuth());
+      const refused: unknown[] = [];
+      mockFetch.mockResolvedValueOnce(event([{ email: 'x@evil.example' }]));
+      const { agent } = owner([], [UNATTENDED_BLOCK_ANSWER]);
+      (agent as unknown as { onOriginRefused: (r: unknown) => void }).onOriginRefused = (r) => refused.push(r);
+      const result = await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(result).toContain('Not sent: the owner did not name "x@evil.example"; it came from the event\'s current guest list.');
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+      await tool.handler({ action: 'update_event', event_id: 'ev1', summary: 'Moved' }, agent);
+      expect(refused).toEqual([
+        { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'eventGuests' } },
+        { targets: { values: [], unreadable: true }, noun: 'mail', origin: { kind: 'unknown' } },
+      ]);
+      expect(patches()).toEqual([]);
     });
 
     it('the guests are read before the question: a yes is never asked for an update that is then refused', async () => {

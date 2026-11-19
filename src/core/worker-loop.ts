@@ -736,6 +736,19 @@ export class WorkerLoop {
     return [...new Set(refusals.map((r) => originRunNotice(task.title, r, lang)))].join('\n');
   }
 
+  /**
+   * Hands the refusal notice of a run that ended by throwing to where the failure is recorded
+   * (`ORIGIN_NOTICE_OF_ERROR`). Never throws: a notice that cannot be built is left out, and the
+   * run's own error, with the status it decides (failed, timeout, stopped), is what is recorded.
+   */
+  #carryOriginNotice(err: unknown, task: TriggerRecord, refusals: () => readonly OriginRefusal[]): void {
+    if (typeof err !== 'object' || err === null) return;
+    try {
+      const notice = this.#originRefusedNotice(task, refusals());
+      if (notice !== null) ORIGIN_NOTICE_OF_ERROR.set(err, notice);
+    } catch { /* the run's own error stands */ }
+  }
+
   /** The worker's own sentences in the instance's notice language, read per notice (`notice-language.ts`). */
   #notices(): WorkerNotices {
     return WORKER_NOTICES[noticeLanguage(this.engine.config?.language)];
@@ -3301,8 +3314,7 @@ export class WorkerLoop {
     } catch (err: unknown) {
       // A run that fails, times out or is stopped after a send was refused still says so in its
       // recorded result: the owner learns of the refusal from the result, not from the model.
-      const refusedBeforeEnd = this.#originRefusedNotice(task, session.getOriginRefusals?.() ?? []);
-      if (refusedBeforeEnd !== null && typeof err === 'object' && err !== null) ORIGIN_NOTICE_OF_ERROR.set(err, refusedBeforeEnd);
+      this.#carryOriginNotice(err, task, () => session.getOriginRefusals?.() ?? []);
       throw err;
     }
     // A send this run refused because the owner did not name its target is said in the result,
@@ -3713,7 +3725,10 @@ export class WorkerLoop {
       // A refusal that names stored text carries its fixed wording too: a push from a contained
       // instance then says why the run did not start, not only that it failed.
       const message = result.error ?? `Pipeline ${task.pipeline_id} execution failed`;
-      throw result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
+      const failure = result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
+      // A send a step refused before the run failed is said before the error, as for a task run.
+      this.#carryOriginNotice(failure, task, () => result.originRefusals ?? []);
+      throw failure;
     }
 
     // What the owner must read even when every step completed: a write the run was

@@ -5160,7 +5160,10 @@ export class Agent implements IAgent {
     const shownTargets = foreign.map((v) => v.target.value);
     const shown: OriginTargets = { values: shownTargets, unreadable: false };
     const noun: TargetNoun = tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
-    const origin = this.originOfTargets();
+    // A source that could not be read leaves where the target comes from unchecked: every report of
+    // it (the run's result, the approval card, the question, the model texts) says it is not known,
+    // never the origin it would have had.
+    const origin: SendOrigin = lookupFailed ? { kind: 'unknown' } : this.originOfTargets();
     const passed: CallTargetOrigin = { known, allKnown: false, unnamed: { targets: shownTargets, origin } };
     // The guard refuses this call without asking anyone, with its own text; the run's owner still
     // learns that a target came from elsewhere.
@@ -5190,10 +5193,10 @@ export class Agent implements IAgent {
     const lang = this._noticeLanguage();
     // Blocked: a reader who does not watch this run refuses it before anything is stored or parked
     // (`PromptStore.insertQuestion`), and the call is refused here.
-    const answer = await this.promptUser(originAsk(tc.name, tc.input, noun, shown, lookupFailed ? { kind: 'unknown' } : origin, lang), ['Allow', 'Deny', '\x00'], { blocked: true });
+    const answer = await this.promptUser(originAsk(tc.name, tc.input, noun, shown, origin, lang), ['Allow', 'Deny', '\x00'], { blocked: true });
     if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-      const denied = lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, { kind: 'unknown' }, noun)}` : originDenied(shown, origin, noun);
+      const denied = lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(denied), is_error: true } };
     }
     return { origin: passed };

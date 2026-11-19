@@ -2166,6 +2166,36 @@ describe('WorkerLoop', () => {
     expect(recorded).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": .* ask lynox in the chat, and lynox will ask you\.\n\n.*provider down/s);
   });
 
+  it('a run that times out after a refused send records the refusal before the timeout, as a timeout', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(Object.assign(new Error('deadline'), { name: 'TimeoutError' }));
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const [, recorded, status] = vi.mocked(tm.recordTaskRun).mock.calls[0]!;
+    expect(status).toBe('timeout');
+    expect(recorded).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": .*\n\nTask timed out after/s);
+  });
+
+  it.each([
+    ['a failure', new Error('provider down'), 'failed', 'provider down'],
+    ['a timeout', Object.assign(new Error('deadline'), { name: 'TimeoutError' }), 'timeout', 'Task timed out after'],
+  ] as const)('a refusal list that throws while %s is recorded leaves the run\'s own error and status', async (_w, err, status, text) => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(err);
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => { throw new Error('refusal list unreadable'); };
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const [, recorded, recordedStatus] = vi.mocked(tm.recordTaskRun).mock.calls[0]!;
+    expect(recordedStatus).toBe(status);
+    expect(recorded).toContain(text);
+    expect(recorded).not.toContain('refusal list unreadable');
+  });
+
   it('CONTROL: a run that fails without a refused send records only the error', async () => {
     const task = makeTask();
     const tm = makeTaskManager([task]);

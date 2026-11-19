@@ -5040,8 +5040,10 @@ export class LynoxHTTPApi {
         // content could carry itself. Never derived from `task`: a task can be a prefill (a
         // mail's subject, a chip, a retry), which the person did not write. The client sends
         // `typed` only for a message started from an empty composer, and it counts only when it
-        // stands in this request's task word for word.
-        ...(typedOf(b?.['typed'], taskText) ?? {}),
+        // stands in this request's task word for word. Only from the owner's browser session, as
+        // "Confirm recipients" takes it: a token's client (a script, an integration) passes on
+        // text it did not have typed, and it must not make an address in it the owner's.
+        ...(this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) !== 'none' ? (typedOf(b?.['typed'], taskText) ?? {}) : {}),
       };
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on

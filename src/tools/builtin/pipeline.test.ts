@@ -1511,6 +1511,26 @@ describe('runSavedWorkflow', () => {
     expect(result.originRefusals).toEqual([refusal]);
   });
 
+  it('a send its steps refused before the run threw still comes back with the failure', async () => {
+    const id = seedSavedWorkflow();
+    const refusal = { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } };
+    mockRunManifest.mockImplementationOnce(async (_m: unknown, _c: unknown, opts: { runTaint?: { onOriginRefused?: (r: unknown) => void } }) => {
+      opts.runTaint?.onOriginRefused?.(refusal);
+      throw new Error('step two threw');
+    });
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('step two threw');
+    expect(result.originRefusals).toEqual([refusal]);
+  });
+
+  it('CONTROL: a run that threw without a refused send carries no refusals', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockImplementationOnce(async () => { throw new Error('step two threw'); });
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL });
+    expect(result).toEqual({ ok: false, error: expect.stringContaining('step two threw') });
+  });
+
   it('a stored workflow whose reference no run resolves is refused before the run, with the repair the owner is told', async () => {
     // Saved before references were checked. A scheduled run reaches the owner through this result:
     // the worker throws its error and pushes it (`worker-loop.ts`, the task failure path).

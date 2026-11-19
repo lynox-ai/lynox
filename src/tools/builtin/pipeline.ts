@@ -967,6 +967,9 @@ export async function runSavedWorkflow(
   }
 
   const writeNotes = new Set<string>();
+  // The sends its steps refuse for a target the owner did not name: kept for the run's result,
+  // also when the run then throws.
+  const originRefusals: import('../../core/origin-notices.js').OriginRefusal[] = [];
 
   // A reference no run resolves (`template-refs.ts`), here before `validateManifest` refuses it, so
   // the caller can tell the owner which step in fixed words (`unresolvedRefStep`).
@@ -996,8 +999,6 @@ export async function runSavedWorkflow(
     // contract rides along only when `decideGrant` passed it, i.e. it came from the
     // grant dialog of the scheduling route while that feature is on, and its stamp
     // still matches.
-    // The sends its steps refuse for a target the owner did not name: kept for the run's result.
-    const originRefusals: import('../../core/origin-notices.js').OriginRefusal[] = [];
     const headlessTaint = headlessRunTaint(runtime?.seed, runParams, runtime?.startedVia);
     headlessTaint.onOriginRefused = (r) => { originRefusals.push(r); };
     const state = await runManifest(manifest, config, buildRunCtx({
@@ -1060,7 +1061,10 @@ export async function runSavedWorkflow(
     };
   } catch (err: unknown) {
     // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
-    return { ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}` };
+    return {
+      ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}`,
+      ...(originRefusals.length > 0 ? { originRefusals } : {}),
+    };
   }
 }
 
