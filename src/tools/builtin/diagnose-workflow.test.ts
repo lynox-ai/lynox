@@ -95,7 +95,7 @@ describe('diagnose_workflow_run (Slice C2)', () => {
     // The visible text stays; the step id, outside the shape with its hidden characters, is not shown
     // as text (the workflow is gone, so no position either).
     expect(out).toContain('Report');
-    expect(out).toContain('[failed] (id outside the allowed form)');
+    expect(out).toContain('[failed] (lynox does not show its id)');
     expect(out).not.toContain('fetch');
     expect(out).toContain('failedhere');
   });

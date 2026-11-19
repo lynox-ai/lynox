@@ -262,3 +262,23 @@ describe('a contract\'s stored values in a refusal', () => {
     expect(bindWorkflowParameters(n, { n: '50' }, { constraints: { n: { max: 10 } } })).toEqual({ ok: false, error: 'Parameter "n" must be <= 10.' });
   });
 });
+
+describe('the values the run form shows the owner', () => {
+  it('appear in no refusal of bindWorkflowParameters, on any path', () => {
+    const values = ['ch-value-1', 'de-value-2', '<script>x</script>'];
+    const schema = [param({ name: 'region' }), param({ name: 'count', type: 'number' })];
+    const constraints = { region: { enum: values }, count: { min: 3, max: 9 } };
+    const refusals = [
+      bindWorkflowParameters(schema, { region: 'eu', count: '5' }, { constraints }),
+      bindWorkflowParameters(schema, { region: values[0], count: '1' }, { constraints }),
+      bindWorkflowParameters(schema, { region: values[0], count: '50' }, { constraints }),
+      bindWorkflowParameters([param({ name: 'region', defaultValue: 'eu' })], {}, { constraints }),
+      bindWorkflowParameters(schema, { region: values[0] }, { constraints }),
+    ];
+    for (const r of refusals) {
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      for (const v of values) expect(r.error).not.toContain(v);
+    }
+  });
+});

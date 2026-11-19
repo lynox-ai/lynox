@@ -61,13 +61,13 @@ export function stepIdIssue(steps: ReadonlyArray<{ id?: unknown; input_from?: un
 }
 
 /** What stands in for a stored id outside the shape where the model reads it. */
-export const OUTSIDE_SHAPE = '(id outside the allowed form)';
+export const OUTSIDE_SHAPE = '(lynox does not show its id)';
 
 /**
  * A stored step id as the model reads it: the id itself when it has the shape, otherwise its position
  * (`#2`, as `update_workflow_steps` takes it) with a note, or the note alone where no position is known.
  * `runName`, where known, is the name its runs use (`stepRunNames`), so a run's message leads to the
- * step: `#2 (id outside the allowed form; runs as "step-2")` (U-325).
+ * step: `#2 (lynox does not show its id; runs as "step-2")` (U-325, U-362).
  */
 export function shownStepId(id: string, index?: number, runName?: string): string {
   if (isStepIdShape(id)) return id;
