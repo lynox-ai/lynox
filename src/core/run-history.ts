@@ -25,6 +25,7 @@ import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
+import { deletedChatGuardDdl, dropDeletedChatGuardDdl } from './deleted-chat-guard.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
 import { stepIdIssue } from '../orchestrator/step-id.js';
 import { templateRefIssue } from '../orchestrator/template-refs.js';
@@ -1818,7 +1819,14 @@ export class RunHistory {
       zeroDeletedContent(db);
       db.pragma('foreign_keys = ON');
       this.db = db;
+      // The guard's triggers name content tables and columns; they go before the migrations, which
+      // may drop or rebuild those, and come back after them (`deleted-chat-guard.ts`).
+      db.exec(dropDeletedChatGuardDdl());
       this._migrate();
+      db.transaction(() => {
+        const tables = new Set((db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((r) => r.name));
+        db.exec(deletedChatGuardDdl(tables));
+      })();
     } catch (err) {
       try { db.close(); } catch { /* best-effort */ }
       throw err;

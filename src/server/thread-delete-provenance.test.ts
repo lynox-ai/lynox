@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
+import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 import { LynoxHTTPApi } from './http-api.js';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
@@ -404,6 +405,93 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
       for (const table of Object.keys(SEEDED)) {
         expect(columnsHolding(table, KEPT).length, table).toBeGreaterThan(0);
       }
+    });
+  });
+
+  describe('what a run of the chat writes after the delete is blanked too', () => {
+    const MARK = `late-${randomBytes(6).toString('hex')}`;
+    const KEPT = `other-${randomBytes(6).toString('hex')}`;
+    let seeded: { runId: string; child: string };
+    let lateQuestion = '';
+    let otherRun = '';
+
+    /** A write into every content store, keyed on `runId` and `workflow`, as a run still going would do. */
+    function writeLate(db: Database.Database, runId: string, workflow: string, mark: string, tag: string): string {
+      db.prepare('UPDATE runs SET response_text = ?, error_text = ? WHERE id = ?').run(`answer ${mark}`, `error ${mark}`, runId);
+      db.prepare(`INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json) VALUES (?, ?, 'http_request', ?, ?)`)
+        .run(`late-tc-${tag}`, runId, `{"v":"${mark}"}`, `out ${mark}`);
+      db.prepare('UPDATE pipeline_runs SET error = ?, manifest_json = ? WHERE id = ?').run(mark, `{"p":"${mark}"}`, workflow);
+      db.prepare(`INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result, error) VALUES (?, 'late', 'failed', ?, ?)`).run(workflow, mark, mark);
+      db.prepare(`INSERT INTO processes (id, name, description, source_run_id, steps_json, parameters_json) VALUES (?, 'late', ?, ?, ?, ?)`)
+        .run(`late-proc-${tag}`, mark, runId, `[{"q":"${mark}"}]`, `[{"d":"${mark}"}]`);
+      db.prepare(`INSERT INTO security_events (event_type, tool_name, input_preview, decision, run_id, detail) VALUES ('danger_flagged', 'http_request', ?, 'flagged', ?, ?)`)
+        .run(mark, runId, mark);
+      db.prepare(`INSERT INTO wire_snapshots (run_id, turn_index, model, provider, system_prompt_hash, user_message, user_message_chars, tool_names, tool_count, max_tokens, ephemeral_tail_present, ephemeral_tail_chars, captured_at)
+        VALUES (?, 7, 'm', 'p', 'h', ?, 1, '[]', 0, 1, 0, 0, 0)`).run(runId, mark);
+      db.prepare(`INSERT INTO pre_approval_sets (id, task_summary, approved_by, patterns_json, max_uses, ttl_ms, run_id) VALUES (?, ?, 'owner', ?, 1, 1, ?)`)
+        .run(`late-pa-${tag}`, mark, `["${mark}"]`, runId);
+      db.prepare(`INSERT INTO pre_approval_events (set_id, pattern_idx, tool_name, match_string, pattern, decision, run_id) VALUES (?, 0, 'http_request', ?, ?, 'approved', NULL)`)
+        .run(`late-pa-${tag}`, mark, mark);
+      db.prepare(`INSERT INTO advisor_suggestions (run_id, type, priority, title, detail, estimated_impact_json) VALUES (?, 'cost', 'low', ?, ?, ?)`)
+        .run(runId, mark, mark, `{"n":"${mark}"}`);
+      const question = `late-pp-${tag}`;
+      db.prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, options_json, status, expires_at)
+        VALUES (?, ?, 'ask_user', ?, ?, 'pending', '2099-01-01T00:00:00.000Z')`).run(question, workflow, mark, `["${mark}"]`);
+      return question;
+    }
+
+    beforeAll(async () => {
+      const { ts } = stores();
+      ts.createThread('t-late', { title: 'still running' });
+      ts.createThread('t-late-other', { title: 'another chat' });
+      seeded = seedRuns('t-late', `seed-${MARK}`);
+      otherRun = seedRuns('t-late-other', `seed-${KEPT}`).runId;
+      if ((await deleteChat('t-late')).status !== 200) throw new Error('fixture: delete failed');
+      // Positive control: the same writes into the other chat keep their content (asserted below).
+      writeLate(runHistory().getDb(), otherRun, 'wf-t-late-other', KEPT, 'other');
+      lateQuestion = writeLate(runHistory().getDb(), seeded.runId, 'wf-t-late', MARK, 'gone');
+    });
+
+    it.each(Object.keys(SEEDED))('%s holds nothing written after the delete', (table) => {
+      expect(columnsHolding(table, MARK)).toEqual([]);
+    });
+
+    it('the same writes into another chat keep their content', () => {
+      for (const table of Object.keys(SEEDED)) expect(columnsHolding(table, KEPT).length, table).toBeGreaterThan(0);
+    });
+
+    it('a question asked after the delete under its workflow is closed as deleted', () => {
+      expect(promptStore().getById(lateQuestion)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted', question: FALLBACK_MARKER });
+    });
+
+    it('a write through the store\'s own writer is blanked, and the run keeps its cost', () => {
+      runHistory().updateRun(seeded.runId, { responseText: `writer ${MARK}`, costUsd: 0.5 });
+      const row = runHistory().getDb().prepare('SELECT response_text AS r, cost_usd AS c FROM runs WHERE id = ?').get(seeded.runId);
+      expect(row).toEqual({ r: FALLBACK_MARKER, c: 0.5 });
+    });
+
+    it('a write on another connection to the file is blanked too', () => {
+      const other = new BetterSqlite3(runHistory().getDb().name);
+      try {
+        other.prepare(`INSERT INTO security_events (event_type, tool_name, input_preview, decision, run_id, detail) VALUES ('danger_flagged', 'x', ?, 'flagged', ?, ?)`)
+          .run(`conn ${MARK}`, seeded.child, `conn ${MARK}`);
+      } finally { other.close(); }
+      expect(columnsHolding('security_events', `conn ${MARK}`)).toEqual([]);
+    });
+
+    it('a run or workflow started later under the chat, its runs or its workflows is blanked', () => {
+      const db = runHistory().getDb();
+      const spawned = runHistory().insertRun({ sessionId: 'spawned-late', taskText: `spawned ${MARK}`, modelTier: 'sonnet', modelId: 'm', spawnParentId: seeded.child });
+      // A parent set after the insert reaches the run as well.
+      const adopted = runHistory().insertRun({ sessionId: 'adopted-late', taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+      db.prepare('UPDATE runs SET batch_parent_id = ?, task_text = ? WHERE id = ?').run(seeded.runId, `adopted ${MARK}`, adopted);
+      const inChat = runHistory().insertRun({ sessionId: 't-late', taskText: `chat ${MARK}`, modelTier: 'sonnet', modelId: 'm' });
+      db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES ('wf-late-new', 'wf', 'running', ?, 't-late')`).run(`{"p":"${MARK}"}`);
+      db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, parent_run_id) VALUES ('wf-late-nested', 'wf', 'running', ?, 'wf-late-new')`).run(`{"p":"${MARK}"}`);
+      const step = runHistory().insertRun({ sessionId: 'wf-late-nested', taskText: `step ${MARK}`, modelTier: 'sonnet', modelId: 'm' });
+      const text = (id: string) => (db.prepare('SELECT task_text AS t FROM runs WHERE id = ?').get(id) as { t: string }).t;
+      expect([text(spawned), text(adopted), text(inChat), text(step)]).toEqual([FALLBACK_MARKER, FALLBACK_MARKER, FALLBACK_MARKER, FALLBACK_MARKER]);
+      expect(columnsHolding('pipeline_runs', MARK)).toEqual([]);
     });
   });
 

@@ -551,6 +551,7 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     contained_threads: 'thread ids and the kind and id of the connection they were contained for',
     conversation_grants: 'thread and grant ids',
     deleted_threads: 'ids of deleted chats',
+    deleted_chat_runs: 'ids of the runs and workflows of deleted chats',
     exact_marker_mirror: 'a marker and the instance id it was set for',
     metrics: 'computed numbers',
     model_provenance_backfill_marker: 'a marker',

@@ -632,6 +632,13 @@ export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> 
  */
 export const FALLBACK_MARKER = '[erased on request]';
 
+/**
+ * The ids of the runs and workflows of deleted chats, whose content stays blank after the delete
+ * (`deleted-chat-guard.ts`): a chat delete adds what it reached, the guard's triggers what starts
+ * under them later.
+ */
+export const DELETED_CHAT_RUNS = 'deleted_chat_runs';
+
 /** Which runs the fallback reaches: the runs of these threads, or of this period. */
 export type FallbackScope =
   | { readonly threadIds: readonly string[] }
@@ -725,6 +732,9 @@ export function blankRunHistoryRows(historyDb: Database.Database, scope: Fallbac
       changed += historyDb.prepare(`UPDATE "${table}" SET ${set} WHERE ${where}`).run({ marker: FALLBACK_MARKER, ...params }).changes;
     }
     const pipelineIds = (historyDb.prepare('SELECT id FROM erase_pipelines').all() as Array<{ id: string }>).map((r) => r.id);
+    // A chat delete keeps what it reached blank: a run or workflow still going writes into these
+    // ids afterwards, and the guard's triggers blank it there (`deleted-chat-guard.ts`).
+    if (byThread) historyDb.exec(`INSERT OR IGNORE INTO ${DELETED_CHAT_RUNS} (id) SELECT id FROM erase_runs UNION SELECT id FROM erase_pipelines;`);
     historyDb.exec('DELETE FROM erase_runs; DELETE FROM erase_pipelines;');
     return { rows: changed, pipelineIds };
   })();
