@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
-import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep, bulkWorkingLine, bulkHeadCounts } from './bulk-runs.js';
-import { t, tf } from '../i18n.svelte.js';
+import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep, bulkWorkingLine, bulkHeadCounts, type BulkHeads } from './bulk-runs.js';
+import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 import { formatCost } from '../format.js';
 
 // While the engine moves a run on by itself, a line names the step it works on, with the run's
@@ -184,7 +184,7 @@ describe('a run the engine works on', () => {
 		run = makeRun({ total: 4, changes: UPDATES(4) });
 		await render();
 		expect(line()).toBe(`lynox liest die Ziele bei ${HOST} …`);
-		expect(counts()).toBe('4');
+		expect(counts()).toBe('4 Ziele');
 		expect(title()).toMatch(/^4 Ziele · /);
 		expect(shown()).not.toContain('geschrieben 0');
 	});
@@ -196,7 +196,7 @@ describe('a run the engine works on', () => {
 		run = { ...run, judge: { tier: 'standard', unjudged: 1, judged: 4 } };
 		await pass(BULK_FOLLOW_MS);
 		expect(line()).toBe('lynox urteilt … 4 von 5');
-		expect(counts()).toBe('5');
+		expect(counts()).toBe('5 Ziele');
 		expect(title()).toMatch(/^5 Ziele · /);
 	});
 
@@ -245,7 +245,7 @@ describe('a run the engine works on', () => {
 		run = { ...run, listFirstPage: null, total: 4, changes: UPDATES(4), judge: { tier: 'standard', unjudged: 3, judged: 1 } };
 		await pass(BULK_FOLLOW_MS);
 		expect(line()).toBe('lynox urteilt … 1 von 4');
-		expect(counts()).toBe('4');
+		expect(counts()).toBe('4 Ziele');
 		// Loaded anew, its targets with it.
 		expect(targetAsks).toBeGreaterThan(asks);
 	});
@@ -346,7 +346,7 @@ describe('a run the engine works on', () => {
 			expect(stopped(), JSON.stringify(o)).toBeNull();
 			// Before the run writes (waiting to start, previewed), only the number of targets stands.
 			const wrote = 'phase' in o && o.phase !== 'previewed';
-			expect(counts(), JSON.stringify(o)).toBe(wrote ? tf('kind' in o ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(n), a: '0', c: '0', f: '0' }) : String(n));
+			expect(counts(), JSON.stringify(o)).toBe(wrote ? tf('kind' in o ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(n), a: '0', c: '0', f: '0' }) : tf('bulk.heads.total', { n: String(n) }));
 			if (component) unmount(component);
 			component = undefined;
 		}
@@ -355,7 +355,7 @@ describe('a run the engine works on', () => {
 	it('names only the targets in the head until the run writes, at the approval too, and the counts once one failed, conflicts or is written before', async () => {
 		run = makeRun({ phase: 'approved', total: 3, changes: UPDATES(3), haltKey: 'awaitingStart', haltReason: 'awaitingStart' });
 		await render();
-		expect(counts()).toBe('3');
+		expect(counts()).toBe('3 Ziele');
 		if (component) unmount(component);
 		component = undefined;
 		// A target failed while the run was still approved: the counts stand, it has begun to write.
@@ -365,8 +365,100 @@ describe('a run the engine works on', () => {
 		// Each count on its own opens the counts: a conflict the read found, a target written.
 		const i18n = { t, tf };
 		const before = { kind: 'apply' as const, phase: 'planned' as const, total: 3, applied: 0, conflicts: 0, failed: 0 };
-		expect(bulkHeadCounts(null, before, i18n)).toBe('3');
+		expect(bulkHeadCounts(null, before, i18n)).toBe('3 Ziele');
 		expect(bulkHeadCounts(null, { ...before, conflicts: 1 }, i18n)).toBe(tf('bulk.head.counts', { n: '3', a: '0', c: '1', f: '0' }));
 		expect(bulkHeadCounts(null, { ...before, phase: 'approved', applied: 1 }, i18n)).toBe(tf('bulk.head.counts', { n: '3', a: '1', c: '0', f: '0' }));
+	});
+});
+
+describe('the head names every target once', () => {
+	const NONE: BulkHeads = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 };
+	const i18n = { t, tf };
+	const done = (total: number, heads: Partial<BulkHeads>, kind: 'apply' | 'undo' = 'apply', phase: BulkRunDetailData['phase'] = 'done') =>
+		bulkHeadCounts(null, { kind, phase, total, applied: 0, conflicts: 0, failed: 0, heads: { ...NONE, ...heads } }, i18n);
+	const label = (): string | null => target.querySelector('[data-testid="bulk-counts"]')?.previousElementSibling?.textContent ?? null;
+
+	it('names the status of a halted run in classes that add up to its targets, in DE and EN', async () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		setLocale('de');
+		run = makeRun({
+			phase: 'writing', total: 16, changes: UPDATES(11), deselected: 2, applied: 9, failed: 1, haltKey: 'unavailable', haltReason: 'unavailable',
+			heads: { ...NONE, deselected: 2, unchanged: 3, written: 9, failed: 1, open: 1 },
+		});
+		await render();
+		expect(label()).toBe('Stand');
+		expect(counts()).toBe('16 Ziele: 2 herausgenommen · 3 unverändert · 9 geschrieben · 0 Konflikte · 1 fehlgeschlagen · 1 offen');
+		if (component) unmount(component);
+		component = undefined;
+		setLocale('en');
+		await render();
+		expect(label()).toBe('Status');
+		expect(counts()).toBe('16 targets: 2 taken out · 3 unchanged · 9 written · 0 conflicts · 1 failed · 1 open');
+	});
+
+	it('names each class in the engine\'s order, a target taken back unwritten with the ones taken back', () => {
+		const one = { deselected: 1, invalid: 1, unchanged: 1, takenBack: 1, written: 1, conflict: 1, unclear: 1, failed: 1, settled: 1, open: 1 };
+		expect(done(10, one, 'apply', 'writing')).toBe('10 Ziele: 1 herausgenommen · 1 ausgelassen · 1 unverändert · 1 geschrieben · 2 zurückgenommen · 1 Konflikt · 1 unklar, ob angekommen · 1 fehlgeschlagen · 1 offen');
+		expect(done(2, { settled: 1, conflict: 1 })).toBe('2 Ziele: 0 geschrieben · 1 zurückgenommen · 1 Konflikt · 0 fehlgeschlagen');
+		expect(done(3, { written: 1, conflict: 2 })).toBe('3 Ziele: 1 geschrieben · 2 Konflikte · 0 fehlgeschlagen');
+	});
+
+	it('keeps written, conflicts and failed at zero and leaves out every other empty class', () => {
+		expect(done(2, { open: 2 }, 'apply', 'writing')).toBe('2 Ziele: 0 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 2 offen');
+		expect(done(2, { unclear: 2 })).toBe('2 Ziele: 0 geschrieben · 0 Konflikte · 2 unklar, ob angekommen · 0 fehlgeschlagen');
+	});
+
+	it('calls the targets not written open while the run may still write them, and not written once it has ended', () => {
+		expect(done(3, { written: 1, open: 2 }, 'apply', 'writing')).toBe('3 Ziele: 1 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 2 offen');
+		for (const phase of ['done', 'aborted', 'undone'] as const) {
+			expect(done(3, { written: 1, open: 2 }, 'apply', phase), phase).toBe('3 Ziele: 1 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 2 nicht geschrieben');
+		}
+		// A run that ended before it wrote anything: the three zeros and the targets not written.
+		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'aborted', total: 4, applied: 0, conflicts: 0, failed: 0, heads: { ...NONE, open: 4 } }, i18n))
+			.toBe('4 Ziele: 0 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 4 nicht geschrieben');
+	});
+
+	it('an atomic run rolled back counts the failed target with the ones taken back, and the page still says why it stopped', async () => {
+		run = makeRun({
+			phase: 'aborted', atomic: true, total: 10, changes: UPDATES(10), applied: 6, failed: 1, undone: 6, haltKey: 'atomicRolledBack', haltReason: 'atomicRolledBack',
+			heads: { ...NONE, takenBack: 6, settled: 1, open: 3 },
+		});
+		await render();
+		expect(counts()).toBe('10 Ziele: 0 geschrieben · 7 zurückgenommen · 0 Konflikte · 0 fehlgeschlagen · 3 nicht geschrieben');
+		expect(shown()).toContain(t('bulk.halt.atomicRolledBack'));
+	});
+
+	it('an undo run names its writes as taken back and what was taken back from it as restored', () => {
+		expect(done(3, { written: 2, takenBack: 1 }, 'undo')).toBe('3 Ziele: 2 zurückgenommen · 1 wiederhergestellt · 0 Konflikte · 0 fehlgeschlagen');
+		expect(done(3, { written: 3 }, 'undo')).toBe('3 Ziele: 3 zurückgenommen · 0 Konflikte · 0 fehlgeschlagen');
+	});
+
+	it('says one target in the singular', () => {
+		expect(done(1, { written: 1 })).toBe('1 Ziel: 1 geschrieben · 0 Konflikte · 0 fehlgeschlagen');
+		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'previewed', total: 1, applied: 0, conflicts: 0, failed: 0, heads: { ...NONE, open: 1 } }, i18n)).toBe('1 Ziel');
+	});
+
+	it('names only the targets before the run writes, the classes notwithstanding', () => {
+		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'previewed', total: 3, applied: 0, conflicts: 0, failed: 0, heads: { ...NONE, deselected: 1, open: 2 } }, i18n)).toBe('3 Ziele');
+	});
+
+	it('moves the classes with each ask while the run writes', async () => {
+		run = makeRun({ phase: 'writing', total: 3, changes: UPDATES(3), applied: 1, heads: { ...NONE, written: 1, open: 2 } });
+		await render();
+		expect(counts()).toBe('3 Ziele: 1 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 2 offen');
+		run = { ...run, applied: 2, heads: { ...NONE, written: 2, open: 1 } };
+		await pass(BULK_FOLLOW_MS);
+		expect(counts()).toBe('3 Ziele: 2 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 1 offen');
+	});
+
+	it('moves the warning about an unclear send with the head while the run writes', async () => {
+		run = makeRun({ phase: 'writing', total: 3, changes: UPDATES(3), heads: { ...NONE, open: 3 } });
+		await render();
+		expect(shown()).not.toContain(t('bulk.sent_unknown.one'));
+		run = { ...run, failed: 1, sentUnknown: 1, heads: { ...NONE, unclear: 1, open: 2 } };
+		await pass(BULK_FOLLOW_MS);
+		expect(counts()).toBe('3 Ziele: 0 geschrieben · 0 Konflikte · 1 unklar, ob angekommen · 0 fehlgeschlagen · 2 offen');
+		expect(shown()).toContain(t('bulk.sent_unknown.one'));
 	});
 });
