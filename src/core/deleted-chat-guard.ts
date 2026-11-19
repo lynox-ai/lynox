@@ -15,7 +15,6 @@
  * The triggers are rebuilt from {@link FALLBACK_CONTENT_COLUMNS} on every open rather than written
  * as a migration, so a column added to that map is covered from the next start on.
  */
-import type Database from 'better-sqlite3';
 import { DELETED_CHAT_RUNS, FALLBACK_CONTENT_COLUMNS, FALLBACK_MARKER } from './connection-erasure.js';
 
 const IN_SCOPE = (expr: string): string => `${expr} IN (SELECT id FROM ${DELETED_CHAT_RUNS})`;
@@ -60,25 +59,12 @@ const quote = (s: string): string => `'${s.replace(/'/g, "''")}'`;
 /**
  * Drops every trigger of the guard. Run before a pending migration: a trigger left from the last
  * start names columns and tables a migration may drop or rename, and SQLite refuses that while a
- * trigger still names them. The guard is put back after the migrations ({@link installDeletedChatGuard}).
+ * trigger still names them. The guard is created again after them ({@link deletedChatGuardDdl}), in the same transaction.
  */
 export function dropDeletedChatGuardDdl(): string {
   return Object.keys(FALLBACK_CONTENT_COLUMNS)
     .map((table) => `DROP TRIGGER IF EXISTS deleted_chat_insert_${table}; DROP TRIGGER IF EXISTS deleted_chat_update_${table};`)
     .join('\n');
-}
-
-/**
- * Puts the guard in place on `db`: drops its triggers and creates them again for the content
- * tables the file holds, in one transaction, so another connection sees either the old triggers or
- * the new ones and never none.
- */
-export function installDeletedChatGuard(db: Database.Database): void {
-  db.transaction(() => {
-    const tables = new Set((db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((r) => r.name));
-    db.exec(dropDeletedChatGuardDdl());
-    db.exec(deletedChatGuardDdl(tables));
-  })();
 }
 
 /**

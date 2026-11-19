@@ -15,7 +15,7 @@ import type { KnowledgeLayer } from '../core/knowledge-layer.js';
 import type { PromptStore } from '../core/prompt-store.js';
 import type { RunHistory } from '../core/run-history.js';
 import { FALLBACK_MARKER } from '../core/connection-erasure.js';
-import { recordExecutedState, getExecutedResult } from '../tools/builtin/pipeline.js';
+import { recordExecutedState, getExecutedResult, forgetExecutedStatesOfChat } from '../tools/builtin/pipeline.js';
 
 /**
  * Deleting a chat keeps what was learned in it, and marks the source as a deleted chat.
@@ -520,18 +520,35 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(columnsHolding('pipeline_step_results', mark)).toEqual([]);
   });
 
-  it('deleting a chat forgets the outputs of its workflows that a retry would read', async () => {
+  it('deleting a chat forgets the outputs of its workflows that a retry would read, also of one ending later', async () => {
     const { ts } = stores();
     const id = randomUUID();
+    const other = randomUUID();
     ts.createThread(id, { title: 'ran a workflow' });
     const state = { manifest: { name: 'wf', steps: [] }, state: { outputs: new Map() }, ranAs: 'owner' } as unknown as Parameters<typeof recordExecutedState>[1];
     recordExecutedState(`wf-run-${id}`, { ...state, originThreadId: id });
-    recordExecutedState(`wf-other-${id}`, { ...state, originThreadId: randomUUID() });
+    recordExecutedState(`wf-other-${id}`, { ...state, originThreadId: other });
+
+    expect((await deleteChat(id)).status).toBe(200);
+    // A workflow the chat started that ends after the delete records its outputs then.
+    recordExecutedState(`wf-late-${id}`, { ...state, originThreadId: id });
+
+    expect(getExecutedResult(`wf-run-${id}`)).toBeUndefined();
+    expect(getExecutedResult(`wf-late-${id}`)).toBeUndefined();
+    expect(getExecutedResult(`wf-other-${id}`)).toBeDefined();
+    forgetExecutedStatesOfChat(other);
+  });
+
+  it('a question a schedule parked in the chat before the delete is closed too', async () => {
+    const { ts } = stores();
+    const id = randomUUID();
+    ts.createThread(id, { title: 'a schedule asked here' });
+    runHistory().getDb().prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at, trigger_id)
+      VALUES (?, ?, 'ask_user', 'Send it?', 'pending', '2099-01-01T00:00:00.000Z', 'trg-early')`).run(`parked-${id}`, id);
 
     expect((await deleteChat(id)).status).toBe(200);
 
-    expect(getExecutedResult(`wf-run-${id}`)).toBeUndefined();
-    expect(getExecutedResult(`wf-other-${id}`)).toBeDefined();
+    expect(promptStore().getById(`parked-${id}`)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted', question: FALLBACK_MARKER });
   });
 
   it('a failure in the third store answers 500 and changes nothing; deleting again clears every store', async () => {

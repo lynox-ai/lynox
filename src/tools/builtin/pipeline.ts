@@ -159,6 +159,8 @@ export function storePipeline(id: string, pipeline: PlannedPipeline): void {
  *  of distinct workflows doesn't evict each other's still-retriable state. */
 export function recordExecutedState(id: string, value: ExecutedState): void {
   executedStates.delete(id);
+  // A run a deleted chat started that ends after the delete: its outputs are not kept for a retry.
+  if (value.originThreadId !== undefined && deletedChats.has(value.originThreadId)) return;
   if (executedStates.size >= MAX_EXECUTED_STATES) {
     const oldest = executedStates.keys().next().value;
     if (oldest !== undefined) executedStates.delete(oldest);
@@ -166,17 +168,25 @@ export function recordExecutedState(id: string, value: ExecutedState): void {
   executedStates.set(id, value);
 }
 
+/** Chats deleted in this process, whose workflow outputs are no longer kept for a retry. Ids only. */
+const deletedChats = new Set<string>();
+const MAX_DELETED_CHATS = 10_000;
+
 /**
- * Forgets what the workflow runs of a deleted chat produced: the runs `pipelineIds` and every run
- * the chat started. A retry reads a run's step outputs from here, not from history.db, so without
- * this a retry from another chat would write the deleted chat's outputs into a new run. Returns how
- * many runs were forgotten.
+ * Forgets what the workflows a deleted chat started produced, and keeps forgetting what one still
+ * going records when it ends. A retry reads a run's step outputs from here, not from history.db,
+ * so without this a retry from another chat would write the deleted chat's outputs into a new run.
+ * Returns how many were forgotten now.
  */
-export function forgetExecutedStatesOfChat(threadId: string, pipelineIds: readonly string[]): number {
-  const ids = new Set(pipelineIds);
+export function forgetExecutedStatesOfChat(threadId: string): number {
+  if (deletedChats.size >= MAX_DELETED_CHATS) {
+    const oldest = deletedChats.values().next().value;
+    if (oldest !== undefined) deletedChats.delete(oldest);
+  }
+  deletedChats.add(threadId);
   let forgotten = 0;
   for (const [id, entry] of executedStates) {
-    if (ids.has(id) || entry.originThreadId === threadId) { executedStates.delete(id); forgotten += 1; }
+    if (entry.originThreadId === threadId) { executedStates.delete(id); forgotten += 1; }
   }
   return forgotten;
 }

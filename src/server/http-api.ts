@@ -6591,12 +6591,12 @@ export class LynoxHTTPApi {
       // blanked, so it is withdrawn too, before anything can read it: no await since the commit.
       const promptStore = engine.getPromptStore();
       for (const session of [id, ...workflows]) {
-        try { promptStore?.withdrawForDeletedThread(session); } catch (err: unknown) {
+        try { promptStore?.withdrawForDeletedThread(session, runHistory !== null); } catch (err: unknown) {
           process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }
       // A retry reads a workflow's step outputs from memory, not from the file: those go as well.
-      forgetExecutedStatesOfChat(id, workflows);
+      forgetExecutedStatesOfChat(id);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 

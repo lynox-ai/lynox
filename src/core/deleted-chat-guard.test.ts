@@ -31,7 +31,7 @@ describe('deleted-chat guard', () => {
     } finally { history.close(); }
   });
 
-  it('a migration that fails on open puts the triggers back before the error leaves', () => {
+  it('a migration that fails on open leaves the triggers as they were', () => {
     const first = open();
     const before = triggersOf(first.history);
     // The last migration runs again and fails: its column is already there.
