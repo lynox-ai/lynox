@@ -1762,11 +1762,11 @@ describe('the start of a judged run, in words', () => {
 		run = judged({ costUsd: 0.25, costCapUsd: 5 });
 		refuseResume = 'supersede_required';
 		await render();
-		expect(target.querySelector('[data-testid="bulk-head-cost"]')?.textContent).toBe('0.25 USD / 5.00 USD');
+		expect(target.querySelector('[data-testid="bulk-head-cost"]')?.textContent).toBe('0.25\u00a0USD / 5.00\u00a0USD');
 		type(capField(), '5');
 		startButton().click();
 		await settle();
-		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50 USD' }));
+		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50\u00a0USD' }));
 		expect(target.textContent).not.toContain('$0.50');
 	});
 
@@ -1776,7 +1776,7 @@ describe('the start of a judged run, in words', () => {
 		await render();
 		buttonByText(t('bulk.restart.judge'))!.click();
 		await settle();
-		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50 USD' }));
+		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50\u00a0USD' }));
 		expect(target.textContent).not.toContain('$0.50');
 	});
 
@@ -1805,13 +1805,15 @@ describe('the start of a judged run, in words', () => {
 		expect(count(target.textContent ?? '', step)).toBe(1);
 	});
 
-	it('tells a mandate in the start line that only the owner starts the run, for a listed run too', async () => {
+	it('tells a mandate once, in the notice at the end, that only the owner starts the run, for a listed run too', async () => {
 		viewerOf = 'mandate';
 		for (const haltKey of ['listed', 'awaitingStart'] as const) {
 			run = judged({ haltKey });
 			await render();
 			expect(headTerms(), haltKey).not.toContain(t('bulk.head.halted'));
-			expect(startLine(), haltKey).toBe(`${t('bulk.awaiting_start')} ${t('bulk.halt.wait_owner_only')}`);
+			expect(startLine(), haltKey).toBe(t('bulk.awaiting_start'));
+			expect(count(target.textContent ?? '', t('bulk.owner_only_notice')), haltKey).toBe(1);
+			expect(target.textContent, haltKey).not.toContain(t('bulk.halt.wait_owner_only'));
 			unmount(component!);
 			component = undefined;
 		}

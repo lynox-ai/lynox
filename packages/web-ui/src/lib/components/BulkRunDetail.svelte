@@ -619,7 +619,7 @@
 				<dd>{tf('bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) })}</dd>
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
 					<dt class="text-text-subtle">{t('bulk.head.cost')}</dt>
-					<dd class="font-mono" data-testid="bulk-head-cost">{`${bulkUsd(run.costUsd)} USD`}{run.costCapUsd !== null ? ` / ${bulkUsd(run.costCapUsd)} USD` : ''}</dd>
+					<dd class="font-mono" data-testid="bulk-head-cost">{`${bulkUsd(run.costUsd)}\u00a0USD`}{run.costCapUsd !== null ? ` / ${bulkUsd(run.costCapUsd)}\u00a0USD` : ''}</dd>
 				{/if}
 				<!-- A run that waits for its start has no halt to name: its start line says what to do (U-339). -->
 				{#if run.haltReason && !bulkWaitsForStart(run)}
@@ -632,9 +632,10 @@
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{tf('bulk.resumes_at', { time: when(run.resumesAt) })}</p>
 			{/if}
 			{#if bulkWaitsForStart(run)}
-				<!-- The start line carries what the halt row said before (U-339): with which button, or who
-				     can start. An owner's list run says it in the list sentence below, so not twice. -->
-				<p class="text-sm text-text-muted" data-testid="bulk-awaiting-start">{t('bulk.awaiting_start')}{#if !(run.haltKey === 'listed' && ownerActs && startButton !== null)}{` ${bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}`}{/if}</p>
+				<!-- The start line carries what the halt row said before (U-347): with which button, or who
+				     can start. An owner's list run says it in the list sentence below, and a mandate reads who
+				     can start in the notice at the end of the page, so neither twice. -->
+				<p class="text-sm text-text-muted" data-testid="bulk-awaiting-start">{t('bulk.awaiting_start')}{#if !mandate && !(run.haltKey === 'listed' && ownerActs && startButton !== null)}{` ${bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}`}{/if}</p>
 			{/if}
 			{#if run.phase === 'planned' && run.haltKey === 'listed'}
 				{#if ownerActs}
@@ -818,7 +819,7 @@
 					{/if}
 					{#if supersedable}
 						<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-							<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)} USD` })}</p>
+							<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)}\u00a0USD` })}</p>
 							<div class="flex flex-wrap gap-2">
 								<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null || !startDomainsValid} aria-describedby={startHint === null ? undefined : 'bulk-start-hint'} onclick={() => start(supersedable!.id)}>{t(startButton ?? 'bulk.start.supersede_yes')}</button>
 								<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
@@ -870,7 +871,7 @@
 						<p class="text-sm text-text-muted">{t(restartKind === 'list' ? 'bulk.restart.kept_list' : 'bulk.restart.kept')}</p>
 						{#if supersedable}
 							<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-								<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)} USD` })}</p>
+								<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)}\u00a0USD` })}</p>
 								<div class="flex flex-wrap gap-2">
 									<button type="button" class={btnPrimary} disabled={busy || (restartKind === 'judge_cap' && bulkRestartCap(capInput, run.costCapUsd) === null)} aria-describedby={restartHint === null ? undefined : 'bulk-restart-hint'} onclick={() => restart(supersedable!.id)}>{t('bulk.start.supersede_yes')}</button>
 									<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
