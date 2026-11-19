@@ -272,9 +272,10 @@ function fieldStrings(value: unknown, into: string[] = []): string[] {
 /**
  * Where a webhook run's step would execute with something an event can choose outside its task
  * text, or `null` when nothing does. Only a step's
- * `task` fences a value as untrusted; a captured call's `input_template` and every other field
- * resolve a placeholder raw into what a tool executes with, so a third party would choose a URL,
- * a path or an argument. Refused there: a mapped param, the whole `params` object, and any
+ * `task` fences a value as untrusted; a captured call's `input_template` resolves a placeholder raw
+ * into what a tool executes with, so a third party would choose a URL, a path or an argument. The
+ * other fields resolve nothing; they are read as well, which can only refuse more.
+ * Refused outside the task: a mapped param, the whole `params` object, and any
  * reference that is not to `params` at all — an earlier step's output (`{{s1.result}}`), which an
  * event's text can steer. An unmapped param is the owner's own value.
  */
