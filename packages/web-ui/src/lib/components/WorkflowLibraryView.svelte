@@ -497,7 +497,7 @@
 				notice = t('workflow_library.stamp.reopen_schedule');
 				return;
 			}
-			// A value kept across the stamp detour stays only if the fresh contract still allows it.
+			// A value kept across the stamp detour stays only if it is still one of the fresh contract's values.
 			paramValues = keptParamValues(fresh.parameters ?? [], paramValues, fresh.capabilityContract, viewer === 'owner');
 			grantPreview = null;
 			scheduleModalWf = fresh;

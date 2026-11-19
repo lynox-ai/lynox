@@ -52,4 +52,16 @@ describe('the values a form keeps when it opens again', () => {
 	it('starts a parameter that is new with nothing', () => {
 		expect(keptParamValues(params, { region: 'ch' }, contract, true)).toEqual({ region: 'ch', note: '' });
 	});
+
+	it('keeps what anyone who is not the owner typed, since they see no values to choose from', () => {
+		expect(keptParamValues(params, { region: 'at', note: 'hi' }, contract, false)).toEqual({ region: 'at', note: 'hi' });
+	});
+
+	it('reads only values typed for a parameter, never one an object inherits, and sets no prototype', () => {
+		const odd = [{ name: '__proto__' }, { name: 'constructor' }];
+		const kept = keptParamValues(odd, {}, contract, true);
+		expect(kept).toEqual(Object.fromEntries([['__proto__', ''], ['constructor', '']]));
+		expect(Object.getPrototypeOf(kept)).toBe(Object.prototype);
+		expect(Object.hasOwn(kept, '__proto__')).toBe(true);
+	});
 });

@@ -30,7 +30,8 @@ export function paramAllowed(contract: unknown, name: string, ownerView: boolean
 
 /**
  * The values a form keeps when it opens again on a fresh copy of the workflow (after the stamp
- * detour): each parameter keeps what was typed or chosen, unless its contract no longer allows it.
+ * detour): each parameter keeps what was typed or chosen, unless it is no longer one of the values the
+ * contract allows. Bounds are not checked here: a value outside them is refused when the workflow runs.
  */
 export function keptParamValues(
 	parameters: readonly { name: string }[],
