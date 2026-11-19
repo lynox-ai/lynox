@@ -327,6 +327,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.phase.done': { de: 'fertig', en: 'done' },
 	'bulk.phase.aborted': { de: 'abgebrochen', en: 'aborted' },
 	'bulk.phase.discarded': { de: 'verworfen', en: 'discarded' },
+	// An aborted run the owner stopped, and one a newer run replaced, as the run page's head names them (U-342).
+	'bulk.phase.stopped': { de: 'gestoppt', en: 'stopped' },
+	'bulk.phase.replaced': { de: 'ersetzt', en: 'replaced' },
 	'bulk.phase.undone': { de: 'zurückgenommen', en: 'undone' },
 	'bulk.halted_suffix': { de: '· angehalten', en: '· halted' },
 	'bulk.stopped_suffix': { de: '· gestoppt', en: '· stopped' },

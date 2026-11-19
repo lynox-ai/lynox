@@ -165,16 +165,23 @@ export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'> & Partial<Pick<Bul
 	return 'bulk.head.halted';
 }
 
-/** A run's phase as the list names it: a run the owner discarded before approving it reads
- *  "discarded", not "aborted" (U-324); every other run by its phase. */
+/** A run's phase as the list names it. An aborted run reads who or what ended it, as the run page's
+ *  head does (U-342): one the owner discarded before approving it „verworfen“ (U-324), one the
+ *  owner stopped and lynox rolled back „gestoppt“, one a newer run replaced „ersetzt“, and one
+ *  lynox ended „abgebrochen“. Every other run by its phase. */
 export function bulkPhaseKey(run: Pick<BulkRun, 'phase' | 'haltKey'>): string {
-	return run.phase === 'aborted' && run.haltKey === 'discarded' ? 'bulk.phase.discarded' : `bulk.phase.${run.phase}`;
+	if (run.phase === 'aborted') {
+		if (run.haltKey === 'discarded') return 'bulk.phase.discarded';
+		if (bulkOwnerStopped(run)) return 'bulk.phase.stopped';
+		if (run.haltKey === 'superseded') return 'bulk.phase.replaced';
+	}
+	return `bulk.phase.${run.phase}`;
 }
 
-/** A run's phase carries the halted or stopped suffix in the list; a discarded one does not, since
- *  its phase already says why it ended. */
+/** A run's phase carries the halted or stopped suffix in the list. An aborted one does not: its
+ *  phase already says how it ended, and „angehalten“ would say it can go on (U-342). */
 export function bulkPhaseHasSuffix(run: Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason'>): boolean {
-	return run.haltReason !== null && !(run.phase === 'aborted' && run.haltKey === 'discarded');
+	return run.haltReason !== null && run.phase !== 'aborted';
 }
 
 /** The same distinction for the suffix on a run's phase in the list. */

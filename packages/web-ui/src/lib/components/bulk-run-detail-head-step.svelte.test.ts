@@ -41,6 +41,7 @@ function makeRun(o: Partial<BulkRunDetailData> = {}): BulkRunDetailData {
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let run: BulkRunDetailData;
+let listRuns: BulkRunDetailData[] = [];
 let locale: ReturnType<typeof getLocale>;
 
 beforeEach(() => {
@@ -53,6 +54,8 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
+		if (u.endsWith('/bulk/runs')) return reply({ runs: listRuns });
+		if (u.endsWith('/merges')) return reply({ merges: [] });
 		// The run's targets, page by page: a run whose rollback left targets loads them whole.
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
 		if (page) {
@@ -201,5 +204,37 @@ describe('an aborted run reads that it cannot go on', () => {
 		unmount(component!);
 		component = undefined;
 		expect((await render({ phase: 'aborted', haltKey: 'superseded', haltReason: 'engine English', checksum: null })).heads).toContain('Replaced');
+	});
+});
+
+describe('the run list names an aborted run as its page does, without „angehalten“', () => {
+	/** The phase chip of each listed run, in the order of the runs. */
+	async function listChips(runs: BulkRunDetailData[]): Promise<string[]> {
+		listRuns = runs;
+		const { default: BulkRunsView } = await import('./BulkRunsView.svelte');
+		component = mount(BulkRunsView, { target });
+		await settle();
+		return [...target.querySelectorAll('tbody tr')].map((tr) => tr.querySelectorAll('td')[2]?.querySelector('span')?.textContent?.replace(/\s+/g, ' ').trim() ?? '');
+	}
+	const at = (id: string, o: Partial<BulkRunDetailData>): BulkRunDetailData => makeRun({ id, createdAt: `2026-11-18T0${id}:00:00Z`, ...o });
+
+	it('an atomic stop reads „gestoppt“, a replaced run „ersetzt“, one lynox ended „abgebrochen“, each alone; a plain stop goes on as „schreibt · gestoppt“', async () => {
+		const chips = await listChips([
+			at('1', { ...ROLLED_BACK, haltKey: 'atomicStoppedRolledBack' }),
+			at('2', { phase: 'aborted', haltKey: 'superseded', haltReason: 'engine English', checksum: null }),
+			at('3', ROLLED_BACK),
+			at('4', { phase: 'aborted', haltKey: 'mandateEnded', haltReason: 'engine English', checksum: null }),
+			at('5', { phase: 'writing', haltKey: 'stoppedByOwner', haltReason: 'engine English', applied: 1 }),
+		]);
+		expect([...chips].sort()).toEqual(['abgebrochen', 'abgebrochen', 'ersetzt', 'gestoppt', 'schreibt · gestoppt']);
+	});
+
+	it('reads in English as approved', async () => {
+		setLocale('en');
+		const chips = await listChips([
+			at('1', { ...ROLLED_BACK, haltKey: 'atomicStoppedRollbackIncomplete', applied: 1 }),
+			at('2', { phase: 'aborted', haltKey: 'superseded', haltReason: 'engine English', checksum: null }),
+		]);
+		expect([...chips].sort()).toEqual(['replaced', 'stopped']);
 	});
 });
