@@ -136,11 +136,14 @@ describe('a run\'s page as a mandate sees it', () => {
 		expect(buttonByText(t('bulk.resume.write'))).toBeDefined();
 	});
 
-	it('says who starts a run that waits for its start, not which button to press', async () => {
+	// The notice at the end of the page says who starts it; the start line does not say it again (U-347).
+	it('says who starts a run that waits for its start once, not which button to press', async () => {
 		run = makeRun({ phase: 'planned', haltKey: 'awaitingStart', haltReason: 'engine English', total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		await renderDetail();
 		expect(buttonByText(t('bulk.start.read'))).toBeUndefined();
-		expect(target.textContent).toContain(t('bulk.halt.wait_owner_only'));
+		expect((target.textContent ?? '').split(t('bulk.owner_only_notice')).length - 1).toBe(1);
+		expect(target.textContent).not.toContain(t('bulk.halt.wait_owner_only'));
+		expect(target.querySelector('[data-testid="bulk-awaiting-start"]')?.textContent).toBe(t('bulk.awaiting_start'));
 		expect(target.textContent).not.toContain(t('bulk.halt.awaitingStart_start').replace('{button}', t('bulk.start.read')));
 		expect(target.textContent).not.toContain('engine English');
 	});

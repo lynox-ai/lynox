@@ -14,7 +14,7 @@
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkNumberLocale, bulkRestartHintKey, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart,
 	} from './bulk-runs.js';
 
@@ -487,6 +487,7 @@
 	// A sentence that names an owner's act names the owner to a mandate.
 	const view = $derived(mandate ? bulkMandateI18n(i18n) : i18n);
 	const restartKind = $derived(run ? bulkRestartKind(run) : null);
+	const restartHint = $derived(busy || restartKind === null ? null : bulkRestartHintKey(restartKind, capInput));
 	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
 	// A long filter list is folded until the owner shows it all; for this run only (ux U-175).
 	let filtersShownFor = $state<string | null>(null);
@@ -618,9 +619,10 @@
 				<dd>{tf('bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) })}</dd>
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
 					<dt class="text-text-subtle">{t('bulk.head.cost')}</dt>
-					<dd class="font-mono" data-testid="bulk-head-cost">{`${bulkUsd(run.costUsd)} USD`}{run.costCapUsd !== null ? ` / ${bulkUsd(run.costCapUsd)} USD` : ''}</dd>
+					<dd class="font-mono" data-testid="bulk-head-cost">{`${bulkUsd(run.costUsd)}\u00a0USD`}{run.costCapUsd !== null ? ` / ${bulkUsd(run.costCapUsd)}\u00a0USD` : ''}</dd>
 				{/if}
-				{#if run.haltReason}
+				<!-- A run that waits for its start has no halt to name: its start line says what to do (U-339). -->
+				{#if run.haltReason && !bulkWaitsForStart(run)}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
 					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}</dd>
 				{/if}
@@ -630,7 +632,10 @@
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{tf('bulk.resumes_at', { time: when(run.resumesAt) })}</p>
 			{/if}
 			{#if bulkWaitsForStart(run)}
-				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
+				<!-- The start line carries what the halt row said before (U-347): with which button, or who
+				     can start. An owner's list run says it in the list sentence below, and a mandate reads who
+				     can start in the notice at the end of the page, so neither twice. -->
+				<p class="text-sm text-text-muted" data-testid="bulk-awaiting-start">{t('bulk.awaiting_start')}{#if !mandate && !(run.haltKey === 'listed' && ownerActs && startButton !== null)}{` ${bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}`}{/if}</p>
 			{/if}
 			{#if run.phase === 'planned' && run.haltKey === 'listed'}
 				{#if ownerActs}
@@ -779,7 +784,7 @@
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.fields')}</h3>
 						<ul class="text-sm space-y-0.5">
 							{#each Object.entries(run.judgeRule.schema.properties) as [field, shape] (field)}
-								{@const shapeText = bulkFieldShapeText(shape, i18n)}
+								{@const shapeText = bulkFieldShapeText(shape, i18n, bulkNumberLocale(getLocale()))}
 								<li data-testid="bulk-start-field">{@render fieldName(field)}{#if shapeText !== null}: <span class="text-text-subtle [overflow-wrap:anywhere]">{shapeText}{#each bulkFieldChoices(shape) ?? [] as choice, i (i)}{i === 0 ? ' ' : ', '}<bdi class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono text-text" data-testid="bulk-field-choice">"{bulkVisibleText(choice)}"</bdi>{/each}</span>{/if}</li>
 							{/each}
 						</ul>
@@ -814,7 +819,7 @@
 					{/if}
 					{#if supersedable}
 						<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-							<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)} USD` })}</p>
+							<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)}\u00a0USD` })}</p>
 							<div class="flex flex-wrap gap-2">
 								<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null || !startDomainsValid} aria-describedby={startHint === null ? undefined : 'bulk-start-hint'} onclick={() => start(supersedable!.id)}>{t(startButton ?? 'bulk.start.supersede_yes')}</button>
 								<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
@@ -866,17 +871,20 @@
 						<p class="text-sm text-text-muted">{t(restartKind === 'list' ? 'bulk.restart.kept_list' : 'bulk.restart.kept')}</p>
 						{#if supersedable}
 							<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-								<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)} USD` })}</p>
+								<p>{tf('bulk.start.supersede', { cost: `${bulkUsd(supersedable.costUsd)}\u00a0USD` })}</p>
 								<div class="flex flex-wrap gap-2">
-									<button type="button" class={btnPrimary} disabled={busy || (restartKind === 'judge_cap' && bulkRestartCap(capInput, run.costCapUsd) === null)} onclick={() => restart(supersedable!.id)}>{t('bulk.start.supersede_yes')}</button>
+									<button type="button" class={btnPrimary} disabled={busy || (restartKind === 'judge_cap' && bulkRestartCap(capInput, run.costCapUsd) === null)} aria-describedby={restartHint === null ? undefined : 'bulk-restart-hint'} onclick={() => restart(supersedable!.id)}>{t('bulk.start.supersede_yes')}</button>
 									<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
 								</div>
 							</div>
 						{:else}
 							<div class="flex flex-wrap gap-2">
-								<button type="button" class={btnPrimary} disabled={busy || (restartKind === 'judge_cap' && bulkRestartCap(capInput, run.costCapUsd) === null)} onclick={() => restart()}>{t(restartKind === 'list' ? 'bulk.restart.list' : restartKind === 'read' ? 'bulk.restart.read' : 'bulk.restart.judge')}</button>
+								<button type="button" class={btnPrimary} disabled={busy || (restartKind === 'judge_cap' && bulkRestartCap(capInput, run.costCapUsd) === null)} aria-describedby={restartHint === null ? undefined : 'bulk-restart-hint'} onclick={() => restart()}>{t(restartKind === 'list' ? 'bulk.restart.list' : restartKind === 'read' ? 'bulk.restart.read' : 'bulk.restart.judge')}</button>
 								<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 							</div>
+						{/if}
+						{#if restartHint !== null}
+							<p id="bulk-restart-hint" class="text-sm text-text-muted" data-testid="bulk-restart-hint">{t(restartHint)}</p>
 						{/if}
 					{/if}
 				</div>
