@@ -3587,8 +3587,8 @@ export class WorkerLoop {
       // its references move with it (`runStepIds`), so a reference the stored text shows as a param
       // can be a step's output in the run. In the fields a run resolves, the copy refuses every
       // reference the stored text would: a moved reference becomes a run name, never `params`.
-      // Only an id or an `input_from` entry outside the shape, which no run resolves, is read as
-      // its run name there.
+      // Only an id or an `input_from` entry outside the shape, whose text no run substitutes into,
+      // is read as its run name there.
       ...(event !== undefined ? { checkWorkflow: (p: PlannedPipeline) => {
         const where = mappedValueOutsideTaskText(runStepIds(p.steps, stepRunNames(p.steps)), event.mappedNames);
         return where === null ? null : `${EVENT_MAPPING_REFUSED} ${where}`;
