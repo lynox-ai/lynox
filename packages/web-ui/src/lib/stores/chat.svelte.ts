@@ -20,6 +20,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
+import { carryPlannedBulkRuns, plannedBulkRunId } from './planned-bulk-run.js';
 import { markCall, trimToMark, type CallMark } from './stream-attempt.js';
 import { turnEndSettlesTools, promptCreatedAtMs, lostPromptRecheckVerdict, shouldArmRecheck } from './prompt-liveness.js';
 import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, anchorKnowledgeChips, type KnowledgeWriteChip } from './knowledge-chip.js';
@@ -130,6 +131,10 @@ export interface ChatMessage {
 	 *  populated from the SSE side-channel, never persisted to the thread and never folded
 	 *  back into model context (so a resume cannot re-inject the untrusted wording). */
 	knowledgeWrites?: KnowledgeWriteChip[];
+	/** The bulk run a `bulk_plan` call of this turn recorded, for the button that opens its page.
+	 *  CLIENT-ONLY, from the SSE side-channel: the ledger's id, never the model's text. The last
+	 *  recorded run wins; a refused plan records none. */
+	plannedBulkRunId?: string;
 	/** Set on a synthetic marker bubble inserted when the engine auto-compacts
 	 *  the conversation — renders as an inline "conversation compacted" divider.
 	 *  The occupancy pair is what the compaction actually DID, in tokens, and is
@@ -2662,6 +2667,13 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			if (chip) (msg.knowledgeWrites ??= []).push(chip);
 			break;
 		}
+		case 'bulk_run_planned': {
+			// bulk_plan recorded a run: the answer gets the button that opens its page. Only an id in
+			// the ledger's form is taken (`plannedBulkRunId`), so nothing else reaches the address.
+			const runId = plannedBulkRunId(data);
+			if (runId !== null) msg.plannedBulkRunId = runId;
+			break;
+		}
 	}
 }
 
@@ -4240,6 +4252,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 				// pending-review chip at run end (the observed end-of-run flicker) and
 				// loses it for good on a settled reload.
 				carryKnowledgeWrites(localMessages, serverMessages);
+				carryPlannedBulkRuns(localMessages, serverMessages);
 				messages = serverMessages;
 				adoptedServer = true;
 				// The carried chips cover what LOCAL storage remembered, but a reload
@@ -4420,6 +4433,7 @@ export async function reconcileThread(): Promise<void> {
 			// Same carry-over as resumeThread — a reconcile on remount must not wipe
 			// a pending-review chip either.
 			carryKnowledgeWrites(messages, serverMessages);
+			carryPlannedBulkRuns(messages, serverMessages);
 			messages = serverMessages;
 			adopted = true;
 			persistChatNow();
